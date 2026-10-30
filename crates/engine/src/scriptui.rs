@@ -402,12 +402,16 @@ pub struct ScriptUi {
     #[serde(skip)]
     pub tasks: Option<ScriptTaskRunner>,
     /// Bumped whenever the project is closed or replaced (New / Open / Close Project): repeating
-    /// tasks of scripts without an open window stop then.
+    /// tasks of scripts without an open window stop then, except those of Startup scripts.
     #[serde(skip)]
     pub project_epoch: u64,
     /// The script contexts of this session with scheduled tasks (kept by the scripting engine).
     #[serde(skip)]
     pub task_hosts: Vec<u32>,
+    /// The script contexts of Startup scripts: their tasks go on when the project is closed or
+    /// replaced, until EffectCraft quits.
+    #[serde(skip)]
+    pub startup_hosts: Vec<u32>,
 }
 
 impl ScriptUi {
@@ -755,6 +759,7 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
         "screenX": num("screenX", -FAR, FAR, 0.0),
         "screenY": num("screenY", -FAR, FAR, 0.0),
         "button": num("button", 0.0, 2.0, 0.0).round(),
+        "buttons": num("buttons", 0.0, 7.0, 0.0).round(),
         "detail": num("detail", 0.0, 1000.0, clicks).round(),
         "altKey": flag("altKey"),
         "ctrlKey": flag("ctrlKey"),
@@ -762,6 +767,17 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
         "shiftKey": flag("shiftKey"),
     });
     dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
+}
+
+/// `scriptui.resize`: the host gave the window a new size (a docked panel's dock, #2585): the
+/// script's window takes it, lays itself out again and gets `onResizing` / `onResize`.
+pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.resize";
+    let window = window_p(s, p, c)?;
+    let size = p.get("size").and_then(Value::as_array).ok_or_else(|| crate::commands::bad(c, "missing `size` [width, height]"))?;
+    let side = |i: usize| size.get(i).and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v.round().clamp(1.0, 16384.0));
+    let (Some(w), Some(h)) = (side(0), side(1)) else { return Err(crate::commands::bad(c, "`size` must be [width, height] in pixels")) };
+    dispatch(s, ScriptUiEvent { window, widget: 0, kind: "resize".into(), value: json!([w, h]) })
 }
 
 /// `scriptui.close`: close a window (a dialog's `show()` returns `result`, default 2 = Cancel).

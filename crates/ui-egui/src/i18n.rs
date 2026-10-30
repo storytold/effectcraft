@@ -15,7 +15,7 @@ pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 11] = ["cs", "de", "es", "fr", "pt-br", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 12] = ["cs", "de", "es", "fr", "pl", "pt-br", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -64,6 +64,11 @@ pub(crate) fn brazilian_portuguese(app: &EffectcraftApp) -> bool {
 /// The UI is in Czech.
 pub(crate) fn czech(app: &EffectcraftApp) -> bool {
     language(app) == "cs"
+}
+
+/// The UI is in Polish.
+pub(crate) fn polish(app: &EffectcraftApp) -> bool {
+    language(app) == "pl"
 }
 
 /// The UI is in Georgian.
@@ -123,7 +128,7 @@ fn web_draws(language: &str) -> bool {
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`).
+/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -134,7 +139,11 @@ fn supported(locale: Option<&str>) -> &'static str {
         "uk" => "uk",
         "es" => "es",
         "cs" => "cs",
+        "pl" => "pl",
         "ka" => "ka",
+        "ru" => "ru",
+        "de" => "de",
+        "fr" => "fr",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -170,6 +179,13 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
             _ => {}
         }
     }
+    if language == "pl" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+        match source {
+            "Reveal in Explorer" => return "Pokaż w Eksploratorze",
+            "Reveal in File Manager" => return "Pokaż w menedżerze plików",
+            _ => {}
+        }
+    }
     if language == "ka" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
         match source {
             "Reveal in Explorer" => return "Explorer-ში ჩვენება",
@@ -193,6 +209,7 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "fr" => FRENCH,
         "de" => GERMAN,
         "cs" => CZECH,
+        "pl" => POLISH,
         "ka" => GEORGIAN,
         _ => return None,
     })
@@ -252,22 +269,35 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         return effects::name(id, &e.label);
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
-    // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
-    let (undo, no_undo, redo, no_redo) = match language(app) {
-        "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
-        "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
-        "zh-hant" => ("復原", "沒有可復原的操作", "重做", "沒有可重做的操作"),
-        "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
-        "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
-        "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
-        "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
+    // looked up in a catalog. A language without this wording keeps the shown undo/redo label, and
+    // the rest of its menu still goes through the catalog below (#1449).
+    let history = match language(app) {
+        "en" => return shown,
+        "ja" => Some(("取り消し", "取り消しできません", "やり直し", "やり直しできません")),
+        "zh-hans" => Some(("撤销", "无可撤销的操作", "重做", "无可重做的操作")),
+        "zh-hant" => Some(("復原", "沒有可復原的操作", "重做", "沒有可重做的操作")),
+        "uk" => Some(("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення")),
+        "es" => Some(("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer")),
+        "pt-br" => Some(("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer")),
+        "cs" => Some(("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat")),
+        "fr" => Some(("Annuler", "Impossible d'annuler", "Rétablir", "Impossible de rétablir")),
+        "de" => Some(("Rückgängig", "Rückgängig nicht möglich", "Wiederholen", "Wiederholen nicht möglich")),
+        "pl" => Some(("Cofnij", "Nie można cofnąć", "Ponów", "Nie można ponowić")),
         // A colon before the history's (untranslated) action name: "დაბრუნება: Comp1".
-        "ka" => ("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია"),
-        _ => return shown,
+        "ka" => Some(("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია")),
+        // A colon before the history's (untranslated) action name: "Отменить: Comp1".
+        "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
+        _ => None,
     };
     match e.command.as_str() {
-        "edit.undo" => app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
-        "edit.redo" => app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
+        "edit.undo" | "edit.redo" => {
+            let Some((undo, no_undo, redo, no_redo)) = history else { return shown };
+            if e.command == "edit.undo" {
+                app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into())
+            } else {
+                app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into())
+            }
+        }
         "window.panel" => {
             let prefix = format!("{}: ", e.label);
             if let Some(name) = shown.strip_prefix(&prefix) {
@@ -293,8 +323,23 @@ pub(crate) fn effect_category(children: &[MenuNode], source: &str) -> Option<Str
     (!children.is_empty() && children.iter().all(|c| matches!(c, MenuNode::Item(e) if e.command == "effect.apply"))).then(|| effects::category(source))
 }
 
+/// Polish names for the Assign Shortcut submenus that carry a workspace's or 3D view's name.
+fn polish_assign_shortcut(source: &str, shown: &str) -> Option<String> {
+    let named = shown.strip_prefix("Assign Shortcut to “")?;
+    match source {
+        "Assign Shortcut to Workspace" => named.strip_suffix("” Workspace").map(|name| format!("Przypisz skrót do obszaru roboczego „{name}”")),
+        "Assign Shortcut to 3D View" => named.strip_suffix('”').map(|name| format!("Przypisz skrót do widoku 3D „{name}”")),
+        _ => None,
+    }
+}
+
 pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> String {
     match language(app) {
+        "pl" => {
+            if let Some(label) = polish_assign_shortcut(source, &shown) {
+                return label;
+            }
+        }
         "cs" => {
             if source == "Assign Shortcut to Workspace" {
                 if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
@@ -469,6 +514,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安装脚本文件..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安装 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "运行脚本文件..."),
+    ("", "Recent Script Files", "最近的脚本文件"),
     ("", "Create Proxy", "创建代理"),
     ("file.createProxy", "Still...", "静止图像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -822,6 +868,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "行落下"),
     ("anim.addKeyframe", "Add Keyframe", "添加关键帧"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "切换定格关键帧"),
+    ("keys.setMuted", "Mute Keyframes", "静音关键帧"),
+    ("keys.setMuted", "Unmute Keyframes", "取消静音关键帧"),
     ("keys.interpolation", "Keyframe Interpolation...", "关键帧插值..."),
     ("keys.velocity", "Keyframe Velocity...", "关键帧速度..."),
     ("", "Keyframe Assistant", "关键帧辅助"),
@@ -1104,6 +1152,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安裝指令碼檔案..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安裝 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "執行指令碼檔案..."),
+    ("", "Recent Script Files", "最近使用的指令碼檔案"),
     ("", "Create Proxy", "建立代理"),
     ("file.createProxy", "Still...", "靜態影像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -1457,6 +1506,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "行落下"),
     ("anim.addKeyframe", "Add Keyframe", "新增關鍵影格"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "切換定格關鍵影格"),
+    ("keys.setMuted", "Mute Keyframes", "靜音關鍵影格"),
+    ("keys.setMuted", "Unmute Keyframes", "取消靜音關鍵影格"),
     ("keys.interpolation", "Keyframe Interpolation...", "關鍵影格插補..."),
     ("keys.velocity", "Keyframe Velocity...", "關鍵影格速度..."),
     ("", "Keyframe Assistant", "關鍵影格輔助"),
@@ -1736,6 +1787,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "スクリプトファイルをインストール..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUIパネルをインストール..."),
     ("file.runScript", "Run Script File...", "スクリプトファイルを実行..."),
+    ("", "Recent Script Files", "最近使用したスクリプトファイル"),
     ("", "Create Proxy", "プロキシを作成"),
     ("file.createProxy", "Still...", "静止画..."),
     ("file.createProxy", "Movie...", "ムービー..."),
@@ -1822,7 +1874,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("comp.settings", "Composition Settings...", "コンポジション設定..."),
     ("comp.setPosterTime", "Set Poster Time", "ポスター時間を設定"),
     ("comp.trimToWorkArea", "Trim Comp to Work Area", "コンポジションをワークエリアにトリミング"),
-    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "コンポジションを目標範囲にクロップ"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "コンポジションを関心領域にクロップ"),
     ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "コンポジションを選択レイヤーの境界にクロップ"),
     ("render.addOutputModule", "Add Output Module", "出力モジュールを追加"),
     ("", "Preview", "プレビュー"),
@@ -1855,7 +1907,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "シェイプレイヤー"),
     ("layer.newAdjustment", "Adjustment Layer", "調整レイヤー"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "コンテンツに応じた塗りつぶしレイヤー..."),
-    ("layer.newPrimitive", "3D Primitive...", "3D プリミティブ..."),
+    ("layer.newPrimitive", "3D Primitive...", "3Dプリミティブ..."),
     ("layer.new3dPrimitive", "Cube", "立方体"),
     ("layer.new3dPrimitive", "Sphere", "球体"),
     ("layer.new3dPrimitive", "Plane", "平面"),
@@ -1875,7 +1927,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.reset", "Reset Mask", "マスクをリセット"),
     ("layer.mask.remove", "Remove Mask", "マスクを削除"),
     ("layer.mask.removeAll", "Remove All Masks", "すべてのマスクを削除"),
-    ("track.mask", "Track Mask", "マスクをトラック"),
+    ("track.mask", "Track Mask", "マスクをトラッキング"),
     ("", "Mode", "モード"),
     ("layer.mask.mode", "None", "なし"),
     ("layer.mask.mode", "Add", "加算"),
@@ -1940,8 +1992,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.transform", "Fit to Comp Height", "コンポジションの高さに合わせる"),
     ("layer.autoOrient", "Auto-Orient...", "自動方向..."),
     ("", "Time", "時間"),
-    ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップ使用可能"),
-    ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "時間リマップを有効化"),
+    ("layer.timeReverse", "Time-Reverse Layer", "レイヤーを時間反転"),
     ("layer.timeStretch", "Time Stretch...", "時間伸縮..."),
     ("layer.freezeFrame", "Freeze Frame", "フレームを固定"),
     ("layer.freezeOnLastFrame", "Freeze On Last Frame", "最後のフレームで固定"),
@@ -2009,7 +2061,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.trackMatte", "Matte with Layer Above", "上のレイヤーをマットにする"),
     ("layer.trackMatte", "Matte with Layer Below", "下のレイヤーをマットにする"),
     ("", "Layer Styles", "レイヤースタイル"),
-    ("layer.style.options", "Layer Style Options...", "レイヤースタイルオプション..."),
+    ("layer.style.options", "Layer Style Options...", "レイヤースタイルのオプション..."),
     ("layer.style.convertToEditable", "Convert to Editable Styles", "編集可能なスタイルに変換"),
     ("layer.style.showAll", "Show All", "すべてを表示"),
     ("layer.style.removeAll", "Remove All", "すべてを削除"),
@@ -2038,7 +2090,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.create", "Convert to Editable Text", "編集可能なテキストに変換"),
     ("layer.create", "Create Shapes from Text", "テキストからシェイプを作成"),
     ("layer.create", "Create Masks from Text", "テキストからマスクを作成"),
-    ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
+    ("layer.create", "Create Shapes from Vector Layer", "ベクターレイヤーからシェイプを作成"),
     ("layer.create", "Create Keyframes from Data", "データからキーフレームを作成"),
     ("layer.create", "Null Controllers for Positional Points", "位置のポイント用ヌルコントローラー"),
     ("layer.create", "Null Controllers for Path Points", "パスのポイント用ヌルコントローラー"),
@@ -2088,7 +2140,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Jitter", "ジッター"),
     ("layer.applyTextPreset", "Drop In Lines", "行をドロップイン"),
     ("anim.addKeyframe", "Add Keyframe", "キーフレームを追加"),
-    ("keys.toggleHold", "Toggle Hold Keyframe", "停止したキーフレームの切り替え"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "ホールドキーフレームの切り替え"),
+    ("keys.setMuted", "Mute Keyframes", "キーフレームをミュート"),
+    ("keys.setMuted", "Unmute Keyframes", "キーフレームのミュートを解除"),
     ("keys.interpolation", "Keyframe Interpolation...", "キーフレーム補間法..."),
     ("keys.velocity", "Keyframe Velocity...", "キーフレーム速度..."),
     ("", "Keyframe Assistant", "キーフレーム補助"),
@@ -2102,7 +2156,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.sequence", "Sequence Layers...", "シーケンスレイヤー..."),
     ("keys.timeReverse", "Time-Reverse Keyframes", "時間反転キーフレーム"),
     ("", "Animate Text", "テキストをアニメート"),
-    ("layer.enablePerChar3D", "Enable Per-character 3D", "文字ごとの3Dを使用可能にする"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "文字ごとの3Dを有効化"),
     ("layer.addTextAnimator", "Anchor Point", "アンカーポイント"),
     ("layer.addTextAnimator", "Position", "位置"),
     ("layer.addTextAnimator", "Scale", "スケール"),
@@ -2114,7 +2168,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.addTextAnimator", "RGB", "RGB"),
     ("layer.addTextAnimator", "Hue", "色相"),
     ("layer.addTextAnimator", "Saturation", "彩度"),
-    ("layer.addTextAnimator", "Brightness", "明度"),
+    ("layer.addTextAnimator", "Brightness", "明るさ"),
     ("", "Stroke Color", "線のカラー"),
     ("layer.addTextAnimator", "Stroke Width", "線幅"),
     ("", "Front", "前面"),
@@ -2136,12 +2190,12 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("text.removeAllAnimators", "Remove All Text Animators", "すべてのテキストアニメーターを削除"),
     ("prop.setExpression", "Add Expression", "エクスプレッションを追加"),
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
-    ("prop.separateDimensions", "Separate Dimensions", "次元に分割"),
-    ("track.camera", "Track Camera", "カメラをトラック"),
+    ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
+    ("track.camera", "Track Camera", "カメラをトラッキング"),
     ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
-    ("track.motion", "Track Motion", "モーションをトラック"),
-    ("track.stabilize", "Stabilize Motion", "モーションをスタビライズ"),
-    ("track.property", "Track this Property", "このプロパティをトラック"),
+    ("track.motion", "Track Motion", "モーションをトラッキング"),
+    ("track.stabilize", "Stabilize Motion", "モーションを安定化"),
+    ("track.property", "Track this Property", "このプロパティをトラッキング"),
     ("anim.reveal", "Reveal Properties with Keyframes", "キーフレームのあるプロパティを表示"),
     ("anim.reveal", "Reveal Properties with Animation", "アニメーションのあるプロパティを表示"),
     ("anim.reveal", "Reveal All Modified Properties", "変更されたすべてのプロパティを表示"),
@@ -2152,9 +2206,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.zoomOut", "Zoom Out", "ズームアウト"),
     ("", "Resolution", "解像度"),
     ("view.res.full", "Full", "フル画質"),
-    ("view.res.half", "Half", "1/2 画質"),
-    ("view.res.third", "Third", "1/3 画質"),
-    ("view.res.quarter", "Quarter", "1/4 画質"),
+    ("view.res.half", "Half", "1/2画質"),
+    ("view.res.third", "Third", "1/3画質"),
+    ("view.res.quarter", "Quarter", "1/4画質"),
     ("view.res.custom", "Custom...", "カスタム..."),
     ("view.displayColorManagement", "Use Display Color Management", "ディスプレイカラーマネジメントを使用"),
     ("", "Simulate Output", "出力をシミュレート"),
@@ -2221,7 +2275,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.workspace", "Default", "初期設定"),
     ("window.workspace", "Review", "レビュー"),
     ("window.workspace", "Learn", "学習"),
-    ("window.workspace", "Small Screen", "小画面"),
+    ("window.workspace", "Small Screen", "小さい画面"),
     ("window.workspace", "Standard", "標準"),
     ("window.workspace", "All Panels", "すべてのパネル"),
     ("window.workspace", "Animation", "アニメーション"),
@@ -2371,6 +2425,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Встановити файл скрипту..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Встановити панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Виконати файл скрипту..."),
+    ("", "Recent Script Files", "Нещодавні файли скриптів"),
     ("", "Create Proxy", "Створити проксі"),
     ("file.createProxy", "Still...", "Зображення..."),
     ("file.createProxy", "Movie...", "Відео..."),
@@ -2724,6 +2779,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Поява рядків згори"),
     ("anim.addKeyframe", "Add Keyframe", "Додати ключовий кадр"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Перемкнути утримання ключового кадру"),
+    ("keys.setMuted", "Mute Keyframes", "Заглушити ключові кадри"),
+    ("keys.setMuted", "Unmute Keyframes", "Зняти заглушення ключових кадрів"),
     ("keys.interpolation", "Keyframe Interpolation...", "Інтерполяція ключових кадрів..."),
     ("keys.velocity", "Keyframe Velocity...", "Швидкість ключових кадрів..."),
     ("", "Keyframe Assistant", "Помічник ключових кадрів"),
@@ -3007,6 +3064,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar archivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar panel de ScriptUI..."),
     ("file.runScript", "Run Script File...", "Ejecutar archivo de script..."),
+    ("", "Recent Script Files", "Archivos de script recientes"),
     ("", "Create Proxy", "Crear proxy"),
     ("file.createProxy", "Still...", "Imagen fija..."),
     ("file.createProxy", "Movie...", "Película..."),
@@ -3360,6 +3418,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Entrada de líneas cayendo"),
     ("anim.addKeyframe", "Add Keyframe", "Añadir fotograma clave"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Conmutar mantener fotograma clave"),
+    ("keys.setMuted", "Mute Keyframes", "Silenciar fotogramas clave"),
+    ("keys.setMuted", "Unmute Keyframes", "Reactivar fotogramas clave"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolación de fotogramas clave..."),
     ("keys.velocity", "Keyframe Velocity...", "Velocidad de fotogramas clave..."),
     ("", "Keyframe Assistant", "Asistente de fotogramas clave"),
@@ -3641,6 +3701,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar arquivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar painel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Executar arquivo de script..."),
+    ("", "Recent Script Files", "Arquivos de script recentes"),
     ("", "Create Proxy", "Criar proxy"),
     ("file.createProxy", "Still...", "Imagem fixa..."),
     ("file.createProxy", "Movie...", "Filme..."),
@@ -3994,6 +4055,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Entrar com queda de linhas"),
     ("anim.addKeyframe", "Add Keyframe", "Adicionar quadro-chave"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Alternar quadro-chave de retenção"),
+    ("keys.setMuted", "Mute Keyframes", "Silenciar quadros-chave"),
+    ("keys.setMuted", "Unmute Keyframes", "Reativar quadros-chave"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolação de quadro-chave..."),
     ("keys.velocity", "Keyframe Velocity...", "Velocidade do quadro-chave..."),
     ("", "Keyframe Assistant", "Assistente de quadro-chave"),
@@ -4283,6 +4346,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Установить файл скрипта..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Установить панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Выполнить файл скрипта..."),
+    ("", "Recent Script Files", "Недавние файлы скриптов"),
     ("", "Create Proxy", "Создать суррогат"),
     ("file.createProxy", "Still...", "Стоп-кадр..."),
     ("file.createProxy", "Movie...", "Видео..."),
@@ -4635,6 +4699,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Появление строк сверху"),
     ("anim.addKeyframe", "Add Keyframe", "Добавить ключевой кадр"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Переключить фиксацию ключевого кадра"),
+    ("keys.setMuted", "Mute Keyframes", "Отключить ключевые кадры"),
+    ("keys.setMuted", "Unmute Keyframes", "Включить ключевые кадры"),
     ("keys.interpolation", "Keyframe Interpolation...", "Интерполяция ключевых кадров..."),
     ("keys.velocity", "Keyframe Velocity...", "Скорость ключевых кадров..."),
     ("", "Keyframe Assistant", "Помощник по ключевым кадрам"),
@@ -4917,6 +4983,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Installer un fichier de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Installer un panneau ScriptUI..."),
     ("file.runScript", "Run Script File...", "Exécuter un fichier de script..."),
+    ("", "Recent Script Files", "Fichiers de script récents"),
     ("", "Create Proxy", "Créer un proxy"),
     ("file.createProxy", "Still...", "Image fixe..."),
     ("file.createProxy", "Movie...", "Vidéo..."),
@@ -5269,6 +5336,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Chute des lignes depuis le haut"),
     ("anim.addKeyframe", "Add Keyframe", "Ajouter une image clé"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Activer/Désactiver l'image clé figée"),
+    ("keys.setMuted", "Mute Keyframes", "Désactiver les images clés"),
+    ("keys.setMuted", "Unmute Keyframes", "Réactiver les images clés"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolation des images clés..."),
     ("keys.velocity", "Keyframe Velocity...", "Vitesse des images clés..."),
     ("", "Keyframe Assistant", "Assistant d'images clés"),
@@ -5551,6 +5620,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Skriptdatei installieren..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI-Bedienfeld installieren..."),
     ("file.runScript", "Run Script File...", "Skriptdatei ausführen..."),
+    ("", "Recent Script Files", "Zuletzt verwendete Skriptdateien"),
     ("", "Create Proxy", "Proxy erstellen"),
     ("file.createProxy", "Still...", "Standbild..."),
     ("file.createProxy", "Movie...", "Film..."),
@@ -5903,6 +5973,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Zeilen fallen ein"),
     ("anim.addKeyframe", "Add Keyframe", "Keyframe hinzufügen"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Halte-Keyframe umschalten"),
+    ("keys.setMuted", "Mute Keyframes", "Keyframes stummschalten"),
+    ("keys.setMuted", "Unmute Keyframes", "Keyframes wieder aktivieren"),
     ("keys.interpolation", "Keyframe Interpolation...", "Keyframe-Interpolation..."),
     ("keys.velocity", "Keyframe Velocity...", "Keyframe-Geschwindigkeit..."),
     ("", "Keyframe Assistant", "Keyframe-Assistent"),
@@ -6102,6 +6174,640 @@ const GERMAN: &[(&str, &str, &str)] = &[
 
 // <<< generated i18n catalogs
 
+/// Polish (pl): original phrase translations of every fixed menu entry.
+const POLISH: &[(&str, &str, &str)] = &[
+    ("", "Front", "Przód"),
+    ("", "Bevel", "Fazowanie"),
+    ("", "Side", "Bok"),
+    ("", "Back", "Tył"),
+    ("layer.addTextAnimator", "Color", "Kolor"),
+    ("", "EffectCraft", "EffectCraft"),
+    ("app.about", "About EffectCraft...", "O programie EffectCraft..."),
+    ("", "Settings...", "Ustawienia..."),
+    ("app.settings", "General...", "Ogólne..."),
+    ("app.settings", "Startup & Repair...", "Uruchamianie i naprawa..."),
+    ("app.settings", "Project...", "Projekt..."),
+    ("app.settings", "Composition...", "Kompozycja..."),
+    ("app.settings", "Previews...", "Podglądy..."),
+    ("app.settings", "Appearance...", "Wygląd..."),
+    ("app.settings", "Grids & Guides...", "Siatki i linie pomocnicze..."),
+    ("app.settings", "Labels...", "Etykiety..."),
+    ("app.settings", "Type...", "Tekst..."),
+    ("app.settings", "Import...", "Import..."),
+    ("app.settings", "Export...", "Eksport..."),
+    ("app.settings", "Audio...", "Audio..."),
+    ("app.settings", "Disk...", "Dysk..."),
+    ("app.settings", "Memory & CPU...", "Pamięć i procesor..."),
+    ("app.settings", "Video...", "Wideo..."),
+    ("app.settings", "3D...", "3D..."),
+    ("app.settings", "Scripting & Expressions...", "Skrypty i wyrażenia..."),
+    ("app.hide", "Hide EffectCraft", "Ukryj EffectCraft"),
+    ("app.hideOthers", "Hide Others", "Ukryj pozostałe"),
+    ("app.showAll", "Show All", "Pokaż wszystko"),
+    ("app.quit", "Quit EffectCraft", "Zakończ EffectCraft"),
+    ("", "File", "Plik"),
+    ("", "New", "Nowy"),
+    ("file.newProject", "New Project", "Nowy projekt"),
+    ("file.newFromTemplate", "New Project from Template...", "Nowy projekt z szablonu..."),
+    ("project.newFolder", "New Folder", "Nowy folder"),
+    ("file.open", "Open Project...", "Otwórz projekt..."),
+    ("", "Open Recent", "Otwórz ostatnie"),
+    ("file.clearRecent", "Clear Recent Projects", "Wyczyść ostatnie projekty"),
+    ("file.close", "Close", "Zamknij"),
+    ("file.closeProject", "Close Project", "Zamknij projekt"),
+    ("file.save", "Save", "Zapisz"),
+    ("", "Save As", "Zapisz jako"),
+    ("file.saveAs", "Save As...", "Zapisz jako..."),
+    ("file.saveCopy", "Save a Copy...", "Zapisz kopię..."),
+    ("file.saveCopyAsXml", "Save a Copy As XML...", "Zapisz kopię jako XML..."),
+    ("templates.saveAs", "Save as Template...", "Zapisz jako szablon..."),
+    ("file.incrementAndSave", "Increment and Save", "Zapisz z kolejnym numerem"),
+    ("file.revert", "Revert", "Przywróć"),
+    ("", "Import", "Importuj"),
+    ("file.import", "File...", "Plik..."),
+    ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
+    ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
+    ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
+    ("file.importSolid", "Solid...", "Plansza..."),
+    ("file.importLottie", "Lottie...", "Lottie..."),
+    ("file.importVanishingPoint", "Vanishing Point (.vpe)...", "Punkt zbiegu (.vpe)..."),
+    ("essential.importTemplate", "Essential Graphics Template...", "Szablon Essential Graphics..."),
+    ("", "Import Recent Footage", "Importuj ostatnie materiały"),
+    ("file.clearRecentFootage", "Clear Recent Footage", "Wyczyść ostatnie materiały"),
+    ("", "Export", "Eksportuj"),
+    ("renderQueue.add", "Add to Render Queue", "Dodaj do kolejki renderowania"),
+    ("file.exportTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.exportLottie", "Lottie JSON...", "Lottie JSON..."),
+    ("essential.exportTemplate", "Essential Graphics Template...", "Szablon Essential Graphics..."),
+    ("app.find", "Find", "Znajdź"),
+    ("layer.addItem", "Add Footage to Comp", "Dodaj materiał do kompozycji"),
+    ("file.newCompFromSelection", "New Comp from Selection...", "Nowa kompozycja z zaznaczenia..."),
+    ("", "Dependencies", "Zależności"),
+    ("file.collectFiles", "Collect Files...", "Zbierz pliki..."),
+    ("file.consolidateFootage", "Consolidate All Footage", "Scal wszystkie materiały"),
+    ("file.removeUnusedFootage", "Remove Unused Footage", "Usuń nieużywane materiały"),
+    ("file.reduceProject", "Reduce Project", "Zredukuj projekt"),
+    ("file.findMissing", "Find Missing Effects", "Znajdź brakujące efekty"),
+    ("file.findMissing", "Find Missing Fonts", "Znajdź brakujące czcionki"),
+    ("file.findMissing", "Find Missing Footage", "Znajdź brakujące materiały"),
+    ("file.relinkFootage", "Relink Missing Footage...", "Połącz ponownie brakujące materiały..."),
+    ("file.watchFolder", "Watch Folder...", "Folder obserwowany..."),
+    ("", "Scripts", "Skrypty"),
+    ("file.installScript", "Install Script File...", "Zainstaluj plik skryptu..."),
+    ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Zainstaluj panel ScriptUI..."),
+    ("file.runScript", "Run Script File...", "Uruchom plik skryptu..."),
+    ("", "Create Proxy", "Utwórz proxy"),
+    ("file.createProxy", "Still...", "Klatka..."),
+    ("file.createProxy", "Movie...", "Film..."),
+    ("", "Set Proxy", "Ustaw proxy"),
+    ("file.setProxy", "File...", "Plik..."),
+    ("file.setProxyNone", "None", "Brak"),
+    ("", "Interpret Footage", "Interpretuj materiał"),
+    ("file.interpretFootage", "Main...", "Główny..."),
+    ("file.interpretProxy", "Proxy...", "Proxy..."),
+    ("file.rememberInterpretation", "Remember Interpretation", "Zapamiętaj interpretację"),
+    ("file.applyInterpretation", "Apply Interpretation", "Zastosuj interpretację"),
+    ("", "Replace Footage", "Zastąp materiał"),
+    ("file.replaceFootage", "File...", "Plik..."),
+    ("file.replaceWithPlaceholder", "Placeholder...", "Element zastępczy..."),
+    ("file.replaceWithSolid", "Solid...", "Plansza..."),
+    ("file.replaceWithLayeredComp", "With Layered Comp", "Z warstwową kompozycją"),
+    ("file.reloadFootage", "Reload Footage", "Wczytaj ponownie materiał"),
+    ("file.revealInFinder", "Reveal in Finder", "Pokaż w Finderze"),
+    ("file.projectSettings", "Project Settings...", "Ustawienia projektu..."),
+    ("app.quit", "Exit", "Zakończ"),
+    ("", "Edit", "Edycja"),
+    ("edit.undo", "Undo", "Cofnij"),
+    ("edit.redo", "Redo", "Ponów"),
+    ("", "History", "Historia"),
+    ("app.commandPalette", "Quick Apply...", "Szybkie stosowanie..."),
+    ("edit.cut", "Cut", "Wytnij"),
+    ("edit.copy", "Copy", "Kopiuj"),
+    ("edit.copyWithPropertyLinks", "Copy with Property Links", "Kopiuj z łączami właściwości"),
+    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "Kopiuj ze względnymi łączami właściwości"),
+    ("edit.copyExpressionOnly", "Copy Expression Only", "Kopiuj tylko wyrażenie"),
+    ("edit.paste", "Paste", "Wklej"),
+    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "Wklej odwrócone klatki kluczowe"),
+    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "Wklej tekst i dopasuj formatowanie"),
+    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "Wklej tylko formatowanie tekstu"),
+    ("edit.clear", "Clear", "Wyczyść"),
+    ("edit.duplicate", "Duplicate", "Powiel"),
+    ("edit.splitLayer", "Split Layer", "Podziel warstwę"),
+    ("edit.liftWorkArea", "Lift Work Area", "Wytnij obszar roboczy"),
+    ("edit.extractWorkArea", "Extract Work Area", "Wyodrębnij obszar roboczy"),
+    ("edit.selectAll", "Select All", "Zaznacz wszystko"),
+    ("edit.deselectAll", "Deselect All", "Usuń zaznaczenie"),
+    ("", "Label", "Etykieta"),
+    ("edit.selectLabelGroup", "Select Label Group", "Zaznacz grupę etykiet"),
+    ("edit.label", "None", "Brak"),
+    ("edit.label", "Red", "Czerwony"),
+    ("edit.label", "Yellow", "Żółty"),
+    ("edit.label", "Aqua", "Akwamaryna"),
+    ("edit.label", "Pink", "Różowy"),
+    ("edit.label", "Lavender", "Lawendowy"),
+    ("edit.label", "Peach", "Brzoskwiniowy"),
+    ("edit.label", "Sea Foam", "Morska piana"),
+    ("edit.label", "Blue", "Niebieski"),
+    ("edit.label", "Green", "Zielony"),
+    ("edit.label", "Purple", "Fioletowy"),
+    ("edit.label", "Orange", "Pomarańczowy"),
+    ("edit.label", "Brown", "Brązowy"),
+    ("edit.label", "Fuchsia", "Fuksja"),
+    ("edit.label", "Cyan", "Cyjan"),
+    ("edit.label", "Sandstone", "Piaskowiec"),
+    ("edit.label", "Dark Green", "Ciemnozielony"),
+    ("app.settings", "Edit Label Colors...", "Edytuj kolory etykiet..."),
+    ("", "Select Keyframe Label Group", "Zaznacz grupę etykiet klatek kluczowych"),
+    ("keys.selectLabelGroup", "On Selected Layers", "Na zaznaczonych warstwach"),
+    ("keys.selectLabelGroup", "On All Layers", "Na wszystkich warstwach"),
+    ("keys.selectLabelGroup", "Visible Keyframes on Selected Layers", "Widoczne klatki kluczowe na zaznaczonych warstwach"),
+    ("keys.selectLabelGroup", "Visible Keyframes on All Layers", "Widoczne klatki kluczowe na wszystkich warstwach"),
+    ("", "Purge", "Wyczyść pamięć"),
+    ("edit.purge", "All Cache...", "Całą pamięć podręczną..."),
+    ("edit.purge", "All Memory & Disk Cache...", "Całą pamięć i pamięć dyskową..."),
+    ("edit.purge", "All Memory", "Całą pamięć"),
+    ("edit.purge", "All Disk Cache...", "Całą pamięć dyskową..."),
+    ("edit.purge", "All 3D Cache...", "Całą pamięć 3D..."),
+    ("edit.purgeUndo", "Undo", "Cofanie"),
+    ("edit.purge", "Image Cache Memory", "Pamięć podręczna obrazów"),
+    ("edit.purge", "Snapshot", "Migawka"),
+    ("edit.editOriginal", "Edit Original...", "Edytuj oryginał..."),
+    ("", "Templates", "Szablony"),
+    ("app.templates", "Render Settings...", "Ustawienia renderowania..."),
+    ("app.templates", "Output Module...", "Moduł wyjściowy..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts", "Skróty klawiaturowe"),
+    ("", "Preferences", "Preferencje"),
+    ("", "Composition", "Kompozycja"),
+    ("comp.new", "New Composition...", "Nowa kompozycja..."),
+    ("comp.settings", "Composition Settings...", "Ustawienia kompozycji..."),
+    ("comp.setPosterTime", "Set Poster Time", "Ustaw czas plakatu"),
+    ("comp.trimToWorkArea", "Trim Comp to Work Area", "Przytnij kompozycję do obszaru roboczego"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "Kadruj kompozycję do obszaru zainteresowania"),
+    ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "Kadruj kompozycję do granic zaznaczonych warstw (warstwy)"),
+    ("render.addOutputModule", "Add Output Module", "Dodaj moduł wyjściowy"),
+    ("", "Preview", "Podgląd"),
+    ("playback.toggle", "Play Current Preview", "Odtwórz bieżący podgląd"),
+    ("playback.cacheWhenIdle", "Cache Frames When Idle", "Buforuj klatki w bezczynności"),
+    ("playback.audio", "Audio", "Audio"),
+    ("", "Save Frame As", "Zapisz klatkę jako"),
+    ("comp.saveFrameAs", "File...", "Plik..."),
+    ("comp.saveFrameAsPsd", "Photoshop Layers...", "Warstwy Photoshopa..."),
+    ("comp.saveFrameAsExr", "ProEXR...", "ProEXR..."),
+    ("comp.copyFrame", "Copy Frame to Clipboard", "Kopiuj klatkę do schowka"),
+    ("render.preRender", "Pre-render...", "Wstępne renderowanie..."),
+    ("render.saveCurrentPreview", "Save Current Preview...", "Zapisz bieżący podgląd..."),
+    ("comp.openInEssentialGraphics", "Open in Essential Graphics", "Otwórz w Essential Graphics"),
+    ("", "Responsive Design — Time", "Projekt responsywny — czas"),
+    ("comp.responsiveTime", "Create Intro", "Utwórz intro"),
+    ("comp.responsiveTime", "Create Outro", "Utwórz outro"),
+    ("comp.responsiveTime", "Create Protected Region from Work Area", "Utwórz chroniony obszar z obszaru roboczego"),
+    ("comp.flowchart", "Composition Flowchart", "Schemat kompozycji"),
+    ("comp.miniFlowchart", "Composition Mini-Flowchart", "Miniaturowy schemat kompozycji"),
+    ("", "VR", "VR"),
+    ("comp.vr.createEnvironment", "Create VR Environment...", "Utwórz środowisko VR..."),
+    ("comp.vr.extractCubemap", "Extract Cubemap...", "Wyodrębnij cubemapę..."),
+    ("", "Layer", "Warstwa"),
+    ("layer.newText", "Text", "Tekst"),
+    ("layer.newSolid", "Solid...", "Plansza..."),
+    ("layer.newLight", "Light...", "Światło..."),
+    ("layer.newCamera", "Camera...", "Kamera..."),
+    ("layer.newNull", "Null Object", "Obiekt zerowy"),
+    ("layer.newShape", "Shape Layer", "Warstwa kształtu"),
+    ("layer.newAdjustment", "Adjustment Layer", "Warstwa korekcyjna"),
+    ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Warstwa wypełnienia z uwzględnieniem zawartości..."),
+    ("layer.new3dPrimitive", "Cube", "Sześcian"),
+    ("layer.new3dPrimitive", "Sphere", "Kula"),
+    ("layer.new3dPrimitive", "Plane", "Płaszczyzna"),
+    ("layer.new3dPrimitive", "Torus", "Torus"),
+    ("layer.new3dPrimitive", "Cone", "Stożek"),
+    ("layer.new3dPrimitive", "Cylinder", "Walec"),
+    ("layer.settings", "Layer Settings...", "Ustawienia warstwy..."),
+    ("layer.openLayer", "Open Layer", "Otwórz warstwę"),
+    ("layer.openSource", "Open Layer Source", "Otwórz źródło warstwy"),
+    ("layer.revealInFinder", "Reveal in Finder", "Pokaż w Finderze"),
+    ("", "Mask", "Maska"),
+    ("layer.addMask", "New Mask", "Nowa maska"),
+    ("layer.mask.shape", "Mask Shape...", "Kształt maski..."),
+    ("layer.mask.set", "Mask Feather...", "Wtapianie maski..."),
+    ("layer.mask.set", "Mask Opacity...", "Krycie maski..."),
+    ("layer.mask.set", "Mask Expansion...", "Rozszerzenie maski..."),
+    ("layer.mask.reset", "Reset Mask", "Resetuj maskę"),
+    ("layer.mask.remove", "Remove Mask", "Usuń maskę"),
+    ("layer.mask.removeAll", "Remove All Masks", "Usuń wszystkie maski"),
+    ("track.mask", "Track Mask", "Śledź maskę"),
+    ("", "Mode", "Tryb"),
+    ("layer.mask.mode", "None", "Brak"),
+    ("layer.mask.mode", "Add", "Dodaj"),
+    ("layer.mask.mode", "Subtract", "Odejmij"),
+    ("layer.mask.mode", "Intersect", "Część wspólna"),
+    ("layer.mask.mode", "Lighten", "Rozjaśnij"),
+    ("layer.mask.mode", "Darken", "Przyciemnij"),
+    ("layer.mask.mode", "Difference", "Różnica"),
+    ("layer.mask.invert", "Inverted", "Odwrócona"),
+    ("layer.mask.lock", "Locked", "Zablokowana"),
+    ("", "Motion Blur", "Rozmycie ruchu"),
+    ("layer.mask.motionBlur", "Same As Layer", "Jak warstwa"),
+    ("layer.mask.motionBlur", "On", "Wł."),
+    ("layer.mask.motionBlur", "Off", "Wył."),
+    ("", "Feather Falloff", "Zanikanie wtapiania"),
+    ("layer.mask.featherFalloff", "Smooth", "Gładkie"),
+    ("layer.mask.featherFalloff", "Linear", "Liniowe"),
+    ("layer.mask.unlockAll", "Unlock All Masks", "Odblokuj wszystkie maski"),
+    ("layer.mask.lockOthers", "Lock Other Masks", "Zablokuj pozostałe maski"),
+    ("layer.mask.hideLocked", "Hide Locked Masks", "Ukryj zablokowane maski"),
+    ("", "Mask and Shape Path", "Ścieżka maski i kształtu"),
+    ("path.rotoBezier", "RotoBezier", "RotoBezier"),
+    ("mask.setClosed", "Closed", "Zamknięta"),
+    ("path.convertToBezier", "Convert To Bezier Path", "Konwertuj na ścieżkę Béziera"),
+    ("path.setFirstVertex", "Set First Vertex", "Ustaw pierwszy wierzchołek"),
+    ("path.freeTransform", "Free Transform Points", "Swobodne przekształcanie punktów"),
+    ("", "Quality", "Jakość"),
+    ("layer.quality", "Best", "Najlepsza"),
+    ("layer.quality", "Draft", "Robocza"),
+    ("layer.quality", "Wireframe", "Szkielet"),
+    ("layer.sampling", "Bilinear", "Dwuliniowa"),
+    ("layer.sampling", "Bicubic", "Dwusześcienna"),
+    ("", "Switches", "Przełączniki"),
+    ("layer.hideOtherVideo", "Hide Other Video", "Ukryj pozostałe wideo"),
+    ("layer.showAllVideo", "Show All Video", "Pokaż całe wideo"),
+    ("layer.unlockAll", "Unlock All Layers", "Odblokuj wszystkie warstwy"),
+    ("layer.expressions", "Enable Expressions", "Włącz wyrażenia"),
+    ("layer.expressions", "Disable Expressions", "Wyłącz wyrażenia"),
+    ("layer.setSwitch", "Shy", "Nieśmiała"),
+    ("layer.setSwitch", "Lock", "Zablokuj"),
+    ("layer.setSwitch", "Audio", "Audio"),
+    ("layer.setSwitch", "Video", "Wideo"),
+    ("layer.setSwitch", "Solo", "Solo"),
+    ("layer.setSwitch", "Effect", "Efekt"),
+    ("layer.setSwitch", "Collapse", "Zwiń"),
+    ("layer.setSwitch", "Motion Blur", "Rozmycie ruchu"),
+    ("layer.setSwitch", "Adjustment Layer", "Warstwa korekcyjna"),
+    ("", "Transform", "Przekształć"),
+    ("layer.transform", "Reset", "Resetuj"),
+    ("layer.setTransform", "Anchor Point...", "Punkt zakotwiczenia..."),
+    ("layer.setTransform", "Position...", "Położenie..."),
+    ("layer.setTransform", "Scale...", "Skala..."),
+    ("layer.setTransform", "Orientation...", "Orientacja..."),
+    ("layer.setTransform", "Rotation...", "Obrót..."),
+    ("layer.setTransform", "Opacity...", "Krycie..."),
+    ("layer.transform", "Flip Horizontal", "Odbij w poziomie"),
+    ("layer.transform", "Flip Vertical", "Odbij w pionie"),
+    ("layer.transform", "Center In View", "Wyśrodkuj w widoku"),
+    ("layer.centerAnchor", "Center Anchor Point in Layer Content", "Wyśrodkuj punkt zakotwiczenia w zawartości warstwy"),
+    ("layer.transform", "Fit to Comp", "Dopasuj do kompozycji"),
+    ("layer.transform", "Fit to Comp Width", "Dopasuj do szerokości kompozycji"),
+    ("layer.transform", "Fit to Comp Height", "Dopasuj do wysokości kompozycji"),
+    ("layer.autoOrient", "Auto-Orient...", "Automatyczna orientacja..."),
+    ("", "Time", "Czas"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "Włącz przemapowanie czasu"),
+    ("layer.timeReverse", "Time-Reverse Layer", "Odwróć czas warstwy"),
+    ("layer.timeStretch", "Time Stretch...", "Rozciągnięcie czasu..."),
+    ("layer.freezeFrame", "Freeze Frame", "Zamrożenie klatki"),
+    ("layer.freezeOnLastFrame", "Freeze On Last Frame", "Zamroź na ostatniej klatce"),
+    ("layer.alignVideoToData", "Align Video to Data", "Wyrównaj wideo do danych"),
+    ("", "Frame Blending", "Mieszanie klatek"),
+    ("layer.frameBlending", "Off", "Wył."),
+    ("layer.frameBlending", "Frame Mix", "Miks klatek"),
+    ("layer.frameBlending", "Pixel Motion", "Ruch pikseli"),
+    ("layer.setSwitch", "3D Layer", "Warstwa 3D"),
+    ("layer.setSwitch", "Guide Layer", "Warstwa pomocnicza"),
+    ("layer.environment", "Environment Layer", "Warstwa środowiska"),
+    ("", "Markers", "Znaczniki"),
+    ("layer.addMarker", "Add Marker", "Dodaj znacznik"),
+    ("layer.updateMarkersFromSource", "Update Markers From Source", "Aktualizuj znaczniki ze źródła"),
+    ("layer.markersLock", "Lock Markers", "Zablokuj znaczniki"),
+    ("layer.deleteAllMarkers", "Delete All Markers", "Usuń wszystkie znaczniki"),
+    ("layer.setSwitch", "Preserve Transparency", "Zachowaj przezroczystość"),
+    ("", "Blending Mode", "Tryb mieszania"),
+    ("layer.setBlendMode", "Normal", "Normalny"),
+    ("layer.setBlendMode", "Dissolve", "Rozpuszczenie"),
+    ("layer.setBlendMode", "Dancing Dissolve", "Tańczące rozpuszczenie"),
+    ("layer.setBlendMode", "Darken", "Ciemniej"),
+    ("layer.setBlendMode", "Multiply", "Mnożenie"),
+    ("layer.setBlendMode", "Color Burn", "Ściemnianie koloru"),
+    ("layer.setBlendMode", "Classic Color Burn", "Klasyczne ściemnianie koloru"),
+    ("layer.setBlendMode", "Linear Burn", "Ściemnianie liniowe"),
+    ("layer.setBlendMode", "Darker Color", "Ciemniejszy kolor"),
+    ("layer.setBlendMode", "Add", "Dodaj"),
+    ("layer.setBlendMode", "Lighten", "Jaśniej"),
+    ("layer.setBlendMode", "Screen", "Mnożenie odwrotne"),
+    ("layer.setBlendMode", "Color Dodge", "Rozjaśnianie koloru"),
+    ("layer.setBlendMode", "Classic Color Dodge", "Klasyczne rozjaśnianie koloru"),
+    ("layer.setBlendMode", "Linear Dodge", "Rozjaśnianie liniowe"),
+    ("layer.setBlendMode", "Lighter Color", "Jaśniejszy kolor"),
+    ("layer.setBlendMode", "Overlay", "Nakładka"),
+    ("layer.setBlendMode", "Soft Light", "Łagodne światło"),
+    ("layer.setBlendMode", "Hard Light", "Ostre światło"),
+    ("layer.setBlendMode", "Linear Light", "Światło liniowe"),
+    ("layer.setBlendMode", "Vivid Light", "Jaskrawe światło"),
+    ("layer.setBlendMode", "Pin Light", "Światło punktowe"),
+    ("layer.setBlendMode", "Hard Mix", "Twarde mieszanie"),
+    ("layer.setBlendMode", "Difference", "Różnica"),
+    ("layer.setBlendMode", "Classic Difference", "Klasyczna różnica"),
+    ("layer.setBlendMode", "Exclusion", "Wykluczenie"),
+    ("layer.setBlendMode", "Subtract", "Odejmowanie"),
+    ("layer.setBlendMode", "Divide", "Dzielenie"),
+    ("layer.setBlendMode", "Hue", "Barwa"),
+    ("layer.setBlendMode", "Saturation", "Nasycenie"),
+    ("layer.setBlendMode", "Color", "Kolor"),
+    ("layer.setBlendMode", "Luminosity", "Jasność"),
+    ("layer.setBlendMode", "Stencil Alpha", "Szablon alfa"),
+    ("layer.setBlendMode", "Stencil Luma", "Szablon luma"),
+    ("layer.setBlendMode", "Silhouette Alpha", "Sylweta alfa"),
+    ("layer.setBlendMode", "Silhouette Luma", "Sylweta luma"),
+    ("layer.setBlendMode", "Alpha Add", "Dodawanie alfa"),
+    ("layer.setBlendMode", "Luminescent Premul", "Luminescencja premul"),
+    ("layer.setBlendMode", "Next Blending Mode", "Następny tryb mieszania"),
+    ("layer.setBlendMode", "Previous Blending Mode", "Poprzedni tryb mieszania"),
+    ("", "Track Matte", "Matowa ścieżka"),
+    ("layer.trackMatte", "No Track Matte", "Bez matowej ścieżki"),
+    ("layer.trackMatte", "Alpha Matte", "Matowa alfa"),
+    ("layer.trackMatte", "Alpha Inverted Matte", "Odwrócona matowa alfa"),
+    ("layer.trackMatte", "Luma Matte", "Matowa luma"),
+    ("layer.trackMatte", "Luma Inverted Matte", "Odwrócona matowa luma"),
+    ("layer.trackMatte", "Matte with Layer Above", "Matowa z warstwą powyżej"),
+    ("layer.trackMatte", "Matte with Layer Below", "Matowa z warstwą poniżej"),
+    ("", "Layer Styles", "Style warstwy"),
+    ("layer.style.options", "Layer Style Options...", "Opcje stylu warstwy..."),
+    ("layer.style.convertToEditable", "Convert to Editable Styles", "Konwertuj na edytowalne style"),
+    ("layer.style.showAll", "Show All", "Pokaż wszystkie"),
+    ("layer.style.removeAll", "Remove All", "Usuń wszystkie"),
+    ("layer.style.dropShadow", "Drop Shadow", "Cień"),
+    ("layer.style.innerShadow", "Inner Shadow", "Cień wewnętrzny"),
+    ("layer.style.outerGlow", "Outer Glow", "Blask zewnętrzny"),
+    ("layer.style.innerGlow", "Inner Glow", "Blask wewnętrzny"),
+    ("layer.style.bevelEmboss", "Bevel and Emboss", "Faza i płaskorzeźba"),
+    ("layer.style.satin", "Satin", "Satyna"),
+    ("layer.style.colorOverlay", "Color Overlay", "Nakładka koloru"),
+    ("layer.style.gradientOverlay", "Gradient Overlay", "Nakładka gradientu"),
+    ("layer.style.stroke", "Stroke", "Obrys"),
+    ("path.groupShapes", "Group Shapes", "Grupuj kształty"),
+    ("path.ungroupShapes", "Ungroup Shapes", "Rozgrupuj kształty"),
+    ("", "Arrange", "Kolejność"),
+    ("layer.arrange", "Bring Layer to Front", "Przesuń warstwę na wierzch"),
+    ("layer.arrange", "Bring Layer Forward", "Przesuń warstwę do przodu"),
+    ("layer.arrange", "Send Layer Backward", "Przesuń warstwę do tyłu"),
+    ("layer.arrange", "Send Layer to Back", "Przesuń warstwę na spód"),
+    ("", "Reveal", "Pokaż"),
+    ("layer.revealSource", "Reveal Layer Source in Project", "Pokaż źródło warstwy w projekcie"),
+    ("comp.flowchart", "Reveal Layer in Project Flowchart", "Pokaż warstwę w schemacie projektu"),
+    ("comp.revealInProject", "Reveal Composition in Project", "Pokaż kompozycję w projekcie"),
+    ("layer.revealExpressionErrors", "Reveal Expression Errors", "Pokaż błędy wyrażeń"),
+    ("", "Create", "Utwórz"),
+    ("layer.create", "Convert to Editable Text", "Konwertuj na edytowalny tekst"),
+    ("layer.create", "Create Shapes from Text", "Utwórz kształty z tekstu"),
+    ("layer.create", "Create Masks from Text", "Utwórz maski z tekstu"),
+    ("layer.create", "Create Shapes from Vector Layer", "Utwórz kształty z warstwy wektorowej"),
+    ("layer.create", "Create Keyframes from Data", "Utwórz klatki kluczowe z danych"),
+    ("layer.create", "Null Controllers for Positional Points", "Kontrolery zerowe dla punktów położenia"),
+    ("layer.create", "Null Controllers for Path Points", "Kontrolery zerowe dla punktów ścieżki"),
+    ("layer.create", "Nulls Following Path Points", "Obiekty zerowe podążające za punktami ścieżki"),
+    ("layer.create", "Null Tracing Along Path", "Obiekt zerowy wzdłuż ścieżki"),
+    ("layer.create", "Create 3D Layer Instance", "Utwórz instancję warstwy 3D"),
+    ("", "Camera", "Kamera"),
+    ("camera.fromView", "Create Camera from 3D View", "Utwórz kamerę z widoku 3D"),
+    ("camera.stereoRig", "Create Stereo 3D Rig", "Utwórz zestaw stereo 3D"),
+    ("camera.orbitNull", "Create Orbit Null", "Utwórz obiekt zerowy orbity"),
+    ("camera.fromModel", "Create Cameras from 3D Model", "Utwórz kamery z modelu 3D"),
+    ("camera.linkFocusToPoi", "Link Focus Distance to Point of Interest", "Powiąż odległość ostrości z punktem zainteresowania"),
+    ("camera.linkFocusToLayer", "Link Focus Distance to Layer", "Powiąż odległość ostrości z warstwą"),
+    ("camera.setFocusToLayer", "Set Focus Distance to Layer", "Ustaw odległość ostrości na warstwę"),
+    ("layer.cameraSettings", "Camera Settings...", "Ustawienia kamery..."),
+    ("view.reset3DView", "Reset 3D View", "Resetuj widok 3D"),
+    ("", "Light", "Światło"),
+    ("light.fromModel", "Create Lights from 3D Model", "Utwórz światła z modelu 3D"),
+    ("light.controlWithCamera", "Control Light with Camera", "Steruj światłem za pomocą kamery"),
+    ("light.environmentBackground", "Create Environment Light Background Layer", "Utwórz warstwę tła światła otoczenia"),
+    ("", "Material", "Materiał"),
+    ("material.revealSource", "Reveal Material Source in Project", "Pokaż źródło materiału w projekcie"),
+    ("material.reset", "Reset Material", "Resetuj materiał"),
+    ("material.duplicateAssign", "Duplicate and Assign Material", "Powiel i przypisz materiał"),
+    ("layer.autoTrace", "Auto-trace...", "Automatyczne obrysowanie..."),
+    ("layer.precompose", "Pre-compose...", "Utwórz kompozycję wstępną..."),
+    ("layer.sceneEditDetection", "Scene Edit Detection...", "Wykrywanie zmian scen..."),
+    ("", "Effect", "Efekt"),
+    ("window.panel", "Effect Controls", "Ustawienia efektów"),
+    ("effect.applyLast", "Last Effect", "Ostatni efekt"),
+    ("effect.removeAll", "Remove All", "Usuń wszystkie"),
+    ("effect.manage", "Manage Effects...", "Zarządzaj efektami..."),
+    ("effect.plugins.load", "Load Effect Plug-in...", "Wczytaj wtyczkę efektu..."),
+    ("", "Animation", "Animacja"),
+    ("anim.savePreset", "Save Animation Preset...", "Zapisz ustawienie animacji..."),
+    ("anim.applyPreset", "Apply Animation Preset...", "Zastosuj ustawienie animacji..."),
+    ("", "Recent Animation Presets", "Ostatnie ustawienia animacji"),
+    ("anim.clearRecentPresets", "Clear Recent Presets", "Wyczyść ostatnie ustawienia"),
+    ("anim.browsePresets", "Browse Presets...", "Przeglądaj ustawienia..."),
+    ("", "Text Animation Presets", "Ustawienia animacji tekstu"),
+    ("layer.applyTextPreset", "Typewriter", "Maszyna do pisania"),
+    ("layer.applyTextPreset", "Fade Up Characters", "Pojawianie się znaków"),
+    ("layer.applyTextPreset", "Bounce In Words", "Odbijające się słowa"),
+    ("layer.applyTextPreset", "Tracking In", "Zbliżanie liter"),
+    ("layer.applyTextPreset", "Scramble", "Mieszanie znaków"),
+    ("layer.applyTextPreset", "Blur In", "Wyostrzanie z rozmycia"),
+    ("layer.applyTextPreset", "Jitter", "Drganie"),
+    ("layer.applyTextPreset", "Drop In Lines", "Wpadające wiersze"),
+    ("anim.addKeyframe", "Add Keyframe", "Dodaj klatkę kluczową"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "Przełącz klatkę zatrzymania"),
+    ("keys.interpolation", "Keyframe Interpolation...", "Interpolacja klatek kluczowych..."),
+    ("keys.velocity", "Keyframe Velocity...", "Prędkość klatek kluczowych..."),
+    ("", "Keyframe Assistant", "Asystent klatek kluczowych"),
+    ("keys.audioToKeyframes", "Convert Audio to Keyframes", "Konwertuj audio na klatki kluczowe"),
+    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "Konwertuj wyrażenie na klatki kluczowe"),
+    ("keys.easyEase", "Easy Ease", "Łagodne przejście"),
+    ("keys.easyEaseIn", "Easy Ease In", "Łagodne wejście"),
+    ("keys.easyEaseOut", "Easy Ease Out", "Łagodne wyjście"),
+    ("keys.exponentialScale", "Exponential Scale", "Skalowanie wykładnicze"),
+    ("keys.rpfCameraImport", "RPF Camera Import", "Import kamery RPF"),
+    ("layer.sequence", "Sequence Layers...", "Ułóż warstwy w sekwencję..."),
+    ("keys.timeReverse", "Time-Reverse Keyframes", "Odwróć czas klatek kluczowych"),
+    ("", "Animate Text", "Animuj tekst"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "Włącz 3D dla każdego znaku"),
+    ("layer.addTextAnimator", "Anchor Point", "Punkt zakotwiczenia"),
+    ("layer.addTextAnimator", "Position", "Położenie"),
+    ("layer.addTextAnimator", "Scale", "Skala"),
+    ("layer.addTextAnimator", "Skew", "Pochylenie"),
+    ("layer.addTextAnimator", "Rotation", "Obrót"),
+    ("layer.addTextAnimator", "Opacity", "Krycie"),
+    ("layer.addTextAnimator", "All Transform Properties", "Wszystkie właściwości przekształcenia"),
+    ("", "Fill Color", "Kolor wypełnienia"),
+    ("layer.addTextAnimator", "RGB", "RGB"),
+    ("layer.addTextAnimator", "Hue", "Barwa"),
+    ("layer.addTextAnimator", "Saturation", "Nasycenie"),
+    ("layer.addTextAnimator", "Brightness", "Jasność"),
+    ("", "Stroke Color", "Kolor obrysu"),
+    ("layer.addTextAnimator", "Stroke Width", "Szerokość obrysu"),
+    ("layer.addTextAnimator", "Tracking", "Światło"),
+    ("layer.addTextAnimator", "Line Anchor", "Zakotwiczenie wiersza"),
+    ("layer.addTextAnimator", "Line Spacing", "Odstęp między wierszami"),
+    ("layer.addTextAnimator", "Character Offset", "Przesunięcie znaku"),
+    ("layer.addTextAnimator", "Character Value", "Wartość znaku"),
+    ("layer.addTextAnimator", "Blur", "Rozmycie"),
+    ("text.animatorFontAxes", "Variable Font Axes", "Osie czcionki zmiennej"),
+    ("", "Add Text Selector", "Dodaj selektor tekstu"),
+    ("text.addSelector", "Range", "Zakres"),
+    ("text.addSelector", "Wiggly", "Falowanie"),
+    ("text.addSelector", "Expression", "Wyrażenie"),
+    ("text.removeAllAnimators", "Remove All Text Animators", "Usuń wszystkie animatory tekstu"),
+    ("prop.setExpression", "Add Expression", "Dodaj wyrażenie"),
+    ("essential.addProperty", "Add Property to Essential Graphics", "Dodaj właściwość do Essential Graphics"),
+    ("prop.separateDimensions", "Separate Dimensions", "Rozdziel wymiary"),
+    ("track.camera", "Track Camera", "Śledź kamerę"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
+    ("track.motion", "Track Motion", "Śledź ruch"),
+    ("track.stabilize", "Stabilize Motion", "Stabilizuj ruch"),
+    ("track.property", "Track this Property", "Śledź tę właściwość"),
+    ("anim.reveal", "Reveal Properties with Keyframes", "Pokaż właściwości z klatkami kluczowymi"),
+    ("anim.reveal", "Reveal Properties with Animation", "Pokaż właściwości z animacją"),
+    ("anim.reveal", "Reveal All Modified Properties", "Pokaż wszystkie zmienione właściwości"),
+    ("", "View", "Widok"),
+    ("view.newViewer", "New Viewer", "Nowa przeglądarka"),
+    ("view.splitLockedViewer", "Split with New Locked Viewer", "Podziel z nową zablokowaną przeglądarką"),
+    ("view.zoomIn", "Zoom In", "Powiększ"),
+    ("view.zoomOut", "Zoom Out", "Pomniejsz"),
+    ("", "Resolution", "Rozdzielczość"),
+    ("view.res.full", "Full", "Pełna"),
+    ("view.res.half", "Half", "Połowa"),
+    ("view.res.third", "Third", "Jedna trzecia"),
+    ("view.res.quarter", "Quarter", "Jedna czwarta"),
+    ("view.res.custom", "Custom...", "Niestandardowa..."),
+    ("view.displayColorManagement", "Use Display Color Management", "Używaj zarządzania kolorem wyświetlacza"),
+    ("", "Simulate Output", "Symuluj wyjście"),
+    ("view.simulateOutput", "No Output Simulation", "Bez symulacji wyjścia"),
+    ("view.simulateOutput", "HDTV (Rec. 709)", "HDTV (Rec. 709)"),
+    ("view.simulateOutput", "SDTV NTSC", "SDTV NTSC"),
+    ("view.simulateOutput", "SDTV PAL", "SDTV PAL"),
+    ("view.simulateOutput", "Legacy Macintosh RGB (Gamma 1.8)", "Starsze RGB komputerów Macintosh (gamma 1,8)"),
+    ("view.simulateOutput", "Internet Standard RGB (sRGB)", "Standardowe internetowe RGB (sRGB)"),
+    ("view.simulateOutput", "UHDTV (Rec. 2020)", "UHDTV (Rec. 2020)"),
+    ("view.simulateOutput", "Display P3", "Display P3"),
+    ("view.simulateOutput", "Linear (1.0 Gamma)", "Liniowe (gamma 1,0)"),
+    ("view.customRgb", "My Custom RGB...", "Moje niestandardowe RGB..."),
+    ("view.simulateOutput", "Custom...", "Niestandardowe..."),
+    ("view.rulers", "Show Rulers", "Pokaż linijki"),
+    ("", "Panel Background Color", "Kolor tła panelu"),
+    ("view.panelBackground", "Black", "Czarny"),
+    ("view.panelBackground", "Dark Gray", "Ciemnoszary"),
+    ("view.panelBackground", "Medium Gray (Default)", "Średnioszary (domyślny)"),
+    ("view.panelBackground", "Light Gray", "Jasnoszary"),
+    ("view.panelBackground", "White", "Biały"),
+    ("view.panelBackground", "Custom", "Niestandardowy"),
+    ("view.panelBackground", "Select Custom Background Color...", "Wybierz niestandardowy kolor tła..."),
+    ("view.guides", "Show Guides", "Pokaż linie pomocnicze"),
+    ("view.snapToGuides", "Snap to Guides", "Przyciągaj do linii pomocniczych"),
+    ("view.lockGuides", "Lock Guides", "Zablokuj linie pomocnicze"),
+    ("view.addGuide", "Add Guide...", "Dodaj linię pomocniczą..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Dodaj procentową linię pomocniczą..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Konwertuj linie pomocnicze na procenty"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Konwertuj linie pomocnicze na piksele"),
+    ("view.clearGuides", "Clear Guides", "Wyczyść linie pomocnicze"),
+    ("view.importGuides", "Import Guides...", "Importuj linie pomocnicze..."),
+    ("view.exportGuides", "Export Guides...", "Eksportuj linie pomocnicze..."),
+    ("view.grid", "Show Grid", "Pokaż siatkę"),
+    ("view.snapToGrid", "Snap to Grid", "Przyciągaj do siatki"),
+    ("view.snapping", "Snapping", "Przyciąganie"),
+    ("view.options", "View Options...", "Opcje widoku..."),
+    ("view.layerControls", "Show Layer Controls", "Pokaż elementy sterujące warstwy"),
+    ("", "Switch View Layout", "Przełącz układ widoków"),
+    ("view.layout", "1 View", "1 widok"),
+    ("view.layout", "2 Views", "2 widoki"),
+    ("view.layout", "4 Views", "4 widoki"),
+    ("view.shareViewOptions", "Share View Options", "Wspólne opcje widoku"),
+    ("", "Switch 3D View", "Przełącz widok 3D"),
+    ("view.3d.activeCamera", "Active Camera", "Aktywna kamera"),
+    ("view.3d.default", "Default", "Domyślny"),
+    ("view.3d.front", "Front", "Przód"),
+    ("view.3d.left", "Left", "Lewo"),
+    ("view.3d.top", "Top", "Góra"),
+    ("view.3d.back", "Back", "Tył"),
+    ("view.3d.right", "Right", "Prawo"),
+    ("view.3d.bottom", "Bottom", "Dół"),
+    ("view.3d.custom1", "Custom View 1", "Widok niestandardowy 1"),
+    ("view.3d.custom2", "Custom View 2", "Widok niestandardowy 2"),
+    ("view.3d.custom3", "Custom View 3", "Widok niestandardowy 3"),
+    ("", "Assign Shortcut to 3D View", "Przypisz skrót do widoku 3D"),
+    ("view.3d.last", "Switch to Last 3D View", "Przełącz na ostatni widok 3D"),
+    ("view.lookAtSelected", "Look at Selected Layers", "Patrz na zaznaczone warstwy"),
+    ("view.lookAtAll", "Look at All Layers", "Patrz na wszystkie warstwy"),
+    ("time.set", "Go to Time...", "Przejdź do czasu..."),
+    ("view.fullScreen", "Enter Full Screen", "Pełny ekran"),
+    ("", "Window", "Okno"),
+    ("", "Workspace", "Obszar roboczy"),
+    ("window.workspace", "Default", "Domyślny"),
+    ("window.workspace", "Review", "Przegląd"),
+    ("window.workspace", "Learn", "Nauka"),
+    ("window.workspace", "Small Screen", "Mały ekran"),
+    ("window.workspace", "Standard", "Standardowy"),
+    ("window.workspace", "All Panels", "Wszystkie panele"),
+    ("window.workspace", "Animation", "Animacja"),
+    ("window.workspace", "Color", "Kolor"),
+    ("window.workspace", "Effects", "Efekty"),
+    ("window.workspace", "Essential Graphics", "Essential Graphics"),
+    ("window.workspace", "Minimal", "Minimalny"),
+    ("window.workspace", "Motion Tracking", "Śledzenie ruchu"),
+    ("window.workspace", "Paint", "Malowanie"),
+    ("window.workspace", "Text", "Tekst"),
+    ("window.workspace", "Undocked Panels", "Panele odpięte"),
+    ("window.resetWorkspace", "Reset to Saved Layout", "Przywróć zapisany układ"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "Zapisz zmiany w tym obszarze roboczym"),
+    ("window.saveWorkspaceAs", "Save as New Workspace...", "Zapisz jako nowy obszar roboczy..."),
+    ("window.editWorkspaces", "Edit Workspaces...", "Edytuj obszary robocze..."),
+    ("", "Assign Shortcut to Workspace", "Przypisz skrót do obszaru roboczego"),
+    ("window.panel", "Align", "Wyrównanie"),
+    ("window.panel", "Audio", "Audio"),
+    ("window.panel", "Brushes", "Pędzle"),
+    ("window.panel", "Character", "Znak"),
+    ("window.panel", "Content-Aware Fill", "Wypełnienie z uwzględnieniem zawartości"),
+    ("window.panel", "Effects & Presets", "Efekty i ustawienia"),
+    ("window.panel", "Essential Graphics", "Essential Graphics"),
+    ("window.panel", "Info", "Informacje"),
+    ("help.inAppTutorials", "Learn", "Nauka"),
+    ("window.panel", "Lumetri Scopes", "Zakresy Lumetri"),
+    ("window.panel", "Mask Interpolation", "Interpolacja maski"),
+    ("window.panel", "Media Browser", "Przeglądarka multimediów"),
+    ("window.panel", "Metadata", "Metadane"),
+    ("window.panel", "Motion Sketch", "Szkic ruchu"),
+    ("window.panel", "Paint", "Malowanie"),
+    ("window.panel", "Paragraph", "Akapit"),
+    ("window.panel", "Preview", "Podgląd"),
+    ("window.panel", "Progress", "Postęp"),
+    ("window.panel", "Properties", "Właściwości"),
+    ("window.panel", "Script Console", "Konsola skryptów"),
+    ("window.panel", "Smoother", "Wygładzanie"),
+    ("window.panel", "Tools", "Narzędzia"),
+    ("window.panel", "Tracker", "Śledzenie"),
+    ("window.panel", "Wiggler", "Wahanie"),
+    ("window.panel", "Composition", "Kompozycja"),
+    ("window.panel", "Flowchart", "Schemat"),
+    ("window.panel", "Footage", "Materiał"),
+    ("window.panel", "Layer", "Warstwa"),
+    ("window.panel", "Project", "Projekt"),
+    ("window.panel", "Render Queue", "Kolejka renderowania"),
+    ("window.panel", "Timeline", "Oś czasu"),
+    ("window.panel", "Create Nulls From Paths", "Utwórz obiekty zerowe ze ścieżek"),
+    ("window.panel", "VR Comp Editor", "Edytor kompozycji VR"),
+    ("", "Help", "Pomoc"),
+    ("help.docs", "EffectCraft Help...", "Pomoc EffectCraft..."),
+    ("help.docs", "Scripting Help...", "Pomoc dotycząca skryptów..."),
+    ("help.docs", "Expression Reference...", "Dokumentacja wyrażeń..."),
+    ("help.docs", "Effect Reference...", "Dokumentacja efektów..."),
+    ("anim.browsePresets", "Animation Presets...", "Ustawienia animacji..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts...", "Skróty klawiaturowe..."),
+    ("help.inAppTutorials", "In-App Tutorials...", "Samouczki w aplikacji..."),
+    ("help.onlineTutorials", "Online Tutorials...", "Samouczki online..."),
+    ("help.systemReport", "System Compatibility Report...", "Raport zgodności systemu..."),
+    ("help.enableLogging", "Enable Logging", "Włącz rejestrowanie"),
+    ("help.revealLogFile", "Reveal Logging File", "Pokaż plik dziennika"),
+    ("help.discord", "Join the ArtCraft Discord...", "Dołącz do Discorda ArtCraft..."),
+    ("help.reportIssue", "Provide Feedback...", "Prześlij opinię..."),
+    ("help.website", "ArtCraft Website", "Witryna ArtCraft"),
+    ("help.appPage", "EffectCraft Home Page", "Strona główna EffectCraft"),
+    ("help.github", "EffectCraft on GitHub", "EffectCraft w serwisie GitHub"),
+    ("file.openDemoProject", "Open Demo Project", "Otwórz projekt demonstracyjny"),
+    ("", "Recent Script Files", "Ostatnie pliki skryptów"),
+    ("layer.newPrimitive", "3D Primitive...", "Bryła podstawowa 3D..."),
+];
+
 /// Czech (cs): original phrase translations of every fixed menu entry.
 const CZECH: &[(&str, &str, &str)] = &[
     ("", "Front", "Přední strana"),
@@ -6185,6 +6891,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Nainstalovat soubor skriptu..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Nainstalovat panel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Spustit soubor skriptu..."),
+    ("", "Recent Script Files", "Nedávné soubory skriptů"),
     ("", "Create Proxy", "Vytvořit zástupný soubor"),
     ("file.createProxy", "Still...", "Statický snímek..."),
     ("file.createProxy", "Movie...", "Video..."),
@@ -6538,6 +7245,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Spustit řádky shora"),
     ("anim.addKeyframe", "Add Keyframe", "Přidat klíčový snímek"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Přepnout podržení klíčového snímku"),
+    ("keys.setMuted", "Mute Keyframes", "Ztlumit klíčové snímky"),
+    ("keys.setMuted", "Unmute Keyframes", "Obnovit klíčové snímky"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolace klíčových snímků..."),
     ("keys.velocity", "Keyframe Velocity...", "Rychlost klíčového snímku..."),
     ("", "Keyframe Assistant", "Pomocník klíčových snímků"),
@@ -6816,6 +7525,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "სკრიპტის ფაილის დაყენება..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI პანელის დაყენება..."),
     ("file.runScript", "Run Script File...", "სკრიპტის ფაილის გაშვება..."),
+    ("", "Recent Script Files", "ბოლო სკრიპტის ფაილები"),
     ("", "Create Proxy", "პროქსის შექმნა"),
     ("file.createProxy", "Still...", "სტატიკური კადრი..."),
     ("file.createProxy", "Movie...", "ვიდეო..."),
@@ -7168,6 +7878,8 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "სტრიქონების ჩამოვარდნა"),
     ("anim.addKeyframe", "Add Keyframe", "საკვანძო კადრის დამატება"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "ფიქსირებული საკვანძო კადრის გადართვა"),
+    ("keys.setMuted", "Mute Keyframes", "საკვანძო კადრების დადუმება"),
+    ("keys.setMuted", "Unmute Keyframes", "საკვანძო კადრების დადუმების მოხსნა"),
     ("keys.interpolation", "Keyframe Interpolation...", "საკვანძო კადრის ინტერპოლაცია..."),
     ("keys.velocity", "Keyframe Velocity...", "საკვანძო კადრის სიჩქარე..."),
     ("", "Keyframe Assistant", "საკვანძო კადრების ასისტენტი"),
@@ -7488,6 +8200,19 @@ mod tests {
         println!("total: {total}");
     }
 
+    /// Prints the translated-row counts per language, the numbers `docs/localization-parity.md`
+    /// quotes. `cargo xtask i18n-report` runs it with `--nocapture`.
+    #[test]
+    fn catalog_row_counts_report() {
+        println!("Localization catalog rows:");
+        for code in CATALOG_CODES {
+            let menus = menu_catalog(code).map_or(0, |catalog| catalog.len());
+            let panels = ui::translated_rows(code);
+            let effect_names = effects::translated_rows(code);
+            println!("{code}: menus {menus}, panels {panels}, effect names {effect_names}, total {}", menus + panels + effect_names);
+        }
+    }
+
     #[test]
     fn menu_catalogs_have_no_stale_or_duplicate_rows() {
         let mut actual = BTreeSet::new();
@@ -7526,6 +8251,43 @@ mod tests {
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
         assert_eq!(label(&app, "", "Composition"), "Composition");
     }
+    /// Match System in the browser also picks the Russian, French and German catalogs, in the
+    /// order of the browser's preferences (#1700).
+    #[test]
+    fn browser_preferences_choose_russian_french_and_german() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (locales, expected) in
+            [(vec!["de-DE", "es-ES"], "de"), (vec!["xx-XX", "fr-CA"], "fr"), (vec!["ru-RU", "cs"], "ru"), (vec!["en-US", "de-DE"], "en"), (vec!["xx-XX"], "en")]
+        {
+            assert_eq!(super::first_supported(None, &tags(&locales), super::web_draws), expected, "{locales:?}");
+        }
+    }
+
+    /// The Edit menu's Undo and Redo name the history's action in the interface language, also in
+    /// the languages added with #1700.
+    #[test]
+    fn undo_and_redo_are_localized_for_russian_french_and_german() {
+        for (language, undo, no_undo, redo, no_redo) in [
+            ("ru", "Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять"),
+            ("fr", "Annuler", "Impossible d'annuler", "Rétablir", "Impossible de rétablir"),
+            ("de", "Rückgängig", "Rückgängig nicht möglich", "Wiederholen", "Wiederholen nicht möglich"),
+        ] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.session.execute("prefs.set", json!({"key": "general.language", "value": language})).unwrap();
+            let entry_of = |app: &EffectcraftApp, command: &str| {
+                let (_, e) = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == command).unwrap();
+                entry(app, e, e.label.clone())
+            };
+            assert_eq!(entry_of(&app, "edit.undo"), no_undo, "{language}");
+            assert_eq!(entry_of(&app, "edit.redo"), no_redo, "{language}");
+            app.session.execute("comp.new", json!({"name": "A", "duration": 1})).unwrap();
+            let action = app.session.history.undo.last().map(|u| u.0.clone()).unwrap();
+            assert_eq!(entry_of(&app, "edit.undo"), format!("{undo} {action}"), "{language}");
+            app.session.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(entry_of(&app, "edit.redo"), format!("{redo} {action}"), "{language}");
+        }
+    }
+
     #[test]
     fn match_system_uses_the_system_language_where_there_is_a_catalog() {
         for (locale, language) in [
@@ -7555,12 +8317,26 @@ mod tests {
             (Some("cs-CZ"), "cs"),
             (Some("cs_CZ.UTF-8"), "cs"),
             (Some("CS_cz.UTF-8"), "cs"),
+            (Some("pl"), "pl"),
+            (Some("pl-PL"), "pl"),
+            (Some("pl_PL.UTF-8"), "pl"),
+            (Some("PL_pl.UTF-8"), "pl"),
             (Some("ka"), "ka"),
             (Some("ka-GE"), "ka"),
             (Some("ka_GE.UTF-8"), "ka"),
+            (Some("ru"), "ru"),
+            (Some("ru-RU"), "ru"),
+            (Some("ru-SK"), "ru"),
+            (Some("ru_RU.UTF-8"), "ru"),
+            (Some("de"), "de"),
+            (Some("de-DE"), "de"),
+            (Some("de_AT.UTF-8"), "de"),
+            (Some("fr"), "fr"),
+            (Some("fr-FR"), "fr"),
+            (Some("fr_CA.UTF-8"), "fr"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
-            (Some("de-DE"), "en"),
+            (Some("nl-NL"), "en"),
             (None, "en"),
         ] {
             assert_eq!(supported(locale), language, "{locale:?}");
@@ -7572,6 +8348,7 @@ mod tests {
         assert_eq!(traditional(&app), system_language() == "zh-hant");
         assert_eq!(spanish(&app), system_language() == "es");
         assert_eq!(czech(&app), system_language() == "cs");
+        assert_eq!(polish(&app), system_language() == "pl");
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ja"})).unwrap();
         assert!(japanese(&app));
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hans"})).unwrap();
@@ -7598,6 +8375,7 @@ mod tests {
             ("es", SPANISH),
             ("pt-br", PORTUGUESE),
             ("cs", CZECH),
+            ("pl", POLISH),
             ("ka", GEORGIAN),
         ] {
             for (command, en, translated) in catalog {
@@ -7609,6 +8387,35 @@ mod tests {
         }
     }
 
+    /// The dock's tab titles are `PanelKind::title()`; the panels the Window menu lists are drawn in
+    /// the interface language through their `(window.panel, title)` rows. `History` and `ScriptUI
+    /// Panel` are in no menu and keep their English names, which is what this pins.
+    #[test]
+    fn the_dock_draws_every_panel_it_can_in_the_interface_language() {
+        use crate::dock::PanelKind;
+        const WITHOUT_A_ROW: &[&str] = &["History", "ScriptUI Panel"];
+        for (name, catalog, code) in [("ja", JAPANESE, "ja"), ("zh-hans", SIMPLIFIED_CHINESE, "zh-hans"), ("zh-hant", TRADITIONAL_CHINESE, "zh-hant")] {
+            // The dock asks both catalogs, so a title may be named by either.
+            ui::set_current(code);
+            for p in PanelKind::ALL {
+                let title = p.title();
+                let in_menu = catalog.iter().any(|(c, en, _)| *c == "window.panel" && *en == title);
+                let in_panel = ui::tr(title) != title;
+                assert_eq!(
+                    in_menu || in_panel,
+                    !WITHOUT_A_ROW.contains(&title),
+                    "{name}: {title} is {}named by a catalog and {}in the exception list",
+                    if in_menu || in_panel { "" } else { "not " },
+                    if WITHOUT_A_ROW.contains(&title) { "" } else { "not " }
+                );
+            }
+        }
+        ui::set_current("en");
+        // The dock asks the catalog rather than drawing the English name.
+        let dock_ui = include_str!("dock_ui.rs");
+        assert!(dock_ui.contains(r#"crate::i18n::command_label("window.panel", title)"#), "dock_ui.rs no longer asks the catalog for the panel titles");
+    }
+
     #[test]
     fn ukrainian_catalog_matches_the_settings_registry() {
         let codes: Vec<_> = effectcraft_engine::prefs::LANGUAGES.iter().map(|(_, code)| *code).filter(|code| !matches!(*code, "system" | "en")).collect();
@@ -7616,6 +8423,35 @@ mod tests {
         assert!(effectcraft_engine::prefs::LANGUAGES.contains(&("Українська", "uk")));
         assert_eq!(code("uk"), "uk");
         assert_eq!(code("unknown"), "en");
+    }
+
+    /// Every catalog language draws its menu entries from the catalog, including those with no
+    /// undo/redo wording of their own: choosing Deutsch, Русский or Français left the menus in
+    /// English (#1449).
+    #[test]
+    fn every_catalog_language_translates_menu_entries() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let menu_entry = |command: &str, label: &str| MenuEntry {
+            label: label.into(),
+            command: command.into(),
+            params: serde_json::Value::Null,
+            shortcut: None,
+            alt_shortcuts: Vec::new(),
+        };
+        let new_comp = menu_entry("comp.new", "New Composition...");
+        let undo = menu_entry("edit.undo", "Undo");
+        for code in CATALOG_CODES {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
+            let drawn = entry(&app, &new_comp, new_comp.label.clone());
+            assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
+            assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+        }
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"de"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Rückgängig nicht möglich");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+        assert_eq!(entry(&app, &new_comp, new_comp.label.clone()), "New Composition...");
     }
 
     #[test]

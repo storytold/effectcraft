@@ -1,0 +1,7 @@
+asset:        behaviors.json
+title:        EffectCraft Behaviors animation presets (Soft Wiggle, Shake, Float, Sway, Orbit, Figure Eight, Bouncing Ball, Drift Right, Drift Diagonal, Pendulum, Wobble, Spin Slow, Spin Fast, Pulse, Heartbeat, Breathe, Rubber Band, Jitter Scale, Blink, Strobe, Flicker, Fade Pulse)
+author:       EffectCraft contributors
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-15 by vangel76 (Claude Code agent, gap 7, #1510)
+notes:        Expressions and values written from scratch for EffectCraft on its own transform properties and expression engine; not derived from any Adobe preset (.ffx) or its values.

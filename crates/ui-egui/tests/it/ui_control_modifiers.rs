@@ -18,6 +18,8 @@ fn frames(app: &mut EffectcraftApp) -> Vec<(bool, egui::Modifiers)> {
         if raw.events.is_empty() {
             break;
         }
+        // The harness feeds the batch itself; a real UI pass would apply it now.
+        app.mark_synthetic_applied();
         let mut button = false;
         for e in &raw.events {
             match e {
@@ -34,7 +36,8 @@ fn frames(app: &mut EffectcraftApp) -> Vec<(bool, egui::Modifiers)> {
 fn send(app: &mut EffectcraftApp, method: &str, params: Value) {
     let ctx = egui::Context::default();
     let (req, _rx) = ControlRequest::new(method, params);
-    let _ = control::handle(app, &ctx, &req);
+    let now = app.now();
+    let _ = control::handle(app, &ctx, &req, now);
 }
 
 #[test]

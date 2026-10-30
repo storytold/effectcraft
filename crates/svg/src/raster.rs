@@ -6,7 +6,7 @@ use effectcraft_raster::{Image, Mask};
 use kurbo::{Affine, Point, Shape as _};
 use rayon::prelude::*;
 
-use crate::{BlendMode, Doc, FillRule, Gradient, GradientKind, Group, Node, Paint, Shape, Spread};
+use crate::{BlendMode, Doc, FillRule, Gradient, GradientKind, Group, Node, Paint, Shape, SoftMask, Spread};
 
 fn mat3(a: Affine) -> Mat3 {
     let c = a.as_coeffs();
@@ -77,6 +77,11 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
         }
         return;
     }
+    draw_offscreen_group(g, m, o, dst, budget);
+}
+
+/// Draws a group through an offscreen buffer, then composites it onto `dst`.
+fn draw_offscreen_group(g: &Group, m: Affine, o: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let only_clip = g.mask.is_none() && g.blend == BlendMode::Normal && o >= 1.0 && !g.knockout;
     // Draw the children on their own (isolated) or over a copy of the backdrop, keep what
     // every clip path covers and the soft mask lets through, then composite with the group's
@@ -85,65 +90,24 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
     if !g.isolated && backdrop.is_none() {
         return;
     }
-    let mut tmp = match &backdrop {
-        Some(b) => match budget.image(dst.width, dst.height, Some(b)) {
-            Some(image) => image,
-            None => {
-                budget.release(b);
-                return;
-            }
-        },
-        None => match budget.image(dst.width, dst.height, None) {
-            Some(image) => image,
-            None => return,
-        },
+    let Some(mut tmp) = budget.image(dst.width, dst.height, backdrop.as_ref()) else {
+        release_backdrop(budget, backdrop.as_ref());
+        return;
     };
     draw_children(g, m, &mut tmp, backdrop.as_ref(), budget);
     if let Some(b) = &backdrop {
         if only_clip {
             // A non-isolated clipping group: the backdrop where the clip excludes the children.
-            let cov = clip_coverage(g, m, dst.width, dst.height);
-            dst.data.par_iter_mut().zip(tmp.data.par_iter()).zip(cov.par_iter()).for_each(|((d, t), c)| {
-                for i in 0..4 {
-                    d[i] = d[i] * (1.0 - c) + t[i] * c;
-                }
-            });
+            clip_onto_backdrop(g, m, dst, &tmp);
             budget.release(&tmp);
-            drop(tmp);
-            if let Some(b) = &backdrop {
-                budget.release(b);
-            }
+            release_backdrop(budget, backdrop.as_ref());
             return;
         }
-        // Remove the backdrop's contribution (ISO 32000-1 §11.4.8): with the group's own
-        // alpha αg (its children alone), C = Cn + (Cn − C0)·(α0/αg − α0).
-        let Some(mut solo) = budget.image(dst.width, dst.height, None) else {
+        if !strip_backdrop(g, m, b, &mut tmp, budget) {
             budget.release(&tmp);
-            drop(tmp);
-            if let Some(b) = &backdrop {
-                budget.release(b);
-            }
+            release_backdrop(budget, backdrop.as_ref());
             return;
-        };
-        draw_children(g, m, &mut solo, None, budget);
-        tmp.data.par_iter_mut().zip(b.data.par_iter()).zip(solo.data.par_iter()).for_each(|((t, b0), s)| {
-            let ag = s[3];
-            if ag <= 0.0 {
-                *t = [0.0; 4];
-                return;
-            }
-            let un = |c: &[f32; 4]| if c[3] > 0.0 { [c[0] / c[3], c[1] / c[3], c[2] / c[3]] } else { [0.0; 3] };
-            let (cn, c0, a0) = (un(t), un(b0), b0[3]);
-            let k = a0 / ag - a0;
-            let mut out = [0.0; 4];
-            for i in 0..3 {
-                out[i] = (cn[i] + (cn[i] - c0[i]) * k).clamp(0.0, 1.0) * ag;
-            }
-            out[3] = ag;
-            *t = out;
-        });
-        budget.release(&solo);
-        drop(solo);
+        }
     }
     if !g.clip.is_empty() {
         let cov = clip_coverage(g, m, dst.width, dst.height);
@@ -153,33 +117,12 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
             }
         });
     }
-    if let Some(sm) = &g.mask {
-        let Some(mut mk) = budget.image(dst.width, dst.height, None) else {
-            budget.release(&tmp);
-            drop(tmp);
-            if let Some(b) = &backdrop {
-                budget.release(b);
-            }
-            return;
-        };
-        draw_group(&sm.content, m, 1.0, &mut mk, budget);
-        let bc = sm.backdrop.map(|v| v as f32);
-        let lum = sm.luminosity;
-        tmp.data.par_iter_mut().zip(mk.data.par_iter()).for_each(|(p, q)| {
-            let k = if lum {
-                // The mask group composited over its backdrop colour, then its luminosity.
-                let c = [0, 1, 2].map(|i| q[i] + bc[i] * (1.0 - q[3]));
-                0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
-            } else {
-                q[3]
-            };
-            let k = k.clamp(0.0, 1.0);
-            for v in p.iter_mut() {
-                *v *= k;
-            }
-        });
-        budget.release(&mk);
-        drop(mk);
+    if let Some(sm) = &g.mask
+        && !apply_soft_mask(sm, m, &mut tmp, budget)
+    {
+        budget.release(&tmp);
+        release_backdrop(budget, backdrop.as_ref());
+        return;
     }
     if g.blend == BlendMode::Normal {
         over(dst, &tmp, o as f32);
@@ -194,10 +137,79 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
         });
     }
     budget.release(&tmp);
-    drop(tmp);
-    if let Some(b) = &backdrop {
+    release_backdrop(budget, backdrop.as_ref());
+}
+
+fn release_backdrop(budget: &mut SurfaceBudget, backdrop: Option<&Image>) {
+    if let Some(b) = backdrop {
         budget.release(b);
     }
+}
+
+/// A clipping group over a backdrop: the children where the clip covers, the backdrop elsewhere.
+fn clip_onto_backdrop(g: &Group, m: Affine, dst: &mut Image, tmp: &Image) {
+    let cov = clip_coverage(g, m, dst.width, dst.height);
+    dst.data.par_iter_mut().zip(tmp.data.par_iter()).zip(cov.par_iter()).for_each(|((d, t), c)| {
+        for i in 0..4 {
+            d[i] = d[i] * (1.0 - c) + t[i] * c;
+        }
+    });
+}
+
+/// Remove the backdrop's contribution (ISO 32000-1 §11.4.8): with the group's own
+/// alpha αg (its children alone), C = Cn + (Cn − C0)·(α0/αg − α0). Returns false when no
+/// scratch buffer is available.
+fn strip_backdrop(g: &Group, m: Affine, backdrop: &Image, tmp: &mut Image, budget: &mut SurfaceBudget) -> bool {
+    let Some(mut solo) = budget.image(tmp.width, tmp.height, None) else {
+        return false;
+    };
+    draw_children(g, m, &mut solo, None, budget);
+    tmp.data.par_iter_mut().zip(backdrop.data.par_iter()).zip(solo.data.par_iter()).for_each(|((t, b0), s)| {
+        let ag = s[3];
+        if ag <= 0.0 {
+            *t = [0.0; 4];
+            return;
+        }
+        let un = |c: &[f32; 4]| if c[3] > 0.0 { [c[0] / c[3], c[1] / c[3], c[2] / c[3]] } else { [0.0; 3] };
+        let (cn, c0, a0) = (un(t), un(b0), b0[3]);
+        let k = a0 / ag - a0;
+        let mut out = [0.0; 4];
+        for i in 0..3 {
+            out[i] = (cn[i] + (cn[i] - c0[i]) * k).clamp(0.0, 1.0) * ag;
+        }
+        out[3] = ag;
+        *t = out;
+    });
+    budget.release(&solo);
+    drop(solo);
+    true
+}
+
+/// Multiplies the group's pixels by its soft mask. Returns false when no scratch buffer is
+/// available.
+fn apply_soft_mask(sm: &SoftMask, m: Affine, tmp: &mut Image, budget: &mut SurfaceBudget) -> bool {
+    let Some(mut mk) = budget.image(tmp.width, tmp.height, None) else {
+        return false;
+    };
+    draw_group(&sm.content, m, 1.0, &mut mk, budget);
+    let bc = sm.backdrop.map(|v| v as f32);
+    let lum = sm.luminosity;
+    tmp.data.par_iter_mut().zip(mk.data.par_iter()).for_each(|(p, q)| {
+        let k = if lum {
+            // The mask group composited over its backdrop colour, then its luminosity.
+            let c = [0, 1, 2].map(|i| q[i] + bc[i] * (1.0 - q[3]));
+            0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+        } else {
+            q[3]
+        };
+        let k = k.clamp(0.0, 1.0);
+        for v in p.iter_mut() {
+            *v *= k;
+        }
+    });
+    budget.release(&mk);
+    drop(mk);
+    true
 }
 
 /// The product of a group's clip-path coverages.

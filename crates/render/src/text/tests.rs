@@ -220,9 +220,9 @@ fn tracking_line_anchor_and_character_offset() {
     animator(&mut p, &mut l, &["tracking", "lineAnchor"], &["range"]);
     p.comp_mut(cid).unwrap().layers.push(l);
     let w0 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(500.0));
+    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(20.0));
     let w1 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    // 4 chars × 500/1000 em × 40 px: the last glyph moves ~ 3.5 × 20 px further (before & after).
+    // Tracking Amount 20 (pixels, as After Effects): the last glyph moves ~ 3.5 × 20 px further (before & after).
     assert!((w1.width() - w0.width() - 3.0 * 20.0).abs() < 1.5, "{} {}", w0.width(), w1.width());
     assert!((w1.x0 - w0.x0 - 10.0).abs() < 1.0, "first char shifts by half its tracking: {} {}", w0.x0, w1.x0);
     // Line Anchor 100%: tracking grows to the left.
@@ -262,10 +262,10 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         p.comp_mut(cid).unwrap().layers.push(l);
         glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])
     };
-    // 4 chars × 500/1000 em × 40 px: 20 px of tracking each, half before and half after.
+    // Tracking Amount 20 (pixels): 20 px of tracking each, half before and half after.
     for (justify, x0, centre, x1) in [(Justify::Left, 10.0, 40.0, 70.0), (Justify::Center, -30.0, 0.0, 30.0), (Justify::Right, -70.0, -40.0, -10.0)] {
         let d = TextDoc { justify, ..doc("ABCD", 40.0) };
-        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 500.0)));
+        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 20.0)));
         let got = [w1.x0 - w0.x0, w1.center().x - w0.center().x, w1.x1 - w0.x1];
         assert!(got.iter().zip([x0, centre, x1]).all(|(g, w)| (g - w).abs() < 1.0), "{justify:?}: moved {got:?}, want {:?}", [x0, centre, x1]);
     }
@@ -277,9 +277,34 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         let (a, b): (Vec<_>, Vec<_>) = paths.into_iter().partition(|g| bounds_of(std::slice::from_ref(g)).center().y < 10.0);
         [bounds_of(&a), bounds_of(&b)]
     };
-    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 500.0)));
+    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 20.0)));
     assert!((a1.x0 - a0.x0 - 10.0).abs() < 1.0, "the left paragraph grows right: {} {}", a0.x0, a1.x0);
     assert!((b1.x1 - b0.x1 + 10.0).abs() < 1.0, "the right paragraph grows left: {} {}", b0.x1, b1.x1);
+}
+
+/// #1798: After Effects adds Tracking Amount in absolute pixels between neighbouring characters,
+/// independent of font size.
+#[test]
+fn text_animator_tracking_amount_uses_pixels_independent_of_font_size() {
+    let width_diff = |font_size: f64, amount: f64| {
+        let (mut p, cid, comp) = setup(2000, 400);
+        let mut l = text_layer(&mut p, &comp, doc("ABCDE", font_size));
+        animator(&mut p, &mut l, &["tracking"], &["range"]);
+        set(&mut l, "text/animators/#1/properties/tracking", Value::Scalar(amount));
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let w = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])).width();
+        let (mut p0, cid0, comp0) = setup(2000, 400);
+        let l0 = text_layer(&mut p0, &comp0, doc("ABCDE", font_size));
+        p0.comp_mut(cid0).unwrap().layers.push(l0);
+        let w0 = bounds_of(&glyph_paths(&ctx(&p0, cid0, 0.0), &p0.comp(cid0).unwrap().layers[0])).width();
+        w - w0
+    };
+    // 5 characters = 4 gaps. In After Effects, Tracking Amount 100 adds 100 px per gap = 400 px total width delta,
+    // regardless of whether font size is 50 px or 200 px.
+    let diff_50 = width_diff(50.0, 100.0);
+    let diff_200 = width_diff(200.0, 100.0);
+    assert!((diff_50 - 400.0).abs() < 1.0, "font_size 50 px width delta: {diff_50}");
+    assert!((diff_200 - 400.0).abs() < 1.0, "font_size 200 px width delta: {diff_200}");
 }
 
 #[test]
@@ -479,6 +504,37 @@ fn per_character_3d_projects_characters() {
     assert!(b[2] - b[0] < flat[2] - flat[0] && b[2] > b[0] + 10, "{b:?} {flat:?}");
 }
 
+/// After Effects 2026 (case 931: "H", 400 px, per-character 3D, X / Y / Z Rotation 40 / 30 /
+/// 20): a character turns like a 3D layer, Rx · Ry · Rz (Z first), so its matrix is the same
+/// product as a layer's X / Y / Z Rotation. The render then matches AE (3 of 5184 grid points
+/// off at edges; with Rz · Ry · Rx 23).
+#[test]
+fn per_character_rotation_turns_z_first_as_a_3d_layer() {
+    let (mut p, cid, comp) = setup(400, 300);
+    let mut l = text_layer(&mut p, &comp, doc("H", 80.0));
+    l.switches.three_d = true;
+    animator(&mut p, &mut l, &["rotation"], &["range"]);
+    let mut next = p.next_id;
+    let mut extra = build::text_anim_props(&mut Ids(&mut next), "rotation", true);
+    p.next_id = next;
+    let props: &mut PropGroup = l.props.group_mut("text/animators/#1/properties").unwrap();
+    props.children.retain(|c| c.match_id() != "rotation");
+    props.children.extend(extra.drain(..).map(Into::into));
+    for (id, v) in [("rotationX", 40.0), ("rotationY", 30.0), ("rotation", 20.0)] {
+        props.get_mut(id).unwrap().value = Value::Scalar(v);
+    }
+    l.props.sub_mut("text").unwrap().get_mut("perChar3d").unwrap().value = Value::Bool(true);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let geom = text_geom(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]).unwrap();
+    let g = &geom.glyphs[0];
+    let want = Mat4::rotate_x(40.0) * Mat4::rotate_y(30.0) * Mat4::rotate_z(20.0);
+    for r in 0..3 {
+        for c in 0..3 {
+            assert!((g.m.0[r][c] - want.0[r][c]).abs() < 1e-9, "row {r} col {c}: {:?} vs {:?}", g.m.0, want.0);
+        }
+    }
+}
+
 #[test]
 fn keyframed_selector_animates() {
     let (mut p, cid, comp) = setup(400, 200);
@@ -542,6 +598,7 @@ fn touching_glyphs_join_without_a_seam() {
             fill,
             stroke: [0.0; 4],
             stroke_width: 0.0,
+            join: effectcraft_path::Join::Miter,
             bold: 0.0,
             apply_fill: true,
             char_index: 0,
@@ -612,6 +669,7 @@ fn faux_bold_under_a_non_uniform_scale() {
         fill: [1.0; 4],
         stroke: [0.0; 4],
         stroke_width: 0.0,
+        join: effectcraft_path::Join::Miter,
         bold: 2.0,
         apply_fill: true,
         char_index: 0,

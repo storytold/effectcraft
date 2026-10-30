@@ -150,7 +150,8 @@ fn engine_execute_only_creates_the_folder() {
     let before = folders(&h);
     let ctx = h.ctx.clone();
     let (req, _rx) = ControlRequest::new("engine.execute", json!({"command": "project.newFolder"}));
-    let _ = control::handle(h.state_mut(), &ctx, &req);
+    let now = h.state().now();
+    let _ = control::handle(h.state_mut(), &ctx, &req, now);
     h.run_steps(3);
     let [folder] = new_folders(&h, &before)[..] else { panic!("one new folder") };
     assert!(!renaming(&h, folder), "no name field for an agent's folder");

@@ -36,7 +36,7 @@ pub fn intern(coords: &[(String, f32)]) -> u32 {
     if key.windows(2).any(|w| w[0].0 == w[1].0) {
         return 0;
     }
-    let mut t = table().lock().unwrap_or_else(|e| e.into_inner());
+    let mut t = table().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(id) = t.by_coords.get(&key) {
         return *id;
     }
@@ -55,7 +55,7 @@ pub fn coords(id: u32) -> Arc<Vec<(String, f32)>> {
     if id == 0 {
         return Arc::new(Vec::new());
     }
-    table().lock().unwrap_or_else(|e| e.into_inner()).values.get(id as usize - 1).cloned().unwrap_or_default()
+    table().lock().unwrap_or_else(std::sync::PoisonError::into_inner).values.get(id as usize - 1).cloned().unwrap_or_default()
 }
 
 fn table() -> &'static Mutex<Table> {
@@ -109,7 +109,7 @@ pub fn outline_units_at(face: FaceId, gid: u32, coords: &[(String, f32)]) -> Opt
     let c = C.get_or_init(Default::default);
     // Quantise to 1/100 of a unit so animation frames reuse outlines.
     let key: Key = (face, gid, coords.iter().map(|(t, v)| (t.clone(), (v * 100.0).round() as i32)).collect());
-    if let Some(v) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+    if let Some(v) = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return v.clone();
     }
     let f = fonts::face(face);
@@ -120,7 +120,7 @@ pub fn outline_units_at(face: FaceId, gid: u32, coords: &[(String, f32)]) -> Opt
         g.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::from(&loc)), &mut pen).ok()?;
         Some(Arc::new(pen.0))
     });
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if m.len() > 20_000 {
         m.clear();
     }

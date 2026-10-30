@@ -48,6 +48,8 @@ pub enum Icon {
     Speaker,
     Solo,
     Lock,
+    /// An open padlock: the shackle lifted clear of the body on the right.
+    LockOpen,
     Shy,
     Collapse,
     Quality,
@@ -110,6 +112,8 @@ pub enum Icon {
     Fullscreen,
     Channel,
     Exposure,
+    /// Stroke width: three bars, thin to thick.
+    StrokeWidth,
     // links
     Chat,
     Globe,
@@ -402,6 +406,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(8.0, 7.0, 3.0, 180.0, 360.0);
             pen.dot(8.0, 10.5, 1.0);
         }
+        LockOpen => {
+            pen.rect(3.5, 7.0, 12.5, 14.0);
+            pen.arc(8.0, 4.0, 3.0, 180.0, 360.0);
+            pen.line(&[(5.0, 4.0), (5.0, 7.0)]);
+            pen.dot(8.0, 10.5, 1.0);
+        }
         Shy => {
             pen.circle(8.0, 8.0, 5.8);
             pen.dot(6.0, 7.0, 0.8);
@@ -539,6 +549,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.line(&[(8.0 + 4.0 * a.cos(), 8.0 + 4.0 * a.sin()), (8.0 + 6.0 * a.cos(), 8.0 + 6.0 * a.sin())]);
             }
             pen.circle(8.0, 8.0, 4.2);
+        }
+        StrokeWidth => {
+            pen.rect_fill(2.5, 3.0, 13.5, 3.75);
+            pen.rect_fill(2.5, 6.5, 13.5, 8.0);
+            pen.rect_fill(2.5, 10.5, 13.5, 13.0);
         }
         Hamburger => {
             for y in [4.5, 8.0, 11.5] {

@@ -470,6 +470,39 @@ fn strip_comments(s: &str) -> String {
     out
 }
 
+/// Splits one simple selector (`tag.class#id`) into its tag, classes and id.
+fn parse_compound(one: &str) -> (Option<String>, Vec<String>, Option<String>) {
+    let mut tag = None;
+    let mut classes = vec![];
+    let mut id = None;
+    let mut cur = String::new();
+    let mut kind = 't';
+    let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
+        if !cur.is_empty() {
+            match kind {
+                '.' => classes.push(std::mem::take(cur)),
+                '#' => *id = Some(std::mem::take(cur)),
+                _ => {
+                    if cur != "*" {
+                        *tag = Some(std::mem::take(cur));
+                    }
+                    cur.clear();
+                }
+            }
+        }
+    };
+    for c in one.chars() {
+        if c == '.' || c == '#' {
+            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+            kind = c;
+        } else {
+            cur.push(c);
+        }
+    }
+    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+    (tag, classes, id)
+}
+
 /// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
 /// [`MAX_CSS_DECLARATIONS`] (#2140).
 fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
@@ -477,12 +510,30 @@ fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
     let mut rest = css.as_str();
     while let Some(open) = rest.find('{') {
         let sel = rest[..open].trim();
+        if sel.starts_with('@') {
+            // Skip the whole at-rule block, matching nested braces by depth.
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, c) in rest[open..].char_indices() {
+                match c {
+                    '{' => depth = depth.saturating_add(1),
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = Some(open + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            rest = &rest[end..];
+            continue;
+        }
         let Some(close) = rest[open..].find('}') else { break };
         let body = &rest[open + 1..open + close];
         rest = &rest[open + close + 1..];
-        if sel.starts_with('@') {
-            continue;
-        }
         let mut decls = parse_decls(body);
         sheet.decls = sheet.decls.saturating_add(decls.len());
         if sheet.decls > MAX_CSS_DECLARATIONS {
@@ -505,34 +556,7 @@ fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
                 sheet.blocks.push(std::mem::take(&mut decls));
                 i
             });
-            let mut tag = None;
-            let mut classes = vec![];
-            let mut id = None;
-            let mut cur = String::new();
-            let mut kind = 't';
-            let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
-                if !cur.is_empty() {
-                    match kind {
-                        '.' => classes.push(std::mem::take(cur)),
-                        '#' => *id = Some(std::mem::take(cur)),
-                        _ => {
-                            if cur != "*" {
-                                *tag = Some(std::mem::take(cur));
-                            }
-                            cur.clear();
-                        }
-                    }
-                }
-            };
-            for c in one.chars() {
-                if c == '.' || c == '#' {
-                    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-                    kind = c;
-                } else {
-                    cur.push(c);
-                }
-            }
-            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+            let (tag, classes, id) = parse_compound(one);
             let specificity = (id.is_some() as u32 * 100)
                 .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
                 .saturating_add(tag.is_some() as u32);
@@ -1237,6 +1261,10 @@ fn xml_depth(text: &str) -> usize {
     max
 }
 
+/// Nodes a document may expand to: a few kilobytes of nested internal entities
+/// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
+const MAX_XML_NODES: u32 = 4_000_000;
+
 /// Parse an SVG document.
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
@@ -1244,7 +1272,8 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     if xml_depth(text) > MAX_XML_DEPTH {
         return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
     }
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };
     let xml = roxmltree::Document::parse_with_options(text, opts).map_err(|e| Error::Xml(e.to_string()))?;
     let root = xml.root_element();
     if root.tag_name().name() != "svg" {

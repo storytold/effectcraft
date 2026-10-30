@@ -421,7 +421,7 @@ fn right_click_in_effect_controls_shows_the_effect_menu() {
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
     h.run_steps(3);
-    let category = " Blur & Sharpen ⏵";
+    let category = " Blur & Sharpen";
     // An effect's header: its own menu.
     let header = rect_of(&h, &format!("effectControls.effect.{fill}")).center();
     right_click(&mut h, header);

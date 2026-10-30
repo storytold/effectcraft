@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-30 · **Change:** minor (features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -51,7 +51,7 @@ Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and
 | UI/UX fidelity | 65% | 60–120 | [ui-parity.md](docs/ui-parity.md) |
 | File formats | 50% | 130–230 | [file-format-parity.md](docs/file-format-parity.md) |
 | Hardware | 40% | 60–120 | [hardware-parity.md](docs/hardware-parity.md) |
-| Localization | 18% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
+| Localization | 24% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
 | Performance | 35% | 50–100 | [gaps.md](docs/gaps.md#g5-performance-at-real-world-scale) |
 | Stability | 45% | 40–80 | [gaps.md](docs/gaps.md#g3-stability-and-a-green-main) |
 | Platforms | 65% | 30–60 | [gaps.md](docs/gaps.md#g2-real-user-reliability-on-every-platform) |
@@ -80,24 +80,24 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#b
 
 ## Languages
 
-UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/localization-parity.md)).
+UI strings translated out of ≈ 4,200 (detail: [localization-parity.md](docs/localization-parity.md)).
 
 | Language | Status | % |
 |---|---|---:|
 | English | full | 100% |
-| Simplified Chinese | partial (menus, part of the panels) | 29% |
-| Spanish | menus only | 16% |
+| Simplified Chinese | partial (menus, most of the panels) | 46% |
+| Spanish | menus only | 29% |
 | Hindi | none | 0% |
 | Arabic | none | 0% |
 | French | menus only | 16% |
-| Portuguese (Brazil) | partial (menus, part of the panels) | 26% |
+| Portuguese (Brazil) | partial (menus, part of the panels) | 34% |
 | Indonesian | none | 0% |
-| Japanese | partial (menus, part of the panels) | 27% |
+| Japanese | partial (menus, most of the panels) | 46% |
 | German | menus only | 16% |
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%), Georgian (partial, 38%; native-speaker reviewed) and Russian (menus only, 16%). No other language has had
+Also shipped: Traditional Chinese (partial, 38%), Ukrainian (partial, 29%), Czech (partial, 29%), Polish (partial, 34%), Georgian (partial, 39%; native-speaker reviewed) and Russian (menus only, 15%). No other language has had
 native-speaker review.
 
 ## Upcoming
@@ -117,10 +117,33 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-30: Text strokes take a Line Join (Miter, Round or Bevel) in the Character panel,
+  Miter for new text as in After Effects (#2077). In the Timeline, effects, masks and shape items
+  drag to a new place in their stack (#2210) and Shift-click adds them to the selection, so one
+  animation preset can hold several (#2552). The Composition panel pans while a mask vertex is
+  held at its edge (#999). Effect buffers that pad a small layer stay within a memory budget
+  (#2261); an MP4 lasts as long as its edit list shows (#2592); the Render Queue's times tick
+  between frames (#2593). ScriptUI drags keep their control past the window edge with
+  `MouseEvent.buttons` (#2584), and docked panels get their dock's size and `onResize` (#2585).
+- 2026-10-28: A shape layer's Rectangle and Ellipse Size get the Constrain Proportions chain
+  that Scale has, so a circle stays a circle while its size is typed, scrubbed or keyed; it
+  starts off, so existing shapes behave as before (#2489).
+- 2026-10-24: Shape layers have the Wiggle Transform path operation (Contents ▸ Add, or
+  `layer.addShapeItem {kind: "wiggler"}`): it wiggles the anchor point, position, scale and
+  rotation of the paths above it by random amounts that change over time, up to the Transform
+  values it holds. The copies of a Repeater above it wiggle independently as far as its
+  Correlation allows; with the Repeater below it, they wiggle together.
+- 2026-10-22: Localization: the panel/dialog catalogs gain 303 rows in Japanese, Simplified
+  Chinese and Traditional Chinese — panel tabs, form and dialog labels, panel context menus,
+  tracker/graph/text-panel controls, File-panel footers and credits. Recounted after #1774:
+  Japanese is 1,923 of ≈ 4,200 interface strings (46%, with 297 effect names); the Chinese
+  panel catalogs hold 998 (Simplified) and 951 (Traditional) rows, and Simplified Chinese is
+  46% with its 307 effect names; the overall share is ≈ 24%.
 - 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
   path into an editable Path 1 with the same geometry, as After Effects does; it used to
   apply to mask RotoBezier only, so a parametric shape path could not be converted at all
   and its vertices could not be edited or animated (#932).
+- 2026-10-14: Georgian (`ka`): every menu row, every panel-catalog row the Chinese catalogs have plus 195 Georgian-only ones, and the effect names and categories; Match System for `ka` / `ka-GE` / `ka_GE.UTF-8` locales. Reviewed by a native speaker.
 - 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
   strokes and undo history are preserved so restoring the timing allows the span edit again.
 - 2026-10-11: Ukrainian panels caught up with the Chinese catalogs. The 95 rows the panel
@@ -135,7 +158,6 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
   follow the shared standard: `docs/parity.md` became `docs/target-app-parity.md`; new
   `docs/roadmap.md`, `localization-parity.md`, `file-format-parity.md`, `hardware-parity.md`,
   `ui-parity.md`, `effects-parity.md` and `scripting-parity.md`.
-- 2026-10-14: Georgian (`ka`): every menu row, every panel-catalog row the Chinese catalogs have plus 195 Georgian-only ones, and the effect names and categories; Match System for `ka` / `ka-GE` / `ka_GE.UTF-8` locales. Reviewed by a native speaker.
 - 2026-10-10: Spanish (#460) and Brazilian Portuguese (#217) menu translations.
 - 2026-10-10: Japanese now translates the interface below the menu bar too: `crates/ui-egui/src/i18n/ui.rs` has a Japanese table with the same 396 rows as the Chinese ones (panels, dialogs, buttons and tooltips; the shape test keeps the three catalogs listing the same source strings). Menus were already Japanese.
 - 2026-10-09: Ukrainian now covers all 396 current panel-catalog strings, including dialogs, buttons and tooltips, alongside its menu translation. The catalog keeps the same source keys and placeholder counts as the Chinese catalogs; missing or engine-generated text still falls back to English.
@@ -155,11 +177,13 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Progress log: text Line Join, Timeline drag-reorder and Shift multi-select of effects, viewer edge pan, effect padding budget, MP4 edit-list duration, Render Queue clock, ScriptUI drag capture and docked-panel size |
+| 2026-10-22 | minor | Localization: 300 more panel/dialog rows in Japanese and the Chinese catalogs, plus the review's three missing rows (Basic, Advanced, Play/Stop) — panel tabs, form and dialog labels, context menus, tracker/graph/text-panel controls, File-panel footers, credits; language shares recounted after #1774 (Japanese 27% → 46% with 297 effect names, Simplified Chinese 29% → 46% with 307 effect names, Traditional Chinese 29% → 38%, overall 18% → 24%) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
+| 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
-| 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
-| 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
+| 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

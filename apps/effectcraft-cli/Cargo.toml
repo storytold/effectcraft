@@ -20,6 +20,9 @@ effectcraft-ui-egui = { workspace = true }
 effectcraft-render = { workspace = true }
 effectcraft-gpu = { workspace = true }
 effectcraft-time = { workspace = true }
+effectcraft-track = { workspace = true }
+effectcraft-segment = { workspace = true }
+effectcraft-sam2 = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
 cpu-time = "1"

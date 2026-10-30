@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "workspace": "My Layout",
+  "dock": {
+    "Split": {
+      "vertical": false,
+      "size": {
+        "FixedB": 300.0
+      },
+      "a": {
+        "Split": {
+          "vertical": true,
+          "size": {
+            "Ratio": 0.56
+          },
+          "a": {
+            "Split": {
+              "vertical": false,
+              "size": {
+                "FixedA": 300.0
+              },
+              "a": {
+                "Tabs": {
+                  "panels": [
+                    "Project",
+                    "EffectControls",
+                    "EffectsPresets"
+                  ],
+                  "active": 2
+                }
+              },
+              "b": {
+                "Tabs": {
+                  "panels": [
+                    "Composition"
+                  ],
+                  "active": 0
+                }
+              }
+            }
+          },
+          "b": {
+            "Split": {
+              "vertical": false,
+              "size": {
+                "Ratio": 0.5
+              },
+              "a": {
+                "Tabs": {
+                  "panels": [
+                    "Timeline"
+                  ],
+                  "active": 0
+                }
+              },
+              "b": {
+                "Tabs": {
+                  "panels": [
+                    "Audio"
+                  ],
+                  "active": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "b": {
+        "Stack": {
+          "entries": [
+            {
+              "panels": [
+                "Properties"
+              ],
+              "active": 0,
+              "open": true,
+              "height": null
+            }
+          ]
+        }
+      }
+    }
+  },
+  "floating": [
+    {
+      "panels": [
+        "Preview"
+      ],
+      "active": 0,
+      "rect": [
+        900.0,
+        120.0,
+        300.0,
+        260.0
+      ]
+    },
+    {
+      "panels": [
+        "RenderQueue"
+      ],
+      "active": 0,
+      "rect": [
+        200.0,
+        500.0,
+        520.0,
+        240.0
+      ]
+    }
+  ],
+  "focused": "Composition",
+  "maximized": null,
+  "saved_workspaces": {
+    "My Layout": {
+      "Split": {
+        "vertical": false,
+        "size": {
+          "FixedB": 300.0
+        },
+        "a": {
+          "Split": {
+            "vertical": true,
+            "size": {
+              "Ratio": 0.56
+            },
+            "a": {
+              "Split": {
+                "vertical": false,
+                "size": {
+                  "FixedA": 300.0
+                },
+                "a": {
+                  "Tabs": {
+                    "panels": [
+                      "Project",
+                      "EffectControls",
+                      "EffectsPresets"
+                    ],
+                    "active": 2
+                  }
+                },
+                "b": {
+                  "Tabs": {
+                    "panels": [
+                      "Composition",
+                      "Layer"
+                    ],
+                    "active": 0
+                  }
+                }
+              }
+            },
+            "b": {
+              "Split": {
+                "vertical": false,
+                "size": {
+                  "Ratio": 0.5
+                },
+                "a": {
+                  "Tabs": {
+                    "panels": [
+                      "Timeline"
+                    ],
+                    "active": 0
+                  }
+                },
+                "b": {
+                  "Tabs": {
+                    "panels": [
+                      "Audio"
+                    ],
+                    "active": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "b": {
+          "Stack": {
+            "entries": [
+              {
+                "panels": [
+                  "Properties"
+                ],
+                "active": 0,
+                "open": true,
+                "height": null
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "saved_floating": {
+    "My Layout": [
+      {
+        "panels": [
+          "Preview"
+        ],
+        "active": 0,
+        "rect": [
+          900.0,
+          120.0,
+          300.0,
+          260.0
+        ]
+      },
+      {
+        "panels": [
+          "RenderQueue"
+        ],
+        "active": 0,
+        "rect": [
+          200.0,
+          500.0,
+          520.0,
+          240.0
+        ]
+      }
+    ]
+  },
+  "panel_windows": [
+    {
+      "panel": "RenderQueue",
+      "rect": [
+        200.0,
+        500.0,
+        520.0,
+        240.0
+      ]
+    }
+  ]
+}

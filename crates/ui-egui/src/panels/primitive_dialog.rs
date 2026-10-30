@@ -58,7 +58,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     super::dialogs::modal(ctx, "New 3D Primitive", vec2(420.0, 300.0), t, |ui| {
         egui::Grid::new("primitive-grid").num_columns(2).spacing([14.0, 9.0]).show(ui, |ui| {
             ui.label(tr("Type"));
-            let combo = egui::ComboBox::from_id_salt("primitive-type").selected_text(tr(d.kind.label())).show_ui(ui, |ui| {
+            let combo = craft_ui::ComboBox::from_id_salt("primitive-type").selected_text(tr(d.kind.label())).show_ui(ui, |ui| {
                 for (i, k) in PrimitiveKind::ALL.into_iter().enumerate() {
                     let item = ui.selectable_value(&mut d.kind, k, tr(k.label()));
                     app.auto.add(&format!("dialog.primitive.typeItem.{i}"), item.rect, k.label());

@@ -4,6 +4,11 @@ use super::*;
 
 use crate::write::pdf;
 
+mod groups;
+mod import;
+mod reader;
+mod shading;
+
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
 /Pattern cs /P0 scn 100 0 100 50 re f\n\
