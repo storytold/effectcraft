@@ -686,6 +686,40 @@ fn a_conformed_clip_plays_its_frames_at_the_conformed_rate() {
 }
 
 #[test]
+fn a_clip_with_sound_has_audio() {
+    // The sample rate (`sspc` f64 at byte 160) is stored for a clip that carries sound (read back
+    // from After Effects with a 48 kHz and a 44.1 kHz mp4) and absent for one that does not (the
+    // 645 clip has none): the importer reads the clip's audio from it.
+    fn set_rate(chunks: &mut [effectcraft_aep::Chunk<'_>], rate: f64) -> usize {
+        let mut n = 0;
+        for c in chunks {
+            if c.id == *b"sspc" && c.bytes().is_some_and(|b| b.get(22..26) == Some(b"XCEX".as_slice())) {
+                let mut data = c.bytes().unwrap_or_default().to_vec();
+                data[160..168].copy_from_slice(&rate.to_be_bytes());
+                *c = effectcraft_aep::Chunk::data(*b"sspc", data);
+                n += 1;
+            } else if let effectcraft_aep::Body::List { children, .. } | effectcraft_aep::Body::Chunks(children) = &mut c.body {
+                n += set_rate(children, rate);
+            }
+        }
+        n
+    }
+    let bytes = fixture!("645-footage-mp4-conform-30.aep");
+    let clip = |bytes: &[u8]| {
+        let mut p = Project::default();
+        let none = |_: &str| false;
+        let options = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
+        effectcraft_aep::import::import(&mut p, bytes, &options).expect("import");
+        p.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.clone()) } else { None }).expect("clip")
+    };
+    assert!(!clip(&bytes).has_audio);
+    let mut file = effectcraft_aep::parse(&bytes).expect("parse");
+    assert_eq!(set_rate(&mut file.chunks, 48_000.0), 1);
+    let loud = clip(&effectcraft_aep::write(&file).expect("write"));
+    assert_eq!((loud.kind, loud.has_video, loud.has_audio), (FootageKind::Video, true, true));
+}
+
+#[test]
 fn stills_of_four_more_types_are_footage() {
     for (name, ext) in [
         ("650-footage-tga-still-as-layer.aep", "tga"),

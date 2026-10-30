@@ -38,8 +38,8 @@ pub struct Footage {
     /// The size in bytes of the source file(s) (`sspc` `u32` at byte 208): 149 for the png, 96044
     /// for the WAV (44 + 48000 x 2), 504 for three 168-byte png files.
     pub file_size: u32,
-    /// The audio sample rate (`sspc` `f64` at byte 160, 48000.0 for the WAV); `None` for footage
-    /// without audio.
+    /// The audio sample rate (`sspc` `f64` at byte 160, 48000.0 for the WAV and for an mp4 with
+    /// 48 kHz sound); `None` for footage without audio.
     pub audio_sample_rate: Option<f64>,
     /// True when the alias points at a folder (`"target_is_folder":true`): an image sequence is ONE
     /// item whose alias is its folder and whose `opti` holds the first file name.

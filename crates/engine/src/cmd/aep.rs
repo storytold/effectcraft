@@ -8,6 +8,7 @@
 //! fallback font).
 
 use effectcraft_aep::import::{AepImportError, ImportOptions};
+use effectcraft_project::{FootageKind, ItemKind};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, str_p};
@@ -36,6 +37,7 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
         let report = effectcraft_aep::import::analyze_with(&bytes, &options).map_err(|e| EngineError::Other(format!("cannot import {path}: {e}")))?;
         return Ok(json!({"dryRun": true, "report": report}));
     }
+    let importer = s.importer.clone();
     let res = s.edit("Import After Effects Project", None, |proj, st| {
         let r = effectcraft_aep::import::import(proj, &bytes, &options).map_err(|e| match e {
             AepImportError::Refused(_) => {
@@ -49,6 +51,21 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
         // The new footage keeps the file as its origin: resolved against it, a refused path missing.
         let created: std::collections::HashSet<_> = r.items.iter().copied().collect();
         crate::doc_path::resolve_footage_of(proj, |id| created.contains(&id), Some(&path));
+        // A video file that is there says whether it carries sound, and it is right when the
+        // project file's stored sample rate is not (the file changed since, or the project is not
+        // After Effects's own). The path is the one the document-path policy resolved above; a
+        // refused or missing one is not read and keeps what the project file says.
+        if let Some(importer) = &importer {
+            for item in proj.items.values_mut().filter(|i| created.contains(&i.id)) {
+                if let ItemKind::Footage(f) = &mut item.kind
+                    && f.kind == FootageKind::Video
+                    && !f.missing
+                    && let Ok(probed) = importer.probe(&f.path)
+                {
+                    f.has_audio = probed.has_audio;
+                }
+            }
+        }
         st.project_selection = vec![r.folder];
         Ok(r)
     })?;

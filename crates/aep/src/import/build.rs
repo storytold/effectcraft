@@ -240,7 +240,9 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         width: f.width,
         height: f.height,
         has_video: kind != FootageKind::Audio,
-        has_audio: kind == FootageKind::Audio,
+        // The sample rate is stored for a clip with sound and for a sound file (docs/aep-format.md,
+        // footage), and only then.
+        has_audio: kind == FootageKind::Audio || (kind == FootageKind::Video && f.audio_sample_rate.is_some()),
         missing: !present,
         sequence,
         ..Footage::default()

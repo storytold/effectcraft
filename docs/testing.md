@@ -7,7 +7,9 @@ cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, layers, a
 
 The After Effects test projects of `crates/aep` are not in the repository; without them the
 `crates/aep`, engine and ui-egui tests that need one print `SKIPPED: fixture <name> missing` and
-pass. Point `EFFECTCRAFT_AEP_FIXTURES` at a folder holding them to run those tests too.
+pass. Point `EFFECTCRAFT_AEP_FIXTURES` at a folder holding them to run those tests too, and set
+`EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` as well to make a missing project fail its test instead of
+skipping (a corpus run that must not pass by skipping).
 
 The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
 interactively — local variables, parameters, column breakpoints — build with the `dev-full`
