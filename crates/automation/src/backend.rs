@@ -64,9 +64,10 @@ impl Backend {
         let params = if params.is_null() { json!({}) } else { params };
         if let Some(c) = self.confinement.clone() {
             for lookup in c.check_command(id, &params)? {
-                let found = match lookup {
+                let found = match &lookup {
                     Lookup::ProjectFile | Lookup::QueueDefault => self.run("project.summary", json!({}))?,
                     Lookup::RenderOutputs => self.run("renderQueue.list", json!({}))?,
+                    Lookup::TemplateMedia(path) => self.run("essential.templateInfo", json!({"path": path}))?,
                 };
                 c.check_lookup(&lookup, &found)?;
             }
