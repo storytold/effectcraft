@@ -1615,3 +1615,79 @@ fn blender_export_requires_an_absolute_path_in_a_write_root() {
     }
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// #1232: what confinement knows writes files or runs other applications is also what an atomic
+/// `engine.batch` refuses, since a rollback can't undo it.
+#[test]
+fn atomic_batches_refuse_every_command_confinement_treats_as_writing_or_external() {
+    use crate::confine::{IMPLICIT_WRITES, REFUSED, WRITES};
+    use effectcraft_engine::commands::batch::NOT_IN_ATOMIC;
+    // Adding a Render Queue item only changes the project; an auto-save writes a recovery copy
+    // the next one replaces; scripts can't run in a batch at all.
+    let allowed = ["renderQueue.add", "file.autoSave", "script.run", "file.runScript"];
+    for id in WRITES.iter().map(|(c, _)| *c).chain(IMPLICIT_WRITES.iter().copied()).chain(REFUSED.iter().copied()) {
+        assert!(NOT_IN_ATOMIC.contains(&id) || allowed.contains(&id), "{id} should be in engine::commands::batch::NOT_IN_ATOMIC");
+    }
+}
+
+/// #1227: importing a template extracts its media into `<name> Media` next to it, so with file
+/// access confined that folder must be inside a write root; a template without media only needs
+/// to be readable.
+#[test]
+fn a_confined_template_import_writes_its_media_only_inside_a_write_root() {
+    use crate::confine::Confinement;
+    use effectcraft_engine::project::{Footage, FootageKind, ItemKind, LayerSource, build};
+    let base = std::env::temp_dir().join(format!("ec-mcp-template-media-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write) = (base.join("in"), base.join("out"));
+    for d in [&read, &write] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let p = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().into_owned();
+    // Two templates in the read root: one carrying a picture, one with nothing to extract.
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255])).save(read.join("pic.png")).unwrap();
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "WithMedia", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+    let with_media = s.active_comp_id().unwrap();
+    {
+        let proj = std::sync::Arc::make_mut(&mut s.project);
+        let foot = Footage { path: p(&read, "pic.png"), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
+        let item = proj.add_item("pic.png", Default::default(), None, ItemKind::Footage(foot));
+        let comp = proj.comp(with_media).unwrap().clone();
+        let layer = build::layer(proj, &comp, "pic.png", LayerSource::Footage { item }, (4, 4), None);
+        let ItemKind::Comp(c) = &mut proj.item_mut(with_media).unwrap().kind else { panic!("comp") };
+        std::sync::Arc::make_mut(c).layers.push(layer);
+    }
+    // A template needs an Essential Graphics control.
+    let pic = s.project.comp(with_media).unwrap().layers[0].id.0;
+    s.execute("essential.addProperty", json!({"layer": pic, "path": "transform/opacity"})).unwrap();
+    s.execute("comp.new", json!({"name": "Plain", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+    let plain = s.active_comp_id().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("essential.addProperty", json!({"layer": solid, "path": "transform/opacity"})).unwrap();
+    s.execute("essential.exportTemplate", json!({"comp": with_media.0, "path": p(&read, "media.ectemplate")})).unwrap();
+    s.execute("essential.exportTemplate", json!({"comp": plain.0, "path": p(&read, "plain.ectemplate")})).unwrap();
+    let info = s.execute("essential.templateInfo", json!({"path": p(&read, "media.ectemplate")})).unwrap();
+    assert_eq!(info["mediaFiles"], 1, "{info}");
+    assert_eq!(info["mediaFolder"], p(&read, "media Media"));
+
+    let mut s = McpServer::new(Backend::headless(Session::default()));
+    s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "Show", "width": 16, "height": 16}}));
+    // Media into a read-only root: refused, and nothing is extracted.
+    let (c, err) = call(&mut s, "execute_command", json!({"command": "essential.importTemplate", "params": {"path": p(&read, "media.ectemplate")}}));
+    assert!(err, "{c:?}");
+    assert!(c[0]["text"].as_str().unwrap_or_default().contains("cannot write"), "{c:?}");
+    assert!(!read.join("media Media").exists());
+    // In a batch it can't be checked step by step: refused too.
+    let (_, err) = call(&mut s, "batch", json!({"steps": [{"command": "essential.importTemplate", "params": {"path": p(&read, "media.ectemplate")}}]}));
+    assert!(err);
+    assert!(!read.join("media Media").exists());
+    // No media: reading is enough.
+    call_json(&mut s, "execute_command", json!({"command": "essential.importTemplate", "params": {"path": p(&read, "plain.ectemplate")}}));
+    // The same template in a write root extracts its media there.
+    std::fs::copy(read.join("media.ectemplate"), write.join("media.ectemplate")).unwrap();
+    call_json(&mut s, "execute_command", json!({"command": "essential.importTemplate", "params": {"path": p(&write, "media.ectemplate")}}));
+    assert!(write.join("media Media").is_dir());
+    let _ = std::fs::remove_dir_all(&base);
+}

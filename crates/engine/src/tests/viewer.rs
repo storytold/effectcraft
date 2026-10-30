@@ -475,6 +475,52 @@ fn vertex_add_delete_convert_on_shape_paths_and_masks_undo() {
     assert_eq!(mp.vertices[3], [50.0, 50.0]);
 }
 
+/// #1250: a loaded path's tangent arrays can be shorter than its vertices (they
+/// deserialize independently). The vertex commands must repair that instead of
+/// panicking on `insert` / indexing / `remove`.
+#[test]
+fn vertex_commands_repair_short_tangent_arrays_from_loaded_paths() {
+    let mut s = comp();
+    let sol = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    let m = s.execute("mask.new", json!({"layer": sol, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let mask_path = |s: &Session| layer(s, sol).masks().unwrap().find_group(m).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    // Simulate the loaded file: keep only a prefix of each tangent array.
+    let truncate_tangents = |s: &mut Session, keep_in: usize, keep_out: usize| {
+        let cid = s.active_comp_id().unwrap();
+        let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(sol)).unwrap();
+        let pr = l.props.find_group_mut(m).unwrap().get_mut("path").unwrap();
+        let KV::Path(sp) = &mut pr.value else { panic!("mask path is not a path value") };
+        sp.in_tangents.truncate(keep_in);
+        sp.out_tangents.truncate(keep_out);
+    };
+
+    // setVertex with tangents at the last vertex (indexing past the stored tangents).
+    truncate_tangents(&mut s, 0, 1);
+    s.execute("mask.setVertex", json!({"layer": sol, "mask": m, "index": 2, "in": [1, 2], "out": [3, 4]})).unwrap();
+    let sp = mask_path(&s);
+    assert_eq!(sp.in_tangents.len(), 3);
+    assert_eq!(sp.out_tangents.len(), 3);
+    assert_eq!(sp.in_tangents[2], [1.0, 2.0]);
+    assert_eq!(sp.out_tangents[2], [3.0, 4.0]);
+
+    // addVertex appending at the end (inserting past the stored tangents).
+    truncate_tangents(&mut s, 1, 0);
+    s.execute("mask.addVertex", json!({"layer": sol, "mask": m, "point": [10, 90]})).unwrap();
+    let sp = mask_path(&s);
+    assert_eq!(sp.vertices.len(), 4);
+    assert_eq!(sp.in_tangents.len(), 4);
+    assert_eq!(sp.out_tangents.len(), 4);
+
+    // deleteVertices on the last vertex (removing past the stored tangents).
+    truncate_tangents(&mut s, 0, 2);
+    s.execute("mask.selectVertices", json!({"vertices": [{"layer": sol, "mask": m, "index": 3}]})).unwrap();
+    s.execute("mask.deleteVertices", json!({})).unwrap();
+    let sp = mask_path(&s);
+    assert_eq!(sp.vertices.len(), 3);
+    assert_eq!(sp.in_tangents.len(), 3);
+    assert_eq!(sp.out_tangents.len(), 3);
+}
+
 #[test]
 fn split_segment_keeps_curve_shape() {
     use effectcraft_keyframe::ShapePath;

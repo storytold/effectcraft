@@ -384,10 +384,11 @@ fn a_script_cannot_confirm_executing_a_file_for_itself() {
     s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
     s.drain_events();
     // A script asserting `confirmed` still gets the question, directly or in a batch.
+    // An atomic batch refuses `file.executeFile` before the step runs (#1232).
     let r = s.execute_for_script("file.executeFile", json!({"path": path, "confirmed": true})).unwrap();
     assert!(r.get("needsConfirmation").is_some(), "{r}");
     assert!(!opened(&mut s));
-    let steps = json!({"steps": [{"command": "file.executeFile", "params": {"path": path, "confirmed": true}}]});
+    let steps = json!({"atomic": false, "steps": [{"command": "file.executeFile", "params": {"path": path, "confirmed": true}}]});
     let r = s.execute_for_script("engine.batch", steps).unwrap();
     assert!(r.to_string().contains("needsConfirmation"), "{r}");
     assert!(!opened(&mut s));

@@ -481,9 +481,12 @@ impl<'a> Cx<'a> {
     }
 
     /// Open a file and remember ownership for cancellation cleanup (including overflow paths).
+    /// Only files this job brings into existence are removed on cancel: a file that was already
+    /// there keeps its old contents until a finished replacement is renamed over it (#1230).
     pub fn create(&self, path: &str) -> crate::Result<out::Out<'_>> {
+        let existed = out::exists(self.sink, path);
         let file = out::create(self.sink, path)?;
-        if self.sink.is_none() {
+        if self.sink.is_none() && !existed {
             self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_owned());
         }
         Ok(file)

@@ -39,6 +39,19 @@ impl ShapePath {
             feather: Vec::new(),
         }
     }
+    /// Restore the invariant of one tangent pair per vertex.
+    ///
+    /// Vertices and the two tangent arrays are stored (and deserialized) independently,
+    /// so a loaded project file can hold fewer — or more — tangents than vertices.
+    /// Code that inserts into, removes from or indexes the tangent arrays by vertex
+    /// index then panics. Call this before such an edit: missing tangents become
+    /// `[0.0; 2]` (a corner vertex, the same default [`ShapePath::polygon`] uses)
+    /// and surplus tangents are dropped. Existing tangents are kept as they are.
+    pub fn normalize_tangents(&mut self) {
+        let n = self.vertices.len();
+        self.in_tangents.resize(n, [0.0; 2]);
+        self.out_tangents.resize(n, [0.0; 2]);
+    }
     pub fn len(&self) -> usize {
         self.vertices.len()
     }
@@ -489,5 +502,50 @@ impl Value {
             Value::Text(t) => json!(t.text),
             v => serde_json::to_value(v).unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShapePath;
+
+    fn path(vertices: usize, in_tangents: usize, out_tangents: usize) -> ShapePath {
+        ShapePath {
+            vertices: (0..vertices).map(|i| [i as f64, 0.0]).collect(),
+            in_tangents: (0..in_tangents).map(|i| [100.0 + i as f64, 0.0]).collect(),
+            out_tangents: (0..out_tangents).map(|i| [200.0 + i as f64, 0.0]).collect(),
+            closed: false,
+            feather: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn normalize_tangents_pads_short_arrays_with_corners() {
+        // The loaded-file case behind effectcraft#1250: fewer tangents than vertices.
+        let mut sp = path(4, 0, 1);
+        sp.normalize_tangents();
+        assert_eq!(sp.in_tangents.len(), 4);
+        assert_eq!(sp.out_tangents.len(), 4);
+        // Existing tangents survive; the missing ones are corner (zero) tangents.
+        assert_eq!(sp.out_tangents[0], [200.0, 0.0]);
+        assert!(sp.in_tangents.iter().all(|t| *t == [0.0; 2]));
+        assert!(sp.out_tangents[1..].iter().all(|t| *t == [0.0; 2]));
+    }
+
+    #[test]
+    fn normalize_tangents_truncates_long_arrays_and_keeps_matching_ones() {
+        let mut sp = path(2, 5, 3);
+        sp.normalize_tangents();
+        assert_eq!(sp.in_tangents, vec![[100.0, 0.0], [101.0, 0.0]]);
+        assert_eq!(sp.out_tangents, vec![[200.0, 0.0], [201.0, 0.0]]);
+
+        let mut ok = ShapePath::polygon(&[[0.0, 0.0], [10.0, 0.0]], false);
+        let before = ok.clone();
+        ok.normalize_tangents();
+        assert_eq!(ok, before);
+
+        let mut empty = ShapePath::default();
+        empty.normalize_tangents();
+        assert!(empty.in_tangents.is_empty() && empty.out_tangents.is_empty());
     }
 }

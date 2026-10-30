@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-14 · **Change:** minor (G3: regression coverage for ten data-loss and crash fixes; path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged; parity estimates unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -239,6 +239,14 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 ### G3. Stability and a green main
 
+- Ten reliability fixes cover export overwrite preservation (#1230), autosave retries (#1231),
+  batch document rollback (#1232), concurrent atomic writes (#1233), cyclic precomps (#1237),
+  template extraction confinement (#1227), template ID collisions (#1229), stale analysis results
+  (#1249), malformed mask tangents (#1250) and exhausted project IDs (#1251). Regression tests
+  exercise these in `export/tests/render_settings.rs`, the engine settings, batch, Essential
+  Graphics, limits, viewer and Warp Stabilizer tests, and the project, keyframe and automation
+  suites. Template imports preserve the same ID headroom required on load and are refused in
+  atomic batches because extracted files cannot be rolled back.
 - Keep `cargo xtask ci` green on the current stable toolchain. A toolchain release that breaks the
   gate is a P0.
 - Fuzz the inputs we don't control: project files, imported media and documents, expressions,

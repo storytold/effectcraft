@@ -891,6 +891,40 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     Ok((manifest, project, entries))
 }
 
+/// Where a template's media goes: `<dir>/<stem> Media`, next to the template file.
+pub fn template_media_dir(path: &str) -> std::path::PathBuf {
+    let pp = std::path::Path::new(path);
+    let dir = pp.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let stem = pp.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Template".into());
+    dir.join(format!("{stem} Media"))
+}
+
+/// Fails if `base` or anything between it and `out` (`out` included) is a symbolic link, which
+/// could send the write elsewhere. Paths that don't exist yet (or aren't on a real file system)
+/// pass.
+fn no_links(base: &std::path::Path, out: &std::path::Path) -> std::io::Result<()> {
+    let link = |p: &std::path::Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    let mut at = base.to_path_buf();
+    let check = |p: &std::path::Path| if link(p) { Err(std::io::Error::other(format!("{} is a symbolic link", p.display()))) } else { Ok(()) };
+    check(&at)?;
+    for c in out.strip_prefix(base).map_err(std::io::Error::other)?.components() {
+        at.push(c);
+        check(&at)?;
+    }
+    Ok(())
+}
+
+/// Write one extracted media file at `out` (inside `base`), refusing symbolic links on the way.
+fn write_media(s: &Session, base: &std::path::Path, out: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    no_links(base, out)?;
+    if let Some(parent) = out.parent() {
+        // Not a real file system (the web app): the services decide where files go.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    no_links(base, out)?;
+    s.services.write_file(&out.to_string_lossy(), data)
+}
+
 /// Where a template's `media/<item>/<file>` entry is written: `<media_dir>/<item>/<file>`.
 /// `None` unless `<item>` is all digits and `<file>` is a plain file name (not empty, `.` or
 /// `..`, no separators, and on Windows no drive, stream or device name), so every entry lands
@@ -914,21 +948,41 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     let (manifest, mut sub, entries) = read_template(&bytes).map_err(|e| bad(C, e))?;
     let name = manifest.get("name").and_then(Value::as_str).unwrap_or("Template").to_string();
     let tcomp = manifest.get("comp").and_then(Value::as_u64).map(ItemId).ok_or_else(|| bad(C, "manifest has no `comp`"))?;
-    // Media next to the template: `<dir>/<stem> Media/<item>/<file>`.
-    let pp = std::path::Path::new(&path);
-    let dir = pp.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    let stem = pp.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Template".into());
-    let media_dir = dir.join(format!("{stem} Media"));
-    let mut written = std::collections::HashMap::new();
+    // Remap the template's ids past the project's and check the result before anything is
+    // written to disk or to the project (#1229).
+    let base = s.project.next_id;
+    essential::offset_ids(&mut sub, base).map_err(|e| bad(C, format!("{path}: {e}")))?;
+    let new_comp = tcomp
+        .0
+        .checked_add(base)
+        .map(ItemId)
+        .filter(|c| sub.comp(*c).is_some())
+        .ok_or_else(|| bad(C, format!("{path}: the manifest's comp {} isn't a composition in the template", tcomp.0)))?;
+    // Media next to the template: `<dir>/<stem> Media/<item>/<file>`. Every destination is
+    // checked before anything is written, and a failed write undoes this import's files (#1227).
+    let media_dir = template_media_dir(&path);
+    let mut plan = vec![];
     for (k, v) in entries.iter().filter(|(k, _)| k.starts_with("media/")) {
+        // The archive reader already drops `..`, absolute names and a drive prefix. Anything
+        // else that is not `media/<digits>/<bare file>` is skipped, so one odd entry does not
+        // reject the template (#1227).
         let Some(out) = template_media_path(&media_dir, k) else { continue };
-        if let Some(parent) = out.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        plan.push((k, out, v));
+    }
+    let mut written = std::collections::HashMap::new();
+    let mut created: Vec<std::path::PathBuf> = vec![];
+    for (k, out, v) in plan {
+        let existed = std::fs::symlink_metadata(&out).is_ok();
+        if let Err(e) = write_media(s, &media_dir, &out, v) {
+            for f in &created {
+                let _ = std::fs::remove_file(f);
+            }
+            return Err(bad(C, format!("cannot extract `{k}` to {}: {e}", out.display())));
         }
-        let out_s = out.to_string_lossy().to_string();
-        if s.services.write_file(&out_s, v).is_ok() {
-            written.insert(k.clone(), out_s);
+        if !existed {
+            created.push(out.clone());
         }
+        written.insert(k.clone(), out.to_string_lossy().to_string());
     }
     for it in sub.items.values_mut() {
         if let ItemKind::Footage(f) = &mut it.kind {
@@ -943,9 +997,6 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let target = if b_p(p, "addToComp") == Some(false) { None } else { comp_id(s, p).ok() };
-    let base = s.project.next_id;
-    essential::offset_ids(&mut sub, base);
-    let new_comp = ItemId(tcomp.0 + base);
     let ids = s.edit("Import Template", None, |proj, st| {
         let folder = proj.add_item(&name, effectcraft_color::Label::Yellow, None, ItemKind::Folder);
         let mut ids = vec![];
@@ -976,7 +1027,14 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
 fn template_info(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("essential.templateInfo", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
-    let (manifest, _, _) = read_template(&bytes).map_err(|e| bad("essential.templateInfo", e))?;
+    let (mut manifest, _, entries) = read_template(&bytes).map_err(|e| bad("essential.templateInfo", e))?;
+    // Where importing would write the template's media, so a confined agent's import can be
+    // checked against its write roots.
+    let media = entries.iter().filter(|(k, _)| k.starts_with("media/")).count();
+    if let Some(m) = manifest.as_object_mut() {
+        m.insert("mediaFiles".into(), json!(media));
+        m.insert("mediaFolder".into(), json!(template_media_dir(path).to_string_lossy()));
+    }
     Ok(manifest)
 }
 
