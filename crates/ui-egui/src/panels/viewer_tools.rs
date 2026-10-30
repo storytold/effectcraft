@@ -669,8 +669,8 @@ pub(crate) fn resolution_label(res: Resolution, scale: f64) -> String {
 }
 
 /// The Composition panel's bottom bar, in After Effects 2026 order: magnification, resolution,
-/// transparency grid, mask and shape path visibility, region of interest, grid and guide
-/// options, show channel, reset exposure, exposure, take / show snapshot, Fast Previews, the 3D
+/// Fast Previews, transparency grid, mask and shape path visibility, region of interest, grid and
+/// guide options, show channel, reset exposure, exposure, take / show snapshot, the 3D
 /// renderer and view, and the current time.
 pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, time: Tick, comp: &Comp) {
     let t = app.tokens;
@@ -721,10 +721,11 @@ fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: 
     }
 }
 
-/// Lay out the viewer's control row from `bar.min.x`: magnification, resolution, transparency, mask, ROI, grid/guide,
-/// channel/colour management, exposure, snapshot, fast previews, 3D renderer/view and Extended Viewer, timecode and render-time
-/// indicators, running commands or toggling viewer UI state. Returns the width the row
-/// occupies, at least `bar.width()`, for the horizontal scroll area.
+/// Lay out the viewer's control row from `bar.min.x`: magnification, resolution, Fast Previews,
+/// transparency, mask, ROI, grid/guide, channel/colour management, exposure, snapshot, 3D
+/// renderer/view and Extended Viewer, timecode and render-time indicators, running commands or
+/// toggling viewer UI state. Returns the width the row occupies, at least `bar.width()`, for the
+/// horizontal scroll area.
 fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, time: Tick, comp: &Comp) -> f32 {
     let t = app.tokens;
     let p = ui.painter().clone();
@@ -779,6 +780,16 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         *x += 24.0;
         (resp.clicked(), r)
     };
+    // Fast Previews.
+    let fp = app.session.state.viewer.fast_previews;
+    let (clicked, fr) = tog(ui, &mut app.auto, &mut x, Icon::Sparkle, fp != FastPreviews::Off || app.ui.viewer.fast_preview, "fastPreviews", "Fast Previews");
+    if clicked {
+        toggle_popup(ui, "vw-fast-pop");
+    }
+    let items: Vec<(String, bool)> = FastPreviews::ALL.iter().map(|m| (m.label().to_string(), fp == *m)).collect();
+    if let Some(i) = popup(app, ui, "vw-fast-pop", fr, &items, "fastPreviewsItem") {
+        let _ = app.session.execute("view.fastPreviewMode", json!({"mode": FastPreviews::ALL[i].id()}));
+    }
     if tog(ui, &mut app.auto, &mut x, Icon::Checker, app.ui.viewer.transparency_grid, "transparency", "Toggle Transparency Grid").0 {
         app.ui.viewer.transparency_grid = !app.ui.viewer.transparency_grid;
     }
@@ -860,16 +871,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     let held = ui.input(|i| i.pointer.primary_down()) && ui.input(|i| i.pointer.press_origin()).is_some_and(|o| sr.intersect(ui.clip_rect()).contains(o));
     if app.session.snapshot.is_some() && held != app.session.state.viewer.show_snapshot {
         let _ = app.session.execute("view.showSnapshot", json!({"value": held}));
-    }
-    // Fast Previews.
-    let fp = vo.fast_previews;
-    let (clicked, fr) = tog(ui, &mut app.auto, &mut x, Icon::Sparkle, fp != FastPreviews::Off || app.ui.viewer.fast_preview, "fastPreviews", "Fast Previews");
-    if clicked {
-        toggle_popup(ui, "vw-fast-pop");
-    }
-    let items: Vec<(String, bool)> = FastPreviews::ALL.iter().map(|m| (m.label().to_string(), fp == *m)).collect();
-    if let Some(i) = popup(app, ui, "vw-fast-pop", fr, &items, "fastPreviewsItem") {
-        let _ = app.session.execute("view.fastPreviewMode", json!({"mode": FastPreviews::ALL[i].id()}));
     }
     x += 4.0;
     // 3D renderer + view.
