@@ -1,5 +1,5 @@
 use super::tools::draw_rigs;
-use super::*;
+use super::{Align2, Color32, EffectcraftApp, EvalCtx, Rect, Sense, Stroke, StrokeKind, Tokens, View3D, ViewerMap, json, pos2, three_d, vec2, widgets};
 
 /// Draw the extra views of a 2- or 4-view layout and return the main view's rectangle.
 pub(super) fn aux_views(
@@ -44,7 +44,16 @@ pub(super) fn aux_views(
     // layout shows them), evaluated on a snapshot of the project.
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp, time: t, expr: snap_expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &snap_project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: snap_expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let selected = app.session.state.selected_layers.clone();
     let mut picked: Option<(usize, View3D)> = None;
     for (i, (r, v)) in aux.into_iter().enumerate() {

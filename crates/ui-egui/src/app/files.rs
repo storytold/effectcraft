@@ -1,4 +1,4 @@
-use super::*;
+use super::{Dialog, EffectcraftApp};
 
 impl EffectcraftApp {
     /// Show the crash-recovery dialog for a previous run that didn't exit cleanly.

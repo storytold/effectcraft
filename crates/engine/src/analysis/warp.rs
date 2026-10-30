@@ -4,7 +4,7 @@
 //! the Warp Stabilizer, `Renderer::layer_input`) for every frame between the layer's In and Out
 //! points on a background thread, and feeds the frames to `effectcraft_track::stabilize`'s
 //! analyzer (step 1 of 2, "Analyzing in background"); step 2 ("Stabilizing") derives the
-//! stabilization plan once to validate the result. When the job finishes, the analysis is
+//! stabilization plan once to validate and cache the result. When the job finishes, the analysis is
 //! written into the effect's hidden Analysis parameter as one undo step, together with a key of
 //! what it was made from (the layer's source, In/Out, start, stretch and Time Remap). Edits that
 //! change those clear the analysis (`invalidate`, run after every edit) and queue the effect
@@ -21,7 +21,7 @@ use effectcraft_project::{GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSour
 use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
-use effectcraft_track::stabilize::{AnalyzeOpts, Analyzer, StabSettings, WarpAnalysis};
+use effectcraft_track::stabilize::{AnalyzeOpts, Analyzer, WarpAnalysis};
 use serde::Serialize;
 
 use crate::tracking::lock;
@@ -245,9 +245,8 @@ async fn run_work(w: WarpWork, shared: &WarpShared) {
     let lt0 = layer.layer_time(w.times[0]).seconds();
     let fd = if w.times.len() > 1 { layer.layer_time(w.times[1]).seconds() - lt0 } else { comp.frame_duration().seconds() };
     let a = an.finish(lt0, fd);
-    // Step 2: derive a plan once (validates the motion and warms nothing else up).
-    let plan = effectcraft_track::stabilize::plan(&a, &StabSettings { fps: if fd > 0.0 { 1.0 / fd } else { 30.0 }, ..Default::default() });
-    if plan.warps.len() != a.frames.len() || plan.warps.iter().any(|h| h.0.iter().flatten().any(|v| !v.is_finite())) {
+    // Plan from the stored JSON, exactly as rendering does, and retain it for the first render.
+    if !warp_stab::prepare_default_plan(&a.to_json()) {
         return fail("the stabilization could not be computed");
     }
     *lock(&shared.result) = Some(a);

@@ -121,7 +121,7 @@ fn lower_third(p: &mut Project) -> Comp {
         [440.0, 914.0],
     );
     anim(&mut title, "transform/opacity", keys(&[(0.4, Value::Scalar(0.0)), (0.9, Value::Scalar(100.0))]));
-    c.layers = vec![title, bar];
+    c.layers = vec![title, bar].into();
     c
 }
 
@@ -130,8 +130,20 @@ fn solid_sized(p: &mut Project, comp: &Comp, folder: ItemId, name: &str, color: 
     build::layer(p, comp, name, LayerSource::Solid { item: sid }, (w, h), None)
 }
 
+/// What `card` draws: name, gradient end colors (hex), size, position and Y rotation.
+#[derive(Clone, Copy)]
+struct CardSpec<'a> {
+    name: &'a str,
+    a: &'a str,
+    b: &'a str,
+    size: (u32, u32),
+    pos: [f64; 3],
+    rot_y: f64,
+}
+
 /// A 3D card: a solid with a diagonal gradient and a thin border grid.
-fn card(p: &mut Project, comp: &Comp, folder: ItemId, name: &str, a: &str, b: &str, size: (u32, u32), pos: [f64; 3], rot_y: f64) -> Layer {
+fn card(p: &mut Project, comp: &Comp, folder: ItemId, spec: &CardSpec) -> Layer {
+    let CardSpec { name, a, b, size, pos, rot_y } = *spec;
     let mut l = solid_sized(p, comp, folder, name, [1.0, 1.0, 1.0], size.0, size.1);
     let (w, h) = (size.0 as f64, size.1 as f64);
     effect(
@@ -192,11 +204,11 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     set(&mut floor, "materialOptions/specularIntensity", Value::Scalar(10.0));
 
     // Cards at different depths and angles; the centre pair intersects.
-    let left = card(p, &c, solids, "Card Blue", "#2E7BF0", "#7A4DFF", (520, 340), [520.0, 560.0, 120.0], 28.0);
-    let right = card(p, &c, solids, "Card Coral", "#FF6A5C", "#FFB347", (520, 340), [1420.0, 560.0, 260.0], -32.0);
-    let mut x1 = card(p, &c, solids, "Cross A", "#1FD1A5", "#2E7BF0", (460, 460), [960.0, 470.0, 520.0], 40.0);
+    let left = card(p, &c, solids, &CardSpec { name: "Card Blue", a: "#2E7BF0", b: "#7A4DFF", size: (520, 340), pos: [520.0, 560.0, 120.0], rot_y: 28.0 });
+    let right = card(p, &c, solids, &CardSpec { name: "Card Coral", a: "#FF6A5C", b: "#FFB347", size: (520, 340), pos: [1420.0, 560.0, 260.0], rot_y: -32.0 });
+    let mut x1 = card(p, &c, solids, &CardSpec { name: "Cross A", a: "#1FD1A5", b: "#2E7BF0", size: (460, 460), pos: [960.0, 470.0, 520.0], rot_y: 40.0 });
     set(&mut x1, "materialOptions/lightTransmission", Value::Scalar(30.0));
-    let x2 = card(p, &c, solids, "Cross B", "#F0E14A", "#FF6A5C", (460, 460), [960.0, 470.0, 520.0], -40.0);
+    let x2 = card(p, &c, solids, &CardSpec { name: "Cross B", a: "#F0E14A", b: "#FF6A5C", size: (460, 460), pos: [960.0, 470.0, 520.0], rot_y: -40.0 });
     // Hero title in 3D space, gently turning.
     let mut title = text_layer(
         p,
@@ -258,7 +270,7 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     );
     anim(&mut caption, "transform/opacity", keys(&[(0.3, Value::Scalar(0.0)), (1.2, Value::Scalar(100.0))]));
 
-    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor];
+    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor].into();
     c
 }
 
@@ -451,7 +463,7 @@ pub fn demo_project() -> Project {
     lower.out_point = t(9.5);
 
     // Stack: top first.
-    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg];
+    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg].into();
     for l in &mut comp.layers {
         if l.name == "Controller" {
             l.switches.video = false;

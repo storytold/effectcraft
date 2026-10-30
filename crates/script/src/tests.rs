@@ -17,6 +17,7 @@ mod include;
 mod panels;
 #[cfg(not(windows))]
 mod services;
+mod startup;
 mod tasks;
 mod ui;
 mod ui_more;
@@ -270,6 +271,44 @@ fn an_undefined_name_mentioned_earlier_reports_its_use_in_the_reading_function()
     assert_eq!(e.line, Some(6), "{e:?}");
 }
 
+/// Scripts reach Wiggle Paths' properties, Spatial Phase included, by their match names.
+#[test]
+fn wiggle_paths_properties_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("W", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var w = sh.property("ADBE Root Vectors Group").addProperty("ADBE Vector Filter - Roughen");
+        w.property("ADBE Vector Spatial Phase").setValue(45);
+        var names = [];
+        for (var i = 1; i <= w.numProperties; i++) names.push(w.property(i).matchName);
+        [w.matchName, w.property("ADBE Vector Spatial Phase").name, names]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "ADBE Vector Filter - Roughen",
+            "Spatial Phase",
+            [
+                "ADBE Vector Roughen Size",
+                "ADBE Vector Roughen Detail",
+                "ADBE Vector Roughen Points",
+                "ADBE Vector Temporal Freq",
+                "ADBE Vector Correlation",
+                "ADBE Vector Temporal Phase",
+                "ADBE Vector Spatial Phase",
+                "ADBE Vector Random Seed"
+            ]
+        ])
+    );
+    let (_, c) = comp_named(&s, "W");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/wiggle/spatialPhase").unwrap().value, KV::Scalar(45.0));
+}
+
 #[test]
 fn match_names_and_lookups() {
     let mut s = session();
@@ -331,6 +370,31 @@ fn match_names_and_lookups() {
     let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
     assert_eq!(sh.props.prop("contents/#1/contents/rect/size").unwrap().value, KV::Vec2([50.0, 60.0]));
     assert_eq!(sh.props.prop("contents/#1/contents/fill/color").unwrap().value, KV::Color([1.0, 0.0, 0.0, 1.0]));
+}
+
+/// Scripts add a Wiggle Transform by its match name or display name and reach its properties.
+#[test]
+fn wiggle_transform_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("W", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var root = sh.property("ADBE Root Vectors Group");
+        var w = root.addProperty("ADBE Vector Filter - Wiggler");
+        var byName = root.addProperty("Wiggle Transform");
+        w.property("ADBE Vector Wiggler Transform").property("Position").setValue([20, 10]);
+        [
+          w.matchName, w.name, byName.matchName, w.property("ADBE Vector Xform Temporal Freq").value,
+          w.property("ADBE Vector Spatial Phase").name, w.property("ADBE Vector Wiggler Transform").name
+        ]
+        "#,
+    );
+    assert_eq!(o.result, json!(["ADBE Vector Filter - Wiggler", "Wiggle Transform 1", "ADBE Vector Filter - Wiggler", 2, "Spatial Phase", "Transform"]));
+    let (_, c) = comp_named(&s, "W");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/wiggler/transform/position").unwrap().value, KV::Vec2([20.0, 10.0]));
 }
 
 #[test]
@@ -453,6 +517,38 @@ fn layers_items_and_markers() {
             .iter()
             .any(|l| l.name == "Key"
                 && matches!(l.source, effectcraft_engine::project::LayerSource::Light { kind: effectcraft_engine::project::LightKind::Spot }))
+    );
+}
+
+#[test]
+fn folder_paths_trim_trailing_separators() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var paths = ['', '/', '///', 'a/b/', 'a\\b\\/', 'a/b', 'a/\n'];
+        var result = paths.map(function (path) {
+          var folder = new Folder(path);
+          return [folder.name, folder.path, __join(path, 'child')];
+        });
+        // A long run followed by a non-separator used to cause quadratic regex backtracking.
+        var longPath = Array(20001).join('/') + 'x';
+        result.push([new Folder(longPath).name, new Folder(longPath).path.length, __join(longPath, 'child').length]);
+        result
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["b", "a", "a/b/child"],
+            ["b", "a", "a\\b/child"],
+            ["b", "a", "a/b/child"],
+            ["\n", "a", "a/\n/child"],
+            ["x", 19999, 20007]
+        ])
     );
 }
 
@@ -992,6 +1088,11 @@ fn footage_proxies_sequences_and_conform_rate() {
     let paths: Vec<String> =
         s.project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.path.replace('\\', "/")) } else { None }).collect();
     assert!(paths.iter().any(|f| f.contains("take_")), "replaced with the take sequence: {paths:?}");
+    // replace() swaps in the one file, even a numbered still, as in After Effects.
+    ok(&mut s, &format!("app.project.item(1).replace(new File('{}'))", p("shot_0002.png")));
+    let kinds: Vec<_> =
+        s.project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some((f.kind, f.path.replace('\\', "/"))) } else { None }).collect();
+    assert!(kinds.iter().any(|(k, f)| *k == effectcraft_engine::project::FootageKind::Still && f.ends_with("shot_0002.png")), "{kinds:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1647,6 +1748,50 @@ fn layer_property_resolves_transform_and_source_text_shortcuts() {
     );
     let (_, c) = comp_named(&s, "x");
     assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
+}
+
+/// A text animator property added by its After Effects name is the one asked for, not its Tracking
+/// Type companion, and it can be found again by that name (#1063).
+#[test]
+fn scripted_text_animator_property_is_the_one_asked_for() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Track", 960, 300, 1, 3, 30);
+        var t = c.layers.addText("MOVARA");
+        var a = t.property("ADBE Text Properties").property("ADBE Text Animators").addProperty("ADBE Text Animator");
+        var props = a.property("ADBE Text Animator Properties");
+        var added = props.addProperty("ADBE Text Tracking Amount");
+        added.setValue(20);
+        [added.name, props.property("ADBE Text Tracking Amount").value, props.property("ADBE Text Tracking Amount").name,
+         added.matchName, props.property(added.matchName).propertyIndex]
+        "#,
+    );
+    assert_eq!(o.result, json!(["Tracking Amount", 20, "Tracking Amount", "ADBE Text Tracking Amount", 2]));
+}
+
+/// The companion properties added with Tracking and Skew are found by their After Effects names,
+/// but cannot be added on their own (#1063).
+#[test]
+fn text_animator_companion_properties_resolve_by_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Track", 960, 300, 1, 3, 30);
+        var t = c.layers.addText("MOVARA");
+        var props = t.property("ADBE Text Properties").property("ADBE Text Animators").addProperty("ADBE Text Animator").property("ADBE Text Animator Properties");
+        props.addProperty("ADBE Text Tracking Amount");
+        props.addProperty("ADBE Text Skew");
+        var type = props.property("ADBE Text Track Type");
+        var axis = props.property("ADBE Text Skew Axis");
+        var added = "";
+        try { props.addProperty("ADBE Text Track Type"); added = "added"; } catch (e) { added = "refused"; }
+        [type ? type.matchName : null, axis ? axis.matchName : null, added]
+        "#,
+    );
+    assert_eq!(o.result, json!(["ADBE Text Track Type", "ADBE Text Skew Axis", "refused"]));
 }
 
 /// #1936: an array whose length doesn't match the property's dimension is an error in After

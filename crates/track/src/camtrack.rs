@@ -67,8 +67,9 @@ pub struct Track2D {
 }
 
 impl Track2D {
+    /// Exclusive end frame, saturated when the track exceeds the frame index range.
     pub fn end(&self) -> u32 {
-        self.start + self.pts.len() as u32
+        u32::try_from(self.pts.len()).ok().and_then(|n| self.start.checked_add(n)).unwrap_or(u32::MAX)
     }
     /// Position on frame `k` when the track covers it.
     pub fn at(&self, k: u32) -> Option<[f64; 2]> {
@@ -482,4 +483,53 @@ pub fn point_color(id: u32) -> [f32; 3] {
     };
     // Bright, slightly desaturated.
     [0.25 + 0.75 * r, 0.25 + 0.75 * g, 0.25 + 0.75 * b]
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn tracks() -> CameraTracks {
+        CameraTracks { size: [1920.0, 1080.0], factor: 1.0, frame_duration: 1.0 / 30.0, frames: 3, ..Default::default() }
+    }
+
+    #[test]
+    fn track_end_saturates_instead_of_wrapping() {
+        assert_eq!(Track2D { start: u32::MAX, pts: vec![[0.0; 2]], ..Default::default() }.end(), u32::MAX);
+        assert_eq!(Track2D { start: 3, pts: vec![[0.0; 2]; 2], ..Default::default() }.end(), 5);
+    }
+
+    #[test]
+    fn solve_rejects_large_frame_count_before_allocating() {
+        let t = CameraTracks { frames: u32::MAX, ..tracks() };
+        let error = solve(&t, &SolveSettings::default(), None).unwrap_err();
+        assert!(error.0.contains("frame or track count"));
+    }
+
+    #[test]
+    fn solve_rejects_overflowing_and_out_of_clip_tracks() {
+        for start in [u32::MAX, 2] {
+            let t = CameraTracks { tracks: vec![Track2D { start, pts: vec![[0.0; 2]; 3], ..Default::default() }], ..tracks() };
+            let error = solve(&t, &SolveSettings::default(), None).unwrap_err();
+            assert!(error.0.contains("frame range"));
+        }
+    }
+
+    #[test]
+    fn solve_rejects_non_finite_track_positions() {
+        let t = CameraTracks { tracks: vec![Track2D { pts: vec![[f32::NAN, 0.0]; 3], ..Default::default() }], ..tracks() };
+        let error = solve(&t, &SolveSettings::default(), None).unwrap_err();
+        assert!(error.0.contains("finite"));
+    }
+
+    #[test]
+    fn solve_rejects_invalid_dimensions_timing_and_scale() {
+        for t in [
+            CameraTracks { size: [f64::NAN, 1080.0], ..tracks() },
+            CameraTracks { frame_duration: 0.0, ..tracks() },
+            CameraTracks { factor: f64::INFINITY, ..tracks() },
+        ] {
+            assert!(solve(&t, &SolveSettings::default(), None).is_err());
+        }
+    }
 }

@@ -2,7 +2,7 @@
 
 use effectcraft_color::BlendMode;
 use effectcraft_keyframe::Value as KV;
-use effectcraft_project::{ItemKind, LayerSource, MaskMode};
+use effectcraft_project::{Comp, ItemKind, Layer, LayerSource, MaskMode};
 use effectcraft_psd::write::*;
 use effectcraft_psd::{DValue, Descriptor, Rect};
 use serde_json::json;
@@ -74,22 +74,8 @@ pub(crate) fn sample_psd() -> Vec<u8> {
     write(&d)
 }
 
-#[test]
-fn psd_imports_as_composition() {
-    let path = tmp("sample.psd");
-    std::fs::write(&path, sample_psd()).unwrap();
-    let mut s = Session::default();
-    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition"})).unwrap();
-    assert_eq!(r["errors"], json!([]), "{r}");
-    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
-    assert_eq!(s.state.active_comp, Some(cid));
-    assert_eq!(s.project.item(cid).unwrap().name, "sample");
-    let c = s.project.comp(cid).unwrap().clone();
-    assert_eq!((c.width, c.height), (120, 80));
-    let names: Vec<&str> = c.layers.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["Title", "Hue Shift", "Vector Masked", "Clipped", "Base", "Group A", "Background"]);
-    // Text layer: editable text, positioned at the type origin.
-    let title = &c.layers[0];
+/// Text layer: editable text, positioned at the type origin.
+fn assert_title_layer(title: &Layer) {
     assert!(matches!(title.source, LayerSource::Text));
     let Some(KV::Text(doc)) = title.props.prop("text/sourceText").map(|p| p.value.clone()) else { panic!("text") };
     assert_eq!(doc.text, "Hello PSD");
@@ -97,14 +83,18 @@ fn psd_imports_as_composition() {
     assert_eq!(doc.font, "Inter");
     assert_eq!(doc.style, "Bold");
     assert_eq!(title.props.prop("transform/position").unwrap().value.as_vec2(), [8.0, 70.0]);
-    // Adjustment layer with Hue/Saturation.
-    let hue = &c.layers[1];
+}
+
+/// Adjustment layer with Hue/Saturation.
+fn assert_hue_layer(hue: &Layer) {
     assert!(hue.switches.adjustment);
     let fx = hue.effects().unwrap().groups().next().unwrap();
     assert_eq!(fx.get("hue").unwrap().value.as_f64(), 40.0);
     assert_eq!(fx.get("saturation").unwrap().value.as_f64(), 10.0);
-    // Vector mask → mask; Stroke style.
-    let vm = &c.layers[2];
+}
+
+/// Vector mask → mask; Stroke style.
+fn assert_vector_mask_layer(vm: &Layer) {
     let m = vm.masks().unwrap().groups().next().unwrap();
     assert!(matches!(m.kind, effectcraft_project::GroupKind::Mask { mode: MaskMode::Add, .. }));
     let Some(KV::Path(p)) = m.get("path").map(|p| p.value.clone()) else { panic!("mask path") };
@@ -113,19 +103,23 @@ fn psd_imports_as_composition() {
     let st = vm.props.group("layerStyles/stroke").unwrap();
     assert_eq!(st.get("size").unwrap().value.as_f64(), 2.0);
     assert_eq!(st.get("position").unwrap().value, KV::Enum(1));
-    // Clipped → preserve transparency; opacity and blend mode.
+}
+
+/// Clipped → preserve transparency (opacity, blend mode); drop shadow.
+fn assert_clipped_and_shadow(c: &Comp) {
     let clipped = &c.layers[3];
     assert!(clipped.preserve_transparency);
     assert_eq!(clipped.blend_mode, BlendMode::Screen);
     assert!((clipped.props.prop("transform/opacity").unwrap().value.as_f64() - 128.0 / 255.0 * 100.0).abs() < 1e-9);
-    // Drop shadow.
     let ds = c.layers[4].props.group("layerStyles/dropShadow").unwrap();
     assert_eq!(ds.get("distance").unwrap().value.as_f64(), 9.0);
     assert_eq!(ds.get("angle").unwrap().value.as_f64(), 45.0);
     assert_eq!(ds.get("useGlobalLight").unwrap().value, KV::Bool(false));
     assert_eq!(ds.get("opacity").unwrap().value.as_f64(), 60.0);
-    // Group → collapsed precomp (pass through) with its layers.
-    let g = &c.layers[5];
+}
+
+/// Group → collapsed precomp (pass through) with its layers; footage items name their Photoshop layer.
+fn assert_group_precomp(s: &Session, g: &Layer) {
     assert!(g.switches.collapse);
     let LayerSource::Comp { item } = g.source else { panic!("precomp") };
     let inner = s.project.comp(item).unwrap();
@@ -140,9 +134,61 @@ fn psd_imports_as_composition() {
     assert_eq!((sl.name.as_str(), sl.layer_size), ("Masked Square", false));
     assert_eq!((f.width, f.height), (120, 80));
     assert_eq!(s.project.item(item).unwrap().name, "Masked Square/sample.psd");
+}
+
+#[test]
+fn psd_imports_as_composition() {
+    let path = tmp("sample.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition"})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    assert_eq!(s.state.active_comp, Some(cid));
+    assert_eq!(s.project.item(cid).unwrap().name, "sample");
+    let c = s.project.comp(cid).unwrap().clone();
+    assert_eq!((c.width, c.height), (120, 80));
+    let names: Vec<&str> = c.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Title", "Hue Shift", "Vector Masked", "Clipped", "Base", "Group A", "Background"]);
+    assert_title_layer(&c.layers[0]);
+    assert_hue_layer(&c.layers[1]);
+    assert_vector_mask_layer(&c.layers[2]);
+    assert_clipped_and_shadow(&c);
+    assert_group_precomp(&s, &c.layers[5]);
     // One undo step removes everything.
     s.execute("edit.undo", json!({})).unwrap();
     assert!(s.project.comp(cid).is_none());
+}
+
+/// #2573: New Composition From Footage on a Photoshop file imported as a composition opens that
+/// composition; it isn't wrapped in another.
+#[test]
+fn psd_imported_as_composition_with_new_comp_is_the_new_comp() {
+    let path = tmp("newcomp.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition", "newComp": true})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    assert_eq!(s.state.active_comp, Some(cid));
+    let roots = s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_)) && i.name.starts_with("newcomp")).count();
+    assert_eq!(roots, 1, "no wrapper comp");
+}
+
+/// A Photoshop file imported as a composition and dropped on the Timeline (`addToComp`) adds
+/// its composition once, not its folder too.
+#[test]
+fn psd_imported_as_composition_into_a_comp_adds_one_layer() {
+    let path = tmp("dropped.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    let main = s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition", "addToComp": true})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let psd = r["comps"][0].as_u64().unwrap();
+    let layers = &s.project.comp(effectcraft_project::ItemId(main)).unwrap().layers;
+    assert_eq!(layers.len(), 1, "{layers:?}");
+    assert!(matches!(layers[0].source, LayerSource::Comp { item } if item.0 == psd));
 }
 
 #[test]

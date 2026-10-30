@@ -52,6 +52,14 @@ fn export_and_reimport_timeline_commands() {
     let r = s.execute_checked("file.exportTimeline", json!({"comp": main, "path": tmp("NoExt"), "format": "otio", "prerender": "none"})).unwrap();
     assert!(r["path"].as_str().unwrap().ends_with("NoExt.otio"));
     assert!(s.execute_checked("file.exportTimeline", json!({"path": tmp("x.xml"), "prerender": "sometimes"})).is_err());
+    // In the background (the export dialog, #2269): a job, then the same file and result.
+    let path = tmp("Background.xml");
+    let r = s.execute_checked("file.exportTimeline", json!({"comp": main, "path": path, "background": true})).unwrap();
+    assert!(r["job"].is_string(), "{r}");
+    s.wait_jobs();
+    let done = s.job_log.last().unwrap();
+    assert_eq!((done.status.as_str(), done.result["path"].as_str()), ("done", Some(path.as_str())));
+    assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
     assert!(s.execute_checked("file.importTimeline", json!({"path": "/nope/a.prproj"})).is_err());
     let formats = s.execute("file.timelineFormats", json!({})).unwrap();
     assert_eq!(formats.as_array().unwrap().len(), 6);

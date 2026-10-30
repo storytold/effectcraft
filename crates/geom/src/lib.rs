@@ -261,6 +261,9 @@ impl Mat3 {
             return Mat3([[x1 - x0, x3 - x0, x0], [y1 - y0, y3 - y0, y0], [0.0, 0.0, 1.0]]);
         }
         let den = dx1 * dy2 - dx2 * dy1;
+        if den == 0.0 || !den.is_finite() {
+            return Mat3::IDENTITY;
+        }
         let g = (sx * dy2 - dx2 * sy) / den;
         let h = (dx1 * sy - sx * dy1) / den;
         Mat3([[x1 - x0 + g * x1, x3 - x0 + h * x3, x0], [y1 - y0 + g * y1, y3 - y0 + h * y3, y0], [g, h, 1.0]])
@@ -448,6 +451,19 @@ pub fn look_at(pos: Vec3, poi: Vec3, extra: Mat4) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quad with three collinear corners has no projective map: identity, not NaN.
+    #[test]
+    fn square_to_quad_degenerate_is_finite() {
+        let m = Mat3::square_to_quad([vec2(0.0, 5.0), vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(20.0, 0.0)]);
+        assert!(m.0.iter().flatten().all(|v| v.is_finite()), "non-finite: {m:?}");
+    }
+
+    #[test]
+    fn square_to_quad_regular_is_finite() {
+        let m = Mat3::square_to_quad([vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(8.0, 6.0), vec2(0.0, 5.0)]);
+        assert!(m.0.iter().flatten().all(|v| v.is_finite()));
+    }
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-9

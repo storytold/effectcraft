@@ -1,4 +1,4 @@
-use super::*;
+use super::{EngineError, Image, ItemId, RenderOpts, Renderer, Result, Session, ThumbnailJob, Tick, Value, commands};
 
 impl Session {
     /// Render a comp frame with the session's footage + expression hosts.
@@ -9,12 +9,52 @@ impl Session {
     /// The renderer [`Session::render`] uses: the session's footage, expressions, layer cache and
     /// accelerator, and the render prefs (nested switches, draft shadows) over `opts`.
     pub fn renderer(&self, opts: RenderOpts) -> Renderer<'_> {
-        let opts = RenderOpts { nested_switches: self.prefs.general.switches_affect_nested_comps, draft_shadows: self.prefs.three_d.realtime_shadows, ..opts };
-        let mut r = Renderer::new(&self.project, self.footage.as_ref(), opts);
+        let mut r = Renderer::new(&self.project, self.footage.as_ref(), self.render_opts(opts));
         r.expr = self.expr.as_deref();
         r.cache = Some(&self.layer_cache);
         r.accel = self.accel.as_deref();
         r
+    }
+
+    /// `opts` with the render prefs (nested switches, draft shadows), as [`Session::renderer`].
+    pub fn render_opts(&self, opts: RenderOpts) -> RenderOpts {
+        RenderOpts { nested_switches: self.prefs.general.switches_affect_nested_comps, draft_shadows: self.prefs.three_d.realtime_shadows, ..opts }
+    }
+
+    /// Whether `effect.cryptomatteAt` with params `p` answers from the kept probe (a few array
+    /// reads; `probeOnly` queries answer `pending` until then). Changes nothing: ask it every
+    /// frame, and start [`Session::crypto_probe_job`] only when a build will actually run.
+    pub fn crypto_probe_ready(&self, p: &Value) -> Result<bool> {
+        commands::crypto_probe_ready(self, p)
+    }
+
+    /// For the Cryptomatte eyedropper: `None` when `effect.cryptomatteAt` with params `p` answers
+    /// from the kept probe, else a job that builds that probe (it may render a precomp's ID pass)
+    /// off the UI thread, for the next query to use. Asking for a job supersedes a build in
+    /// flight for another probe (it then stores nothing): ask only to run it.
+    pub fn crypto_probe_job(&self, p: &Value) -> Result<Option<commands::CryptoProbeJob>> {
+        commands::crypto_probe_job(self, p)
+    }
+
+    /// Let go of the kept Cryptomatte probe (and its aux channels), and cancel a build in
+    /// flight: the eyedropper was disarmed. Edits, footage changes and Open / New do it too.
+    pub fn drop_crypto_probe(&self) {
+        if let Ok(mut slot) = self.crypto_probe.lock() {
+            slot.clear();
+        }
+    }
+
+    /// Whether a Cryptomatte probe is kept, and how many were built so far (for tests).
+    #[doc(hidden)]
+    pub fn crypto_probe_stats(&self) -> (bool, u64) {
+        self.crypto_probe.lock().map_or((false, 0), |s| (s.kept(), s.builds().1))
+    }
+
+    /// How many probe jobs ran so far, built or cancelled before they began (for tests: each
+    /// is a thread in the eyedropper).
+    #[doc(hidden)]
+    pub fn crypto_probe_jobs(&self) -> u64 {
+        self.crypto_probe.lock().map_or(0, |s| s.builds().0)
     }
 
     /// Render a comp frame (comp time `t`) as opaque 8-bit RGBA over the comp background, scaled
@@ -56,7 +96,7 @@ impl Session {
             effectcraft_project::ItemKind::Footage(f) if f.has_video => {
                 let f = f.clone();
                 Some(Box::new(move || {
-                    let img = footage.frame(item, &f, Tick(0))?;
+                    let img = effectcraft_render::cineon_frame(footage.frame(item, &f, Tick(0))?, &f);
                     // Point-sample down to at most `max_side` on the long side.
                     let step = (img.width.max(img.height) as f32 / max_side.max(1) as f32).ceil().max(1.0) as u32;
                     let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));
@@ -95,5 +135,6 @@ impl Session {
             self.footage.forget(p);
         }
         self.layer_cache.clear();
+        self.drop_crypto_probe();
     }
 }

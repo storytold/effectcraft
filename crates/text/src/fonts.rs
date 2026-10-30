@@ -292,15 +292,37 @@ impl Face {
 }
 
 struct Db {
+    fallback: Arc<Face>,
     faces: Vec<Arc<Face>>,
     scanned: bool,
+}
+
+/// Keep the compiled-in regular face available independently of discovery results.
+fn bundled_default_face() -> Arc<Face> {
+    let info =
+        read_faces_bytes(INTER_REGULAR).into_iter().next().map(|n| info_from(n, FaceData::Static(INTER_REGULAR), "bundled")).unwrap_or_else(|| FaceInfo {
+            family: DEFAULT_FAMILY.into(),
+            style: "Regular".into(),
+            weight: 400,
+            italic: false,
+            index: 0,
+            data: FaceData::Static(INTER_REGULAR),
+            origin: "bundled",
+            native_family: None,
+            full_name: "Inter Regular".into(),
+            postscript: Some("Inter-Regular".into()),
+            variable: false,
+            instances: Vec::new(),
+        });
+    Arc::new(Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() })
 }
 
 fn db() -> &'static RwLock<Db> {
     static DB: OnceLock<RwLock<Db>> = OnceLock::new();
     DB.get_or_init(|| {
-        let mut db = Db { faces: Vec::new(), scanned: false };
-        for b in [INTER_REGULAR, INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD, INTER_ITALIC, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR] {
+        let fallback = bundled_default_face();
+        let mut db = Db { faces: vec![fallback.clone()], fallback, scanned: false };
+        for b in [INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD, INTER_ITALIC, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR] {
             for n in read_faces_bytes(b) {
                 push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
             }
@@ -363,12 +385,67 @@ pub fn scan_system() -> usize {
 }
 
 /// Scan the system font folders again, adding fonts installed since the last scan (faces already
-/// known are kept, so font ids stay valid). Returns the number of faces added.
+/// known are kept, so font ids stay valid). Returns the number of faces added. This walks every
+/// fontconfig directory, so the UI calls [`start_rescan`] instead of running it on the frame thread.
 pub fn rescan_system() -> usize {
     let _scan = SCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = if cfg!(target_arch = "wasm32") { 0 } else { add_source(&DirectorySource::system()) };
     db().write().unwrap_or_else(std::sync::PoisonError::into_inner).scanned = true;
     n
+}
+
+/// A rescan started by [`start_rescan`], if one is in flight or finished and not yet polled.
+#[cfg(not(target_arch = "wasm32"))]
+static RESCAN: std::sync::Mutex<Option<std::thread::JoinHandle<usize>>> = std::sync::Mutex::new(None);
+
+/// Start [`rescan_system`] on a background thread. Returns false when a rescan is already
+/// running, the thread could not be spawned, or this build has no system font folders (wasm).
+pub fn start_rescan() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut slot = RESCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|h| !h.is_finished()) {
+            return false;
+        }
+        match std::thread::Builder::new().name("font-rescan".into()).spawn(rescan_system) {
+            Ok(handle) => {
+                *slot = Some(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Whether a background rescan is still walking the font folders.
+pub fn rescan_busy() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        RESCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|h| !h.is_finished())
+    }
+}
+
+/// Faces added by the latest background rescan, once that thread has finished. `None` while it
+/// is still running or when nothing was started.
+pub fn poll_rescan() -> Option<usize> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut slot = RESCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let finished = slot.as_ref().is_some_and(std::thread::JoinHandle::is_finished);
+        if finished { slot.take().and_then(|h| h.join().ok()) } else { None }
+    }
 }
 
 /// Start the system font scan on a background thread, so the font menus are complete by the
@@ -394,10 +471,7 @@ pub fn system_scanned() -> bool {
 /// A face by id (panics never: unknown ids give the default face).
 pub fn face(id: FaceId) -> Arc<Face> {
     let d = db().read().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // The bundled fonts are compiled in and always parse (`tests::bundled_families_and_resolution` checks them), so
-    // the database is never empty.
-    #[allow(clippy::expect_used)]
-    d.faces.get(id).or_else(|| d.faces.first()).cloned().expect("bundled fonts present")
+    d.faces.get(id).cloned().unwrap_or_else(|| d.fallback.clone())
 }
 
 /// All faces (bundled first).
@@ -688,14 +762,28 @@ const JAPANESE_FAMILIES: &[&str] = &[
 ];
 /// Han ideograph families for Simplified Chinese, in the order the platforms' own fallback tables
 /// prefer them (Windows, macOS, then the Linux/Noto names). Missing ones cost one name lookup each.
-const SIMPLIFIED_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft YaHei", "SimSun", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei"];
+/// `Hiragino Sans GB`, `Heiti SC` and `Songti SC` are the Simplified faces a macOS install without
+/// the on-demand PingFang has (macOS 27 on an English install ships them, not PingFang): without
+/// them Chinese Han text fell through to the Japanese face and drew Japanese glyph forms (#453).
+const SIMPLIFIED_CHINESE_FAMILIES: &[&str] = &[
+    "Microsoft YaHei",
+    "SimSun",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Songti SC",
+    "STSong",
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+];
 /// The same for Traditional Chinese. The two scripts share almost all of their code points but not
 /// the glyph forms (`东` against `東`'s neighbours, `直`, `骨`), so one list for both drew a
 /// Traditional interface with Simplified forms - the faces do not differ in *coverage*, which is
 /// what the fallback search checks, so the script has to pick the list.
 const TRADITIONAL_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
+    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Songti TC", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
 const KOREAN_FAMILIES: &[&str] = &["Malgun Gothic", "Gulim", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans KR", "NanumGothic"];
 /// The platforms' plain text families for the other scripts the bundled fonts lack, in the same
 /// order (Windows, macOS, then the Linux/Noto names).

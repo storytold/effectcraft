@@ -123,7 +123,15 @@ fn ffprobe_video(path: &Path) -> Option<String> {
         .output()
         .expect("ffprobe");
     assert!(out.status.success() && out.stderr.is_empty(), "ffprobe rejected {}: {}", path.display(), String::from_utf8_lossy(&out.stderr));
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // An ffprobe whose build lacks this codec's decoder (distro "free" builds) only parses the
+    // container: pix_fmt and the counted frames come back unknown/N/A, describing the build
+    // rather than our output. Skip the oracle, as when ffprobe is absent.
+    if s.contains("|unknown|") || s.ends_with("|N/A") {
+        eprintln!("ffprobe cannot decode this codec here: skipping the oracle ({s})");
+        return None;
+    }
+    Some(s)
 }
 
 /// Decode every frame with ffmpeg (no errors allowed) and check frames 0, 4, 5 and the last.
@@ -140,7 +148,14 @@ fn ffmpeg_check(path: &Path, decoder: Option<&str>, tol: f32) {
         cmd.args(["-c:v", d]);
     }
     let out = cmd.arg("-i").arg(path).args(["-pix_fmt", "rgba"]).arg(dir.join("f%03d.png")).output().expect("ffmpeg");
-    assert!(out.status.success() && out.stderr.is_empty(), "ffmpeg ({decoder:?}) failed on {}: {}", path.display(), String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    // Same as ffprobe: an ffmpeg without this codec's decoder cannot judge our output, so the
+    // oracle skips instead of failing (the in-repo decode above already proved the frames).
+    if !out.status.success() && err.contains("no decoder found") {
+        eprintln!("ffmpeg cannot decode this codec here: skipping the oracle decode ({err})");
+        return;
+    }
+    assert!(out.status.success() && err.is_empty(), "ffmpeg ({decoder:?}) failed on {}: {}", path.display(), err);
     for k in [0, 4, 5, FRAMES - 1] {
         let img = image::open(dir.join(format!("f{:03}.png", k + 1))).expect("ffmpeg frame").to_rgba8();
         check_frame(&Image::from_rgba8(img.width(), img.height(), img.as_raw()), k, tol);

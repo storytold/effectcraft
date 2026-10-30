@@ -18,10 +18,11 @@
 //! | cpal audio output | Web Audio: an AudioWorklet fed from the preview mixdown (`audio`) |
 //! | TCP control channel / MCP | `window.effectcraft` JavaScript API (`api`) |
 //!
-//! [`store`] is portable (unit-tested natively); everything else is `wasm32`-only.
+//! [`store`] and [`startup`] are portable (unit-tested natively); everything else is `wasm32`-only.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod startup;
 pub mod store;
 
 #[cfg(target_arch = "wasm32")]
@@ -32,6 +33,8 @@ mod app;
 pub mod audio;
 #[cfg(target_arch = "wasm32")]
 pub mod browse;
+#[cfg(target_arch = "wasm32")]
+pub mod config_file;
 #[cfg(target_arch = "wasm32")]
 pub mod diskcache;
 #[cfg(target_arch = "wasm32")]

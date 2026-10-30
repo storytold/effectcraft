@@ -20,7 +20,7 @@
 
 <p align="center">
   A free, open-source compositor: compositions, layers,
-  keyframes, 306 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
+  keyframes, 308 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
   Windows and Linux, and in the browser. Young, moving fast, and already usable.
 </p>
 
@@ -84,9 +84,10 @@ a few places where it matters to us:
   without a plugin.
 - **A project file you can read.** Projects are versioned JSON (`.ecproj`), so they diff cleanly
   in version control.
-- **Everything is scriptable.** Every menu item, timeline drag and property edit goes through one
-  command registry, so the same actions are reachable from a command line, a JSON control
-  channel and an MCP server for agents.
+- **Everything is scriptable.** Menu actions, timeline edits and property changes are exposed as
+  commands. Engine commands are available through the CLI, JSON control channel and MCP;
+  UI-only commands use the frontend dispatcher and can be invoked through the control channel
+  or an attached MCP bridge.
 - **No FFmpeg.** Video and audio decoding and encoding are pure Rust: FilmCraft's codecs and
   EffectCraft's own VP9, AV1, HEVC and Opus encoders.
 
@@ -126,7 +127,7 @@ or into the Timeline, between layers and at the time you point to.
 
 ## Effects
 
-306 built-in effects across its categories, each with its parameter names, order and
+308 built-in effects across its categories, each with its parameter names, order and
 defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
 color-grading panel…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
@@ -155,7 +156,7 @@ tools, and Front, Top, Left and Custom views.
 
 A dedicated Render Queue, with Render Settings and Output Modules: **H.264** MP4 and
 **ProRes** MOV (Proxy to 4444 XQ with alpha) with audio, **HEVC** (Main / Main 10) and **AV1**
-MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, TIFF and 32-bit EXR sequences, animated GIF and WAV/AIFF. Field
+MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, TIFF, Targa and 32-bit EXR sequences, animated GIF and WAV/AIFF. Field
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
@@ -173,8 +174,10 @@ cannot express; File ▸ Import ▸ Lottie… opens one as a new composition.
 
 ## Built for agents
 
-Everything you can do from a menu is a command with an id, and agents can reach every one of
-them:
+Engine commands are available through the CLI, JSON control channel and MCP. UI-only commands
+need the running app's frontend dispatcher: complete menu access requires the app's control
+channel or an attached MCP bridge. Headless MCP sessions expose supported engine commands,
+but not UI-only commands or bridge-only `ui_*` tools.
 
 - **MCP server:** `effectcraft-cli mcp` speaks the Model Context Protocol over stdio, headless
   or bridged to the running app (`--bridge 9877`). Tools cover commands, the project and property
@@ -228,7 +231,7 @@ tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING
 ## Where it stands
 
 EffectCraft is young: its first commit was on 1 October 2026. A comprehensive feature set
-exists, including 306 effects, but breadth is not the same as full maturity across every edge
+exists, including 308 effects, but breadth is not the same as full maturity across every edge
 case. Today it's a good place to try things and to tell us what breaks. It isn't yet recommended
 for production client work. In particular:
 
@@ -275,9 +278,13 @@ send us right now.
 | arm64 (Snapdragon and other ARM PCs) | `effectcraft-<ver>-windows-arm64.msi` | `effectcraft-<ver>-windows-arm64-portable.zip` |
 | x86 (32-bit) | `effectcraft-<ver>-windows-x86.msi` | `effectcraft-<ver>-windows-x86-portable.zip` |
 
-Installers and executables are code-signed. The installer asks where to install EffectCraft
-(Program Files by default), and later versions install into the same folder. To install silently
+Installers and executables are code-signed. The installer asks who to install EffectCraft for and where. By default it installs for your
+account only, into `%LOCALAPPDATA%\Programs\ArtCraft\EffectCraft`, without an administrator prompt;
+"Everyone on this computer" installs into `C:\Program Files\ArtCraft\EffectCraft` (`Program Files (x86)` for the 32-bit build). Later versions
+install into the same folder. To install silently
 into a folder of your choice: `msiexec /i effectcraft-<ver>-windows-x64.msi /qn INSTALLFOLDER="D:\Apps\EffectCraft"`.
+A silent install is per-user by default. `INSTALLFOLDER` chooses the folder, not who it is installed for;
+add `ALLUSERS=1`, from an elevated terminal or deployment tool, for an all-users install.
 
 ### macOS
 

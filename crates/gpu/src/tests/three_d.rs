@@ -11,7 +11,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, Layer, LayerSource, LightKin
 use effectcraft_render::{Backend, RenderOpts, Renderer};
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Pattern, Scene, check, compare_at, gpu, n, opts, set};
+use crate::tests::{Pattern, Scene, check, compare_at, diff, gpu, n, opts, set, tolerance};
 
 const W: u32 = 160;
 const H: u32 = 100;
@@ -134,6 +134,22 @@ fn lights_specular_transmission_and_shadows() {
 }
 
 #[test]
+fn wide_shadow_diffusion() {
+    // #2444: a wide penumbra takes more than the 3 × 3 kernel's samples; both sides pick the
+    // same count.
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = crossing(depth, BlendMode::Normal);
+        for l in &mut s.p.comp_mut(s.cid).unwrap().layers {
+            if l.switches.three_d {
+                set(l, "materialOptions/castsShadows", Value::Enum(1));
+            }
+        }
+        light(&mut s, LightKind::Point, [150.0, 20.0, -80.0], &[("castsShadows", Value::Bool(true)), ("shadowDiffusion", n(60.0))]);
+        check(&format!("wide shadow diffusion {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.005);
+    }
+}
+
+#[test]
 fn depth_of_field_and_motion_blur() {
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         let mut s = crossing(depth, BlendMode::Normal);
@@ -161,7 +177,7 @@ fn mattes_preserve_transparency_precomps_and_adjustment_splits() {
         let mid = s.push(m);
         let layers = &mut s.p.comp_mut(s.cid).unwrap().layers;
         layers[1].track_matte = Some(TrackMatte { layer: mid, kind: MatteKind::Luma });
-        if let Some(far) = layers.iter_mut().find(|l| l.switches.three_d && l.name == "Pattern") {
+        if let Some(far) = layers.find_mut(|l| l.switches.three_d && l.name == "Pattern") {
             far.preserve_transparency = true;
         }
         // Move the matte below the bottom so the 3D run stays one run.
@@ -187,7 +203,7 @@ fn mattes_preserve_transparency_precomps_and_adjustment_splits() {
         a.switches.three_d = true;
         set(&mut a, "transform/rotationX", Value::Scalar(40.0));
         let b = s.solid([0.2, 0.8, 0.4], 30, 20);
-        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a];
+        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a].into();
         let mut pre = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (80, 60), None);
         pre.switches.collapse = true;
         pre.switches.three_d = true;
@@ -209,6 +225,10 @@ fn the_gpu_draws_classic_3d_runs_itself() {
     assert_eq!(prep.planes.iter().filter(|p| p.draw).count(), 3);
     let mut e = crate::context::Enc::new(g.context());
     let canvas = e.image(W, H);
+    if !g.context().has_kernel("classic3d") {
+        // FXC (DirectX 12) can't build the kernel (#613); the CPU fallback is tested below.
+        return;
+    }
     let out = crate::classic3d::draw_run(&mut e, &prep, &canvas).expect("the kernel draws the run");
     let img = e.download(&out).unwrap();
     let mut cpu = effectcraft_raster::Image::new(W, H);
@@ -253,7 +273,9 @@ fn bokeh_depth_of_field_runs_on_the_gpu() {
                 assert!(prep.planes.iter().filter(|p| p.draw).all(|p| p.dof.is_some()), "{label}: depth of field deferred to the GPU");
                 let mut e = crate::context::Enc::new(g.context());
                 let canvas = e.image(W, H);
-                assert!(crate::classic3d::draw_run(&mut e, &prep, &canvas).is_some(), "{label}: drawn on the GPU");
+                if g.context().has_kernel("classic3d") {
+                    assert!(crate::classic3d::draw_run(&mut e, &prep, &canvas).is_some(), "{label}: drawn on the GPU");
+                }
             }
         }
     }
@@ -277,7 +299,7 @@ fn two_d_layer_with_a_three_d_track_matte() {
             let layers = &mut s.p.comp_mut(s.cid).unwrap().layers;
             let fi = layers.iter().position(|l| l.id == fid).unwrap();
             layers[fi].track_matte = Some(TrackMatte { layer: mid, kind });
-            if let Some(ml) = layers.iter_mut().find(|l| l.id == mid) {
+            if let Some(ml) = layers.find_mut(|l| l.id == mid) {
                 ml.switches.video = false;
             }
             check(&format!("3d matte {kind:?} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.005);
@@ -286,5 +308,29 @@ fn two_d_layer_with_a_three_d_track_matte() {
             s.p.comp_mut(s.cid).unwrap().renderer = effectcraft_project::Renderer::Advanced3D;
             check(&format!("3d matte {kind:?} {depth:?} (Advanced 3D)"), compare_at(&s, opts(), Tick::ZERO), 0.005);
         }
+    }
+}
+
+/// #613: FXC on DirectX 12 fails to build `classic3d` (it can't unroll its loops). The
+/// compositor still starts without it, lists it, and 3D runs render on the CPU, matching the
+/// CPU render.
+#[test]
+fn classic_3d_runs_render_on_the_cpu_without_the_kernel() {
+    let Some(base) = gpu() else {
+        return;
+    };
+    let ctx = base.context().without_kernel("classic3d");
+    assert!(!ctx.has_kernel("classic3d"));
+    let g = crate::Gpu::from_context(ctx);
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = crossing(depth, BlendMode::Normal);
+        camera(&mut s, [30.0, 20.0, -260.0], None);
+        let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(&g);
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let mut d = diff(&cpu, &img, tolerance(depth));
+        d.quantized = depth != BitDepth::Bpc32;
+        check(&format!("classic 3D without its kernel {depth:?}"), Some(d), 0.0);
     }
 }

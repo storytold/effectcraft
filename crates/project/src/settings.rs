@@ -1,5 +1,5 @@
 use super::item::{ItemId, LayerId};
-use super::*;
+use super::{BTreeMap, ColorSpace, Deserialize, Label, Serialize, Tick};
 
 /// The project file schema. 2: effects on layers without a source rectangle (shape, text)
 /// measure positions from the top-left of their comp-sized bounds (effect space), not from

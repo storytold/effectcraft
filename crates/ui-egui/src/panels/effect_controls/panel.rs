@@ -1,7 +1,7 @@
 use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, selected_layer};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
-use super::*;
+use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
 
 // ---------------------------------------------------------------------------------------------
 
@@ -11,6 +11,140 @@ pub fn start_rename(ctx: &egui::Context, uid: u64, name: &str) {
     ctx.data_mut(|d| d.insert_temp(id, name.to_string()));
     ctx.data_mut(|d| d.insert_temp(id.with("select"), true));
     ctx.memory_mut(|m| m.request_focus(id.with("field")));
+}
+
+/// Where an effect header's parts sit, for its rename field.
+struct EffectHdr<'a> {
+    g: &'a PropGroup,
+    shown: &'a str,
+    r: Rect,
+    tw: Rect,
+    reset: Rect,
+    rename_id: egui::Id,
+    layer_id: u64,
+}
+
+/// The effect header's name field while renaming: Enter or blur commits, Escape cancels.
+fn rename_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, h: &EffectHdr, mut value: String, actions: &mut Actions) {
+    let EffectHdr { g, shown, r, tw, reset, rename_id, layer_id } = *h;
+    let ctx = ui.ctx().clone();
+    let name_rect = Rect::from_min_max(pos2(tw.max.x + 6.0, r.min.y + 2.0), pos2(reset.min.x - 6.0, r.max.y - 2.0));
+    let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
+    // Focus the field the frame it first exists: focusing an id not yet on screen leaves
+    // the accessibility tree with a focus it doesn't contain.
+    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some() {
+        crate::widgets::select_all(&ctx, response.id, &value);
+        response.request_focus();
+    }
+    app.auto.add(&format!("effectControls.effect.{}.nameEdit", g.uid), name_rect, "Effect name");
+    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("select"))).unwrap_or(false) {
+        widgets::select_all(&ctx, response.id, &value);
+    }
+    // Escape cancels. egui drops the field's focus on Escape in the same frame, so the
+    // key is checked on the focus being lost as well as held.
+    let escape = (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let commit = response.lost_focus() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+    if escape || commit {
+        ctx.data_mut(|d| d.remove::<String>(rename_id));
+        // The field opens with the drawn name, so committing it unchanged is not a rename.
+        if !escape && !value.trim().is_empty() && value != shown {
+            actions.push(("prop.renameGroup".into(), json!({"layer": layer_id, "prop": g.uid, "name": value})));
+        }
+    } else {
+        ctx.data_mut(|d| d.insert_temp(rename_id, value));
+    }
+}
+
+struct EditorCx<'a> {
+    bp: &'a egui::Painter,
+    layer: &'a Layer,
+    ectx: &'a EvalCtx<'a>,
+}
+
+/// An effect's custom editor (curves, levels, roto...), or the histogram-only fallback.
+fn effect_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &EditorCx, g: &PropGroup, er: Rect, actions: &mut Actions) {
+    let GroupKind::Effect { effect } = &g.kind else { return };
+    match effect.as_str() {
+        "ec.color.curves" => curves_editor(app, ui, cx.bp, cx.layer, g, cx.ectx, er, actions),
+        effectcraft_engine::effects::warp_stab::ID => warp_editor(app, ui, cx.bp, cx.layer, g, er, actions),
+        effectcraft_engine::effects::camera_tracker::ID => crate::panels::camera_tracker_ui::editor(app, ui, cx.bp, cx.layer, g, er, actions),
+        effectcraft_engine::effects::roto::ID => roto_editor(app, ui, cx.bp, cx.layer, g, er, actions),
+        effectcraft_engine::effects::object_matte::ID => object_matte_editor(app, ui, cx.bp, cx.layer, g, er, actions),
+        "ec.color.levels" | "ec.color.levelsic" => levels_editor(app, ui, cx.bp, cx.layer, g, effect, cx.ectx, er, actions),
+        crate::panels::fx_editors::GLOW | crate::panels::fx_editors::RESHAPE | crate::panels::fx_editors::EXTRACTOR => {
+            crate::panels::fx_editors::header_editor(app, ui, cx.bp, cx.layer, g, effect, cx.ectx, er, actions)
+        }
+        _ => histogram_only(app, ui, cx.bp, g, er),
+    }
+}
+
+struct ReorderDrag<'a> {
+    tops: &'a [(u64, f32)],
+    y: f32,
+    du: u64,
+    drag_id: egui::Id,
+    layer_id: u64,
+}
+
+/// Drag an effect header to reorder: the insertion line between headers, and the drop.
+fn reorder_drag(ctx: &egui::Context, bp: &egui::Painter, body: Rect, t: &Tokens, st: &ReorderDrag, actions: &mut Actions) {
+    let ReorderDrag { tops, y, du, drag_id, layer_id } = *st;
+    if let Some(pos) = ctx.pointer_interact_pos() {
+        let slot = tops.iter().position(|(_, ty)| pos.y < *ty + (ROW + 2.0) / 2.0).unwrap_or(tops.len());
+        let ly = tops.get(slot).map(|(_, ty)| *ty).unwrap_or(y - 4.0);
+        bp.line_segment([pos2(body.min.x + 4.0, ly), pos2(body.max.x - 4.0, ly)], Stroke::new(2.0, t.accent));
+        if ctx.input(|i| i.pointer.any_released()) {
+            if let Some(from) = tops.iter().position(|(u, _)| *u == du) {
+                let to = if slot > from { slot - 1 } else { slot };
+                if to != from {
+                    actions.push(("effect.reorder".into(), json!({"layer": layer_id, "effect": du, "index": to + 1})));
+                }
+            }
+            ctx.data_mut(|d| d.remove::<u64>(drag_id));
+        }
+    }
+    if !ctx.input(|i| i.pointer.any_down()) {
+        ctx.data_mut(|d| d.remove::<u64>(drag_id));
+    }
+}
+
+/// Drop effects and animation presets here.
+fn drop_payload(ui: &egui::Ui, rect: Rect, p: &egui::Painter, t: &Tokens, layer_id: u64, actions: &mut Actions) {
+    let ctx = ui.ctx().clone();
+    if let Some(payload) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx)
+        && ui.rect_contains_pointer(rect)
+        && let Some((id, params)) = match payload.as_ref() {
+            crate::panels::DragPayload::Effect(e) => Some(("effect.apply", json!({"effect": e, "layers": [layer_id]}))),
+            crate::panels::DragPayload::Preset { preset, .. } => Some(preset.apply_to(layer_id)),
+            _ => None,
+        }
+    {
+        p.rect_stroke(rect, 0.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+        if ctx.input(|i| i.pointer.any_released()) {
+            actions.push((id.into(), params));
+            egui::DragAndDrop::clear_payload(&ctx);
+        }
+    }
+}
+
+fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, t: &Tokens, effect: &str, g: &PropGroup, r: Rect) {
+    // About…: the effect's name and category (AE's About dialog).
+    let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.center().y - 9.0), vec2(44.0, 18.0));
+    let aresp = ui.interact(about, egui::Id::unique(("ec-about", g.uid)), Sense::click());
+    bp.text(about.center(), Align2::CENTER_CENTER, crate::i18n::tr("About..."), Tokens::ui(11.5), if aresp.hovered() { t.hot_text } else { t.text_dim });
+    app.auto.add(&format!("effectControls.effect.{}.about", g.uid), about, "About");
+    let apop = egui::Id::unique(("ec-about-pop", g.uid));
+    if aresp.clicked() {
+        widgets::open_popup(ui, apop);
+    }
+    if let Some(spec) = effectcraft_engine::effects::find(effect) {
+        let lines = vec![
+            crate::i18n::effects::name(spec.id, spec.name),
+            format!("Category: {}", crate::i18n::effects::category(spec.category)),
+            "EffectCraft built-in effect (MIT OR Apache-2.0)".to_string(),
+        ];
+        let _ = widgets::popup_menu(ui, apop, about.left_bottom(), &lines, None);
+    }
 }
 
 /// The Effect Controls panel for the selected layer: a header with the comp and layer names, then
@@ -32,7 +166,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let comp_name = app.session.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp: &comp, time: app.session.time(), expr: snap_expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &snap_project,
+        comp_id: cid,
+        comp: &comp,
+        time: app.session.time(),
+        expr: snap_expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let hdr = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
     p.text(pos2(hdr.min.x + 10.0, hdr.center().y), Align2::LEFT_CENTER, format!("{} • {}", comp_name, layer.name), Tokens::ui(11.5), t.text_dim);
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
@@ -49,7 +192,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         bp.text(
             pos2(body.center().x, body.min.y + 40.0),
             Align2::CENTER_CENTER,
-            "No effects. Drag one from Effects & Presets.",
+            crate::i18n::tr("No effects. Drag one from Effects & Presets."),
             Tokens::ui(12.0),
             t.text_faint,
         );
@@ -99,32 +242,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let rename_id = egui::Id::unique(("ec-rename", g.uid));
         let editing: Option<String> = ctx.data(|d| d.get_temp(rename_id));
         let reset = Rect::from_min_size(pos2(r.max.x - 96.0, r.center().y - 9.0), vec2(40.0, 18.0));
-        if let Some(mut value) = editing.as_ref().cloned() {
-            let name_rect = Rect::from_min_max(pos2(tw.max.x + 6.0, r.min.y + 2.0), pos2(reset.min.x - 6.0, r.max.y - 2.0));
-            let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
-            // Focus the field the frame it first exists: focusing an id not yet on screen leaves
-            // the accessibility tree with a focus it doesn't contain.
-            if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some() {
-                crate::widgets::select_all(&ctx, response.id, &value);
-                response.request_focus();
-            }
-            app.auto.add(&format!("effectControls.effect.{}.nameEdit", g.uid), name_rect, "Effect name");
-            if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("select"))).unwrap_or(false) {
-                widgets::select_all(&ctx, response.id, &value);
-            }
-            // Escape cancels. egui drops the field's focus on Escape in the same frame, so the
-            // key is checked on the focus being lost as well as held.
-            let escape = (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
-            let commit = response.lost_focus() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-            if escape || commit {
-                ctx.data_mut(|d| d.remove::<String>(rename_id));
-                // The field opens with the drawn name, so committing it unchanged is not a rename.
-                if !escape && !value.trim().is_empty() && value != shown {
-                    actions.push(("prop.renameGroup".into(), json!({"layer": layer.id.0, "prop": g.uid, "name": value})));
-                }
-            } else {
-                ctx.data_mut(|d| d.insert_temp(rename_id, value));
-            }
+        let hdr_cx = EffectHdr { g, shown: &shown, r, tw, reset, rename_id, layer_id: layer.id.0 };
+        if let Some(value) = editing.as_ref().cloned() {
+            rename_field(app, ui, &hdr_cx, value, &mut actions);
         } else {
             let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::semibold(12.0), t.text);
             app.auto.add(&format!("effectControls.effect.{}.name", g.uid), name, &g.name);
@@ -135,23 +255,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if rresp.clicked() {
             actions.push(("effect.reset".into(), json!({"layer": layer.id.0, "effect": g.uid})));
         }
-        // About…: the effect's name and category (AE's About dialog).
-        let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.center().y - 9.0), vec2(44.0, 18.0));
-        let aresp = ui.interact(about, egui::Id::unique(("ec-about", g.uid)), Sense::click());
-        bp.text(about.center(), Align2::CENTER_CENTER, crate::i18n::tr("About..."), Tokens::ui(11.5), if aresp.hovered() { t.hot_text } else { t.text_dim });
-        app.auto.add(&format!("effectControls.effect.{}.about", g.uid), about, "About");
-        let apop = egui::Id::unique(("ec-about-pop", g.uid));
-        if aresp.clicked() {
-            widgets::open_popup(ui, apop);
-        }
-        if let Some(spec) = effectcraft_engine::effects::find(effect) {
-            let lines = vec![
-                crate::i18n::effects::name(spec.id, spec.name),
-                format!("Category: {}", crate::i18n::effects::category(spec.category)),
-                "EffectCraft built-in effect (MIT OR Apache-2.0)".to_string(),
-            ];
-            let _ = widgets::popup_menu(ui, apop, about.left_bottom(), &lines, None);
-        }
+        about_button(app, ui, &bp, &t, effect, g, r);
         let hresp = ui.interact(
             Rect::from_min_max(pos2(tw.max.x, r.min.y), pos2(reset.min.x - 4.0, r.max.y)),
             egui::Id::unique(("ec-hdr", g.uid)),
@@ -234,18 +338,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(er) {
                         actions.push(("prop.select".into(), json!({"layer":layer.id.0,"prop":g.uid})));
                     }
-                    match effect.as_str() {
-                        "ec.color.curves" => curves_editor(app, ui, &bp, &layer, g, &ectx, er, &mut actions),
-                        effectcraft_engine::effects::warp_stab::ID => warp_editor(app, ui, &bp, &layer, g, er, &mut actions),
-                        effectcraft_engine::effects::camera_tracker::ID => crate::panels::camera_tracker_ui::editor(app, ui, &bp, &layer, g, er, &mut actions),
-                        effectcraft_engine::effects::roto::ID => roto_editor(app, ui, &bp, &layer, g, er, &mut actions),
-                        effectcraft_engine::effects::object_matte::ID => object_matte_editor(app, ui, &bp, &layer, g, er, &mut actions),
-                        "ec.color.levels" | "ec.color.levelsic" => levels_editor(app, ui, &bp, &layer, g, effect, &ectx, er, &mut actions),
-                        crate::panels::fx_editors::GLOW | crate::panels::fx_editors::RESHAPE | crate::panels::fx_editors::EXTRACTOR => {
-                            crate::panels::fx_editors::header_editor(app, ui, &bp, &layer, g, effect, &ectx, er, &mut actions)
-                        }
-                        _ => histogram_only(app, ui, &bp, g, er),
-                    }
+                    effect_editor(app, ui, &EditorCx { bp: &bp, layer: &layer, ectx: &ectx }, g, er, &mut actions);
                 }
             }
             let scope = FxScope { effect: effect.as_str(), root: g, path: String::new() };
@@ -264,25 +357,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         y += 4.0;
     }
-    // Drag an effect header to reorder: insertion line between headers.
     if let Some(du) = dragging {
-        if let Some(pos) = ctx.pointer_interact_pos() {
-            let slot = tops.iter().position(|(_, ty)| pos.y < *ty + (ROW + 2.0) / 2.0).unwrap_or(tops.len());
-            let ly = tops.get(slot).map(|(_, ty)| *ty).unwrap_or(y - 4.0);
-            bp.line_segment([pos2(body.min.x + 4.0, ly), pos2(body.max.x - 4.0, ly)], Stroke::new(2.0, t.accent));
-            if ctx.input(|i| i.pointer.any_released()) {
-                if let Some(from) = tops.iter().position(|(u, _)| *u == du) {
-                    let to = if slot > from { slot - 1 } else { slot };
-                    if to != from {
-                        actions.push(("effect.reorder".into(), json!({"layer": layer.id.0, "effect": du, "index": to + 1})));
-                    }
-                }
-                ctx.data_mut(|d| d.remove::<u64>(drag_id));
-            }
-        }
-        if !ctx.input(|i| i.pointer.any_down()) {
-            ctx.data_mut(|d| d.remove::<u64>(drag_id));
-        }
+        reorder_drag(&ctx, &bp, body, &t, &ReorderDrag { tops: &tops, y, du, drag_id, layer_id: layer.id.0 }, &mut actions);
     }
     // Right-click anywhere a control has no menu of its own: the Effect menu, which applies to
     // the selected layers (After Effects). Drawn after the rows, whose menus open first.
@@ -297,21 +373,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ui.set_clip_rect(panel_clip);
     let content_h = y + scroll.offset - body.min.y;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
-    // Drop effects and animation presets here.
-    if let Some(payload) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx)
-        && ui.rect_contains_pointer(rect)
-        && let Some((id, params)) = match payload.as_ref() {
-            crate::panels::DragPayload::Effect(e) => Some(("effect.apply", json!({"effect": e, "layers": [layer.id.0]}))),
-            crate::panels::DragPayload::Preset { preset, .. } => Some(preset.apply_to(layer.id.0)),
-            _ => None,
-        }
-    {
-        p.rect_stroke(rect, 0.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
-        if ctx.input(|i| i.pointer.any_released()) {
-            actions.push((id.into(), params));
-            egui::DragAndDrop::clear_payload(&ctx);
-        }
-    }
+    drop_payload(ui, rect, &p, &t, layer.id.0, &mut actions);
     if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
         app.ui.viewer.property_interacting = true;
         ctx.request_repaint();

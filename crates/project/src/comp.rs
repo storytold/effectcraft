@@ -1,7 +1,7 @@
 use super::item::LayerId;
 use super::layer::{Layer, LayerSource};
 use super::settings::{Marker, yes};
-use super::*;
+use super::{Deserialize, FrameRate, Node, PropGroup, Serialize, Tick, Value, essential, styles};
 
 /// 3D renderer of a composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,8 +87,8 @@ pub struct Comp {
     pub display_start: Tick,
     pub background: [f32; 3],
     pub work_area: (Tick, Tick),
-    /// Layer #1 first (top of the stack).
-    pub layers: Vec<Layer>,
+    /// Layer #1 first (top of the stack). Each layer is shared between undo states until edited.
+    pub layers: super::Layers,
     #[serde(default)]
     pub markers: Vec<Marker>,
     pub shutter_angle: f64,
@@ -188,7 +188,7 @@ impl Comp {
             display_start: Tick::ZERO,
             background: [0.0, 0.0, 0.0],
             work_area: (Tick::ZERO, duration),
-            layers: vec![],
+            layers: super::Layers::new(),
             markers: vec![],
             shutter_angle: 180.0,
             shutter_phase: -90.0,
@@ -239,7 +239,7 @@ impl Comp {
     }
 
     pub fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
-        self.layers.iter_mut().find(|l| l.id == id)
+        self.layers.find_mut(|l| l.id == id)
     }
 
     /// 1-based layer number (#) of a layer.
@@ -275,15 +275,35 @@ impl Comp {
     }
 }
 
+/// A protected time marker with a duration sets the comp's timing (Responsive Design), so it is
+/// part of the pixels even where plain markers are not.
+fn is_timing_marker(m: &Marker) -> bool {
+    m.protected && m.duration > Tick::ZERO
+}
+
+fn timing_markers(m: &[Marker]) -> impl Iterator<Item = (Tick, Tick)> + '_ {
+    m.iter().filter(|m| is_timing_marker(m)).map(|m| (m.time, m.duration))
+}
+
 impl Comp {
     /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
     /// Shy Layers and the viewer's Resolution.
     pub fn same_pixels(&self, o: &Comp) -> bool {
-        self.same_settings(o) && self.layers.len() == o.layers.len() && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
+        self.same_pixels_with(o, true)
     }
 
-    /// [`Self::same_pixels`] but for the layers.
-    fn same_settings(&self, o: &Comp) -> bool {
+    /// [`Self::same_pixels`], with the comp's and its layers' markers counting only when
+    /// `with_markers`: only expressions read them, so while none does, adding or moving a marker
+    /// (even during playback) leaves every rendered frame valid. Protected time markers with a
+    /// duration set the timing (Responsive Design), so those always count.
+    pub fn same_pixels_with(&self, o: &Comp, with_markers: bool) -> bool {
+        self.same_settings(o, with_markers)
+            && self.layers.len() == o.layers.len()
+            && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels_with(b, with_markers))
+    }
+
+    /// [`Self::same_pixels_with`] but for the layers.
+    fn same_settings(&self, o: &Comp, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here).
         let Comp {
             width,
@@ -321,7 +341,7 @@ impl Comp {
             && *display_start == o.display_start
             && *background == o.background
             && *work_area == o.work_area
-            && *markers == o.markers
+            && (if with_markers { *markers == o.markers } else { timing_markers(markers).eq(timing_markers(&o.markers)) })
             && *shutter_angle == o.shutter_angle
             && *shutter_phase == o.shutter_phase
             && *motion_blur_samples == o.motion_blur_samples
@@ -356,7 +376,7 @@ impl Comp {
             })
         }
         // Solo hides every other layer at every frame.
-        if !self.same_settings(o) || self.any_solo() != o.any_solo() {
+        if !self.same_settings(o, true) || self.any_solo() != o.any_solo() {
             return None;
         }
         let common = |a: &Comp, b: &Comp| a.layers.iter().map(|l| l.id).filter(|id| b.layer(*id).is_some()).collect::<Vec<_>>();
@@ -393,34 +413,33 @@ impl Comp {
         self.layers.iter().any(|l| l.switches.solo && l.source.is_av())
     }
 
-    /// Draws the same pixels as `o` once plain markers are ignored: they change no pixels. Protected
-    /// time markers with a duration set the timing (Responsive Design), so those still count.
-    pub fn same_pixels_ignoring_markers(&self, o: &Comp) -> bool {
-        let protected =
-            |m: &[Marker]| -> Vec<(Tick, Tick)> { m.iter().filter(|m| m.protected && m.duration > Tick::ZERO).map(|m| (m.time, m.duration)).collect() };
-        if protected(&self.markers) != protected(&o.markers) {
-            return false;
-        }
-        let mut c = self.clone();
-        c.markers = o.markers.clone();
-        for (a, b) in c.layers.iter_mut().zip(&o.layers) {
-            a.markers = b.markers.clone();
-            a.markers_locked = b.markers_locked;
-        }
-        c.same_pixels(o)
-    }
-
     /// The comp with those switches and the Resolution at their defaults (borrowed when they
     /// already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
-        if !self.hide_shy && self.resolution.is_auto() && self.layers.iter().all(|l| l.switches == l.switches.pixels()) {
+        self.pixel_form_with(true)
+    }
+
+    /// [`Self::pixel_form`], also without the comp's plain markers and its layers' markers when not
+    /// `with_markers` (see [`Self::same_pixels_with`] and [`Project::reads_markers`]).
+    pub fn pixel_form_with(&self, with_markers: bool) -> std::borrow::Cow<'_, Comp> {
+        if !self.hide_shy
+            && self.resolution.is_auto()
+            && self.layers.iter().all(|l| l.switches == l.switches.pixels())
+            && (with_markers || (self.markers.iter().all(is_timing_marker) && self.layers.iter().all(|l| l.markers.is_empty())))
+        {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut c = self.clone();
         c.hide_shy = false;
         c.resolution = Resolution::Auto;
+        if !with_markers {
+            c.markers.retain(is_timing_marker);
+        }
         for l in &mut c.layers {
             l.switches = l.switches.pixels();
+            if !with_markers {
+                l.markers.clear();
+            }
         }
         std::borrow::Cow::Owned(c)
     }

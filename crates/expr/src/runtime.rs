@@ -51,6 +51,8 @@ thread_local! {
     pub static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
     /// Script runs since the outermost evaluation on this thread began (nested ones included).
     pub static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stack address where the current script run began (0: none; see [`native_stack`]).
+    static STACK_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -232,17 +234,54 @@ fn native_random(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
     Ok(JsValue::from(noise::unit(noise::mix(&parts))))
 }
 
+/// Stack a script run may use below [`run`] for natives that recurse once per level of a nested
+/// value (`join`, `JSON.stringify`, …; the prelude calls [`native_stack`] per level). It is the
+/// same on every thread, so a value converts or fails alike in preview, export and commands.
+/// Expressions run on render, export and diagnostics threads (2 MiB, std and rayon's default)
+/// and on the main thread for commands and syntax checks (1 MiB on Windows). A debug build
+/// stops the nested-value tests within a fresh 512 KiB thread, which leaves the main thread
+/// 512 KiB for its callers. The parser's limit ([`crate::rewrite::MAX_NESTING`]) is the tighter
+/// one there: 30 levels need about 1 MiB in debug builds. On wasm32 the address of a local is on
+/// the shadow stack, not the engine's call stack, so this measures nothing useful there.
+const NATIVE_STACK: usize = 256 << 10;
+
+/// An address on the current stack (on wasm32, the shadow stack).
+fn stack_here() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
+}
+
+/// `__stack()`: throw once the current run has used [`NATIVE_STACK`] (values nested so deeply
+/// would overflow the stack, which aborts the app).
+fn native_stack(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    let base = STACK_BASE.with(|b| b.get());
+    if base != 0 && base.abs_diff(stack_here()) > NATIVE_STACK {
+        return Err(JsNativeError::range().with_message("value is nested too deeply").into());
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `__nest(src)`: throw when source handed to `eval` / `Function` at run time nests deeper than
+/// the parser's stack allows (the expression text itself is checked before it is compiled).
+fn native_nesting(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let src = string(args, 0, ctx)?;
+    crate::rewrite::check_plain_nesting(&src).map_err(|e| JsNativeError::range().with_message(e.trim_start_matches("Error: ").to_string()))?;
+    Ok(JsValue::undefined())
+}
+
 impl Runtime {
     fn new() -> Result<Runtime, String> {
         let mut ctx = Context::default();
         let limits = ctx.runtime_limits_mut();
         limits.set_loop_iteration_limit(LOOP_LIMIT);
         limits.set_recursion_limit(400);
-        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 4] = [
+        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 6] = [
+            (js_string!("__stack"), 0, native_stack),
             (js_string!("__h"), 6, native_host),
             (js_string!("__wig"), 8, native_wiggle),
             (js_string!("__noise"), 3, native_noise),
             (js_string!("__rnd"), 6, native_random),
+            (js_string!("__nest"), 1, native_nesting),
         ];
         for (name, len, f) in natives {
             ctx.register_global_callable(name, len, NativeFunction::from_fn_ptr(f)).map_err(|e| e.to_string())?;
@@ -361,6 +400,9 @@ pub fn out_of_time() -> bool {
     }
 }
 
+/// Levels of nested arrays a script result keeps.
+const MAX_DETACH: usize = 4;
+
 /// Copy a JS value out of the heap.
 fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
     if v.is_undefined() {
@@ -380,7 +422,7 @@ fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
     }
     let err = |e: boa_engine::JsError| format_error(&e.to_string(), usize::MAX);
     if let Some(o) = v.as_object() {
-        if o.is_array() && depth < 4 {
+        if o.is_array() && depth < MAX_DETACH {
             let arr = JsArray::from_object(o).map_err(err)?;
             let n = arr.length(ctx).map_err(err)?.min(1 << 16);
             let mut out = Vec::with_capacity(n as usize);
@@ -407,6 +449,11 @@ fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
             let closed = o.get(js_string!("__closed"), ctx).map_err(err)?.to_boolean();
             return Ok(Out::Path { points, ins, outs, closed });
         }
+    }
+    // Below the levels detached above, an object's text could be its whole nested content
+    // (`String([[[…]]])`), converted by natives that recurse once per level.
+    if depth >= MAX_DETACH && v.is_object() {
+        return Ok(Out::Object("[object]".into()));
     }
     Ok(Out::Object(v.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default()))
 }
@@ -484,6 +531,8 @@ fn position_line(msg: &str) -> Option<usize> {
 /// `__begin` with memoized answers, so nothing carries over. A script that really overflows the
 /// stack fails again on the fresh context and reports the error.
 pub fn run(text: &str, b: &Begin) -> Run {
+    // Runs don't nest (other expressions are evaluated between runs), so one base suffices.
+    STACK_BASE.with(|s| s.set(stack_here()));
     RUNTIME.with(|r| {
         let mut r = r.borrow_mut();
         for fresh in [false, true] {
@@ -628,6 +677,7 @@ pub fn styled_doc(v: &serde_json::Value, own: &effectcraft_keyframe::TextDoc) ->
             let p0 = src.para(0);
             d.set_paras(vec![p0; d.para_count()]);
             d.stroke_over_fill = src.stroke_over_fill;
+            d.line_join = src.line_join;
         }
     }
     for op in v.get("ops").and_then(|o| o.as_array()).into_iter().flatten() {

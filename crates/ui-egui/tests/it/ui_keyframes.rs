@@ -105,11 +105,15 @@ fn ctrl_c_and_ctrl_v_copy_and_paste_keys_at_the_current_time() {
             _ => None,
         })
         .collect();
-    assert_eq!(copied, ["EffectCraft: 1 keyframe"], "the system clipboard is filled, so Ctrl+V sends a paste event");
+    // The system clipboard has the key as After Effects keyframe text (for other applications),
+    // so it isn't empty and Ctrl+V sends a paste event.
+    let [text] = copied.as_slice() else { panic!("one copy: {copied:?}") };
+    assert!(text.starts_with("Adobe After Effects 9.0 Keyframe Data\n"), "{text}");
+    assert!(text.contains("Transform\tOpacity\n\tFrame\tpercent\t\n\t30\t100\t\n"), "{text}");
     assert!(h.state().session.state.clip_is_keys);
     // Move to 3 s, Ctrl+V: the key lands there.
     h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(3.0));
-    h.input_mut().events.push(Event::Paste("EffectCraft: 1 keyframe".into()));
+    h.input_mut().events.push(Event::Paste(text.clone()));
     h.run_steps(2);
     assert_eq!(key_times(&h, id), vec![0.0, 1.0, 3.0]);
 }
@@ -190,8 +194,18 @@ fn copy_and_paste_key_subsets_across_position_rotation_and_scale() {
             assert_eq!(h.state().session.state.selected_props.len(), 3);
             h.input_mut().events.push(Event::Copy);
             h.step();
-            let note = format!("EffectCraft: {count} keyframes");
-            assert!(h.output().platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == &note)));
+            let note = h
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let rows = note.lines().filter(|line| line.strip_prefix('\t').is_some_and(|row| row.starts_with(|c: char| c.is_ascii_digit()))).count();
+            assert_eq!(rows, count, "one row per copied key: {note}");
             h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(2.0));
             let undo_steps = h.state().session.history.undo.len();
             h.input_mut().events.push(Event::Paste(note));

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    EngineError, FootageKind, Ids, ItemId, ItemKind, Layer, LayerSource, Project, Result, Session, Value, bad, build, has_comp, json, layer_mut, layers_p,
+    unlocked,
+};
 
 /// A layer whose source is an item (footage, precomposition or solid), as in After Effects'
 /// Replace Source. Text, shape, null, camera, light and 3D model layers have no AVItem source to

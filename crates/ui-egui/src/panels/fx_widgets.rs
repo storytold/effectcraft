@@ -59,7 +59,8 @@ pub fn angle_field(ui: &mut egui::Ui, at: Pos2, id: egui::Id, v: f64, decimals: 
     let (rev, deg) = split_angle(v);
     let (rr, new_rev, _) = widgets::hot_int_at(ui, at, id.with("rev"), rev, 0.1, "x", t);
     let sign = ui.painter().text(pos2(rr.max.x - 2.0, rr.center().y), Align2::LEFT_CENTER, if deg < 0.0 { "-" } else { "+" }, Tokens::ui(12.0), t.hot_text);
-    let (dr, new_deg, _) = widgets::hot_number_at(ui, pos2(sign.max.x - 2.0, at.y), id, deg.abs(), 0.5, (-1e9, 1e9), decimals, "°", t);
+    let (dr, new_deg, _) =
+        widgets::hot_number_at(ui, pos2(sign.max.x - 2.0, at.y), id, deg.abs(), &widgets::HotSpec { speed: 0.5, range: (-1e9, 1e9), decimals, suffix: "°" }, t);
     let dragging = new_deg.is_some() && ui.ctx().is_being_dragged(id);
     let out = match (new_rev, new_deg) {
         (Some(r), _) => Some(r as f64 * 360.0 + deg),
@@ -171,12 +172,7 @@ pub fn eyedropper_button(ui: &mut egui::Ui, rect: Rect, active: bool, id: egui::
     } else {
         t.text_dim
     };
-    // A pipette: a diagonal glass tube with a bulb at the top right and a tip at the bottom left.
-    let r = rect.shrink(rect.width() * 0.2);
-    let at = |x: f32, y: f32| pos2(r.min.x + x * r.width(), r.min.y + y * r.height());
-    p.line_segment([at(0.08, 0.92), at(0.62, 0.38)], Stroke::new(2.2, col));
-    p.circle_filled(at(0.76, 0.24), r.width() * 0.2, col);
-    p.line_segment([at(0.5, 0.3), at(0.7, 0.5)], Stroke::new(1.4, col));
+    crate::color_picker::draw_pipette(p, rect, col);
     resp
 }
 
@@ -200,14 +196,21 @@ pub fn layer_to_comp(l2c: &Mat3, p: [f64; 2]) -> [f64; 2] {
 /// `region` ([x, y, w, h] in comp pixels: the whole comp, or the region of interest or Extended
 /// Viewer area it was rendered for), maybe at a reduced resolution. `None` outside it.
 pub fn frame_pixel(img: &egui::ColorImage, region: [f64; 4], pt: [f64; 2]) -> Option<Color32> {
+    img.pixels.get(frame_pixel_index(img.size, region, pt)?).copied()
+}
+
+pub(crate) fn frame_pixel_index(size: [usize; 2], region: [f64; 4], pt: [f64; 2]) -> Option<usize> {
+    if size.contains(&0) {
+        return None;
+    }
     let [x, y, w, h] = region;
     let (fx, fy) = ((pt[0] - x) / w, (pt[1] - y) / h);
     if !(0.0..1.0).contains(&fx) || !(0.0..1.0).contains(&fy) {
         return None;
     }
-    let sx = ((fx * img.size[0] as f64).floor() as usize).min(img.size[0].saturating_sub(1));
-    let sy = ((fy * img.size[1] as f64).floor() as usize).min(img.size[1].saturating_sub(1));
-    img.pixels.get(sy.checked_mul(img.size[0])?.checked_add(sx)?).copied()
+    let sx = ((fx * size[0] as f64).floor() as usize).min(size[0].saturating_sub(1));
+    let sy = ((fy * size[1] as f64).floor() as usize).min(size[1].saturating_sub(1));
+    sy.checked_mul(size[0])?.checked_add(sx)
 }
 
 /// Straight RGBA (0..1) of the displayed frame at comp point `pt` ([`frame_pixel`]).

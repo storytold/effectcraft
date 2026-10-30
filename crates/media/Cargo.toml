@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-render = { workspace = true }
@@ -21,12 +22,13 @@ effectcraft-pdf = { workspace = true }
 effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
+filmcraft-aac = { workspace = true }
 filmcraft-isobmff = { workspace = true }
+filmcraft-matroska = { workspace = true }
+filmcraft-mpegts = { workspace = true }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
-# AIFF import (#1428): enables the aiff reader of filmcraft-codecs' symphonia.
-symphonia = { workspace = true }
 exr = { workspace = true }
 gif = { workspace = true }
 image = { workspace = true, features = ["gif", "webp", "tiff", "bmp", "exr", "tga", "hdr"] }

@@ -78,7 +78,7 @@ fn transition_preset_by_name_and_bad_input() {
 #[test]
 fn preset_catalogue_is_unique_and_categorised() {
     let all = crate::animation_presets();
-    let known = ["Transitions", "Backgrounds"];
+    let known = ["Transitions", "Backgrounds", "Behaviors"];
     let mut ids = std::collections::HashSet::new();
     let mut names = std::collections::HashSet::new();
     for (id, name, cat) in &all {
@@ -90,7 +90,7 @@ fn preset_catalogue_is_unique_and_categorised() {
         assert!(!ids.contains(&id.to_lowercase()) && !names.contains(&name.to_lowercase()), "text preset {id} clashes");
     }
     let n = |c: &str| all.iter().filter(|(_, _, k)| k == c).count();
-    assert!(n("Backgrounds") >= 15 && n("Transitions") >= 20);
+    assert!(n("Backgrounds") >= 15 && n("Transitions") >= 20 && n("Behaviors") >= 20);
 }
 
 #[test]
@@ -125,4 +125,35 @@ fn preset_expressions_and_point_fractions() {
     let ramp = s.active_comp().unwrap().layers[0].effects().unwrap().groups().nth(2).unwrap().clone();
     assert_eq!(ramp.prop("end").unwrap().value, effectcraft_keyframe::Value::Vec2([80.0, 90.0]));
     assert_eq!(ramp.prop("startColor").unwrap().keys.len(), 2);
+}
+
+/// #1510: Behaviors presets add no effects; each puts an enabled expression on a transform
+/// property, and undo removes it again.
+#[test]
+fn every_behavior_preset_applies_and_undoes() {
+    let (mut s, solid) = session();
+    let list = s.execute("anim.builtinPresets", json!({"category": "Behaviors"})).unwrap();
+    let list = list.as_array().unwrap().clone();
+    assert!(list.len() >= 20, "{}", list.len());
+    let driven = |s: &Session| {
+        let l = &s.active_comp().unwrap().layers[0];
+        ["transform/position", "transform/scale", "transform/rotation", "transform/opacity"]
+            .iter()
+            .filter(|p| l.props.prop(p).is_some_and(|pr| pr.has_expression()))
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    for p in &list {
+        let id = p["id"].as_str().unwrap();
+        let r = s.execute("anim.applyBuiltinPreset", json!({"layers": [solid], "preset": id})).unwrap();
+        assert_eq!(r["skipped"], json!([]), "{id}: every path and expression applies");
+        assert_eq!(r["effects"], json!([]), "{id}: behaviors add no effects");
+        let applied = driven(&s);
+        assert_eq!(applied.len(), 1, "{id}: exactly one property is driven");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(driven(&s).is_empty(), "{id}: undo removes the expression");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(driven(&s), applied, "{id}: redo restores the expression");
+        s.execute("edit.undo", json!({})).unwrap();
+    }
 }

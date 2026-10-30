@@ -1,6 +1,4 @@
 //! The desktop binary rejects a bad command line before it starts anything (#997).
-// Integration tests: unwrapping and panicking on failure is fine here.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

@@ -33,9 +33,9 @@ fn choice(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str, opti
 
 /// A drag-to-change number field for an anim-tool setting: `v` clamped to `range`, `speed` points
 /// per pixel, `dec` decimals and a `suffix`; returns the new value, or `v` when it did not change.
-fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, v: f64, speed: f64, range: (f64, f64), dec: usize, suffix: &str) -> f64 {
+fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, v: f64, spec: widgets::HotSpec) -> f64 {
     let t = app.tokens;
-    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("animtool-n", auto)), v, speed, range, dec, suffix, &t);
+    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("animtool-n", auto)), v, &spec, &t);
     app.auto.add(auto, r, &format!("{v}"));
     nv.unwrap_or(v)
 }
@@ -45,7 +45,7 @@ fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &st
 fn checkbox(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(at, vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("animtool-cb", auto))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("animtool-cb", auto))).changed();
     ui.painter().text(pos2(r.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     app.auto.add(auto, r, text);
     if clicked { !on } else { on }
@@ -105,15 +105,29 @@ pub fn wiggler(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += ROW + 4.0;
     label(&p, x0, y, "Frequency:", &t);
-    st.wiggle_frequency = number(app, ui, pos2(xv, y), "wiggler.frequency", st.wiggle_frequency, 0.1, (0.1, 100.0), 1, " per second");
+    st.wiggle_frequency = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "wiggler.frequency",
+        st.wiggle_frequency,
+        widgets::HotSpec { speed: 0.1, range: (0.1, 100.0), decimals: 1, suffix: " per second" },
+    );
     y += ROW;
     label(&p, x0, y, "Magnitude:", &t);
-    st.wiggle_magnitude = number(app, ui, pos2(xv, y), "wiggler.magnitude", st.wiggle_magnitude, 0.5, (0.0, 100_000.0), 1, "");
+    st.wiggle_magnitude = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "wiggler.magnitude",
+        st.wiggle_magnitude,
+        widgets::HotSpec { speed: 0.5, range: (0.0, 100_000.0), decimals: 1, suffix: "" },
+    );
     y += ROW + 8.0;
     app.ui.anim_tools = st.clone();
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("wg-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::unique("wg-apply")).clicked() {
         let params = json!({
             "apply": if st.wiggle_spatial { "spatial" } else { "temporal" },
             "noise": if st.wiggle_smooth { "smooth" } else { "jagged" },
@@ -149,12 +163,19 @@ pub fn smoother(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(xv, y + 9.0), Align2::LEFT_CENTER, txt, Tokens::ui(12.0), t.text);
     y += ROW;
     label(&p, x0, y, "Tolerance:", &t);
-    let tol = number(app, ui, pos2(xv, y), "smoother.tolerance", app.ui.anim_tools.smooth_tolerance, 0.05, (0.0, 10_000.0), 2, "");
+    let tol = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "smoother.tolerance",
+        app.ui.anim_tools.smooth_tolerance,
+        widgets::HotSpec { speed: 0.05, range: (0.0, 10_000.0), decimals: 2, suffix: "" },
+    );
     app.ui.anim_tools.smooth_tolerance = tol;
     y += ROW + 8.0;
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 3;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("sm-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::unique("sm-apply")).clicked() {
         apply(app, "keys.smooth", json!({"tolerance": tol}));
     }
     app.auto.add("smoother.apply", b, "Apply");
@@ -170,10 +191,24 @@ pub fn motion_sketch(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut y = rect.min.y + 10.0;
     let mut st = app.ui.anim_tools.clone();
     label(&p, x0, y, "Capture speed at:", &t);
-    st.sketch_speed = number(app, ui, pos2(xv, y), "motionSketch.captureSpeed", st.sketch_speed, 1.0, (1.0, 10_000.0), 0, " %");
+    st.sketch_speed = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "motionSketch.captureSpeed",
+        st.sketch_speed,
+        widgets::HotSpec { speed: 1.0, range: (1.0, 10_000.0), decimals: 0, suffix: " %" },
+    );
     y += ROW;
     label(&p, x0, y, "Smoothing:", &t);
-    st.sketch_smoothing = number(app, ui, pos2(xv, y), "motionSketch.smoothing", st.sketch_smoothing, 0.1, (0.0, 100.0), 1, "");
+    st.sketch_smoothing = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "motionSketch.smoothing",
+        st.sketch_smoothing,
+        widgets::HotSpec { speed: 0.1, range: (0.0, 100.0), decimals: 1, suffix: "" },
+    );
     y += ROW + 2.0;
     p.text(pos2(x0, y + 8.0), Align2::LEFT_CENTER, tr("Show:"), Tokens::ui(12.0), t.text_dim);
     y += ROW - 6.0;
@@ -328,12 +363,19 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
         changes.insert("keyframeRate".into(), if i == 0 { json!("auto") } else { json!(fps) });
     }
     if let Some(r) = o.keyframe_rate {
-        let nr = number(app, ui, pos2(xv + 78.0, y), "maskInterp.rate", r, 0.5, (0.1, 1000.0), 1, " per second");
+        let nr = number(
+            app,
+            ui,
+            pos2(xv + 78.0, y),
+            "maskInterp.rate",
+            r,
+            widgets::HotSpec { speed: 0.5, range: (0.1, 1000.0), decimals: 1, suffix: " per second" },
+        );
         if (nr - r).abs() > 1e-9 {
             changes.insert("keyframeRate".into(), json!(nr));
         }
     } else {
-        p.text(pos2(xv + 78.0, y + 9.0), Align2::LEFT_CENTER, "per second", Tokens::ui(12.0), t.text_dim);
+        p.text(pos2(xv + 78.0, y + 9.0), Align2::LEFT_CENTER, crate::i18n::tr("per second"), Tokens::ui(12.0), t.text_dim);
     }
     y += ROW;
     let mut check = |app: &mut EffectcraftApp, y: f32, key: &str, text: &str, on: bool| {
@@ -346,13 +388,20 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     check(app, y, "linearVertexPaths", "Use \"Linear\" Vertex Paths", o.linear_vertex_paths);
     y += ROW;
     label(&p, x0, y, "Bending Resistance:", &t);
-    let br = number(app, ui, pos2(xv, y), "maskInterp.bendingResistance", o.bending_resistance, 0.5, (0.0, 100.0), 0, "");
+    let br = number(
+        app,
+        ui,
+        pos2(xv, y),
+        "maskInterp.bendingResistance",
+        o.bending_resistance,
+        widgets::HotSpec { speed: 0.5, range: (0.0, 100.0), decimals: 0, suffix: "" },
+    );
     if (br - o.bending_resistance).abs() > 1e-9 {
         changes.insert("bendingResistance".into(), json!(br));
     }
     y += ROW;
     label(&p, x0, y, "Quality:", &t);
-    let q = number(app, ui, pos2(xv, y), "maskInterp.quality", o.quality, 0.5, (0.0, 100.0), 0, "");
+    let q = number(app, ui, pos2(xv, y), "maskInterp.quality", o.quality, widgets::HotSpec { speed: 0.5, range: (0.0, 100.0), decimals: 0, suffix: "" });
     if (q - o.quality).abs() > 1e-9 {
         changes.insert("quality".into(), json!(q));
     }
@@ -363,7 +412,8 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     }
     y += ROW;
     if let Some(v) = o.add_vertices {
-        let nv = number(app, ui, pos2(x0 + 22.0, y), "maskInterp.addVertices", v, 0.2, (0.1, 2000.0), 1, "");
+        let nv =
+            number(app, ui, pos2(x0 + 22.0, y), "maskInterp.addVertices", v, widgets::HotSpec { speed: 0.2, range: (0.1, 2000.0), decimals: 1, suffix: "" });
         if (nv - v).abs() > 1e-9 {
             changes.insert("addVertices".into(), json!(nv));
         }
@@ -404,7 +454,7 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     }
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("mi-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::unique("mi-apply")).clicked() {
         match app.session.execute("mask.interpolate", json!({})) {
             Ok(r) => app.ui.status = format!("Mask Interpolation: {} keyframes added ({} vertices)", r["keys"], r["vertices"]),
             Err(e) => app.ui.status = e.to_string(),

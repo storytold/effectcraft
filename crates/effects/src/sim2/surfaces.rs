@@ -1,4 +1,4 @@
-use super::*;
+use super::{Acc, Buf, EffectCtx, Image, IntoParallelIterator, ParallelIterator, Plane, Px, Shape, SimCache, Sprite, Value, gauss_plane, params_key, unpremul};
 
 // ------------------------------------------------------------------ Caustics
 

@@ -38,7 +38,8 @@ pub fn puppet_eval(s: &Session, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick)
     let fx = layer.effects()?;
     let index = fx.groups().position(|g| g.uid == fx_uid)?;
     let g = fx.groups().nth(index)?;
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let mut r = Renderer::new(&s.project, &*s.footage, RenderOpts::default());
     r.expr = s.expr.as_deref();
     r.cache = Some(&s.layer_cache);

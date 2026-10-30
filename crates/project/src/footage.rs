@@ -1,5 +1,5 @@
-use super::settings::yes;
-use super::*;
+use super::settings::{Marker, yes};
+use super::{ColorSpace, Deserialize, FrameRate, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FootageKind {
@@ -44,12 +44,153 @@ impl FieldOrder {
     }
 }
 
+/// File extensions of the movie containers footage is imported from (FilmCraft reads them). The
+/// import and proxy file dialogs, the Media Browser and `effectcraft_media::is_importable` all go
+/// by this list.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "mxf", "avi"];
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlphaMode {
     #[default]
     Straight,
     Premultiplied,
     Ignore,
+}
+
+/// Interpret Footage ▸ Cineon Settings ▸ Units: how the Converted Black and White Points are
+/// shown and entered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CineonUnits {
+    /// 10-bit code values (0–1023).
+    #[default]
+    TenBit,
+    /// 8-bit values (0–255).
+    EightBit,
+    /// Floating point (0–1).
+    Float,
+}
+
+impl CineonUnits {
+    pub const ALL: [CineonUnits; 3] = [CineonUnits::TenBit, CineonUnits::EightBit, CineonUnits::Float];
+
+    /// The id commands use: `10bit`, `8bit` or `float`.
+    pub fn id(self) -> &'static str {
+        match self {
+            CineonUnits::TenBit => "10bit",
+            CineonUnits::EightBit => "8bit",
+            CineonUnits::Float => "float",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CineonUnits::TenBit => "10-bit",
+            CineonUnits::EightBit => "8-bit",
+            CineonUnits::Float => "Float",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CineonUnits> {
+        match s.to_ascii_lowercase().replace([' ', '_', '-'], "").as_str() {
+            "10bit" | "10" => Some(CineonUnits::TenBit),
+            "8bit" | "8" => Some(CineonUnits::EightBit),
+            "float" | "32bit" => Some(CineonUnits::Float),
+            _ => None,
+        }
+    }
+
+    /// A 10-bit value (0–1023) in these units.
+    pub fn from_ten_bit(self, v: f64) -> f64 {
+        match self {
+            CineonUnits::TenBit => v,
+            CineonUnits::EightBit => v * 255.0 / 1023.0,
+            CineonUnits::Float => v / 1023.0,
+        }
+    }
+
+    /// A value in these units as a 10-bit value (0–1023).
+    pub fn to_ten_bit(self, v: f64) -> f64 {
+        match self {
+            CineonUnits::TenBit => v,
+            CineonUnits::EightBit => v * 1023.0 / 255.0,
+            CineonUnits::Float => v * 1023.0,
+        }
+    }
+}
+
+/// Interpret Footage ▸ Cineon Settings of DPX and Cineon footage: how the file's logarithmic
+/// (printing density) code values become the footage's pixels. Code values are counted in 10-bit
+/// units whatever the file's bit depth.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CineonSettings {
+    /// Logarithmic Conversion: convert the code values from log to the Current Gamma. When it
+    /// is off, the code values are shown as stored.
+    pub log_conversion: bool,
+    /// Converted Black Point: the level the 10 Bit Black Point becomes (10-bit units).
+    pub converted_black: f32,
+    /// Converted White Point: the level the 10 Bit White Point becomes (10-bit units).
+    pub converted_white: f32,
+    /// 10 Bit Black Point: the code value of minimum density.
+    pub black: f32,
+    /// 10 Bit White Point: the code value of maximum density.
+    pub white: f32,
+    /// Current Gamma: the gamma the converted values are encoded with (1: linear light).
+    pub gamma: f32,
+    /// Highlight Rolloff (0–100): values near and above the white point ramp off gradually
+    /// instead of clipping; 0 keeps over-range values.
+    pub rolloff: f32,
+    /// Units of the Converted Black and White Points.
+    pub units: CineonUnits,
+}
+
+impl Default for CineonSettings {
+    fn default() -> Self {
+        CineonSettings {
+            log_conversion: false,
+            converted_black: 0.0,
+            converted_white: 1023.0,
+            black: 95.0,
+            white: 685.0,
+            gamma: 1.7,
+            rolloff: 20.0,
+            units: CineonUnits::TenBit,
+        }
+    }
+}
+
+impl CineonSettings {
+    /// The highest 10-bit value.
+    pub const MAX: f32 = 1023.0;
+
+    /// A code value (0–1 of the 10-bit range) converted from log to the Current Gamma and the
+    /// converted black and white levels (0–1; above 1 for over-range highlights).
+    pub fn convert(&self, v: f32) -> f32 {
+        let lin = cineon_log_to_lin(v, self.black, self.white, 1.0, self.gamma, self.rolloff);
+        let out = (self.converted_black + (self.converted_white - self.converted_black) * lin) / Self::MAX;
+        if out.is_finite() { out } else { 0.0 }
+    }
+}
+
+/// Cineon log to linear, shared by Interpret Footage ▸ Cineon Settings and the Cineon Converter
+/// effect. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
+/// Black and White Points. The result is 0 at the black point and 1 at the white point, raised to
+/// `scale / gamma`, with values above `1 - rolloff / 100` ramped off toward 1 (Highlight Rolloff
+/// 0–100; 0 keeps over-range values). A Gamma below 0.01 is raised to 0.01. Cineon Settings passes
+/// a `scale` of 1 (Gamma 1 gives linear light) and the Cineon Converter passes 1.7 (its default
+/// Gamma 1.7 gives linear light).
+pub fn cineon_log_to_lin(v: f32, black: f32, white: f32, scale: f32, gamma: f32, rolloff: f32) -> f32 {
+    // Kodak printing density: 0.002 density per code value, negative gamma 0.6.
+    let exposure = |code: f32| 10f32.powf((code - white) * 0.002 / 0.6);
+    let offset = exposure(black);
+    let mut lin = ((exposure(v * CineonSettings::MAX) - offset) / (1.0 - offset).max(1e-6)).max(0.0);
+    lin = lin.powf(scale / gamma.max(0.01));
+    let knee = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
+    if knee < 1.0 && lin > knee {
+        let w = 1.0 - knee;
+        lin = knee + w * (1.0 - (-(lin - knee) / w).exp());
+    }
+    lin
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,6 +239,9 @@ pub struct Footage {
     /// colour profile, Interpret As Linear Light and the working space don't apply.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_rgb: bool,
+    /// Interpret Footage ▸ Cineon Settings (DPX and Cineon files only; [`Footage::cineon_applies`]).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cineon: CineonSettings,
     /// Data footage ([`FootageKind::Data`]): the file's text (JSON, CSV or TSV), kept in the
     /// project so expressions read it everywhere (and on the web).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +259,10 @@ pub struct Footage {
     /// timecode isn't read). It only relabels source time, as in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timecode: Option<i64>,
+    /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
+    /// made from the footage starts with them, and Update Markers From Source copies new ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -145,16 +293,29 @@ impl Default for Footage {
             invert_alpha: false,
             linear_light: false,
             preserve_rgb: false,
+            cineon: CineonSettings::default(),
             data: None,
             layer: None,
             page: 0,
             alphabetical: false,
             start_timecode: None,
+            markers: vec![],
         }
     }
 }
 
 impl Footage {
+    /// The file is DPX or Cineon (the formats Interpret Footage ▸ Cineon Settings applies to).
+    pub fn is_cineon_file(&self) -> bool {
+        let ext = std::path::Path::new(&self.path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        matches!(ext.as_str(), "dpx" | "cin")
+    }
+
+    /// Cineon Settings ▸ Logarithmic Conversion applies: it is on and the file is DPX or Cineon.
+    pub fn cineon_applies(&self) -> bool {
+        self.cineon.log_conversion && self.is_cineon_file()
+    }
+
     /// Interpret As Linear Light applies (Preserve RGB passes the file's values through).
     pub fn linear_light_applies(&self) -> bool {
         self.linear_light && !self.preserve_rgb

@@ -1,6 +1,7 @@
 use super::common::{h, hs};
 use super::sprites::{Acc, Post, Shape, Sprite, SpritePlan, Tint, aa, raster};
-use super::*;
+use super::{Buf, EffectCtx, Image, IntoParallelIterator, ParallelIterator, unpremul};
+use crate::util::layer_rect_at;
 
 // ------------------------------------------------------------------ CC Rainfall / CC Snowfall
 
@@ -160,11 +161,21 @@ pub fn bubble_list(ctx: &EffectCtx, b: &Buf) -> Vec<Bubble> {
         .collect()
 }
 
+/// CC Bubbles' refraction sample bounds in the pixels of a buffer with `offset` and `scale`: the
+/// layer rectangle's first and last pixel centres (x0, y0, x1, y1). Samples clamped to them repeat
+/// the layer's edge pixels instead of reaching transparent padding around it (#2024).
+pub fn bubble_sample_bounds(ctx: &EffectCtx, offset: [f64; 2], scale: f64) -> [f32; 4] {
+    let (lx, ly, lw, lh) = layer_rect_at(ctx, offset, scale);
+    let (x0, y0) = (lx + 0.5, ly + 0.5);
+    [x0 as f32, y0 as f32, (lx + lw - 0.5).max(x0) as f32, (ly + lh - 0.5).max(y0) as f32]
+}
+
 pub(super) fn bubbles(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pr = ctx.params;
     let metal = pr.e("reflectionType") == 1;
     let shading = pr.e("shadingType");
     let list = bubble_list(ctx, &b);
+    let [x0, y0, x1, y1] = bubble_sample_bounds(ctx, b.offset, b.scale);
     let src = b.img.clone();
     let mut out = Image::new(src.width, src.height);
     raster(
@@ -182,7 +193,8 @@ pub(super) fn bubbles(ctx: &EffectCtx, mut b: Buf) -> Buf {
             // Liquid refracts (inverted, magnified), metal reflects (wide-angle mirror).
             let k = if metal { 1.6 } else { -0.7 };
             let nz = (1.0 - d2).max(0.0).sqrt();
-            let p = src.sample_bilinear((q.sx + dx * q.r * k) as f64, (q.sy + dy * q.r * k) as f64);
+            let (sx, sy) = ((q.sx + dx * q.r * k).max(x0).min(x1), (q.sy + dy * q.r * k).max(y0).min(y1));
+            let p = src.sample_bilinear_clamped(sx as f64, sy as f64);
             let (c, sa) = unpremul(p);
             let mut c = if sa <= 0.0 { [0.6, 0.7, 0.8] } else { c };
             let mut a = cov;

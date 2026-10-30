@@ -253,6 +253,7 @@ fn bubbles(e: &mut Enc, ctx: &EffectCtx, b: GBuf, geo: &effectcraft_effects::Buf
     }
     let mut p = Params::default();
     p.u[1] = [0, (ctx.params.e("reflectionType") == 1) as u32, ctx.params.e("shadingType"), 0];
+    p.f[0] = effectcraft_effects::bubble_sample_bounds(ctx, b.offset, b.scale);
     let img = raster(e, items, 1, false, &b.img, None, p, w, h)?;
     Some(GBuf { img, ..b })
 }

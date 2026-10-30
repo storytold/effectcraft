@@ -143,6 +143,11 @@ pub fn import(
     if depth > MAX_DEPTH {
         return Err(Error::TooDeep(MAX_DEPTH));
     }
+    // FilmCraft's parser expands internal entities without a node limit (#2129); Final Cut Pro
+    // and FCPXML exports never declare any.
+    if matches!(format, TimelineFormat::Fcp7Xml | TimelineFormat::Fcpxml) && bytes.windows(8).any(|w| w == b"<!ENTITY") {
+        return Err(Error::XmlEntities);
+    }
     let fc_opts = filmcraft_interchange::ImportOptions {
         base_dir: opts.base_dir.clone(),
         edl_frame_rate: opts.edl_frame_rate.map(|f| {

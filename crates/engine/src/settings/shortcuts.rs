@@ -1,6 +1,7 @@
 //! Keyboard shortcut presets (Edit ▸ Keyboard Shortcuts).
 //!
-//! Every menu entry, registry command and frontend command is *bindable*: it has a binding key
+//! Every menu entry, registry command and frontend command, and every script File ▸ Scripts
+//! lists, is *bindable*: it has a binding key
 //! (the command id, plus its bound parameters for entries such as `app.settings
 //! {"page":"general"}`), a scope (application-wide or a panel) and default keys. The built-in
 //! preset "EffectCraft Default" is After Effects' default keyboard layout and is read-only; custom
@@ -105,6 +106,21 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
             &mut out,
         );
     }
+    // File ▸ Scripts ▸ Recent Script Files lists its scripts at run time; the first one, the most
+    // recent, has a key.
+    let recent = json!({"recent": 0});
+    push(
+        Bindable {
+            key: binding_key("file.runScript", &recent),
+            command: "file.runScript".into(),
+            params: recent,
+            label: "Run Most Recent Script File".into(),
+            path: vec!["File".into(), "Scripts".into(), "Recent Script Files".into()],
+            scope: APP_SCOPE.into(),
+            defaults: normalize("Cmd+Alt+Shift+D").into_iter().collect(),
+        },
+        &mut out,
+    );
     for c in crate::command_specs() {
         if !c.journal || entries.iter().any(|(_, e)| e.command == c.id) {
             continue;
@@ -140,6 +156,27 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
         );
     }
     out
+}
+
+/// The File ▸ Scripts entries of the scripts `names` (file names, as the menu lists them), with
+/// no default keys. A key is bound to the script's name, so it stays with that script when
+/// scripts are added to or removed from the folder.
+pub fn script_bindables(names: &[String]) -> Vec<Bindable> {
+    names
+        .iter()
+        .map(|n| {
+            let params = json!({"name": n});
+            Bindable {
+                key: binding_key("file.runScript", &params),
+                command: "file.runScript".into(),
+                params,
+                label: n.clone(),
+                path: vec!["File".into(), "Scripts".into()],
+                scope: APP_SCOPE.into(),
+                defaults: vec![],
+            }
+        })
+        .collect()
 }
 
 /// Canonical shortcut text (`cmd+shift+k`, `Shift+Cmd+K`, `⌘⇧K` → `Cmd+Shift+K`); `None` if it
@@ -421,7 +458,16 @@ pub struct ShortcutTable {
 
 impl ShortcutTable {
     pub fn build(maps: &Keymaps, ui: &[UiCommand]) -> ShortcutTable {
-        let bindables = bindables(ui);
+        Self::build_with_scripts(maps, ui, &[])
+    }
+
+    /// [`ShortcutTable::build`] with the File ▸ Scripts entries of the scripts `scripts`, listed
+    /// after the other File ▸ Scripts entries.
+    pub fn build_with_scripts(maps: &Keymaps, ui: &[UiCommand], scripts: &[String]) -> ShortcutTable {
+        let mut bindables = bindables(ui);
+        let at = bindables.iter().rposition(|b| b.path.starts_with(&["File".to_string(), "Scripts".to_string()])).map_or(bindables.len(), |i| i + 1);
+        let new: Vec<Bindable> = script_bindables(scripts).into_iter().filter(|s| !bindables.iter().any(|b| b.key == s.key)).collect();
+        bindables.splice(at..at, new);
         let keys = bindables.iter().map(|b| (b.key.clone(), maps.keys_of(b))).collect();
         ShortcutTable { bindables, keys }
     }

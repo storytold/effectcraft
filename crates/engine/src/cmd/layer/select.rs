@@ -1,4 +1,4 @@
-use super::*;
+use super::{EngineError, LayerId, Result, Session, Value, b_p, comp_id, json, resolve_layer};
 
 pub(super) fn select(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
@@ -25,13 +25,19 @@ pub(super) fn select(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     } else {
-        s.state.selected_layers = ids;
-        s.state.selected_props.clear();
-        s.state.selected_keys.clear();
-        let keep = s.state.selected_layers.clone();
-        s.state.selected_vertices.retain(|v| keep.contains(&v.layer));
+        select_only(&mut s.state, ids);
     }
     Ok(json!(s.state.selected_layers.iter().map(|l| l.0).collect::<Vec<_>>()))
+}
+
+/// Make `ids` the whole layer selection, as a plain click on them does: no property or keyframe
+/// stays selected, and mask vertices stay selected only on layers that are still selected.
+pub(crate) fn select_only(st: &mut crate::EditorState, ids: Vec<LayerId>) {
+    st.selected_layers = ids;
+    st.selected_props.clear();
+    st.selected_keys.clear();
+    let keep = st.selected_layers.clone();
+    st.selected_vertices.retain(|v| keep.contains(&v.layer));
 }
 
 pub(super) fn select_step(s: &mut Session, p: &Value, dir: i64) -> Result<Value> {

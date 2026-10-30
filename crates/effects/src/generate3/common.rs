@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectSpec, ParamUi, Value, slider};
 
 pub(super) fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Generate", params, render, gpu: false, float: true }

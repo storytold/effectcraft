@@ -1,5 +1,6 @@
 //! Inspect the actual viewer's painted colors and pointer-driven control geometry.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::{
     EffectcraftApp,
@@ -269,10 +270,10 @@ fn viewer_theme_and_width_visual_matrix() {
 }
 
 fn save_stable_snapshot(h: &mut Harness<'_, EffectcraftApp>, path: &str, width: f32) {
-    let image = h.render().unwrap();
+    let image = h.render_serialized().unwrap();
     image.save(path).unwrap();
     h.run_steps(3);
-    let repeated = h.render().unwrap();
+    let repeated = h.render_serialized().unwrap();
     assert!(image == repeated, "settled synthetic viewer pixels must repeat exactly: {path}");
     if width == 900.0 {
         let times: Vec<_> = h

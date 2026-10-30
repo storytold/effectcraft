@@ -113,6 +113,11 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
     if is_svg(path, bytes) || is_pdf_like(path, bytes) {
         let doc = vector_doc(path, bytes, footage.layer.as_ref(), footage.page).unwrap_or(Err(String::new())).map_err(MediaError::Decode)?;
         let (w, h) = doc.pixel_size();
+        // A declared size up to 30000² would be a 14 GB allocation that aborts the app (#2136):
+        // past what Continuously Rasterize can draw, the footage reports an error instead.
+        if u64::from(w) * u64::from(h) > u64::from(MAX_VECTOR_SIDE) * u64::from(MAX_VECTOR_SIDE) {
+            return Err(MediaError::Decode(format!("{path}: {w}×{h} pixels is larger than vector footage can be drawn ({MAX_VECTOR_SIDE}×{MAX_VECTOR_SIDE})")));
+        }
         let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
         // The rasteriser produces premultiplied pixels already.
         let _ = op;
@@ -121,10 +126,32 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
     Ok(None)
 }
 
+/// The largest side vector footage is drawn at, decoded or continuously rasterised.
+const MAX_VECTOR_SIDE: u32 = 16384;
+
 /// A vector file rasterised at `scale` × its pixel size (Continuously Rasterize).
 pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::SourceLayer>, page: u32, scale: f64) -> Option<Image> {
     let doc = vector_doc(path, bytes, layer, page)?.ok()?;
     let (w, h) = doc.pixel_size();
-    let (sw, sh) = (((w as f64 * scale).ceil() as u32).clamp(1, 16384), ((h as f64 * scale).ceil() as u32).clamp(1, 16384));
+    let (sw, sh) = (((w as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE), ((h as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE));
     Some(effectcraft_svg::rasterize(&doc, sw, sh, scale))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #2136: an SVG that declares 30000×30000 asked for a 14 GB image and aborted the app; it
+    /// is now an error, and a drawable size still decodes.
+    #[test]
+    fn vector_footage_past_the_drawable_size_is_an_error_not_an_abort() {
+        let huge = br#"<svg xmlns="http://www.w3.org/2000/svg" width="30000" height="30000"/>"#;
+        let footage = probe("huge.svg", huge).unwrap().unwrap();
+        let e = decode("huge.svg", huge, &footage, AlphaOp::new(footage.alpha, footage.premul_color)).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(e.contains("30000×30000"), "{e}");
+        let small = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20"/></svg>"#;
+        let footage = probe("small.svg", small).unwrap().unwrap();
+        let img = decode("small.svg", small, &footage, AlphaOp::new(footage.alpha, footage.premul_color)).unwrap().unwrap();
+        assert_eq!((img.width, img.height), (40, 20));
+    }
 }

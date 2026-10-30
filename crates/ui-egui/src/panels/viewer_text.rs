@@ -810,6 +810,91 @@ fn typing_key(ui: &egui::Ui, bump: bool) -> String {
     format!("text-typing-{n}")
 }
 
+/// A press inside the edited text layer: grab a box handle, place the caret (shift extends from
+/// `shift_anchor`), or, outside the text, commit the edit. Returns the drag it starts, if any.
+fn press_on_edited(app: &mut EffectcraftApp, ui: &egui::Ui, map: &ViewerMap, e: &Edited, pos: Pos2, shift_anchor: Option<usize>) -> Option<Drag> {
+    if let Some(h) = e.handles().iter().position(|h| e.to_screen(map, *h).distance(pos) < 7.0) {
+        let b = e.doc.box_size.unwrap_or([0.0; 2]);
+        return Some(Drag::Resize { layer: e.layer.id, handle: h, start_box: [e.doc.box_pos[0], e.doc.box_pos[1], b[0], b[1]] });
+    }
+    if e.contains(map, pos) {
+        let ci = e.hit(map, pos);
+        exec(app, "text.setSelection", json!({"anchor": shift_anchor.unwrap_or(ci), "caret": ci}));
+        typing_key(ui, true);
+        return Some(Drag::Select { layer: e.layer.id });
+    }
+    // Clicking elsewhere commits the edit.
+    exec(app, "text.endEdit", json!({}));
+    None
+}
+
+/// A press with the Type tool that missed the edited text: edit the text layer under it, or
+/// start creating a new one.
+fn press_type_tool(app: &mut EffectcraftApp, ectx: &EvalCtx, map: &ViewerMap, pos: Pos2, tool: Tool) -> Drag {
+    if let Some(e) = text_layer_at(app, ectx, map, pos, true) {
+        let ci = e.hit(map, pos);
+        exec(app, "text.edit", json!({"layer": e.layer.id.0, "caret": ci}));
+        Drag::Select { layer: e.layer.id }
+    } else {
+        Drag::Create { start: map.to_comp(pos), vertical: tool == Tool::TypeVertical }
+    }
+}
+
+/// The paragraph box after dragging `handle` by (`dx`, `dy`) in layer space.
+fn resized_box(start_box: [f64; 4], handle: usize, dx: f64, dy: f64) -> [f64; 4] {
+    let [mut x0, mut y0, w, h] = start_box;
+    let (mut x1, mut y1) = (x0 + w, y0 + h);
+    if matches!(handle, 0 | 6 | 7) {
+        x0 += dx;
+    }
+    if matches!(handle, 2..=4) {
+        x1 += dx;
+    }
+    if matches!(handle, 0..=2) {
+        y0 += dy;
+    }
+    if matches!(handle, 4..=6) {
+        y1 += dy;
+    }
+    [x0.min(x1), y0.min(y1), (x1 - x0).abs().max(4.0), (y1 - y0).abs().max(4.0)]
+}
+
+/// Keyboard routing for the text editor: while a session is live, keep the focus on it and feed
+/// it this frame's keys; otherwise release the IME and the focus.
+fn keyboard_focus(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    if app.session.state.text_edit.is_some() && app.dialog.is_none() && ui.is_enabled() {
+        // Register after pointer handling so new edits take focus in this frame. An inactive
+        // editor must not take Tab focus and immediately surrender it before viewer controls.
+        ui.interact(Rect::from_min_size(rect.min, vec2(1.0, 1.0)), focus_id(), egui::Sense::focusable_noninteractive());
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(focus_id(), egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true });
+        });
+        // A session started elsewhere (menu, agent, Properties) takes the keyboard once…
+        let seen = ime_seen_id(ui.ctx().viewport_id());
+        let key = app.session.state.text_edit.as_ref().map(|e| (e.layer.0, e.session));
+        // …and gets it back when a click in the viewer or a formatting panel left nothing holding
+        // it; not merely because nothing has the focus (#831).
+        let regain = ui.memory(|m| m.focused().is_none()) && keeps_text_edit(app.ui.focused);
+        if ui.data(|d| d.get_temp::<Option<(u64, u64)>>(seen)).flatten() != key || regain {
+            ui.data_mut(|d| d.insert_temp(seen, key));
+            ui.memory_mut(|m| m.request_focus(focus_id()));
+        }
+        if ui.memory(|m| m.has_focus(focus_id())) {
+            keyboard(app, ui, rect);
+        }
+    } else {
+        // Resolve the viewport before taking the data lock: `viewport_id()`
+        // acquires the same context lock that `data_mut` holds.
+        let viewport = ui.ctx().viewport_id();
+        ui.data_mut(|d| d.insert_temp::<Option<(u64, u64)>>(ime_seen_id(viewport), None));
+        invalidate_ime_composition(ui, app);
+        clear_preedit(ui);
+        if ui.memory(|m| m.has_focus(focus_id())) {
+            ui.memory_mut(|m| m.surrender_focus(focus_id()));
+        }
+    }
+}
+
 /// Viewer hook: draws the edit overlay and handles text pointer and keyboard input. Returns
 /// true when it owns this frame's pointer interaction (the viewer then skips its own gestures).
 pub fn hook(
@@ -858,7 +943,6 @@ pub fn hook(
         }
     });
     let pointer = ui.input(|i| i.pointer.interact_pos());
-    let handle_hit = |e: &Edited, s: Pos2| e.handles().iter().position(|h| e.to_screen(map, *h).distance(s) < 7.0);
 
     // ---- press
     if pressed
@@ -870,30 +954,14 @@ pub fn hook(
     {
         let mut handled = false;
         if let Some(e) = &cur {
-            if let Some(h) = handle_hit(e, pos) {
-                let b = e.doc.box_size.unwrap_or([0.0; 2]);
-                drag = Some(Drag::Resize { layer: e.layer.id, handle: h, start_box: [e.doc.box_pos[0], e.doc.box_pos[1], b[0], b[1]] });
+            let shift_anchor = if mods.shift { Some(editing.as_ref().map_or_else(|| e.hit(map, pos), |sel| sel.anchor)) } else { None };
+            if let Some(d) = press_on_edited(app, ui, map, e, pos, shift_anchor) {
+                drag = Some(d);
                 handled = true;
-            } else if e.contains(map, pos) {
-                let ci = e.hit(map, pos);
-                let anchor = if mods.shift { editing.as_ref().map_or(ci, |sel| sel.anchor) } else { ci };
-                exec(app, "text.setSelection", json!({"anchor": anchor, "caret": ci}));
-                typing_key(ui, true);
-                drag = Some(Drag::Select { layer: e.layer.id });
-                handled = true;
-            } else {
-                // Clicking elsewhere commits the edit.
-                exec(app, "text.endEdit", json!({}));
             }
         }
         if !handled && type_tool {
-            if let Some(e) = text_layer_at(app, ectx, map, pos, true) {
-                let ci = e.hit(map, pos);
-                exec(app, "text.edit", json!({"layer": e.layer.id.0, "caret": ci}));
-                drag = Some(Drag::Select { layer: e.layer.id });
-            } else {
-                drag = Some(Drag::Create { start: map.to_comp(pos), vertical: tool == Tool::TypeVertical });
-            }
+            drag = Some(press_type_tool(app, ectx, map, pos, tool));
             handled = true;
         }
         if handled {
@@ -948,22 +1016,7 @@ pub fn hook(
             {
                 let (px, py) = e.to_layer(map, p);
                 let (qx, qy) = e.to_layer(map, q);
-                let (dx, dy) = (px - qx, py - qy);
-                let [mut x0, mut y0, w, h] = start_box;
-                let (mut x1, mut y1) = (x0 + w, y0 + h);
-                if matches!(handle, 0 | 6 | 7) {
-                    x0 += dx;
-                }
-                if matches!(handle, 2..=4) {
-                    x1 += dx;
-                }
-                if matches!(handle, 0..=2) {
-                    y0 += dy;
-                }
-                if matches!(handle, 4..=6) {
-                    y1 += dy;
-                }
-                let bx = [x0.min(x1), y0.min(y1), (x1 - x0).abs().max(4.0), (y1 - y0).abs().max(4.0)];
+                let bx = resized_box(start_box, handle, px - qx, py - qy);
                 exec(app, "layer.setText", json!({"layer": layer.0, "box": bx, "merge": format!("text-box-{}", layer.0)}));
             }
         }
@@ -1009,37 +1062,7 @@ pub fn hook(
     // composition's identity as a stale guard before this pass's IME events are read.
     sync_ime_target(ui, app);
     sync_ime_selection(ui, app);
-    if app.session.state.text_edit.is_some() && app.dialog.is_none() && ui.is_enabled() {
-        // Register after pointer handling so new edits take focus in this frame. An inactive
-        // editor must not take Tab focus and immediately surrender it before viewer controls.
-        ui.interact(Rect::from_min_size(resp.rect.min, vec2(1.0, 1.0)), focus_id(), egui::Sense::focusable_noninteractive());
-        ui.memory_mut(|m| {
-            m.set_focus_lock_filter(focus_id(), egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true });
-        });
-        // A session started elsewhere (menu, agent, Properties) takes the keyboard once…
-        let seen = ime_seen_id(ui.ctx().viewport_id());
-        let key = app.session.state.text_edit.as_ref().map(|e| (e.layer.0, e.session));
-        // …and gets it back when a click in the viewer or a formatting panel left nothing holding
-        // it; not merely because nothing has the focus (#831).
-        let regain = ui.memory(|m| m.focused().is_none()) && keeps_text_edit(app.ui.focused);
-        if ui.data(|d| d.get_temp::<Option<(u64, u64)>>(seen)).flatten() != key || regain {
-            ui.data_mut(|d| d.insert_temp(seen, key));
-            ui.memory_mut(|m| m.request_focus(focus_id()));
-        }
-        if ui.memory(|m| m.has_focus(focus_id())) {
-            keyboard(app, ui, resp.rect);
-        }
-    } else {
-        // Resolve the viewport before taking the data lock: `viewport_id()`
-        // acquires the same context lock that `data_mut` holds.
-        let viewport = ui.ctx().viewport_id();
-        ui.data_mut(|d| d.insert_temp::<Option<(u64, u64)>>(ime_seen_id(viewport), None));
-        invalidate_ime_composition(ui, app);
-        clear_preedit(ui);
-        if ui.memory(|m| m.has_focus(focus_id())) {
-            ui.memory_mut(|m| m.surrender_focus(focus_id()));
-        }
-    }
+    keyboard_focus(app, ui, resp.rect);
 
     // ---- overlay
     if let Some(s) = app.session.state.text_edit.clone()
@@ -1219,111 +1242,7 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
                 }
                 typing_key(ui, true);
             }
-            egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
-                use egui::Key;
-                let cmd = m.command;
-                let mv = |app: &mut EffectcraftApp, to: &str| {
-                    exec(app, "text.moveCaret", json!({"to": to, "extend": m.shift}));
-                };
-                match key {
-                    Key::ArrowLeft | Key::ArrowRight if m.alt => {
-                        // Kerning at the caret, tracking over a selection.
-                        let step = if cmd { 100.0 } else { 20.0 } * if key == Key::ArrowLeft { -1.0 } else { 1.0 };
-                        let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
-                        if sel.is_empty() {
-                            if sel.caret < doc.char_len() {
-                                let cur = match doc.style_at(sel.caret).kerning {
-                                    Kerning::Manual(v) => v,
-                                    _ => 0.0,
-                                };
-                                exec(
-                                    app,
-                                    "layer.setText",
-                                    json!({"layer": sel.layer.0, "range": [sel.caret, sel.caret + 1], "kerning": cur + step, "merge": format!("text-kern-{}", sel.caret)}),
-                                );
-                            }
-                        } else {
-                            let r = sel.range();
-                            let cur = doc.style_at(r.start).tracking;
-                            exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "tracking": cur + step, "merge": "text-track"}));
-                        }
-                    }
-                    Key::ArrowLeft => mv(app, if cmd { "wordLeft" } else { "left" }),
-                    Key::ArrowRight => mv(app, if cmd { "wordRight" } else { "right" }),
-                    Key::ArrowUp => mv(app, if cmd { "paraUp" } else { "up" }),
-                    Key::ArrowDown => mv(app, if cmd { "paraDown" } else { "down" }),
-                    Key::Home => mv(app, if cmd { "start" } else { "lineStart" }),
-                    Key::End => mv(app, if cmd { "end" } else { "lineEnd" }),
-                    Key::Backspace => {
-                        let k = typing_key(ui, false);
-                        let before = ime_stamp(app, &ctx);
-                        if exec(app, "text.delete", json!({"word": cmd || m.alt, "merge": k})).is_some() {
-                            note_ime_application_edit(app, &ctx, before);
-                        }
-                    }
-                    Key::Delete => {
-                        let k = typing_key(ui, false);
-                        let before = ime_stamp(app, &ctx);
-                        if exec(app, "text.delete", json!({"direction": "forward", "word": cmd || m.alt, "merge": k})).is_some() {
-                            note_ime_application_edit(app, &ctx, before);
-                        }
-                    }
-                    Key::Enter if cmd => {
-                        exec(app, "text.endEdit", json!({}));
-                    }
-                    Key::Enter => {
-                        let k = typing_key(ui, false);
-                        let before = ime_stamp(app, &ctx);
-                        if exec(app, "text.insert", json!({"text": "\n", "merge": k})).is_some() {
-                            note_ime_application_edit(app, &ctx, before);
-                        }
-                    }
-                    Key::Tab => {
-                        let k = typing_key(ui, false);
-                        let before = ime_stamp(app, &ctx);
-                        if exec(app, "text.insert", json!({"text": "\t", "merge": k})).is_some() {
-                            note_ime_application_edit(app, &ctx, before);
-                        }
-                    }
-                    Key::Escape => {
-                        exec(app, "text.endEdit", json!({}));
-                    }
-                    // The editor owns exactly Cmd/Ctrl+A (Select All) and Cmd/Ctrl+Z with or
-                    // without Shift (Undo, Redo). Other modifiers on those keys aren't editing
-                    // chords, so they fall through to the binding match below: Shift+A is
-                    // Deselect All's default, and Alt variants are free for a rebound one.
-                    Key::A if cmd && !m.shift && !m.alt => {
-                        exec(app, "text.setSelection", json!({"select": "all"}));
-                    }
-                    Key::Z if cmd && !m.alt => {
-                        let before = ime_stamp(app, &ctx);
-                        if crate::menus::invoke(app, &ctx, if m.shift { "edit.redo" } else { "edit.undo" }, json!({})).is_ok() {
-                            note_ime_application_edit(app, &ctx, before);
-                        }
-                    }
-                    Key::Comma | Key::Period if cmd && m.shift => {
-                        let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
-                        let r = sel.range();
-                        let size = sel.pending.as_ref().map_or_else(|| doc.style_at(r.start).size, |p| p.size);
-                        let ns = (size + if key == Key::Period { 2.0 } else { -2.0 }).max(1.0);
-                        exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "size": ns}));
-                    }
-                    // The app-wide shortcut dispatcher is skipped while this editor holds the
-                    // keyboard, so the Deselect All chord (Cmd/Ctrl+Shift+A or F2 by default)
-                    // must be matched here and run through the command dispatcher like undo
-                    // above. Matching the command's current binding, not a fixed key, keeps
-                    // rebound shortcuts working and gives every route one final state; the
-                    // forwarding test also refuses chords a focused editor must never surrender
-                    // (see `forwardable_during_text_edit`).
-                    _ if crate::menus::chord_matches(&app.session, "edit.deselectAll", key, m) && crate::menus::forwardable_during_text_edit(m, key) => {
-                        let _ = crate::menus::invoke(app, &ctx, "edit.deselectAll", json!({}));
-                    }
-                    _ => {}
-                }
-                if !matches!(key, Key::Backspace | Key::Delete | Key::Enter | Key::Tab) {
-                    typing_key(ui, true);
-                }
-            }
+            egui::Event::Key { key, pressed: true, modifiers: m, .. } => key_event(app, ui, &ctx, &sel, key, m),
             _ => {}
         }
         let route_ended = app.session.state.text_edit.is_none() || app.dialog.is_some();
@@ -1341,6 +1260,125 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
             suspend_reset(&ctx);
             custom_mutations = false;
         }
+    }
+}
+
+/// An application key press in the edited text: caret moves, deletes, insertions, formatting and
+/// the editor's own chords.
+fn key_event(
+    app: &mut EffectcraftApp,
+    ui: &egui::Ui,
+    ctx: &egui::Context,
+    sel: &effectcraft_engine::commands::text_edit::TextEdit,
+    key: egui::Key,
+    m: egui::Modifiers,
+) {
+    use egui::Key;
+    let cmd = m.command;
+    let mv = |app: &mut EffectcraftApp, to: &str| {
+        exec(app, "text.moveCaret", json!({"to": to, "extend": m.shift}));
+    };
+    match key {
+        Key::ArrowLeft | Key::ArrowRight if m.alt => {
+            // Kerning at the caret, tracking over a selection.
+            let step = if cmd { 100.0 } else { 20.0 } * if key == Key::ArrowLeft { -1.0 } else { 1.0 };
+            let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
+            if sel.is_empty() {
+                if sel.caret < doc.char_len() {
+                    let cur = match doc.style_at(sel.caret).kerning {
+                        Kerning::Manual(v) => v,
+                        _ => 0.0,
+                    };
+                    exec(
+                        app,
+                        "layer.setText",
+                        json!({"layer": sel.layer.0, "range": [sel.caret, sel.caret + 1], "kerning": cur + step, "merge": format!("text-kern-{}", sel.caret)}),
+                    );
+                }
+            } else {
+                let r = sel.range();
+                let cur = doc.style_at(r.start).tracking;
+                exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "tracking": cur + step, "merge": "text-track"}));
+            }
+        }
+        Key::ArrowLeft => mv(app, if cmd { "wordLeft" } else { "left" }),
+        Key::ArrowRight => mv(app, if cmd { "wordRight" } else { "right" }),
+        Key::ArrowUp => mv(app, if cmd { "paraUp" } else { "up" }),
+        Key::ArrowDown => mv(app, if cmd { "paraDown" } else { "down" }),
+        Key::Home => mv(app, if cmd { "start" } else { "lineStart" }),
+        Key::End => mv(app, if cmd { "end" } else { "lineEnd" }),
+        Key::Backspace => {
+            let k = typing_key(ui, false);
+            let before = ime_stamp(app, ctx);
+            if exec(app, "text.delete", json!({"word": cmd || m.alt, "merge": k})).is_some() {
+                note_ime_application_edit(app, ctx, before);
+            }
+        }
+        Key::Delete => {
+            let k = typing_key(ui, false);
+            let before = ime_stamp(app, ctx);
+            if exec(app, "text.delete", json!({"direction": "forward", "word": cmd || m.alt, "merge": k})).is_some() {
+                note_ime_application_edit(app, ctx, before);
+            }
+        }
+        Key::Enter if cmd => {
+            exec(app, "text.endEdit", json!({}));
+        }
+        Key::Enter => {
+            let k = typing_key(ui, false);
+            let before = ime_stamp(app, ctx);
+            if exec(app, "text.insert", json!({"text": "\n", "merge": k})).is_some() {
+                note_ime_application_edit(app, ctx, before);
+            }
+        }
+        Key::Tab => {
+            let k = typing_key(ui, false);
+            let before = ime_stamp(app, ctx);
+            if exec(app, "text.insert", json!({"text": "\t", "merge": k})).is_some() {
+                note_ime_application_edit(app, ctx, before);
+            }
+        }
+        Key::Escape => {
+            exec(app, "text.endEdit", json!({}));
+        }
+        // The editor owns exactly Cmd/Ctrl+A (Select All) and Cmd/Ctrl+Z with or
+        // without Shift (Undo, Redo). Other modifiers on those keys aren't editing
+        // chords, so they fall through to the binding match below: Shift+A is
+        // Deselect All's default, and Alt variants are free for a rebound one.
+        Key::A if cmd && !m.shift && !m.alt => {
+            exec(app, "text.setSelection", json!({"select": "all"}));
+        }
+        Key::Z if cmd && !m.alt => {
+            let before = ime_stamp(app, ctx);
+            if crate::menus::invoke(app, ctx, if m.shift { "edit.redo" } else { "edit.undo" }, json!({})).is_ok() {
+                note_ime_application_edit(app, ctx, before);
+            }
+        }
+        Key::Comma | Key::Period if cmd && m.shift => {
+            let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
+            let r = sel.range();
+            let size = sel.pending.as_ref().map_or_else(|| doc.style_at(r.start).size, |p| p.size);
+            let ns = (size + if key == Key::Period { 2.0 } else { -2.0 }).max(1.0);
+            exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "size": ns}));
+        }
+        // The app-wide shortcut dispatcher is skipped while this editor holds the
+        // keyboard, so commands that end the edit by moving the selection — Deselect
+        // All (Cmd/Ctrl+Shift+A or F2 by default) and Duplicate (Cmd/Ctrl+D) — must be
+        // matched here and run through the command dispatcher like undo above.
+        // Matching each command's current binding, not a fixed key, keeps rebound
+        // shortcuts working and gives every route one final state; a chord bound to
+        // both commands resolves in list order. The forwarding test also refuses
+        // chords a focused editor must never surrender (see
+        // `forwardable_during_text_edit`).
+        _ if crate::menus::forwardable_during_text_edit(m, key)
+            && let Some(cmd_id) = ["edit.deselectAll", "edit.duplicate"].into_iter().find(|id| crate::menus::chord_matches(&app.session, id, key, m)) =>
+        {
+            let _ = crate::menus::invoke(app, ctx, cmd_id, json!({}));
+        }
+        _ => {}
+    }
+    if !matches!(key, Key::Backspace | Key::Delete | Key::Enter | Key::Tab) {
+        typing_key(ui, true);
     }
 }
 

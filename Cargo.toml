@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/*"]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -13,7 +13,9 @@ repository = "https://github.com/storytold/effectcraft"
 [workspace.dependencies]
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
-craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", features = ["egui"] }
+craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+# craft-update: app-specific pretend versions apply to startup and manual checks.
+craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "04aa1703b32d299e54f78fcde4182f2b393a9116", features = ["egui"] }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -26,6 +28,7 @@ effectcraft-text = { path = "crates/text" }
 effectcraft-effects = { path = "crates/effects" }
 effectcraft-track = { path = "crates/track" }
 effectcraft-segment = { path = "crates/segment" }
+effectcraft-sam2 = { path = "crates/sam2" }
 effectcraft-model = { path = "crates/model" }
 effectcraft-render = { path = "crates/render" }
 effectcraft-gpu = { path = "crates/gpu" }
@@ -73,6 +76,8 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 harfrust = { version = "0.12", default-features = false, features = ["std"] }
 exr = "1.74"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+same-file = "1.0"
+tempfile = "3.27"
 
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
@@ -80,30 +85,30 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # VideoToolbox, Media Foundation, NVDEC, VA-API). It is FilmCraft's one crate with OS FFI (`unsafe`
 # confined to its FFI modules), so only the desktop app binary (`apps/effectcraft`, L6) depends on
 # it and registers its decoders at startup; our own crates stay `unsafe`-free and wasm-clean.
-filmcraft-platform = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
+filmcraft-platform = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
 # encoders + muxer (crates/export)
-filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-prores = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-aac = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-isobmff = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
+filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-prores = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-aac = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-isobmff = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+# container headers read for AAC channel layouts (crates/media)
+filmcraft-matroska = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-mpegts = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
 # decoder used as the round-trip oracle of effectcraft-opusenc (crates/export dev-dependency)
-filmcraft-opus = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-vp9 = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
+filmcraft-opus = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-vp9 = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
 # decoders used as the round-trip oracles of effectcraft-hevcenc / effectcraft-av1enc (dev-dependencies only)
-filmcraft-hevc = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-av1 = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
+filmcraft-hevc = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-av1 = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
 # timeline interchange (EDL, FCP7 XML, FCPXML, OTIO) for Premiere Pro interop (crates/interchange only)
-filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe" }
-# The symphonia filmcraft-codecs already builds, named only to turn on its AIFF reader: the pinned
-# rev enables wav alone (FilmCraft main enables aiff too). Drop it when the pin moves past that.
-symphonia = { version = "0.5.5", default-features = false, features = ["aiff"] }
+filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9bf15d510eda1c413c0ccabb1d7e08b41c5" }
 
 # gpu (the same wgpu eframe / egui-wgpu use)
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
@@ -135,14 +140,18 @@ sys-locale = "0.3"
 # filmcraft-prores = { path = "../filmcraft/crates/prores" }
 # filmcraft-aac = { path = "../filmcraft/crates/aac" }
 # filmcraft-isobmff = { path = "../filmcraft/crates/isobmff" }
+# filmcraft-matroska = { path = "../filmcraft/crates/matroska" }
+# filmcraft-mpegts = { path = "../filmcraft/crates/mpegts" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
 dbg_macro = "warn"
 todo = "warn"
-too_many_arguments = "allow"
 needless_range_loop = "allow"
 type_complexity = "allow"
 
@@ -154,6 +163,13 @@ debug = false
 opt-level = 1
 # Panics and backtraces keep file and line; full debug info only made the many test binaries large.
 debug = "line-tables-only"
+
+# Same settings as `dev`, but with full debug info for interactive debugger sessions: local
+# variables, parameters and column breakpoints work. Use `--profile dev-full` when debugging;
+# everything else stays on the fast default. See CONTRIBUTING.md, "Setup".
+[profile.dev-full]
+inherits = "dev"
+debug = true
 
 # Pixel hot loops: keep debug builds interactive.
 [profile.dev.package.effectcraft-raster]

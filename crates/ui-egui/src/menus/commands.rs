@@ -1,4 +1,4 @@
-use super::*;
+use super::UiCommand;
 
 macro_rules! uic {
     ($id:literal, $label:literal, [$($m:literal),*], $sc:expr) => {

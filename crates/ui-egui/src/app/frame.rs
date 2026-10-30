@@ -90,7 +90,7 @@ impl EffectcraftApp {
 
     /// Apply the engine events drained this tick: open a comp, show a toast, open a URL, run a frontend command,
     /// purge frame caches or copy an image; command and clipboard failures go to `app.ui.status`.
-    pub(super) fn handle_events(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_events(&mut self, ctx: &egui::Context) {
         for ev in self.session.drain_events() {
             match ev {
                 effectcraft_engine::Event::OpenComp(c) => {
@@ -127,10 +127,13 @@ impl EffectcraftApp {
         self.now = self.clock.now();
         // The compositor exists before the first paint and while hidden (device-loss handling
         // must run there too).
-        self.init_gpu(frame);
+        self.init_gpu(ctx, frame);
         self.apply_gpu_failure(ctx);
         if self.gpu_failure_applied == Some(true) {
             self.close_after_device_loss(ctx);
+            // On macOS the app quits through `-[NSApplication terminate:]` instead of closing the
+            // window while AppKit's run loop is running (#341).
+            craft_quit::on_close_request(ctx);
             return;
         }
         // Focus comes from the fresh viewport copy; a full pass's `InputState::focused` is only a
@@ -141,6 +144,9 @@ impl EffectcraftApp {
         // commands handled here use the right catalog already.
         let language = crate::i18n::language(self);
         crate::i18n::set_current(language);
+        // #1089: a font-menu rescan runs off the UI thread. Poll it on the logic tick so the
+        // status and the menu update even when the window is not painting.
+        crate::panels::text_panels::poll_font_rescan(self, ctx);
         if self.styled_language != language {
             self.want_paint = true;
         }
@@ -198,6 +204,8 @@ impl EffectcraftApp {
             self.command_inbox = Some(rx);
         }
         // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
+        // An answered file dialog can change the project, so the answers above run first. The host
+        // calls `panels::unsaved::quit_on_close` last in its `logic`.
         panels::unsaved::on_close_requested(self, ctx);
         let title = panels::unsaved::window_title(self);
         if title != self.window_title {
@@ -370,6 +378,10 @@ impl EffectcraftApp {
         // Video Preview is a second viewport: only a real pass can update it.
         prefs_live::frame(self, &ctx);
         self.auto.begin_frame();
+        panels::viewer_tools::clear_sample_source(&ctx);
+        if let Some(rect) = crate::color_picker::take_automation(&ctx) {
+            self.auto.add("colorPicker.eyedropper", rect, "Eyedropper");
+        }
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -379,6 +391,11 @@ impl EffectcraftApp {
         let full = ui.max_rect();
         if self.dialog.is_some() {
             ui.disable();
+            // A dialog that edits what is behind it live (Preview) leaves the window at full
+            // brightness: clicks still don't reach it, but the canvas is not greyed out.
+            if self.dialog == Some(Dialog::GradientEditor) || panels::live_preview::active(self) {
+                ui.set_opacity(1.0);
+            }
         }
         ui.painter().rect_filled(full, 0.0, t.app_bg);
         let mut top = full.min.y;
@@ -393,6 +410,9 @@ impl EffectcraftApp {
         let header = egui::Rect::from_min_size(egui::pos2(full.min.x, top), egui::vec2(full.width(), header_h));
         header::show(self, ui, header);
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 4.0, header.max.y + 2.0), egui::pos2(full.max.x - 4.0, full.max.y - 4.0));
+        crate::color_picker::note_dialog(&ctx, self.dialog);
+        // After the shortcuts, menus and header, which can replace the project (New, Open).
+        self.ui.timeline.scope_links(self.session.script_ui.project_epoch);
         self.dock_area(ui, body);
         #[cfg(not(target_arch = "wasm32"))]
         prefs_live::dropped_files(self, ui, full);
@@ -455,6 +475,13 @@ impl EffectcraftApp {
             if resp.clicked() {
                 self.ui.status.clear();
                 self.toast = None;
+            }
+            // "Preparing the GPU compositor…" stays until the compositor is attached (tens of
+            // seconds on a cold shader cache), not 5 s: `finish_gpu_build` clears it, and the
+            // worker's repaint brings that frame, so nothing needs to tick meanwhile. A click
+            // still dismisses it.
+            if self.ui.status == crate::GPU_PREPARING && self.gpu_initializing() {
+                return;
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             if !self.ui.status.is_empty() {
@@ -519,33 +546,40 @@ impl EffectcraftApp {
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
-        self.tick_footage_reload(ctx, now);
+        self.tick_footage_reload(ctx);
     }
 
-    /// Settings ▸ Import ▸ Reload Footage Changed on Disk: every two seconds, and as soon as the
-    /// window comes back to the front (after saving in another app), stamp the footage files on a
-    /// worker thread and reload the ones that changed.
-    fn tick_footage_reload(&mut self, ctx: &egui::Context, now: f64) {
+    /// Settings ▸ Import ▸ Reload Footage Changed on Disk: a worker thread stamps the footage
+    /// files (every two seconds while the window is in front, and as soon as it comes back to
+    /// the front after saving in another app) and wakes this frame only when a stamp changed;
+    /// the changed files are reloaded here. Nothing here asks for a repaint: an idle app with
+    /// unchanged footage stays asleep.
+    fn tick_footage_reload(&mut self, ctx: &egui::Context) {
         use effectcraft_engine::footage_reload;
-        if let Some(Err(e)) = footage_reload::poll_scan(&mut self.session) {
+        if let Some(stamps) = self.footage_watcher.as_ref().and_then(footage_reload::Watcher::take)
+            && let Err(e) = footage_reload::apply_stamps(&mut self.session, stamps)
+        {
             self.ui.status = e.to_string();
         }
-        let (last_key, focus_key) = (egui::Id::unique("footageReload.lastScan"), egui::Id::unique("footageReload.focused"));
-        let focused = self.focused;
-        let was_focused: bool = ctx.data(|d| d.get_temp(focus_key)).unwrap_or(focused);
-        ctx.data_mut(|d| d.insert_temp(focus_key, focused));
-        if self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty() {
+        let off = self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty();
+        if off {
+            if let Some(w) = &mut self.footage_watcher {
+                w.set_watched(Default::default());
+            }
+            self.footage_watch_key = None;
             return;
         }
-        let last: f64 = ctx.data(|d| d.get_temp(last_key)).unwrap_or(0.0);
-        if now - last >= 2.0 || (focused && !was_focused) {
-            ctx.data_mut(|d| d.insert_temp(last_key, now));
-            footage_reload::start_scan(&mut self.session);
+        if self.footage_watcher.is_none() {
+            let wake = ctx.clone();
+            self.footage_watcher = footage_reload::Watcher::start(self.session.services.clone(), move || wake.request_repaint());
         }
-        if self.session.footage_scan.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        let Some(watcher) = &mut self.footage_watcher else { return };
+        watcher.set_focused(self.focused);
+        // Which files are watched follows the project and the preference, not the frame.
+        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone());
+        if self.footage_watch_key.as_ref() != Some(&key) {
+            self.footage_watch_key = Some(key);
+            watcher.set_watched(footage_reload::watched(&self.session));
         }
     }
 }

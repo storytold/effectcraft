@@ -24,9 +24,40 @@ fn have_ffmpeg() -> bool {
     *HAVE.get_or_init(|| Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()))
 }
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none. Distro "free"
+/// builds often omit `libx264` (the one named historically here) but ship an alternative, so pick
+/// the first present by name rather than hard-coding one that may be absent. These tests only
+/// need *an* H.264 encoder to make an oracle fixture; the encoder identity is irrelevant.
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 /// Run ffmpeg to produce `name` (once; written to a temp name and renamed so concurrent test
 /// processes never see a partial file). `None` when ffmpeg is unavailable.
 fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, true)
+}
+
+/// Like [`ffmpeg_fixture`] for a fixture this build of ffmpeg may fail to make: an encoder found
+/// in the `-encoders` listing can still not run here (the hardware backends need their device,
+/// Fedora's `libopenh264` is the `noopenh264` stub), and fixtures built from one, like
+/// [`h264_mp4`], should skip with a note rather than fail on the packager's choice of ffmpeg —
+/// the same way every test here skips when ffmpeg is missing altogether.
+fn try_ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, false)
+}
+
+fn ffmpeg_fixture_inner(name: &str, args: &[&str], must_succeed: bool) -> Option<PathBuf> {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not found: skipping");
         return None;
@@ -39,7 +70,14 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     let ext = out.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let tmp = out.with_file_name(format!("tmp-{}-{:?}.{ext}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     let st = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).arg(&tmp).status().expect("run ffmpeg");
-    assert!(st.success(), "ffmpeg failed for {name}");
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        if must_succeed {
+            panic!("ffmpeg failed for {name}");
+        }
+        eprintln!("this ffmpeg build cannot make {name}: skipping");
+        return None;
+    }
     if std::fs::rename(&tmp, &out).is_err() {
         // Another test made it first; on Windows the rename fails while that test has it open.
         let _ = std::fs::remove_file(&tmp);
@@ -48,39 +86,35 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     Some(out)
 }
 
+/// Video options the chosen H.264 encoder actually accepts. `libx264` keeps its constant-quality
+/// `-preset`/`-crf` pair; `libopenh264` rejects both (it takes a bitrate), and the hardware
+/// backends take a bitrate too — without this, a build whose picked encoder is not libx264 failed
+/// the fixture and silently skipped every check gated on it.
+fn h264_video_options(enc: &str) -> Vec<&'static str> {
+    if enc == "libx264" { vec!["-preset", "medium", "-crf", "18"] } else { vec!["-b:v", "2M"] }
+}
+
 fn h264_mp4() -> Option<PathBuf> {
-    ffmpeg_fixture(
-        "testsrc2_1080p.mp4",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=1920x1080:rate=30:duration=2",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000:duration=2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-colorspace",
-            "bt709",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-c:a",
-            "aac",
-            "-ac",
-            "2",
-            "-shortest",
-        ],
-    )
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
+    let enc = h264_encoder()?;
+    let mut args: Vec<&'static str> = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=1920x1080:rate=30:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:v",
+        enc,
+        "-pix_fmt",
+        "yuv420p",
+    ];
+    args.extend(h264_video_options(enc));
+    args.extend(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "aac", "-ac", "2", "-shortest"]);
+    try_ffmpeg_fixture("testsrc2_1080p.mp4", &args)
 }
 
 fn prores_mov() -> Option<PathBuf> {
@@ -172,9 +206,14 @@ fn tone_wav() -> Option<PathBuf> {
 
 /// Frame `n` of `src` as RGBA PNG extracted by ffmpeg (Y'CbCr → RGB with the BT.709 matrix).
 fn reference_frame(src: &Path, n: usize) -> Image {
+    reference_frame_in(src, n, "bt709")
+}
+
+/// [`reference_frame`] of a movie whose Y'CbCr is in `matrix` (`bt601` for Motion JPEG).
+fn reference_frame_in(src: &Path, n: usize, matrix: &str) -> Image {
     let stem = src.file_stem().expect("stem").to_string_lossy().to_string();
     let name = format!("ref_{stem}_{n}.png");
-    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix=bt709:in_range=auto:out_range=pc:flags=bilinear+accurate_rnd+full_chroma_int,format=rgba");
+    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=auto:out_range=pc:flags=bilinear+accurate_rnd+full_chroma_int,format=rgba");
     let p = ffmpeg_fixture(&name, &["-i", src.to_str().expect("utf8"), "-vf", &vf, "-fps_mode", "passthrough", "-frames:v", "1"]).expect("ffmpeg");
     load_png(&p)
 }
@@ -281,7 +320,10 @@ fn h264_audio_samples() {
 /// H.264 + AAC at 44.1 kHz in MP4 (ffmpeg writes an edit list that skips the AAC priming):
 /// 440 Hz left, a 200 → 1000 Hz sweep right, 29.97 fps.
 fn aac_44k_mp4() -> Option<PathBuf> {
-    ffmpeg_fixture(
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
+    let enc = h264_encoder()?;
+    try_ffmpeg_fixture(
         "aac_44k.mp4",
         &[
             "-f",
@@ -293,7 +335,7 @@ fn aac_44k_mp4() -> Option<PathBuf> {
             "-i",
             "aevalsrc=0.5*sin(2*PI*440*t)|0.5*sin(2*PI*(200+400*t/3)*t):s=44100:d=3",
             "-c:v",
-            "libx264",
+            enc,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -476,12 +518,12 @@ fn dnxhd_mxf() -> Option<PathBuf> {
     )
 }
 
-/// MXF is importable footage (After Effects imports it), whatever the extension's case.
+/// MXF and AVI are importable footage (After Effects imports them), whatever the extension's case.
 #[test]
-fn mxf_is_importable() {
-    assert!(effectcraft_media::is_importable(Path::new("/media/A001C003.mxf")));
-    assert!(effectcraft_media::is_importable(Path::new("/media/A001C003.MXF")));
-    assert!(!effectcraft_media::is_importable(Path::new("/media/A001C003.avi")), "no AVI demuxer yet");
+fn mxf_and_avi_are_importable() {
+    for name in ["A001C003.mxf", "A001C003.MXF", "capture.avi", "CAPTURE.AVI"] {
+        assert!(effectcraft_media::is_importable(&Path::new("/media").join(name)), "{name}");
+    }
 }
 
 #[test]
@@ -525,6 +567,124 @@ fn mxf_dnxhd_frames() {
         eprintln!("mxf dnxhd frame {n}: {db:.2} dB");
         assert!(db > 35.0, "frame {n}: {db:.2} dB");
     }
+}
+
+fn mjpeg_avi() -> Option<PathBuf> {
+    ffmpeg_fixture(
+        "testsrc2_mjpeg_pcm.avi",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=25:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-pix_fmt",
+            "yuvj420p",
+            "-c:a",
+            "pcm_s16le",
+            "-ac",
+            "2",
+        ],
+    )
+}
+
+#[test]
+fn avi_mjpeg_with_pcm_audio() {
+    let Some(p) = mjpeg_avi() else { return };
+    let f = probe(&p).expect("probe");
+    assert_eq!(f.kind, FootageKind::Video);
+    assert_eq!((f.width, f.height), (640, 360));
+    assert_eq!(f.frame_rate, FrameRate::FPS_25);
+    assert!((f.duration.seconds() - 2.0).abs() < 0.1, "duration {:?}", f.duration.seconds());
+    assert!(f.has_video && f.has_audio);
+    assert_eq!(f.codec, "Motion JPEG");
+    let pool = MediaPool::new();
+    for n in [0usize, 1, 30, 7, 49] {
+        let img = pool.frame_at(&f, t_of(f.frame_rate, n as i64)).expect("frame");
+        let db = psnr(&img, &reference_frame_in(&p, n, "bt601"));
+        assert!(db > 35.0, "frame {n}: {db:.2} dB");
+    }
+    let s = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(s.len(), 9600);
+    let rms = (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+    assert!((rms - 0.0625).abs() < 0.01, "rms {rms}");
+}
+
+/// An AVI whose video FilmCraft can't decode imports, and says why it shows no picture (as an
+/// unsupported stream in any other container does), rather than failing as a broken file.
+#[test]
+fn avi_with_an_unsupported_codec_says_so() {
+    let Some(p) = ffmpeg_fixture("testsrc2_xvid.avi", &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=1", "-c:v", "mpeg4", "-vtag", "XVID"])
+    else {
+        return;
+    };
+    let f = probe(&p).expect("a valid AVI imports");
+    assert_eq!((f.kind, f.width, f.height), (FootageKind::Video, 320, 180));
+    let pool = MediaPool::new();
+    if pool.frame(ItemId(1), &f, Tick::ZERO).is_some() {
+        // FilmCraft decodes MPEG-4 Part 2 now: nothing to report
+        assert_eq!(pool.problem(&f), None);
+        return;
+    }
+    let why = pool.problem(&f).expect("a failed frame leaves a reason");
+    assert!(why.contains("MPEG-4 Part 2") && why.contains("isn't supported"), "{why}");
+}
+
+/// A file that only looks like an AVI is an import error that says so.
+#[test]
+fn an_invalid_avi_is_an_import_error() {
+    let e = probe_bytes("broken.avi", Arc::from(&b"RIFF\x10\0\0\0AVI LIST\0\0\0\0garbage"[..])).expect_err("not an AVI");
+    assert!(e.to_string().contains("invalid AVI"), "{e}");
+}
+
+/// A damaged AVI imports: a truncated recording as far as it goes, and a packet that doesn't
+/// decode loses its own frame only, with a reason that says the file is damaged rather than
+/// unsupported.
+#[test]
+fn a_damaged_avi_loses_only_what_is_damaged() {
+    let Some(p) = mjpeg_avi() else { return };
+    let bytes = std::fs::read(&p).expect("read");
+    let full = probe(&p).expect("probe");
+    let pool = MediaPool::new();
+
+    let cut: Arc<[u8]> = bytes[..bytes.len() / 3].into();
+    let f = probe_bytes("cut.avi", cut.clone()).expect("a truncated AVI imports");
+    assert!(f.duration > Tick::ZERO && f.duration < full.duration, "{:?} of {:?}", f.duration, full.duration);
+    pool.add_bytes("cut.avi", cut);
+    let last = f.frame_rate.frame_at(f.duration - Tick(1));
+    assert!(pool.frame(ItemId(1), &f, t_of(f.frame_rate, last)).is_some(), "its last frame");
+
+    // Garble the JPEG data of the video chunk of frame 10.
+    let mut bad = bytes.clone();
+    let mut at = bad.windows(4).position(|w| w == b"movi").expect("movi") + 4;
+    let mut video = 0;
+    while let Some(head) = bad.get(at..at + 8) {
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if &head[2..4] == b"dc" {
+            if video == 10 {
+                bad[at + 8 + 200..at + 8 + size.min(3000)].iter_mut().enumerate().for_each(|(i, b)| *b = if i % 7 == 0 { 0xFF } else { 0 });
+                break;
+            }
+            video += 1;
+        }
+        at += 8 + size + size % 2;
+    }
+    assert_eq!(video, 10, "found frame 10's chunk");
+    let f = probe_bytes("bad.avi", bad.clone().into()).expect("a damaged AVI imports");
+    pool.add_bytes("bad.avi", bad.into());
+    assert!(pool.frame(ItemId(2), &f, t_of(f.frame_rate, 10)).is_none(), "the damaged frame");
+    for n in [9, 11, 30] {
+        assert!(pool.frame(ItemId(2), &f, t_of(f.frame_rate, n)).is_some(), "frame {n}");
+    }
+    let why = pool.problem(&f).expect("a failed frame leaves a reason");
+    assert!(why.contains("can't be decoded") && !why.contains("isn't supported"), "{why}");
 }
 
 #[test]
@@ -878,7 +1038,7 @@ fn flac_audio_of_any_shape_reads_in_device_blocks() {
         // ffmpeg's sine source has an amplitude of 1/8 (mono is duplicated). The fixture carries
         // channels 0 and 1 at full level and the others at half, so a multichannel file sounds as
         // its stereo downmix (tests/it/downmix.rs checks that matrix channel by channel).
-        let gains = effectcraft_media::downmix::stereo_gains(channels as usize, false);
+        let gains = effectcraft_media::downmix::stereo_gains(channels as usize);
         let side = |s: usize| gains.iter().enumerate().map(|(c, g)| f64::from(g[s]) * if c < 2 { 1.0 } else { 0.5 }).sum::<f64>();
         let want = 0.125 * ((side(0).powi(2) + side(1).powi(2)) / 2.0).sqrt() / 2f64.sqrt();
         let rms = (sum / n.max(1) as f64).sqrt();
@@ -1098,7 +1258,7 @@ fn a_called_off_read_does_not_decode() {
 /// footage reports it (not a black frame without a word).
 #[test]
 fn an_unsupported_stream_reports_why_it_shows_no_picture() {
-    let Some(p) = ffmpeg_fixture(
+    let Some(p) = try_ffmpeg_fixture(
         "h264_high422_10bit.mp4",
         &["-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=1", "-c:v", "libx264", "-profile:v", "high422", "-pix_fmt", "yuv422p10le"],
     ) else {
@@ -1121,4 +1281,14 @@ fn an_unsupported_stream_reports_why_it_shows_no_picture() {
     assert_eq!(pool.problem(&f).as_deref(), Some(why.as_str()));
     pool.forget(&f.path);
     assert_eq!(pool.problem(&f), None);
+}
+
+#[test]
+fn the_h264_fixture_options_fit_the_picked_encoder() {
+    assert_eq!(h264_video_options("libx264"), ["-preset", "medium", "-crf", "18"]);
+    for enc in ["libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv"] {
+        let options = h264_video_options(enc);
+        assert!(!options.iter().any(|o| *o == "-preset" || *o == "-crf"), "{enc} rejects preset/crf: {options:?}");
+        assert!(options.contains(&"-b:v"), "{enc} gets a bitrate: {options:?}");
+    }
 }

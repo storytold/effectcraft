@@ -77,3 +77,75 @@ fn open_graph_toggle_twice(h: &mut Harness<'_, EffectcraftApp>) {
     assert!(!h.state().ui.timeline.graph_editor);
     open_graph(h);
 }
+
+#[test]
+fn locked_graph_keys_preserve_the_existing_selection_and_keyframes() {
+    use egui::{Event, Modifiers, PointerButton, pos2, vec2};
+    for (button, modifiers, drag) in [
+        (PointerButton::Primary, Modifiers::NONE, false),
+        (PointerButton::Primary, Modifiers::SHIFT, false),
+        (PointerButton::Primary, Modifiers::COMMAND, false),
+        (PointerButton::Secondary, Modifiers::NONE, false),
+        (PointerButton::Primary, Modifiers::NONE, true),
+    ] {
+        let (mut h, layer, uid) = harness(true);
+        let s = &mut h.state_mut().session;
+        let locked = s.execute("layer.newSolid", json!({"name": "Locked", "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+        for (time, value) in [(9.0, 100.0), (11.0, 200.0)] {
+            s.execute("prop.addKey", json!({"layer": locked, "path": "transform/rotation", "time": time, "value": value})).unwrap();
+        }
+        let locked_id = effectcraft_engine::project::LayerId(locked);
+        let locked_uid = s.active_comp().unwrap().layer(locked_id).unwrap().props.prop("transform/rotation").unwrap().uid;
+        s.execute("layer.setSwitch", json!({"layers": [locked], "switch": "locked", "value": true})).unwrap();
+        s.execute("keys.select", json!({"keys": [{"layer": layer, "prop": uid, "time": 12.0}]})).unwrap();
+        s.state.selected_props = vec![(effectcraft_engine::project::LayerId(layer), uid), (locked_id, locked_uid)];
+        let selection = s.state.selected_keys.clone();
+        let before = s.project.clone();
+        open_graph(&mut h);
+        h.state_mut().ui.timeline.graph_auto_zoom = false;
+        h.state_mut().ui.timeline.graph_range = Some((0.0, 800.0));
+        h.run_steps(3);
+        let [x, y, w, height] = h.state().auto.find(&format!("timeline.graph.key.{locked_uid}.0.0")).expect("locked key drawn").rect;
+        let point = pos2(x + w / 2.0, y + height / 2.0);
+        h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+        h.input_mut().events.push(Event::PointerMoved(point));
+        h.input_mut().events.push(Event::PointerButton { pos: point, button, pressed: true, modifiers });
+        h.step();
+        let end = if drag { point + vec2(30.0, -20.0) } else { point };
+        h.input_mut().events.push(Event::PointerMoved(end));
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: end, button, pressed: false, modifiers });
+        h.run_steps(3);
+        assert_eq!(h.state().session.state.selected_keys, selection, "{button:?}, {modifiers:?}, drag={drag}");
+        assert_eq!(
+            serde_json::to_value(&h.state().session.project).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "locked gestures must not edit another key"
+        );
+    }
+}
+
+#[test]
+fn an_unlocked_graph_keys_menu_edits_the_clicked_key() {
+    use egui::{Event, Modifiers, PointerButton, pos2};
+    use egui_kittest::kittest::Queryable;
+    let (mut h, layer, uid) = harness(true);
+    h.state_mut().session.execute("keys.select", json!({"keys": [{"layer": layer, "prop": uid, "time": 12.0}]})).unwrap();
+    open_graph(&mut h);
+    let [x, y, w, height] = h.state().auto.find(&format!("timeline.graph.key.{uid}.0.0")).unwrap().rect;
+    let at = pos2(x + w / 2.0, y + height / 2.0);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(3);
+    let selected = &h.state().session.state.selected_keys;
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].time.seconds(), 8.0);
+    h.get_by_label("Easy Ease").click();
+    h.run_steps(3);
+    let prop = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(uid).unwrap();
+    assert_eq!(prop.keys[0].out_interp, effectcraft_engine::keyframe::Interp::Bezier);
+    assert_eq!(prop.keys[1].out_interp, effectcraft_engine::keyframe::Interp::Linear);
+}

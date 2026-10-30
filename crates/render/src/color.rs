@@ -21,7 +21,7 @@
 
 use effectcraft_color::{ColorSpace, Conversion};
 use effectcraft_project::{Footage, HdrMode, ProjectSettings};
-use effectcraft_raster::Image;
+use effectcraft_raster::{Image, quantize_px};
 use rayon::prelude::*;
 
 /// The colour pipeline of a project (see the module docs).
@@ -218,27 +218,6 @@ pub fn quantize(img: &mut Image, levels: f32) {
     quantize_rect(img, PxRect { x0: 0, y0: 0, x1: img.width, y1: img.height }, levels);
 }
 
-/// Clamp (colour ≤ alpha ≤ 1, NaN → 0) and round half up; values are non-negative after the
-/// clamp, so the integer conversion rounds like `round()` and vectorises.
-#[allow(clippy::manual_clamp)] // max/min map NaN to 0; clamp would keep NaN
-#[inline(always)]
-fn quantize_px(p: &mut [f32; 4], levels: f32, inv: f32) {
-    let a = round_half_up(p[3].max(0.0).min(1.0) * levels) * inv;
-    let hi = [a, a, a, a];
-    for c in 0..3 {
-        p[c] = round_half_up(p[c].max(0.0).min(hi[c]) * levels) * inv;
-    }
-    p[3] = a;
-}
-
-/// `v` (0..=65 535) rounded half up. The same either way; the fastest on each target: x86-64's
-/// baseline converts to integers in one instruction but has no `floor` (SSE4.1), while in wasm
-/// `floor` is one instruction and converting back from `u32` several (about 1.5× faster there).
-#[inline(always)]
-fn round_half_up(v: f32) -> f32 {
-    if cfg!(target_arch = "wasm32") { (v + 0.5).floor() } else { (v + 0.5) as u32 as f32 }
-}
-
 /// [`quantize`] restricted to a rectangle (already clamped to the image), row-parallel.
 fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
     if r.x0 >= r.x1 || r.y0 >= r.y1 {
@@ -248,7 +227,17 @@ fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
     let w = img.width as usize;
     let (x0, x1) = (r.x0 as usize, r.x1 as usize);
     img.data[r.y0 as usize * w..r.y1 as usize * w].par_chunks_mut(w).for_each(|row| {
-        for p in &mut row[x0..x1] {
+        // Runs of all-zero pixels (+0.0 in every channel) quantise to themselves: skip them a
+        // cache line at a time (sparse shape, precomp and glow buffers are mostly empty).
+        let (blocks, rest) = row[x0..x1].as_chunks_mut::<4>();
+        for b in blocks {
+            if b.as_flattened().iter().fold(0, |a, v| a | v.to_bits()) != 0 {
+                for p in b {
+                    quantize_px(p, levels, inv);
+                }
+            }
+        }
+        for p in rest {
             quantize_px(p, levels, inv);
         }
     });
@@ -307,6 +296,39 @@ pub fn output_hdr(img: &mut Image, to_linear: Option<Conversion>, mode: HdrMode,
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Skipping all-zero runs leaves every pixel as quantising it one by one does, bit for bit
+    /// (negative zeros and lone pixels in empty runs included).
+    #[test]
+    fn quantize_skips_only_zero_runs() {
+        let mut img = Image::new(23, 7);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = match i % 11 {
+                0 => [0.3, -0.2, 0.71, 0.9],
+                3 => [-0.0, 0.0, 0.0, 0.0],
+                5 => [0.0, 0.0, 0.0, -0.0],
+                7 => [1.7, 0.4, f32::NAN, 0.5],
+                _ => [0.0; 4],
+            };
+        }
+        for levels in [255.0f32, 32_768.0] {
+            let mut want = img.clone();
+            for p in &mut want.data {
+                quantize_px(p, levels, 1.0 / levels);
+            }
+            for r in [PxRect { x0: 0, y0: 0, x1: 23, y1: 7 }, PxRect { x0: 3, y0: 1, x1: 20, y1: 6 }] {
+                let mut got = img.clone();
+                quantize_rect(&mut got, r, levels);
+                for (i, (g, p)) in got.data.iter().zip(&img.data).enumerate() {
+                    let (x, y) = (i as u32 % 23, i as u32 / 23);
+                    let w = if x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1 { want.data[i] } else { *p };
+                    assert_eq!(g.map(f32::to_bits), w.map(f32::to_bits), "{levels} {r:?} px ({x}, {y})");
+                }
+            }
+        }
+    }
+
     /// Both forms `round_half_up` picks between agree on everything quantising feeds it:
     /// 0..=levels, exact halves included.
     #[test]

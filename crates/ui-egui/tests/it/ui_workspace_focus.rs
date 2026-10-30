@@ -17,6 +17,29 @@ fn tab_id(p: PanelKind) -> Id {
 }
 
 #[test]
+fn workspace_commands_wait_for_migration_without_changing_named_layouts() {
+    let store = Arc::new(MemoryConfig::default());
+    let original = include_str!("../fixtures/workspaces-v1.json");
+    store.write("workspaces.json", original).unwrap();
+    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+    assert!(!app.ui.native_outer.is_empty());
+    let ctx = egui::Context::default();
+    let before = (app.ui.workspace.clone(), app.ui.saved_workspaces.clone(), app.ui.dock.clone());
+    for (id, params) in [
+        ("window.saveWorkspace", json!({})),
+        ("window.saveWorkspaceAs", json!({"name": "Too soon"})),
+        ("window.editWorkspaces", json!({"name": "My Layout", "delete": true})),
+        ("window.editWorkspaces", json!({"name": "My Layout", "rename": "Too soon"})),
+    ] {
+        let error = effectcraft_ui_egui::menus::invoke(&mut app, &ctx, id, params).unwrap_err();
+        assert!(error.contains("positions"), "{id}: {error}");
+        assert_eq!((app.ui.workspace.clone(), app.ui.saved_workspaces.clone(), app.ui.dock.clone()), before);
+        assert_eq!(store.read("workspaces.json").as_deref(), Some(original));
+        assert_eq!(store.read("workspaces.old.json"), None);
+    }
+}
+
+#[test]
 fn named_and_current_workspaces_survive_frontend_restart() {
     let store = Arc::new(MemoryConfig::default());
     let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });

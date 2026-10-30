@@ -2,7 +2,10 @@
 //! modes plus V_PRED / H_PRED without edge filtering, 7.11.3 block inter prediction without
 //! reference scaling) so that the encoder predicts exactly like a decoder.
 
-use crate::tables::*;
+use crate::tables::{
+    DC_PRED, EIGHTTAP, H_PRED, PAETH_PRED, SM_WEIGHTS_TX_4X4, SM_WEIGHTS_TX_8X8, SM_WEIGHTS_TX_16X16, SM_WEIGHTS_TX_32X32, SMOOTH_H_PRED, SMOOTH_PRED,
+    SMOOTH_V_PRED, SUBPEL_FILTERS, V_PRED,
+};
 use crate::transform::round2;
 
 /// A plane buffer (padded to whole superblocks).
@@ -184,19 +187,20 @@ pub(crate) fn predict_intra(ed: &Edges, e: &IntraEdge, mode: usize, pred: &mut [
 /// final rounding is the identity) of the `w x h` block at plane position (x, y) displaced by
 /// `mv` (1/8 luma sample units, [row, col]). `last_x` / `last_y` are the largest sample
 /// coordinates of the reference plane; the result goes to `pred` (row stride `w`).
-pub(crate) fn predict_inter(
-    refp: &Plane,
-    last_x: i32,
-    last_y: i32,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    mv: [i32; 2],
-    ss: usize,
-    bit_depth: u32,
-    pred: &mut [u16],
-) {
+pub(crate) struct InterBlock {
+    pub last_x: i32,
+    pub last_y: i32,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub mv: [i32; 2],
+    pub subsampling: usize,
+    pub bit_depth: u32,
+}
+
+pub(crate) fn predict_inter(refp: &Plane, block: &InterBlock, pred: &mut [u16]) {
+    let InterBlock { last_x, last_y, x, y, width: w, height: h, mv, subsampling: ss, bit_depth } = *block;
     // positions in 1/16 sample units ((startX >> 6) & 15 is the filter phase)
     let px = ((x as i32) << 4) + ((2 * mv[1]) >> ss);
     let py = ((y as i32) << 4) + ((2 * mv[0]) >> ss);
@@ -293,7 +297,8 @@ pub(crate) fn predict_inter(
 
 /// The visible `w x h` area of a reference plane interpolated at the sub-sample phase
 /// (`fx`, `fy`) (1/16 units) with the EIGHTTAP filter, as `predict_inter` computes it for
-/// blocks wider and taller than 4. Used for motion search.
+/// blocks wider and taller than 4. The reference for `half_planes`, which the encoder uses.
+#[cfg(test)]
 pub(crate) fn subpel_plane(refp: &Plane, w: usize, h: usize, fx: usize, fy: usize, bit_depth: u32) -> Vec<u16> {
     let kh = &SUBPEL_FILTERS[EIGHTTAP][fx];
     let kv = &SUBPEL_FILTERS[EIGHTTAP][fy];
@@ -323,6 +328,66 @@ pub(crate) fn subpel_plane(refp: &Plane, w: usize, h: usize, fx: usize, fy: usiz
     out
 }
 
+/// The three half-sample planes (8, 0), (0, 8), (8, 8) of `subpel_plane` in one pass: the
+/// horizontal half-sample pass is shared by (8, 0) and (8, 8), and the phase-0 kernels reduce to
+/// exact shifts (Round2( 128 * v, 11 ) = Round2( v, 4 ), Round2( 16 * s, 11 ) = Round2( s, 7 )),
+/// so the result equals three `subpel_plane` calls bit for bit.
+pub(crate) fn half_planes(refp: &Plane, w: usize, h: usize, bit_depth: u32) -> [Vec<u16>; 3] {
+    let k = &SUBPEL_FILTERS[EIGHTTAP][8];
+    let max = (1i32 << bit_depth) - 1;
+    let (lx, ly) = (w as i32 - 1, h as i32 - 1);
+    // horizontal pass at phase 8: Round2( sum, 3 )
+    let mut hp = vec![0i32; w * h];
+    for y in 0..h {
+        let row = &refp.row(y)[..w];
+        let out = &mut hp[y * w..y * w + w];
+        let tap = |x: i32| -> i32 {
+            let mut s = 0i32;
+            for t in 0..8 {
+                s += k[t] as i32 * row[(x + t as i32 - 3).clamp(0, lx) as usize] as i32;
+            }
+            round2(s, 3)
+        };
+        if w >= 8 {
+            for x in 0..3 {
+                out[x] = tap(x as i32);
+            }
+            for (x, o) in out.iter_mut().enumerate().take(w - 4).skip(3) {
+                let seg = &row[x - 3..x + 5];
+                let mut s = 0i32;
+                for t in 0..8 {
+                    s += k[t] as i32 * seg[t] as i32;
+                }
+                *o = round2(s, 3);
+            }
+            for x in w - 4..w {
+                out[x] = tap(x as i32);
+            }
+        } else {
+            for (x, o) in out.iter_mut().enumerate() {
+                *o = tap(x as i32);
+            }
+        }
+    }
+    let p80: Vec<u16> = hp.iter().map(|&v| round2(v, 4).clamp(0, max) as u16).collect();
+    let mut p08 = vec![0u16; w * h];
+    let mut p88 = vec![0u16; w * h];
+    for y in 0..h {
+        let rows: [usize; 8] = std::array::from_fn(|t| (y as i32 + t as i32 - 3).clamp(0, ly) as usize);
+        let (o08, o88) = (&mut p08[y * w..y * w + w], &mut p88[y * w..y * w + w]);
+        for x in 0..w {
+            let (mut a, mut b) = (0i32, 0i32);
+            for t in 0..8 {
+                a += k[t] as i32 * refp.data[rows[t] * refp.stride + x] as i32;
+                b += k[t] as i32 * hp[rows[t] * w + x];
+            }
+            o08[x] = round2(a, 7).clamp(0, max) as u16;
+            o88[x] = round2(b, 11).clamp(0, max) as u16;
+        }
+    }
+    [p80, p08, p88]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,7 +405,11 @@ mod tests {
             for (bx, by) in [(0i32, 0i32), (8, 8), (24, 16), (-5, 20), (30, -3)] {
                 let mut pred = vec![0u16; 64];
                 let mv = [by * 8 + fy as i32 / 2, bx * 8 + fx as i32 / 2];
-                predict_inter(&p, w as i32 - 1, h as i32 - 1, 0, 0, 8, 8, mv, 0, 8, &mut pred);
+                predict_inter(
+                    &p,
+                    &InterBlock { last_x: w as i32 - 1, last_y: h as i32 - 1, x: 0, y: 0, width: 8, height: 8, mv, subsampling: 0, bit_depth: 8 },
+                    &mut pred,
+                );
                 for r in 0..8 {
                     for c in 0..8 {
                         let (x, y) = ((bx + c).clamp(0, w as i32 - 1), (by + r).clamp(0, h as i32 - 1));
@@ -349,6 +418,20 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn half_planes_match_subpel_plane() {
+        for (w, h) in [(37usize, 29usize), (5, 3), (1, 1), (64, 64)] {
+            let mut p = Plane::new(64, 64);
+            for (i, v) in p.data.iter_mut().enumerate() {
+                *v = ((i * 7919) % 1024) as u16;
+            }
+            let hp = half_planes(&p, w, h, 10);
+            for (i, (fx, fy)) in [(8, 0), (0, 8), (8, 8)].into_iter().enumerate() {
+                assert_eq!(hp[i], subpel_plane(&p, w, h, fx, fy, 10), "{w}x{h} phase ({fx}, {fy})");
             }
         }
     }
