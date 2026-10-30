@@ -824,3 +824,34 @@ fn double_click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
     }
     h.run_steps(2);
 }
+
+#[test]
+fn select_all_effects_with_cmd_a_in_effect_controls() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    let ctx = h.ctx.clone();
+    assert!(h.state().session.state.selected_props.is_empty());
+
+    // Cmd+A / Ctrl+A selects all effects on the active layer
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(3);
+
+    let fx_count = layer(&h.state().session, x.small).effects().unwrap().groups().count();
+    assert_eq!(h.state().session.state.selected_props.len(), fx_count);
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(x.small)]);
+
+    // Deselect All deselects the effects while keeping the layer selected
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.deselectAll", json!({})).unwrap();
+    assert!(h.state().session.state.selected_props.is_empty());
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(x.small)]);
+
+    // edit.selectAll menu command also selects all effects
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.selectAll", json!({})).unwrap();
+    assert_eq!(h.state().session.state.selected_props.len(), fx_count);
+
+    // Pressing Delete / Clear removes all effects
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.clear", json!({})).unwrap();
+    assert_eq!(layer(&h.state().session, x.small).effects().map(|f| f.groups().count()).unwrap_or(0), 0);
+}

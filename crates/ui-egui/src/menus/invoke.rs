@@ -226,6 +226,25 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             _ => {}
         }
     }
+    if no_params(&params) && (app.ui.focused == PanelKind::EffectControls || app.panel_at(ctx.pointer_latest_pos()) == PanelKind::EffectControls) {
+        match id {
+            "edit.selectAll" => {
+                app.ui.focused = PanelKind::EffectControls;
+                if app.session.state.selected_layers.is_empty() {
+                    return Ok(Value::Null);
+                }
+                return run_engine(app, ctx, "effect.selectAll", json!({}));
+            }
+            "edit.deselectAll" => {
+                app.ui.focused = PanelKind::EffectControls;
+                if app.session.state.selected_layers.is_empty() {
+                    return Ok(Value::Null);
+                }
+                return run_engine(app, ctx, "effect.deselectAll", json!({}));
+            }
+            _ => {}
+        }
+    }
     // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
     // leaves the active composition open (it used to close the composition next to it).
     if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
