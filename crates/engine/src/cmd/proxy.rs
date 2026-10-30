@@ -117,6 +117,7 @@ fn interpret_proxy(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(C, "the selected items have no proxy"));
     }
     let it = super::file_more::Interpretation::parse(p, C)?;
+    it.check(items.iter().filter_map(|i| s.project.item(*i).and_then(|x| x.proxy.as_ref()).map(|px| &px.footage)), C)?;
     let guesses: Vec<_> = items
         .iter()
         .map(|i| {
@@ -229,7 +230,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Proxy...",
             ["File", "Interpret Footage"],
             None,
-            "{items?|item?, alpha?, guessAlpha?, matteColor?|premulColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?, preserveRgb?, overrideStart?, startTimecode? (as file.interpretFootage)}",
+            "{items?|item?, alpha?, guessAlpha?, matteColor?|premulColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?, preserveRgb?, overrideStart?, startTimecode? (as file.interpretFootage), logConversion?, cineonUnits?, convertedBlack?, convertedWhite?, pointUnits?, tenBitBlack?, tenBitWhite?, currentGamma?, highlightRolloff? (Cineon Settings of DPX and Cineon proxies)}",
             has_proxy,
             interpret_proxy
         ),

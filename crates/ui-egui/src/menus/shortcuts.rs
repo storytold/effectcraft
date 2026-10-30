@@ -210,6 +210,9 @@ fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
     ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     if app.dialog == Some(crate::Dialog::LayerStyles) {
         crate::panels::layer_styles_dialog::finish(app, false);
+    } else if app.dialog == Some(crate::Dialog::GradientEditor) {
+        // Escape is Cancel: the preview rolls back.
+        crate::panels::gradient_editor::finish(app, false, ctx);
     } else if app.dialog == Some(crate::Dialog::Info) {
         crate::panels::forms::close_info(app);
     } else {
@@ -222,8 +225,35 @@ fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
         if app.dialog == Some(crate::Dialog::UnsavedChanges) {
             app.dialog_state.unsaved.command = None;
         }
+        // Escape is Cancel: a Preview that edited the project rolls back.
+        crate::panels::live_preview::cancel(app);
         app.dialog = None;
     }
+}
+
+/// Escape with a dialog open: it is Cancel. Escape while recording a shortcut cancels the
+/// recording, not the editor; so does Escape in its Delete Preset prompt.
+fn cancel_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if crate::panels::shortcut_editor::recording(app) || crate::panels::shortcut_editor::confirming(app) {
+        return;
+    }
+    if app.dialog == Some(crate::Dialog::Info) {
+        crate::panels::forms::close_info(app);
+        return;
+    }
+    if app.dialog == Some(crate::Dialog::GradientEditor) {
+        crate::panels::gradient_editor::finish(app, false, ctx);
+        return;
+    }
+    // Escape in Settings is Cancel: restore the settings from when it opened.
+    if app.dialog == Some(crate::Dialog::Settings)
+        && let Some(p) = app.dialog_state.prefs_snapshot.take()
+    {
+        app.session.prefs = p;
+        app.session.prefs_changed();
+    }
+    crate::panels::live_preview::cancel(app);
+    app.dialog = None;
 }
 
 type KeyEvent = (egui::Key, egui::Modifiers, bool, Option<egui::Key>);
@@ -341,23 +371,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         }
         // Escape closes dialogs.
         if key == egui::Key::Escape && app.dialog.is_some() {
-            // Escape while recording a shortcut cancels the recording, not the editor; so does
-            // Escape in its Delete Preset prompt.
-            if crate::panels::shortcut_editor::recording(app) || crate::panels::shortcut_editor::confirming(app) {
-                continue;
-            }
-            if app.dialog == Some(crate::Dialog::Info) {
-                crate::panels::forms::close_info(app);
-                continue;
-            }
-            // Escape in Settings is Cancel: restore the settings from when it opened.
-            if app.dialog == Some(crate::Dialog::Settings)
-                && let Some(p) = app.dialog_state.prefs_snapshot.take()
-            {
-                app.session.prefs = p;
-                app.session.prefs_changed();
-            }
-            app.dialog = None;
+            cancel_dialog(app, ctx);
             continue;
         }
         if app.dialog.is_some() {

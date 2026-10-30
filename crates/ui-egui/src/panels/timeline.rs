@@ -1528,8 +1528,8 @@ fn shift_range(ctx: &egui::Context, cid: ItemId, comp: &Comp, rows: &[Row], sele
     let anchor = ctx.data(|d| d.get_temp::<LayerId>(anchor_id(cid))).or_else(|| selected.first().copied())?;
     let a = comp.layers.iter().position(|l| l.id == anchor)?;
     let b = comp.layers.iter().position(|l| l.id == layer)?;
-    let span = comp.layers.get(a.min(b)..=a.max(b))?;
-    Some(span.iter().filter(|l| !l.switches.locked && rows.iter().any(|r| r.layer == l.id)).map(|l| l.id.0).collect())
+    let span = comp.layers.iter().skip(a.min(b)).take(a.max(b) - a.min(b) + 1);
+    Some(span.filter(|l| !l.switches.locked && rows.iter().any(|r| r.layer == l.id)).map(|l| l.id.0).collect())
 }
 
 /// Set on the frame the reorder drag is released.
@@ -1772,7 +1772,7 @@ fn layout(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, cid: ItemId, comp
 fn empty_timeline(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "(no composition)", Tokens::ui(12.0), t.text_faint);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("(no composition)"), Tokens::ui(12.0), t.text_faint);
     // Dropping footage into an empty Timeline should create its first composition,
     // just like dropping onto the Project panel's New Composition button (#649).
     if let Some(crate::panels::DragPayload::Item(dragged)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx).as_deref()
@@ -2213,7 +2213,7 @@ fn header_search_and_switches(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &T
     let comp = g.comp.clone();
     let sr = Rect::from_min_size(pos2(tc_rect.max.x + 14.0, top + 12.0), vec2((left_w - 420.0).clamp(120.0, 220.0), 22.0));
     let mut search = app.ui.timeline.search.clone();
-    widgets::search_field(ui, sr, &mut search, "Search", &t);
+    widgets::search_field(ui, sr, &mut search, crate::i18n::tr("Search"), &t);
     app.ui.timeline.search = search;
     app.auto.add("timeline.search", sr, "Search");
     let mut bx = rect.min.x + left_w - 10.0;
@@ -3591,7 +3591,15 @@ fn group_row_click(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
     }
     app.auto.add(&format!("timeline.group.{uid}.name"), gr_rect, name);
     if gr.clicked() && uid & (WAVE_BIT | GEOM_BIT) == 0 {
-        actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false})));
+        // Shift or Cmd/Ctrl adds the group to the selection, or takes a selected one out, as
+        // property rows and Effect Controls headers do (#2552: several effects and styles for
+        // one animation preset).
+        let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+        if add && app.session.state.selected_props.contains(&(layer.id, *uid)) {
+            actions.push(("prop.deselect".into(), json!({"layer": layer.id.0, "prop": uid})));
+        } else {
+            actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false, "add": add})));
+        }
     }
     if gr.double_clicked() {
         if fx.is_some() {
@@ -3622,7 +3630,7 @@ fn waveform_row(app: &mut EffectcraftApp, g: &Rw, rc: &RowCtx<'_>) {
     let RowKind::Waveform { item, .. } = &rc.row.kind else { return };
     lp.rect_filled(left, 0.0, if ri.is_multiple_of(2) { t.row } else { t.row_alt });
     let indent = cw.name + 6.0 + 14.0 * row.depth as f32;
-    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, "Waveform", Tokens::ui(12.0), t.text);
+    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, crate::i18n::tr("Waveform"), Tokens::ui(12.0), t.text);
     let wr = Rect::from_min_max(pos2(graph_x0, r.min.y), r.max);
     gp.rect_filled(wr, 0.0, t.tl_bg);
     app.auto.add(&format!("timeline.layer.{}.waveform", layer.id.0), wr, "Waveform");
@@ -3632,7 +3640,7 @@ fn waveform_row(app: &mut EffectcraftApp, g: &Rw, rc: &RowCtx<'_>) {
             gp.text(
                 pos2(tm.x(layer.in_point.seconds()).max(wr.min.x) + 6.0, wr.center().y),
                 Align2::LEFT_CENTER,
-                "Building waveform…",
+                crate::i18n::tr("Building waveform…"),
                 Tokens::ui(11.0),
                 t.text_faint,
             );
@@ -4111,6 +4119,7 @@ fn key_context_menu(app: &mut EffectcraftApp, g: &mut Rw, rc: &RowCtx<'_>, prop:
             ("Keyframe Interpolation…", "keys.interpolation", json!({})),
             ("Keyframe Velocity…", "keys.velocity", json!({})),
             ("Toggle Hold Keyframe", "keys.toggleHold", json!({})),
+            (if k.muted { "Unmute Keyframes" } else { "Mute Keyframes" }, "keys.setMuted", json!({"muted": !k.muted})),
             ("Rove Across Time", "keys.interpolation", json!({"roving": !k.roving})),
             ("-", "", json!({})),
             ("Easy Ease", "keys.easyEase", json!({})),
@@ -4203,6 +4212,8 @@ fn key_paint(g: &Rw, rc: &RowCtx<'_>, k: &effectcraft_engine::keyframe::Keyframe
         None if ks => t.keyframe_selected,
         None => t.keyframe,
     };
+    // Muted keys stay visible and editable but no longer drive the value.
+    let kcol = if k.muted { kcol.gamma_multiply(0.35) } else { kcol };
     if k.roving {
         // Roving keys: a small dot (their time follows their neighbours).
         gp.circle_filled(c, 2.5, kcol);
@@ -5128,6 +5139,7 @@ const SHAPE_ADD_ITEMS: &[(&str, &str)] = &[
     ("trim", "Trim Paths"),
     ("twist", "Twist"),
     ("wiggle", "Wiggle Paths"),
+    ("wiggler", "Wiggle Transform"),
     ("zigzag", "Zig Zag"),
 ];
 

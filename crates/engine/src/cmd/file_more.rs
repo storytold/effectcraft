@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use effectcraft_color::Label;
-use effectcraft_project::{AlphaMode, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid, limits};
+use effectcraft_project::{AlphaMode, CineonSettings, CineonUnits, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid, limits};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
@@ -501,7 +501,7 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
             }
             _ => return Err(bad("file.runScript", format!("step {}: needs `command`", i + 1))),
         };
-        if id == "file.runScript" || id == "script.run" {
+        if super::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
             return Err(bad("file.runScript", "scripts can't run scripts"));
         }
         let r = if from_file { s.execute_for_script(&id, params) } else { s.execute(&id, params) };
@@ -536,7 +536,7 @@ fn is_jsxbin(name: &str) -> bool {
 }
 
 /// A script error becomes a toast and a command error.
-fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
+pub(crate) fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
     if let Some(e) = out.get("error").filter(|e| !e.is_null()) {
         let line = e.get("line").and_then(Value::as_u64).map(|l| format!(" (line {l})")).unwrap_or_default();
         let msg = e.get("message").and_then(Value::as_str).unwrap_or("script error");
@@ -549,6 +549,13 @@ fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
 /// Run a script's code under its file name (installed / sample scripts, ScriptUI panels).
 pub(crate) fn run_js_named(s: &mut Session, code: &str, name: &str) -> Result<Value> {
     let out = run_js(s, code, name, false)?;
+    report_js(s, name, out)
+}
+
+/// Run the code of the script file at `path` (its `#include`s and `$.fileName` use that path),
+/// reported under its file name `name` (Startup and Shutdown scripts).
+pub(crate) fn run_js_file(s: &mut Session, code: &str, path: &str, name: &str) -> Result<Value> {
+    let out = run_js(s, code, path, false)?;
     report_js(s, name, out)
 }
 
@@ -594,6 +601,131 @@ pub(crate) struct Interpretation {
     preserve_rgb: Option<bool>,
     /// Start Timecode.
     start: Option<StartTimecode>,
+    /// Cineon Settings (DPX and Cineon footage).
+    cineon: CineonEdit,
+}
+
+/// Interpret Footage ▸ Cineon Settings parsed from command parameters (every field optional).
+#[derive(Clone, Debug, Default)]
+struct CineonEdit {
+    /// Logarithmic Conversion.
+    log: Option<bool>,
+    units: Option<CineonUnits>,
+    /// The units the Converted Black and White Points are given in (`pointUnits`, else `cineonUnits`,
+    /// else the footage's own Units).
+    point_units: Option<CineonUnits>,
+    converted_black: Option<f64>,
+    converted_white: Option<f64>,
+    /// 10 Bit Black and White Points.
+    black: Option<f64>,
+    white: Option<f64>,
+    gamma: Option<f64>,
+    rolloff: Option<f64>,
+}
+
+impl CineonEdit {
+    fn parse(p: &Value, cmd: &str) -> Result<CineonEdit> {
+        let units = |key: &str| -> Result<Option<CineonUnits>> {
+            match str_p(p, key) {
+                None => Ok(None),
+                Some(u) => CineonUnits::parse(u).map(Some).ok_or_else(|| bad(cmd, format!("{key}: 10bit|8bit|float, not `{u}`"))),
+            }
+        };
+        let num = |key: &str, lo: f64, hi: f64| -> Result<Option<f64>> {
+            match p.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .filter(|x| x.is_finite() && (lo..=hi).contains(x))
+                    .map(Some)
+                    .ok_or_else(|| bad(cmd, format!("{key}: a number from {lo} to {hi}"))),
+            }
+        };
+        let units_now = units("cineonUnits")?;
+        Ok(CineonEdit {
+            log: b_p(p, "logConversion"),
+            units: units_now,
+            point_units: units("pointUnits")?.or(units_now),
+            // Range-checked once their units are known (`settings_for`).
+            converted_black: num("convertedBlack", f64::MIN, f64::MAX)?,
+            converted_white: num("convertedWhite", f64::MIN, f64::MAX)?,
+            black: num("tenBitBlack", 0.0, 1023.0)?,
+            white: num("tenBitWhite", 0.0, 1023.0)?,
+            gamma: num("currentGamma", 0.1, 10.0)?,
+            rolloff: num("highlightRolloff", 0.0, 100.0)?,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.log.is_none()
+            && self.units.is_none()
+            && self.converted_black.is_none()
+            && self.converted_white.is_none()
+            && self.black.is_none()
+            && self.white.is_none()
+            && self.gamma.is_none()
+            && self.rolloff.is_none()
+    }
+
+    /// Footage `f`'s Cineon Settings after this edit; `None` when nothing changes them (no Cineon
+    /// parameters, or `f` is not a DPX or Cineon file).
+    fn settings_for(&self, f: &Footage, cmd: &str) -> Result<Option<CineonSettings>> {
+        if self.is_empty() || !f.is_cineon_file() {
+            return Ok(None);
+        }
+        let mut c = f.cineon;
+        let units = self.point_units.unwrap_or(c.units);
+        let point = |v: f64| -> Result<f32> {
+            let ten = units.to_ten_bit(v);
+            let max = units.from_ten_bit(f64::from(CineonSettings::MAX));
+            if (0.0..=f64::from(CineonSettings::MAX)).contains(&ten) {
+                Ok(ten as f32)
+            } else {
+                Err(bad(cmd, format!("converted points: 0 to {max} in {} units", units.label())))
+            }
+        };
+        if let Some(v) = self.converted_black {
+            c.converted_black = point(v)?;
+        }
+        if let Some(v) = self.converted_white {
+            c.converted_white = point(v)?;
+        }
+        if let Some(v) = self.log {
+            c.log_conversion = v;
+        }
+        if let Some(u) = self.units {
+            c.units = u;
+        }
+        if let Some(v) = self.black {
+            c.black = v as f32;
+        }
+        if let Some(v) = self.white {
+            c.white = v as f32;
+        }
+        if let Some(v) = self.gamma {
+            c.gamma = v as f32;
+        }
+        if let Some(v) = self.rolloff {
+            c.rolloff = v as f32;
+        }
+        if c.black >= c.white {
+            return Err(bad(cmd, "the 10 Bit Black Point must be below the 10 Bit White Point"));
+        }
+        Ok(Some(c))
+    }
+}
+
+/// Footage `f`'s Cineon Settings as commands report them (`null` for files they don't apply to).
+fn cineon_json(f: &Footage) -> Value {
+    if !f.is_cineon_file() {
+        return Value::Null;
+    }
+    let c = &f.cineon;
+    json!({
+        "logConversion": c.log_conversion, "units": c.units.id(),
+        "convertedBlack": c.units.from_ten_bit(f64::from(c.converted_black)), "convertedWhite": c.units.from_ten_bit(f64::from(c.converted_white)),
+        "tenBitBlack": c.black, "tenBitWhite": c.white, "currentGamma": c.gamma, "highlightRolloff": c.rolloff,
+    })
 }
 
 /// Interpret Footage ▸ Start Timecode.
@@ -687,7 +819,21 @@ impl Interpretation {
                 v.as_f64().filter(|x| x.is_finite() && (0.0..=StartTimecode::MAX as f64).contains(x)).map(|x| x.round() as i64).ok_or_else(start_err)?,
             )),
         };
+        it.cineon = CineonEdit::parse(p, cmd)?;
         Ok(it)
+    }
+
+    /// Check the Cineon Settings this interpretation gives each of `footage`: an error names a
+    /// value out of range, or Cineon parameters when none of the footage is DPX or Cineon.
+    pub(crate) fn check<'a>(&self, footage: impl IntoIterator<Item = &'a Footage>, cmd: &str) -> Result<()> {
+        if self.cineon.is_empty() {
+            return Ok(());
+        }
+        let mut any = false;
+        for f in footage {
+            any |= self.cineon.settings_for(f, cmd)?.is_some();
+        }
+        if any { Ok(()) } else { Err(bad(cmd, "Cineon Settings apply to DPX and Cineon footage only")) }
     }
 
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
@@ -749,6 +895,10 @@ impl Interpretation {
         if let Some(v) = self.preserve_rgb {
             f.preserve_rgb = v;
         }
+        // Checked before the edit (`Interpretation::check`).
+        if let Ok(Some(c)) = self.cineon.settings_for(f, "file.interpretFootage") {
+            f.cineon = c;
+        }
         // After the frame rate: timecode is read at the footage's rate.
         if let Some(start) = self.start.as_ref().and_then(|t| t.frame(f.frame_rate)) {
             f.start_timecode = start;
@@ -795,6 +945,11 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("file.interpretFootage", "select footage"));
     }
     let it = Interpretation::parse(p, "file.interpretFootage")?;
+    let footage = items.iter().filter_map(|i| match s.project.item(*i).map(|x| &x.kind) {
+        Some(ItemKind::Footage(f)) => Some(f),
+        _ => None,
+    });
+    it.check(footage, "file.interpretFootage")?;
     let guesses: Vec<Option<(AlphaMode, [f32; 3])>> = items
         .iter()
         .map(|i| match (it.guess, s.project.item(*i).map(|x| &x.kind)) {
@@ -830,7 +985,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
                 "linearLight": f.linear_light, "preserveRgb": f.preserve_rgb, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
-                "frames": f.sequence_frames(),
+                "frames": f.sequence_frames(), "cineon": cineon_json(f),
             })),
             _ => None,
         })
@@ -861,6 +1016,9 @@ fn apply_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
                 f.linear_light = src.linear_light;
                 f.preserve_rgb = src.preserve_rgb;
                 f.color_profile = src.color_profile;
+                if f.is_cineon_file() && src.is_cineon_file() {
+                    f.cineon = src.cineon;
+                }
                 if src.native_rate.is_some() {
                     if f.native_rate.is_none() {
                         f.native_rate = Some(f.frame_rate);
@@ -1090,7 +1248,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start)}",
+            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
             has_footage_selection,
             interpret
         ),

@@ -745,7 +745,8 @@ function __uiMouseWanted(c, inherited) {
 }
 
 // A ScriptUI MouseEvent. `v`: {x, y (relative to the target control), button (0 left, 1 middle,
-// 2 right), detail (click count), screenX, screenY, altKey, ctrlKey, metaKey, shiftKey}.
+// 2 right), buttons (held: 1 left, 2 right, 4 middle), detail (click count), screenX, screenY,
+// altKey, ctrlKey, metaKey, shiftKey}.
 function __uiMouseEvent(type, target, v) {
   var num = function (x, d) {
     x = Number(x);
@@ -765,6 +766,7 @@ function __uiMouseEvent(type, target, v) {
     timeStamp: new Date(),
     detail: num(v.detail, type === "mousemove" || type === "mouseover" || type === "mouseout" ? 0 : 1),
     button: num(v.button, 0),
+    buttons: num(v.buttons, 0),
     clientX: num(v.x, 0),
     clientY: num(v.y, 0),
     screenX: num(v.screenX, 0),

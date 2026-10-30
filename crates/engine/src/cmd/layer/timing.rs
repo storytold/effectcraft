@@ -18,7 +18,7 @@ pub(super) fn timing(s: &mut Session, p: &Value) -> Result<Value> {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let fd = comp.frame_duration();
         let comp_dur = comp.duration;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let shift = |l: &mut Layer, d: Tick| {
                 l.start_time += d;
                 l.in_point += d;
@@ -161,14 +161,14 @@ pub(super) fn arrange(s: &mut Session, p: &Value) -> Result<Value> {
                 for i in 1..n {
                     if picked(&comp.layers[i]) && !picked(&comp.layers[i - 1]) {
                         let run_end = (i..n).find(|j| !picked(&comp.layers[*j])).unwrap_or(n);
-                        comp.layers[i - 1..run_end].rotate_left(1);
+                        comp.layers.rotate_range_left(i - 1..run_end, 1);
                     }
                 }
             } else {
                 for i in (0..n.saturating_sub(1)).rev() {
                     if picked(&comp.layers[i]) && !picked(&comp.layers[i + 1]) {
                         let run_start = (0..=i).rev().find(|j| !picked(&comp.layers[*j])).map_or(0, |j| j + 1);
-                        comp.layers[run_start..=i + 1].rotate_right(1);
+                        comp.layers.rotate_range_right(run_start..=i + 1, 1);
                     }
                 }
             }

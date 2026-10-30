@@ -236,7 +236,7 @@ fn dragging_selected_project_items_adds_every_item_to_the_viewer() {
     let to = comp_to_screen(&h.ctx, [80.0, 45.0]).unwrap();
     drag(&mut h, from, to, Modifiers::NONE);
     assert_eq!(stack(&h), ["Clip", "Other", "Top", "Middle", "Bottom"]);
-    for layer in &h.state().session.active_comp().unwrap().layers[..2] {
+    for layer in h.state().session.active_comp().unwrap().layers.iter().take(2) {
         let Some(KV::Vec3(p)) = layer.props.prop("transform/position").map(|p| p.value.clone()) else { panic!("no position") };
         let tol = 1.0 / last_fit(&h.ctx) as f64 + 1e-6;
         assert!((p[0] - 80.0).abs() <= tol && (p[1] - 45.0).abs() <= tol, "{p:?}");
@@ -629,6 +629,27 @@ fn import_dialog_offers_the_image_sequence_option() {
     click_id(&mut h, "form.ok");
     step_until(&mut h, |h| footage_items(h).len() == 2);
     assert_eq!(footage_items(&h)[1], ("frame_[0001-0003].png".to_string(), 3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2573: the empty Composition viewer's New Composition From Footage imports the picked file
+/// (through the Import Image Sequence question a numbered still asks) and makes a composition
+/// of it, as in After Effects.
+#[test]
+fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    h.run_steps(3);
+    let dir = frames("fromfootage", 2);
+    let pick = dir.join("frame_0002.png").to_string_lossy().to_string();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.state_mut().hooks.pick_files = Some(Box::new(move |_: &[&str]| vec![pick.clone()]));
+    click_id(&mut h, "viewer.empty.import");
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| h.state().session.active_comp().is_some());
+    let comp = h.state().session.active_comp().unwrap();
+    assert_eq!((comp.width, comp.height), (64, 32));
+    assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["frame_0002.png"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

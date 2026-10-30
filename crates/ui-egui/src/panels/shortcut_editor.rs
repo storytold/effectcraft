@@ -49,6 +49,8 @@ const PANEL_COLOR: Color32 = Color32::from_rgb(0x3f, 0xa8, 0x6c);
 
 pub fn open(app: &mut EffectcraftApp) {
     app.dialog_state.shortcuts = EditorState::default();
+    // Scripts copied into the Scripts folder since the table was built are listed too.
+    app.session.scripts_changed();
     app.dialog = Some(Dialog::Shortcuts);
 }
 

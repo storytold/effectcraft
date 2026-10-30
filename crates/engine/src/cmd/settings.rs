@@ -73,13 +73,21 @@ fn prefs_pages(_: &mut Session, _: &Value) -> Result<Value> {
 
 // ---------------------------------------------------------------- shortcuts
 
-/// The bindable named by `command` (+ `params`), or by a binding key (`app.settings {...}`).
-fn bindable(s: &Session, p: &Value, cmd: &str) -> Result<crate::shortcuts::Bindable> {
+/// The bindable named by `command` (+ `params`), or by a binding key (`app.settings {...}`). A
+/// File ▸ Scripts entry (`file.runScript {"name": …}`) is looked up in File ▸ Scripts' list as it
+/// is now (the Scripts folder and the bundled scripts), and a script it doesn't list is an error,
+/// not Run Script File….
+fn bindable(s: &mut Session, p: &Value, cmd: &str) -> Result<crate::shortcuts::Bindable> {
     let c = str_p(p, "command").ok_or_else(|| bad(cmd, "missing `command`"))?;
     let params = p.get("params").cloned().unwrap_or(Value::Null);
-    let t = s.shortcuts();
     let key = binding_key(c, &params);
-    t.find(&key).or_else(|| t.find(c)).cloned().ok_or_else(|| bad(cmd, format!("`{key}` can't have a shortcut (see shortcuts.list)")))
+    let script = (c == "file.runScript" && params.get("name").is_some()) || c.starts_with("file.runScript {");
+    if script {
+        s.scripts_changed();
+    }
+    let t = s.shortcuts();
+    let found = if script { t.find(&key) } else { t.find(&key).or_else(|| t.find(c)) };
+    found.cloned().ok_or_else(|| bad(cmd, format!("`{key}` can't have a shortcut (see shortcuts.list)")))
 }
 
 fn keys_param(p: &Value, cmd: &str) -> Result<Vec<String>> {
@@ -93,6 +101,8 @@ fn keys_param(p: &Value, cmd: &str) -> Result<Vec<String>> {
 }
 
 fn sc_list(s: &mut Session, p: &Value) -> Result<Value> {
+    // Scripts copied into the Scripts folder since the table was built are listed too.
+    s.scripts_changed();
     let q = str_p(p, "query").unwrap_or("").to_lowercase();
     let assigned = p.get("assigned").and_then(Value::as_bool).unwrap_or(false);
     let keys_q = str_p(p, "keys").and_then(normalize);

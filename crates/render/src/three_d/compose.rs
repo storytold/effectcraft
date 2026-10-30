@@ -523,6 +523,7 @@ fn gather<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Layer], out: (u32,
         extra = ctx
             .comp
             .layers
+            .as_arcs()
             .par_iter()
             .filter(|l| l.switches.three_d && l.has_video() && l.is_active_at(ctx.time) && !in_run.contains(&l.id) && !l.switches.adjustment)
             .filter(|l| Material::of(ctx, l).casts_shadows != 0)

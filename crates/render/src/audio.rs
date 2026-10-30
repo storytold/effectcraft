@@ -406,7 +406,7 @@ mod tests {
             pr.value = effectcraft_project::Value::Vec2([-6.0206, -96.0]);
         }
         let mut comp = comp;
-        comp.layers = vec![l1, l2];
+        comp.layers = vec![l1, l2].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         assert!(comp_has_audio(&p, cid));
         let rate = 1000;
@@ -452,11 +452,11 @@ mod tests {
         let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
         let tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         let mut inner = base.clone();
-        inner.layers = vec![tone];
+        inner.layers = vec![tone].into();
         let inner_id = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let pre = build::layer(&mut p, &base, "pre", LayerSource::Comp { item: inner_id }, (64, 64), None);
         let mut outer = base.clone();
-        outer.layers = vec![pre];
+        outer.layers = vec![pre].into();
         let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
         let rate = 8000;
         let t = Tick::from_seconds_f64(0.5);
@@ -483,7 +483,7 @@ mod tests {
         let mut tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         tone.stretch = stretch;
         let mut comp = base.clone();
-        comp.layers = vec![tone];
+        comp.layers = vec![tone].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let n = 2000usize;
         let t = Tick::from_seconds_f64(0.5);

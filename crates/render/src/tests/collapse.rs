@@ -53,17 +53,17 @@ fn scene(collapse: bool, flatten: bool) -> (Project, ItemId) {
         a.parent = Some(null.id);
         b.parent = Some(null.id);
         let mut c = outer.clone();
-        c.layers = vec![null, b, a, bg];
+        c.layers = vec![null, b, a, bg].into();
         p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(c.into()))
     } else {
         let mut inner = inner;
-        inner.layers = vec![b, a];
+        inner.layers = vec![b, a].into();
         let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (100, 100), None);
         xf(&mut pre);
         pre.switches.collapse = collapse;
         let mut c = outer.clone();
-        c.layers = vec![pre, bg];
+        c.layers = vec![pre, bg].into();
         p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(c.into()))
     };
     (p, cid)
@@ -154,7 +154,7 @@ fn referenced_layer_overrides_change_the_owner_cache_key() {
     p.next_id = next;
     b.props.sub_mut("effects").unwrap().children.push(fx.into());
     let mut c = comp;
-    c.layers = vec![b, a];
+    c.layers = vec![b, a].into();
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
     let comp = p.comp(cid).unwrap();
     let b = comp.layer(bid).unwrap();
@@ -182,7 +182,7 @@ fn collapsed_3d_layers_join_the_parent_scene() {
         let mut blue = solid(&mut p, &inner, [0.0, 0.0, 1.0], (60, 60), [100.0, 100.0, -200.0]);
         blue.switches.three_d = true;
         let mut inner = inner;
-        inner.layers = vec![blue];
+        inner.layers = vec![blue].into();
         let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (200, 200), None);
         pre.switches.three_d = true;
@@ -190,7 +190,7 @@ fn collapsed_3d_layers_join_the_parent_scene() {
         let mut red = solid(&mut p, &outer, [1.0, 0.0, 0.0], (100, 100), [100.0, 100.0, 0.0]);
         red.switches.three_d = true;
         let mut c = outer;
-        c.layers = vec![red, pre];
+        c.layers = vec![red, pre].into();
         let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(c.into()));
         render_frame(&p, cid, Tick::ZERO, 1.0).get(100, 100)
     };
@@ -228,11 +228,11 @@ fn scaled_square(cr: bool, via_parent: bool) -> Image {
         set(&mut null, "transform/scale", Value::Vec3([800.0, 800.0, 100.0]));
         set(&mut l, "transform/position", Value::Vec3([0.0, 0.0, 0.0]));
         l.parent = Some(null.id);
-        c.layers = vec![l, null];
+        c.layers = vec![l, null].into();
     } else {
         set(&mut l, "transform/position", Value::Vec3([100.3, 100.3, 0.0]));
         set(&mut l, "transform/scale", Value::Vec3([800.0, 800.0, 100.0]));
-        c.layers = vec![l];
+        c.layers = vec![l].into();
     }
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
     render_frame(&p, cid, Tick::ZERO, 1.0)
@@ -261,7 +261,7 @@ fn wireframe_quality_draws_the_layer_bounds() {
     let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], (40, 40), [50.0, 50.0, 0.0]);
     l.switches.quality = Quality::Wireframe;
     let mut c = comp;
-    c.layers = vec![l];
+    c.layers = vec![l].into();
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
     let img = render_frame(&p, cid, Tick::ZERO, 1.0);
     assert_eq!(img.get(50, 50)[3], 0.0, "no fill");
@@ -272,7 +272,7 @@ fn wireframe_quality_draws_the_layer_bounds() {
     let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], (40, 40), [50.5, 50.0, 0.0]);
     l.switches.quality = Quality::Draft;
     let mut c = comp;
-    c.layers = vec![l];
+    c.layers = vec![l].into();
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
     let img = render_frame(&p, cid, Tick::ZERO, 1.0);
     assert!(img.data.iter().all(|q| q[3] == 0.0 || q[3] == 1.0));
@@ -290,13 +290,13 @@ fn collapsed_precomp_of_another_size_renders_through_the_parent_camera() {
         let mut blue = solid(&mut p, &inner, [0.0, 0.0, 1.0], (40, 40), [500.0, 300.0, 0.0]);
         blue.switches.three_d = true;
         let mut inner = inner;
-        inner.layers = vec![blue];
+        inner.layers = vec![blue].into();
         let iid = p.add_item("Scene", Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let mut pre = build::layer(&mut p, &outer, "Scene", LayerSource::Comp { item: iid }, (1000, 600), None);
         pre.switches.three_d = three_d_precomp;
         pre.switches.collapse = true;
         let mut c = outer.clone();
-        c.layers = vec![pre];
+        c.layers = vec![pre].into();
         if camera {
             let cam = build::layer(&mut p, &outer, "Camera", LayerSource::Camera, (300, 200), None);
             c.layers.insert(0, cam);
@@ -327,7 +327,7 @@ fn text_scaled_up_stays_sharp_without_the_switch() {
         set(&mut l, "transform/scale", Value::Vec3([scale, scale, 100.0]));
         assert!(!l.switches.collapse);
         let mut c = comp;
-        c.layers = vec![l];
+        c.layers = vec![l].into();
         let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
         render_frame(&p, cid, Tick::ZERO, 1.0)
     };
@@ -351,7 +351,7 @@ fn unscaled_text_rasterises_at_the_output_scale() {
     let mut comp = Comp::new(240, 160, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
     let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (240, 160), None);
     l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HE".into(), size: 30.0, ..Default::default() }));
-    comp.layers = vec![l];
+    comp.layers = vec![l].into();
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
     for i in 0..500 {
         let pos = [3.1 + i as f64 * 0.37, 7.3 + i as f64 * 0.29, 0.0];
@@ -387,7 +387,7 @@ fn effects_on_a_scaled_shape_follow_its_scale() {
         set(&mut l, "transform/position", Value::Vec3([100.0, 100.0, 0.0]));
         set(&mut l, "transform/scale", Value::Vec3([scale, scale, 100.0]));
         let mut c = comp;
-        c.layers = vec![l];
+        c.layers = vec![l].into();
         let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
         render_frame(&p, cid, Tick::ZERO, 1.0)
     };

@@ -314,7 +314,7 @@ fn particle_world_scene(pan: f64) -> (Project, ItemId) {
         let Value::Vec3(v) = pr.value else { panic!("{path}: {:?}", pr.value) };
         pr.value = Value::Vec3([v[0] + pan, v[1], v[2]]);
     }
-    p.comp_mut(cid).unwrap().layers = vec![cam, l];
+    p.comp_mut(cid).unwrap().layers = vec![cam, l].into();
     (p, cid)
 }
 
@@ -373,7 +373,7 @@ fn burst_scene_keys(cut: Option<f64>, start: f64, stretch: f64, hold: bool) -> (
     l.in_point = l.start_time;
     l.out_point = Tick::from_seconds_f64(4.0);
     l.stretch = stretch;
-    p.comp_mut(cid).unwrap().layers = vec![l];
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
     (p, cid)
 }
 
@@ -507,7 +507,7 @@ fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
         let key = |t: f64, v: f64| Keyframe::new(Tick::from_seconds_f64(t), Value::Scalar(v));
         fx.unwrap().prop_mut("birthRate").unwrap().keys = vec![key(0.0, 3.0), key(0.5, 3.0), key(0.5 + 1.0 / 30.0, 0.0)];
     }
-    p.comp_mut(cid).unwrap().layers = vec![l];
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
     (p, cid)
 }
 
@@ -614,7 +614,7 @@ fn cache_scene() -> (Project, ItemId) {
         vec![Keyframe::new(Tick::ZERO, Value::Vec3([20.0, 70.0, 0.0])), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Vec3([120.0, 70.0, 0.0]))];
     add_effect_200(&mut p, &mut text, "ec.blur.gaussian", &[("blurriness", Value::Scalar(6.0))]);
     let c = p.comp_mut(cid).unwrap();
-    c.layers = vec![text, shape, bg];
+    c.layers = vec![text, shape, bg].into();
     (p, cid)
 }
 
@@ -854,7 +854,7 @@ fn edge_pinning_displaces_all_of_a_centred_shape_layer() {
         p.comp_mut(cid).unwrap().layers.push(l.clone());
         let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
         add_effect_200(&mut p, &mut l, id, &vals);
-        p.comp_mut(cid).unwrap().layers = vec![l];
+        p.comp_mut(cid).unwrap().layers = vec![l].into();
         let warped = render_frame(&p, cid, Tick::ZERO, 1.0);
         // Alpha change per comp quadrant (TL, TR, BL, BR): the rectangle's edges move in each.
         let mut q = [0.0f32; 4];
@@ -888,7 +888,7 @@ fn default_effect_points_sit_at_the_centre_of_a_shape_layer() {
         p.comp_mut(cid).unwrap().layers.push(l.clone());
         let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
         add_effect_200(&mut p, &mut l, id, &vals);
-        p.comp_mut(cid).unwrap().layers = vec![l];
+        p.comp_mut(cid).unwrap().layers = vec![l].into();
         let warped = render_frame(&p, cid, Tick::ZERO, 1.0);
         // Alpha change per comp quadrant (TL, TR, BL, BR): the top and bottom edges move in each.
         let mut q = [0.0f32; 4];
@@ -917,7 +917,7 @@ fn effects_on_text_reach_past_the_text_bounds() {
     let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
     let painted = plain.data.iter().filter(|px| px[3] > 0.5).count();
     add_effect_200(&mut p, &mut l, "ec.distort.cctiler", &[("scale", Value::Scalar(25.0))]);
-    p.comp_mut(cid).unwrap().layers = vec![l];
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
     let tiled = render_frame(&p, cid, Tick::ZERO, 1.0);
     let (mut lo, mut hi) = (u32::MAX, 0u32);
     for y in 0..100 {
@@ -951,7 +951,7 @@ fn cc_smear_trails_text_past_its_bounds() {
         "ec.distort.ccsmear",
         &[("from", Value::Vec2([110.0, 45.0])), ("to", Value::Vec2([185.0, 45.0])), ("reach", Value::Scalar(100.0)), ("radius", Value::Scalar(40.0))],
     );
-    p.comp_mut(cid).unwrap().layers = vec![l];
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
     let smeared = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
     assert!(plain > 40 && smeared > plain + 25, "CC Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
 }
@@ -974,7 +974,7 @@ fn layer_parameters_see_a_whole_shape_layer() {
     let matte_id = shape.id;
     let mut s = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
     add_effect_200(&mut p, &mut s, "ec.channel.setmatte", &[("takeMatteFromLayer", Value::Layer(Some(matte_id.0)))]);
-    p.comp_mut(cid).unwrap().layers = vec![s, shape];
+    p.comp_mut(cid).unwrap().layers = vec![s, shape].into();
     let f = render_frame(&p, cid, Tick::ZERO, 1.0);
     // The matte covers x 50..150, y 25..75: kept inside (all four quadrants), gone outside.
     for (x, y) in [(60, 30), (140, 30), (60, 70), (140, 70)] {
@@ -1064,7 +1064,7 @@ fn self_inputs_share_source_semantics_across_effects_and_times() {
         "ec.channel.blend",
         &[("blendWithLayer", Value::Layer(Some(id))), ("blendWithLayerSource", Value::Enum(0)), ("blendWithOriginal", Value::Scalar(0.0))],
     );
-    p.comp_mut(cid).unwrap().layers = vec![l];
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
     let c = p.comp(cid).unwrap();
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     assert!(crate::cache::input_key(&ctx, &c.layers[0], 1.0, false, false, 1).is_some());
@@ -1082,7 +1082,7 @@ fn timed_source_reads_preserve_other_layer_masks() {
     let mask = build::mask(&mut Ids(&mut next), "Left", ShapePath::rect([50.0, 50.0], 80.0, 80.0), MaskMode::Add, [255, 255, 0]);
     p.next_id = next;
     other.props.sub_mut("masks").unwrap().children.push(mask.into());
-    p.comp_mut(cid).unwrap().layers = vec![owner.clone(), other.clone()];
+    p.comp_mut(cid).unwrap().layers = vec![owner.clone(), other.clone()].into();
     let ctx = crate::EvalCtx::new(&p, cid, p.comp(cid).unwrap(), Tick::ZERO);
     let renderer = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
     let host = crate::FxHost { r: &renderer, ctx: &ctx, layer: &owner, origin: [0.0; 2], index: Default::default(), original: None };
@@ -1103,7 +1103,7 @@ fn layer_dependencies_remain_cacheable_and_invalidate_only_related_edits() {
     let unrelated = solid(&mut p, &comp, [0.2, 0.3, 0.4], 200, 100);
     add_effect_200(&mut p, &mut source, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(third.id.0))), ("blendWithOriginal", Value::Scalar(0.0))]);
     add_effect_200(&mut p, &mut owner, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(source.id.0))), ("blendWithOriginal", Value::Scalar(0.0))]);
-    p.comp_mut(cid).unwrap().layers = vec![owner, source, third, unrelated];
+    p.comp_mut(cid).unwrap().layers = vec![owner, source, third, unrelated].into();
     let key = |p: &Project, time: f64, limit| {
         let comp = p.comp(cid).unwrap();
         let ctx = crate::EvalCtx::new(p, cid, comp, Tick::from_seconds_f64(time));
@@ -1144,12 +1144,12 @@ fn precomp_dependencies_hash_nested_sources_and_evaluated_animation() {
     child.props.prop_mut("transform/opacity").unwrap().keys =
         vec![Keyframe::new(Tick::ZERO, Value::Scalar(100.0)), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Scalar(50.0))];
     let mut nested = comp.clone();
-    nested.layers = vec![child];
+    nested.layers = vec![child].into();
     let nested_id = p.add_item("Nested", Label::Sandstone, None, ItemKind::Comp(nested.into()));
     let pre = build::layer(&mut p, &comp, "Precomp", LayerSource::Comp { item: nested_id }, (200, 100), None);
     let mut owner = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
     add_effect_200(&mut p, &mut owner, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(pre.id.0))), ("blendWithOriginal", Value::Scalar(0.0))]);
-    p.comp_mut(cid).unwrap().layers = vec![owner, pre];
+    p.comp_mut(cid).unwrap().layers = vec![owner, pre].into();
     let key = |p: &Project, time| {
         let c = p.comp(cid).unwrap();
         crate::cache::layer_key(&crate::EvalCtx::new(p, cid, c, time), &c.layers[0], 1.0, false, false).unwrap()
@@ -1224,7 +1224,7 @@ fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
         let Value::Vec3(v) = pr.value else { panic!("{path}: {:?}", pr.value) };
         pr.value = Value::Vec3([v[0] + pan, v[1], v[2]]);
     }
-    p.comp_mut(cid).unwrap().layers = vec![cam, owner, source];
+    p.comp_mut(cid).unwrap().layers = vec![cam, owner, source].into();
     (p, cid)
 }
 
@@ -1336,7 +1336,7 @@ fn instance_scene(pan: f64) -> (Project, ItemId) {
     }
     let mut owner = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
     add_effect_200(&mut p, &mut owner, "ec.3d.instance3d", &[("layer", Value::Layer(Some(model.id.0)))]);
-    p.comp_mut(cid).unwrap().layers = vec![cam, owner, model];
+    p.comp_mut(cid).unwrap().layers = vec![cam, owner, model].into();
     (p, cid)
 }
 

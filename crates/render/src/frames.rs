@@ -1,6 +1,7 @@
 use super::footage::NoFootage;
 use super::opts::RenderOpts;
-use super::{EvalCtx, Footage, FrameBlend, FrameRate, Image, ItemId, Layer, LayerSource, Project, Renderer, TICKS_PER_SECOND, Tick, shapes, text};
+use super::{Arc, EvalCtx, Footage, FrameBlend, FrameRate, Image, ItemId, Layer, LayerSource, Project, Renderer, TICKS_PER_SECOND, Tick, shapes, text};
+use rayon::prelude::*;
 
 /// The layer's frame blending mode, if the comp's Enable Frame Blending switch is on.
 /// One field of an interlaced frame as a full frame: the field's lines (`parity` 0 = even /
@@ -31,6 +32,23 @@ pub fn field_frame(img: &Image, parity: usize) -> Image {
         }
     }
     out
+}
+
+/// Interpret Footage ▸ Cineon Settings ▸ Logarithmic Conversion converts the log code values of
+/// a decoded (premultiplied) frame of `f` to the Current Gamma. When the conversion does not
+/// apply, the frame is returned unchanged.
+pub fn cineon_frame(img: Arc<Image>, f: &Footage) -> Arc<Image> {
+    if !f.cineon_applies() {
+        return img;
+    }
+    let cs = f.cineon;
+    let mut out = (*img).clone();
+    out.data.par_iter_mut().for_each(|p| {
+        let a = p[3];
+        let c = if a > 1e-6 { [p[0] / a, p[1] / a, p[2] / a] } else { [0.0; 3] }.map(|v| cs.convert(v));
+        *p = [c[0] * a, c[1] * a, c[2] * a, a];
+    });
+    Arc::new(out)
 }
 
 /// Interpret Footage ▸ Invert Alpha and Interpret As Linear Light on decoded (premultiplied)

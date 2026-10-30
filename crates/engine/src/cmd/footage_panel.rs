@@ -56,6 +56,12 @@ pub fn timecode(item: Option<&effectcraft_project::Item>, fr: effectcraft_time::
     }
 }
 
+/// The frame the Footage panel shows: footage `f` at source time `t`, with its Cineon Settings
+/// applied.
+pub fn frame(s: &Session, item: ItemId, f: &effectcraft_project::Footage, t: Tick) -> Option<std::sync::Arc<effectcraft_raster::Image>> {
+    s.footage.frame(item, f, t).map(|img| effectcraft_render::cineon_frame(img, f))
+}
+
 fn source_time(s: &Session, p: &Value, item: ItemId) -> Option<Tick> {
     let (_, fr) = source_timing(s, item);
     if let Some(t) = f_p(p, "time") {

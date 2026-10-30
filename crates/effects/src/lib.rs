@@ -312,6 +312,19 @@ impl Buf {
         self.offset[0] += l as f64;
         self.offset[1] += t as f64;
     }
+    /// Grow by `left` and `top` transparent pixels on those sides only.
+    pub fn grow_left_top(&mut self, left: u32, top: u32) {
+        self.pad_sides([left, top, 0, 0]);
+    }
+    /// Give the buffer the pixel-grid phase (modulo [`GRID_ALIGN`]) that [`Buf::cover`] of
+    /// `size` would, by growing left/top only ([`align_plan`]). A downscaled layer is resampled
+    /// through a pyramid whose 2x2 blocks follow the buffer's grid, so a buffer that starts at
+    /// its content's corner instead of the cover's resamples to different pixels (#1205).
+    pub fn align(&mut self, size: [f64; 2]) {
+        if let Some((l, t)) = align_plan(self.offset, self.scale, size, self.img.width, self.img.height) {
+            self.grow_left_top(l, t);
+        }
+    }
     /// Grow by `pad` transparent pixels on every side, within [`pad_within_budget`] and as
     /// clamped by [`Image::effective_pad`].
     pub fn pad(&mut self, pad: u32) {
@@ -375,6 +388,33 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
         return None;
     }
     Some((dx as i64, dy as i64))
+}
+
+/// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
+/// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
+/// skips the renderer's cover of the whole layer rectangle (#1205).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+
+/// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
+/// of the resampling pyramid used for downscaled layers.
+pub const GRID_ALIGN: u32 = 64;
+
+/// Left/top growth giving a buffer [`cover_plan`]'s grid phase modulo [`GRID_ALIGN`]; `None`
+/// when there is nothing to add.
+pub fn align_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32)> {
+    let (dx, dy, _, _) = cover_plan(offset, scale, size, width, height)?;
+    let (l, t) = (dx % GRID_ALIGN, dy % GRID_ALIGN);
+    (l != 0 || t != 0).then_some((l, t))
+}
+
+/// Padding for an effect that moves pixels up to `want` past the content (not an adjustment
+/// layer): `want`, capped at what reaches the layer rectangle, in whole [`GRID_ALIGN`] steps so
+/// the grid phase stays. 0 once the buffer covers the layer.
+pub fn cover_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64, want: u32) -> u32 {
+    if ctx.adjustment {
+        return 0;
+    }
+    want.min(util::layer_cover_pad(ctx, size, offset, scale)).div_ceil(GRID_ALIGN) * GRID_ALIGN
 }
 
 /// Where [`Buf::cover`] would take a buffer: shift its pixels by `(dx, dy)` and resize it to
@@ -553,6 +593,15 @@ pub struct EffectSpec {
     pub gpu: bool,
     /// Supports 32 bpc float (badge).
     pub float: bool,
+}
+
+impl EffectSpec {
+    /// True when this effect grows its own buffer (blur/glow margins, Repeat Edge
+    /// [`Buf::cover`], displacement [`cover_pad`]) so a stack of only these can skip the
+    /// renderer's full-layer cover and keep the pyramid grid phase (#1205).
+    pub fn skips_cover(&self) -> bool {
+        SKIPS_COVER.contains(&self.id)
+    }
 }
 
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {
@@ -1582,5 +1631,25 @@ mod tests {
         let g = instantiate(find("ec.noise.matchgrain").unwrap(), &mut Ids(&mut next), "Match Grain", [10.0, 10.0]);
         assert_eq!(g.get("noiseSourceLayerSource").map(|p| p.value.clone()), Some(Value::Enum(0)));
         assert_eq!(g.props().filter(|p| p.match_id == "noiseSourceLayerSource").count(), 1);
+    }
+
+    #[test]
+    fn align_plan_is_cover_shift_mod_grid() {
+        // Content inset from the layer origin: pixel 0 maps to layer (50, 30).
+        let offset = [-50.0, -30.0];
+        let scale = 1.0;
+        let size = [1920.0, 1080.0];
+        let (dx, dy, _, _) = cover_plan(offset, scale, size, 80, 40).unwrap();
+        assert_eq!((dx, dy), (50, 30));
+        assert_eq!(align_plan(offset, scale, size, 80, 40), Some((50, 30)));
+        assert_eq!(align_plan([-64.0, -128.0], 1.0, size, 80, 40), None);
+    }
+
+    #[test]
+    fn known_margin_effects_skip_cover_and_twirl_does_not() {
+        for id in SKIPS_COVER {
+            assert!(find(id).expect(id).skips_cover(), "{id}");
+        }
+        assert!(!find("ec.distort.twirl").unwrap().skips_cover());
     }
 }

@@ -470,7 +470,7 @@ mod tests {
         let mut ids = Ids(&mut p.next_id);
         add_style(&mut a, &mut ids, "dropShadow", &gl, true);
         add_style(&mut b, &mut ids, "bevelEmboss", &gl, true);
-        comp.layers = vec![a, b];
+        comp.layers = vec![a, b].into();
         comp.layers[1].props.sub_mut(GROUP).unwrap().sub_mut(BLENDING).unwrap().get_mut("globalLightAngle").unwrap().value = Value::Scalar(45.0);
         assert!(needs_sync(&comp));
         sync_comp(&mut comp);

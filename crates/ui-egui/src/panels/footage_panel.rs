@@ -68,7 +68,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let cached: Option<((u64, i64, u64), egui::TextureHandle, [u32; 2])> = ctx.data(|d| d.get_temp(tid));
         let tex = match cached {
             Some((k, tex, size)) if k == key => Some((tex, size)),
-            _ => app.session.footage.frame(view.item, f, view.time).map(|img| {
+            _ => effectcraft_engine::commands::footage_panel::frame(&app.session, view.item, f, view.time).map(|img| {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.to_rgba8());
                 let tex = crate::frames::load_fitted(&ctx, "footage-panel", ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| d.insert_temp(tid, (key, tex.clone(), [img.width, img.height])));

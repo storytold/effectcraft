@@ -1484,6 +1484,68 @@ fn key_selection_toggles_and_skips_locked_layers_and_hold_restores_bezier() {
 }
 
 #[test]
+fn muting_keys_skips_them_in_the_timeline_value_and_undoes() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0), (2.0, 300.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    let value_at = |s: &Session, t: f64| layer(s, a).props.prop("transform/opacity").unwrap().value_at(Tick::from_seconds_f64(t)).as_f64();
+    let select = |s: &mut Session| s.execute("keys.select", json!({"keys": [{"layer": a, "path": "transform/opacity", "time": 1.0}]})).unwrap();
+    select(&mut s);
+    let before = value_at(&s, 0.5);
+    s.execute("keys.setMuted", json!({"muted": true})).unwrap();
+    assert!(layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+    // The muted key no longer bends the 0 → 300 segment.
+    assert!((value_at(&s, 0.5) - 75.0).abs() < 1e-6);
+    assert!((value_at(&s, 1.5) - 225.0).abs() < 1e-6);
+    s.undo();
+    assert!(!layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+    assert!((value_at(&s, 0.5) - before).abs() < 1e-6);
+    // The same command unmutes.
+    select(&mut s);
+    s.execute("keys.setMuted", json!({"muted": true})).unwrap();
+    s.execute("keys.setMuted", json!({"muted": false})).unwrap();
+    assert!(!layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+}
+
+/// Both Animation-menu rows mute and unmute through `Session::execute`, and undo/redo work.
+#[test]
+fn mute_and_unmute_keyframes_menu_rows_work_and_undo() {
+    fn rows(nodes: &[crate::menus::MenuNode], out: &mut Vec<(String, Value)>) {
+        for n in nodes {
+            match n {
+                crate::menus::MenuNode::Item(e) if e.command == "keys.setMuted" => out.push((e.label.clone(), e.params.clone())),
+                crate::menus::MenuNode::Submenu { children, .. } => rows(children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut menu = vec![];
+    rows(&crate::menus::parse(crate::menus::TREE, false).unwrap(), &mut menu);
+    assert_eq!(menu.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["Mute Keyframes", "Unmute Keyframes"], "{menu:?}");
+
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    let muted = |s: &Session| layer(s, a).props.prop("transform/opacity").unwrap().keys[1].muted;
+    s.execute("keys.select", json!({"keys": [{"layer": a, "path": "transform/opacity", "time": 1.0}]})).unwrap();
+    let run = |s: &mut Session, params: &Value| {
+        s.execute("keys.setMuted", if params.is_null() { json!({}) } else { params.clone() }).unwrap();
+    };
+    run(&mut s, &menu[0].1);
+    assert!(muted(&s));
+    s.undo();
+    assert!(!muted(&s));
+    s.redo();
+    assert!(muted(&s));
+    run(&mut s, &menu[1].1);
+    assert!(!muted(&s));
+}
+
+#[test]
 fn transform_drags_apply_their_whole_offset_to_the_keys_they_started_with() {
     let mut s = comp();
     let a = solid(&mut s, "#ff0000");

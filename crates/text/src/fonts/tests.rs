@@ -203,6 +203,8 @@ fn system_scan_finds_fonts() {
     let n = all_faces().iter().filter(|f| f.info.origin == "system").count();
     eprintln!("system fonts: {n} faces in {:?}", t.elapsed());
     assert_eq!(scan_system(), 0, "scans once");
+    // A minimum face count on Linux belongs with the native-fonts gate in #1591. A container
+    // that has fontconfig and only a handful of faces must still pass this portable test.
     if cfg!(target_os = "macos") {
         assert!(n > 20, "{n}");
         let r = resolve("Helvetica", "Bold");

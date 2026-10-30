@@ -550,7 +550,7 @@ fn opening_an_old_project_upgrades_effect_instances() {
             effectcraft_project::ItemKind::Comp(c) => c,
             _ => panic!("not a composition"),
         });
-        let l = comp.layers.iter_mut().find(|l| l.id == LayerId(a)).unwrap();
+        let l = comp.layers.find_mut(|l| l.id == LayerId(a)).unwrap();
         for n in &mut l.props.sub_mut("effects").unwrap().children {
             let Node::Group(g) = n else { continue };
             if g.match_id == "ec.blur.gaussian" {

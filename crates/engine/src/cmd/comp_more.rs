@@ -25,7 +25,7 @@ fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &
         let (old_w, old_h) = (c.width, c.height);
         c.width = w;
         c.height = h;
-        for l in c.layers.iter_mut().filter(|l| l.parent.is_none()) {
+        for l in c.layers.iter_mut_where(|l| l.parent.is_none()) {
             if let Some(tr) = l.transform_mut() {
                 super::layer::offset_position(tr, -x, -y);
             }

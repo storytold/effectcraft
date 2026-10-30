@@ -812,7 +812,7 @@ fn footer(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, foot: 
         (Icon::NewComp, "newComp", "Create a new Composition"),
     ] {
         let r = Rect::from_min_size(pos2(x, foot.min.y + 3.0), vec2(22.0, 22.0));
-        let resp = widgets::icon_button(ui, r, icon, false, &t, egui::Id::unique(("pfoot", id))).on_hover_text(tip);
+        let resp = widgets::icon_button(ui, r, icon, false, &t, egui::Id::unique(("pfoot", id))).on_hover_text(crate::i18n::tr(tip));
         app.auto.add(&format!("project.{id}"), r, tip);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::tr(tip)));
         if resp.clicked() {

@@ -626,7 +626,7 @@ pub fn apply_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     super::dialogs::modal(ctx, "Motion Tracker Apply Options", vec2(380.0, 170.0), t, |ui| {
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Apply Dimensions:"));
-            let labels = ["X and Y", "X only", "Y only"];
+            let labels = [crate::i18n::tr("X and Y"), crate::i18n::tr("X only"), crate::i18n::tr("Y only")];
             let r = craft_ui::ComboBox::from_id_salt("track-apply-dims")
                 .selected_text(labels[d.dims.min(2)])
                 .show_ui(ui, |ui| {

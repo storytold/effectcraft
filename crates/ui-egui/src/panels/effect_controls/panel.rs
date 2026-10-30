@@ -192,7 +192,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         bp.text(
             pos2(body.center().x, body.min.y + 40.0),
             Align2::CENTER_CENTER,
-            "No effects. Drag one from Effects & Presets.",
+            crate::i18n::tr("No effects. Drag one from Effects & Presets."),
             Tokens::ui(12.0),
             t.text_faint,
         );

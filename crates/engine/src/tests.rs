@@ -42,6 +42,7 @@ pub(crate) mod roto;
 mod sequence;
 mod session;
 mod settings;
+mod shared_layers;
 mod shortcut_cmds;
 pub(crate) mod stubs;
 mod styles;

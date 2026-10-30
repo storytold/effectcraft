@@ -182,7 +182,7 @@ pub(super) fn bubbles(ctx: &EffectCtx, mut b: Buf) -> Buf {
             // Liquid refracts (inverted, magnified), metal reflects (wide-angle mirror).
             let k = if metal { 1.6 } else { -0.7 };
             let nz = (1.0 - d2).max(0.0).sqrt();
-            let p = src.sample_bilinear((q.sx + dx * q.r * k) as f64, (q.sy + dy * q.r * k) as f64);
+            let p = src.sample_bilinear_clamped((q.sx + dx * q.r * k) as f64, (q.sy + dy * q.r * k) as f64);
             let (c, sa) = unpremul(p);
             let mut c = if sa <= 0.0 { [0.6, 0.7, 0.8] } else { c };
             let mut a = cov;

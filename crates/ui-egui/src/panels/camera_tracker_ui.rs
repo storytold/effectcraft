@@ -413,12 +413,12 @@ pub fn editor(
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(84.0, 22.0));
     let b3 = Rect::from_min_size(pos2(b2.max.x + 8.0, b1.min.y), vec2(110.0, 22.0));
-    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::unique(("ct-analyze", g.uid))).clicked() && !busy {
+    if widgets::text_button(ui, b1, crate::i18n::tr("Analyze"), false, &t, egui::Id::unique(("ct-analyze", g.uid))).clicked() && !busy {
         actions.push(("camera.analyze".into(), me.clone()));
     }
     app.auto.add(&format!("effectControls.cameraTracker.{}.analyze", g.uid), b1, "Analyze");
     if running {
-        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::unique(("ct-cancel", g.uid))).clicked() {
+        if widgets::text_button(ui, b2, crate::i18n::tr("Cancel"), false, &t, egui::Id::unique(("ct-cancel", g.uid))).clicked() {
             actions.push(("camera.cancel".into(), json!({})));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.cancel", g.uid), b2, "Cancel");
@@ -426,7 +426,7 @@ pub fn editor(
     let params = effectcraft_engine::camera_track::static_params(g);
     let solve = ct::solve(&params);
     if solve.is_some() {
-        if widgets::text_button(ui, b3, "Create Camera", false, &t, egui::Id::unique(("ct-camera", g.uid))).clicked() {
+        if widgets::text_button(ui, b3, crate::i18n::tr("Create Camera"), false, &t, egui::Id::unique(("ct-camera", g.uid))).clicked() {
             actions.push(("camera.create".into(), me.clone()));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.createCamera", g.uid), b3, "Create Camera");

@@ -87,6 +87,13 @@ pub(crate) fn name(id: &str, english: &str) -> String {
     catalog(current()).and_then(|c| c.row(id)).map_or_else(|| english.to_string(), |(_, translated)| translated.to_string())
 }
 
+/// The number of effect-name rows `language` translates, for the row-count report; 0 when it has
+/// no catalog or when it is English.
+#[cfg(test)]
+pub(super) fn translated_rows(language: &str) -> usize {
+    catalog(language).map_or(0, |c| c.rows.len())
+}
+
 /// The name to draw for an effect group the property tree stores as `stored`: the catalog name,
 /// plus the instance index the engine appends to a repeat (`Gaussian Blur 2` → `高斯模糊 2`).
 ///

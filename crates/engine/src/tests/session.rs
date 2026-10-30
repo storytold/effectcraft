@@ -86,7 +86,7 @@ fn imported_files_go_into_the_comp_where_they_were_dropped() {
     s.execute("file.import", params).unwrap();
     let comp = s.active_comp().unwrap();
     assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["a.png", "b.png", "Bg"]);
-    for l in &comp.layers[..2] {
+    for l in comp.layers.iter().take(2) {
         assert_eq!(l.props.prop("transform/position").map(|p| p.value.clone()), Some(effectcraft_keyframe::Value::Vec3([40.0, 50.0, 0.0])));
         assert_eq!(l.in_point, effectcraft_time::Tick::from_seconds_f64(1.0));
     }
@@ -157,6 +157,46 @@ fn background_imports_report_progress_and_select_what_arrived() {
     // Agents and scripts import at once by default.
     let r = s.execute("file.import", json!({"paths": ["/drop/e.png"]})).unwrap();
     assert_eq!(r["items"].as_array().map(Vec::len), Some(1));
+}
+
+/// #2573: New Composition From Footage (`file.import {newComp}`) makes one composition of what
+/// the import made, first file on top, at once or when the background job lands; an import that
+/// made nothing makes no comp.
+#[test]
+fn new_comp_from_footage_makes_a_comp_of_what_was_imported() {
+    use effectcraft_project::{Footage, FootageKind, ItemKind};
+    struct Probe;
+    impl crate::Importer for Probe {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            if path.ends_with(".xyz") {
+                return Err("unsupported file".into());
+            }
+            Ok(Footage { path: path.into(), kind: FootageKind::Still, width: 64, height: 32, has_video: true, ..Default::default() })
+        }
+    }
+    let mut s = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+    let comps = |s: &Session| s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_))).count();
+    let layers = |s: &Session| s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    // At once.
+    s.execute("file.import", json!({"paths": ["/drop/a.png", "/drop/b.xyz"], "newComp": true})).unwrap();
+    assert_eq!(comps(&s), 1);
+    assert_eq!(layers(&s), ["a.png"]);
+    assert_eq!((s.active_comp().unwrap().width, s.active_comp().unwrap().height), (64, 32));
+    // In the background: the job's own items, whatever is selected or active meanwhile; it takes
+    // precedence over `addToComp`.
+    s.execute("file.import", json!({"paths": ["/drop/c.png", "/drop/d.png"], "background": true, "newComp": true, "addToComp": true})).unwrap();
+    s.state.project_selection.clear();
+    s.execute("jobs.wait", json!({})).unwrap();
+    assert_eq!(comps(&s), 2);
+    assert_eq!(layers(&s), ["c.png", "d.png"]);
+    // Nothing imported: no comp, and the failure is reported.
+    s.execute("file.import", json!({"paths": ["/drop/e.xyz"], "background": true, "newComp": true})).unwrap();
+    s.execute("jobs.wait", json!({})).unwrap();
+    assert_eq!(comps(&s), 2);
+    assert!(s.job_log.last().unwrap().message.contains("unsupported file"));
+    let r = s.execute("file.import", json!({"paths": ["/drop/f.xyz"], "newComp": true})).unwrap();
+    assert_eq!(comps(&s), 2);
+    assert_eq!(r["errors"].as_array().map(Vec::len), Some(1));
 }
 
 /// Audio, Lock and Shy don't change pixels: toggling them keeps the cached layers (#103).

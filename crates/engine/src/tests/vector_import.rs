@@ -160,6 +160,37 @@ fn psd_imports_as_composition() {
     assert!(s.project.comp(cid).is_none());
 }
 
+/// #2573: New Composition From Footage on a Photoshop file imported as a composition opens that
+/// composition; it isn't wrapped in another.
+#[test]
+fn psd_imported_as_composition_with_new_comp_is_the_new_comp() {
+    let path = tmp("newcomp.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition", "newComp": true})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    assert_eq!(s.state.active_comp, Some(cid));
+    let roots = s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_)) && i.name.starts_with("newcomp")).count();
+    assert_eq!(roots, 1, "no wrapper comp");
+}
+
+/// A Photoshop file imported as a composition and dropped on the Timeline (`addToComp`) adds
+/// its composition once, not its folder too.
+#[test]
+fn psd_imported_as_composition_into_a_comp_adds_one_layer() {
+    let path = tmp("dropped.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    let main = s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition", "addToComp": true})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let psd = r["comps"][0].as_u64().unwrap();
+    let layers = &s.project.comp(effectcraft_project::ItemId(main)).unwrap().layers;
+    assert_eq!(layers.len(), 1, "{layers:?}");
+    assert!(matches!(layers[0].source, LayerSource::Comp { item } if item.0 == psd));
+}
+
 #[test]
 fn psd_retain_layer_sizes() {
     let path = tmp("retain.psd");

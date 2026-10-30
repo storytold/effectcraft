@@ -34,7 +34,7 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     let fd = comp_rate.frame_duration();
     s.edit(if reverse { "Time-Reverse Layer" } else { "Time Stretch" }, None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let old = l.stretch;
             if reverse {
                 // Keep the in/out points; play the visible span backwards.
@@ -109,7 +109,7 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
         let mut next = proj.next_id;
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let mut on = false;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id) && remappable(l)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id) && remappable(l)) {
             let has = l.props.get("timeRemap").is_some();
             let target = want.unwrap_or(!has);
             on |= target;

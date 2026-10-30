@@ -97,6 +97,21 @@ fn bubbles_rise() {
     assert!(y0 >= 0.0 && y1 >= 0.0 && (y1 < y0 || y0 < 8.0), "{y0} -> {y1}");
 }
 
+/// #2024: bubbles near the layer's edges show its edge pixels, not the pale colour that stands
+/// in for transparent ones.
+#[test]
+fn bubbles_near_edges_show_the_layer() {
+    let blue = Image::filled(40, 40, [0.0, 0.0, 1.0, 1.0]);
+    let pale = [0, 1].map(|reflection| {
+        let vals = [("bubbleAmount", num(200.0)), ("bubbleSize", num(3.0)), ("reflectionType", Value::Enum(reflection))];
+        let a = run("ec.sim.ccbubbles", &vals, blue.clone(), 0.3);
+        assert!(a.data.iter().any(|p| p[3] > 0.5), "bubbles drawn");
+        // Blue plus the white highlight keeps blue − red = alpha; the pale colour leaves 0.2 · alpha.
+        a.data.iter().filter(|p| (p[2] - p[0] - p[3]).abs() > 1e-4).count()
+    });
+    assert_eq!(pale, [0, 0], "pale bubble pixels (liquid, metal)");
+}
+
 #[test]
 fn drizzle_ripples() {
     let a = run("ec.sim.ccdrizzle", &[], ramp(48, 48), 0.6);

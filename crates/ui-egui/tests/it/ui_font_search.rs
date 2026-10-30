@@ -256,3 +256,24 @@ fn font_menu_grows_back_after_an_empty_search() {
     click(&mut h, "character.font.option.JetBrains Mono");
     assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "JetBrains Mono", "a click on a row picks the font");
 }
+
+/// #1089: the font menu can re-run the system scan without restarting the app, and the press
+/// does not also flip the "Variable fonts only" filter.
+#[test]
+fn font_menu_rescan_button_adds_fonts_installed_later() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    s.execute("layer.newText", json!({"text": "Keep this text", "font": "Inter"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    click(&mut h, "character.font");
+    h.run_steps(3);
+    assert!(h.state().auto.find("character.font.rescan").is_some(), "the filter row offers a rescan");
+    click(&mut h, "character.font.rescan");
+    assert!(h.state().ui.status.contains("Rescan Fonts"), "the status reports the rescan: {}", h.state().ui.status);
+    // The popup stays open, the variable filter did not flip, and the list still has the bundled families.
+    assert!(h.state().auto.find("character.font.search").is_some(), "the popup stays open");
+    let rows = h.state().auto.query("character.font.option.");
+    assert!(rows.iter().any(|r| r.label == "Inter"), "{:?}", rows.iter().map(|r| &r.label).collect::<Vec<_>>());
+}

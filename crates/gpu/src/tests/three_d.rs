@@ -177,7 +177,7 @@ fn mattes_preserve_transparency_precomps_and_adjustment_splits() {
         let mid = s.push(m);
         let layers = &mut s.p.comp_mut(s.cid).unwrap().layers;
         layers[1].track_matte = Some(TrackMatte { layer: mid, kind: MatteKind::Luma });
-        if let Some(far) = layers.iter_mut().find(|l| l.switches.three_d && l.name == "Pattern") {
+        if let Some(far) = layers.find_mut(|l| l.switches.three_d && l.name == "Pattern") {
             far.preserve_transparency = true;
         }
         // Move the matte below the bottom so the 3D run stays one run.
@@ -203,7 +203,7 @@ fn mattes_preserve_transparency_precomps_and_adjustment_splits() {
         a.switches.three_d = true;
         set(&mut a, "transform/rotationX", Value::Scalar(40.0));
         let b = s.solid([0.2, 0.8, 0.4], 30, 20);
-        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a];
+        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a].into();
         let mut pre = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (80, 60), None);
         pre.switches.collapse = true;
         pre.switches.three_d = true;
@@ -299,7 +299,7 @@ fn two_d_layer_with_a_three_d_track_matte() {
             let layers = &mut s.p.comp_mut(s.cid).unwrap().layers;
             let fi = layers.iter().position(|l| l.id == fid).unwrap();
             layers[fi].track_matte = Some(TrackMatte { layer: mid, kind });
-            if let Some(ml) = layers.iter_mut().find(|l| l.id == mid) {
+            if let Some(ml) = layers.find_mut(|l| l.id == mid) {
                 ml.switches.video = false;
             }
             check(&format!("3d matte {kind:?} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.005);

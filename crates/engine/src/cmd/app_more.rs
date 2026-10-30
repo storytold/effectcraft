@@ -240,7 +240,7 @@ fn replace_with_precomp(s: &mut Session, p: &Value) -> Result<Value> {
             let ids: Vec<ItemId> = proj.items.keys().copied().filter(|c| *c != comp).collect();
             for cid in ids {
                 if let Some(c) = proj.comp_mut(cid) {
-                    for l in c.layers.iter_mut().filter(|l| is_user(l)) {
+                    for l in c.layers.iter_mut_where(|l| is_user(l)) {
                         l.source = LayerSource::Comp { item: comp };
                         n += 1;
                     }

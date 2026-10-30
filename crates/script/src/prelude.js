@@ -1706,7 +1706,8 @@ Object.defineProperty(FootageItem.prototype, "mainSource", {
     return this.__mainSource;
   },
 });
-FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
+// replace() swaps in one file, even a numbered still (replaceWithSequence brings a run), as in After Effects.
+FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: false }); };
 FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
   __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
 };

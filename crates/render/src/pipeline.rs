@@ -1,6 +1,6 @@
 use super::accel::{Accelerator, Backend, CpuFx, FxStep, FxTarget};
 use super::footage::{FootageSource, is_vector_footage};
-use super::frames::{blend_frames, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
+use super::frames::{blend_frames, cineon_frame, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
 use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
 use super::{
@@ -566,14 +566,26 @@ impl<'a> Renderer<'a> {
         let Some(fx) = layer.effects() else { return };
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
-        // #659: an authored layer's buffer spans only its painted content while the stack works
-        // on the layer's whole region (`layer_size`): give the buffer the room a sized source
-        // already has, so tiling or displacement can place pixels outside the content instead
-        // of losing them at its edge. Only when something will actually run, and not for an
-        // adjustment layer, whose buffer is the comp below and already spans it.
-        if !adjustment
-            && fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::find(effect).is_some_and(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)))) {
-            target.cover(layer_size);
+        // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
+        // place pixels outside it grow the buffer themselves, by exactly what they need
+        // (`layer_cover_pad`: CC Tiler, CC Smear, CC Mosaic sharp) instead of a blanket cover of
+        // the whole layer rectangle on every stack — which paid a comp-sized texture per layer,
+        // per frame in flight, for glow and blur that never use the extra room. The buffer still
+        // takes the cover's pixel-grid phase: a downscaled layer resamples along that grid.
+        // Effects not known to stay inside their own margins (Twirl, Bulge, Transform, ...) still
+        // get the cover: they move content past the painted bounds without growing the buffer.
+        let video = || {
+            fx.groups().filter(|g| g.enabled).filter_map(|g| match &g.kind {
+                GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+                _ => None,
+            })
+        };
+        if !adjustment && video().next().is_some() {
+            if video().all(|s| s.skips_cover()) {
+                target.align(layer_size);
+            } else {
+                target.cover(layer_size);
+            }
         }
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {
@@ -817,16 +829,17 @@ impl<'a> Renderer<'a> {
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
             let i = field_rate.frame_at(t).max(0);
-            let img = self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f))?;
+            let img = cineon_frame(self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f))?, f);
             let dominant_upper = f.fields == effectcraft_project::FieldOrder::UpperFirst;
             // Upper field = even lines (0, 2, …).
             let parity = if (i % 2 == 0) == dominant_upper { 0 } else { 1 };
             return Some(Arc::new(interpret_pixels(&field_frame(&img, parity), f, self.pipe.linear_footage_space(f))));
         }
         // Interpretation is per pixel but not linear: it runs on the frame before resampling.
-        let size = size.filter(|_| !(f.invert_alpha || f.linear_light_applies()));
+        let per_pixel = f.invert_alpha || f.linear_light_applies();
+        let size = size.filter(|_| !(per_pixel || f.cineon_applies()));
         let img = self.footage_frame_raw(ctx, layer, item, f, t, size)?;
-        if f.invert_alpha || f.linear_light_applies() { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
+        if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
@@ -844,6 +857,10 @@ impl<'a> Renderer<'a> {
                     if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
                         f.premul_color.map(f32::to_bits).hash(&mut h);
                     }
+                    if f.cineon_applies() {
+                        let c = &f.cineon;
+                        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
+                    }
                     h.finish()
                 });
                 if let (Some(c), Some(k)) = (self.cache, key)
@@ -851,8 +868,9 @@ impl<'a> Renderer<'a> {
                 {
                     return Some(Arc::new(b.img.clone()));
                 }
-                let a = self.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float);
-                let b = self.footage.frame_with(item, f, f.frame_rate.tick_of(i + 1), None, float);
+                // Log scans are converted before they blend: the conversion is not linear.
+                let a = self.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float).map(|a| cineon_frame(a, f));
+                let b = self.footage.frame_with(item, f, f.frame_rate.tick_of(i + 1), None, float).map(|b| cineon_frame(b, f));
                 if let (Some(a), Some(b)) = (a, b) {
                     let img = blend_frames(mode, &a, &b, w as f32);
                     if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
@@ -862,7 +880,7 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
-        self.footage.frame_with(item, f, t, size, float)
+        self.footage.frame_with(item, f, t, size, float).map(|img| cineon_frame(img, f))
     }
 
     /// Source → masks, clamped/quantised to the project depth.

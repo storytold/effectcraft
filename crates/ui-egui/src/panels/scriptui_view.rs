@@ -395,7 +395,11 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
         return;
     }
     let mut st: MouseTrack = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-    let (latest, events, mods, time) = ui.input(|i| (i.pointer.latest_pos(), i.events.clone(), i.modifiers, i.time));
+    let (latest, events, mods, time, held) = ui.input(|i| {
+        let held = |b: egui::PointerButton, bit: u8| if i.pointer.button_down(b) { bit } else { 0 };
+        let held = held(egui::PointerButton::Primary, 1) | held(egui::PointerButton::Secondary, 2) | held(egui::PointerButton::Middle, 4);
+        (i.pointer.latest_pos(), i.events.clone(), i.modifiers, i.time, held)
+    });
     let ctx = ui.ctx();
     let layer = ui.layer_id();
     let target = |p: egui::Pos2| -> Option<&Widget> {
@@ -414,7 +418,7 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             w.id,
             json!({
                 "type": ty, "x": p.x - at.x, "y": p.y - at.y, "screenX": p.x, "screenY": p.y,
-                "button": button, "detail": detail,
+                "button": button, "buttons": held, "detail": detail,
                 "altKey": mods.alt, "ctrlKey": mods.ctrl, "shiftKey": mods.shift, "metaKey": mods.mac_cmd,
             }),
         ));
@@ -431,10 +435,15 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
         }
         st.hover = now_id;
     }
-    if let Some((w, p)) = now
-        && st.at != Some(p)
-    {
-        send(w, "mousemove", p, 0, 0, acts);
+    // While a button is held, the control it was pressed on keeps getting the moves, inside or
+    // outside the window, as in After Effects (#2584).
+    let captured = st.down.and_then(|(c, _)| root.find(c));
+    if let Some(p) = latest.filter(|p| st.at != Some(*p)) {
+        match (captured, now) {
+            (Some(c), _) => send(c, "mousemove", p, 0, 0, acts),
+            (None, Some((w, _))) => send(w, "mousemove", p, 0, 0, acts),
+            (None, None) => {}
+        }
     }
     st.at = latest;
     // Presses and releases.
@@ -446,7 +455,9 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             egui::PointerButton::Secondary => 2,
             _ => continue,
         };
-        let Some(w) = target(*pos) else {
+        // A release goes to the control the button was pressed on, wherever the pointer is.
+        let pressed_on = st.down.filter(|(_, db)| !*pressed && *db == b).and_then(|(c, _)| root.find(c));
+        let Some(w) = pressed_on.or_else(|| target(*pos)) else {
             if !pressed {
                 st.down = None;
             }
@@ -460,7 +471,8 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             send(w, "mousedown", *pos, b, st.clicks, acts);
         } else {
             send(w, "mouseup", *pos, b, st.clicks, acts);
-            if st.down == Some((w.id, b)) && b == 0 && w.enabled && w.mouse.iter().any(|m| m == "click") {
+            let over = target(*pos).is_some_and(|t| t.id == w.id);
+            if over && st.down == Some((w.id, b)) && b == 0 && w.enabled && w.mouse.iter().any(|m| m == "click") {
                 // The click with the pointer's details, after mousedown / mouseup, in place of
                 // the plain click the control reported.
                 acts.retain(|a| !matches!(a, Act::Click(aw, ac) if *aw == win && *ac == w.id));

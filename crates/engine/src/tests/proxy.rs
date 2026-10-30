@@ -1,6 +1,6 @@
 //! Proxies (Set Proxy, Use Proxy, Proxy Use render settings, comp proxies, Create Proxy) and
-//! Interpret Footage (fields, pixel aspect, alpha guess / invert, linear light), rendered through
-//! a synthetic footage source.
+//! Interpret Footage (fields, pixel aspect, alpha guess / invert, linear light, Cineon Settings),
+//! rendered through a synthetic footage source.
 
 use std::sync::Arc;
 
@@ -36,6 +36,12 @@ fn file_px(path: &str, x: u32, y: u32) -> [f32; 4] {
         "matte_black.png" => [0.0, 0.5, 0.0, 0.5],
         "matte_white.png" => [0.5, 1.0, 0.5, 0.5],
         "half.png" => [1.0, 1.0, 1.0, 0.25],
+        // A log film scan: code values 95, 685, 400 and 1023 across, as the DPX reader hands
+        // them out (code / 1023).
+        "scan.dpx" | "plate.dpx" => {
+            let v = [95.0, 685.0, 400.0, 1023.0][x.min(3) as usize] / 1023.0;
+            [v, v, v, 1.0]
+        }
         _ => {
             let _ = x;
             [1.0, 1.0, 1.0, 1.0]
@@ -47,7 +53,7 @@ fn size_of(path: &str) -> (u32, u32) {
     match std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("") {
         "red16.png" => (16, 16),
         "blue8.png" => (8, 8),
-        "lines.mov" | "matte_black.png" | "matte_white.png" | "half.png" => (4, 4),
+        "lines.mov" | "matte_black.png" | "matte_white.png" | "half.png" | "scan.dpx" | "plate.dpx" => (4, 4),
         _ => (10, 10),
     }
 }
@@ -64,7 +70,12 @@ impl FootageSource for Synthetic {
         for y in 0..h {
             for x in 0..w {
                 // Decoders hand out premultiplied pixels (straight file colour × alpha).
-                let p = file_px(&f.path, x, y);
+                let mut p = file_px(&f.path, x, y);
+                // A log scan sequence: code 95 on even frames, 685 on odd ones.
+                if f.path.ends_with("frames.dpx") {
+                    let v = if f.frame_rate.frame_at(t) % 2 == 0 { 95.0 } else { 685.0 } / 1023.0;
+                    p = [v, v, v, 1.0];
+                }
                 img.set(x, y, [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]);
             }
         }
@@ -76,7 +87,7 @@ struct Probe;
 impl crate::Importer for Probe {
     fn probe(&self, path: &str) -> Result<Footage, String> {
         let (w, h) = size_of(path);
-        let video = path.ends_with(".mov");
+        let video = path.ends_with(".mov") || path.ends_with("frames.dpx");
         Ok(Footage {
             path: path.into(),
             kind: if video { FootageKind::Video } else { FootageKind::Still },
@@ -430,4 +441,126 @@ fn guess_alpha_invert_and_linear_light() {
     s.execute("file.rememberInterpretation", json!({"item": h.0})).unwrap();
     s.execute("file.applyInterpretation", json!({"items": [w.0]})).unwrap();
     assert!(foot(&s, w).preserve_rgb);
+}
+
+/// Color ▸ Cineon Settings: Logarithmic Conversion turns a DPX file's log code values into the
+/// Current Gamma between the converted points (off, they show as stored); the converted points
+/// are read and reported in the chosen Units; out-of-range values and footage that is not DPX
+/// or Cineon are refused; Remember / Apply Interpretation and undo carry the settings.
+#[test]
+fn cineon_settings_convert_dpx_code_values() {
+    let mut s = session();
+    let d = import(&mut s, "/m/scan.dpx");
+    let other = import(&mut s, "/m/plate.dpx");
+    let png = import(&mut s, "/m/red16.png");
+    let foot = |s: &Session, i: ItemId| match &s.project.item(i).unwrap().kind {
+        ItemKind::Footage(f) => f.clone(),
+        _ => panic!("not footage"),
+    };
+    s.execute("comp.new", json!({"name": "C", "width": 4, "height": 4, "frameRate": 10, "duration": 1})).unwrap();
+    let c = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": d.0})).unwrap();
+    let at = |s: &Session, x: i64| px(s, c, 0.0, RenderOpts::default(), x, 0)[0];
+    let near = |a: f32, b: f32| (a - b).abs() < 1.5 / 255.0;
+    // Off: the code values as stored.
+    assert!(near(at(&s, 2), 400.0 / 1023.0), "{}", at(&s, 2));
+    // The checked path (control channel, MCP) accepts every Cineon parameter the doc lists.
+    let out = s.execute_checked("file.interpretFootage", json!({"items": [d.0], "logConversion": true, "highlightRolloff": 0})).unwrap();
+    assert_eq!(out["items"][0]["cineon"]["logConversion"], true, "{out}");
+    assert!(near(at(&s, 0), 0.0) && near(at(&s, 1), 1.0), "{} {}", at(&s, 0), at(&s, 1));
+    assert!(near(at(&s, 2), 0.26190), "code 400 at gamma 1.7: {}", at(&s, 2));
+    s.execute("file.interpretFootage", json!({"item": d.0, "currentGamma": 1})).unwrap();
+    assert!(near(at(&s, 2), 0.10251), "code 400 in linear light: {}", at(&s, 2));
+    // Converted points, in 8-bit units.
+    let out = s
+        .execute_checked("file.interpretFootage", json!({"items": [d.0], "cineonUnits": "8bit", "convertedBlack": 16, "convertedWhite": 235, "currentGamma": 1, "tenBitBlack": 95, "tenBitWhite": 685}))
+        .unwrap();
+    assert_eq!(out["items"][0]["cineon"]["units"], "8bit");
+    assert!((out["items"][0]["cineon"]["convertedWhite"].as_f64().unwrap() - 235.0).abs() < 1e-3, "{out}");
+    assert!(near(at(&s, 0), 16.0 / 255.0) && near(at(&s, 1), 235.0 / 255.0), "{} {}", at(&s, 0), at(&s, 1));
+    // The form sends the points in the units it showed them in (`pointUnits`) with a new Units.
+    s.execute_checked("file.interpretFootage", json!({"items": [d.0], "pointUnits": "8bit", "cineonUnits": "float", "convertedWhite": 255})).unwrap();
+    let f = foot(&s, d);
+    assert_eq!(f.cineon.units, effectcraft_project::CineonUnits::Float);
+    assert!((f.cineon.converted_white - 1023.0).abs() < 1e-3, "{:?}", f.cineon);
+    // Refused: a black point at or above the white point, values out of range, and footage
+    // that is not DPX or Cineon. Nothing changes.
+    let before = foot(&s, d).cineon;
+    for bad in [
+        json!({"item": d.0, "tenBitBlack": 700}),
+        json!({"item": d.0, "tenBitWhite": 2000}),
+        json!({"item": d.0, "currentGamma": 0}),
+        json!({"item": d.0, "highlightRolloff": -1}),
+        json!({"item": d.0, "convertedWhite": 1.5}),
+        json!({"item": d.0, "cineonUnits": "12bit"}),
+        json!({"item": png.0, "logConversion": true}),
+    ] {
+        assert!(s.execute("file.interpretFootage", bad.clone()).is_err(), "{bad}");
+    }
+    assert_eq!(foot(&s, d).cineon, before);
+    assert!(foot(&s, png).cineon == effectcraft_project::CineonSettings::default());
+    // With DPX and other footage selected, only the DPX file takes the settings.
+    s.execute("file.interpretFootage", json!({"items": [png.0, other.0], "logConversion": true})).unwrap();
+    assert!(foot(&s, other).cineon.log_conversion && !foot(&s, png).cineon.log_conversion);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(!foot(&s, other).cineon.log_conversion);
+    // Remember / Apply Interpretation.
+    s.state.project_selection = vec![d];
+    s.execute("file.rememberInterpretation", json!({"item": d.0})).unwrap();
+    s.execute("file.applyInterpretation", json!({"items": [other.0, png.0]})).unwrap();
+    assert_eq!(foot(&s, other).cineon, before);
+    assert_eq!(foot(&s, png).cineon, effectcraft_project::CineonSettings::default());
+    // Off again: as stored.
+    s.execute("file.interpretFootage", json!({"item": d.0, "logConversion": false})).unwrap();
+    assert!(near(at(&s, 2), 400.0 / 1023.0), "{}", at(&s, 2));
+    // Frame Mix blends converted frames: halfway between code 95 (black) and 685 (white) at
+    // Current Gamma 1 is 0.5, not the conversion of the blended code values.
+    let seq = import(&mut s, "/m/frames.dpx");
+    s.execute("file.interpretFootage", json!({"item": seq.0, "logConversion": true, "currentGamma": 1, "highlightRolloff": 0})).unwrap();
+    s.execute("comp.new", json!({"name": "Blend", "width": 10, "height": 10, "frameRate": 20, "duration": 1})).unwrap();
+    let bc = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": seq.0})).unwrap();
+    s.execute("layer.frameBlending", json!({"mode": "frameMix"})).unwrap();
+    let mid = px(&s, bc, 0.05, RenderOpts::default(), 5, 5)[0];
+    assert!(near(mid, 0.5), "frame-mixed log frames: {mid}");
+    // A DPX proxy of a composition: Interpret Proxy's settings convert it where it stands in.
+    s.execute("comp.new", json!({"name": "Inner", "width": 4, "height": 4, "frameRate": 10, "duration": 1})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 4, "height": 4, "frameRate": 10, "duration": 1})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/scan.dpx"})).unwrap();
+    let proxied = |s: &Session, x: i64| px(s, outer, 0.0, RenderOpts::default(), x, 0)[0];
+    assert!(near(proxied(&s, 1), 685.0 / 1023.0), "{}", proxied(&s, 1));
+    s.execute_checked("file.interpretProxy", json!({"items": [inner.0], "logConversion": true, "highlightRolloff": 0})).unwrap();
+    assert!(near(proxied(&s, 0), 0.0) && near(proxied(&s, 1), 1.0), "{} {}", proxied(&s, 0), proxied(&s, 1));
+}
+
+/// The Footage panel, the Project panel thumbnail and the tracker's source frames show DPX
+/// footage with its Cineon Settings, as a composition renders it.
+#[test]
+fn cineon_settings_apply_to_footage_panel_thumbnail_and_tracking() {
+    let mut s = session();
+    let d = import(&mut s, "/m/scan.dpx");
+    s.execute("comp.new", json!({"name": "C", "width": 4, "height": 4, "frameRate": 10, "duration": 1})).unwrap();
+    let c = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": d.0})).unwrap();
+    s.execute("file.interpretFootage", json!({"item": d.0, "logConversion": true, "highlightRolloff": 0})).unwrap();
+    let near = |a: f32, b: f32| (a - b).abs() < 1.5 / 255.0;
+    let rendered = px(&s, c, 0.0, RenderOpts::default(), 2, 0)[0];
+    assert!(near(rendered, 0.26190), "code 400 at gamma 1.7: {rendered}");
+    let f = match &s.project.item(d).unwrap().kind {
+        ItemKind::Footage(f) => f.clone(),
+        _ => panic!("not footage"),
+    };
+    let panel = crate::commands::footage_panel::frame(&s, d, &f, Tick::ZERO).unwrap().get(2, 0)[0];
+    assert!(near(panel, rendered), "Footage panel: {panel}");
+    let (w, _, rgba) = (s.thumbnail_job(d, Tick::ZERO, 64).unwrap())().unwrap();
+    assert_eq!(w, 4);
+    let thumb = rgba[8] as f32 / 255.0;
+    assert!(near(thumb, rendered), "Project panel thumbnail: {thumb}");
+    let comp = s.project.comp(c).unwrap();
+    let r = crate::render::Renderer::new(&s.project, s.footage.as_ref(), RenderOpts::default());
+    let (img, _) = crate::tracking::source_frame(&r, &s.project, c, comp, &comp.layers[0], Tick::ZERO, None).unwrap();
+    assert!(near(img.get(2, 0)[0], rendered), "tracker source frame: {}", img.get(2, 0)[0]);
 }

@@ -77,7 +77,7 @@ fn buffer_bytes(count: u64, stride: u64, limit: u64) -> Option<u64> {
 /// Checking these before serialization bounds host packing as well as the GPU uploads.
 fn packed_bytes(counts: [u64; 6], uniform_limit: u64, storage_limit: u64, buffer_limit: u64) -> Option<[u64; 7]> {
     let mut sizes = [0; 7];
-    sizes[0] = buffer_bytes(40, 4, uniform_limit.min(buffer_limit))?;
+    sizes[0] = buffer_bytes(44, 4, uniform_limit.min(buffer_limit))?;
     for (index, (count, stride)) in counts.into_iter().zip([96, 16, 16, 80, 80, 4]).enumerate() {
         let size = count.checked_mul(stride)?.max(16);
         sizes[index + 1] = buffer_bytes(size, 1, storage_limit.min(buffer_limit))?;
@@ -164,11 +164,11 @@ mod capability_tests {
 
     #[test]
     fn packed_arrays_preflight_exact_strides_and_empty_padding() {
-        assert_eq!(packed_bytes([0; 6], 160, 16, 160), Some([160, 16, 16, 16, 16, 16, 16]));
-        assert_eq!(packed_bytes([2; 6], 160, 192, 192), Some([160, 192, 32, 32, 160, 160, 16]));
-        assert!(packed_bytes([0; 6], 159, 16, 160).is_none());
-        assert!(packed_bytes([0; 6], 160, 15, 160).is_none());
-        assert!(packed_bytes([2; 6], 160, 192, 191).is_none());
+        assert_eq!(packed_bytes([0; 6], 176, 16, 176), Some([176, 16, 16, 16, 16, 16, 16]));
+        assert_eq!(packed_bytes([2; 6], 176, 192, 192), Some([176, 192, 32, 32, 160, 160, 16]));
+        assert!(packed_bytes([0; 6], 175, 16, 176).is_none());
+        assert!(packed_bytes([0; 6], 176, 15, 176).is_none());
+        assert!(packed_bytes([2; 6], 176, 192, 191).is_none());
         for index in 0..6 {
             let mut counts = [0; 6];
             counts[index] = u64::MAX;
@@ -203,7 +203,7 @@ mod capability_tests {
         };
         for (scene, counts) in [(Scene::default(), [0; 6]), (scene, [1; 6])] {
             let actual = pack(&scene).map(|bytes| bytes.len() as u64);
-            assert_eq!(Some(actual), packed_bytes(counts, 160, 160, 160));
+            assert_eq!(Some(actual), packed_bytes(counts, 176, 176, 176));
         }
     }
 }
@@ -315,10 +315,25 @@ fn pack(s: &Scene) -> [Vec<u8>; 7] {
     globals.extend([s.eye[0], s.eye[1], s.eye[2], s.ortho as u32 as f32]);
     globals.extend([s.cam_fwd[0], s.cam_fwd[1], s.cam_fwd[2], s.lights.len() as f32]);
     globals.extend([s.ambient[0], s.ambient[1], s.ambient[2], s.env.is_some() as u32 as f32]);
-    let e = s.env.unwrap_or(effectcraft_render::three_d::adv::EnvInfo { radiance: 0, mips: 1, irradiance: 0, intensity: 0.0, rotation: 0.0 });
+    let e = s.env.unwrap_or(effectcraft_render::three_d::adv::EnvInfo {
+        radiance: 0,
+        mips: 1,
+        irradiance: 0,
+        intensity: 0.0,
+        rotation: 0.0,
+        sun: [0.0; 3],
+        key: 0.0,
+        shadow: -1,
+        shadow_darkness: 0.0,
+        shadow_diffusion: 0.0,
+    });
     globals.extend([e.radiance as f32, e.mips as f32, e.irradiance as f32, e.intensity]);
     let lit = !(s.lights.is_empty() && s.env.is_none() && s.ambient == [0.0; 3]);
-    globals.extend([e.rotation, lit as u32 as f32, 0.0, 0.0]);
+    // env2: rotation, any lighting (0/1), shadow map index (-1 none), shadow darkness.
+    globals.extend([e.rotation, lit as u32 as f32, e.shadow as f32, e.shadow_darkness]);
+    // The environment's dominant direction (its shadow's source), for the shadow bias slope,
+    // and its key fraction — how much of its light the shadow can remove (shade::env_shadow).
+    globals.extend([e.sun[0], e.sun[1], e.sun[2], e.key]);
     let mats = s.materials.iter().flat_map(|m| {
         let flags = (m.double_sided as u32)
             | (m.unlit as u32) << 1
