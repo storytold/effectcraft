@@ -401,7 +401,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Log:", "ログ:"),
     ("Loop (Trace Path)", "ループ（パスをトレース）"),
     ("MIT OR Apache-2.0 • Fonts: Inter, JetBrains Mono (OFL)", "MIT OR Apache-2.0 • フォント：Inter、JetBrains Mono (OFL)"),
-    ("Magnification ratio popup", "拡大率のポップアップ"),
+    ("Magnification ratio popup", "拡大率ポップアップ"),
     ("Make Comp Size", "コンポジションサイズにする"),
     ("Markers", "マーカー"),
     ("Masks", "マスク"),
@@ -657,18 +657,18 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Fit", "フィット"),
     ("Fit up to 100%", "100%までフィット"),
     ("Full", "フル画質"),
-    ("Half", "1/2画質"),
+    ("Half", "1/2 画質"),
     ("Only this layer uses this solid.", "この平面を使用するのはこのレイヤーだけです。"),
     ("Proportional Grid", "プロポーショナルグリッド"),
-    ("Quarter", "1/4画質"),
+    ("Quarter", "1/4 画質"),
     ("Region of Interest", "関心領域"),
     ("Reset Exposure", "露出をリセット"),
     ("Show Channel and Color Management Settings", "チャンネルとカラーマネジメント設定を表示"),
     ("Show Snapshot (hold)", "スナップショットを表示（長押し）"),
-    ("Take Snapshot", "スナップショットを取得"),
-    ("Third", "1/3画質"),
+    ("Take Snapshot", "スナップショット"),
+    ("Third", "1/3 画質"),
     ("Toggle Mask and Shape Path Visibility", "マスクとシェイプのパスを表示"),
-    ("Toggle Transparency Grid", "透明グリッドを切り替え"),
+    ("Toggle Transparency Grid", "透明グリッド"),
     ("16 bits per channel", "チャンネルあたり16ビット"),
     ("32 bits per channel (float)", "チャンネルあたり32ビット（浮動小数点）"),
     ("8 bits per channel", "チャンネルあたり8ビット"),
@@ -880,7 +880,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Disable Video Output When in Background", "バックグラウンド動作時のビデオ出力を無効にする"),
     ("Default 3D Renderer", "既定の3Dレンダラー"),
     ("Show 3D Reference Axes", "3D参照軸を表示"),
-    ("Extended Viewer", "拡張ビューアー"),
+    ("Extended Viewer", "拡張ビューア"),
     ("Realtime Shadows in Draft", "ドラフトのリアルタイムシャドウ"),
     ("Scripting & Expressions", "スクリプトとエクスプレッション"),
     ("Application Scripting", "アプリケーションのスクリプト"),
@@ -1059,7 +1059,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Convert to Editable Styles", "編集可能なスタイルに変換"),
     ("Show All", "すべて表示"),
     ("Remove All", "すべて削除"),
-    ("Separate Dimensions", "次元を分離"),
+    ("Separate Dimensions", "次元に分割"),
     ("Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
     ("Continuous Bezier", "連続ベジェ"),
     ("Auto Bezier", "自動ベジェ"),
@@ -1108,11 +1108,11 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Cache Before Playback", "再生前にキャッシュ"),
     ("Pre-roll", "プリロール"),
     ("Post-roll", "ポストロール"),
-    ("If caching, play cached frames", "キャッシュ中はキャッシュ済みフレームを再生"),
+    ("If caching, play cached frames", "キャッシュ中なら再生"),
     ("File Path", "ファイルパス"),
     ("Interpret Footage", "フッテージの解釈"),
     ("Create a new Folder", "新しいフォルダーを作成"),
-    ("Create a new Composition", "新しいコンポジションを作成"),
+    ("Create a new Composition", "新規コンポジションを作成"),
     ("First Frame", "最初のフレーム"),
     ("Previous Frame", "前のフレーム"),
     ("Next Frame", "次のフレーム"),
@@ -1176,11 +1176,11 @@ const JAPANESE: &[(&str, &str)] = &[
     ),
     ("Auto-zoom graph height", "グラフの高さを自動ズーム"),
     ("Fit all graphs to view", "すべてのグラフをビューに合わせる"),
-    ("Fit selection to view", "選択項目をビューに合わせる"),
+    ("Fit selection to view", "選択範囲に合わせて表示"),
     ("Snap (key drags snap to the current time and other keys)", "スナップ (キーのドラッグを現在の時間や他のキーに合わせる)"),
     ("Show Transform Box when multiple keys are selected", "複数のキーを選択したときにトランスフォームボックスを表示"),
     ("Separate Dimensions (Position)", "次元を分離 (位置)"),
-    ("Convert selected keyframes to Hold", "選択したキーフレームをホールドに変換"),
+    ("Convert selected keyframes to Hold", "選択したキーフレームを停止に変換"),
     ("Convert selected keyframes to Linear", "選択したキーフレームをリニアに変換"),
     ("Convert selected keyframes to Auto Bezier", "選択したキーフレームを自動ベジェに変換"),
     ("Easy Ease (F9)", "イージーイーズ (F9)"),
@@ -1261,7 +1261,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Horizontal ruler", "水平ルーラー"),
     ("Viewer controls", "ビューアーのコントロール"),
     ("Resolution/Down Sample Factor", "解像度/ダウンサンプル係数"),
-    ("Adjust Exposure", "露出を調整"),
+    ("Adjust Exposure", "露出調整"),
     ("Snapshot taken", "スナップショットを撮影しました"),
     ("Fast Previews", "高速プレビュー"),
     ("3D View", "3Dビュー"),
@@ -7709,6 +7709,39 @@ mod tests {
             header.contains("app.auto.add(&format!(\"tools.select.{tool:?}\"), row.rect, tool.label())"),
             "the automation label must stay the English tool name"
         );
+    }
+
+    #[test]
+    fn the_measured_after_effects_terms_are_the_ones_the_panel_catalog_uses() {
+        // Read from the installed After Effects 2026 (26.5) Japanese interface with Windows UI
+        // Automation: the Composition panel's buttons and the Preview panel's checkbox. Nothing
+        // pinned these words before, and the menu's `Crop Comp to Region of Interest` read
+        // 目標範囲 until ccae8411 replaced it with AE's 関心領域.
+        const MEASURED: &[(&str, &str)] = &[
+            ("Choose grid and guide options", "グリッドとガイドのオプションを選択"),
+            ("Fast Previews", "高速プレビュー"),
+            ("Half", "1/2 画質"),
+            ("If caching, play cached frames", "キャッシュ中なら再生"),
+            ("Fit selection to view", "選択範囲に合わせて表示"),
+            ("Convert selected keyframes to Hold", "選択したキーフレームを停止に変換"),
+            ("Extended Viewer", "拡張ビューア"),
+            ("Magnification ratio popup", "拡大率ポップアップ"),
+            ("Create a new Composition", "新規コンポジションを作成"),
+            ("Adjust Exposure", "露出調整"),
+            ("Separate Dimensions", "次元に分割"),
+            ("Quarter", "1/4 画質"),
+            ("Region of Interest", "関心領域"),
+            ("Reset Exposure", "露出をリセット"),
+            ("Show Channel and Color Management Settings", "チャンネルとカラーマネジメント設定を表示"),
+            ("Take Snapshot", "スナップショット"),
+            ("Third", "1/3 画質"),
+            ("Toggle Mask and Shape Path Visibility", "マスクとシェイプのパスを表示"),
+            ("Toggle Transparency Grid", "透明グリッド"),
+        ];
+        for (en, ae) in MEASURED {
+            assert!(JAPANESE.iter().any(|(key, _)| *key == *en), "{en} has no Japanese row");
+            assert_eq!(row(JAPANESE, en), *ae, "{en} must use After Effects' own word");
+        }
     }
 
     #[test]
