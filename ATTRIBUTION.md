@@ -64,7 +64,7 @@ and licence texts are in [`NOTICE`](NOTICE).
 | `crates/model/tests/fixtures/cube.obj` | EffectCraft contributors | Original work: Wavefront OBJ test fixture (unit cube, two materials) | MIT OR Apache-2.0 |
 | `crates/model/tests/fixtures/cube.mtl` | EffectCraft contributors | Original work: MTL test fixture (materials of cube.obj) | MIT OR Apache-2.0 |
 
-The After Effects test projects of `crates/aep` are not in this repository: `cargo xtask aep-corpus` fetches them, pinned and sha256-verified, from https://github.com/vangel76/effectcraft-aep-corpus (original work of the contributor vangel76, generated with After Effects 2026 as own test data, MIT OR Apache-2.0; each file has its `.attribution` sidecar there).
+The After Effects test projects of `crates/aep` are not in this repository. They are original work of an EffectCraft contributor, generated with After Effects 2026 as own test data (MIT OR Apache-2.0, each file with its `.attribution` sidecar); the tests read them only from the folder named by `EFFECTCRAFT_AEP_FIXTURES` (opt-in).
 
 ## Screenshots
 

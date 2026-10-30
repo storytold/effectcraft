@@ -258,7 +258,7 @@ difference.
   the Transform values, the keys (time, interpolation, value) and the expressions is compared; the
   container is consistent (writes back byte for byte); the report, the refusal and the JSON round
   trip; the output is deterministic; an export holds no local data.
-- `crates/aep/tests/it/export/roundtrip.rs`: every case of the corpus (`cargo xtask aep-corpus`) is imported,
+- `crates/aep/tests/it/export/roundtrip.rs`: every case of the corpus (opt-in, `EFFECTCRAFT_AEP_FIXTURES`) is imported,
   exported and imported again; the two imported projects are equal for the exported subset (more
   than 100 compositions, masks included).
 - `crates/aep/tests/it/export/masks.rs`: masks built in code (all seven modes, inverted, feather,

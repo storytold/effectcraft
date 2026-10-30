@@ -208,16 +208,13 @@ mod tests {
 
     #[test]
     fn a_lossy_import_asks_and_import_anyway_imports() {
-        // The combined effects project of the test corpus (`cargo xtask aep-corpus`) has effects
-        // outside the importer's table.
-        let dir = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES")
-            .filter(|d| !d.is_empty())
-            .map_or_else(|| [env!("CARGO_MANIFEST_DIR"), "..", "..", "corpus", "aep"].iter().collect(), std::path::PathBuf::from);
-        let path = dir.join("effects.aep");
-        if !path.is_file() {
+        // The combined effects project of the test corpus (opt-in, the folder named by
+        // `EFFECTCRAFT_AEP_FIXTURES`) has effects outside the importer's table.
+        let path = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("effects.aep"));
+        let Some(path) = path.filter(|p| p.is_file()) else {
             println!("SKIPPED: fixture effects.aep missing");
             return;
-        }
+        };
         let ctx = egui::Context::default();
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));

@@ -3,12 +3,11 @@
 ```sh
 cargo test --workspace     # everything
 cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, layers, assets, wasm
-cargo xtask aep-corpus     # opt-in: the After Effects test projects of crates/aep, into corpus/aep/
 ```
 
-`cargo xtask ci` does not fetch the After Effects test projects; without them the `crates/aep`
-and engine tests that need one print `SKIPPED: fixture <name> missing` and pass. Run
-`cargo xtask aep-corpus` once (pinned, sha256-verified) to run them too.
+The After Effects test projects of `crates/aep` are not in the repository; without them the
+`crates/aep`, engine and ui-egui tests that need one print `SKIPPED: fixture <name> missing` and
+pass. Point `EFFECTCRAFT_AEP_FIXTURES` at a folder holding them to run those tests too.
 
 The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
 interactively — local variables, parameters, column breakpoints — build with the `dev-full`
