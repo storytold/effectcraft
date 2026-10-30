@@ -155,7 +155,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
         });
         ui.add_space(8.0);
-        let r = ui.checkbox(&mut d.cue, tr("Cue Point"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.cue, tr("Cue Point"));
         app.auto.add("dialog.marker.cue", r.rect, "Cue Point");
         ui.add_enabled_ui(d.cue, |ui| {
             ui.horizontal(|ui| {
@@ -191,7 +191,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let r = ui.checkbox(&mut d.protected, tr("Protected Region"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.protected, tr("Protected Region"));
             app.auto.add("dialog.marker.protected", r.rect, "Protected Region");
             ui.add_space(20.0);
             ui.label(tr("Label:"));
@@ -296,21 +296,13 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
                 hx += 5.0;
             }
         }
-        p.line_segment([pos2(xe, y0), pos2(xe, y0 + h)], Stroke::new(1.0, col));
     }
-    p.add(egui::Shape::convex_polygon(marker_shape(x, y0, h), col, Stroke::NONE));
     if !m.comment.is_empty() {
         // The name sits in a small outlined box beside the flag, as in After Effects. It is drawn in the theme's field
         // colours, so it follows Dark, Darker and Light.
         let galley = p.layout_no_wrap(m.comment.lines().next().unwrap_or_default().to_string(), Tokens::ui(10.0), t.text);
-        let (box_w, mut box_x) = (galley.size().x + 8.0, x + 6.0);
-        // A duration that ends under the box would be hidden by its fill: the box steps past the end cap instead.
-        if let Some(xe) = end
-            && xe > box_x
-            && xe < box_x + box_w
-        {
-            box_x = xe + 3.0;
-        }
+        let box_w = galley.size().x + 8.0;
+        let box_x = name_box_x(x, box_w, end, p.clip_rect());
         let box_rect = Rect::from_min_size(pos2(box_x, y0), vec2(box_w, h.max(galley.size().y + 2.0)));
         p.rect(box_rect, t.radius_sm, t.field_bg, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
         p.galley(pos2(box_rect.min.x + 4.0, box_rect.center().y - galley.size().y / 2.0), galley, t.text);
@@ -385,6 +377,33 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     });
 }
 
+fn name_box_x(x: f32, width: f32, end: Option<f32>, clip: Rect) -> f32 {
+    let start = x + 6.0;
+    let right = match end {
+        Some(end) if end > start && end < start + width => end + 3.0,
+        _ => start,
+    };
+    if right + width <= clip.right() {
+        return right;
+    }
+    let left = x - 6.0 - width;
+    if left >= clip.left() {
+        return left;
+    }
+    start
+}
+
+/// Flags and duration handles sit above every name box in their marker strip.
+fn marker_glyphs(p: &egui::Painter, tokens: &Tokens, tm: TMap, marker: &Marker, time: f64, y0: f32, y1: f32) {
+    let color = marker_color(tokens, marker.label);
+    let h = (y1 - y0).min(10.0);
+    p.add(egui::Shape::convex_polygon(marker_shape(tm.x(time), y0, h), color, Stroke::NONE));
+    if marker.duration > Tick(0) {
+        let end = tm.x(time + marker.duration.seconds());
+        p.line_segment([pos2(end, y0), pos2(end, y0 + h)], Stroke::new(1.0, color));
+    }
+}
+
 /// Composition markers in the ruler strip `[y0, y1]`, protected regions over `rows`.
 pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, strip: Rect, rows: Rect) {
     let p = ui.painter().with_clip_rect(strip);
@@ -397,6 +416,9 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
     }
     for (i, m) in comp.markers.iter().enumerate() {
         marker(app, ui, &p, comp, tm, m, m.time.seconds(), MarkerRef { layer: None, index: i }, strip.min.y, strip.max.y);
+    }
+    for m in &comp.markers {
+        marker_glyphs(&p, &app.tokens, tm, m, m.time.seconds(), strip.min.y, strip.max.y);
     }
 }
 
@@ -438,6 +460,9 @@ pub(crate) fn layer_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, clip: R
     nested_markers(app, ui, &p, comp, layer, tm, r);
     for (i, m) in layer.markers.iter().enumerate() {
         marker(app, ui, &p, comp, tm, m, layer.comp_time(m.time).seconds(), MarkerRef { layer: Some(layer.id.0), index: i }, r.min.y + 3.0, r.max.y - 3.0);
+    }
+    for m in &layer.markers {
+        marker_glyphs(&p, &app.tokens, tm, m, layer.comp_time(m.time).seconds(), r.min.y + 3.0, r.max.y - 3.0);
     }
 }
 
@@ -487,6 +512,21 @@ fn nested_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_name_box_stays_visible_near_the_right_clip_edge() {
+        let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 20.0));
+        let x = name_box_x(70.0, 20.0, Some(85.0), clip);
+        assert!(x >= clip.left() && x + 20.0 <= clip.right());
+        assert!(x + 20.0 < 70.0 - 4.0, "the left-hand box must not cover its own marker flag");
+        assert!(85.0 < x || 85.0 > x + 20.0, "the end cap must remain outside the box");
+        assert_eq!(name_box_x(20.0, 20.0, Some(35.0), clip), 38.0);
+        for end in [None, Some(72.0), Some(110.0)] {
+            let x = name_box_x(90.0, 20.0, end, clip);
+            assert!(x >= clip.left() && x + 20.0 <= clip.right(), "all right-edge names must remain visible: {end:?}");
+            assert!(x + 20.0 < 90.0 - 4.0);
+        }
+    }
 
     #[test]
     fn marker_dialog_reads_and_writes_every_field() {

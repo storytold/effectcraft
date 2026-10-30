@@ -2,6 +2,7 @@
 //! as its own Timeline tab (not a rename, and not in place of the comp shown), the tabs switch and
 //! close comps, and a dragged tab lands where its insertion mark shows.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -135,7 +136,7 @@ fn tab_drag_snapshot() {
     }
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out");
     std::fs::create_dir_all(dir).unwrap();
-    h.render().expect("render").save(format!("{dir}/tab-drag.png")).unwrap();
+    h.render_serialized().expect("render").save(format!("{dir}/tab-drag.png")).unwrap();
 }
 
 /// A precomp layer's bar shows its comp's markers; a double-click opens that comp at the marker.

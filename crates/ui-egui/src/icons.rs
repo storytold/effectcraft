@@ -112,6 +112,8 @@ pub enum Icon {
     Fullscreen,
     Channel,
     Exposure,
+    /// Stroke width: three bars, thin to thick.
+    StrokeWidth,
     // links
     Chat,
     Globe,
@@ -547,6 +549,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.line(&[(8.0 + 4.0 * a.cos(), 8.0 + 4.0 * a.sin()), (8.0 + 6.0 * a.cos(), 8.0 + 6.0 * a.sin())]);
             }
             pen.circle(8.0, 8.0, 4.2);
+        }
+        StrokeWidth => {
+            pen.rect_fill(2.5, 3.0, 13.5, 3.75);
+            pen.rect_fill(2.5, 6.5, 13.5, 8.0);
+            pen.rect_fill(2.5, 10.5, 13.5, 13.0);
         }
         Hamburger => {
             for y in [4.5, 8.0, 11.5] {

@@ -7,7 +7,8 @@
 use crate::i18n::tr;
 use effectcraft_engine::commands::text_edit::active_editor_snapshot;
 use effectcraft_engine::keyframe::Value as KV;
-use effectcraft_engine::project::styles::{BLENDING, STYLES};
+use effectcraft_engine::project::build::Ids;
+use effectcraft_engine::project::styles::{BLENDING, GROUP, STYLES, blending_options};
 use effectcraft_engine::project::{Layer, LayerId, ParamUi, Property};
 use egui::vec2;
 use serde_json::{Value, json};
@@ -22,6 +23,8 @@ pub struct LayerStyleState {
     pub selected: String,
     pub undo_mark: usize,
     checkpoint: Option<Checkpoint>,
+    /// The Gradient Editor opened from this dialog: closing it comes back here (#2057).
+    pub gradient_open: bool,
 }
 
 /// The project and undo history as a dialog found them, for a Cancel that rolls its live edits back.
@@ -57,7 +60,8 @@ pub fn open(app: &mut EffectcraftApp, params: &Value) -> Result<(), String> {
         return Err(format!("unknown layer style `{style}`"));
     }
     let checkpoint = checkpoint(app);
-    app.dialog_state.layer_style = LayerStyleState { layer, selected: style, undo_mark: app.session.history.undo.len(), checkpoint: Some(checkpoint) };
+    app.dialog_state.layer_style =
+        LayerStyleState { layer, selected: style, undo_mark: app.session.history.undo.len(), checkpoint: Some(checkpoint), gradient_open: false };
     app.dialog = Some(Dialog::LayerStyles);
     Ok(())
 }
@@ -88,7 +92,7 @@ fn control(ui: &mut egui::Ui, p: &Property, v: &KV) -> Option<Value> {
     match (v, &p.ui) {
         (KV::Bool(b), _) => {
             let mut on = *b;
-            ui.checkbox(&mut on, "").changed().then(|| json!(on))
+            crate::widgets::labelled_checkbox(ui, &mut on, "").changed().then(|| json!(on))
         }
         (KV::Enum(i), ParamUi::Popup { options }) => {
             let mut sel = *i as usize;
@@ -117,10 +121,6 @@ fn control(ui: &mut egui::Ui, p: &Property, v: &KV) -> Option<Value> {
             let changed = crate::widgets::srgb_color_button(ui, &mut rgb).changed();
             changed.then(|| json!(rgb))
         }
-        (KV::Gradient(_), _) => {
-            ui.label(egui::RichText::new(tr("Edit in the Timeline")).weak());
-            None
-        }
         _ => {
             ui.label(egui::RichText::new(format!("{v:?}").chars().take(24).collect::<String>()).weak());
             None
@@ -135,6 +135,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     };
     let lid = l.id.0;
     let styles = l.layer_styles().cloned();
+    // Shown only: its uids are never stored in the project.
+    let mut next = app.session.project.next_id;
+    let blending_template =
+        if styles.is_none() && l.can_have_styles() { app.session.active_comp().map(|c| blending_options(&mut Ids(&mut next), &c.global_light)) } else { None };
     let sel = app.dialog_state.layer_style.selected.clone();
     let time = app.session.time();
     let lt = l.layer_time(time);
@@ -172,7 +176,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                             if id != BLENDING {
                                 let g = styles.as_ref().and_then(|s| s.sub(id));
                                 let mut on = g.is_some_and(|g| g.enabled);
-                                if ui.checkbox(&mut on, "").changed() {
+                                if crate::widgets::labelled_checkbox(ui, &mut on, "").changed() {
                                     if g.is_none() {
                                         actions.push(("layer.style.add".into(), json!({"layers": [lid], "style": id})));
                                     } else {
@@ -199,7 +203,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 let head = ui.label(egui::RichText::new(name).font(Tokens::semibold(13.0)));
                 app.auto.add("dialog.layerStyle.page", head.rect, &sel);
                 ui.add_space(6.0);
-                let Some(g) = styles.as_ref().and_then(|s| s.sub(&sel)) else {
+                // A layer with no styles still shows Blending Options, with the values the Layer
+                // Styles group would start from; the first change creates the group (#1389).
+                let missing = blending_template.as_ref().filter(|_| sel == BLENDING && styles.is_none());
+                let Some(g) = styles.as_ref().and_then(|s| s.sub(&sel)).or(missing) else {
                     ui.label(egui::RichText::new(tr("Not applied: tick it in the list to add it.")).weak());
                     return;
                 };
@@ -220,14 +227,35 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                                 }
                                 let lbl = ui.label(&p.name);
                                 let v = p.value_at(lt);
-                                let edit = ui.scope(|ui| control(ui, p, &v));
-                                if let Some(nv) = edit.inner {
-                                    actions.push((
-                                        "prop.set".into(),
-                                        json!({"layer": lid, "prop": p.uid, "value": nv, "merge": format!("layer-style-dialog-{}", p.uid)}),
-                                    ));
+                                if matches!(v, KV::Gradient(_)) {
+                                    // The Gradient Editor, over this dialog (a style the dialog
+                                    // only shows has no property to edit yet).
+                                    let path = g.match_path_of(p.uid).unwrap_or_default();
+                                    let r = ui.add_enabled(missing.is_none(), egui::Button::new(tr("Edit Gradient…")));
+                                    if r.clicked() {
+                                        actions.push(("prop.editGradient".into(), json!({"layer": lid, "prop": p.uid})));
+                                        app.dialog_state.layer_style.gradient_open = true;
+                                    }
+                                    app.auto.add(&format!("dialog.layerStyle.value.{sel}/{path}"), r.rect, &p.name);
+                                    ui.end_row();
+                                    return;
                                 }
+                                let edit = ui.scope(|ui| control(ui, p, &v));
                                 let path = g.match_path_of(p.uid).unwrap_or_default();
+                                if let Some(nv) = edit.inner {
+                                    // Keyed by path, not uid: the group created by the first
+                                    // change and the rest of the drag stay one undo step.
+                                    let merge = format!("layer-style-dialog-{lid}-{sel}/{path}");
+                                    if missing.is_some() {
+                                        actions.push(("layer.style.add".into(), json!({"layers": [lid], "style": BLENDING, "merge": merge})));
+                                        actions.push((
+                                            "prop.set".into(),
+                                            json!({"layer": lid, "path": format!("{GROUP}/{BLENDING}/{path}"), "value": nv, "merge": merge}),
+                                        ));
+                                    } else {
+                                        actions.push(("prop.set".into(), json!({"layer": lid, "prop": p.uid, "value": nv, "merge": merge})));
+                                    }
+                                }
                                 app.auto.add(&format!("dialog.layerStyle.prop.{sel}/{path}"), lbl.rect, &p.name);
                                 app.auto.add(&format!("dialog.layerStyle.value.{sel}/{path}"), edit.response.rect, &p.name);
                                 ui.end_row();

@@ -245,7 +245,7 @@ pub fn open(app: &mut EffectcraftApp, p: &Json) -> Result<Json, String> {
 /// Set the property to the draft: one `prop.set` at the time the editor opened, in composition
 /// time, or nothing when the draft is unchanged (so OK adds no keyframe).
 fn commit(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    app.dialog = None;
+    close(app);
     let d = std::mem::take(&mut app.dialog_state.gradient);
     let g = d.gradient();
     // The preview already set the property to this draft, in one merged undo step: OK keeps it.
@@ -279,7 +279,12 @@ pub fn finish(app: &mut EffectcraftApp, ok: bool, ctx: &egui::Context) {
         preview_merge::rollback(app, cp, d.applied_at.as_ref());
     }
     app.session.history.merge_key = None;
-    app.dialog = None;
+    close(app);
+}
+
+/// Close the editor: back to the Layer Style dialog when it opened from there (#2057).
+fn close(app: &mut EffectcraftApp) {
+    app.dialog = std::mem::take(&mut app.dialog_state.layer_style.gradient_open).then_some(Dialog::LayerStyles);
 }
 
 /// Keep the property in step with the draft while Preview is on: apply a changed draft with one

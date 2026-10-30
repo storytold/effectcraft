@@ -4,6 +4,10 @@ Everything in EffectCraft is an engine command with a stable id and JSON params.
 panel gestures, the CLI, the control channel and MCP all go through the same commands, so anything a
 user can do, an agent can do too. There are three ways in:
 
+Render-queue outputs cannot replace footage, proxies or the project file. See
+[render source protection](file-format-parity.md#render-source-protection) for aliases, default names and sequence
+limits. This guard does not change ordinary-file overwrite defaults or add another confirmation API.
+
 | Interface | Best for | Needs a window |
 |---|---|---|
 | **MCP** (`effectcraft-cli mcp`) | Claude Code and other MCP clients | no (headless), or yes with `--bridge` |
@@ -108,7 +112,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `run_script {code, name?}` | Run JavaScript with the After Effects-style scripting object model (`app.project`, `comp.layers.addText(…)`, `layer.property("ADBE Transform Group").property("ADBE Position").setValueAtTime(…)`…). Returns `{ok, result, output, error: {message, line, column}}`; edits are undoable. |
 | `get_project` / `get_comp {comp?}` | Project items, comp settings and layers. |
 | `get_layer {layer, comp?, time?, depth?, flat?}` | A layer's property tree (`depth` limits how many group levels expand). Every node has a `path`. |
-| `get_property {layer, path, comp?, time?}` | A leaf property's value at a time, keyframes and expression. Group paths (for example `geometryOptions`) contain children: inspect them with `get_layer`, then query a leaf such as `geometryOptions/extrusionDepth`. |
+| `get_property {layer, path, comp?, time?}` | A leaf property's value at a time, keyframes and expression; a popup (enum) property adds `options` (`[{value, label}]`, zero-based values, also in `get_layer`). Group paths (for example `geometryOptions`) contain children: inspect them with `get_layer`, then query a leaf such as `geometryOptions/extrusionDepth`. |
 | `set_property {layer, path, value?, time?, timeBase?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe (`timeBase: "comp"` for comp seconds); with `expression` it sets an expression. |
 | `add_keyframe {layer, path, time+value \| keys:[...], timeBase?, interpolation?, comp?}` | Adds keys (layer seconds, or comp seconds with `timeBase: "comp"`), then optionally applies linear/bezier/hold/easyEase. |
 | `list_effects {filter?, compact?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters; `compact` lists only ids, names and categories. |
@@ -463,7 +467,12 @@ and Origin), `camera.createFromSolve {kind: text|solid|null|shadowCatcher, point
 {center, normal, size?}, multiple?}` (Create Text / Solid / Null / Shadow Catcher, Camera and Light,
 Create Multiple …), `camera.deletePoints {points?, wait?}` (re-solves; with Auto-delete Points
 Across Time the same feature's other tracks go too) and `camera.create` (the Create Camera button).
-Each is one undo step; the first create adds the one-node "3D Tracker Camera" keyed on every frame.
+Each edit is one undo step; the first create adds the one-node "3D Tracker Camera" keyed on every frame.
+
+`camera.exportBlender {path: ".py", layer?, effect?, sensorWidth?: 36, unitScale?: 0.01,
+startFrame?: 1, includePoints?: true}` exports the solve as an executable Blender scene script:
+baked camera/lens/focus, synced video background, points and ground. See
+[Blender camera export](blender-camera-export.md) for framing, assumptions and limitations.
 Changing the layer's frames clears the analysis; changing `effects/#1/shotType`,
 `effects/#1/horizontalAngleOfView`, `effects/#1/advanced/solveMethod` re-solves the stored tracks.
 

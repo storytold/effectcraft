@@ -470,6 +470,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let mut key_screens: Vec<(serde_json::Value, Pos2)> = vec![];
     for c in &cs {
         let (lid, uid, d) = (c.layer.id, c.prop.uid, c.dim);
+        let unlocked = !c.layer.switches.locked;
         for k in &c.keys {
             let kp = pos2(tm.x(k.t), ymap(k.v));
             // In the speed graph an end key rises with the handle being dragged; skipping it once it
@@ -491,9 +492,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 app.auto.add(&format!("timeline.graph.handle.{uid}.{d}.{}.{side}", k.idx), hr, "Bezier handle");
                 // The same side's handles of every selected key move with it, by as much as the
                 // pointer moved (After Effects), in one undo step.
-                if hresp.drag_started() {
+                if unlocked && hresp.drag_started() {
                     let grabs: Vec<HandleGrab> = cs
                         .iter()
+                        .filter(|c2| !c2.layer.switches.locked)
                         .flat_map(|c2| {
                             c2.keys.iter().flat_map(move |k2| {
                                 k2.handles.iter().filter(|h2| h2.out == h.out).map(move |h2| HandleGrab {
@@ -513,7 +515,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(hp);
                     ctx.data_mut(|dd| dd.insert_temp::<HandleDrag>(handle_drag_id(), (press, grabs)));
                 }
-                if hresp.dragged()
+                if unlocked
+                    && hresp.dragged()
                     && let Some(pt) = hresp.interact_pointer_pos()
                     && let Some((press, grabs)) = ctx.data(|dd| dd.get_temp::<HandleDrag>(handle_drag_id()))
                 {
@@ -544,7 +547,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             app.auto.add(&format!("timeline.graph.key.{uid}.{d}.{}", k.idx), kr, &c.prop.name);
             let mods = ui.input(|i| i.modifiers);
             let key = &c.prop.keys[k.idx];
-            if kresp.clicked() && mods.command {
+            if unlocked && kresp.clicked() && mods.command {
                 // Ctrl+click: Linear ↔ Auto Bezier; Ctrl+Alt+click: Hold on / off (as in the Timeline).
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()]})));
                 if mods.alt {
@@ -553,20 +556,22 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     let linear = key.in_interp == Interp::Linear && key.out_interp == Interp::Linear;
                     actions.push(("keys.interpolation".into(), json!({"interpolation": if linear { "autoBezier" } else { "linear" }})));
                 }
-            } else if kresp.clicked() && mods.shift {
+            } else if unlocked && kresp.clicked() && mods.shift {
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()], "toggle": true})));
-            } else if (kresp.clicked() || kresp.drag_started()) && !k.sel {
+            } else if unlocked && (kresp.clicked() || kresp.drag_started() || kresp.secondary_clicked()) && !k.sel {
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()], "add": mods.shift})));
             }
             // A drag moves every selected key, by how far the pointer went from where the button
             // went down (the key doesn't jump under the pointer); Shift keeps it to the time or
             // the value axis, whichever moved more.
-            if kresp.drag_started()
+            if unlocked
+                && kresp.drag_started()
                 && let Some(o) = ui.input(|i| i.pointer.press_origin())
             {
                 ctx.data_mut(|dd| dd.insert_temp(key_grab_id(), KeyGrab { press: o, t: k.t }));
             }
-            if kresp.dragged()
+            if unlocked
+                && kresp.dragged()
                 && let Some(pt) = kresp.interact_pointer_pos()
                 && let Some(g) = ctx.data(|dd| dd.get_temp::<KeyGrab>(key_grab_id()))
             {
@@ -587,6 +592,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 ctx.data_mut(|dd| dd.insert_temp(drag_id, false));
                 actions.push(("__endMerge".into(), json!({})));
             }
+            // Right-click: the Timeline's key menu, with the same commands.
+            crate::widgets::context_menu(&kresp, |ui| super::timeline::key_menu(ui, app, c.layer, c.prop, key, k.sel, actions));
         }
     }
 

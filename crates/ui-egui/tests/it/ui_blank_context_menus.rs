@@ -1,4 +1,5 @@
 //! Right-click actions in the blank Project and Timeline areas, and on Timeline property names.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemKind;
 use effectcraft_ui_egui::dock::WorkspaceExt as _;
@@ -20,7 +21,7 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
 }
 fn snapshot(h: &mut Harness<'_, EffectcraftApp>, name: &str) {
     if let Ok(dir) = std::env::var("BLANK_CONTEXT_MENU_SNAPSHOTS") {
-        h.render().unwrap().save(format!("{dir}/{name}.png")).unwrap();
+        h.render_serialized().unwrap().save(format!("{dir}/{name}.png")).unwrap();
     }
 }
 fn right_click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {

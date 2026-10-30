@@ -7,6 +7,8 @@ use effectcraft_ui_egui::EffectcraftApp;
 use egui_kittest::Harness;
 use serde_json::json;
 
+use crate::ui_gpu::wait_for_compositor;
+
 fn settle(h: &mut Harness<'_, EffectcraftApp>) {
     for _ in 0..600 {
         h.step();
@@ -42,6 +44,7 @@ fn same_adapter(name: String) -> eframe::egui_wgpu::WgpuSetup {
 /// viewer's GPU frames change when the light is added.
 #[test]
 fn environment_light_lights_the_scene_on_the_gpu() {
+    let _device = crate::gpu_test::lock();
     let Some(probe) = effectcraft_gpu::Gpu::headless() else {
         eprintln!("no GPU adapter: skipping");
         return;
@@ -50,22 +53,25 @@ fn environment_light_lights_the_scene_on_the_gpu() {
     eprintln!("headless compositor adapter: {adapter}");
     let gl = adapter.ends_with("(Gl)");
     drop(probe);
-    let mut s = Session::default();
-    s.execute("file.openDemoProject", json!({})).unwrap();
-    s.execute("comp.open", json!({"comp": "3D Showcase"})).unwrap();
-    s.execute("time.set", json!({"time": 5.0})).unwrap();
-    s.execute("comp.settings", json!({"renderer": "classic3D"})).unwrap();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 900.0))
         .with_pixels_per_point(1.0)
         .wgpu_setup(same_adapter(adapter))
-        .build_eframe(|_| EffectcraftApp::new(s));
-    settle(&mut h);
+        .build_eframe(|_| EffectcraftApp::new(Session::default()));
+    // The project opens once the compositor (built on a worker thread) is attached, so the
+    // frames compared below are GPU frames, not ones the CPU composited meanwhile (see ui_gpu.rs).
+    wait_for_compositor(&mut h);
     if gl && h.state().gpu_adapter().is_none() {
         eprintln!("egui-wgpu's GL device has WebGL2 limits: the viewer stays on the CPU, skipping");
         return;
     }
     assert!(h.state().gpu_adapter().is_some(), "GPU compositor on egui-wgpu's device");
+    let s = &mut h.state_mut().session;
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    s.execute("comp.open", json!({"comp": "3D Showcase"})).unwrap();
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    s.execute("comp.settings", json!({"renderer": "classic3D"})).unwrap();
+    settle(&mut h);
     let before = h.state_mut().viewer_pixels().expect("GPU frame before adding the light").pixels.clone();
 
     h.state_mut().session.execute("layer.newLight", json!({"kind": "Environment", "color": [1.0, 0.0, 0.0], "intensity": 100.0})).unwrap();

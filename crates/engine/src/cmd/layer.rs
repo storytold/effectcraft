@@ -28,6 +28,7 @@ pub(crate) use create::{color_p, index_p, insert_layer, insert_layer_at, place, 
 pub(crate) use parent::parent_fixes;
 use parent::set_parent;
 use replace::{has_replace_source, replace_source};
+pub(crate) use select::select_only;
 use select::{select, select_next, select_prev, select_step};
 use switches::{blend, rename, set_comment, set_switch, track_matte};
 use timing::{arrange, move_frames, precompose, slip, timing};
@@ -147,7 +148,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("layer.moveLater", "Move Layers 1 Frame Later", [], Some("Alt+PageDown"), "{layers?}", has_layers, |s, p| move_frames(s, p, 1)),
         cmd!("layer.moveEarlier10", "Move Layers 10 Frames Earlier", [], Some("Alt+Shift+PageUp"), "{layers?}", has_layers, |s, p| move_frames(s, p, -10)),
         cmd!("layer.moveLater10", "Move Layers 10 Frames Later", [], Some("Alt+Shift+PageDown"), "{layers?}", has_layers, |s, p| move_frames(s, p, 10)),
-        cmd!("layer.slip", "Slip Edit", [], None, "{layers?, delta? (seconds) | frames?, merge?}", has_layers, slip),
+        cmd!(
+            "layer.slip",
+            "Slip Edit",
+            [],
+            None,
+            "{layers?, delta? (seconds) | frames?, merge?} → {requested, slipped: [{layer, delta, clamped}]}",
+            has_layers,
+            slip
+        ),
         cmd!("layer.slipBack", "Slip Edit 1 Frame Earlier", [], None, "{layers?}", has_layers, |s, p| {
             let mut p = p.clone();
             p["frames"] = json!(-1);

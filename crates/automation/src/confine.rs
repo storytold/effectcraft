@@ -6,10 +6,11 @@
 //! `engine.batch`) is checked before it runs: its file parameters must be absolute paths inside
 //! the roots (symbolic links resolved, no `..`), any other absolute path in its parameters too,
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
-//! Render Queue) are checked against where they would write. Commands that run code or open
-//! other applications (scripts, ScriptUI panels and the events that reach them, Execute File,
-//! Reveal in Finder…) are refused while confined, as is granting scripts the file and network
-//! access the user withheld.
+//! Render Queue) are checked against where they would write. Queueing a render without naming
+//! its output needs a saved project, because the default output of an unsaved one is the home
+//! folder. Commands that run code or open other applications (scripts, ScriptUI panels and the
+//! events that reach them, Execute File, Reveal in Finder…) are refused while confined, as is
+//! granting scripts the file and network access the user withheld.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -97,6 +98,7 @@ const MIXED_WRITES: &[(&str, &[&str])] = &[("templates.create", &["projectPath",
 
 /// Commands that write files named by these parameters.
 const WRITES: &[(&str, &[&str])] = &[
+    ("camera.exportBlender", &["path"]),
     ("file.save", &["path"]),
     ("file.saveAs", &["path"]),
     ("file.saveCopy", &["path"]),
@@ -121,6 +123,9 @@ const WRITES: &[(&str, &[&str])] = &[
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
 const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
 
+/// Commands that queue a render, whose output defaults to the project's folder when not given.
+const QUEUES_AN_OUTPUT: &[&str] = &["renderQueue.add", "render.preRender", "file.createProxy"];
+
 /// What must be looked up before an implicitly writing command may run.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lookup {
@@ -128,6 +133,10 @@ pub enum Lookup {
     ProjectFile,
     /// Every output of the queued Render Queue items (`renderQueue.list`).
     RenderOutputs,
+    /// Whether the open project has a file (`project.summary` → `path`): a render queued without
+    /// `output` (Render Queue, Pre-render, Create Proxy) writes beside it, or to the home folder
+    /// before the first save.
+    QueueDefault,
 }
 
 impl Confinement {
@@ -166,7 +175,7 @@ impl Confinement {
 
     /// Check engine command `id` with `params` before it runs. Returns what must still be looked
     /// up and passed to [`Confinement::check_lookup`] for commands that write implicitly.
-    pub fn check_command(&self, id: &str, params: &Value) -> Result<Option<Lookup>> {
+    pub fn check_command(&self, id: &str, params: &Value) -> Result<Vec<Lookup>> {
         if REFUSED.contains(&id) || effectcraft_engine::commands::scripts::RUNS_SCRIPTS.contains(&id) {
             return Err(Error::BadArgs(format!("`{id}` is not available while file access is confined (--automation-read-root/--automation-write-root)")));
         }
@@ -189,11 +198,11 @@ impl Confinement {
                 if named.iter().chain(mixed).filter_map(|k| inner_params.get(*k)).any(has_reference) {
                     return Err(Error::BadArgs(format!("`{inner}` in a batch: file paths can't be `$N` references while file access is confined")));
                 }
-                if self.check_command(inner, &inner_params)?.is_some() {
+                if !self.check_command(inner, &inner_params)?.is_empty() {
                     return Err(Error::BadArgs(format!("`{inner}` writes to its project's or queue's files: run it on its own while file access is confined")));
                 }
             }
-            return Ok(None);
+            return Ok(vec![]);
         }
         let (named, access) = match (keys_of(WRITES, id), keys_of(READS, id)) {
             (Some(k), _) => (k, Access::Write),
@@ -202,6 +211,10 @@ impl Confinement {
             (None, None) => (&[][..], Access::Read),
         };
         let mut given = false;
+        // Whether one of them is a file: not a Render Queue template, whose own output is relative
+        // and resolved like one the agent never gave, and not an array, which the commands that
+        // take a single output read as nothing at all.
+        let mut gave_a_file = false;
         for key in named {
             let Some(v) = params.get(*key).filter(|v| !v.is_null()) else { continue };
             given = true;
@@ -214,6 +227,7 @@ impl Confinement {
                 match p.as_str() {
                     Some(s) if matches!(id, "render.preRender" | "file.createProxy") && !looks_like_path(s) => {}
                     Some(s) => {
+                        gave_a_file |= v.is_string();
                         self.check(s, access)?;
                     }
                     None => return Err(Error::BadArgs(format!("`{id}`: `{key}` must be a path"))),
@@ -239,10 +253,19 @@ impl Confinement {
         if matches!(id, "file.openRecent" | "file.importRecent" | "anim.applyRecentPreset") && !given {
             return Err(Error::BadArgs(format!("`{id}`: give `path` while file access is confined")));
         }
-        if IMPLICIT_WRITES.contains(&id) && !(given && id == "file.save") {
-            return Ok(Some(if id == "file.save" || id == "file.incrementAndSave" { Lookup::ProjectFile } else { Lookup::RenderOutputs }));
+        let mut lookups = vec![];
+        // An output the agent did not name is derived from where the project sits: the Default
+        // Output Folder preference when that is set, beside the project file otherwise — and the
+        // home folder when the project has never been saved, outside every root (#2479). Only
+        // that last case is certainly outside, and reading the preference here would duplicate
+        // the engine's precedence, so an unsaved project is told to name its output instead.
+        if QUEUES_AN_OUTPUT.contains(&id) && !gave_a_file {
+            lookups.push(Lookup::QueueDefault);
         }
-        Ok(None)
+        if IMPLICIT_WRITES.contains(&id) && !(given && id == "file.save") {
+            lookups.push(if id == "file.save" || id == "file.incrementAndSave" { Lookup::ProjectFile } else { Lookup::RenderOutputs });
+        }
+        Ok(lookups)
     }
 
     /// Check what a [`Lookup`] found: `project.summary` or `renderQueue.list`'s result.
@@ -252,6 +275,13 @@ impl Confinement {
                 // Increment and Save writes beside it.
                 Some(p) => self.check(p, Access::Write).map(drop),
                 None => Err(Error::BadArgs("the project has no file yet: give `path` (Save As) inside an automation write root".into())),
+            },
+            // A saved project's default output sits beside it, and rendering checks it then.
+            Lookup::QueueDefault => match found.get("path").and_then(Value::as_str) {
+                Some(_) => Ok(()),
+                None => Err(Error::BadArgs(
+                    "the project has no file yet, so the default output would go to the home folder: give `output` inside an automation write root, or save the project inside one first".into(),
+                )),
             },
             Lookup::RenderOutputs => {
                 let items = found.get("items").or(Some(found)).and_then(Value::as_array).cloned().unwrap_or_default();

@@ -32,13 +32,14 @@ use engine::{MERCURY, PS2, PW_EFFECT_CAMERA, Stepped, rate_history, sim_key, sim
 #[cfg(test)]
 pub(crate) use engine::{PState, PW_ANIMS, Phys, simulate};
 pub(crate) use engine::{SPS, steps_at};
+pub(crate) use particle_fx::particle_world_textured;
 pub use particle_fx::{Blob, mercury_blobs};
 #[cfg(test)]
 use particle_fx::{PW_RATE, mercury_phys, ps2_phys, pw_phys};
 pub use registry::{specs, sprite_plan};
 pub use sprites::{Acc, Post, Shape, Sprite, SpritePlan, Tint};
 pub(crate) use sprites::{combine, raster, splat};
-pub use weather::{Bubble, bubble_list, drizzle_drops};
+pub use weather::{Bubble, bubble_list, bubble_sample_bounds, drizzle_drops};
 
 #[cfg(test)]
 mod tests;

@@ -18,6 +18,7 @@ pub mod history;
 mod home;
 mod interchange;
 pub mod menus;
+mod output_guard;
 pub mod preview;
 pub mod render_queue;
 pub mod scriptui;
@@ -241,8 +242,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// The stamps being taken on a worker thread ([`footage_reload::start_scan`]).
-    pub footage_scan: Option<footage_reload::Scan>,
     /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
     pub disk_salt: Option<(u64, u64)>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
@@ -351,7 +350,6 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             disk_salt: None,
-            footage_scan: None,
             script_calls: ScriptCalls::default(),
         }
     }

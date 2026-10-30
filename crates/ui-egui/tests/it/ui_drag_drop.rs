@@ -501,6 +501,19 @@ fn dropped_file_on_viewer_imports_and_adds_layer_at_pointer() {
     assert!((p[0] - 80.0).abs() <= tol && (p[1] - 45.0).abs() <= tol, "{p:?}");
 }
 
+/// #2588: a file dropped on the Timeline joins the composition the panel shows, as it does on the
+/// viewer; the import places the layer.
+#[test]
+fn dropped_file_on_the_timeline_becomes_a_layer() {
+    let (mut h, _) = harness();
+    h.state_mut().session.importer = Some(Arc::new(Gated { started: AtomicUsize::new(0), allow: Arc::new(AtomicUsize::new(usize::MAX)) }));
+    h.event(Event::PointerMoved(rect(&h, "panel.Timeline").center()));
+    h.step();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(std::env::temp_dir().join("timeline-drop.mp4"))));
+    h.run_steps(2);
+    step_until(&mut h, |h| h.state().session.active_comp().is_some_and(|c| c.layers.iter().any(|l| l.name == "timeline-drop.mp4")));
+}
+
 /// #678: a dropped Photoshop file asks how to import it, as File ▸ Import ▸ File… does; the
 /// Import Kind starts at Settings ▸ Import ▸ Default Drag Import As, and OK imports the drop.
 #[test]

@@ -35,6 +35,7 @@ Commands (CLI, MCP, control channel):
 - `general.pathPointSize`: Path Point and Handle Size
 - `general.recentItems`: Recent Projects Shown
 - `general.showToolTips`: Show Tool Tips
+- `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
@@ -120,9 +121,11 @@ Commands (CLI, MCP, control channel):
 - `import.reportMissingFrames`: gaps in an image sequence's numbering are reported on import
   (they show as colour-bar placeholders, as in After Effects; see [footage.md](footage.md))
 - `import.autoReloadFootage`: Automatically Reload Footage, `off`, `nonSequence` (the default, as
-  in After Effects) or `all` (image sequences too). Every two seconds,
-  and as soon as the window comes back to the front, the desktop app compares each footage file's
-  size and modification time with what they were, and reloads what another app saved: a
+  in After Effects) or `all` (image sequences too). Every two seconds while its window is in
+  front (every ten seconds while another app has the front), and as soon as the window comes back
+  to the front, the desktop app compares each footage file's size and modification time with what
+  they were, on a worker thread that only wakes the interface when something changed, and reloads
+  what another app saved: a
   Photoshop file edited in PhotoCraft or Photoshop shows its new pixels without File ▸ Reload
   Footage. It is not an undo step and doesn't modify the project; a layer item stays on its layer
   (found again by name), and a file that can't be read yet (still being written) is tried again once it changes again.

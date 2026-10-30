@@ -6,7 +6,7 @@ use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, La
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, has_comp, has_layers, layers_p, match_path_of, selected_leaf_props, str_p};
+use super::{CommandSpec, has_comp, has_layers, layers_or, layers_p, match_path_of, selected_leaf_props, str_p};
 use crate::{EngineError, KeyRef, LinkClip, Result, Session, cmd};
 
 fn can_undo(s: &Session) -> std::result::Result<(), String> {
@@ -25,6 +25,7 @@ fn has_clip(s: &Session) -> std::result::Result<(), String> {
         && s.state.key_clipboard.is_empty()
         && s.state.effect_clipboard.is_empty()
         && s.state.contents_clipboard.is_empty()
+        && s.state.mask_clipboard.is_empty()
         && s.state.link_clipboard.is_none()
         && s.state.value_clipboard.is_empty()
     {
@@ -104,9 +105,16 @@ pub(crate) fn reid(layer: &mut Layer, next: &mut u64) {
     *next += 1;
 }
 
+/// `edit.duplicate`: copies the targets in place. Without `layers` the targets are, in order:
+/// during a text edit the edited layer (the edit is committed first, as `text.endEdit` does),
+/// else the selected effects, shape items or text animators, else the selected layers. Layer
+/// copies are selected and their ids returned; the other paths return their delegated result.
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
-    // Effects selected → duplicate them (Edit ▸ Duplicate in Effect Controls).
-    if p.get("layers").is_none() {
+    let editing = s.state.text_edit.is_some();
+    // Effects selected → duplicate them (Edit ▸ Duplicate in Effect Controls). An open text edit
+    // comes first, as it does for Clear: opening the editor keeps the property selection, but
+    // while typing, Duplicate means the edited layer, not an effect or item selected before.
+    if p.get("layers").is_none() && !editing {
         let fx = super::effect::selected_effects(s);
         if !fx.is_empty() {
             let mut out = vec![];
@@ -126,7 +134,17 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
             return super::prop_groups::duplicate_contents(s, &items);
         }
     }
-    let (cid, ids) = layers_p(s, p)?;
+    // A deselected layer never keeps an open text edit (#2226): the copies take the selection, so
+    // commit an open edit first, exactly as `text.endEdit` and Deselect All do — one call on the
+    // command path so every route (menu, shortcut, palette, MCP, script) ends the edit and leaves
+    // the same final state. Unnamed, the target is the edited layer even when an engine route
+    // selected another one meanwhile.
+    let edited = s.state.text_edit.as_ref().map(|e| e.layer);
+    super::text_edit::end_edit(s, &Value::Null)?;
+    let (cid, ids) = match edited {
+        Some(layer) => layers_or(s, p, &[layer])?,
+        None => layers_p(s, p)?,
+    };
     let new = s.edit("Duplicate", None, |proj, st| {
         let mut next = proj.next_id;
         let comp = proj.comp_mut(cid).ok_or(crate::EngineError::NoComp)?;
@@ -143,14 +161,16 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         }
         relink_copies(comp, &map);
         proj.next_id = next;
-        st.selected_layers = created.clone();
+        // The property, keyframe and mask-vertex selection the edit kept belongs to the originals;
+        // left in place, the next Duplicate or Clear would act on it, not on the copies. So during
+        // an edit the copies take the selection the way a click on them would.
+        if editing {
+            super::layer::select_only(st, created.clone());
+        } else {
+            st.selected_layers = created.clone();
+        }
         Ok(created)
     })?;
-    // Duplicating selects the copies, so an open text edit on a now-deselected layer ends
-    // (#2226): typing must not keep editing an unselected layer.
-    if s.state.text_edit.as_ref().is_some_and(|e| !s.state.selected_layers.contains(&e.layer)) {
-        super::text_edit::end_edit(s, &Value::Null)?;
-    }
     Ok(json!(new.iter().map(|l| l.0).collect::<Vec<_>>()))
 }
 
@@ -266,6 +286,7 @@ fn clear_clipboards(s: &mut Session) {
     s.state.key_clipboard.clear();
     s.state.effect_clipboard.clear();
     s.state.contents_clipboard.clear();
+    s.state.mask_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.value_clipboard.clear();
     s.state.keyframe_text = None;
@@ -291,6 +312,16 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     // Effects selected (Effect Controls / timeline) → copy the effects.
     if p.get("layers").is_none() && !super::effect::selected_effects(s).is_empty() {
         return s.execute("effect.copy", json!({}));
+    }
+    // Masks selected → copy them (not their layer), for Paste onto other layers (#2091), unless
+    // a layer is named explicitly.
+    if p.get("layers").is_none() && p.get("layer").is_none_or(Value::is_null) {
+        let masks = super::prop_groups::copy_masks(s);
+        if !masks.is_empty() {
+            clear_clipboards(s);
+            s.state.mask_clipboard = masks;
+            return Ok(json!({"masks": s.state.mask_clipboard.len()}));
+        }
     }
     // Shape items selected in a shape layer's Contents → copy them (not their layer).
     if p.get("layers").is_none() {
@@ -577,6 +608,9 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if !s.state.contents_clipboard.is_empty() {
         return super::prop_groups::paste_contents(s, p);
+    }
+    if !s.state.mask_clipboard.is_empty() {
+        return super::prop_groups::paste_masks(s, p);
     }
     let cid = super::comp_id(s, p)?;
     let clip = s.state.clipboard.clone();
@@ -968,7 +1002,15 @@ pub fn specs() -> Vec<CommandSpec> {
             paste_reversed
         ),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Delete"), "{layers?}", layers_or_keys, delete),
-        cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+D"), "{layers?} (effects or shape items when they are selected)", has_layers, duplicate),
+        cmd!(
+            "edit.duplicate",
+            "Duplicate",
+            ["Edit"],
+            Some("Cmd+D"),
+            "{layers?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
+            layers_or_text_edit,
+            duplicate
+        ),
         cmd!("edit.splitLayer", "Split Layer", ["Edit"], Some("Cmd+Shift+D"), "{layers?}", has_layers, split),
         cmd!("edit.liftWorkArea", "Lift Work Area", ["Edit"], None, "{layers?}", has_comp, lift),
         cmd!("edit.extractWorkArea", "Extract Work Area", ["Edit"], None, "{layers?}", has_comp, extract),
@@ -1036,6 +1078,11 @@ fn history_goto(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn layers_or_keys(s: &Session) -> std::result::Result<(), String> {
     if !s.state.selected_keys.is_empty() || !s.state.selected_vertices.is_empty() { super::has_comp(s) } else { has_layers(s) }
+}
+
+/// Duplicate's unnamed target: the edited layer during a text edit, else the selection.
+fn layers_or_text_edit(s: &Session) -> std::result::Result<(), String> {
+    if s.state.text_edit.is_some() { super::has_comp(s) } else { has_layers(s) }
 }
 
 fn always_ok(_: &Session) -> std::result::Result<(), String> {

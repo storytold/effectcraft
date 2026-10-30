@@ -446,18 +446,26 @@ fn an_empty_glyph_does_not_cover_its_character() {
     assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
 }
 
-/// A Microsoft family that isn't installed renders in its installed metric-compatible
-/// substitute instead of Inter, and still reports itself missing (#1677).
+/// A missing Microsoft family uses its metric-compatible substitute instead of Inter and still
+/// reports itself missing (#1677). An installed original family takes precedence.
 #[test]
 fn microsoft_families_resolve_to_metric_compatible_substitutes() {
     add_font_data(test_font("Carlito"));
     add_font_data(test_font("Caladea"));
-    let calibri = resolve("Calibri", "Regular");
-    assert_eq!(face(calibri.face).info.family, "Carlito");
-    assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-    let cambria = resolve("Cambria", "Bold");
-    assert_eq!(face(cambria.face).info.family, "Caladea");
-    assert!(cambria.missing);
+    for (requested, style, substitute) in [("Calibri", "Regular", "Carlito"), ("Cambria", "Bold", "Caladea")] {
+        let alias = resolve_alias(requested, style).expect("the substitute is available");
+        assert_eq!(face(alias.face).info.family, substitute);
+        assert!(alias.missing, "the original name stays missing for Find Missing Fonts");
+
+        let resolved = resolve(requested, style);
+        let family = &face(resolved.face).info.family;
+        if family.eq_ignore_ascii_case(requested) {
+            assert!(!resolved.missing, "an installed original family is available");
+        } else {
+            assert_eq!(family, substitute);
+            assert!(resolved.missing);
+        }
+    }
     let unknown = resolve("No Such Family 1677", "Regular");
     assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
     assert!(unknown.missing);

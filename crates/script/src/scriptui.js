@@ -912,6 +912,18 @@ function __uiDispatch(winId, id, kind, valueJson) {
     w.close(v === null ? 2 : v);
     return;
   }
+  // The host gave the window a new size (a docked panel's dock): take it, lay out, tell the script.
+  if (kind === "resize") {
+    var nw = Number(v && v[0]), nh = Number(v && v[1]);
+    var b = w.__ub || w.__lb;
+    if (nw > 0 && nh > 0 && (b[2] - b[0] !== nw || b[3] - b[1] !== nh)) {
+      w.__ub = [b[0], b[1], b[0] + nw, b[1] + nh];
+      __uiLayout(w);
+      w.__fire("onResizing");
+      w.__fire("onResize");
+    }
+    return;
+  }
   var c = __uiFind(w, id);
   if (!c || c.enabled === false) return;
   var radio = function () {

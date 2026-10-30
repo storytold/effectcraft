@@ -366,6 +366,7 @@ pub(crate) fn display_key(app: &EffectcraftApp, has_conversion: bool) -> String 
 /// is set), or the snapshot while Show Snapshot is on / F5 is held, through Show Channel and the
 /// exposure. Fast Previews ▸ Wireframe draws layer outlines instead.
 pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter: &egui::Painter, comp_rect: Rect, cid: ItemId, ectx: &EvalCtx) {
+    clear_sample_source(ctx);
     let opts = app.session.state.viewer.clone();
     let snap = showing_snapshot(app, ctx);
     // Settings ▸ Video ▸ Mirror on Computer Monitor off: playback goes to Video Preview only.
@@ -393,6 +394,8 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
     let dc = vw::DisplayColor::of(&app.session);
     let dc_key = display_key(app, dc.is_some());
     let plain = opts.channel == Channel::Rgb && opts.exposure == 0.0 && dc.is_none();
+    let display = SampleDisplay { channel: opts.channel, colorized: opts.colorized, exposure: opts.exposure, conversion: dc.clone() };
+    let region = shown_region(ctx, [ectx.comp.width as f32, ectx.comp.height as f32]);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     if snap {
         let Some(s) = app.session.snapshot.clone() else { return };
@@ -415,6 +418,12 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
             }
         };
         painter.image(tex.id(), comp_rect, uv, Color32::WHITE);
+        note_sample_source(
+            ctx,
+            SampleSource::Snapshot(s.image.clone()),
+            [0.0, 0.0, ectx.comp.width as f64, ectx.comp.height as f64],
+            (!plain).then_some(display),
+        );
         painter.text(comp_rect.left_top() + vec2(6.0, 6.0), Align2::LEFT_TOP, crate::i18n::tr("Snapshot"), Tokens::ui(11.0), SNAP_COLOR);
         return;
     }
@@ -428,6 +437,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
                 ctx.request_repaint();
             }
             painter.image(id, comp_rect, uv, Color32::WHITE);
+            if let Some((_, key)) = app.viewer_shown {
+                note_sample_source(ctx, SampleSource::Gpu(key), region, None);
+            }
             return;
         }
         comp_rect
@@ -444,6 +456,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         if plain {
             let uv = app.viewer_image.as_ref().map_or(uv, |src| fitted_uv(ctx, src.size, minify));
             painter.image(tex.id(), rect, uv, Color32::WHITE);
+            if let Some(image) = app.viewer_image.clone() {
+                note_sample_source(ctx, SampleSource::Cpu(image), region, None);
+            }
             return;
         }
         rect
@@ -470,6 +485,71 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         }
     };
     painter.image(tex.id(), rect, fitted_uv(ctx, src.size, minify), Color32::WHITE);
+    note_sample_source(ctx, SampleSource::Cpu(src), region, Some(display));
+}
+
+#[derive(Clone)]
+enum SampleSource {
+    Cpu(std::sync::Arc<egui::ColorImage>),
+    Gpu(crate::frames::FrameKey),
+    Snapshot(std::sync::Arc<effectcraft_engine::render::Image>),
+}
+
+#[derive(Clone)]
+struct SampleDisplay {
+    channel: Channel,
+    colorized: bool,
+    exposure: f32,
+    conversion: Option<vw::DisplayColor>,
+}
+
+#[derive(Clone)]
+struct DisplayedSample {
+    pass: u64,
+    source: SampleSource,
+    region: [f64; 4],
+    display: Option<SampleDisplay>,
+}
+
+fn sample_source_id() -> egui::Id {
+    egui::Id::unique("viewer-displayed-sample-source")
+}
+
+pub(crate) fn clear_sample_source(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<DisplayedSample>(sample_source_id()));
+}
+
+fn note_sample_source(ctx: &egui::Context, source: SampleSource, region: [f64; 4], display: Option<SampleDisplay>) {
+    let sample = DisplayedSample { pass: ctx.cumulative_pass_nr(), source, region, display };
+    ctx.data_mut(|data| data.insert_temp(sample_source_id(), sample));
+}
+
+/// Sample only a frame actually drawn this pass, with that draw's channel, exposure and
+/// display conversion. Hidden and wireframe views deliberately have no sample source.
+pub(crate) fn sample_displayed(app: &EffectcraftApp, ctx: &egui::Context, point: [f64; 2]) -> Option<[f32; 4]> {
+    let sample = ctx.data(|data| data.get_temp::<DisplayedSample>(sample_source_id()))?;
+    if sample.pass != ctx.cumulative_pass_nr() {
+        return None;
+    }
+    let pixel = match sample.source {
+        SampleSource::Cpu(image) => super::fx_widgets::frame_pixel(&image, sample.region, point)?,
+        SampleSource::Gpu(key) => {
+            if app.viewer_shown.map(|(_, shown)| shown) != Some(key) {
+                return None;
+            }
+            super::fx_widgets::frame_pixel(app.viewer_image.as_ref()?, sample.region, point)?
+        }
+        SampleSource::Snapshot(image) => {
+            let index = super::fx_widgets::frame_pixel_index([image.width as usize, image.height as usize], sample.region, point)?;
+            crate::frames::display_pixel(*image.data.get(index)?)
+        }
+    };
+    let image = egui::ColorImage::new([1, 1], vec![pixel]);
+    let image = match sample.display {
+        Some(display) => transformed(&image, display.channel, display.colorized, display.exposure, display.conversion),
+        None => image,
+    };
+    super::fx_widgets::sample_frame(&image, [0.0, 0.0, 1.0, 1.0], [0.5, 0.5])
 }
 
 /// The texture coordinates of a frame of `size` in its texture, fitted with at least `minify`

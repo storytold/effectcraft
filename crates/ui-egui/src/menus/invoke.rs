@@ -115,7 +115,7 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 
 /// The arrow keys nudge the selected layers 1 pixel at the viewer's magnification (`up`,
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
-/// they move by fractions of a comp pixel. From any panel except Project (which owns the
+/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets and Render Queue (which own the
 /// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
 /// menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
@@ -131,7 +131,10 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if app.ui.focused == PanelKind::Project || (st.selected_layers.is_empty() && st.selected_vertices.is_empty()) || st.text_edit.is_some() {
+    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+        || (st.selected_layers.is_empty() && st.selected_vertices.is_empty())
+        || st.text_edit.is_some()
+    {
         return Ok(Value::Null);
     }
     // Screen pixels per comp pixel.
@@ -168,7 +171,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
     })
 }
 
-fn no_params(p: &Value) -> bool {
+pub(super) fn no_params(p: &Value) -> bool {
     p.as_object().is_none_or(|m| m.is_empty())
 }
 
@@ -222,6 +225,21 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             }
             _ => {}
         }
+    }
+    // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
+    // leaves the active composition open (it used to close the composition next to it).
+    if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
+        app.apply_dock(craft_ui::docking::Action::Close { panel: PanelKind::RenderQueue })?;
+        // The focus goes to a panel that is still there, so the next Close acts on the composition
+        // instead of on the queue that is gone.
+        let next = [PanelKind::Timeline, PanelKind::Composition, PanelKind::Project].into_iter().find(|p| panel_shown(app, *p)).unwrap_or(PanelKind::Project);
+        app.show_panel(next);
+        app.focus_panel(ctx, next);
+        // Activating a passive viewer emits OpenComp, which raises Timeline. Finish that routing
+        // before restoring the destination panel, including when they share the same tab group.
+        app.handle_events(ctx);
+        app.show_panel(next);
+        return Ok(Value::Null);
     }
     // Edit ▸ Paste with SVG markup on the system clipboard pastes it as a shape layer (After
     // Effects 26.3). Copying in the app replaces the system clipboard with a note naming what

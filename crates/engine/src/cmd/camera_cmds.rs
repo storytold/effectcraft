@@ -42,9 +42,23 @@ pub fn specs() -> Vec<CommandSpec> {
             create_from_solve
         ),
         cmd!("camera.create", "Create Camera", [], None, "{layer?, effect?}", has_comp, |s, p| create_from_solve(s, &with_kind(p, "camera"))),
+        cmd!(
+            "camera.exportBlender",
+            "Export Scene to Blender...",
+            [],
+            None,
+            "{path: .py, comp?, layer?, effect?, sensorWidth?: mm (default 36), unitScale?: Blender units per comp pixel (default 0.01), startFrame?: positive integer (default 1), includePoints?: true}",
+            has_comp,
+            export_blender
+        ),
         cmd!("camera.setGroundPlane", "Set Ground Plane and Origin", [], None, "{points?: [id] (default: selected), layer?, effect?}", has_comp, set_ground),
         cmd!("camera.deletePoints", "Delete Selected Points", [], None, "{points?: [id] (default: selected), layer?, effect?, wait?}", has_comp, delete_points),
     ]
+}
+
+fn export_blender(s: &mut Session, p: &Value) -> Result<Value> {
+    let (cid, lid, uid) = ct_p(s, p, "camera.exportBlender")?;
+    super::blender::export(s, p, cid, lid, uid)
 }
 
 fn with_kind(p: &Value, kind: &str) -> Value {

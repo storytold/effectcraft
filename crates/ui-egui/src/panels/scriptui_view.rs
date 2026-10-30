@@ -26,6 +26,8 @@ enum Act {
     Close(u32),
     /// A mouse event (`scriptui.mouse` parameters without window and widget).
     Mouse(u32, u32, Value),
+    /// A docked panel's new size (`scriptui.resize`).
+    Resize(u32, [f32; 2]),
 }
 
 fn rect_of(origin: egui::Pos2, b: [f64; 4]) -> Rect {
@@ -500,6 +502,7 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Act::Set(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v})),
             Act::Changing(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v, "changing": true})),
             Act::Close(w) => ("scriptui.close", json!({"window": w})),
+            Act::Resize(w, [x, y]) => ("scriptui.resize", json!({"window": w, "size": [x, y]})),
             Act::Mouse(w, id, mut v) => {
                 if let Some(o) = v.as_object_mut() {
                     o.insert("window".into(), json!(w));
@@ -582,6 +585,14 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     // A modal script dialog blocks the panels too.
     let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
     let mut acts = vec![];
+    // The script learns its dock's size when it changes (#2585), as After Effects tells a
+    // docked panel: its window takes the size and onResize runs.
+    let dock = [rect.width().round(), rect.height().round()];
+    let told = egui::Id::unique(("scriptui-dock-size", id));
+    if ui.data(|d| d.get_temp::<[f32; 2]>(told)) != Some(dock) && dock[0] >= 1.0 && dock[1] >= 1.0 {
+        ui.data_mut(|d| d.insert_temp(told, dock));
+        acts.push(Act::Resize(id, dock));
+    }
     let content = rect;
     egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());

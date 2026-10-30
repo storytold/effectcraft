@@ -285,7 +285,7 @@ fn get_comp(b: &mut Backend, a: &Value) -> Result<Reply> {
     json_reply(b.exec("comp.info", obj(&[("comp", get(a, "comp"))]))?)
 }
 
-/// Flatten a `layer.tree` property tree into `[{path, type, value, keys?, expression?}]`.
+/// Flatten a `layer.tree` property tree into `[{path, type, value, keys?, expression?, options?}]`.
 fn flatten(node: &Value, out: &mut Vec<Value>) {
     // A group cut off by `depth` stays visible (instead of vanishing from the flat list).
     if node.get("truncated").and_then(Value::as_bool) == Some(true) {
@@ -301,6 +301,9 @@ fn flatten(node: &Value, out: &mut Vec<Value>) {
             }
             if let Some(e) = node.get("expression") {
                 o["expression"] = e.clone();
+            }
+            if let Some(opts) = node.get("options") {
+                o["options"] = opts.clone();
             }
             out.push(o);
         }
@@ -626,7 +629,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_layer",
-        description: "A layer's property tree (transform, masks, effects, text, shape contents, ...): leaf properties have a `path` usable with get_property/set_property/add_keyframe, plus uid, match id, name, type, value at `time`, keyframes and expression. Groups contain children; inspect them here, then select a leaf path. `flat: true` returns just a list of {path, type, value, keys, expression} (compact).",
+        description: "A layer's property tree (transform, masks, effects, text, shape contents, ...): leaf properties have a `path` usable with get_property/set_property/add_keyframe, plus uid, match id, name, type, value at `time`, keyframes and expression; popup (enum) properties add `options` ([{value, label}]). Groups contain children; inspect them here, then select a leaf path. `flat: true` returns just a list of {path, type, value, keys, expression, options} (compact).",
         bridge_only: false,
         schema: || {
             schema(
@@ -643,7 +646,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_property",
-        description: "Read one property: type, value at `time` (comp seconds; default the current time), whether it is animated, its keyframes (time, value, in/out interpolation) and expression.",
+        description: "Read one property: type, value at `time` (comp seconds; default the current time), whether it is animated, its keyframes (time, value, in/out interpolation) and expression. Popup (enum) properties add `options`: [{value, label}], the values set_property takes.",
         bridge_only: false,
         schema: || {
             schema(

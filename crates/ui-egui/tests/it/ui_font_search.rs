@@ -1,4 +1,5 @@
 //! Real keyboard/pointer coverage for the font menus in both text panels.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, commands::text_edit::layer_doc, project::LayerId};
 use effectcraft_ui_egui::{EffectcraftApp, dock::PanelKind};
 use egui::{Event, Key, Modifiers, PointerButton};
@@ -29,6 +30,7 @@ fn type_text(h: &mut Harness<'_, EffectcraftApp>, text: &str) {
 
 #[test]
 fn font_search_filters_selects_and_undoes_in_both_panels() {
+    let _device = crate::gpu_test::lock();
     for (panel, prefix) in [(PanelKind::Character, "character.font"), (PanelKind::Properties, "properties.text.font")] {
         let mut s = Session::default();
         s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
@@ -56,7 +58,7 @@ fn font_search_filters_selects_and_undoes_in_both_panels() {
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|r| r.label.to_lowercase().contains("jetbrains")));
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-            h.render().unwrap().save(format!("{dir}/{prefix}-search.png")).unwrap();
+            h.render_serialized().unwrap().save(format!("{dir}/{prefix}-search.png")).unwrap();
         }
         assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "typing only filters");
         key(&mut h, Key::Enter);
@@ -76,7 +78,7 @@ fn font_search_filters_selects_and_undoes_in_both_panels() {
         // Reopening clears the previous query, and mouse selection still works.
         h.run_steps(2);
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-            h.render().unwrap().save(format!("{dir}/{prefix}-reopened.png")).unwrap();
+            h.render_serialized().unwrap().save(format!("{dir}/{prefix}-reopened.png")).unwrap();
         }
         assert!(h.state().auto.query(&format!("{prefix}.option.")).len() > 1);
         type_text(&mut h, "JetBrains");

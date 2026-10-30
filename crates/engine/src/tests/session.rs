@@ -320,6 +320,53 @@ fn toolbar_fill_and_stroke_paint_selected_shape_layers() {
     let _ = s.render(cid, s.time(), Default::default());
 }
 
+/// The toolbar/query width follows the selected solid or gradient stroke, including animation.
+#[test]
+fn shape_toolbar_reads_solid_and_gradient_stroke_widths_at_the_current_time() {
+    for kind in ["solid", "linear", "radial"] {
+        for (stretch, expected) in [(100.0, 17.0), (200.0, 13.0)] {
+            let mut s = Session::default();
+            s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
+            let layer = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
+            s.execute("layer.timeStretch", json!({"layer": layer, "percent": stretch})).unwrap();
+            let configured = s.execute("shape.fillStroke", json!({"fill": false, "strokeType": kind, "strokeWidth": 9})).unwrap();
+            assert_eq!(configured["strokeWidth"].as_f64(), Some(9.0), "configured {kind} stroke");
+            let group = if kind == "solid" { "stroke" } else { "gstroke" };
+            let path = format!("contents/group/contents/{group}/width");
+            for (time, width) in [(0, 9), (1, 17)] {
+                s.execute("prop.addKey", json!({"layer": layer, "path": path, "time": time, "timeBase": "layer", "value": width})).unwrap();
+            }
+            s.set_time(effectcraft_time::Tick::from_seconds_f64(1.0));
+            let displayed = s.execute("shape.fillStroke", json!({})).unwrap();
+            assert_eq!(displayed["strokeWidth"].as_f64(), Some(expected), "animated {kind} stroke at {stretch}% stretch");
+        }
+    }
+}
+
+/// A later solid stroke supplies color without overwriting the first gradient stroke's width.
+#[test]
+fn shape_toolbar_keeps_the_first_gradient_width_with_a_later_solid_stroke() {
+    for kind in ["linear", "radial"] {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
+        let layer = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("shape.fillStroke", json!({"strokeType": kind, "strokeWidth": 9})).unwrap();
+        s.execute("layer.addShapeItem", json!({"layer": layer, "group": "contents/group", "kind": "stroke"})).unwrap();
+        for (field, value) in [("color", json!([0.0, 1.0, 0.0, 1.0])), ("width", json!(99))] {
+            s.execute("prop.set", json!({"layer": layer, "path": format!("contents/group/contents/stroke/{field}"), "value": value})).unwrap();
+        }
+        for (time, width) in [(0, 9), (1, 17)] {
+            s.execute("prop.addKey", json!({"layer": layer, "path": "contents/group/contents/gstroke/width", "time": time, "value": width})).unwrap();
+        }
+        for (time, width) in [(0.0, 9.0), (1.0, 17.0)] {
+            s.set_time(effectcraft_time::Tick::from_seconds_f64(time));
+            let displayed = s.execute("shape.fillStroke", json!({})).unwrap();
+            assert_eq!(displayed["strokeWidth"].as_f64(), Some(width));
+            assert_eq!(displayed["stroke"], json!([0.0, 1.0, 0.0, 1.0]));
+        }
+    }
+}
+
 /// A Wiggle Paths saved without Spatial Phase gets the property, at 0°, after Temporal Phase when
 /// the project opens.
 #[test]

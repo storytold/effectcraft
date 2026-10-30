@@ -1778,7 +1778,7 @@ fn empty_timeline(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(crate::panels::DragPayload::Item(dragged)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx).as_deref()
         && ui.rect_contains_pointer(rect)
     {
-        let items: Vec<ItemId> = crate::panels::project_drop_items(app, *dragged)
+        let items: Vec<ItemId> = crate::panels::project_drop_items(app, *dragged, None)
             .into_iter()
             .map(ItemId)
             .filter(|id| {
@@ -3058,7 +3058,7 @@ fn layer_mode_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
     }
     let tr = Rect::from_center_size(pos2(cw.mode + 76.0 + 6.0, cy), vec2(14.0, 14.0));
     app.auto.add(&format!("timeline.layer.{}.preserveTransparency", layer.id.0), tr, "Preserve Transparency");
-    if widgets::checkbox(ui, tr, layer.preserve_transparency, &t, egui::Id::unique(("pt", layer.id.0))).clicked() {
+    if widgets::checkbox(ui, tr, layer.preserve_transparency, &t, egui::Id::unique(("pt", layer.id.0))).changed() {
         // The click gives the selection the state the clicked row toggles to,
         // whatever the first selected layer's value (as the switches do).
         actions.push((
@@ -3565,7 +3565,7 @@ fn group_mask_mode(ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>) {
             actions.push(("layer.setMask".into(), json!({"layer": layer.id.0, "mask": uid, "mode": opts[i]})));
         }
         let ir = Rect::from_min_size(pos2(mr.max.x + 8.0, cy - 8.0), vec2(16.0, 16.0));
-        if widgets::checkbox(ui, ir, inverted, &t, egui::Id::unique(("minv", uid))).clicked() {
+        if widgets::checkbox(ui, ir, inverted, &t, egui::Id::unique(("minv", uid))).changed() {
             actions.push(("layer.setMask".into(), json!({"layer": layer.id.0, "mask": uid, "inverted": !inverted})));
         }
         lp.text(pos2(ir.max.x + 4.0, cy), Align2::LEFT_CENTER, crate::i18n::tr("Inverted"), Tokens::ui(11.0), t.text_dim);
@@ -4100,72 +4100,91 @@ fn key_double_click(g: &mut Rw, rc: &RowCtx<'_>, prop: &Property, kh: &KeyHit<'_
 /// The keyframe right-click menu.
 fn key_context_menu(app: &mut EffectcraftApp, g: &mut Rw, rc: &RowCtx<'_>, prop: &Property, kh: &KeyHit<'_>) {
     let KeyHit { k, ks, ref kresp, .. } = *kh;
-    let t = g.tl.t;
     let actions = &mut g.tl.actions;
     let layer = rc.layer;
-    let uid = &prop.uid;
+    crate::widgets::context_menu(kresp, |ui| key_menu(ui, app, layer, prop, k, ks, actions));
+}
 
-    crate::widgets::context_menu(kresp, |ui| {
-        for (lbl, cmd, params) in [
-            ("Edit Value…", "keys.set", json!({"layer": layer.id.0, "prop": uid, "time": k.time.seconds()})),
-            ("-", "", json!({})),
-            ("Copy", "keys.copy", json!({})),
-            ("Paste", "keys.paste", json!({})),
-            ("-", "", json!({})),
-            ("Select Equal Keyframes", "keys.selectEqual", json!({})),
-            ("Select Previous Keyframes", "keys.selectPrevious", json!({})),
-            ("Select Following Keyframes", "keys.selectFollowing", json!({})),
-            ("-", "", json!({})),
-            ("Keyframe Interpolation…", "keys.interpolation", json!({})),
-            ("Keyframe Velocity…", "keys.velocity", json!({})),
-            ("Toggle Hold Keyframe", "keys.toggleHold", json!({})),
-            (if k.muted { "Unmute Keyframes" } else { "Mute Keyframes" }, "keys.setMuted", json!({"muted": !k.muted})),
-            ("Rove Across Time", "keys.interpolation", json!({"roving": !k.roving})),
-            ("-", "", json!({})),
-            ("Easy Ease", "keys.easyEase", json!({})),
-            ("Easy Ease In", "keys.easyEaseIn", json!({})),
-            ("Easy Ease Out", "keys.easyEaseOut", json!({})),
-            ("Time-Reverse Keyframes", "keys.timeReverse", json!({})),
-            ("-", "", json!({})),
-            ("Linear", "keys.interpolation", json!({"interpolation": "linear"})),
-            ("Bezier", "keys.interpolation", json!({"interpolation": "bezier"})),
-            ("Auto Bezier", "keys.interpolation", json!({"interpolation": "autoBezier"})),
-            ("Select All Keyframes", "keys.selectAll", json!({})),
-            ("Delete", "keys.delete", json!({})),
-        ] {
-            if lbl == "Select All Keyframes" {
-                // Keyframe colour labels.
+/// The commands of a keyframe's right-click menu, for the Timeline and the Graph Editor alike. They act
+/// on the selected keys, so a menu opened on an unselected key selects it first. A locked layer's keys
+/// can still be copied and selected, but not edited.
+pub(crate) fn key_menu(
+    ui: &mut egui::Ui,
+    app: &EffectcraftApp,
+    layer: &Layer,
+    prop: &Property,
+    k: &effectcraft_engine::keyframe::Keyframe,
+    selected: bool,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let t = app.tokens;
+    let locked = layer.switches.locked;
+    let uid = &prop.uid;
+    let this_key = json!({"layer": layer.id.0, "prop": uid, "time": k.time.seconds()});
+    for (lbl, cmd, params) in [
+        ("Edit Value…", "keys.set", this_key.clone()),
+        ("-", "", json!({})),
+        ("Copy", "keys.copy", json!({})),
+        ("Paste", "keys.paste", json!({})),
+        ("-", "", json!({})),
+        ("Select Equal Keyframes", "keys.selectEqual", json!({})),
+        ("Select Previous Keyframes", "keys.selectPrevious", json!({})),
+        ("Select Following Keyframes", "keys.selectFollowing", json!({})),
+        ("-", "", json!({})),
+        ("Keyframe Interpolation…", "keys.interpolation", json!({})),
+        ("Keyframe Velocity…", "keys.velocity", json!({})),
+        ("Toggle Hold Keyframe", "keys.toggleHold", json!({})),
+        (if k.muted { "Unmute Keyframes" } else { "Mute Keyframes" }, "keys.setMuted", json!({"muted": !k.muted})),
+        ("Rove Across Time", "keys.interpolation", json!({"roving": !k.roving})),
+        ("-", "", json!({})),
+        ("Easy Ease", "keys.easyEase", json!({})),
+        ("Easy Ease In", "keys.easyEaseIn", json!({})),
+        ("Easy Ease Out", "keys.easyEaseOut", json!({})),
+        ("Time-Reverse Keyframes", "keys.timeReverse", json!({})),
+        ("-", "", json!({})),
+        ("Linear", "keys.interpolation", json!({"interpolation": "linear"})),
+        ("Bezier", "keys.interpolation", json!({"interpolation": "bezier"})),
+        ("Auto Bezier", "keys.interpolation", json!({"interpolation": "autoBezier"})),
+        ("Select All Keyframes", "keys.selectAll", json!({})),
+        ("Delete", "keys.delete", json!({})),
+    ] {
+        if lbl == "Select All Keyframes" {
+            // Keyframe colour labels.
+            ui.add_enabled_ui(!locked, |ui| {
                 ui.menu_button(crate::i18n::tr("Label"), |ui| {
                     for (i, l) in effectcraft_engine::color::Label::ALL.into_iter().enumerate() {
                         if widgets::label_entry(ui, l, &app.session.prefs.label_name(l), k.label as usize == i, &t).clicked() {
-                            if !ks {
-                                actions.push(("keys.select".into(), json!({"keys": [{"layer": layer.id.0, "prop": uid, "time": k.time.seconds()}]})));
+                            if !selected {
+                                actions.push(("keys.select".into(), json!({"keys": [this_key.clone()]})));
                             }
                             actions.push(("keys.setLabel".into(), json!({"label": i})));
                             ui.close();
                         }
                     }
                 });
-            }
-            if lbl == "-" {
-                ui.separator();
-                continue;
-            }
-            if lbl == "Rove Across Time" && !prop.spatial {
-                continue;
-            }
-            if lbl == "Edit Value…" && !matches!(k.value, Value::Scalar(_) | Value::Vec2(_) | Value::Vec3(_)) {
-                continue;
-            }
-            if ui.button(lbl).clicked() {
-                if !ks {
-                    actions.push(("keys.select".into(), json!({"keys": [{"layer": layer.id.0, "prop": uid, "time": k.time.seconds()}]})));
-                }
-                actions.push((cmd.into(), params));
-                ui.close();
-            }
+            });
         }
-    });
+        if lbl == "-" {
+            ui.separator();
+            continue;
+        }
+        if lbl == "Rove Across Time" && !prop.spatial {
+            continue;
+        }
+        if lbl == "Edit Value…" && !matches!(k.value, Value::Scalar(_) | Value::Vec2(_) | Value::Vec3(_)) {
+            continue;
+        }
+        let edits = !matches!(cmd, "keys.copy" | "keys.selectEqual" | "keys.selectPrevious" | "keys.selectFollowing" | "keys.selectAll");
+        // An unselected key is selected before the command runs, and locked keys cannot be selected.
+        let unselectable = locked && !selected && cmd != "keys.selectAll";
+        if ui.add_enabled(!(unselectable || locked && edits), egui::Button::new(crate::i18n::context_item(cmd, &params, lbl))).clicked() {
+            if !selected {
+                actions.push(("keys.select".into(), json!({"keys": [this_key.clone()]})));
+            }
+            actions.push((cmd.into(), params));
+            ui.close();
+        }
+    }
 }
 
 /// Starts a key drag (or Alt-scale).
@@ -4945,7 +4964,7 @@ fn drop_insert_layers(app: &mut EffectcraftApp, g: &mut Rw, payload: &std::sync:
         match payload.as_ref() {
             crate::panels::DragPayload::Item(id) => {
                 // Insert each selected item at the drop point, in selection order.
-                for (offset, item) in crate::panels::project_drop_items(app, *id).into_iter().enumerate() {
+                for (offset, item) in crate::panels::project_drop_items(app, *id, Some(g.tl.cid)).into_iter().enumerate() {
                     actions.push(("layer.addItem".into(), json!({"item": item, "index": index.saturating_add(offset), "time": time.clone()})));
                 }
             }
@@ -5581,11 +5600,21 @@ impl<'a> ValueEdit<'a> {
         Self { p, layer, prop, at, uid, merge: format!("scrub-{uid}"), scrub, proportional }
     }
 
-    /// Queues the `prop.set` of one edit.
+    /// Queues the `prop.set` of one edit; consecutive edits of the property (a scrub) are one undo step.
     fn set(&self, actions: &mut Vec<(String, serde_json::Value)>, v: serde_json::Value) {
+        self.push(actions, v, Some(&self.merge));
+    }
+
+    /// Queues the `prop.set` of a discrete choice (a drop-down pick, a check box): its own undo
+    /// step, never merged with the property's previous edit (#2152).
+    fn set_step(&self, actions: &mut Vec<(String, serde_json::Value)>, v: serde_json::Value) {
+        self.push(actions, v, None);
+    }
+
+    fn push(&self, actions: &mut Vec<(String, serde_json::Value)>, v: serde_json::Value, merge: Option<&str>) {
         actions.push((
             "prop.set".into(),
-            json!({"layer": self.layer.id.0, "prop": self.uid, "value": v, "merge": self.merge, "selected": true, "offset": self.scrub, "proportional": self.proportional}),
+            json!({"layer": self.layer.id.0, "prop": self.uid, "value": v, "merge": merge, "selected": true, "offset": self.scrub, "proportional": self.proportional}),
         ))
     }
 }
@@ -5664,18 +5693,21 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
     // Mask Feather: two linked values, never negative (as in After Effects, #203).
     let feather = prop.match_id == "feather" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }));
     let range = if feather { (0.0, 1e9) } else { (-1e9, 1e9) };
+    // Audio Levels link their two channels too, off by default, by the same dB change (#2485).
+    let levels = prop.match_id == "levels" && layer.props.parent_of(uid).is_some_and(|g| g.match_id == "audio");
     // Scale and Mask Feather: the chain link (Constrain Proportions, on by default).
     // Rectangle and Ellipse Path Size have it too, off by default (#2489).
     let size = prop.match_id == "size" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.match_id.as_str(), "rect" | "ellipse"));
-    let linkable = feather || size || (pct && prop.match_id == "scale");
-    let linked = linkable && app.ui.timeline.is_linked(uid, !size);
+    let linkable = feather || size || levels || (pct && prop.match_id == "scale");
+    let linked = linkable && app.ui.timeline.is_linked(uid, !(size || levels));
     if linkable {
         let lr = Rect::from_center_size(pos2(x + 7.0, at.y), vec2(14.0, 14.0));
-        let resp = ui.interact(lr, egui::Id::unique(("tl-link", uid)), Sense::click()).on_hover_text(crate::i18n::tr("Constrain Proportions"));
+        let label = if levels { "Link Channels" } else { "Constrain Proportions" };
+        let resp = ui.interact(lr, egui::Id::unique(("tl-link", uid)), Sense::click()).on_hover_text(crate::i18n::tr(label));
         icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
-        app.auto.add(&format!("timeline.prop.{uid}.link"), lr, "Constrain Proportions");
+        app.auto.add(&format!("timeline.prop.{uid}.link"), lr, label);
         if resp.clicked() {
-            app.ui.timeline.toggle_link(uid, !size);
+            app.ui.timeline.toggle_link(uid, !(size || levels));
         }
         x += 18.0;
     }
@@ -5696,7 +5728,8 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
             // Alt edits one value of a linked pair (Ctrl+Alt is a proportional scrub).
             let shown = if linked && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers)) { n.min(c.len()) } else { 1 };
             let from = if shown == 1 { d } else { 0 };
-            for (e, v) in widgets::constrained(c.get(from..from + shown).unwrap_or_default(), d - from, nv).into_iter().enumerate() {
+            let link = if levels { widgets::shifted } else { widgets::constrained };
+            for (e, v) in link(c.get(from..from + shown).unwrap_or_default(), d - from, nv).into_iter().enumerate() {
                 if let Some(slot) = nc.get_mut(from + e) {
                     *slot = v;
                 }
@@ -5704,8 +5737,15 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
             ve.set(actions, json!(nc));
             // Typed into these components only: other selected layers keep the rest of
             // their own value (#1434).
+            // Linked Audio Levels: the typed channel, the other following by that layer's own
+            // change, so each keeps its balance (#2485).
             if let Some((_, a)) = actions.last_mut() {
-                a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
+                if levels {
+                    a["dims"] = json!([d]);
+                    a["follow"] = json!((from..from + shown).filter(|&e| e != d).collect::<Vec<_>>());
+                } else {
+                    a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
+                }
             }
         }
         x = r.max.x + if d + 1 < n { 2.0 } else { 0.0 };
@@ -5754,8 +5794,8 @@ fn bool_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
     let t = app.tokens;
     let x = at.x;
     let r = Rect::from_min_size(pos2(x, at.y - 8.0), vec2(16.0, 16.0));
-    if widgets::checkbox(ui, r, *b, &t, egui::Id::unique(("cb", uid))).clicked() {
-        ve.set(actions, json!(!b));
+    if widgets::checkbox(ui, r, *b, &t, egui::Id::unique(("cb", uid))).changed() {
+        ve.set_step(actions, json!(!b));
     }
     app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
 }
@@ -5766,14 +5806,7 @@ fn enum_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
     let (p, layer, prop, at, uid) = (ve.p, ve.layer, ve.prop, ve.at, ve.uid);
     let t = app.tokens;
     let x = at.x;
-    // Text Path Options ▸ Path lists the layer's masks.
-    let mask_opts: Option<Vec<String>> = layer
-        .props
-        .prop("text/pathOptions/path")
-        .filter(|q| q.uid == uid)
-        .map(|_| std::iter::once("None".to_string()).chain(layer.masks().into_iter().flat_map(|m| m.groups().map(|g| g.name.clone()))).collect());
-    let ui_opts = mask_opts.map(|options| ParamUi::Popup { options });
-    if let ParamUi::Popup { options } = ui_opts.as_ref().unwrap_or(&prop.ui) {
+    if let Some(options) = layer.popup_options(prop) {
         let r = Rect::from_min_size(pos2(x, at.y - 9.0), vec2(150.0, 18.0));
         let label = options.get(*i as usize).cloned().unwrap_or_default();
         let pop = egui::Id::unique(("epop", uid));
@@ -5781,8 +5814,8 @@ fn enum_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
             widgets::open_popup(ui, pop);
         }
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
-        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(*i as usize)) {
-            ve.set(actions, json!(ni));
+        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, Some(*i as usize)) {
+            ve.set_step(actions, json!(ni));
         }
     } else {
         p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.for_value(prop.has_expression()).hot_text);
@@ -5802,7 +5835,7 @@ fn layer_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>,
     if let Some(comp) = app.session.active_comp_arc()
         && let Some(chosen) = widgets::layer_picker(ui, r, &comp.layers, *l, &t, egui::Id::unique(("tl-lay", uid)))
     {
-        ve.set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+        ve.set_step(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
     }
     app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
 }

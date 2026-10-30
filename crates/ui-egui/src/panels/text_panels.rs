@@ -127,21 +127,46 @@ fn numeric_fields(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
         let row = i / 2;
         let fx = x0 + col as f32 * (w / 2.0);
         let fy = y + row as f32 * 28.0;
-        p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(
-            ui,
-            pos2(fx + 26.0, fy),
-            egui::Id::unique(("char", key)),
-            v,
-            &widgets::HotSpec { speed: 0.5, range, decimals: 0, suffix },
-            &t,
-        );
+        let stroke = key == "strokeWidth";
+        if stroke {
+            // The stroke-width icon, as in After Effects, not a letter that reads as "width".
+            crate::icons::paint(p, Rect::from_min_size(pos2(fx, fy + 1.0), vec2(18.0, 18.0)), crate::icons::Icon::StrokeWidth, t.text_dim);
+        } else {
+            p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
+        }
+        // Fractional stroke widths (the 0.25 / 0.5 / 0.75 presets) show their decimals.
+        let decimals = if stroke && v.fract().abs() > 1e-9 { 2 } else { 0 };
+        let (r, nv, _) =
+            widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::unique(("char", key)), v, &widgets::HotSpec { speed: 0.5, range, decimals, suffix }, &t);
         app.auto.add(&format!("character.{key}"), r, key);
+        if stroke {
+            stroke_width_presets(app, ui, r, enabled, actions);
+        }
         if let Some(nv) = nv
             && enabled
         {
             actions.push(json!({key: nv, "merge": format!("char-{key}")}));
         }
+    }
+}
+
+/// The stroke width's presets menu beside its value (`r`), as in After Effects.
+fn stroke_width_presets(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, enabled: bool, actions: &mut Vec<serde_json::Value>) {
+    const PRESETS: [f64; 22] = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
+    let t = app.tokens;
+    let br = Rect::from_min_size(pos2(r.max.x + 4.0, r.min.y + 2.0), vec2(16.0, 16.0));
+    let pop = egui::Id::unique("char-stroke-width-pop");
+    if widgets::icon_button(ui, br, crate::icons::Icon::ChevronDown, false, &t, egui::Id::unique("char-stroke-width-presets"))
+        .on_hover_text(tr("Stroke width presets"))
+        .clicked()
+        && enabled
+    {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add("character.strokeWidth.presets", br, "Stroke width presets");
+    let labels: Vec<String> = PRESETS.iter().map(|v| format!("{v} px")).collect();
+    if let Some(v) = widgets::popup_menu(ui, pop, br.left_bottom(), &labels, None).and_then(|i| PRESETS.get(i)) {
+        actions.push(json!({"strokeWidth": v}));
     }
 }
 
@@ -173,21 +198,43 @@ fn kerning_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     }
 }
 
-/// Stroke Over Fill / Fill Over Stroke (grid row 2, right).
-fn stroke_order_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: Grid, doc: &TextDoc, actions: &mut Vec<serde_json::Value>) {
+/// Stroke order (grid row 2, right): per character (Fill Over Stroke / Stroke Over Fill), or for
+/// the whole layer, which is the layer's More Options > Fill & Stroke (`fill_stroke`, see
+/// [`layer_fill_stroke`]). Returns the layer order picked, if any.
+fn stroke_order_field(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    g: Grid,
+    doc: &TextDoc,
+    fill_stroke: u32,
+    actions: &mut Vec<serde_json::Value>,
+) -> Option<u32> {
     let t = app.tokens;
     let Grid { x0, y, w, enabled } = g;
     let fx = x0 + w / 2.0;
     let fy = y + 2.0 * 28.0;
     let dr = Rect::from_min_size(pos2(fx, fy), vec2(w / 2.0, 20.0));
-    let labels = vec!["Fill Over Stroke".to_string(), "Stroke Over Fill".to_string()];
+    let labels: Vec<String> =
+        ["Fill Over Stroke", "Stroke Over Fill", "-", "All Fills Over All Strokes", "All Strokes Over All Fills"].iter().map(|s| s.to_string()).collect();
+    let current = match fill_stroke {
+        1 => 3,
+        2 => 4,
+        _ => doc.stroke_over_fill as usize,
+    };
     let pop = egui::Id::unique("char-stroke-order-pop");
-    if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
+    if widgets::dropdown(ui, dr, &labels[current], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
         widgets::open_popup(ui, pop);
     }
     app.auto.add("character.strokeOverFill", dr, "Stroke order");
-    if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(doc.stroke_over_fill as usize)) {
-        actions.push(json!({"strokeOverFill": i == 1}));
+    match widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(current)) {
+        Some(i @ (3 | 4)) => Some(i as u32 - 2),
+        Some(i) => {
+            actions.push(json!({"strokeOverFill": i == 1}));
+            // A per-character order puts the layer back on the Per Character Palette, or it
+            // would have no visible effect.
+            (fill_stroke != 0).then_some(0)
+        }
+        None => None,
     }
 }
 
@@ -203,6 +250,27 @@ fn line_join_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             actions.push(json!({"lineJoin": key}));
         }
     }
+}
+
+/// Sets the layer's More Options > Fill & Stroke to `v` together with the per-character order
+/// it changes, as one undo step.
+fn apply_layer_fill_stroke(app: &mut EffectcraftApp, ctx: &egui::Context, tt: &TextTarget, v: u32, actions: Vec<serde_json::Value>) {
+    let set = json!({"command": "prop.set", "params": {"layer": tt.layer, "path": "text/moreOptions/fillStroke", "value": v}});
+    let steps: Vec<serde_json::Value> =
+        std::iter::once(set).chain(actions.into_iter().map(|a| json!({"command": "layer.setText", "params": tt.params(a)}))).collect();
+    if let Err(e) = crate::menus::invoke(app, ctx, "engine.batch", json!({"steps": steps, "label": "Stroke Order"})) {
+        app.ui.status = e;
+    }
+}
+
+/// A text layer's More Options > Fill & Stroke in the active comp: 0 per character palette,
+/// 1 all fills over all strokes, 2 all strokes over all fills.
+fn layer_fill_stroke(app: &EffectcraftApp, layer: u64) -> u32 {
+    let (Some(comp), Some(cid)) = (app.session.active_comp(), app.session.active_comp_id()) else { return 0 };
+    let Some(l) = comp.layer(effectcraft_engine::project::LayerId(layer)) else { return 0 };
+    let Some(more) = l.props.sub("text").and_then(|t| t.sub("moreOptions")) else { return 0 };
+    let ectx = EvalCtx { expr: app.session.expr.as_deref(), ..EvalCtx::new(&app.session.project, cid, comp, app.session.time()) };
+    ectx.e(l, more, "fillStroke")
 }
 
 /// The Character panel for the text being edited (or the selected text layer): font family and
@@ -246,14 +314,15 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let grid = Grid { x0, y, w, enabled };
     numeric_fields(app, ui, &p, grid, &doc, &mut actions);
     kerning_field(app, ui, &p, grid, &doc, &mut actions);
-    stroke_order_field(app, ui, grid, &doc, &mut actions);
+    let fill_stroke = target.as_ref().map_or(0, |tt| layer_fill_stroke(app, tt.layer));
+    let layer_fill_stroke_pick = stroke_order_field(app, ui, grid, &doc, fill_stroke, &mut actions);
     line_join_field(app, ui, &p, grid, &doc, &mut actions);
     y += 6.0 * 28.0 + 8.0;
     // Fill / stroke swatches with their enable boxes.
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let fx = x0 + i as f32 * (w / 2.0);
         let cr = Rect::from_min_size(pos2(fx, y + 3.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-apply", key))).clicked() && enabled {
+        if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-apply", key)))).inner.changed() && enabled {
             actions.push(json!({if key == "fill" { "applyFill" } else { "applyStroke" }: !on}));
         }
         app.auto.add(&format!("character.{key}.enabled"), cr, label);
@@ -269,7 +338,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let er = Rect::from_min_size(pos2(fs.max.x + 4.0, y + 1.0), vec2(18.0, 18.0));
         let active = app.ui.text_color_pick.as_ref().is_some_and(|pick| pick.layer == target.as_ref().map_or(0, |tt| tt.layer) && pick.field == key);
-        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::unique(("char-eye", key)), &t);
+        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::unique(("char-eye", key)), &t)
+            .on_hover_text(tr("Eyedropper: click, then click in the Composition panel"));
         app.auto.add(&format!("character.{key}.eyedropper"), er, &format!("{label} eyedropper"));
         if eye.clicked() {
             if active {
@@ -305,7 +375,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += 32.0;
     // Ligatures.
     let lr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::unique("char-ligatures")).clicked() && enabled {
+    if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::unique("char-ligatures"))).inner.changed() && enabled {
         actions.push(json!({"ligatures": !doc.ligatures}));
     }
     app.auto.add("character.ligatures", lr, "Ligatures");
@@ -329,7 +399,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .enumerate()
         {
             let cr = Rect::from_min_size(pos2(x0 + i as f32 * 120.0, y), vec2(14.0, 14.0));
-            if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-vert", key))).clicked() && enabled {
+            if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-vert", key)))).inner.changed() && enabled {
                 actions.push(json!({key: !on}));
             }
             app.auto.add(&format!("character.{key}"), cr, label);
@@ -383,6 +453,9 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => {}
     }
     let Some(tt) = target else { return };
+    if let Some(v) = layer_fill_stroke_pick {
+        apply_layer_fill_stroke(app, &ctx, &tt, v, std::mem::take(&mut actions));
+    }
     for a in actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, "layer.setText", tt.params(a)) {
             app.ui.status = e;
@@ -629,7 +702,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 30.0;
     let hr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::unique("para-hanging")).clicked() && enabled {
+    if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::unique("para-hanging"))).inner.changed() && enabled {
         actions.push(json!({"hangingPunctuation": !doc.hanging_punctuation}));
     }
     app.auto.add("paragraph.hangingPunctuation", hr, "Roman Hanging Punctuation");
@@ -729,11 +802,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
         ui.set_width(rect.width().max(180.0));
         // Filter row: a checkbox that keeps only the variable fonts.
         let filter_h = 22.0;
-        let row = ui.add_sized([ui.available_width(), filter_h], egui::Button::selectable(false, ""));
-        let box_rect = Rect::from_min_size(row.rect.min, vec2(18.0, filter_h));
-        let label_rect = Rect::from_min_max(pos2(box_rect.max.x + 2.0, row.rect.min.y), row.rect.max);
-        let boxed = widgets::checkbox(ui, box_rect, only_variable, &t, id.with("variable-check"));
-        ui.painter().text(label_rect.left_center(), Align2::LEFT_CENTER, tr("Variable fonts only"), Tokens::ui(11.5), t.text);
+        let row = ui.add_sized([ui.available_width(), filter_h], widgets::DragCheckbox::new(&mut only_variable, tr("Variable fonts only")));
         app_ref.auto.add(&format!("{auto}.variable"), row.rect, "Variable fonts only");
         // #1089: fonts installed after launch appear without restarting. The button is its own
         // row: the popup is only 180 px wide, so a control pinned to the filter row covers
@@ -744,11 +813,13 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             app_ref.ui.status = format!("{}…", tr("Rescan Fonts"));
         }
         app_ref.auto.add(&format!("{auto}.rescan"), resc, "Rescan Fonts");
-        let toggled = row.clicked() || boxed.clicked();
+        let toggled = row.changed();
         if toggled {
-            only_variable = !only_variable;
             ui.data_mut(|d| d.insert_temp(variable_id, only_variable));
-            // Typing goes on into the search field.
+        }
+        // The native checkbox can take focus on release after changing on press.
+        // Typing goes on into the search field after either event.
+        if toggled || row.clicked() {
             ui.memory_mut(|m| m.request_focus(search_id));
         }
         let query = state.query.trim().to_lowercase();

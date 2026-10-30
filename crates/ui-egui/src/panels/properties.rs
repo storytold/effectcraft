@@ -264,6 +264,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
     let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
     let resp = ui.interact(label, egui::Id::unique(("props-label", uid)), Sense::click());
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, &pr.name);
     app.auto.add(&format!("{base}.label"), label, &pr.name);
     if resp.double_clicked() {
         app.ui.timeline.search.clear();
@@ -456,7 +457,7 @@ fn text_section(
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let ry = y + i as f32 * 24.0;
         let cr = Rect::from_min_size(pos2(x0, ry + 2.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("props-apply", key))).clicked() {
+        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("props-apply", key))).changed() {
             let k = if key == "fill" { "applyFill" } else { "applyStroke" };
             set(actions, json!({k: !on}));
         }

@@ -36,7 +36,7 @@ pub use sections::{
 use sections::{Extra, default_labels, lenient_comp_presets};
 
 /// Current settings layout version.
-pub const PREFS_VERSION: u32 = 3;
+pub const PREFS_VERSION: u32 = 4;
 /// Settings file name in the config store.
 pub const PREFS_FILE: &str = "prefs.json";
 

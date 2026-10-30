@@ -699,16 +699,9 @@ fn phase_scene(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
         app.auto.add("viewer.warpBanner", r, &text);
     }
 
-    // Footage that can't be decoded (no decoder for its codec / profile): say why on the layer
-    // instead of leaving a black picture.
-    let mut notices = 0;
-    for layer in comp.layers.iter().filter(|l| l.is_active_at(time) && l.switches.video) {
-        let effectcraft_engine::project::LayerSource::Footage { item } = &layer.source else { continue };
-        let Some(effectcraft_engine::project::ItemKind::Footage(f)) = app.session.project.item(*item).map(|i| &i.kind) else { continue };
-        let Some(why) = app.session.footage.problem(f) else { continue };
-        if notices >= 3 {
-            break;
-        }
+    // Footage (or the proxy in use for footage or a precomp) that can't be decoded (no decoder
+    // for its codec / profile): say why on the layer instead of leaving a black picture.
+    for (notices, (layer, why)) in footage_problems(app, ectx, comp, time).into_iter().enumerate() {
         let (m, _) = l2c(ectx, layer);
         let (w, h) = effectcraft_engine::render::source_size(&app.session.project, layer);
         let c = m.apply(effectcraft_engine::geom::vec2(w as f64 / 2.0, h as f64 / 2.0));
@@ -720,12 +713,25 @@ fn phase_scene(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
         painter.rect_stroke(r, 3.0, Stroke::new(1.0, t.warning), StrokeKind::Inside);
         painter.galley(pos2(r.min.x + 12.0, r.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
         app.auto.add(&format!("viewer.footageProblem.{}", layer.id.0), r, &text);
-        notices += 1;
     }
     v.vertex_marks = vertex_marks;
     v.track_hits = track_hits;
     v.track_cur = track_cur;
     v.has_3d = has_3d;
+}
+
+/// Up to three layers active at `time` whose footage, or the proxy in use for footage or a
+/// precomp, can't be decoded, each with the reason.
+fn footage_problems<'c>(app: &EffectcraftApp, ectx: &EvalCtx, comp: &'c Comp, time: Tick) -> Vec<(&'c Layer, String)> {
+    comp.layers
+        .iter()
+        .filter(|l| l.is_active_at(time) && l.switches.video)
+        .filter_map(|layer| {
+            let (LayerSource::Footage { item } | LayerSource::Comp { item }) = &layer.source else { return None };
+            Some((layer, ectx.project.item(*item).and_then(|i| app.session.footage.item_problem(i))?))
+        })
+        .take(3)
+        .collect()
 }
 
 fn phase_rigs(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &mut Vw<'_>) {
@@ -864,6 +870,24 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     resp
 }
 
+/// Frames to step when wheel scrubbing is on, or `None` when this gesture should zoom or pan.
+/// A scrub notch's smoothed tail stays a scrub after the wheel event itself is gone, so that
+/// tail does not zoom or pan (#1218).
+fn wheel_scrub_frames(ctx: &egui::Context, pref: bool, scroll: &super::ViewerScroll) -> Option<i64> {
+    let tail_id = egui::Id::unique("viewer-wheel-scrub-tail");
+    let was_tail: bool = ctx.data(|d| d.get_temp(tail_id)).unwrap_or(false);
+    let moving = scroll.pan != egui::Vec2::ZERO || (scroll.zoom - 1.0).abs() > 3e-4;
+    let scrub = pref && !scroll.trackpad && !scroll.wheel_modified && (scroll.wheel_lines.abs() >= 0.01 || (was_tail && moving));
+    ctx.data_mut(|d| {
+        if scrub {
+            d.insert_temp(tail_id, true);
+        } else {
+            d.remove::<bool>(tail_id);
+        }
+    });
+    scrub.then_some((scroll.wheel_lines.round() as i64).clamp(-30, 30))
+}
+
 fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -945,12 +969,21 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
         };
         ctx.set_cursor_icon(cursor);
         // The mouse wheel and a trackpad pinch zoom around the pointer; a two-finger trackpad
-        // scroll pans.
+        // scroll pans. With general.viewerWheelScrubbing, an unmodified wheel steps frames
+        // instead, including the smoothed tail of that notch so it does not zoom or pan (#1218).
         let scroll = super::viewer_scroll(&ctx);
-        if scroll.pan != egui::Vec2::ZERO && area.contains(hp) {
+        let scrub = wheel_scrub_frames(&ctx, app.session.prefs.general.viewer_wheel_scrubbing, &scroll);
+        if let Some(frames) = scrub {
+            if frames != 0 && area.contains(hp) {
+                if app.playback.playing {
+                    let _ = crate::menus::invoke(app, &ctx, "playback.stop", json!({}));
+                }
+                let _ = app.session.execute("time.step", json!({"frames": frames}));
+            }
+        } else if scroll.pan != egui::Vec2::ZERO && area.contains(hp) {
             app.ui.viewer.pan = [app.ui.viewer.pan[0] + scroll.pan.x, app.ui.viewer.pan[1] + scroll.pan.y];
         }
-        if (scroll.zoom - 1.0).abs() > 3e-4 && area.contains(hp) {
+        if scrub.is_none() && (scroll.zoom - 1.0).abs() > 3e-4 && area.contains(hp) {
             let nz = (zoom * scroll.zoom).clamp(0.01, 32.0);
             let before = map.to_comp(hp);
             let new_origin = hp - vec2(before[0] as f32 * nz, before[1] as f32 * nz);
@@ -1668,8 +1701,9 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
                     let _ = app.session.execute("mask.convertVertex", json!({"layer": h.layer.0, "mask": h.mask, "index": h.index}));
                 } else if let Some(k) = ov::motion_key_at(&key_hits, pos) {
                     // A key showing direction handles becomes Linear; one without, Auto Bezier.
+                    // Separated X / Y Position have no spatial interpolation to convert.
                     let curved = key_hits.iter().any(|h| h.tangent.is_some() && h.layer == k.layer && h.prop == k.prop && h.time == k.time);
-                    if select_motion_key(app, &k) {
+                    if k.axes.is_none() && select_motion_key(app, &k) {
                         let spatial = if curved { "linear" } else { "autoBezier" };
                         let _ = app.session.execute("keys.interpolation", json!({"spatial": spatial}));
                     }

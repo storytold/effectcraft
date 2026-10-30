@@ -231,12 +231,12 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             });
             ui.end_row();
             ui.label(tr("Depth of Field"));
-            ui.checkbox(&mut d.dof, tr("Enable Depth of Field"));
+            crate::widgets::labelled_checkbox(ui, &mut d.dof, tr("Enable Depth of Field"));
             ui.end_row();
             ui.label(tr("Focus Distance"));
             ui.horizontal(|ui| {
                 ui.add_enabled(!d.lock_to_zoom, crate::widgets::drag_value(egui::DragValue::new(&mut d.focus).range(0.0..=100000.0).suffix(" px")));
-                ui.checkbox(&mut d.lock_to_zoom, tr("Lock to Zoom"));
+                crate::widgets::labelled_checkbox(ui, &mut d.lock_to_zoom, tr("Lock to Zoom"));
             });
             ui.end_row();
             ui.label(tr("Aperture"));
@@ -354,7 +354,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             if casts_shadows(d.kind) {
                 ui.label(tr("Shadows"));
-                let cb = ui.checkbox(&mut d.casts_shadows, tr("Casts Shadows"));
+                let cb = crate::widgets::labelled_checkbox(ui, &mut d.casts_shadows, tr("Casts Shadows"));
                 app.auto.add_response("dialog.light.casts", &cb, "Casts Shadows");
                 ui.end_row();
                 ui.label(tr("Shadow Darkness"));

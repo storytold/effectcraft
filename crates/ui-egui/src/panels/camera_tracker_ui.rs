@@ -430,6 +430,11 @@ pub fn editor(
             actions.push(("camera.create".into(), me.clone()));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.createCamera", g.uid), b3, "Create Camera");
+        let export = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 70.0), vec2(218.0, 22.0));
+        if widgets::text_button(ui, export, tr("Export Scene to Blender..."), false, &t, egui::Id::unique(("ct-blender", g.uid))).clicked() && !busy {
+            actions.push(("camera.exportBlender".into(), me.clone()));
+        }
+        app.auto.add(&format!("effectControls.cameraTracker.{}.exportBlender", g.uid), export, "Export Scene to Blender...");
     }
     let status = match app.session.camera_progress() {
         Some(pr) if running => pr.banner(),
@@ -457,4 +462,4 @@ pub fn editor(
 }
 
 /// Height of [`editor`].
-pub const EDITOR_HEIGHT: f32 = 68.0;
+pub const EDITOR_HEIGHT: f32 = 100.0;

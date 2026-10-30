@@ -2,6 +2,7 @@
 //! interest drawing, rulers and guides, snapping, the shape Pen and motion-path key drags
 //! (egui_kittest, UI logic only).
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::commands::shape_tool::PaintKind;
 use effectcraft_engine::project::LayerId;
@@ -51,6 +52,65 @@ fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
     }
     h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
+}
+
+/// #1218: frame stepping is optional, and consumes the whole wheel gesture including its
+/// smoothed tail. Ctrl/Cmd+wheel still zooms.
+#[test]
+fn mouse_wheel_over_the_monitor_scrubs_frames() {
+    let mut h = harness();
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.viewerWheelScrubbing", "value": true})).unwrap();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let line = |dy: f32, modifiers: egui::Modifiers| Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, dy),
+        modifiers,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(line(1.0, egui::Modifiers::NONE));
+    h.step();
+    let t1 = h.state().session.time();
+    for _ in 0..20 {
+        assert_eq!(h.state().ui.viewer.zoom, z0, "frame wheel must never zoom");
+        h.step();
+    }
+    assert!(t1 > t0, "wheel up advanced the playhead ({t0:?} -> {t1:?})");
+    h.input_mut().events.push(line(-2.0, egui::Modifiers::NONE));
+    h.step();
+    assert!(h.state().session.time() < t1, "two lines back moves before the single line forward");
+    let z0 = h.state().ui.viewer.zoom;
+    let t2 = h.state().session.time();
+    let mods = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(line(3.0, mods));
+    h.step();
+    assert_eq!(h.state().session.time(), t2, "Ctrl+wheel must not scrub");
+    assert_ne!(h.state().ui.viewer.zoom, z0, "Ctrl+wheel still zooms");
+}
+
+#[test]
+fn mouse_wheel_zooms_by_default_without_stepping_frames() {
+    let mut h = harness();
+    assert!(!h.state().session.prefs.general.viewer_wheel_scrubbing);
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, 1.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(20);
+    assert_eq!(h.state().session.time(), t0);
+    assert_ne!(h.state().ui.viewer.zoom, z0);
 }
 
 /// Comp pixel → screen point.
@@ -448,7 +508,7 @@ fn mid_drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, mods: egu
         h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
         h.step();
     }
-    h.render().expect("the mid-drag frame")
+    h.render_serialized().expect("the mid-drag frame")
 }
 
 /// Release the button where the drag left it.
@@ -490,7 +550,7 @@ fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
         h.state_mut().ui.tool = tool;
         settle_viewer(&mut h);
         let (a, b) = (screen(&h, from), screen(&h, to));
-        let before = h.render().expect("the frame before the drag");
+        let before = h.render_serialized().expect("the frame before the drag");
         let mid = mid_drag(&mut h, a, b, egui::Modifiers::default());
         let fill = fill_rgb(&h);
 
@@ -526,7 +586,7 @@ fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
         h.state_mut().ui.tool = Tool::Ellipse;
         settle_viewer(&mut h);
         let (a, b) = (screen(&h, from.map(|v| v as f32)), screen(&h, to.map(|v| v as f32)));
-        let before = h.render().expect("the frame before the drag");
+        let before = h.render_serialized().expect("the frame before the drag");
         // Measured with the button down, so this is the ghost and not the committed shape.
         let mid = mid_drag(&mut h, a, b, mods);
         let on = [centre[0] as f32 + size[0] as f32 / 4.0, centre[1] as f32 + size[1] as f32 / 4.0];
@@ -595,7 +655,7 @@ fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
     h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.step();
     // Where the layer is not (yet): the plate behind it.
-    let plate = px_at(&h.render().unwrap(), &h, [440.0, 200.0]);
+    let plate = px_at(&h.render_serialized().unwrap(), &h, [440.0, 200.0]);
 
     // Drag in small steps, still holding the button, and give the renders a chance to land.
     let mut moved = false;
@@ -606,7 +666,7 @@ fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
         std::thread::sleep(std::time::Duration::from_millis(15));
         // 30 comp px behind the pointer: inside the layer, well away from its outline, its anchor
         // icon and where it started.
-        let at = px_at(&h.render().expect("mid-drag frame"), &h, [320.0 + 200.0 * (i as f32 / 40.0) - 30.0, 200.0]);
+        let at = px_at(&h.render_serialized().expect("mid-drag frame"), &h, [320.0 + 200.0 * (i as f32 / 40.0) - 30.0, 200.0]);
         if i >= 30 && delta(at, plate) > 30 {
             moved = true;
             break;

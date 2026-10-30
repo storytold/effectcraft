@@ -510,6 +510,12 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
         adj.switches.adjustment = true;
         s.effect(&mut adj, "ec.channel.invert", &[]);
         s.push(adj);
+        // An adjustment layer in another blend mode blends the adjusted comp in that mode (#2618).
+        let mut adj = s.solid([1.0, 1.0, 1.0], 70, 40);
+        adj.switches.adjustment = true;
+        adj.blend_mode = BlendMode::Screen;
+        set(&mut adj, "transform/opacity", Value::Scalar(60.0));
+        s.push(adj);
         check(&format!("collapse + adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
     }
 }
