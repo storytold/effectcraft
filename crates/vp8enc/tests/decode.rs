@@ -130,7 +130,7 @@ fn the_image_crate_reads_it_back_close_to_the_source() {
         let frame = encode_rgba(&rgba, w, h, &Vp8Params { quality, loop_filter: None }).expect("encode");
         let img = image::load_from_memory_with_format(&riff(&frame.data), image::ImageFormat::WebP).expect("decode").to_rgba8();
         assert_eq!(img.dimensions(), (w, h));
-        img.as_raw().chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect::<Vec<u8>>()
+        img.as_raw().as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect::<Vec<u8>>()
     };
     let best = decode(100);
     let mut last = 0.0;

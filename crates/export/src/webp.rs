@@ -202,7 +202,7 @@ impl Clock {
 /// Fully transparent pixels drop their colour, which nobody sees: they compress better and
 /// compare equal however the renderer left them.
 pub(crate) fn clear_transparent(px: &mut [u8]) {
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         if let [r, g, b, 0] = p {
             (*r, *g, *b) = (0, 0, 0);
         }
@@ -221,7 +221,7 @@ pub(crate) fn changed(prev: &[u8], cur: &[u8], w: u32, h: u32) -> Result<Option<
         if a == b {
             continue;
         }
-        let mut xs = a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate().filter(|(_, (p, q))| p != q).map(|(x, _)| x as u32);
+        let mut xs = a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0.iter()).enumerate().filter(|(_, (p, q))| p != q).map(|(x, _)| x as u32);
         let Some(first) = xs.next() else { continue };
         let last = xs.next_back().unwrap_or(first);
         (x0, x1) = (x0.min(first), x1.max(last));
@@ -264,8 +264,8 @@ fn encode_lossy(px: &[u8], w: u32, h: u32, quality: u8, alpha_quality: u8) -> Re
     let frame = effectcraft_vp8enc::encode_rgba(px, w, h, &effectcraft_vp8enc::Vp8Params { quality, loop_filter: None })
         .map_err(|e| ExportError::Encode(e.to_string()))?;
     let mut out = Vec::with_capacity(frame.data.len() + 16);
-    if !px.chunks_exact(4).all(|p| p.get(3) == Some(&255)) {
-        let mut alpha: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+    if !px.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
+        let mut alpha: Vec<u8> = px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         let levels = alpha_levels(alpha_quality);
         reduce_levels(&mut alpha, levels);
         // The lossless format predicts on its own, and a filter's residuals can defeat that as
@@ -383,9 +383,9 @@ fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], parts: &[&[u8]]) -> Result<()>
 
 /// A lossless `VP8L` chunk. Opaque frames go to the encoder as RGB, which it compresses better.
 fn encode_lossless(px: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
-    let opaque = px.chunks_exact(4).all(|p| p.get(3) == Some(&255));
+    let opaque = px.as_chunks::<4>().0.iter().all(|p| p[3] == 255);
     let (data, color) = if opaque {
-        (px.chunks_exact(4).flat_map(|p| p.iter().take(3).copied()).collect(), ExtendedColorType::Rgb8)
+        (px.as_chunks::<4>().0.iter().flat_map(|p| p.iter().take(3).copied()).collect(), ExtendedColorType::Rgb8)
     } else {
         (px.to_vec(), ExtendedColorType::Rgba8)
     };
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(c[0].1[0] & 0x03, ALPH_LOSSLESS, "compressed with the lossless format");
         assert_eq!(c[0].1[0] & ALPH_LEVEL_REDUCTION, 0, "exact at alpha quality 100");
         let img = image::load_from_memory_with_format(&still(&data, w, h), image::ImageFormat::WebP).unwrap().to_rgba8();
-        for (got, want) in img.as_raw().chunks_exact(4).zip(px.chunks_exact(4)) {
+        for (got, want) in img.as_raw().as_chunks::<4>().0.iter().zip(px.as_chunks::<4>().0.iter()) {
             assert_eq!(got[3], want[3], "alpha is lossless");
             if want[3] == 255 {
                 assert!(got.iter().zip(want).take(3).all(|(a, b)| a.abs_diff(*b) <= 12), "{got:?} vs {want:?}");
@@ -710,10 +710,10 @@ mod tests {
         let data = encode_frame(&px, w, h, Codec::Lossy { quality: 90, alpha_quality: 50 }).unwrap();
         let c = chunks(&data);
         assert_eq!(c[0].1[0] & ALPH_LEVEL_REDUCTION, ALPH_LEVEL_REDUCTION, "level reduction is signalled");
-        let mut want: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+        let mut want: Vec<u8> = px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         reduce_levels(&mut want, alpha_levels(50));
         let img = image::load_from_memory_with_format(&still(&data, w, h), image::ImageFormat::WebP).unwrap().to_rgba8();
-        let got: Vec<u8> = img.as_raw().chunks_exact(4).map(|p| p[3]).collect();
+        let got: Vec<u8> = img.as_raw().as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(got, want);
     }
 
