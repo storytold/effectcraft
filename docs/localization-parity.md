@@ -80,7 +80,7 @@ counted, so the true percentages are slightly lower.
 | Spanish | `es` | 1,142 (≈ 29%): menus 629 rows, panels 513 | Menus only; the panel catalog from #996 | Latin, fine | no | partial | 9–12 h + review |
 | Hindi | `hi` | 0 | — | UI: Devanagari fallback font but no shaping; text layers shape Devanagari | no | none (After Effects: none) | 9–13 h + shaping in the UI |
 | Arabic | `ar` | 0 | — | UI: Arabic fallback font but no shaping and no RTL layout; text layers: bidi + shaping | no | none (After Effects: none) | 9–13 h + 15–25 h RTL UI |
-| French | `fr` | 624 (≈ 16%) | Menus only | Latin, fine | no | menus only | 7–10 h + review |
+| French | `fr` | 2,124 (≈ 51%): menus 632 rows, panels 1,184, effect names 308 | Panels and dialogs at the source list of the other panel catalogs; effect names and their 21 categories; no help; machine-translated from the English, not yet native-speaker proofread | Latin, fine | no | partial | 2–4 h + review |
 | Portuguese (Brazil) | `pt-br` | 1,324 (≈ 34%): menus 629 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,923 (≈ 46%): menus 630 rows, panels 996, effect names 297 | Panels and dialogs partly; no help, effect names translated for 297 of the 307 ids and their parameter names not; Home screen literals unwrapped (#574, closed) | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
