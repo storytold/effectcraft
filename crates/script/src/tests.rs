@@ -625,7 +625,7 @@ fn a_script_cannot_confirm_executing_a_file_for_itself() {
     let opened = |s: &mut Session| s.drain_events().iter().any(|e| matches!(e, effectcraft_engine::Event::OpenUrl(_)));
     for code in [
         format!("JSON.stringify(app.run('file.executeFile', {{path: {q}, confirmed: true}}))"),
-        format!("JSON.stringify(app.run('engine.batch', {{steps: [{{command: 'file.executeFile', params: {{path: {q}, confirmed: true}}}}]}}))"),
+        format!("JSON.stringify(app.run('engine.batch', {{atomic: false, steps: [{{command: 'file.executeFile', params: {{path: {q}, confirmed: true}}}}]}}))"),
         format!("new File({q}).execute()"),
     ] {
         let o = ok(&mut s, &code);

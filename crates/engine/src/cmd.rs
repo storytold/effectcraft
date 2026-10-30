@@ -9,7 +9,7 @@ pub mod anim_tools;
 mod animation;
 pub(crate) mod app_more;
 mod autotrace;
-mod batch;
+pub mod batch;
 mod blender;
 mod camera_cmds;
 mod comp;
