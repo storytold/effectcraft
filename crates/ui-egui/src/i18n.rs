@@ -2848,7 +2848,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("text.removeAllAnimators", "Remove All Text Animators", "すべてのテキストアニメーターを削除"),
     ("prop.setExpression", "Add Expression", "エクスプレッションを追加"),
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
-    ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
+    ("prop.separateDimensions", "Separate Dimensions", "次元に分割"),
     ("track.camera", "Track Camera", "カメラをトラッキング"),
     ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
     ("track.motion", "Track Motion", "モーションをトラッキング"),
