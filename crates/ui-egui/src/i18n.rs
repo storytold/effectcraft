@@ -154,42 +154,38 @@ fn supported(locale: Option<&str>) -> &'static str {
     }
 }
 
+/// The Windows and Linux sources of *Reveal in Finder* in each catalog that has them, keyed by
+/// language code: the platform names the file manager before the catalog sees the label, so the
+/// macOS row alone leaves the other two in English (#1450).
+const REVEAL_FINDER: &[(&str, &str, &str)] = &[
+    ("uk", "Показати у Провіднику", "Показати у файловому менеджері"),
+    ("de", "Im Explorer anzeigen", "Im Dateimanager anzeigen"),
+    ("cs", "Zobrazit v Průzkumníku", "Zobrazit ve správci souborů"),
+    ("ja", "エクスプローラーで表示", "ファイルマネージャーで表示"),
+    ("pl", "Pokaż w Eksploratorze", "Pokaż w menedżerze plików"),
+    ("ka", "Explorer-ში ჩვენება", "ფაილების მენეჯერში ჩვენება"),
+    ("zh-hans", "在资源管理器中显示", "在文件管理器中显示"),
+    ("zh-hant", "在檔案總管中顯示", "在檔案管理員中顯示"),
+    ("es", "Mostrar en el Explorador", "Mostrar en el gestor de archivos"),
+    ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
+    ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
+    ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
+];
+
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {
     let language = language(app);
-    // The engine names the platform's file manager before the catalog sees the label. These
-    // two commands keep their ids, but on Windows/Linux their source is no longer "Finder".
-    if language == "uk" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+    // The engine names the platform's file manager before the catalog sees the label, so on
+    // Windows and Linux the source is no longer "Finder" and the catalog's row misses. Every
+    // language that names a file manager says so here (#1450); a language with no row keeps the
+    // English source rather than a guess.
+    if matches!(command, "file.revealInFinder" | "layer.revealInFinder")
+        && let Some((_, explorer, manager)) = REVEAL_FINDER.iter().find(|(code, ..)| *code == language)
+    {
+        // Only the Windows and Linux sources are overridden; "Reveal in Finder" keeps going to the
+        // catalog below, which holds the macOS wording.
         match source {
-            "Reveal in Explorer" => return "Показати у Провіднику",
-            "Reveal in File Manager" => return "Показати у файловому менеджері",
-            _ => {}
-        }
-    }
-    if language == "de" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
-        match source {
-            "Reveal in Explorer" => return "Im Explorer anzeigen",
-            "Reveal in File Manager" => return "Im Dateimanager anzeigen",
-            _ => {}
-        }
-    }
-    if language == "cs" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
-        match source {
-            "Reveal in Explorer" => return "Zobrazit v Průzkumníku",
-            "Reveal in File Manager" => return "Zobrazit ve správci souborů",
-            _ => {}
-        }
-    }
-    if language == "pl" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
-        match source {
-            "Reveal in Explorer" => return "Pokaż w Eksploratorze",
-            "Reveal in File Manager" => return "Pokaż w menedżerze plików",
-            _ => {}
-        }
-    }
-    if language == "ka" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
-        match source {
-            "Reveal in Explorer" => return "Explorer-ში ჩვენება",
-            "Reveal in File Manager" => return "ფაილების მენეჯერში ჩვენება",
+            "Reveal in Explorer" => return explorer,
+            "Reveal in File Manager" => return manager,
             _ => {}
         }
     }
@@ -8251,6 +8247,24 @@ mod tests {
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
         assert_eq!(label(&app, "", "Composition"), "Composition");
     }
+    /// Every catalog names the platform's file manager: the engine substitutes it for "Finder"
+    /// before the label reaches the catalog, so the macOS row alone leaves Windows and Linux in
+    /// English (#1450).
+    #[test]
+    fn the_reveal_command_names_the_file_manager_in_every_catalog() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        for (code, explorer, manager) in REVEAL_FINDER {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value": code})).unwrap();
+            assert_eq!(label(&app, "file.revealInFinder", "Reveal in Explorer"), *explorer, "{code}");
+            assert_eq!(label(&app, "layer.revealInFinder", "Reveal in File Manager"), *manager, "{code}");
+        }
+        // English keeps the source, and the macOS wording still comes from the catalog.
+        app.session.execute("prefs.set", json!({"key":"general.language", "value": "en"})).unwrap();
+        assert_eq!(label(&app, "file.revealInFinder", "Reveal in Explorer"), "Reveal in Explorer");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value": "ja"})).unwrap();
+        assert_eq!(label(&app, "file.revealInFinder", "Reveal in Finder"), "Finderで表示");
+    }
+
     /// Match System in the browser also picks the Russian, French and German catalogs, in the
     /// order of the browser's preferences (#1700).
     #[test]
