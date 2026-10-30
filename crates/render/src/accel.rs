@@ -131,6 +131,14 @@ pub trait FxTarget {
             buf
         });
     }
+    /// Give the buffer the pixel-grid phase the layer rectangle's cover would
+    /// ([`effectcraft_effects::Buf::align`]): grows left/top by less than 64 pixels.
+    fn align(&mut self, size: [f64; 2]) {
+        self.cpu(&mut |mut buf| {
+            buf.align(size);
+            buf
+        });
+    }
 }
 
 /// The CPU effect target (GPU chains go through [`Accelerator::effects`]: upload, readback).

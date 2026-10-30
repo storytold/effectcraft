@@ -185,6 +185,7 @@ pub const SHAPE_ITEMS: &[(&str, &str)] = &[
     ("trim", "ADBE Vector Filter - Trim"),
     ("twist", "ADBE Vector Filter - Twist"),
     ("wiggle", "ADBE Vector Filter - Roughen"),
+    ("wiggler", "ADBE Vector Filter - Wiggler"),
     ("zigzag", "ADBE Vector Filter - Zigzag"),
 ];
 
@@ -246,6 +247,12 @@ const SHAPE_PROPS: &[(&str, &str, &str)] = &[
     ("pucker", "amount", "ADBE Vector PuckerBloat Amount"),
     ("twist", "angle", "ADBE Vector Twist Angle"),
     ("twist", "center", "ADBE Vector Twist Center"),
+    ("wiggler", "speed", "ADBE Vector Xform Temporal Freq"),
+    ("wiggler", "correlation", "ADBE Vector Correlation"),
+    ("wiggler", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggler", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggler", "seed", "ADBE Vector Random Seed"),
+    ("wiggler", "transform", "ADBE Vector Wiggler Transform"),
     ("merge", "mode", "ADBE Vector Merge Type"),
     ("wiggle", "size", "ADBE Vector Roughen Size"),
     ("wiggle", "detail", "ADBE Vector Roughen Detail"),
@@ -439,6 +446,7 @@ pub fn shape_kind(name: &str) -> Option<&'static str> {
         "twist" => "twist",
         "zigzag" => "zigzag",
         "wigglepaths" => "wiggle",
+        "wiggletransform" => "wiggler",
         "mergepaths" => "merge",
         _ => return None,
     })

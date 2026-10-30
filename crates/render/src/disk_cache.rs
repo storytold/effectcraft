@@ -1278,7 +1278,7 @@ mod tests {
         let f = Footage { path: "/virtual.mov".into(), width: 16, height: 9, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
         let fid = p.add_item("virtual.mov", effectcraft_color::Label::None, None, ItemKind::Footage(f));
         let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
-        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)];
+        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)].into();
         let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
 
         let id = |mark: u64| move |path: &str| (path == "/virtual.mov").then_some((8, mark));

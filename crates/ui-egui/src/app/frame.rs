@@ -144,6 +144,9 @@ impl EffectcraftApp {
         // commands handled here use the right catalog already.
         let language = crate::i18n::language(self);
         crate::i18n::set_current(language);
+        // #1089: a font-menu rescan runs off the UI thread. Poll it on the logic tick so the
+        // status and the menu update even when the window is not painting.
+        crate::panels::text_panels::poll_font_rescan(self, ctx);
         if self.styled_language != language {
             self.want_paint = true;
         }
@@ -384,6 +387,11 @@ impl EffectcraftApp {
         let full = ui.max_rect();
         if self.dialog.is_some() {
             ui.disable();
+            // A dialog that edits what is behind it live (Preview) leaves the window at full
+            // brightness: clicks still don't reach it, but the canvas is not greyed out.
+            if self.dialog == Some(Dialog::GradientEditor) || panels::live_preview::active(self) {
+                ui.set_opacity(1.0);
+            }
         }
         ui.painter().rect_filled(full, 0.0, t.app_bg);
         let mut top = full.min.y;

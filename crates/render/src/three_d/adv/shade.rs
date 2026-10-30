@@ -382,6 +382,23 @@ pub fn light_shadow(s: &Scene, l: &Light, p: [f32; 3], ng: [f32; 3], n_l: f32) -
     1.0 - l.shadow_darkness * (1.0 - f)
 }
 
+/// The visibility of the Environment light at `p` (1 = unshadowed), darkened by its Shadow
+/// Darkness — but only by the image's key fraction: the shadow map occludes the dominant
+/// (key) lobe, while the environment's fill keeps shining on the shadowed surface, so an
+/// Environment light's shadow stays partial the way After Effects renders an area-light
+/// shadow (a broad environment like the default studio shadows softly, a lone bright spot
+/// on black almost fully). A directionless image (or a non-casting light) has no map
+/// and shades unshadowed.
+pub fn env_shadow(s: &Scene, e: &EnvInfo, p: [f32; 3], ng: [f32; 3], n: [f32; 3]) -> f32 {
+    if e.shadow < 0 || e.sun == [0.0; 3] {
+        return 1.0;
+    }
+    let Some(m) = s.shadows.get(e.shadow as usize) else { return 1.0 };
+    let n_l = dot(n, e.sun).clamp(0.0, 1.0);
+    let f = shadow_factor(m, &s.shadow_texels, p, ng, n_l);
+    1.0 - e.shadow_darkness * e.key * (1.0 - f)
+}
+
 /// Unit direction from `p` to light `l`, and the distance (infinite for a parallel light).
 fn to_light(l: &Light, p: [f32; 3]) -> ([f32; 3], f32) {
     if l.kind == 0 {
@@ -529,9 +546,11 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
         let (irr, spec) = env_light(s, e, n, r, rough);
         let f0 = [mix(0.04 * m.specular_k, rgb[0], metallic), mix(0.04 * m.specular_k, rgb[1], metallic), mix(0.04 * m.specular_k, rgb[2], metallic)];
         let (a, b) = env_brdf(n_v, rough);
+        // The Environment light's shadow darkens its own diffuse and specular.
+        let sh = if m.receives_shadows { env_shadow(s, e, f.pos, ng, n) } else { 1.0 };
         for c in 0..3 {
             let fs = f0[c] * a + b;
-            out[c] += (irr[c] * rgb[c] * (1.0 - fs) * (1.0 - metallic) * m.diffuse_k + spec[c] * fs) * ao;
+            out[c] += (irr[c] * rgb[c] * (1.0 - fs) * (1.0 - metallic) * m.diffuse_k + spec[c] * fs) * ao * sh;
         }
     }
     let c = add(out, emissive);
@@ -556,6 +575,10 @@ fn shadow_only(s: &Scene, m: &Material, f: &Frag, alpha: f32) -> [f32; 4] {
             continue;
         }
         amount = amount.max(1.0 - light_shadow(s, l, f.pos, n, n_l));
+    }
+    // The Environment light's shadow counts too (it reaches every surface: no falloff).
+    if let Some(e) = &s.env {
+        amount = amount.max(1.0 - env_shadow(s, e, f.pos, n, n));
     }
     [0.0, 0.0, 0.0, alpha * amount]
 }

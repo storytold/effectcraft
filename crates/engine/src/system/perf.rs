@@ -180,7 +180,7 @@ pub fn large_project(spec: &LargeSpec) -> Project {
             *n += 1;
             layers.push(l);
         }
-        comp.layers = layers;
+        comp.layers = layers.into();
     };
     let others = spec.comps.saturating_sub(1);
     let depth = spec.nest_depth.min(others);
@@ -215,7 +215,7 @@ pub fn large_project(spec: &LargeSpec) -> Project {
         n += 1;
         layers.push(l);
     }
-    main.layers = layers;
+    main.layers = layers.into();
     p.add_item("Main", crate::color::Label::None, None, ItemKind::Comp(Arc::new(main)));
     // `Main` must be the first comp `replace_project` opens: give it the smallest id.
     let main_id = p.items.values().find(|i| i.name == "Main").map(|i| i.id).expect("main");

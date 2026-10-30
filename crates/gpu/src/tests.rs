@@ -498,7 +498,7 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
             b.blend_mode = BlendMode::Difference;
             (a, b)
         };
-        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a];
+        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a].into();
         let bg = s.footage(97, 61);
         s.push(bg);
         let mut pre = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (60, 40), None);

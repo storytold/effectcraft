@@ -402,12 +402,16 @@ pub struct ScriptUi {
     #[serde(skip)]
     pub tasks: Option<ScriptTaskRunner>,
     /// Bumped whenever the project is closed or replaced (New / Open / Close Project): repeating
-    /// tasks of scripts without an open window stop then.
+    /// tasks of scripts without an open window stop then, except those of Startup scripts.
     #[serde(skip)]
     pub project_epoch: u64,
     /// The script contexts of this session with scheduled tasks (kept by the scripting engine).
     #[serde(skip)]
     pub task_hosts: Vec<u32>,
+    /// The script contexts of Startup scripts: their tasks go on when the project is closed or
+    /// replaced, until EffectCraft quits.
+    #[serde(skip)]
+    pub startup_hosts: Vec<u32>,
 }
 
 impl ScriptUi {
@@ -755,6 +759,7 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
         "screenX": num("screenX", -FAR, FAR, 0.0),
         "screenY": num("screenY", -FAR, FAR, 0.0),
         "button": num("button", 0.0, 2.0, 0.0).round(),
+        "buttons": num("buttons", 0.0, 7.0, 0.0).round(),
         "detail": num("detail", 0.0, 1000.0, clicks).round(),
         "altKey": flag("altKey"),
         "ctrlKey": flag("ctrlKey"),

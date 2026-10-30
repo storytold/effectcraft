@@ -360,7 +360,7 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
 
 const SHAPE_ITEMS: &[&str] = &[
     "group", "rect", "ellipse", "star", "path", "fill", "stroke", "gfill", "gstroke", "trim", "repeater", "round", "offset", "pucker", "twist", "zigzag",
-    "wiggle", "merge", "front", "bevel", "side", "back",
+    "wiggle", "wiggler", "merge", "front", "bevel", "side", "back",
 ];
 
 /// Selected shape items (contents entries) of shape layers: (layer, uid).

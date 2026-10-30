@@ -686,7 +686,7 @@ impl Session {
                         continue;
                     }
                     if let Some(c) = proj.comp_mut(cid) {
-                        for l in c.layers.iter_mut().filter(|l| matches!(l.source, LayerSource::Comp { item } if item == comp)) {
+                        for l in c.layers.iter_mut_where(|l| matches!(l.source, LayerSource::Comp { item } if item == comp)) {
                             l.source = LayerSource::Footage { item: fid };
                         }
                     }

@@ -77,7 +77,7 @@ fn fx() -> Fx {
 
     let ids = (a.id, b.id, title.id, shape.id);
     let c = p.comp_mut(cid).unwrap();
-    c.layers = vec![a, b, title, shape];
+    c.layers = vec![a, b, title, shape].into();
     c.markers.push(Marker { time: secs(1.5), comment: "comp marker".into(), ..Default::default() });
 
     let other = Comp::new(64, 32, FrameRate::FPS_24, Tick::from_seconds_f64(3.0));
@@ -1099,6 +1099,8 @@ fn shadowing_layer_attribute_names_is_local() {
     let f = fx();
     assert_close!(f.num("var width = 3;\nwidth * 2", 0.0), 6.0);
     assert_close!(f.num("width", 0.0), 20.0, 1e-9);
+    assert_close!(f.num("function width() { return 4; }\nwidth() * 2", 0.0), 8.0);
+    assert_close!(f.num("width", 0.0), 20.0, 1e-9);
 }
 
 #[test]
@@ -1490,6 +1492,99 @@ fn time_to_frames_preserves_coercion_and_small_durations() {
         ("var calls = 0; var t = {valueOf: function () { calls++; return 0.05; }}; timeToFrames(t, 24, true) + 100 * calls", 102.0),
     ] {
         assert_eq!(f.num(expression, 0.0), expected, "{expression}");
+    }
+}
+
+/// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another
+/// layer's `("effects")("Slider Control")` or `(1)`, as the pick whip writes them with Compact
+/// English off (they failed: "not a callable function"). It is still a layer.
+#[test]
+fn layers_are_callable_property_groups() {
+    let f = fx();
+    assert_close!(f.num("thisLayer(\"transform\")(\"opacity\")", 0.0), 100.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"ec.control.slider\")(\"slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"Slider Control\")(1)", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(1)(\"effects\")(1)(1)", 0.0), 42.0);
+    // Its own name, index and methods, and a layer as the result still reads as its index.
+    assert_close!(f.num("thisLayer.name == \"A\" ? thisComp.layer(\"B\").index : 0", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(\"B\")", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(thisComp.layer(\"B\"), -1).index", 0.0), 1.0);
+    assert!(f.err("thisLayer(\"nope\")").contains("no property"), "{}", f.err("thisLayer(\"nope\")"));
+}
+
+/// A layer is kept from one evaluation to the next (it is dear to make) but reads the project
+/// afresh in each, and an expression's own fields on it don't reach the next one.
+#[test]
+fn a_kept_layer_reads_the_project_again() {
+    let mut f = fx();
+    let first = "thisComp.layer(\"B\").index * 10 + thisComp.layer(2).name.length";
+    assert_close!(f.num(first, 0.0), 21.0);
+    f.layer_mut(f.b).name = "Bee".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisComp.layer(\"Bee\").index * 10 + thisComp.layer(2).name.length", 0.0), 11.0);
+    assert_close!(f.num("thisLayer.index", 0.0), 2.0);
+    let _ = f.ev(f.a, ROT, "thisLayer.mine = 5; 0", 0.0);
+    assert_close!(f.num("thisLayer.mine === undefined ? 1 : 0", 0.0), 1.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; L.__c = 'x'; L.__l = 99; L.__i = ['Z', 7]; L.__s = __S; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; delete L.__c; delete L.__l; delete L.__i; delete L.__s; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+    let _ = f.ev(f.a, ROT, "Object.freeze(thisLayer); 0", 0.0);
+    f.layer_mut(f.a).name = "Ay".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 12.0);
+}
+
+/// The kept layers are bounded: past the bound a layer isn't kept, an evaluation that makes more
+/// layers than are kept still sees one object for each layer it had kept, and the evaluations
+/// after it, which start over, read the right layers.
+#[test]
+fn the_kept_layers_are_bounded() {
+    let f = fx();
+    let same = "(thisLayer === thisComp.layer(thisLayer.index) ? 1 : 0)";
+    let many =
+        format!("var c = thisLayer.__c;\nfor (var i = 0; i < 5000; i++) __layer(c, 100000 + i);\n{same} * 10 + (__layer(c, 1e6) === __layer(c, 1e6) ? 0 : 1)");
+    assert_close!(f.num(&many, 0.0), 11.0);
+    assert_close!(f.num(&format!("{same} * 100 + thisLayer.index * 10 + thisLayer.name.length"), 0.0), 111.0);
+    assert_close!(f.num(&format!("{same} * 100 + thisLayer.index * 10 + thisLayer.name.length"), 0.0), 111.0);
+}
+
+/// A change to `Object.prototype` doesn't reach the kept layers: a frozen object put there under
+/// the comp's id, before any of its layers is kept, doesn't stop them being kept.
+#[test]
+fn the_kept_layers_dont_go_through_object_prototype() {
+    let f = fx();
+    let _ = f.ev(f.a, ROT, "try { Object.prototype[thisComp.__c] = Object.freeze({}); } catch (e) {} 0", 0.0);
+    assert_close!(f.num("thisLayer === thisComp.layer(thisLayer.index) ? 1 : 0", 0.0), 1.0);
+}
+
+/// The prelude is kept from one evaluation to the next, so an expression can't change its object
+/// model or internals for the ones after it.
+#[test]
+fn an_expression_cant_change_the_prelude_for_the_next() {
+    let f = fx();
+    let read = "[thisComp.layer(1).index, thisLayer.index, thisLayer('transform').property('rotation').value,                 thisLayer.transform.opacity.value, thisProject.bitsPerChannel, comp(thisComp.name).numLayers, width]";
+    let before = f.ev(f.a, ROT, read, 0.5).unwrap();
+    let attacks = [
+        "Comp.prototype.layer = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer).index = 0",
+        "Object.getPrototypeOf(thisLayer('transform')).property = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer.transform.opacity).value = 0",
+        "Comp = function () {}",
+        "Prop = function () {}",
+        "thisProject = null",
+        "__h = function () { return null; }",
+        "__layer = function () { return null; }",
+        "__child = function () {}",
+        "delete __mkProp",
+        "delete thisLayer",
+        "delete thisComp",
+        "delete width",
+        "Object.defineProperty(globalThis, 'thisComp', { get: function () { return 0; } })",
+    ];
+    for a in attacks {
+        let _ = f.ev(f.a, ROT, &format!("try {{ {a} }} catch (e) {{}} 0"), 0.0);
+        assert_eq!(f.ev(f.a, ROT, read, 0.5).unwrap(), before, "after `{a}`");
     }
 }
 

@@ -90,7 +90,7 @@ fn deselect_all(s: &mut Session, _: &Value) -> Result<Value> {
 fn relink_copies(comp: &mut Comp, map: &[(LayerId, LayerId)]) {
     let present: Vec<LayerId> = comp.layers.iter().map(|l| l.id).collect();
     let link = |id: LayerId| map.iter().find(|(o, _)| *o == id).map(|(_, c)| *c).or(present.contains(&id).then_some(id));
-    for l in comp.layers.iter_mut().filter(|l| map.iter().any(|(_, c)| *c == l.id)) {
+    for l in comp.layers.iter_mut_where(|l| map.iter().any(|(_, c)| *c == l.id)) {
         l.parent = l.parent.and_then(link);
         l.track_matte = l.track_matte.and_then(|m| link(m.layer).map(|layer| TrackMatte { layer, ..m }));
     }
@@ -685,7 +685,7 @@ fn label(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         if let Some(comp) = proj.comp_mut(cid) {
-            for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+            for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
                 l.label = lab;
             }
         }

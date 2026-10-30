@@ -31,6 +31,7 @@ function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   __seed = 0;
   __timeless = false;
   __projectInfo = null;
+  __layersTrim();
 }
 
 function __finish(r) {
@@ -44,7 +45,7 @@ function __finish(r) {
 
 function __result(r) {
   r = __v(r);
-  if (r !== null && typeof r === 'object' && r.__isLayer) return r.index;
+  if (typeof r === 'function' && r.__isLayer) return r.index;
   if (r !== null && typeof r === 'object' && r.__isTextStyle) return r.__out();
   // `[temp, temp]` where temp is a property (pick-whip 1D → 2D): read the values here, while
   // host requests can still be answered and the script re-run.
@@ -488,7 +489,7 @@ function __ancestor(c, l, path, countUp) {
   if (typeof n !== 'number' || !(n >= 1) || !isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
   n = Math.floor(n);
   var info = __h(__ANCESTOR, c, l, path, n);
-  if (info === 'layer') return new Layer(c, l);
+  if (info === 'layer') return __layer(c, l);
   if (info === null) __err('propertyGroup(' + n + ') goes above the layer');
   return __mkGroup(c, l, info);
 }
@@ -518,10 +519,10 @@ Comp.prototype = {
     return __err('Composition "' + this.name + '" has no active camera');
   },
   layer: function (a, rel) {
-    if (a !== null && typeof a === 'object' && a.__isLayer) return this.layer(a.index + (rel || 0));
+    if (typeof a === 'function' && a.__isLayer) return this.layer(a.index + (rel || 0));
     var id = __h(__LAYER, this.__c, a);
     if (id === null) __err(typeof a === 'string' ? 'Layer named "' + a + '" does not exist' : 'Layer index ' + a + ' out of range');
-    return new Layer(this.__c, id);
+    return __layer(this.__c, id);
   },
   toString: function () { return '[object Comp]'; },
 };
@@ -596,7 +597,55 @@ var thisProject = {
 
 // Layer -----------------------------------------------------------------------------------------
 
-function Layer(c, l) { this.__c = c; this.__l = l; this.__i = null; }
+// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another layer's
+// `("effects")("Slider Control")`, `thisLayer(1)` (what the pick whip writes with Compact English
+// off). Callable like a group (`__mkGroup`), with the Layer methods.
+function Layer(c, l) {
+  var f = function (k) { return f.__group(k); };
+  delete f.name;
+  delete f.length;
+  Object.setPrototypeOf(f, Layer.prototype);
+  // Kept across evaluations (`__layer`), so an expression can't change which layer it is, delete
+  // a field or leave its own on it. Its info is private to `__info`, which reads it again in an
+  // evaluation whose `__S` isn't the one it was read in (every evaluation has a new `__S`), so
+  // freezing the layer can't keep its info either.
+  var info = null, read = null;
+  Object.defineProperty(f, '__c', { value: c });
+  Object.defineProperty(f, '__l', { value: l });
+  Object.defineProperty(f, '__info', {
+    get: function () {
+      if (read !== __S) { info = __h(__LINFO, c, l); read = __S; }
+      return info;
+    },
+  });
+  Object.preventExtensions(f);
+  return f;
+}
+
+// Layer `l` of comp `c`, made once per runtime: a callable Layer is dearer to make than a plain
+// object, so it is kept, and its info (`__info`) is read again in each evaluation.
+// The kept layers are out of an expression's reach (their maps have no prototype, so a change to
+// `Object.prototype` doesn't reach them either), and bounded like the runtime's scripts: once
+// `max` are kept, the layers after them aren't, and the next evaluation starts over
+// (`__layersTrim`, so a layer stays the same object for a whole evaluation).
+var __layer, __layersTrim;
+(function () {
+  var layers = Object.create(null), kept = 0, max = 4096;
+  __layer = function (c, l) {
+    // By comp, then layer: a `c + ':' + l` key costs more to build than the lookup saves.
+    var m = layers[c], f = m && m[l];
+    if (f) return f;
+    f = new Layer(c, l);
+    if (kept < max) {
+      (m || (layers[c] = Object.create(null)))[l] = f;
+      kept++;
+    }
+    return f;
+  };
+  __layersTrim = function () {
+    if (kept >= max) { layers = Object.create(null); kept = 0; }
+  };
+})();
 
 function __m3(m, p) {
   var x = p[0] || 0, y = p[1] || 0;
@@ -620,7 +669,6 @@ function __m4(m, p, vec) {
 
 Layer.prototype = {
   __isLayer: true,
-  get __info() { return this.__i || (this.__i = __h(__LINFO, this.__c, this.__l)); },
   get name() { return this.__info[0]; },
   get index() { return this.__info[1]; },
   get inPoint() { return this.__info[2]; },
@@ -632,7 +680,7 @@ Layer.prototype = {
   get parent() {
     var p = this.__info[7];
     if (p === null) __err('Layer "' + this.name + '" has no parent');
-    return new Layer(this.__c, p);
+    return __layer(this.__c, p);
   },
   get hasVideo() { return this.__info[8]; },
   get enabled() { return this.__info[11]; },
@@ -804,7 +852,7 @@ Prop.prototype = {
   propertyGroup: function (n) { return __ancestor(this.__c, this.__l, this.__p, n); },
   __wrap: function (v) {
     var kind = this.__info[2];
-    if (kind === 'layer') return v === null ? null : new Layer(this.__c, v);
+    if (kind === 'layer') return v === null ? null : __layer(this.__c, v);
     if (kind === 'path' && v !== null) return new __Path(v[0], v[1], v[2], v[3]);
     return v;
   },
@@ -834,7 +882,7 @@ Prop.prototype = {
     for (var i = 1; i < times.length; i++) if (Math.abs(times[i] - t) < Math.abs(times[best] - t)) best = i;
     return this.key(best + 1);
   },
-  __seedIndex: function () { return this.__self ? __S.idx : new Layer(this.__c, this.__l).index; },
+  __seedIndex: function () { return this.__self ? __S.idx : __layer(this.__c, this.__l).index; },
   wiggle: function (freq, amp, octaves, ampMult, t) {
     if (octaves === undefined) octaves = 1;
     if (ampMult === undefined) ampMult = 0.5;
@@ -903,8 +951,9 @@ var __propHandler = {
     var v = t.value;
     if (v === null || v === undefined) return undefined;
     var x = v[k];
-    // Property groups are callable proxies: hand them over as they are, not bound like methods (#809).
-    if (x?.__isGroup) return x;
+    // Property groups and layers are callable: hand them over as they are, not bound like methods
+    // (#809).
+    if (typeof x === 'function' && (x.__isGroup || x.__isLayer)) return x;
     return typeof x === 'function' ? x.bind(v) : x;
   },
 };
@@ -1082,18 +1131,18 @@ Markers.prototype = {
 // ---------------------------------------------------------------------------------------------
 // Unqualified names: thisLayer / thisProperty attributes and the `this*` objects. They're
 // accessors on the global object; assigning one (`var width = 10`) shadows it for the current
-// evaluation only.
+// evaluation only. They can't be deleted or redefined, so an expression can't take one away from
+// the evaluations after it.
 
 function __global(name, get) {
   Object.defineProperty(globalThis, name, {
-    configurable: true,
     get: function () { return name in __S.vars ? __S.vars[name] : get(); },
     set: function (v) { __S.vars[name] = v; },
   });
 }
 
 __global('thisComp', function () { return __S.comp || (__S.comp = new Comp(__S.c)); });
-__global('thisLayer', function () { return __S.layer || (__S.layer = new Layer(__S.c, __S.l)); });
+__global('thisLayer', function () { return __S.layer || (__S.layer = __layer(__S.c, __S.l)); });
 __global('thisProperty', function () { return __S.prop || (__S.prop = __mkProp(__S.c, __S.l, __S.path)); });
 ['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active',
   'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'marker'].forEach(function (k) {
@@ -1225,4 +1274,24 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
 
   delete globalThis.Proxy;
   delete globalThis.Reflect;
+})();
+
+// ---------------------------------------------------------------------------------------------
+// The runtime runs this file once and keeps it for the thread's later evaluations, so an
+// expression can't change the object model or the internals: the prototypes are frozen, and the
+// `__` globals, the constructors and `thisProject` can't be reassigned. The `__` state below is
+// set again by `__begin` in each evaluation.
+
+[Comp, Footage, Layer, Prop, Markers, __Path, __TextStyle].forEach(function (f) {
+  Object.freeze(f.prototype);
+  Object.freeze(f);
+});
+[__GroupProto, __groupHandler, __propHandler, thisProject].forEach(Object.freeze);
+(function () {
+  var perEvaluation = { __S: true, __rc: true, __seed: true, __timeless: true, __projectInfo: true };
+  var model = { Comp: true, Footage: true, Layer: true, Prop: true, Markers: true, thisProject: true };
+  Object.getOwnPropertyNames(globalThis).forEach(function (k) {
+    if (!(k.slice(0, 2) === '__' && !perEvaluation[k]) && !model[k]) return;
+    if ('value' in Object.getOwnPropertyDescriptor(globalThis, k)) Object.defineProperty(globalThis, k, { writable: false, configurable: false });
+  });
 })();

@@ -58,7 +58,7 @@ fn adjustment_scene(out: f64, scale: f64) -> (Project, ItemId) {
     tile_then_scale(&mut p, &mut adj, out, scale);
     let mut layers = vec![adj];
     layers.extend(picture(&mut p, &comp));
-    p.comp_mut(cid).unwrap().layers = layers;
+    p.comp_mut(cid).unwrap().layers = layers.into();
     (p, cid)
 }
 
@@ -68,7 +68,7 @@ fn layer_scene(out: f64, scale: f64) -> (Project, ItemId) {
     let inner = Comp::new(W, H, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
     let iid = p.add_item("Picture", Label::Sandstone, None, ItemKind::Comp(inner.clone().into()));
     let layers = picture(&mut p, &inner);
-    p.comp_mut(iid).unwrap().layers = layers;
+    p.comp_mut(iid).unwrap().layers = layers.into();
     let mut pre = build::layer(&mut p, &comp, "Picture", LayerSource::Comp { item: iid }, (W, H), None);
     tile_then_scale(&mut p, &mut pre, out, scale);
     p.comp_mut(cid).unwrap().layers.push(pre);
@@ -151,7 +151,7 @@ fn adjustment_motion_tile_matches_the_after_effects_frames() {
             }
             adj.props.sub_mut("effects").unwrap().children.push(g.into());
         }
-        p.comp_mut(cid).unwrap().layers = vec![adj, red];
+        p.comp_mut(cid).unwrap().layers = vec![adj, red].into();
         // Quarter resolution: comp pixel (x, y) is output pixel (x / 4, y / 4).
         let img = render_frame(&p, cid, Tick::ZERO, 0.25);
         let at = |x: f64, y: f64| img.get((x / 4.0) as i64, (y / 4.0) as i64);

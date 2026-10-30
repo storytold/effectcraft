@@ -113,6 +113,42 @@ fn panels_open_at_quit_dock_again_at_launch() {
     assert_eq!(store.read(effectcraft_engine::commands::scripts::OPEN_PANELS_FILE).as_deref(), Some(r#"{"open":[]}"#));
 }
 
+/// A script copied into the Scripts folder while the app runs is listed in Edit ▸ Keyboard
+/// Shortcuts and takes a key there: File ▸ Scripts shows the key next to the script, and
+/// pressing it runs the script as its menu entry does.
+#[test]
+fn a_key_given_to_a_script_runs_it() {
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    let store = std::sync::Arc::new(MemoryConfig::default());
+    let mut s = effectcraft_host::session();
+    s.config = Some(store.clone());
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    assert!(h.state().session.shortcuts().find(r#"file.runScript {"name":"Rename Layers.jsx"}"#).is_some(), "the shortcut table is built");
+    store.write("Scripts/Add Comp.jsx", "app.project.items.addComp('From Key', 64, 64, 1, 1, 25);").unwrap();
+    effectcraft_ui_egui::panels::shortcut_editor::open(h.state_mut());
+    let script = json!({"name": "Add Comp.jsx"});
+    let r = h.state_mut().session.execute("shortcuts.set", json!({"command": "file.runScript", "params": script, "keys": "Cmd+Alt+Shift+F7"})).unwrap();
+    assert_eq!(r["command"], r#"file.runScript {"name":"Add Comp.jsx"}"#, "{r}");
+    assert_eq!(r["keys"], json!(["Cmd+Alt+Shift+F7"]), "{r}");
+    assert_eq!(r["conflicts"], json!([]), "{r}");
+    h.state_mut().dialog = None;
+    let spec = effectcraft_ui_egui::native_menu::build(h.state());
+    let entry = spec.items().into_iter().find(|i| i.command == "file.runScript" && i.params == script).expect("the File ▸ Scripts entry");
+    assert_eq!(entry.shortcut.as_deref(), Some("Cmd+Alt+Shift+F7"));
+    let (m, k, ..) = effectcraft_ui_egui::menus::bindings(&h.state().session)
+        .into_iter()
+        .find(|b| b.2 == "file.runScript" && b.3 == script)
+        .expect("the key is bound to the script");
+    let made = |h: &Harness<'_, EffectcraftApp>| h.state().session.project.items.values().filter(|i| i.name == "From Key").count();
+    assert_eq!(made(&h), 0);
+    for pressed in [true, false] {
+        h.event(Event::Key { key: k, physical_key: Some(k), pressed, repeat: false, modifiers: m });
+        h.step();
+    }
+    assert_eq!(made(&h), 1, "the key runs the script");
+}
+
 /// The bundled Ease Presets ScriptUI panel (Window ▸ Ease Presets.jsx) docks, and clicking a
 /// preset in its list eases the selected keyframes in one undo step.
 #[test]
@@ -261,6 +297,47 @@ fn script_windows_send_mouse_events_to_listeners() {
     let (snap, log) = (text(&h, "snap"), text(&h, "log"));
     assert!(snap.checked, "toggled once");
     assert_eq!(log.text, "snap true d1");
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
+/// #2584: a drag that starts on a control keeps reaching it outside the script window (moves and
+/// the release), and `MouseEvent.buttons` tells a drag from a hover.
+#[test]
+fn a_drag_keeps_its_control_past_the_window_edge() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Drag");
+      var pad = w.add("group", undefined, undefined, { name: "pad" });
+      pad.preferredSize = [120, 80];
+      var log = w.add("statictext", undefined, "", { name: "log" });
+      log.preferredSize = [400, 20];
+      var seen = [];
+      var rec = function (e) { seen.push(e.type + (e.clientX < 0 ? " out" : " in") + " B" + e.buttons); log.text = seen.join("|"); };
+      pad.addEventListener("mousedown", rec);
+      pad.addEventListener("mousemove", rec);
+      pad.addEventListener("mouseup", rec);
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "drag.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+    let win = h.state().session.script_ui.windows[0].id;
+    let pad = rect(&h, &format!("scriptui.{win}.pad"));
+    let (from, to) = (pad.min + vec2(10.0, 20.0), pad.min + vec2(-300.0, 20.0));
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.run_steps(1);
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 4.0)));
+        h.run_steps(1);
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(3);
+    let log = h.state().session.script_ui.windows[0].root.lookup(&json!("log")).cloned().unwrap().text;
+    assert!(log.starts_with("mousemove in B0|mousedown in B1|"), "a hover move has no button held: {log}");
+    assert!(log.contains("mousedown in B1|mousemove out B1"), "moves outside the window still arrive, with the button held: {log}");
+    assert!(log.ends_with("|mouseup out B0"), "the release outside reaches the control: {log}");
     h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
 }
 

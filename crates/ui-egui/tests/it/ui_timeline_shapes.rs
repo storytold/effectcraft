@@ -76,6 +76,22 @@ fn shape_contents_add_menu_adds_path_operations() {
     assert_eq!(items, ["group", "trim"]);
 }
 
+#[test]
+fn shape_contents_add_menu_adds_wiggle_transform() {
+    let mut s = session();
+    let l = s.execute("layer.newShape", json!({"kind": "ellipse"})).unwrap()["layer"].as_u64().unwrap();
+    let contents = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("contents").unwrap().uid;
+    let mut h = harness(s);
+    open_layer(&mut h, l);
+    click(&mut h, &format!("timeline.group.{contents}.add"));
+    assert!(h.get_by_label("Zig Zag").rect().max.y <= 1000.0, "the whole menu fits in the window");
+    let entry = h.get_by_label("Wiggle Transform").rect();
+    click_at(&mut h, entry.center());
+    let layer = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+    let items: Vec<&str> = layer.props.sub("contents").unwrap().groups().map(|g| g.match_id.as_str()).collect();
+    assert_eq!(items, ["group", "wiggler"]);
+}
+
 /// A shape group's inner Contents is elided in After Effects: opening the group lists its items
 /// (here the path) directly, with no "Contents" row between them.
 #[test]
@@ -431,4 +447,43 @@ fn effects_drag_to_a_new_place_in_the_timeline() {
     assert_eq!(names(&h), ["Tint", "Invert", "Gaussian Blur"]);
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
     assert_eq!(names(&h), ["Tint", "Gaussian Blur", "Invert"], "one undo step per drop");
+}
+
+/// #2552: Shift-clicking effect rows in the Timeline adds them to the selection (and a second
+/// Shift-click takes one out), so one animation preset can hold several effects.
+#[test]
+fn shift_click_selects_several_effects_for_a_preset() {
+    let mut s = session();
+    let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    for fx in ["Gaussian Blur", "Invert"] {
+        s.execute("effect.apply", json!({"layers": [l], "effect": fx})).unwrap();
+    }
+    let effects = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().clone();
+    let uids: Vec<u64> = effects.groups().map(|g| g.uid).collect();
+    let mut h = harness(s);
+    h.state_mut().ui.timeline.open_groups.insert(effects.uid);
+    open_layer(&mut h, l);
+    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, uid: u64| {
+        let p = center(h, &format!("timeline.group.{uid}.name"));
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::SHIFT));
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT });
+            h.step();
+        }
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(2);
+    };
+    let selected = |h: &Harness<'_, EffectcraftApp>| h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect::<Vec<_>>();
+    click(&mut h, &format!("timeline.group.{}.name", uids[0]));
+    assert_eq!(selected(&h), [uids[0]]);
+    shift_click(&mut h, uids[1]);
+    assert_eq!(selected(&h), [uids[0], uids[1]], "Shift adds the second effect");
+    let path = std::env::temp_dir().join(format!("ec-2552-{}.ffx", std::process::id()));
+    let r = h.state_mut().session.execute("anim.savePreset", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!(r["effects"], 2, "{r}");
+    let _ = std::fs::remove_file(&path);
+    shift_click(&mut h, uids[1]);
+    assert_eq!(selected(&h), [uids[0]], "a second Shift-click takes it out");
 }

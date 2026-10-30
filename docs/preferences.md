@@ -190,7 +190,8 @@ Effect Controls uses compact, fixed 20 pt parameter rows, as After Effects does:
 Edit ▸ Keyboard Shortcuts (`Cmd+Alt+'`) opens the shortcut editor: an on-screen keyboard showing
 which keys are assigned for the held modifiers (purple: application-wide, green: panel-specific,
 both: split), modifier toggles, a searchable list of every command (all engine commands, menu
-entries with bound parameters and the frontend's tool / panel commands), and a preset menu.
+entries with bound parameters, the scripts File ▸ Scripts lists and the frontend's tool / panel
+commands), and a preset menu.
 
 - **Presets.** "EffectCraft Default" is After Effects' default layout and is read-only; editing
   it creates a "Custom" copy. Custom presets store only their differences from the default and

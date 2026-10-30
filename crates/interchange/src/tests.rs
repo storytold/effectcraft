@@ -411,7 +411,7 @@ fn ae_project() -> (Project, ItemId) {
     let mut ls = effectcraft_project::build::layer(&mut p, &c, "tone", LayerSource::Footage { item: s }, (0, 0), None);
     ls.out_point = t(3.0);
     ls.props.prop_mut("audio/levels").unwrap().value = Value::Vec2([-3.0, -3.0]);
-    c.layers = vec![lt, lp, la, ls];
+    c.layers = vec![lt, lp, la, ls].into();
     let cid = comp_item(&mut p, "Main", c);
     (p, cid)
 }
@@ -478,6 +478,59 @@ fn export_then_reimport_keeps_the_timeline() {
 
 fn tr_orig(l: &Layer) -> &effectcraft_project::Property {
     l.transform().unwrap().get("position").unwrap()
+}
+
+/// #1894: XML timelines have no mute state, so a muted key must not be written as a keyframe
+/// (the export would otherwise animate through it).
+#[test]
+fn export_skips_muted_keyframes() {
+    let mut p = Project::default();
+    let a = footage_item(&mut p, "/media/a.mov");
+    let mut c = Comp::new(W, H, FrameRate::new(25, 1), t(4.0));
+    let mut l = effectcraft_project::build::layer(&mut p, &c, "clip", LayerSource::Footage { item: a }, (W, H), None);
+    {
+        let pos = l.transform_mut().unwrap().get_mut("position").unwrap();
+        pos.keys = vec![
+            Keyframe::new(t(0.0), Value::Vec3([100.0, 120.0, 0.0])),
+            Keyframe::new(t(1.0), Value::Vec3([500.0, 240.0, 0.0])),
+            Keyframe::new(t(2.0), Value::Vec3([300.0, 60.0, 0.0])),
+        ];
+        pos.keys[1].muted = true;
+    }
+    c.layers.push(l);
+    let cid = comp_item(&mut p, "Main", c);
+    let out = export(&p, cid, &ExportOptions { format: TimelineFormat::Fcp7Xml, ..Default::default() }, &HashMap::new()).unwrap();
+    let (q, r) = import_doc(&out.bytes, "Main.xml", &mut probe);
+    let main = r.comps.iter().copied().find(|c| q.item(*c).unwrap().name == "Main").expect("Main");
+    let pos = layer(q.comp(main).unwrap(), "clip").transform().unwrap().get("position").unwrap();
+    assert_eq!(pos.keys.len(), 2, "the muted key was exported");
+    assert_eq!(pos.keys[0].value.as_vec3()[0], 100.0);
+    assert_eq!(pos.keys[1].value.as_vec3()[0], 300.0);
+}
+
+/// #1894: a muted non-uniform scale key must not force a uniform layer to pre-render; only the
+/// active keys matter, and the static value when every key is muted.
+#[test]
+fn muted_non_uniform_scale_does_not_force_prerendering() {
+    let mut p = Project::default();
+    let a = footage_item(&mut p, "/media/a.mov");
+    let mut c = Comp::new(W, H, FrameRate::new(25, 1), t(2.0));
+    let mut l = effectcraft_project::build::layer(&mut p, &c, "clip", LayerSource::Footage { item: a }, (W, H), None);
+    {
+        let scale = l.transform_mut().unwrap().get_mut("scale").unwrap();
+        scale.keys = vec![Keyframe::new(t(0.0), Value::Vec3([100.0, 100.0, 100.0])), Keyframe::new(t(1.0), Value::Vec3([50.0, 200.0, 100.0]))];
+        scale.keys[1].muted = true;
+    }
+    let lid = l.id;
+    c.layers.push(l);
+    let cid = comp_item(&mut p, "Main", c);
+    assert_eq!(prerender_reason(&p, cid, lid, &ExportOptions::default()), None);
+    // With every key muted the static value drives evaluation, so a non-uniform static scale
+    // still takes the flattened path.
+    let scale = p.comp_mut(cid).unwrap().layer_mut(lid).unwrap().transform_mut().unwrap().get_mut("scale").unwrap();
+    scale.keys[0].muted = true;
+    scale.value = Value::Vec3([50.0, 200.0, 100.0]);
+    assert_eq!(prerender_reason(&p, cid, lid, &ExportOptions::default()).as_deref(), Some("non-uniform scale"));
 }
 
 #[test]

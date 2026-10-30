@@ -526,7 +526,7 @@ pub(super) fn set_parent(s: &mut Session, p: &Value) -> Result<Value> {
     let fixes = if compensate { parent_fixes(s, cid, &ids, parent) } else { vec![] };
     s.edit("Parent", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.parent = parent;
             if let Some(f) = fixes.iter().find(|f| f.layer == l.id) {
                 f.apply(l);

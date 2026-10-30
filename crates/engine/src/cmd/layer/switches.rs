@@ -19,7 +19,7 @@ pub(super) fn set_switch(s: &mut Session, p: &Value) -> Result<Value> {
         let first = comp.layers.iter().find(|l| ids.contains(&l.id)).map(|l| switch_value(l, &name)).unwrap_or(Some(false));
         let Some(first) = first else { return Err(bad("layer.setSwitch", format!("unknown switch `{name}`"))) };
         let target = v.unwrap_or(!first);
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             set_switch_value(l, &name, target);
             last = target;
         }
@@ -55,7 +55,7 @@ fn set_switch_others(s: &mut Session, cid: ItemId, ids: &[LayerId], name: &str, 
             alone &= on == (ids.contains(&l.id) == active);
         }
         let others = value.unwrap_or(alone == active);
-        for l in comp.layers.iter_mut().filter(|l| applies(l)) {
+        for l in comp.layers.iter_mut_where(|l| applies(l)) {
             let v = if ids.contains(&l.id) { active } else { others };
             set_switch_value(l, name, v);
         }
@@ -152,7 +152,7 @@ pub(super) fn set_comment(s: &mut Session, p: &Value) -> Result<Value> {
     let text = str_p(p, "comment").ok_or_else(|| bad("layer.setComment", "missing `comment`"))?.to_string();
     s.edit("Layer Comment", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.comment = text.clone();
         }
         Ok(())
@@ -169,7 +169,7 @@ pub(super) fn blend(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.edit("Blending Mode", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.blend_mode = match mode {
                 Some(m) => m,
                 None if step > 0 => l.blend_mode.next(),

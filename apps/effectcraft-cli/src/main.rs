@@ -1296,7 +1296,7 @@ fn adv3d_bench_comp(p: &mut effectcraft_engine::project::Project) -> Option<Item
         set(l, "cameraOptions/highlightGain", Value::Scalar(20.0));
         set(l, "cameraOptions/highlightThreshold", Value::Scalar(200.0));
     });
-    comp.layers = layers;
+    comp.layers = layers.into();
     Some(p.add_item("Advanced 3D (bench)", effectcraft_engine::color::Label::None, None, ItemKind::Comp(comp.into())))
 }
 

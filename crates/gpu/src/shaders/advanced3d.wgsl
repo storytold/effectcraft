@@ -14,8 +14,10 @@ struct Globals {
     ambient: vec4<f32>,
     // radiance first texture, mip count, irradiance texture, intensity
     env: vec4<f32>,
-    // rotation, any lighting (0/1), -, -
+    // rotation, any lighting (0/1), shadow map index (-1 none), shadow darkness
     env2: vec4<f32>,
+    // the environment's dominant direction (its shadow's source)
+    env_sun: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -339,6 +341,18 @@ fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32,
     return 1.0 - darkness * (1.0 - f);
 }
 
+// The Environment light's shadow from its dominant direction (shade::env_shadow). Only the
+// image's key fraction (g.env_sun.w) of the light is occluded — the fill keeps shining — so
+// the shadow stays partial the way After Effects renders an area-light shadow.
+fn env_shadow(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.env2.z < 0.0) {
+        return 1.0;
+    }
+    let n_l = clamp(dot(n, g.env_sun.xyz), 0.0, 1.0);
+    let f = shadow_factor(u32(g.env2.z + 0.5) * SHADOW_STRIDE, p, ng, n_l);
+    return 1.0 - g.env2.w * g.env_sun.w * (1.0 - f);
+}
+
 fn attenuation(kind: u32, falloff: u32, radius: f32, falloff_distance: f32, cos_inner: f32, cos_outer: f32, dir: vec3<f32>, to_l: vec3<f32>, dist: f32) -> f32 {
     var k = 1.0;
     if (falloff == 1u && kind != 0u) {
@@ -424,6 +438,10 @@ fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32
             continue;
         }
         amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
+    }
+    // The Environment light's shadow counts too (it reaches every surface: no falloff).
+    if (g.ambient.w > 0.5) {
+        amount = max(amount, 1.0 - env_shadow(pos, n, n));
     }
     return amount;
 }
@@ -564,7 +582,11 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let f0 = mix(vec3<f32>(0.04 * spec_k), rgb, metallic);
         let ab = env_brdf(n_v, rough);
         let fs = f0 * ab.x + vec3<f32>(ab.y);
-        acc = acc + (irr * rgb * (vec3<f32>(1.0) - fs) * (1.0 - metallic) * diff_k + spec * fs) * ao;
+        var esh = 1.0;
+        if (receives_shadows) {
+            esh = env_shadow(i.pos, ng, n);
+        }
+        acc = acc + (irr * rgb * (vec3<f32>(1.0) - fs) * (1.0 - metallic) * diff_k + spec * fs) * ao * esh;
     }
     let c = acc + emissive;
     out.color = vec4<f32>(c * alpha, alpha);

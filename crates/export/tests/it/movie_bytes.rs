@@ -61,7 +61,7 @@ fn project() -> (Project, ItemId) {
     }
     box_.blend_mode = BlendMode::Screen;
 
-    comp.layers = vec![box_, ring, solid];
+    comp.layers = vec![box_, ring, solid].into();
     let cid = p.add_item("Comp 1", Label::Sandstone, None, ItemKind::Comp(comp.into()));
     (p, cid)
 }

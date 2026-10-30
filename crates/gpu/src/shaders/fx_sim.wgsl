@@ -180,7 +180,7 @@ fn fxm_bubble(at: u32, x: f32, y: f32) -> FxmShade {
     }
     let k = select(-0.7, 1.6, P.u[1].y != 0u);
     let nz = sqrt(max(1.0 - d2, 0.0));
-    let s = fxm_unpremul(sample_bilinear(src, data[at + 4u] + dx * qr * k, data[at + 5u] + dy * qr * k));
+    let s = fxm_unpremul(sample_bilinear_clamped(src, data[at + 4u] + dx * qr * k, data[at + 5u] + dy * qr * k));
     var c = s.xyz;
     if (s.w <= 0.0) {
         c = vec3<f32>(0.6, 0.7, 0.8);

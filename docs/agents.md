@@ -212,8 +212,25 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
   or call `save_project {"path": …}` after each milestone.
 - **Environment light.** `layer.newLight` also accepts `"kind":"Environment"`: an equirectangular
   image that metallic surfaces reflect. Set its `lightOptions/source` to a footage, comp or solid
-  layer by layer id; with no source it uses the comp's Environment Layer (`layer.environment`)
-  ([#261](https://github.com/storytold/effectcraft/issues/261)).
+  layer by layer id; with no source it uses the comp's Environment Layer (`layer.environment`),
+  or a default studio environment — bright above and toward the initial camera, dark below and
+  behind, at a dim 0.3 mean level — of the light's colour × intensity when there is none; either
+  way the light brightens the scene. A selected Source or Environment Layer that fails to
+  render — a deleted layer, missing footage — lights nothing instead: the light never silently
+  falls back to the studio default. It has `castsShadows`/`shadowDarkness`/`shadowDiffusion`
+  like the other lights: Cast Shadows shades the scene from the image's dominant bright region
+  (the default environment's key, or a source image's brightest area; an image without a
+  sufficiently strong dominant direction has none — a uniform one, or opposing bright regions
+  that cancel — so it casts no shadow) — the region weighted by the light's colour, so a
+  coloured light shadows from the regions it actually lights (opposing red and blue regions
+  cancel to a white light, but a red light's shadow comes from the red one) — occluding only
+  that key's share of the light, so the
+  shadow stays partial like After Effects' area-light shadows, and soft by default (a penumbra
+  of at least 8 pixels or four map texels, plus Shadow Diffusion). It only lights
+  Advanced 3D comps, so creating one (or changing a light's type to Environment) switches a
+  Classic 3D comp to Advanced 3D
+  ([#261](https://github.com/storytold/effectcraft/issues/261),
+  [#2436](https://github.com/storytold/effectcraft/issues/2436)).
 
 ### Cookbook (from end-to-end QA)
 
@@ -583,7 +600,9 @@ A dialog's `show()` waits for the user: the `script.run` / `file.runScript` repl
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
 that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
-`window.restoreScriptPanels` (the panels open when the app last quit). Scripts' `app.settings`:
+`window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
+`file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes
+the project first). Scripts' `app.settings`:
 `script.settings.get {"section": …, "key": …}` and `script.settings.save {…, "value": …}`.
 Extension points and the bundled extensions: [plugins.md](plugins.md).
 

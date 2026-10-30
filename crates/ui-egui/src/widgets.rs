@@ -602,7 +602,7 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
 pub fn layer_picker(
     ui: &mut Ui,
     rect: Rect,
-    layers: &[effectcraft_engine::project::Layer],
+    layers: &effectcraft_engine::project::Layers,
     current: Option<u64>,
     t: &Tokens,
     id: egui::Id,

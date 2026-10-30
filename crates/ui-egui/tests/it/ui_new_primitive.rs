@@ -70,7 +70,7 @@ fn choose(h: &mut Harness<'_, EffectcraftApp>, kind: PrimitiveKind) {
 }
 
 fn layers(h: &Harness<'_, EffectcraftApp>) -> Vec<Layer> {
-    h.state().session.active_comp().unwrap().layers.clone()
+    h.state().session.active_comp().unwrap().layers.to_vec()
 }
 
 fn renderer(h: &Harness<'_, EffectcraftApp>) -> Renderer {

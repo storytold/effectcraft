@@ -96,7 +96,7 @@ impl Session {
             effectcraft_project::ItemKind::Footage(f) if f.has_video => {
                 let f = f.clone();
                 Some(Box::new(move || {
-                    let img = footage.frame(item, &f, Tick(0))?;
+                    let img = effectcraft_render::cineon_frame(footage.frame(item, &f, Tick(0))?, &f);
                     // Point-sample down to at most `max_side` on the long side.
                     let step = (img.width.max(img.height) as f32 / max_side.max(1) as f32).ceil().max(1.0) as u32;
                     let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));

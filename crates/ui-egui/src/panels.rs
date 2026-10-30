@@ -28,6 +28,7 @@ pub mod key_dialogs;
 pub mod layer_panel;
 pub mod layer_styles_dialog;
 pub mod learn;
+pub mod live_preview;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;
@@ -36,6 +37,7 @@ pub mod paint_panels;
 pub mod panel_kit;
 pub mod path_vr_panels;
 pub mod precomp;
+pub(crate) mod preview_merge;
 pub mod primitive_dialog;
 pub mod project;
 pub mod properties;
@@ -332,7 +334,7 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     }
                 }
                 _ => {
-                    ui.label(egui::RichText::new(panel.title()).weak());
+                    ui.label(egui::RichText::new(crate::i18n::label(app, "window.panel", panel.title())).weak());
                 }
             }
         });

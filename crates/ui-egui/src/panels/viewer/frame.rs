@@ -9,13 +9,13 @@ pub(super) fn empty_state(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     let c = rect.center();
     p.text(c - vec2(0.0, 40.0), Align2::CENTER_CENTER, crate::i18n::tr("Composition"), Tokens::semibold(16.0), t.text);
     let b1 = Rect::from_center_size(c + vec2(0.0, 0.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b1, "New Composition", true, &t, egui::Id::unique("empty-newcomp")).clicked() {
+    if widgets::text_button(ui, b1, crate::i18n::tr("New Composition"), true, &t, egui::Id::unique("empty-newcomp")).clicked() {
         crate::panels::dialogs::open_new_comp(app);
     }
     app.auto.add("viewer.empty.newComp", b1, "New Composition");
     let b2 = Rect::from_center_size(c + vec2(0.0, 40.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b2, "New Composition From Footage", false, &t, egui::Id::unique("empty-fromfootage")).clicked() {
-        let _ = crate::menus::invoke(app, &ui.ctx().clone(), "file.import", json!({}));
+    if widgets::text_button(ui, b2, crate::i18n::tr("New Composition From Footage"), false, &t, egui::Id::unique("empty-fromfootage")).clicked() {
+        let _ = crate::menus::invoke(app, &ui.ctx().clone(), "file.import", json!({"newComp": true}));
     }
     app.auto.add("viewer.empty.import", b2, "New Composition From Footage");
     // A Project item dropped on the empty viewer creates the first composition,

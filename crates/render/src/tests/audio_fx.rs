@@ -78,7 +78,7 @@ fn comp_with(id: Option<&str>, vals: &[(&str, Value)], solid: bool) -> (Project,
         l.props.sub_mut("effects").unwrap().children.push(g.into());
     }
     let mut comp = comp;
-    comp.layers = vec![l];
+    comp.layers = vec![l].into();
     let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
     (p, cid)
 }
@@ -272,7 +272,7 @@ fn audio_spectrum_follows_time_through_the_layer_cache() {
     g.prop_mut("audioLayer").unwrap().value = Value::Layer(Some(a.id.0));
     s.props.sub_mut("effects").unwrap().children.push(g.into());
     let mut comp = comp;
-    comp.layers = vec![s, a];
+    comp.layers = vec![s, a].into();
     let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
 
     let src = Signal(late_tone);
