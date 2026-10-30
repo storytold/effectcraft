@@ -96,6 +96,18 @@ pub trait Accelerator: Send + Sync {
     /// results, `pass_begin` clears the miss. Synchronous accelerators never miss.
     fn frame_begin(&self) {}
     fn pass_begin(&self) {}
+    /// A rendered comp frame is done (the GPU pool ages sizes no frame asks for, and evicts
+    /// only those once full). The multi-frame render paths call it once per comp frame:
+    /// [`crate::passes::comp_frame`] (exports; a field-rendered output frame is two), remote frames
+    /// and the preview workers. One-off renders (`Session::render`, single-frame export,
+    /// thumbnails) don't, so they don't advance the pool's clock. Without it the pool never
+    /// finds a stale size and keeps its first sizes, dropping newcomers.
+    fn frame_end(&self) {}
+    /// A render of many frames (an export) is done: drop what is kept only to speed up the
+    /// next frame (pooled working textures). Exports call it, even when they fail, panic or
+    /// are dropped; other multi-frame paths (preview, remote frames) don't, so there the pool
+    /// keeps up to its budget until the next export ends.
+    fn render_end(&self) {}
     fn pass_missed(&self) -> bool {
         false
     }

@@ -784,7 +784,7 @@ fn display_frames_are_mipmapped() {
         view_formats: &[],
     });
     let mut e = crate::context::Enc::new(&g.ctx);
-    e.encoder().copy_texture_to_texture(
+    e.record(&[]).copy_texture_to_texture(
         wgpu::TexelCopyTextureInfo { texture: &f.texture, mip_level: 1, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
         wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
         wgpu::Extent3d { width: w1, height: h1, depth_or_array_layers: 1 },
@@ -920,7 +920,7 @@ fn a_failed_frame_returns_no_texture_to_the_pool() {
     let rejected = rejected_texture(&g);
     let earlier = g.within_memory(|| crate::context::Enc::new(&g.ctx).image(48, 16)).expect("an earlier frame");
     let mut other = crate::context::Enc::new(&g.ctx);
-    other.encoder();
+    other.record(&[]);
     g.within_memory(|| (crate::context::Enc::new(&g.ctx).image(64, 32), rejected.create_view(&Default::default()))).expect_err("the frame fails");
     drop(earlier);
     drop(other);
@@ -1314,4 +1314,224 @@ fn owned_devices_favour_memory_usage() {
     assert!(matches!(d.memory_hints, wgpu::MemoryHints::MemoryUsage));
     assert_eq!(d.label, Some("effectcraft gpu"));
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
+}
+
+/// A GPU context of its own with a small pool budget, so other tests (sharing [`gpu`]) neither
+/// see the budget nor add to what the pool keeps.
+fn private_gpu(budget: usize) -> Option<Gpu> {
+    gpu()?;
+    let g = Gpu::headless()?;
+    g.context().set_pool_budget(budget);
+    Some(g)
+}
+
+/// Review of #1523: every idle effect-call owner kept up to the pool budget of its own,
+/// outside the shared accounting, and there are as many as calls ever ran at once (16 frame
+/// threads: ~12 GB after a 4K render). Finished calls share the free list's one budget, and
+/// the end of a render drops it.
+#[test]
+fn idle_effect_calls_share_one_pool_budget() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // 16 effect calls in flight at once, each with three 1 MB working textures.
+    let mut encs: Vec<_> = (0..16).map(|_| crate::context::Enc::lent(ctx)).collect();
+    for e in &mut encs {
+        let imgs: Vec<_> = (0..3).map(|_| e.image(256, 256)).collect();
+        drop(imgs);
+    }
+    drop(encs);
+    let kept = ctx.pool_retained_bytes();
+    assert!(kept <= budget, "idle effect calls keep {} MB, budget {} MB", kept >> 20, budget >> 20);
+    // A later call reuses them instead of allocating.
+    let (hits, _) = ctx.pool_stats();
+    drop(crate::context::Enc::lent(ctx).image(256, 256));
+    assert_eq!(ctx.pool_stats().0, hits + 1, "a later effect call reuses a kept texture");
+    effectcraft_render::Accelerator::render_end(&g);
+    assert_eq!(ctx.pool_retained_bytes(), 0, "the end of a render drops the kept textures");
+}
+
+/// Review of #1523: a full free list rejected every new texture instead of evicting, so once
+/// sizes that no longer occur (per-frame blur bounds, padded layer sizes) filled it, a steady
+/// size never got a hit again: ~0.75 GB of dead weight plus an allocation per working texture.
+#[test]
+fn stale_sizes_do_not_starve_a_steady_size() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    for k in 0..16 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256 + k, 256), e.image(256 + k, 256)));
+        drop(e);
+        ctx.pool_frame_end();
+    }
+    let (hits0, misses0) = ctx.pool_stats();
+    for _ in 0..10 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(300, 300), e.image(300, 300)));
+        drop(e);
+        ctx.pool_frame_end();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(ctx.pool_evictions() > 0, "the stale sizes were evicted");
+    assert!(hits >= 18 && misses <= 2, "steady 300x300 calls after stale sizes: {hits} hits, {misses} misses");
+}
+
+/// Review of #1523: a `pool_frame_end` wait that clears none of the evicted bytes (timeout, or
+/// callbacks that never run) must not re-wait on every later frame while `dying` stays put.
+#[test]
+fn a_wait_without_progress_is_not_repeated() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let phantom = 1 << 20;
+    ctx.pool_charge_dying(phantom as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 1, "first frame with dying bytes waits once");
+    for _ in 0..3 {
+        ctx.pool_frame_end();
+    }
+    assert_eq!(ctx.pool_waits(), 1, "no progress: later frames must not wait again");
+    ctx.pool_charge_dying(-(phantom as isize));
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 1, "dying cleared: poll only, stall cleared");
+    ctx.pool_charge_dying(phantom as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 2, "a new stall waits once");
+    // Partial progress: more dying while stalled → still no wait; drop below stalled → wait.
+    let extra = phantom / 2;
+    ctx.pool_charge_dying(extra as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 2, "dying above stalled: poll only");
+    ctx.pool_charge_dying(-(extra as isize + 1));
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 3, "dying dropped below stalled: wait again");
+    ctx.pool_charge_dying(-((phantom - 1) as isize));
+}
+
+/// RTX 3090 4K runs of #1523: evicting the least recently freed texture to fit every newcomer
+/// thrashes when a frame frees more than the budget in a repeating order (blur/glow
+/// intermediates): each free evicts the size the next call takes first, so every take
+/// missed (d_blurglow misses back at the old level, and evict + reallocate raised the peak).
+/// Sizes still in use stay; a kept subset of the cycle must keep hitting.
+#[test]
+fn repeating_sizes_over_the_budget_keep_hitting() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // Five ~2.1 MB sizes a frame (10.5 MB > 8 MB), one effect call each, same order every frame.
+    let sizes: Vec<(u32, u32)> = (0..5).map(|k| (256 + 8 * k, 512)).collect();
+    let frame = || {
+        for &(w, h) in &sizes {
+            drop(crate::context::Enc::lent(ctx).image(w, h));
+        }
+        ctx.pool_frame_end();
+    };
+    for _ in 0..3 {
+        frame();
+    }
+    let (hits0, misses0) = ctx.pool_stats();
+    let evicted0 = ctx.pool_evictions();
+    for _ in 0..10 {
+        frame();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(hits >= 30, "10 frames of a 5-size cycle over the budget: {hits} hits, {misses} misses");
+    assert_eq!(ctx.pool_evictions(), evicted0, "sizes in use were evicted");
+}
+
+/// Review of #1523: a lent call's image read by another, still open encoder must not go back to
+/// the lent call for reuse when its lease drops first: that encoder's read is not submitted yet.
+#[test]
+fn image_read_by_an_open_encoder_is_not_reused_by_its_lent_call() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let mut frame = crate::context::Enc::new(ctx);
+    let mut lent = crate::context::Enc::lent(ctx);
+    let img = lent.image(64, 64);
+    let dst = frame.image(64, 64);
+    frame.copy_into(&img, &dst, 0, 0);
+    drop(img);
+    let (hits, _) = ctx.pool_stats();
+    drop(lent.image(64, 64));
+    assert_eq!(ctx.pool_stats().0, hits, "the lent call reused a texture an open encoder still reads");
+    drop(lent);
+    let (hits, _) = ctx.pool_stats();
+    drop(crate::context::Enc::lent(ctx).image(64, 64));
+    // The other 64x64 (the lent call's second image) is free; the read one still waits.
+    let (hits2, _) = ctx.pool_stats();
+    assert_eq!(hits2, hits + 1);
+    let (h, _) = ctx.pool_stats();
+    let mut e = crate::context::Enc::lent(ctx);
+    let a = e.image(64, 64);
+    let b = e.image(64, 64);
+    assert_eq!(ctx.pool_stats().0, h + 1, "the read texture waits for the open encoder");
+    drop((a, b, e));
+    frame.submit();
+    drop(dst);
+}
+
+/// The same through [`Gpu::effects`] from 16 threads at once, as an export's frame threads.
+#[test]
+fn effect_calls_on_16_threads_keep_one_pool_budget() {
+    if on_gl() {
+        return; // one context lock per adapter on wgpu's GL backend (see hold_gpu_lock)
+    }
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let g = &g;
+    let ctx = g.context();
+    let spec = effectcraft_effects::find("ec.blur.gaussian").unwrap();
+    let size = [240.0, 240.0];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    params.values.insert("blurriness".into(), Value::Scalar(6.0));
+    let buf = effectcraft_effects::Buf { img: pattern(3, 240, 240), offset: [0.0, 0.0], scale: 1.0 };
+    let go = std::sync::Barrier::new(16);
+    std::thread::scope(|s| {
+        for i in 0..16 {
+            let (params, buf, go) = (&params, &buf, &go);
+            s.spawn(move || {
+                go.wait();
+                for _ in 0..3 {
+                    let fx = effectcraft_effects::EffectCtx { params, time: 0.0, layer_size: size, seed: i, adjustment: false, env: Default::default() };
+                    effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: fx }], buf, None).expect("the GPU runs the effect");
+                }
+            });
+        }
+    });
+    let kept = ctx.pool_retained_bytes();
+    assert!(kept <= budget, "16 threads of effect calls keep {} MB, budget {} MB", kept >> 20, budget >> 20);
+    effectcraft_render::Accelerator::render_end(g);
+    assert_eq!(ctx.pool_retained_bytes(), 0, "the end of a render drops the kept textures");
+}
+
+/// Sceptic r2 of #1523: only the export pipeline ended frames, so off export (preview, remote
+/// frames) the pool's clock stood still, no size ever went stale and a full free list dropped
+/// every newcomer again. Frames rendered through [`effectcraft_render::passes::comp_frame`]
+/// (no explicit `pool_frame_end`) must age the sizes they did not ask for.
+#[test]
+fn frames_outside_the_export_pipeline_age_the_pool() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // Fill the free list with sizes no frame asks for again.
+    for k in 0..16 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256 + k, 256), e.image(256 + k, 256)));
+    }
+    let evicted0 = ctx.pool_evictions();
+    let s = blend_scene(BitDepth::Bpc8, BlendMode::Screen);
+    let mut r = Renderer::new(&s.p, &Pattern, opts());
+    r.accel = Some(&g);
+    for _ in 0..3 {
+        effectcraft_render::passes::block_on(effectcraft_render::passes::comp_frame(&r, s.cid, Tick::ZERO));
+    }
+    for _ in 0..4 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(300, 300), e.image(300, 300)));
+    }
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(ctx.pool_evictions() > evicted0, "rendered frames did not age the pool: stale sizes were never evicted");
 }
