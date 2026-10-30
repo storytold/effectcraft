@@ -8094,11 +8094,8 @@ mod tests {
     #[test]
     fn the_view_menu_resolution_rows_match_the_panel() {
         ui::set_current("ja");
-        for (id, en, ja) in [
-            ("view.res.half", "Half", "1/2 画質"),
-            ("view.res.third", "Third", "1/3 画質"),
-            ("view.res.quarter", "Quarter", "1/4 画質"),
-        ] {
+        for (id, en, ja) in [("view.res.half", "Half", "1/2 画質"), ("view.res.third", "Third", "1/3 画質"), ("view.res.quarter", "Quarter", "1/4 画質")]
+        {
             assert_eq!(command_label(id, en), ja, "{id}");
         }
         ui::set_current("en");
