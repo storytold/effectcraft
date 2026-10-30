@@ -292,7 +292,7 @@ fn parented_point_light_keeps_its_direction_under_a_rotated_null() {
     assert!((eye1 - eye0).length() < 1e-6 && (f1 - f0).length() < 1e-6, "{eye0:?} {eye1:?} {f0:?} {f1:?}");
 }
 
-/// Keyed Orientation under a Z-only turn is shifted exactly, so the light keeps its direction at
+/// Keyed Orientation under a Z-only turn is re-expressed exactly, so the light keeps its direction at
 /// every time, between the keys too.
 #[test]
 fn keyed_orientation_under_a_z_turn_keeps_the_direction_at_every_time() {
@@ -310,8 +310,8 @@ fn keyed_orientation_under_a_z_turn_keeps_the_direction_at_every_time() {
     }
 }
 
-/// Under a tilted null the keys alone cannot follow (Euler angles are blended between them), so keys are
-/// added between them: the light keeps its direction within a small angle at every time.
+/// Under a tilted null the re-expressed endpoints preserve the quaternion arc exactly,
+/// without adding keys between them.
 #[test]
 fn keyed_orientation_under_a_tilted_null_follows_between_the_keys() {
     {
@@ -326,10 +326,9 @@ fn keyed_orientation_under_a_tilted_null_follows_between_the_keys() {
         s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
         for (t, b) in times.into_iter().zip(before) {
             let a = frame_at(&s, light, t);
-            // 0.05 degrees is about 9e-4 of a radian on a unit vector.
-            assert!((a.0 - b.0).length() < 1e-6 && (a.1 - b.1).length() < 2e-3, "at {t:?}: {:?} vs {:?}", a.1, b.1);
+            assert!((a.0 - b.0).length() < 1e-6 && (a.1 - b.1).length() < 1e-8, "at {t:?}: {:?} vs {:?}", a.1, b.1);
         }
-        assert!(layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().keys.len() > 2, "keys were added between the two");
+        assert_eq!(layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().keys.len(), 2, "quaternion arcs need no extra keys");
     }
 }
 
@@ -351,10 +350,9 @@ fn one_node_light_under_a_mirrored_null_keeps_its_authored_values() {
     assert_eq!(v3(&after, "transform/orientation"), v3(&before, "transform/orientation"));
 }
 
-/// The cap on keys added by baking is for the whole Orientation property, not for each segment:
-/// many strongly eased segments under a tilted parent stay within it.
+/// Many strongly eased Orientation segments keep their authored key count and easing.
 #[test]
-fn baked_orientation_keys_are_capped_across_the_whole_property() {
+fn reexpressed_orientation_preserves_key_count_across_the_whole_property() {
     let mut s = session();
     let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
     let count = 120;
@@ -369,8 +367,8 @@ fn baked_orientation_keys_are_capped_across_the_whole_property() {
     let nul = rotated_null(&mut s, [20.0, -35.0, 60.0], 30.0);
     s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
     let n = layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().keys.len();
-    assert!(n <= 4096, "{n} keys: the cap is for the property, not per segment");
-    // the segments the cap left unchecked keep their authored easing instead of turning into straight blends
+    assert_eq!(n, count, "re-expressing quaternion arcs must not add keys");
+    // Re-expressed endpoints retain their authored easing.
     let orientation = layer_in(&s, cid(&s), light);
     let keys = &orientation.props.prop("transform/orientation").unwrap().keys;
     let last = keys.iter().rev().nth(1).expect("the penultimate key");

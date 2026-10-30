@@ -92,6 +92,41 @@ fn maximum_influence_resolves_flat_midpoint_time_curve() {
     }
 }
 
+/// Keyed Orientation moves along the shortest arc, eased in time, as After Effects 2026 reads
+/// it back (cases 802 and 803: keys [0,0,0] at 0 s and [60,80,40] at 2 s).
+#[test]
+fn keyed_orientation_matches_after_effects() {
+    let close = |v: Value, e: [f64; 3]| {
+        let v = v.as_vec3();
+        assert!((0..3).all(|i| (v[i] - e[i]).abs() < 2e-3), "{v:?} vs {e:?}");
+    };
+    let lin = vec![Keyframe::new(s(0.0), Value::Vec3([0.0; 3])), Keyframe::new(s(2.0), Value::Vec3([60.0, 80.0, 40.0]))];
+    close(evaluate_orientation(&lin, s(0.5)).unwrap(), [16.9201, 16.0688, 16.0629]);
+    close(evaluate_orientation(&lin, s(1.0)).unwrap(), [30.6186, 35.7617, 28.4317]);
+    close(evaluate_orientation(&lin, s(2.0)).unwrap(), [60.0, 80.0, 40.0]);
+    // A middle key reads back as stored (not as another angle triple of the same rotation).
+    let three =
+        vec![Keyframe::new(s(0.0), Value::Vec3([0.0; 3])), Keyframe::new(s(1.0), Value::Vec3([0.0, 120.0, 0.0])), Keyframe::new(s(2.0), Value::Vec3([0.0; 3]))];
+    assert_eq!(evaluate_orientation(&three, s(1.0)), Some(Value::Vec3([0.0, 120.0, 0.0])));
+    // Easy ease (AE's preset: speed 0, influence 33 %) on both keys.
+    let ease = |k: Keyframe| {
+        let mut k = k.eased();
+        k.in_ease = vec![Ease { speed: 0.0, influence: 0.33 }];
+        k.out_ease = vec![Ease { speed: 0.0, influence: 0.33 }];
+        k
+    };
+    let eased: Vec<Keyframe> = lin.into_iter().map(ease).collect();
+    close(evaluate_orientation(&eased, s(0.5)).unwrap(), [11.0974, 9.5750, 10.5916]);
+    close(evaluate_orientation(&eased, s(1.0)).unwrap(), [30.6186, 35.7617, 28.4317]);
+    close(evaluate_orientation(&eased, s(1.5)).unwrap(), [47.6915, 65.7590, 40.3338]);
+    // Hold keys and other value types.
+    let held = vec![Keyframe::new(s(0.0), Value::Vec3([1.0, 2.0, 3.0])).hold(), Keyframe::new(s(1.0), Value::Vec3([0.0; 3]))];
+    close(evaluate_orientation(&held, s(0.5)).unwrap(), [1.0, 2.0, 3.0]);
+    let scalar = vec![Keyframe::new(s(0.0), Value::Scalar(0.0)), Keyframe::new(s(1.0), Value::Scalar(10.0))];
+    assert_eq!(evaluate_orientation(&scalar, s(0.5)), Some(Value::Scalar(5.0)));
+    assert_eq!(evaluate_orientation(&[], s(0.5)), None);
+}
+
 /// M13.15: agents set gradients as plain JSON, not only the tagged form `get` returns.
 #[test]
 fn gradients_coerce_from_plain_json() {
@@ -186,6 +221,61 @@ fn bezier_with_linear_speed_matches_linear() {
         let t = i as f64 * 0.1;
         let v = evaluate(&keys, s(t), false).unwrap().as_f64();
         assert!((v - 50.0 * t).abs() < 1e-6, "{t} {v}");
+    }
+}
+
+/// A linear side next to an eased one keeps the segment's average speed at 16.67 %
+/// influence. After Effects time-remap read-backs (a square at x = 50 + 455 * remap): out of
+/// a key at 2 s (3.5, speed 0, influence 50 %) into a linear key at 4 s (0.5) the remap is
+/// 3.290 at 2.5 s and 2.657 at 3 s (33.3 % gave 3.308 and 2.629).
+#[test]
+fn a_linear_side_next_to_an_eased_side_matches_after_effects() {
+    let mut a = Keyframe::new(s(2.0), Value::Scalar(3.5));
+    a.out_interp = Interp::Bezier;
+    a.out_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+    let keys = vec![a, Keyframe::new(s(4.0), Value::Scalar(0.5))];
+    for (t, ae) in [(2.5, 3.290), (3.0, 2.657)] {
+        let v = evaluate(&keys, s(t), false).unwrap().as_f64();
+        // AE's square edge is read to the pixel: 1 px = 1 / 455 of remap.
+        assert!((v - ae).abs() < 2.0 / 455.0, "{t}: {v} vs {ae}");
+    }
+    // The mirror case: a linear out into an eased in.
+    let mut b = Keyframe::new(s(4.0), Value::Scalar(0.5));
+    b.in_interp = Interp::Bezier;
+    b.in_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+    let mirror = vec![Keyframe::new(s(2.0), Value::Scalar(3.5)), b];
+    let v = evaluate(&mirror, s(3.5), false).unwrap().as_f64();
+    assert!((v - (4.0 - 3.290)).abs() < 2.0 / 455.0, "{v}");
+    assert_eq!(side_ease(&keys, 1, 0, false, false).map(|e| e.influence), Some(LINEAR_SIDE_INFLUENCE));
+}
+
+/// Keyed Orientation shapes a linear side next to an eased one as a scalar property does
+/// (`LINEAR_SIDE_INFLUENCE`): about one axis the shortest arc is the angle itself, so the
+/// orientation follows the same curve as a scalar with the same keys (CodeRabbit on #1876).
+#[test]
+fn orientation_linear_side_next_to_an_eased_side_matches_a_scalar() {
+    let ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+    let (mut a, mut sa) = (Keyframe::new(s(2.0), Value::Vec3([0.0, 0.0, 0.0])), Keyframe::new(s(2.0), Value::Scalar(0.0)));
+    for k in [&mut a, &mut sa] {
+        k.out_interp = Interp::Bezier;
+        k.out_ease = ease.clone();
+    }
+    let orient = vec![a, Keyframe::new(s(4.0), Value::Vec3([0.0, 0.0, 90.0]))];
+    let scalar = vec![sa, Keyframe::new(s(4.0), Value::Scalar(90.0))];
+    // The mirror: a linear out into an eased in.
+    let (mut b, mut sb) = (Keyframe::new(s(4.0), Value::Vec3([0.0, 0.0, 90.0])), Keyframe::new(s(4.0), Value::Scalar(90.0)));
+    for k in [&mut b, &mut sb] {
+        k.in_interp = Interp::Bezier;
+        k.in_ease = ease.clone();
+    }
+    let orient_m = vec![Keyframe::new(s(2.0), Value::Vec3([0.0, 0.0, 0.0])), b];
+    let scalar_m = vec![Keyframe::new(s(2.0), Value::Scalar(0.0)), sb];
+    for (o, sc) in [(&orient, &scalar), (&orient_m, &scalar_m)] {
+        for t in [2.25, 2.5, 3.0, 3.5, 3.75] {
+            let Some(Value::Vec3(v)) = evaluate_orientation(o, s(t)) else { panic!("orientation at {t}") };
+            let want = evaluate(sc, s(t), false).unwrap().as_f64();
+            assert!((v[2] - want).abs() < 1e-6 && v[0].abs() < 1e-9 && v[1].abs() < 1e-9, "{t}: {v:?} vs {want}");
+        }
     }
 }
 
