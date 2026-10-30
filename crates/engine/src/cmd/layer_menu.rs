@@ -19,9 +19,10 @@ fn has_masks(s: &Session) -> std::result::Result<(), String> {
 }
 
 fn has_markers(s: &Session) -> std::result::Result<(), String> {
-    has_layers(s)?;
     let c = s.active_comp().ok_or("no composition")?;
-    if s.state.selected_layers.iter().filter_map(|l| c.layer(*l)).any(|l| !l.markers.is_empty()) {
+    if s.state.selected_layers.is_empty() {
+        if !c.markers.is_empty() { Ok(()) } else { Err("the composition has no markers".into()) }
+    } else if s.state.selected_layers.iter().filter_map(|l| c.layer(*l)).any(|l| !l.markers.is_empty()) {
         Ok(())
     } else {
         Err("the selected layers have no markers".into())
@@ -596,6 +597,13 @@ fn markers_lock(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn delete_all_markers(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
+    if ids.is_empty() {
+        s.edit("Delete All Markers", None, |proj, _| {
+            proj.comp_mut(cid).ok_or(EngineError::NoComp)?.markers.clear();
+            Ok(())
+        })?;
+        return Ok(Value::Null);
+    }
     s.edit("Delete All Markers", None, |proj, _| {
         for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id) && !l.markers_locked) {
             l.markers.clear();
