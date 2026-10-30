@@ -16,7 +16,9 @@
 //! there the test prints `SKIPPED: fixture <name> missing` and returns without failing (the
 //! macros below), so the suite runs without the projects. The directory is the one in the
 //! `EFFECTCRAFT_AEP_FIXTURES` environment variable (which may also hold the old single-case
-//! files); without it every such test skips. The engine tests include this file too.
+//! files); without it every such test skips. With `EFFECTCRAFT_AEP_FIXTURES_REQUIRED` set (to
+//! anything but an empty string) a missing project fails the test instead, so a run against the
+//! corpus cannot pass by skipping. The engine tests include this file too.
 #![allow(dead_code, unused_macros)]
 
 mod cases;
@@ -179,6 +181,11 @@ pub fn names(ext: &str) -> Option<Vec<String>> {
 }
 
 pub fn skipped(name: &str) {
+    assert!(
+        std::env::var_os("EFFECTCRAFT_AEP_FIXTURES_REQUIRED").is_none_or(|v| v.is_empty()),
+        "fixture {name} missing (EFFECTCRAFT_AEP_FIXTURES_REQUIRED is set; EFFECTCRAFT_AEP_FIXTURES = {:?})",
+        std::env::var_os("EFFECTCRAFT_AEP_FIXTURES")
+    );
     println!("SKIPPED: fixture {name} missing");
 }
 

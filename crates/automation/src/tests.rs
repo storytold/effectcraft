@@ -486,6 +486,21 @@ fn autosave_flushes_on_read_errors_and_broken_output() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn fake_render_frame(session: &Session, params: &Value) -> Value {
+    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
+    if params["write"] == true {
+        let Some(path) = params["path"].as_str() else { return json!({"ok": false, "error": "missing output path"}) };
+        if let Err(error) = session.write_output(path, &png) {
+            return json!({"ok": false, "error": error.to_string()});
+        }
+    }
+    let mut result = json!({"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)});
+    if params["write"] == true {
+        result["path"] = params["path"].clone();
+    }
+    json!({"ok": true, "result": result})
+}
+
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
@@ -503,10 +518,7 @@ fn fake_app() -> u16 {
                     Ok(v) => json!({"ok": true, "result": v}),
                     Err(e) => json!({"ok": false, "error": e.to_string()}),
                 },
-                "render.frame" => {
-                    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
-                    json!({"ok": true, "result": {"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)}})
-                }
+                "render.frame" => fake_render_frame(&session, p),
                 "ui.screenshot" => {
                     let png = crate::encode_png(8, 8, vec![128; 256], 0).unwrap();
                     std::fs::write(p["path"].as_str().unwrap(), png).unwrap();
@@ -1614,4 +1626,107 @@ fn blender_export_requires_an_absolute_path_in_a_write_root() {
         assert!(confinement.check_command("engine.batch", &batch).is_err());
     }
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// `render_frame` writes the frame to the `path` it is given, and never over a file the open
+/// project reads (#1743): footage, a proxy or the project file. The refusal comes before the
+/// frame is rendered, and the file is untouched.
+#[test]
+fn render_frame_never_writes_over_a_file_the_project_reads() {
+    use effectcraft_engine::{
+        color::Label,
+        project::{Footage, FootageKind, ItemKind},
+    };
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (clip, project) = (dir.join("clip.png"), dir.join("Project.ecproj"));
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 16, "height": 16})).unwrap();
+    session.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();
+    Arc::make_mut(&mut session.project).add_item(
+        "clip.png",
+        Label::Aqua,
+        None,
+        ItemKind::Footage(Footage {
+            path: clip.to_string_lossy().into_owned(),
+            kind: FootageKind::Still,
+            width: 16,
+            height: 16,
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let saved = std::fs::read(&project).unwrap();
+    let mut s = McpServer::new(Backend::headless(session));
+    for (file, what) in [(&clip, "footage"), (&project, "project")] {
+        let (c, err) = call(&mut s, "render_frame", json!({"path": file.to_string_lossy(), "inline": false}));
+        let text = c[0]["text"].as_str().unwrap();
+        assert!(err && text.contains(&*file.to_string_lossy()) && text.contains(what), "{what}: {text}");
+    }
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same through the desktop app: the app knows the project's files, so the tool asks it
+/// (`file.checkOutput`) before it writes anything.
+#[test]
+fn bridged_render_frame_asks_the_app_before_it_writes() {
+    use effectcraft_engine::project::{Footage, FootageKind};
+    struct Probe;
+    impl effectcraft_engine::Importer for Probe {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            Ok(Footage { path: path.to_string(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-bridge-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("clip.png");
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (stream, _) = l.accept().unwrap();
+        let mut out = stream.try_clone().unwrap();
+        let mut session = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+        for line in BufReader::new(stream).lines() {
+            let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let p = &msg["params"];
+            let mut reply = match msg["method"].as_str().unwrap() {
+                "engine.execute" => match session.execute(p["command"].as_str().unwrap(), p["params"].clone()) {
+                    Ok(v) => json!({"ok": true, "result": v}),
+                    Err(e) => json!({"ok": false, "error": e.to_string()}),
+                },
+                "render.frame" if p["write"] == true && p["path"].is_string() => fake_render_frame(&session, p),
+                "render.frame" => json!({"ok": false, "error": "a frame save must be one app-owned write"}),
+                m => json!({"ok": false, "error": format!("unknown method `{m}`")}),
+            };
+            reply["id"] = msg["id"].clone();
+            writeln!(out, "{reply}").unwrap();
+        }
+    });
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"width": 16, "height": 16}}));
+    call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [clip.to_string_lossy()]}}));
+
+    let (c, err) = call(&mut s, "render_frame", json!({"path": clip.to_string_lossy(), "inline": false}));
+    let text = c[0]["text"].as_str().unwrap();
+    assert!(err && text.contains("clip.png") && text.contains("footage"), "{text}");
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
 }

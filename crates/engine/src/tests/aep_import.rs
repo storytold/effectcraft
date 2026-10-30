@@ -272,3 +272,50 @@ fn stored_footage_paths_follow_the_document_path_policy() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// An importer that finds sound in every video it probes.
+struct WithSound;
+
+impl crate::Importer for WithSound {
+    fn probe(&self, path: &str) -> Result<effectcraft_project::Footage, String> {
+        Ok(effectcraft_project::Footage {
+            path: path.into(),
+            kind: effectcraft_project::FootageKind::Video,
+            has_video: true,
+            has_audio: true,
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn a_video_with_sound_arrives_audible() {
+    // The clip of the 645 project stores no sample rate (it has no sound there); the file next to
+    // it is asked: with sound in it the imported footage has audio and its layer is part of the
+    // mix; a missing file is left as the project file says.
+    use effectcraft_project::{Footage, ItemKind};
+    let Some(bytes) = common::try_fixture("645-footage-mp4-conform-30.aep") else { return };
+    let root = std::env::temp_dir().join(format!("ec-aep-video-sound-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("clip.mp4"), b"x").unwrap();
+    for (name, stored) in [("beside", "clip.mp4"), ("absent", "gone.mp4")] {
+        let aep = root.join(format!("{name}.aep"));
+        std::fs::write(&aep, with_footage_path(&bytes, stored)).unwrap();
+        let mut s = Session { importer: Some(std::sync::Arc::new(WithSound)), ..Default::default() };
+        s.execute("file.importAep", json!({"path": aep.to_string_lossy(), "allowLosses": true})).unwrap();
+        let footage: Footage = s
+            .project
+            .items
+            .values()
+            .find_map(|i| match &i.kind {
+                ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Video => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: no video footage"));
+        assert_eq!((footage.missing, footage.has_audio), (name == "absent", name == "beside"), "{name}");
+        let audible = s.project.comps().any(|(id, _)| effectcraft_render::audio::comp_has_audio(&s.project, *id));
+        assert_eq!(audible, name == "beside", "{name}: audible mix");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

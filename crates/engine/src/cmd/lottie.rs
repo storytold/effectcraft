@@ -8,6 +8,7 @@ use crate::{EngineError, Result, Session, cmd};
 
 fn export_lottie(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.exportLottie", "missing `path`"))?.to_string();
+    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let opts = ExportOptions { include_expressions: b_p(p, "includeExpressions").unwrap_or(false), text_as_shapes: b_p(p, "textAsShapes").unwrap_or(false) };
     let services = s.services.clone();
@@ -20,7 +21,7 @@ fn export_lottie(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         res.to_string_compact().into_bytes()
     };
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &bytes)?;
     let n = res.warnings.len();
     s.toast(if n == 0 { format!("Exported Lottie to {path}") } else { format!("Exported Lottie to {path} ({n} warning{})", if n == 1 { "" } else { "s" }) });
     Ok(json!({"path": path, "bytes": bytes.len(), "warnings": res.warnings}))

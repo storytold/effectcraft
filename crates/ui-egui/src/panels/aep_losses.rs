@@ -212,6 +212,7 @@ mod tests {
         // `EFFECTCRAFT_AEP_FIXTURES`) has effects outside the importer's table.
         let path = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("effects.aep"));
         let Some(path) = path.filter(|p| p.is_file()) else {
+            assert!(std::env::var_os("EFFECTCRAFT_AEP_FIXTURES_REQUIRED").is_none_or(|v| v.is_empty()), "fixture effects.aep missing");
             println!("SKIPPED: fixture effects.aep missing");
             return;
         };

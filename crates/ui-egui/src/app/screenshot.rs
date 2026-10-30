@@ -251,6 +251,12 @@ impl EffectcraftApp {
                     }
                     let shot = self.pending_screenshots.remove(i);
                     self.shot_bytes = self.shot_bytes.saturating_sub(shot.reserved_bytes);
+                    if let Some(path) = shot.path.as_deref()
+                        && let Err(error) = self.session.refuse_export(path)
+                    {
+                        let _ = shot.reply.send(json!({"ok": false, "error": error.to_string()}));
+                        continue;
+                    }
                     let r = control::save_screenshot(&image, shot.path.as_deref(), shot.crop, [sx, sy]);
                     let _ = shot.reply.send(r);
                 }
@@ -326,5 +332,63 @@ impl EffectcraftApp {
             s.crop = crop;
             i += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Footage, FootageKind, ItemKind};
+    use std::sync::Arc;
+
+    #[test]
+    fn queued_screenshots_recheck_sources_when_the_capture_completes() {
+        let dir = std::env::temp_dir().join(format!("effectcraft-pending-shot-protection-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for kind in ["footage", "project", "free"] {
+            let path = dir.join(format!("{kind}.png"));
+            let text = path.to_string_lossy().into_owned();
+            let mut app = EffectcraftApp::new(Session::default());
+            let ctx = egui::Context::default();
+            let geom = DrawGeometry { rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2.0, 2.0)), ppp: 1.0, epoch: 0 };
+            app.draw_geom = Some(geom);
+            assert!(app.session.refuse_export(&text).is_ok());
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.admit_screenshot(&ctx, Some(text.clone()), ShotTarget::Window, tx);
+            let (slot, callback) = craft_ui::capture::CaptureSlot::new(&ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
+            let shot = app.pending_screenshots.last_mut().unwrap();
+            shot.issued = Some(geom);
+            shot.slot = Some(slot);
+            // The destination becomes protected after admission, before pixels arrive.
+            let original = match kind {
+                "footage" => {
+                    std::fs::write(&path, b"SOURCE FOOTAGE").unwrap();
+                    let footage = Footage { path: text.clone(), kind: FootageKind::Still, ..Default::default() };
+                    Arc::make_mut(&mut app.session.project).add_item("clip", effectcraft_engine::color::Label::None, None, ItemKind::Footage(footage));
+                    Some(std::fs::read(&path).unwrap())
+                }
+                "project" => {
+                    app.session.execute("file.saveAs", json!({"path": text})).unwrap();
+                    Some(std::fs::read(&path).unwrap())
+                }
+                _ => None,
+            };
+            callback.complete(Arc::new(egui::ColorImage::filled([2, 2], egui::Color32::RED)));
+            app.drain_completed_screenshots(geom);
+            let reply = rx.try_recv().unwrap();
+            if let Some(original) = original {
+                assert_eq!(reply["ok"], false, "{kind}: {reply}");
+                assert!(reply["error"].as_str().unwrap_or_default().contains(kind), "{reply}");
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            } else {
+                assert_eq!(reply["ok"], true, "{reply}");
+                assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+            }
+            assert!(app.pending_screenshots.is_empty());
+            assert_eq!(app.shot_bytes, 0);
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(dir).unwrap();
     }
 }

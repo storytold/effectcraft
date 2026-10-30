@@ -489,6 +489,9 @@ fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut
                 ui.label(RichText::new(state).color(if active { t.accent } else { t.text_dim }));
             });
             ui.label(RichText::new(m["description"].as_str().unwrap_or_default()).color(t.text_dim));
+            if let Some(hint) = m["hint"].as_str() {
+                ui.label(RichText::new(hint).color(if m["recommended"].as_bool().unwrap_or(false) { t.accent } else { t.text_dim }));
+            }
             if let Some(by) = m["authors"].as_str() {
                 ui.label(RichText::new(format!("By {by}")).color(t.text_dim));
             }
@@ -505,12 +508,19 @@ fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut
                         }
                     }
                 }
+                if let (Some(source), Some(file)) = (m["source"].as_str(), m["sourceFile"].as_str()) {
+                    let response = ui.link(file).on_hover_text(crate::i18n::tr("Source"));
+                    reg(app, &format!("settings.{prefix}.source.{id}"), &response, file);
+                    if response.clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(source));
+                    }
+                }
             });
             if classic {
                 return;
             }
             ui.horizontal(|ui| {
-                if !installed && !web {
+                if !installed && !web && m["url"].as_str().is_some_and(|url| !url.is_empty()) {
                     let r = ui.add_enabled(busy.is_none(), egui::Button::new(tr("Download")));
                     reg(app, &format!("settings.{prefix}.download.{id}"), &r, "Download");
                     if r.clicked() {
@@ -919,5 +929,30 @@ pub fn recovery(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         && let Err(e) = crate::menus::invoke(app, ctx, "file.open", json!({"path": p}))
     {
         app.ui.status = e;
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// Install-only models must not offer a download that the command will reject.
+    #[test]
+    fn sam2_settings_offer_file_installation_without_downloads() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let tokens = app.tokens;
+        let mut actions = vec![];
+        let mut output = ctx
+            .run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 2200.0))), ..Default::default() }, |ui| {
+                models_ui(&mut app, ui, &tokens, &mut actions, Task::Mask)
+            });
+        output.textures_delta.clear();
+        for id in ["sam2.1-hiera-tiny", "sam2.1-hiera-small", "sam2.1-hiera-base-plus", "sam2.1-hiera-large"] {
+            assert!(app.auto.find(&format!("settings.roto.download.{id}")).is_none());
+            assert!(app.auto.find(&format!("settings.roto.install.{id}")).is_some());
+            assert_eq!(app.auto.find(&format!("settings.roto.source.{id}")).unwrap().label, "model.safetensors");
+        }
+        assert!(actions.is_empty());
     }
 }

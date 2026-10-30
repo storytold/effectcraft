@@ -53,6 +53,17 @@ receive `resultType: complete` and list/read cache hints; document reads are nev
 {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"effectcraft://document"}}
 ```
 
+## Two outputs on one file
+
+Two outputs of one job that write the same file (two items with one Output To, a duplicated item,
+output modules or segments that meet) refuse the whole `renderQueue.render` before anything is
+written: the reply is `isError: true`, naming both items, and the queue is left as it was.
+Sequences clash only on the frames both write. Skip Existing Files leaves earlier frames alone
+only when the exporter can check the final destination; browser/memory sinks and storage-overflow
+renders still report collisions. Preflight checks every configured overflow destination, since free
+space can change during a render. A new item's default output name is numbered (`Main.mp4`,
+`Main_1.mp4`) when another item of the queue writes it.
+
 ## Progress and cancellation
 
 Headless `command_run` / `execute_command` calls to `renderQueue.render` (unless `wait: false`)
