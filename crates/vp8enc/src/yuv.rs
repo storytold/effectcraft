@@ -6,10 +6,12 @@
 
 use crate::encode::Plane;
 
+/// BT.601 studio-range luma (16–235) from RGB.
 fn luma(r: i32, g: i32, b: i32) -> u8 {
     (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8
 }
 
+/// BT.601 studio-range Cb and Cr (16–240) from RGB.
 fn chroma(r: i32, g: i32, b: i32) -> (u8, u8) {
     let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
     let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
@@ -61,6 +63,7 @@ pub(crate) fn rgba_to_yuv420(rgba: &[u8], width: u32, height: u32) -> (Plane, Pl
 mod tests {
     use super::*;
 
+    /// Black and white map to 16 and 235, and grey has neutral chroma.
     #[test]
     fn studio_range() {
         assert_eq!(luma(0, 0, 0), 16);
@@ -68,6 +71,7 @@ mod tests {
         assert_eq!(chroma(128, 128, 128), (128, 128));
     }
 
+    /// Padding repeats the edge pixel, and chroma ignores fully transparent pixels.
     #[test]
     fn padding_repeats_the_edge_and_alpha_weights_chroma() {
         // 3×1: red opaque, then two fully transparent black pixels.

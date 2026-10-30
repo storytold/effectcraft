@@ -36,6 +36,7 @@ fn picture(w: u32, h: u32, seed: u32) -> Vec<u8> {
     out
 }
 
+/// A VP8 frame wrapped as a still WebP file.
 fn riff(vp8: &[u8]) -> Vec<u8> {
     let mut chunk = b"VP8 ".to_vec();
     chunk.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
@@ -50,12 +51,14 @@ fn riff(vp8: &[u8]) -> Vec<u8> {
     f
 }
 
+/// Where the tests write their files.
 fn out_dir() -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/vp8enc");
     std::fs::create_dir_all(&d).expect("mkdir");
     d
 }
 
+/// Whether ffmpeg is on the path.
 fn have_ffmpeg() -> bool {
     Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success())
 }
@@ -89,6 +92,7 @@ fn reconstruction(frame: &Vp8Frame, w: u32, h: u32) -> Vec<u8> {
     out
 }
 
+/// ffmpeg decodes the frame to exactly the encoder's own reconstruction.
 #[test]
 fn a_decoder_reconstructs_exactly_what_the_encoder_did() {
     if !have_ffmpeg() {
@@ -108,12 +112,14 @@ fn a_decoder_reconstructs_exactly_what_the_encoder_did() {
     }
 }
 
+/// The peak signal-to-noise ratio of `b` against `a`, in dB.
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
     let se: f64 = a.iter().zip(b).map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2)).sum();
     let mse = se / a.len() as f64;
     if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() }
 }
 
+/// The `image` crate decodes it close to the quality-100 decode.
 #[test]
 fn the_image_crate_reads_it_back_close_to_the_source() {
     // Against the decode at quality 100, so the comparison is of the coding alone and not of
@@ -136,6 +142,7 @@ fn the_image_crate_reads_it_back_close_to_the_source() {
     assert!(last > 38.0, "quality 95: {last:.1} dB");
 }
 
+/// A higher quality gives a larger frame.
 #[test]
 fn higher_quality_spends_more_bytes() {
     let (w, h) = (96, 64);
@@ -145,6 +152,7 @@ fn higher_quality_spends_more_bytes() {
     assert!(low < mid && mid < high, "{low} {mid} {high}");
 }
 
+/// Empty, short and oversized pictures are errors.
 #[test]
 fn bad_sizes_are_errors() {
     assert!(encode_rgba(&[], 0, 0, &Vp8Params::default()).is_err());
@@ -152,6 +160,7 @@ fn bad_sizes_are_errors() {
     assert!(encode_rgba(&[0; 4], 16384, 1, &Vp8Params::default()).is_err());
 }
 
+/// Prints how much of the error is the coding and how much is 4:2:0 colour.
 #[test]
 #[ignore = "diagnostic: prints how the error divides between the codec and 4:2:0 colour"]
 fn where_the_error_is() {

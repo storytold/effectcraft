@@ -49,6 +49,7 @@ pub(crate) enum Codec {
 }
 
 impl Codec {
+    /// The largest side a frame can have: 16384 px for VP8L, 16383 px for VP8 (both 14-bit fields).
     fn max_side(self) -> u32 {
         match self {
             Codec::Lossless => MAX_SIDE,
@@ -73,6 +74,7 @@ pub(crate) struct Rect {
     pub h: u32,
 }
 
+/// Render the time span as an animated WebP: frames that repeat are merged and each one stores only the area that changed.
 pub(crate) async fn webp(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
     let codec = if cx.output.webp_lossless {
         Codec::Lossless
@@ -178,6 +180,7 @@ pub(crate) struct Clock {
 }
 
 impl Clock {
+    /// A clock for `num`/`den` frames per second; an error when that rate has no millisecond duration.
     pub(crate) fn new(num: f64, den: f64) -> Result<Clock> {
         let ms_per_frame = 1000.0 * den / num;
         if !ms_per_frame.is_finite() || ms_per_frame <= 0.0 {
@@ -420,6 +423,7 @@ pub(crate) struct Anim<W: Write + Seek> {
     written: u64,
 }
 
+/// `v`'s low 24 bits, little-endian, as WebP's 3-byte fields.
 fn put24(v: u32) -> [u8; 3] {
     let [a, b, c, _] = v.to_le_bytes();
     [a, b, c]
@@ -446,6 +450,7 @@ impl<W: Write + Seek> Anim<W> {
         Ok(a)
     }
 
+    /// An `ANMF` chunk: the frame's offset (stored halved), size, duration and data, written without blending.
     pub(crate) fn frame(&mut self, f: &Frame) -> Result<()> {
         let size = u32::try_from(f.data.len().saturating_add(16)).map_err(|_| self.too_large())?;
         let r = f.rect;
@@ -469,6 +474,7 @@ impl<W: Write + Seek> Anim<W> {
         Ok(())
     }
 
+    /// Write `b`, refusing anything that would take the RIFF size past 32 bits.
     fn put(&mut self, b: &[u8]) -> Result<()> {
         let written = self.written.saturating_add(b.len() as u64);
         // The RIFF size (the file less its first 8 bytes) is 32 bits.
@@ -480,6 +486,7 @@ impl<W: Write + Seek> Anim<W> {
         Ok(())
     }
 
+    /// The error for a file past the RIFF size limit.
     fn too_large(&self) -> ExportError {
         ExportError::Unsupported("a WebP file is limited to 4 GB: shorten the time span or lower the resolution".into())
     }
@@ -490,15 +497,18 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// A `w`×`h` RGBA buffer of colour `c`.
     fn solid(w: u32, h: u32, c: [u8; 4]) -> Vec<u8> {
         c.repeat((w * h) as usize)
     }
 
+    /// Set the pixel at (`x`, `y`) of a `w`-wide RGBA buffer to `c`.
     fn set(px: &mut [u8], w: u32, x: u32, y: u32, c: [u8; 4]) {
         let i = ((y * w + x) * 4) as usize;
         px[i..i + 4].copy_from_slice(&c);
     }
 
+    /// Rounded durations carry their error, so 60 fps totals 100 ms over six frames.
     #[test]
     fn clock_carries_rounding() {
         let mut c = Clock::new(60.0, 1.0).unwrap();
@@ -514,6 +524,7 @@ mod tests {
         assert!(Clock::new(f64::NAN, 1.0).is_err());
     }
 
+    /// The changed area is `None` for equal frames and otherwise starts on an even pixel (offsets are stored halved).
     #[test]
     fn changed_area_snaps_to_even_corner() {
         let (w, h) = (8, 6);
@@ -529,6 +540,7 @@ mod tests {
         assert_eq!(changed(&a, &c, w, h).unwrap(), Some(Rect { x: 0, y: 0, w, h }));
     }
 
+    /// Buffers smaller than their size claims are errors.
     #[test]
     fn short_buffers_are_errors_not_panics() {
         assert!(changed(&[0; 8], &[0; 4], 2, 1).is_err());
@@ -544,6 +556,7 @@ mod tests {
         assert!(vp8l_chunk(b"not webp").is_err());
     }
 
+    /// Fully transparent pixels are cleared to zero; any other alpha keeps its colour.
     #[test]
     fn transparent_pixels_lose_their_colour() {
         let mut px = vec![9, 8, 7, 0, 9, 8, 7, 1];
@@ -551,6 +564,7 @@ mod tests {
         assert_eq!(px, [0, 0, 0, 0, 9, 8, 7, 1]);
     }
 
+    /// Cropping copies just the rect's pixels, row by row.
     #[test]
     fn crop_takes_the_rect() {
         let w = 4;
@@ -561,6 +575,7 @@ mod tests {
         assert_eq!(&c[8..16], &px[40..48]);
     }
 
+    /// A lossless frame chunk has an even size and decodes back to its pixels.
     #[test]
     fn frame_chunk_is_even_and_decodes() {
         let (w, h) = (5, 3);
@@ -604,6 +619,7 @@ mod tests {
         f
     }
 
+    /// A lossy frame with transparency is an `ALPH` chunk followed by its `VP8 ` chunk.
     #[test]
     fn lossy_frames_carry_their_alpha_beside_them() {
         let (w, h) = (24, 20);
@@ -654,6 +670,7 @@ mod tests {
         a
     }
 
+    /// Each alpha filter (none, horizontal, vertical, gradient) is undone exactly.
     #[test]
     fn alpha_filters_undo_exactly() {
         let (w, h) = (13, 9);
@@ -666,6 +683,7 @@ mod tests {
         assert!(entropy(&filter_alpha(&ramp, w, h, 1)) < entropy(&ramp));
     }
 
+    /// Fewer alpha levels at lower quality, always keeping 0 and 255.
     #[test]
     fn alpha_levels_keep_the_ends() {
         assert_eq!(alpha_levels(100), 256);
@@ -678,6 +696,7 @@ mod tests {
         assert_eq!(distinct.len(), 16);
     }
 
+    /// Alpha reduced to fewer levels decodes to exactly those levels.
     #[test]
     fn reduced_alpha_decodes_to_the_reduced_values() {
         let (w, h) = (24, 20);
@@ -698,12 +717,14 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// An opaque lossy frame is a `VP8 ` chunk alone.
     #[test]
     fn opaque_lossy_frames_have_no_alpha_chunk() {
         let data = encode_frame(&solid(16, 16, [9, 200, 30, 255]), 16, 16, Codec::Lossy { quality: 75, alpha_quality: 100 }).unwrap();
         assert_eq!(chunks(&data).iter().map(|(f, _)| *f).collect::<Vec<_>>(), [*b"VP8 "]);
     }
 
+    /// `image_stream` finds the bitstream right after the chunk header.
     #[test]
     fn the_image_stream_is_the_chunk_after_its_header() {
         let chunk = encode_frame(&solid(3, 3, [1, 2, 3, 255]), 3, 3, Codec::Lossless).unwrap();
@@ -713,6 +734,7 @@ mod tests {
         assert_eq!(stream, &chunk[13..8 + size]);
     }
 
+    /// The `VP8X` and `ANIM` headers carry the flags, canvas size, background and loop count, and `finish` fills in the RIFF size.
     #[test]
     fn container_headers_and_size() {
         let mut buf = Cursor::new(Vec::new());

@@ -3,6 +3,7 @@
 //! writes OUT_PREFIX_qQ.webp for each Q (alpha is ignored: the picture is encoded as if opaque).
 //! `EFFECTCRAFT_VP8_LF=N` forces the loop filter level (0 = off).
 
+/// Encode the PNG at each quality given on the command line.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(input), Some(prefix)) = (args.first(), args.get(1)) else {

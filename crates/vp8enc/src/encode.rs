@@ -23,6 +23,7 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// A zeroed `width`×`height` plane.
     pub(crate) fn new(width: usize, height: usize) -> Plane {
         Plane { width, height, data: vec![0; width * height] }
     }
@@ -30,6 +31,7 @@ impl Plane {
     pub fn get(&self, x: usize, y: usize) -> u8 {
         if x < self.width { self.data.get(y * self.width + x).copied().unwrap_or(0) } else { 0 }
     }
+    /// Set the sample at (x, y); writes outside the plane are ignored.
     pub(crate) fn set(&mut self, x: usize, y: usize, v: u8) {
         if x < self.width
             && let Some(p) = self.data.get_mut(y * self.width + x)
@@ -67,6 +69,7 @@ struct Quant {
 }
 
 impl Quant {
+    /// The dequantization factors for quantizer index `q` (0–127, §14.1).
     fn new(q: u8) -> Quant {
         let q = usize::from(q.min(127));
         let (dc, ac) = (DC_QLOOKUP[q], AC_QLOOKUP[q]);
@@ -83,6 +86,7 @@ fn quantize(c: f64, dq: i32, dc: bool) -> i16 {
     if c < 0.0 { -level } else { level }
 }
 
+/// A level times its dequantization factor, as a decoder computes it.
 fn dequant(level: i16, dq: i32) -> i16 {
     (i32::from(level) * dq) as i16
 }
@@ -127,6 +131,7 @@ trait TokenSink {
 
 struct CostSink(f32);
 impl TokenSink for CostSink {
+    /// Adds the bit's cost.
     fn bit(&mut self, _: usize, _: usize, _: usize, _: Option<usize>, prob: u8, bit: bool) {
         self.0 += cost(prob, bit);
     }
@@ -134,6 +139,7 @@ impl TokenSink for CostSink {
 
 struct CountSink(Box<[[[[[u32; 2]; 11]; 3]; 8]; 4]>);
 impl TokenSink for CountSink {
+    /// Counts the bit against its tree node, for choosing probabilities.
     fn bit(&mut self, ty: usize, band: usize, ctx: usize, node: Option<usize>, _: u8, bit: bool) {
         if let Some(n) = node {
             self.0[ty][band][ctx][n][usize::from(bit)] += 1;
@@ -142,6 +148,7 @@ impl TokenSink for CountSink {
 }
 
 impl TokenSink for BoolWriter {
+    /// Writes the bit.
     fn bit(&mut self, _: usize, _: usize, _: usize, _: Option<usize>, prob: u8, bit: bool) {
         self.put(prob, bit);
     }
@@ -233,12 +240,14 @@ fn code_block<S: TokenSink>(s: &mut S, probs: &Probs, levels: &[i16; 16], ty: us
     true
 }
 
+/// The bits a block of levels costs to code, from its first coefficient.
 fn block_cost(probs: &Probs, levels: &[i16; 16], ty: usize, first: usize, ctx: usize) -> f32 {
     let mut s = CostSink(0.0);
     code_block(&mut s, probs, levels, ty, first, ctx);
     s.0
 }
 
+/// Whether any coefficient from `first` on is non-zero.
 fn any_coded(levels: &[i16; 16], first: usize) -> bool {
     (first..16).any(|i| levels[ZIGZAG[i]] != 0)
 }
@@ -365,11 +374,13 @@ struct Chroma {
     bits: f32,
 }
 
+/// `v` clamped to a sample.
 fn clamp255(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
 impl Encoder<'_> {
+    /// The rate-distortion cost: the squared error plus λ times the bits.
     fn cost_of(&self, sse: u64, bits: f32) -> f64 {
         sse as f64 + self.lambda * f64::from(bits)
     }
@@ -399,6 +410,7 @@ impl Encoder<'_> {
         (Edges { above, left, corner, have_above: mby > 0, have_left: mbx > 0 }, right)
     }
 
+    /// The reconstructed edges an 8×8 chroma block predicts from, with the spec's 127 / 129 outside the frame.
     fn chroma_edges(rec: &Plane, mbx: usize, mby: usize) -> Edges<8> {
         let (x0, y0) = (mbx * 8, mby * 8);
         let above: [u8; 8] = std::array::from_fn(|i| if mby == 0 { 127 } else { rec.get(x0 + i, y0 - 1) });
@@ -421,6 +433,7 @@ impl Encoder<'_> {
         })
     }
 
+    /// Code the macroblock's luma with one 16×16 prediction `mode`: its residual through Y2 and its cost.
     fn whole_luma(&self, mbx: usize, mby: usize, mode: u8, e: &Edges<16>) -> Luma {
         let (x0, y0) = (mbx * 16, mby * 16);
         let mut pred = [0u8; 256];
@@ -534,6 +547,7 @@ impl Encoder<'_> {
         Some(Luma { mode: B_PRED, bmodes: bm, y2: [0; 16], y, recon: wr, sse, bits })
     }
 
+    /// Code the macroblock's U and V with prediction `mode`: their levels, reconstruction and cost.
     fn chroma(&self, mbx: usize, mby: usize, mode: u8) -> Chroma {
         let (x0, y0) = (mbx * 8, mby * 8);
         let up = self.above_nz.get(mbx).copied().unwrap_or_default();

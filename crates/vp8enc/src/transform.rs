@@ -69,6 +69,7 @@ pub(crate) fn iwht(input: &[i16; 16]) -> [i16; 16] {
     out
 }
 
+/// The forward DCT's basis, scaled to match the spec's inverse.
 fn basis_dct() -> [[f64; 4]; 4] {
     let c = std::f64::consts::SQRT_2 * (std::f64::consts::PI / 8.0).cos();
     let s = std::f64::consts::SQRT_2 * (std::f64::consts::PI / 8.0).sin();
@@ -110,6 +111,7 @@ pub(crate) fn fwht(dc: &[f64; 16]) -> [f64; 16] {
 mod tests {
     use super::*;
 
+    /// The DCT and its inverse round-trip residuals within a level.
     #[test]
     fn dct_round_trips() {
         let mut x = 7u32;
@@ -127,6 +129,7 @@ mod tests {
         }
     }
 
+    /// The Walsh–Hadamard transform and its inverse round-trip within a level.
     #[test]
     fn wht_round_trips() {
         let mut x = 99u32;
@@ -144,6 +147,7 @@ mod tests {
         }
     }
 
+    /// A lone DC coefficient inverts to a flat block.
     #[test]
     fn a_lone_dc_is_flat() {
         let mut c = [0i16; 16];

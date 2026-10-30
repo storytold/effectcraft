@@ -1837,6 +1837,7 @@ mod tests {
         assert_eq!(m.frame_size(fw, fh, 1.0), (fw, fh));
     }
 
+    /// Animated WebP parses from its names, extension and label, and has alpha but no audio.
     #[test]
     fn animated_webp_format() {
         let f = OutputFormat::from_name("webp").unwrap();

@@ -448,6 +448,7 @@ fn webp_frame_chunks(path: &Path) -> Vec<Vec<[u8; 4]>> {
         .collect()
 }
 
+/// Lossless WebP: held frames are merged, the timeline matches the comp and it reads back as footage.
 #[test]
 fn webp_roundtrip() {
     let (p, cid) = project(None);
@@ -471,6 +472,7 @@ fn webp_roundtrip() {
     assert!(webp_frame_chunks(&path).iter().all(|c| c == &[*b"VP8L"]), "lossless frames are VP8L");
 }
 
+/// Lossless WebP with RGB + Alpha keeps transparency and plays once when looping is off.
 #[test]
 fn webp_keeps_alpha() {
     let (p, cid) = project(None);
@@ -494,6 +496,7 @@ fn webp_keeps_alpha() {
     }
 }
 
+/// WebP output is lossy by default; opaque frames are `VP8 ` alone and still decode close to the source.
 #[test]
 fn webp_lossy_by_default() {
     let (p, cid) = project(None);
@@ -512,6 +515,7 @@ fn webp_lossy_by_default() {
     decode_movie(&path, FRAMES, 0.05);
 }
 
+/// Lossy WebP with alpha keeps the alpha exact while the colour is lossy.
 #[test]
 fn webp_lossy_keeps_alpha_exactly() {
     let (p, cid) = project(None);
