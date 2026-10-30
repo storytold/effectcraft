@@ -173,6 +173,10 @@ page!(Import {
     unlabeled_alpha: String = "ask".into(),
     /// Default drag import as: `footage`, `comp`, `compLayerSizes`.
     drag_import_as: String = "footage".into(),
+    /// Network shares (`\\server\share`, separated by `;` or line breaks) whose footage a project
+    /// follows wherever the project is saved; other computers' paths are followed only from a
+    /// project on the same share (`doc_path`).
+    trusted_shares: String = String::new(),
 });
 
 page!(Export {

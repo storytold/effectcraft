@@ -19,7 +19,7 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let bytes = s.services.read_file(&tpl).map_err(|e| EngineError::Other(format!("cannot read the new project template {tpl}: {e}")))?;
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
-        crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
+        crate::doc_path::resolve_footage(&mut proj, Some(&tpl), &s.stored_paths.trusted());
         s.replace_project(proj, None);
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
@@ -51,7 +51,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
-    let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
+    let refused = crate::doc_path::resolve_footage(&mut proj, Some(path), &s.stored_paths.trusted());
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
