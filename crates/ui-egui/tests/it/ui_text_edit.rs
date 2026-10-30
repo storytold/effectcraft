@@ -8,6 +8,7 @@ use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 fn app() -> EffectcraftApp {
@@ -171,7 +172,7 @@ fn type_tool_click_type_edit_and_commit() {
 /// #831: clicking another panel (a solid's row in the Timeline) ends text editing and gives the
 /// keyboard back, whether the edit began with the Type tool (which stays selected) or by command:
 /// typed characters change no text and Space plays. The Character panel keeps the edit, and a
-/// text layer clicked into being and left empty goes away.
+/// text layer clicked into being and left empty stays, as it does in After Effects.
 #[test]
 fn clicking_another_panel_stops_typing_into_text() {
     for type_tool in [false, true] {
@@ -194,7 +195,7 @@ fn clicking_another_panel_stops_typing_into_text() {
             assert_eq!(layers(&h), 3, "the Type tool started a text layer");
             let at_row = row(&h);
             click(&mut h, at_row, Modifiers::NONE);
-            assert_eq!(layers(&h), 2, "left empty, it is removed");
+            assert_eq!(layers(&h), 3, "left empty, it stays, as in After Effects");
             click(&mut h, at, Modifiers::NONE);
         } else {
             h.state_mut().session.execute("text.edit", json!({"layer": title})).unwrap();
@@ -580,7 +581,7 @@ fn type_tool_selected_text_preference_skips_ineligible_layers_and_falls_back_to_
 }
 
 /// Opens a fresh Type-tool edit holding `text` and returns the harness with the new layer id,
-/// so the Deselect All tests start from the same state.
+/// so the Deselect All and Duplicate tests start from the same state.
 fn type_tool_edit(a: EffectcraftApp, text: &str) -> (Harness<'static, EffectcraftApp>, u64) {
     let mut h = harness(a);
     h.run_steps(3);
@@ -726,6 +727,110 @@ fn deselect_all_menu_item_follows_the_edit_while_the_project_panel_is_focused() 
     assert_eq!(h.state().ui.focused, PanelKind::Project, "the Project panel is still the focused panel");
     // With no edit, the item deselects Project items again: nothing selected there, nothing to do.
     assert!(!enabled(&h), "Deselect All follows the empty Project selection once the edit is over");
+}
+
+/// Layer ids of the active comp, bottom to top.
+fn layer_ids(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
+    h.state().session.active_comp().map_or(vec![], |c| c.layers.iter().map(|l| l.id.0).collect())
+}
+
+#[test]
+fn duplicate_chord_ends_a_type_tool_edit_and_selects_the_copy() {
+    let (mut h, lid) = type_tool_edit(app(), "Hello");
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open edit, as Deselect All does");
+    let copy = *s.state.selected_layers.first().expect("the copy is selected");
+    assert_ne!(copy.0, lid, "the copy (not the edited original) holds the selection");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "the original keeps its text");
+    assert_eq!(layer_doc(s, copy).unwrap().text, "Hello", "the copy carries it too");
+}
+
+#[test]
+fn duplicate_chord_ends_an_edit_started_while_the_project_panel_is_focused() {
+    let (mut h, lid) = project_focused_text_edit("Hi");
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "Cmd+D ends the edit even with Project focused");
+    let copy = s.state.selected_layers.first().expect("the copy is selected");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hi", "the typed text is kept");
+    assert_eq!(layer_doc(s, *copy).unwrap().text, "Hi", "on the copy as well");
+}
+
+#[test]
+fn rebound_duplicate_chord_forwards_from_inside_the_edit() {
+    let mut a = app();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["Cmd+Alt+D"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    // The default key no longer belongs to Duplicate: while the editor holds the keyboard a
+    // chord that matches no command does nothing, and the current binding is what forwards.
+    let n = layer_ids(&h).len();
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    assert!(h.state().session.state.text_edit.is_some(), "Cmd+D was rebound away: the edit stays open");
+    assert_eq!(layer_ids(&h).len(), n, "and nothing was duplicated");
+    key(&mut h, Key::D, Modifiers { alt: true, ..Modifiers::COMMAND });
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "the rebound chord ends the edit");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "the text is kept");
+    assert_eq!(layer_ids(&h).len(), n + 1, "and the copy exists");
+}
+
+#[test]
+fn duplicate_rebound_onto_a_bare_letter_stays_typing() {
+    let mut a = app();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["D"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    let n = layer_ids(&h).len();
+    // A binding without a command modifier is text as far as the editor is concerned: the editor
+    // must not surrender a key that types (same invariant as the app-wide dispatcher).
+    key(&mut h, Key::D, Modifiers::NONE);
+    assert!(h.state().session.state.text_edit.is_some(), "a bare-letter Duplicate binding does not end the edit");
+    assert_eq!(layer_ids(&h).len(), n, "and does not duplicate");
+    type_text(&mut h, "D");
+    let (lid2, text, _, _) = edited(&h);
+    assert_eq!(lid2, lid, "the same edit on the same layer continues");
+    assert_eq!(text, "HelloD", "and the letter typed into the text");
+}
+
+#[test]
+fn duplicate_chord_copies_the_edited_layer_not_an_effect_still_selected() {
+    let mut a = app();
+    let lid = a.session.execute("layer.newText", json!({"text": "alpha beta", "size": 40, "box": [40, 60, 250, 100]})).unwrap()["layer"].as_u64().unwrap();
+    // Applying the blur selects it, as clicking it in Effect Controls does.
+    a.session.execute("effect.apply", json!({"layers": [lid], "effect": "Gaussian Blur"})).unwrap();
+    a.ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    let mut h = harness(a);
+    h.run_steps(3);
+    let comp = rect(&h, "viewer.comp");
+    click(&mut h, comp.min + egui::vec2(80.0, 85.0) * (comp.width() / 640.0), Modifiers::NONE);
+    assert_eq!(edited(&h).0, lid, "the Type tool's click opens the text layer for editing");
+    assert!(!h.state().session.state.selected_props.is_empty(), "and the blur stays selected");
+    let n = layer_ids(&h).len();
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the edit");
+    assert_eq!(layer_ids(&h).len(), n + 1, "and copies the edited layer");
+    let blurs = s.active_comp().unwrap().layer(LayerId(lid)).unwrap().effects().map_or(0, |fx| fx.groups().count());
+    assert_eq!(blurs, 1, "not the blur");
+}
+
+#[test]
+fn a_chord_bound_to_both_forwarded_commands_resolves_in_list_order() {
+    let mut a = app();
+    // Shortcuts may hold one chord for several commands (the conflict is a toast, not a
+    // refusal), so the editor's forwarding resolves a shared chord in list order — Deselect
+    // All before Duplicate. This pins that documented contract: the shared chord must end the
+    // edit like Deselect All, without running Duplicate behind it.
+    a.session.execute("shortcuts.set", json!({"command": "edit.deselectAll", "keys": ["Cmd+Alt+G"]})).unwrap();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["Cmd+Alt+G"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    let n = layer_ids(&h).len();
+    key(&mut h, Key::G, Modifiers { alt: true, ..Modifiers::COMMAND });
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "the shared chord still ends the edit");
+    assert!(s.state.selected_layers.is_empty(), "Deselect All wins the shared chord: nothing is selected");
+    assert_eq!(layer_ids(&h).len(), n, "so the chord did not duplicate");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "and the text is kept");
 }
 
 /// The on-canvas editor's outgoing IME producer: the descriptor carries the edited layer's
@@ -1733,4 +1838,36 @@ fn same_caret_application_text_replacement_rejects_the_previous_context_fence() 
     h.input_mut().events.extend(fresh_ime("が"));
     h.run_steps(1);
     assert_eq!(edited(&h).1, "Aがbcd");
+}
+
+/// #2077: the Character panel's Line Join buttons set the stroke's corner style (Miter for new text).
+#[test]
+fn character_panel_line_join_buttons_set_the_join() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Join", "size": 80, "applyStroke": true, "strokeWidth": 8})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = harness(EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let join = |h: &Harness<'_, EffectcraftApp>| layer_doc(&h.state().session, LayerId(lid)).unwrap().line_join;
+    assert_eq!(join(&h), effectcraft_engine::keyframe::LineJoin::Miter);
+    let bevel = rect(&h, "character.lineJoin.bevel").center();
+    click(&mut h, bevel, Modifiers::NONE);
+    assert_eq!(join(&h), effectcraft_engine::keyframe::LineJoin::Bevel);
+}
+
+/// #2075: the Character panel's stroke width has a presets menu (0.25 … 100 px) beside its value.
+#[test]
+fn character_panel_stroke_width_presets_set_the_width() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Stroke", "size": 80, "applyStroke": true, "strokeWidth": 8})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = harness(EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let arrow = rect(&h, "character.strokeWidth.presets").center();
+    click(&mut h, arrow, Modifiers::NONE);
+    let entry = h.get_by_label("0.5 px").rect().center();
+    click(&mut h, entry, Modifiers::NONE);
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().stroke_width, 0.5);
 }

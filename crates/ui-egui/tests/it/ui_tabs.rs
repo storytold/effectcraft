@@ -2,6 +2,7 @@
 //! as its own Timeline tab (not a rename, and not in place of the comp shown), the tabs switch and
 //! close comps, and a dragged tab lands where its insertion mark shows.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -135,7 +136,7 @@ fn tab_drag_snapshot() {
     }
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out");
     std::fs::create_dir_all(dir).unwrap();
-    h.render().expect("render").save(format!("{dir}/tab-drag.png")).unwrap();
+    h.render_serialized().expect("render").save(format!("{dir}/tab-drag.png")).unwrap();
 }
 
 /// A precomp layer's bar shows its comp's markers; a double-click opens that comp at the marker.
@@ -465,4 +466,32 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
     assert_eq!(h.state().session.state.active_comp, Some(ItemId(hidden)));
     assert_eq!(open_comps(&h), comps);
     assert!(has(&h, &format!("panel.tab.Timeline.{hidden}")));
+}
+
+/// Whether `id` was registered in the last frame (not the one before).
+fn drawn(h: &Harness<'_, EffectcraftApp>, id: &str) -> bool {
+    h.state().auto.elements.iter().any(|e| e.id == id)
+}
+
+#[test]
+fn an_inactive_comp_tab_shows_its_close_button_on_hover_and_closes_without_showing_its_comp() {
+    let (mut h, pre, main) = harness();
+    h.state_mut().session.state.open_comps = vec![ItemId(main), ItemId(pre)];
+    h.run_steps(3);
+    let (tm, tp) = (rect(&h, &format!("panel.tab.Timeline.{main}")), rect(&h, &format!("panel.tab.Timeline.{pre}")));
+    // The shown comp's × is always there; Pre's only while the pointer is over its tab.
+    h.event(Event::PointerMoved(pos2(800.0, 900.0)));
+    h.run_steps(2);
+    assert!(drawn(&h, "panel.tab.Timeline.close") && drawn(&h, &format!("panel.tab.Timeline.{main}.close")));
+    assert!(!drawn(&h, &format!("panel.tab.Timeline.{pre}.close")), "no × on an inactive tab the pointer is not over");
+    h.event(Event::PointerMoved(tp.center()));
+    h.run_steps(2);
+    let close = rect(&h, &format!("panel.tab.Timeline.{pre}.close"));
+    assert!(tp.contains_rect(close), "{close:?} inside {tp:?}");
+    // Every comp tab keeps the ×'s room: hovering changes no width.
+    assert_eq!((rect(&h, &format!("panel.tab.Timeline.{main}")), rect(&h, &format!("panel.tab.Timeline.{pre}"))), (tm, tp));
+    // Its × closes Pre's Timeline; Main stays shown.
+    click_n(&mut h, close.center(), 1);
+    assert_eq!(open_comps(&h), vec![main]);
+    assert_eq!(h.state().session.state.active_comp, Some(ItemId(main)));
 }

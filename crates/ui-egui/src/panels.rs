@@ -27,6 +27,7 @@ pub mod key_dialogs;
 pub mod layer_panel;
 pub mod layer_styles_dialog;
 pub mod learn;
+pub mod live_preview;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;
@@ -35,6 +36,7 @@ pub mod paint_panels;
 pub mod panel_kit;
 pub mod path_vr_panels;
 pub mod precomp;
+pub(crate) mod preview_merge;
 pub mod primitive_dialog;
 pub mod project;
 pub mod properties;
@@ -122,8 +124,10 @@ impl PresetRef {
 
 /// Layers carried by a Project item drag. Dragging a selected item uses the
 /// complete selection, while dragging an unselected item uses only that item.
-/// Folders and data files are not composition layers.
-pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64) -> Vec<u64> {
+/// Folders and data files are not composition layers, and the composition the
+/// drop lands in is left out of a selection: it cannot contain itself, and one
+/// such item would make the engine refuse the whole drop (#2589).
+pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64, target: Option<effectcraft_engine::project::ItemId>) -> Vec<u64> {
     use effectcraft_engine::project::{FootageKind, ItemId, ItemKind};
 
     let selected = &app.session.state.project_selection;
@@ -131,12 +135,16 @@ pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64) -> Vec<u64>
         selected.iter().map(|id| id.0).collect()
     } else {
         // One unselected item goes through as is, so a folder or data file still gets the
-        // engine's error instead of a silent no-op.
-        return vec![dragged];
+        // engine's error instead of a silent no-op. The composition the drop lands in is the
+        // one case that never reaches it, selected or not (#2589).
+        return if Some(ItemId(dragged)) == target { Vec::new() } else { vec![dragged] };
     };
     candidates
         .into_iter()
         .filter(|id| {
+            if Some(ItemId(*id)) == target {
+                return false;
+            }
             app.session.project.item(ItemId(*id)).is_some_and(|item| match &item.kind {
                 ItemKind::Comp(_) | ItemKind::Solid(_) => true,
                 ItemKind::Footage(f) => f.kind != FootageKind::Data,
@@ -173,6 +181,82 @@ pub(crate) fn toggle_time_display(app: &mut EffectcraftApp, resp: &egui::Respons
 /// Timeline).
 pub(crate) fn space_hand(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.key_down(egui::Key::Space)) && !ctx.egui_wants_keyboard_input()
+}
+
+/// What a scroll gesture over a viewer (Composition, Layer) does this frame.
+pub(crate) struct ViewerScroll {
+    /// Points to pan by: a two-finger trackpad scroll.
+    pub pan: egui::Vec2,
+    /// Factor to zoom by around the pointer: a pinch, Ctrl/Cmd+scroll, a mouse wheel, or
+    /// Alt + a trackpad scroll.
+    pub zoom: f32,
+    /// The gesture came from a trackpad (or is still the smoothed tail of one).
+    pub trackpad: bool,
+    /// Unmodified mouse-wheel lines this frame. Zero for a trackpad, a point-unit wheel, or
+    /// Ctrl/Cmd/Alt+wheel.
+    pub wheel_lines: f32,
+    /// This frame has a Ctrl/Cmd/Alt mouse-wheel event, which keeps zooming.
+    pub wheel_modified: bool,
+}
+
+/// Splits the frame's scroll input into a viewer pan and a zoom: a mouse wheel zooms and a
+/// trackpad's two-finger scroll pans.
+///
+/// Where the platform names the device (`MouseWheelSource`, macOS), that decides. Elsewhere a
+/// wheel scrolls in lines, but in a browser and with some high-resolution wheels it scrolls in
+/// points like a trackpad does, so the unit alone doesn't tell them apart. A scroll in points is
+/// a trackpad's once it has shown what a wheel can't do: a touch phase, movement on both axes at
+/// once, or a pinch. That holds until a wheel scrolls in lines. Until then the vertical part
+/// zooms; the horizontal part always pans.
+pub(crate) fn viewer_scroll(ctx: &egui::Context) -> ViewerScroll {
+    let id = egui::Id::unique("viewer-scroll-trackpad");
+    // The scroll is smoothed over the frames after its event, so the device is remembered.
+    let was: bool = ctx.data(|d| d.get_temp(id)).unwrap_or(false);
+    let trackpad = ctx.input(|i| {
+        i.events.iter().fold(was, |t, e| match e {
+            egui::Event::MouseWheel { source: egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum, .. } => true,
+            egui::Event::MouseWheel { source: egui::MouseWheelSource::Wheel, .. } => false,
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, phase, modifiers, .. } => {
+                // Shift turns a wheel's scroll sideways, which is still one axis.
+                t || *phase == egui::TouchPhase::Start || (delta.x != 0.0 && delta.y != 0.0 && !modifiers.shift)
+            }
+            egui::Event::MouseWheel { .. } => false,
+            egui::Event::Zoom(_) => true,
+            _ => t,
+        })
+    });
+    if trackpad != was {
+        ctx.data_mut(|d| d.insert_temp(id, trackpad));
+    }
+    let (scroll, pinch, alt) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt));
+    let pinch = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
+    let scroll = if scroll.x.is_finite() && scroll.y.is_finite() { scroll } else { egui::Vec2::ZERO };
+    let (wheel_lines, wheel_modified) = ctx.input(|i| {
+        let mut lines = 0.0;
+        let mut modified = false;
+        if !trackpad {
+            for event in &i.events {
+                if let egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, modifiers, source, .. } = event
+                    && !matches!(source, egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum)
+                {
+                    if modifiers.command || modifiers.ctrl || modifiers.alt {
+                        modified = true;
+                    } else {
+                        lines += delta.y;
+                    }
+                }
+            }
+        }
+        (lines, modified)
+    });
+    let (pan, zoom) = if trackpad && !alt {
+        (scroll, pinch)
+    } else if alt {
+        (egui::Vec2::ZERO, pinch * (scroll.y / 300.0).exp())
+    } else {
+        (egui::vec2(scroll.x, 0.0), pinch * (scroll.y / 300.0).exp())
+    };
+    ViewerScroll { pan, zoom, trackpad, wheel_lines, wheel_modified }
 }
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
@@ -281,7 +365,7 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     }
                 }
                 _ => {
-                    ui.label(egui::RichText::new(panel.title()).weak());
+                    ui.label(egui::RichText::new(crate::i18n::label(app, "window.panel", panel.title())).weak());
                 }
             }
         });

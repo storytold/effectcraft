@@ -299,6 +299,25 @@ fn save_dialogs_offer_the_file_extension() {
     assert_eq!(*asked.borrow(), ["project Frame.png"]);
 }
 
+/// File ▸ Scripts ▸ Recent Script Files and its key run a script again without a file dialog.
+#[test]
+fn recent_script_files_run_without_a_dialog() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("ec-recent-script-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("New Comp.jsonl");
+    std::fs::write(&script, r#"{"command": "comp.new", "params": {"name": "From Script", "width": 64, "height": 36, "frameRate": 30, "duration": 1}}"#)
+        .unwrap();
+    app.session.execute("file.runScript", json!({"path": script.to_string_lossy()})).unwrap();
+    let (m, k, id, params) =
+        bindings(&app.session).into_iter().find(|b| b.2 == "file.runScript" && b.3 == json!({"recent": 0})).expect("the most recent script has a key");
+    assert_eq!((m, k), parse_shortcut("Cmd+Alt+Shift+D").unwrap());
+    assert_eq!(invoke(&mut app, &ctx, &id, params).unwrap()["steps"], 1);
+    assert_eq!(app.session.project.items.values().filter(|i| i.name.starts_with("From Script")).count(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #511: with a host's non-blocking dialogs, a command's file dialog opens without running
 /// a nested event loop inside the frame (a drag over the window then aborted the app on
 /// macOS); the command runs on a later frame with the answer, and a cancelled one not at all.
@@ -397,6 +416,175 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
         let crate::FileDialog::Open { exts, .. } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
         assert!(exts.iter().any(|ext| ext == "tga"), "{command}: {exts:?}");
     }
+}
+
+/// Cmd+W with the Render Queue focused closes the queue; the composition next to it stays
+/// open (it used to be closed, and the queue stayed).
+#[test]
+fn cmd_w_in_the_render_queue_closes_the_queue_not_the_comp() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let a = app.session.execute("comp.new", json!({"name": "A", "duration": 4})).unwrap()["comp"].as_u64();
+    app.show_panel(PanelKind::RenderQueue);
+    assert_eq!(app.ui.focused, PanelKind::RenderQueue);
+    invoke(&mut app, &ctx, "file.close", json!({})).unwrap();
+    assert!(!app.ui.dock.is_visible(PanelKind::RenderQueue));
+    assert_eq!(app.session.state.active_comp.map(|c| c.0), a);
+    assert_eq!(app.session.state.open_comps.len(), 1);
+    // The focus left the closed queue: the next Close closes the composition.
+    assert_ne!(app.ui.focused, PanelKind::RenderQueue);
+    invoke(&mut app, &ctx, "file.close", json!({})).unwrap();
+    assert_eq!(app.session.state.open_comps.len(), 0, "a second Close acts on the composition");
+}
+
+#[test]
+fn file_close_is_available_for_an_empty_render_queue_without_a_comp() {
+    for params in [Value::Null, json!({})] {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(app.session.active_comp().is_none());
+        app.show_panel(PanelKind::RenderQueue);
+        assert!(menu_items(&app).iter().find(|item| item.id == "file.close").unwrap().enabled);
+        invoke(&mut app, &ctx, "file.close", params).unwrap();
+        assert!(!app.ui.dock.is_open(PanelKind::RenderQueue));
+    }
+}
+
+#[test]
+fn closing_the_render_queue_reveals_the_panel_receiving_focus() {
+    for maximized in [false, true] {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.close_panel(PanelKind::Timeline);
+        app.close_panel(PanelKind::Composition);
+        app.show_panel(PanelKind::EffectControls);
+        assert!(!app.ui.dock.is_visible(PanelKind::Project));
+        app.show_panel(PanelKind::RenderQueue);
+        if maximized {
+            app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::RenderQueue, rect: [50.0, 60.0, 400.0, 200.0] }).unwrap();
+            app.toggle_maximize(PanelKind::EffectControls);
+            app.ui.focused = PanelKind::RenderQueue;
+            assert!(app.ui.dock.is_floating(PanelKind::RenderQueue));
+        }
+        invoke(&mut app, &ctx, "file.close", json!({})).unwrap();
+        assert_eq!(app.ui.focused, PanelKind::Project);
+        assert!(app.ui.dock.is_visible(app.ui.focused), "focus must belong to a front tab");
+        assert_eq!(app.ui.maximized, None, "the focused docked panel must be on screen");
+    }
+}
+
+/// Closing a floating queue must focus the viewer that is actually shown, retaining maximization.
+#[test]
+fn closing_a_floating_queue_preserves_the_maximized_composition() {
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    let app = h.state_mut();
+    app.show_panel(PanelKind::Composition);
+    app.show_panel(PanelKind::RenderQueue);
+    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::RenderQueue, rect: [50.0, 60.0, 400.0, 200.0] }).unwrap();
+    app.toggle_maximize(PanelKind::Composition);
+    app.ui.focused = PanelKind::RenderQueue;
+    assert!(app.ui.dock.is_visible(PanelKind::Timeline), "the hidden underlying tab triggers the regression");
+    assert!(!panel_shown(app, PanelKind::Timeline));
+    invoke(app, &ctx, "file.close", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.focused, PanelKind::Composition);
+    assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition));
+    assert!(!h.state().ui.dock.is_open(PanelKind::RenderQueue));
+    assert_eq!(h.state().session.state.open_comps.len(), 1);
+}
+
+#[test]
+fn queue_close_preserves_state_when_workspace_is_locked() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "A", "duration": 2})).unwrap();
+    app.show_panel(PanelKind::RenderQueue);
+    app.ui.dock.locked = true;
+    let workspace = app.ui.dock.clone();
+    let comp = app.session.active_comp_id();
+    for _ in 0..2 {
+        assert!(invoke(&mut app, &ctx, "file.close", Value::Null).is_err());
+        assert_eq!(app.ui.dock, workspace);
+        assert_eq!(app.ui.focused, PanelKind::RenderQueue);
+        assert_eq!(app.session.active_comp_id(), comp);
+    }
+    assert!(!menu_items(&app).iter().find(|item| item.id == "file.close").unwrap().enabled);
+    app.ui.dock.locked = false;
+    invoke(&mut app, &ctx, "file.close", Value::Null).unwrap();
+    assert!(!app.ui.dock.is_open(PanelKind::RenderQueue));
+}
+
+#[test]
+fn queue_close_preserves_viewer_command_target() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let a = app.session.execute("comp.new", json!({"name": "A", "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    let b = app.session.execute("comp.new", json!({"name": "B", "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    app.show_panel(PanelKind::Viewer(1));
+    app.ui.viewers.insert(0, Some(a));
+    app.ui.viewers.insert(1, Some(b));
+    app.ui.active_viewer = 1;
+    app.apply_dock(craft_ui::docking::Action::Move {
+        panel: PanelKind::Timeline,
+        anchor: PanelKind::Composition,
+        placement: craft_ui::docking::Placement::Tab { before: None },
+    })
+    .unwrap();
+    app.close_panel(PanelKind::Timeline);
+    app.show_panel(PanelKind::Composition);
+    app.show_panel(PanelKind::RenderQueue);
+    assert_eq!(app.session.active_comp_id().map(|id| id.0), Some(b));
+    invoke(&mut app, &ctx, "file.close", json!({})).unwrap();
+    assert_eq!(app.ui.focused, PanelKind::Composition);
+    assert_eq!(app.ui.active_viewer, 0);
+    assert_eq!(app.session.active_comp_id().map(|id| id.0), Some(a));
+    invoke(&mut app, &ctx, "file.close", json!({})).unwrap();
+    assert!(!app.session.state.open_comps.iter().any(|id| id.0 == a));
+    assert!(app.session.state.open_comps.iter().any(|id| id.0 == b));
+}
+
+#[test]
+fn queue_close_keeps_passive_viewer_focus_across_frames() {
+    let mut session = effectcraft_engine::Session::default();
+    let a = session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    let b = session.execute("comp.new", json!({"name": "B", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    let app = h.state_mut();
+    app.show_panel(PanelKind::Viewer(1));
+    app.ui.viewers.insert(0, Some(a));
+    app.ui.viewers.insert(1, Some(b));
+    app.ui.active_viewer = 1;
+    app.apply_dock(craft_ui::docking::Action::Move {
+        panel: PanelKind::Timeline,
+        anchor: PanelKind::Composition,
+        placement: craft_ui::docking::Placement::Tab { before: None },
+    })
+    .unwrap();
+    app.close_panel(PanelKind::Timeline);
+    app.show_panel(PanelKind::Composition);
+    app.show_panel(PanelKind::RenderQueue);
+    invoke(app, &ctx, "file.close", Value::Null).unwrap();
+    h.run_steps(4);
+    let app = h.state_mut();
+    assert_eq!(app.ui.focused, PanelKind::Composition);
+    assert_eq!(app.ui.active_viewer, 0);
+    assert_eq!(app.session.active_comp_id().map(|id| id.0), Some(a));
+    assert!(app.ui.dock.is_visible(PanelKind::Composition));
+    assert!(!app.ui.dock.is_open(PanelKind::RenderQueue));
+    invoke(app, &ctx, "file.close", json!({})).unwrap();
+    assert!(!app.session.state.open_comps.iter().any(|id| id.0 == a));
+    assert!(app.session.state.open_comps.iter().any(|id| id.0 == b));
+    // A later explicit Open still routes normally, rather than inheriting a deferred focus override.
+    invoke(app, &ctx, "comp.open", json!({"comp": b})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Timeline));
+    assert_eq!(h.state().session.active_comp_id().map(|id| id.0), Some(b));
 }
 
 #[test]

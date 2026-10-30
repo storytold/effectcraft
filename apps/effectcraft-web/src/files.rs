@@ -151,6 +151,10 @@ impl Services for WebServices {
     fn is_dir(&self, _path: &str) -> bool {
         false
     }
+    /// The table's keys are the paths themselves.
+    fn full_path(&self, path: &str) -> Option<String> {
+        Some(path.to_string())
+    }
 }
 
 /// Media import from the table (the bytes are also handed to the media pool, which decodes them).

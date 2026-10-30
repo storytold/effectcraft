@@ -97,7 +97,9 @@ pub fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         return (0.0, 0.0, l);
     }
     let d = max - min;
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let denom = if l > 0.5 { 2.0 - max - min } else { max + min };
+    // Over-range (HDR) or negative inputs can make the denominator zero or negative.
+    let s = if denom > 0.0 { d / denom } else { 1.0 };
     let h = if max == r {
         (((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0).rem_euclid(1.0)
     } else if max == g {
@@ -261,6 +263,20 @@ impl Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsl_round_trip_is_finite_for_out_of_range_colours() {
+        for (r, g, b) in [(1.5, 0.5, 0.5), (2.0, 0.1, 0.3), (-0.5, 0.2, 0.9)] {
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            assert!(h.is_finite() && s.is_finite() && l.is_finite(), "{h} {s} {l}");
+            let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+            assert!(r2.is_finite() && g2.is_finite() && b2.is_finite(), "{r2} {g2} {b2}");
+        }
+        // A 32 bpc colour whose denominator stays positive still round-trips exactly.
+        let (h, s, l) = rgb_to_hsl(1.2, 0.5, 0.5);
+        let (r, g, b) = hsl_to_rgb(h, s, l);
+        assert!((r - 1.2).abs() < 1e-5 && (g - 0.5).abs() < 1e-5 && (b - 0.5).abs() < 1e-5, "{r} {g} {b}");
+    }
 
     #[test]
     fn hsv_to_rgb_tiny_negative_hue_is_red() {

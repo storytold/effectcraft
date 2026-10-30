@@ -71,6 +71,55 @@ After the fix, all ten tangents equal AE's to the printed 0.001 px, and the two 
 test `spatial_auto_bezier_tangents_follow_after_effects` checks the rule on other original keys,
 including a timing change. AE's output stays local; only the script and these scores are tracked.
 
+## Justify All with the every-line composer
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) on box text (EXPORTER read-back t6):
+with Justify All, AE stretches the paragraph's last line too and breaks the lines so that it is not
+a lone word (4 / 4 / 4 words where the other justifications break 6 / 6 / 1). EffectCraft's
+every-line composer ignored the last line's slack and left "twelve" alone on a stretched line; it now
+counts that slack for Justify All, and every word starts within 1 px of AE's. Regression test:
+`justify_all_balances_the_lines_with_the_every_line_composer`.
+
+## Right-to-left point text with a justified paragraph
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) (EXPORTER read-back t7): right-to-left
+point text whose paragraph has a justified code (justify last left / centre / right, justify all)
+sits flush right at its anchor, like right-aligned text. EffectCraft placed it by the last-line
+side (left / centre / left). Now flush right; left-to-right point text is unchanged (not measured).
+Regression test: `rtl_point_text_with_a_justified_paragraph_is_flush_at_its_start`. Still open:
+AE wraps right-to-left box text slightly wider (its word gaps are 1–2 px narrower than in
+left-to-right text with the same font), so a 300 px box fits a word more per line.
+
+## Text animator tracking
+
+Measured on 19 October 2026 with After Effects 2026 (26.2): a text animator's Tracking Amount is in
+pixels, not 1/1000 em like the Character panel's tracking (Amount 30 adds 30 px between neighbouring
+characters at 80 px and at 40 px, half before and half after each), and a Subtract range selector
+over characters the first selector leaves out keeps them at 0 instead of tracking them negatively.
+With both, the EXPORTER's t8 layer D (Tracking 30 on characters 2–4 by index, a Subtract selector
+over the last 20 %) puts every glyph where AE does (it ended 88 px short). The "Tracking In" text
+preset now animates 40 → 0 px (was 400 → 0 thousandths of an em). Lottie export is unchanged (not
+checked against a player). Regression tests: `animator_tracking_is_in_pixels_as_in_after_effects`,
+`modes_combine`.
+
+## Per-character 3D rotation order
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) (case 931: "H" at 400 px, per-character
+3D, animator X / Y / Z Rotation 40 / 30 / 20): a character turns as a 3D layer does, Rx · Ry · Rz
+(Z first). EffectCraft composed Rz · Ry · Rx, so the glyph faced another way (23 of 5184 grid points
+off, max 255); now 3 at the anti-aliased edge (mean 0.015). Regression test:
+`per_character_rotation_turns_z_first_as_a_3d_layer`.
+
+## Rectangle path start point
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) on 400 × 300 shape rectangles with Trim
+Paths: a plain rectangle starts at its top-right corner and runs clockwise (0–25 % covers the right
+edge and 50 px of the bottom); with Roundness 40 it starts where the top-right arc meets the right
+edge. Start 70 / End 30 draws 30–70 %. EffectCraft started at the top-left corner (and the rounded
+rectangle elsewhere), so trimmed rectangles drew the wrong segment (86 of 5184 grid points off,
+now 5 at stroke edges). `effectcraft_path::rect` now draws AE's order, which also gives Convert to
+Bezier AE's vertex order. Regression test: `rectangles_start_where_after_effects_starts_them`.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`

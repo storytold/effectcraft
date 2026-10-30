@@ -37,7 +37,8 @@ pub struct Dof {
 impl Dof {
     /// Circle-of-confusion diameter (comp pixels) for a point at camera depth `z`.
     pub fn coc(&self, z: f64) -> f64 {
-        if z <= NEAR || self.focus <= 0.0 {
+        // No defocus can be measured against a non-finite focus or depth, so it counts as in focus.
+        if !z.is_finite() || z <= NEAR || !self.focus.is_finite() || self.focus <= 0.0 {
             return 0.0;
         }
         self.aperture * (z - self.focus).abs() / z * self.blur_level
@@ -241,6 +242,53 @@ fn path_tangent(ctx: &EvalCtx, layer: &Layer) -> Option<Vec3> {
         .filter(|k| **k <= ctx.time)
         .find_map(|&k| dir(pos(k) - pos(k - dt)))
         .or_else(|| keys.iter().filter(|k| **k > ctx.time).find_map(|&k| dir(pos(k + dt) - pos(k))))
+        .or_else(|| {
+            // An expression has no keys to fall back on: sample it instead.
+            let expr = dims.iter().any(|m| tr.get(m).is_some_and(|p| p.has_expression()));
+            expr.then(|| sampled_tangent(ctx, layer, &pos, dt, true).or_else(|| sampled_tangent(ctx, layer, &pos, dt, false))).flatten()
+        })
+}
+
+/// Samples spent on each phase of [`sampled_tangent`]: it runs per layer per frame.
+const MOTION_SEARCH_STEPS: u32 = 12;
+
+/// Direction of the motion nearest to the context time, before it (`earlier`) or after it, for a
+/// position with no keyframes to fall back on (an expression). Steps 1, 2, 4, ... frames away
+/// (within the layer's in/out points) until the position differs from the current one, then
+/// bisects down to `dt` the moment the motion stopped (or started), so the heading kept is the
+/// one at the end of the motion whichever frame is shown.
+fn sampled_tangent(ctx: &EvalCtx, layer: &Layer, pos: &dyn Fn(effectcraft_time::Tick) -> Vec3, dt: effectcraft_time::Tick, earlier: bool) -> Option<Vec3> {
+    let here = pos(ctx.time);
+    let moved = |t| (pos(t) - here).length() > 1e-9;
+    let limit = if earlier { layer.in_point.min(ctx.time) } else { layer.out_point.max(ctx.time) };
+    let mut step = ctx.comp.frame_duration().max(dt);
+    let (mut still, mut away) = (ctx.time, None);
+    for _ in 0..MOTION_SEARCH_STEPS {
+        let t = if earlier { (ctx.time - step).max(limit) } else { (ctx.time + step).min(limit) };
+        if moved(t) {
+            away = Some(t);
+            break;
+        }
+        still = t;
+        if t == limit {
+            break;
+        }
+        step = step + step;
+    }
+    let mut away = away?;
+    for _ in 0..MOTION_SEARCH_STEPS {
+        if (still - away).abs() <= dt {
+            break;
+        }
+        let mid = away + (still - away).mul_ratio(1, 2);
+        if moved(mid) {
+            away = mid;
+        } else {
+            still = mid;
+        }
+    }
+    let d = if earlier { here - pos(away) } else { pos(away) - here };
+    (d.length() > 1e-9 && d.length().is_finite()).then(|| d.normalize())
 }
 
 /// Auto-Orient ▸ Orient Along Path for 2D layers: extra Z rotation in degrees.
@@ -313,22 +361,27 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
     let (eye, fwd, down) = layer_frame(ctx, cam);
     let opts = cam.props.sub("cameraOptions");
     let zoom = opts.map(|g| ctx.f(cam, g, "zoom", 1000.0)).unwrap_or(1000.0).max(1e-3);
-    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| Dof {
-        focus: ctx.f(cam, g, "focusDistance", zoom),
-        aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
-        blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
-        iris: super::bokeh::Iris {
-            sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
-            rotation: ctx.f(cam, g, "irisRotation", 0.0),
-            roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
-            aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
-            fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
-        },
-        highlight: super::bokeh::Highlight {
-            gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
-            threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
-            saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
-        },
+    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| {
+        // A non-finite Focus Distance would make every blur radius non-finite; use the value the
+        // property defaults to (the zoom plane) instead.
+        let focus = ctx.f(cam, g, "focusDistance", zoom);
+        Dof {
+            focus: if focus.is_finite() { focus } else { zoom },
+            aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
+            blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
+            iris: super::bokeh::Iris {
+                sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
+                rotation: ctx.f(cam, g, "irisRotation", 0.0),
+                roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
+                aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
+                fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
+            },
+            highlight: super::bokeh::Highlight {
+                gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
+                threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
+                saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
+            },
+        }
     });
     CameraState { view: basis_view(eye, fwd, down), eye, zoom, ortho: false, dof }
 }

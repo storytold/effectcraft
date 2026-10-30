@@ -126,6 +126,10 @@ const LIGHT_BYTES: usize = 6 * 16;
 /// Composite a prepared Classic 3D run over `canvas`. `None` when it cannot run here (the
 /// caller draws it on the CPU).
 pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<GpuImage> {
+    // FXC (DirectX 12) may fail to build the kernel (#613): the caller renders the run on the CPU.
+    if !e.g.has_kernel("classic3d") {
+        return None;
+    }
     let (w, h) = (canvas.width, canvas.height);
     let boxes: Vec<[i64; 4]> = run.planes.iter().filter(|p| p.draw).map(|p| p.bbox).collect();
     if boxes.is_empty() {

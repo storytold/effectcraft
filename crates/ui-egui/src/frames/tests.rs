@@ -1,5 +1,11 @@
 use super::*;
 
+#[test]
+fn converting_a_frame_with_nan_alpha_keeps_the_viewer_alive() {
+    let image = effectcraft_engine::render::Image::filled(1, 1, [0.5, 0.25, 0.1, f32::NAN]);
+    assert_eq!(to_color_image(&image).pixels, [egui::Color32::TRANSPARENT]);
+}
+
 struct ProbeDisk {
     keys: Mutex<HashSet<u128>>,
     probes: std::sync::atomic::AtomicUsize,
@@ -437,7 +443,9 @@ fn a_newer_viewer_frame_drops_the_ones_still_waiting() {
         gpu_display: false,
         disk: None,
     };
-    let request = |k: FrameKey, urgent: bool| f.request_with(&src, k, ItemId(k.comp), Tick::ZERO, RenderOpts::default(), urgent);
+    let request = |k: FrameKey, urgent: bool| {
+        f.request_with(&src, k, ItemId(k.comp), Tick::ZERO, RenderOpts::default(), if urgent { Want::Viewer } else { Want::Prefetch })
+    };
     let other = FrameKey { comp: 2, ..key(1, 0, 0) };
     request(other, true);
     request(key(1, 20, 0), false);
@@ -556,6 +564,131 @@ fn prefetch_renders_the_frames_the_playhead_reaches_first() {
     }
     assert_eq!(order, [(1, 11), (1, 12), (1, 20), (1, 30), (1, 40), (2, 1)]);
     assert_eq!(f.inflight(), 6, "frame 5, behind the playhead, is no longer in flight");
+}
+
+/// A decoder that works in parallel, as the renderer does, in a comp that shows it.
+#[derive(Default)]
+struct ParallelClip {
+    started: std::sync::atomic::AtomicUsize,
+    /// Frames started by the time frame 1 was done.
+    started_at_first: std::sync::atomic::AtomicUsize,
+}
+
+impl FootageSource for ParallelClip {
+    fn frame(&self, _: ItemId, _: &effectcraft_engine::project::Footage, t: Tick) -> Option<Arc<effectcraft_engine::render::Image>> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        (0..16).into_par_iter().for_each(|_| (0..4).into_par_iter().for_each(|_| std::thread::sleep(std::time::Duration::from_millis(1))));
+        if effectcraft_engine::time::FrameRate::FPS_30.frame_at(t) == 1 {
+            self.started_at_first.store(self.started.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        Some(Arc::new(effectcraft_engine::render::Image::new(4, 4)))
+    }
+}
+
+/// A 10 s comp of a [`ParallelClip`]: the frame cache, the clip, the render source, the comp
+/// and the key of its frame 0.
+fn parallel_clip() -> (Frames, Arc<ParallelClip>, RenderSource, ItemId, FrameKey) {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Footage, FootageKind};
+    use effectcraft_engine::time::FrameRate;
+    use serde_json::json;
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 10})).unwrap()["comp"].as_u64().unwrap());
+    let clip = Footage {
+        kind: FootageKind::Video,
+        width: 4,
+        height: 4,
+        has_video: true,
+        frame_rate: FrameRate::FPS_30,
+        duration: Tick::from_seconds_f64(10.0),
+        ..Default::default()
+    };
+    let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+    s.execute("layer.addItem", json!({"item": item.0})).unwrap();
+    let footage = Arc::new(ParallelClip::default());
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: footage.clone(),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: None,
+    };
+    let f = Frames::default();
+    let series = FrameKey { revision: s.revision, content: f.content_of(&s.project, s.revision, cid), comp: cid.0, frame: 0, scale: 1000, view: 0, opts: 0 };
+    (f, footage, src, cid, series)
+}
+
+fn wait_for_renders(f: &Frames) {
+    for _ in 0..8000 {
+        if f.inflight() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.inflight(), 0, "every queued frame rendered");
+}
+
+/// A playing preview's frames render side by side, and each works in parallel: a render
+/// waiting for its own parallel work took over pieces of the frames started after it, and
+/// its frame was done only once theirs were. The frames right ahead of the playhead, started
+/// first, came last: the preview stood still while the frames further ahead turned green.
+/// Cache Frames When Idle left the same gaps.
+#[test]
+fn frames_started_first_are_done_first() {
+    use effectcraft_engine::time::FrameRate;
+    for playing in [true, false] {
+        let (f, footage, src, cid, series) = parallel_clip();
+        let frames = 60;
+        if playing {
+            f.set_playhead(Some(Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false }));
+        }
+        for frame in 1..=frames {
+            let (key, t) = (FrameKey { frame, ..series }, FrameRate::FPS_30.tick_of(frame));
+            if playing {
+                f.request(&src, key, cid, t, RenderOpts::default());
+            } else {
+                f.request_background(&src, key, cid, t, RenderOpts::default());
+            }
+            if frame == 1 {
+                // Its parallel work has started (and idle threads have taken pieces of it).
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+        }
+        wait_for_renders(&f);
+        assert_eq!(f.cached_frames(&series).len(), frames as usize);
+        let before = footage.started_at_first.load(Ordering::SeqCst);
+        assert!(before <= 2 * f.parallelism(), "{before} frames were started before the first one was done (playing: {playing})");
+    }
+}
+
+/// Prefetch frames queued when a preview starts or stops, or that become the viewer's
+/// frame, still render: they change hands between the lanes and the pool.
+#[test]
+fn queued_frames_render_when_a_preview_starts_or_stops() {
+    use effectcraft_engine::time::FrameRate;
+    let (f, _, src, cid, series) = parallel_clip();
+    let playhead = Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false };
+    let request = |frames: std::ops::Range<i64>| {
+        for frame in frames {
+            f.request(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
+        }
+    };
+    // Queued for the pool, then a preview starts.
+    request(1..40);
+    f.set_playhead(Some(playhead));
+    // Queued for the lanes, then the preview stops.
+    request(40..80);
+    f.set_playhead(None);
+    wait_for_renders(&f);
+    // Queued for the lanes, then the viewer shows one of them.
+    for frame in 80..120 {
+        f.request_background(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
+    }
+    f.request_urgent(&src, FrameKey { frame: 119, ..series }, cid, FrameRate::FPS_30.tick_of(119), RenderOpts::default());
+    wait_for_renders(&f);
+    assert_eq!(f.cached_frames(&series).len(), 119);
 }
 
 /// The cache is full. A zoom (or preview-resolution) change left the frames of the old
@@ -895,33 +1028,59 @@ fn adding_a_source_does_not_hide_changes_to_existing_dependencies() {
     }
 }
 
+/// Adding, moving or deleting a marker (Num* while a preview plays) keeps the cached frames:
+/// the sound would otherwise stop at the next frame that has to be rendered again (#1083).
+/// Only expressions that read markers make them part of the pixels.
 #[test]
-fn markers_keep_the_frames() {
+fn markers_keep_the_frames_unless_an_expression_reads_them() {
     use effectcraft_engine::Session;
     use serde_json::json;
     let mut s = Session::default();
     let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
-    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
-    let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
+    let inner = ItemId(id(s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "duration": 2})).unwrap(), "comp"));
+    let solid = id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000"})).unwrap(), "layer");
+    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 2})).unwrap(), "comp"));
+    id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer");
     let f = Frames::default();
-    let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
-    let o0 = at(&s);
-    s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
-    assert_eq!(at(&s), o0, "a marker changes no pixels, so it keeps the frames");
+    let at = |s: &Session, c: ItemId| f.content_of(&s.project, s.revision, c);
+    let (o0, i0) = (at(&s, outer), at(&s, inner));
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 0.5, "comment": "beat"})).unwrap();
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 1.0})).unwrap();
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 1.5})).unwrap();
+    assert_eq!((at(&s, outer), at(&s, inner)), (o0, i0), "comp markers");
+    s.execute("markers.set", json!({"comp": inner.0, "layer": solid, "new": true, "time": 0.25})).unwrap();
+    assert_eq!((at(&s, outer), at(&s, inner)), (o0, i0), "layer marker");
+    // An expression reading markers makes them count again.
+    s.execute("prop.setExpression", json!({"comp": inner.0, "layer": solid, "path": "transform/opacity", "expression": "thisComp.marker.numKeys"})).unwrap();
+    let (o1, i1) = (at(&s, outer), at(&s, inner));
+    assert_ne!(o1, o0);
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 1.0})).unwrap();
+    assert_ne!(at(&s, inner), i1, "marker read by an expression");
+    assert_ne!(at(&s, outer), o1, "marker read by an expression in a nested comp");
 }
 
+/// A protected time marker with a duration sets the comp's timing (Responsive Design), so it
+/// changes the frames even though plain markers do not; and any expression, which can read
+/// markers, makes every marker count.
 #[test]
-fn markers_count_when_an_expression_can_read_them() {
+fn timing_markers_and_expressions_still_change_the_frames() {
     use effectcraft_engine::Session;
     use serde_json::json;
     let mut s = Session::default();
     let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
     let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
     let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
-    s.execute("prop.setExpression", json!({"comp": outer.0, "layer": solid, "path": "transform/opacity", "expression": "1"})).unwrap();
     let f = Frames::default();
     let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
     let o0 = at(&s);
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
-    assert_ne!(at(&s), o0, "an expression can read the marker, so the frames change");
+    assert_eq!(at(&s), o0, "a plain marker changes no pixels, so it keeps the frames");
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 0.25})).unwrap();
+    s.execute("markers.set", json!({"comp": outer.0, "index": 0, "duration": 0.25, "protected": true})).unwrap();
+    let o1 = at(&s);
+    assert_ne!(o1, o0, "a protected time marker with a duration sets the timing");
+    s.execute("prop.setExpression", json!({"comp": outer.0, "layer": solid, "path": "transform/opacity", "expression": "1"})).unwrap();
+    let o2 = at(&s);
+    s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
+    assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }

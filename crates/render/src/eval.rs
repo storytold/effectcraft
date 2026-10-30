@@ -39,17 +39,33 @@ pub struct EvalCtx<'a> {
     /// Footage frames for expressions that read rendered pixels (`sampleImage`): the renderer's
     /// own source while rendering; `None` renders footage as transparent.
     pub footage: Option<&'a dyn crate::FootageSource>,
+    /// Property values overridden by the Essential Properties of a collapsed precomp instance.
+    pub property_overrides: &'a [crate::PropertyOverride],
+    /// Media Replacement values overridden by the Essential Properties of a collapsed precomp
+    /// instance.
+    pub media_overrides: &'a [crate::MediaOverride],
 }
 
 impl<'a> EvalCtx<'a> {
     pub fn new(project: &'a Project, comp_id: ItemId, comp: &'a Comp, time: Tick) -> EvalCtx<'a> {
-        EvalCtx { project, comp_id, comp, time, expr: None, footage: None }
+        EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[] }
     }
     pub fn at(&self, time: Tick) -> EvalCtx<'a> {
         EvalCtx { time, ..*self }
     }
     /// Value of a property at the context time (keyframes, then expression).
     pub fn value(&self, layer: &Layer, prop: &Property) -> Value {
+        // A collapsed precomp instance's Essential Property override replaces the base value;
+        // its expression (if any) still runs, and sees the overrides of this context.
+        if let Some(o) = self.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == prop.uid) {
+            let v = o.value(layer, prop, self.time);
+            if prop.has_expression()
+                && let Some(h) = self.expr
+            {
+                return h.eval(self, layer, prop, &v).unwrap_or(v);
+            }
+            return v;
+        }
         // Separated Position reads as the combination of X/Y/Z Position.
         if prop.match_id == "position"
             && let Some(tr) = layer.transform()
@@ -60,7 +76,13 @@ impl<'a> EvalCtx<'a> {
             let y = tr.get("positionY").map(|p| self.value(layer, p).as_f64()).unwrap_or(0.0);
             return Value::Vec3([self.value(layer, px).as_f64(), y, z]);
         }
-        let lt = layer.layer_time(self.time);
+        self.value_at_layer_time(layer, prop, layer.layer_time(self.time))
+    }
+    /// [`Self::value`] with the keyframes read at layer time `lt` exactly, rather than at the
+    /// context time mapped through the layer's start and stretch (which rounds under a
+    /// fractional stretch: a Hold key at `lt` could read its previous value). An expression
+    /// still runs at the context time.
+    pub fn value_at_layer_time(&self, layer: &Layer, prop: &Property, lt: Tick) -> Value {
         let v = prop.value_at(lt);
         if prop.has_expression()
             && let Some(h) = self.expr
@@ -139,13 +161,15 @@ impl<'a> EvalCtx<'a> {
     /// Source pixel aspect relative to the comp's: non-square footage (or solids, or precomps
     /// with another pixel aspect) is stretched horizontally by this factor in the comp.
     pub fn par_ratio(&self, layer: &Layer) -> f64 {
-        let par = match &layer.source {
-            LayerSource::Footage { item } | LayerSource::Solid { item } | LayerSource::Comp { item } => match self.project.item(*item).map(|i| &i.kind) {
-                Some(effectcraft_project::ItemKind::Footage(f)) => f.pixel_aspect,
-                Some(effectcraft_project::ItemKind::Solid(s)) => s.pixel_aspect,
-                Some(effectcraft_project::ItemKind::Comp(c)) => c.pixel_aspect,
-                _ => 1.0,
-            },
+        let item = match &layer.source {
+            LayerSource::Footage { item } => Some(self.media_item(layer, *item)),
+            LayerSource::Solid { item } | LayerSource::Comp { item } => Some(*item),
+            _ => None,
+        };
+        let par = match item.and_then(|item| self.project.item(item)).map(|i| &i.kind) {
+            Some(effectcraft_project::ItemKind::Footage(f)) => f.pixel_aspect,
+            Some(effectcraft_project::ItemKind::Solid(s)) => s.pixel_aspect,
+            Some(effectcraft_project::ItemKind::Comp(c)) => c.pixel_aspect,
             _ => 1.0,
         };
         let r = par / if self.comp.pixel_aspect > 0.0 { self.comp.pixel_aspect } else { 1.0 };
@@ -231,14 +255,46 @@ impl<'a> EvalCtx<'a> {
             (Mat3([[m[0][0], m[0][1], m[0][3]], [m[1][0], m[1][1], m[1][3]], [0.0, 0.0, 1.0]]), 0.0)
         }
     }
+    /// The footage item a layer uses, honouring this instance's Media Replacement override.
+    pub fn media_item(&self, layer: &Layer, item: ItemId) -> ItemId {
+        self.media_overrides.iter().rev().find(|m| m.layer == layer.id).map_or(item, |m| m.item)
+    }
+
+    /// Size of a layer's source in layer pixels, honouring Media Replacement.
+    pub fn source_size(&self, layer: &Layer) -> (u32, u32) {
+        let item = match &layer.source {
+            LayerSource::Footage { item } => Some(self.media_item(layer, *item)),
+            LayerSource::Comp { item } | LayerSource::Solid { item } => Some(*item),
+            _ => None,
+        };
+        match layer.source {
+            LayerSource::Null => (100, 100),
+            _ => item.and_then(|item| self.project.item(item)).and_then(|i| i.dimensions()).unwrap_or((0, 0)),
+        }
+    }
+
     /// [`effect_bounds`] of a layer of this comp.
     pub fn effect_bounds(&self, layer: &Layer) -> ([f64; 2], [f64; 2]) {
-        effect_bounds(self.project, self.comp, layer)
+        effect_bounds_of(self.comp, self.source_size(layer))
     }
     /// Effect space (see [`effect_bounds`]) → comp matrix.
     pub fn effect_to_comp(&self, layer: &Layer) -> Mat3 {
         let o = self.effect_bounds(layer).1;
         self.layer_to_comp(layer).0 * Mat3::translate(vec2(o[0], o[1]))
+    }
+}
+
+impl crate::PropertyOverride {
+    fn value(&self, layer: &Layer, prop: &Property, time: Tick) -> Value {
+        if self.font {
+            // A Font control merges only the font into the target text, as
+            // `essential::with_overrides` does.
+            let mut value = prop.value_at(layer.layer_time(time));
+            effectcraft_project::essential::merge_font(&mut value, &self.value);
+            value
+        } else {
+            self.value.clone()
+        }
     }
 }
 
@@ -315,7 +371,11 @@ pub fn responsive_source_time(comp: &Comp, stretch: f64, elapsed: f64) -> Option
 /// surrounds. Effects work in **effect space**, measured from that corner (After Effects' layer
 /// space for effect points: a shape layer's default effect point is its bounds' centre).
 pub fn effect_bounds(project: &Project, comp: &Comp, layer: &Layer) -> ([f64; 2], [f64; 2]) {
-    match source_size(project, layer) {
+    effect_bounds_of(comp, source_size(project, layer))
+}
+
+fn effect_bounds_of(comp: &Comp, size: (u32, u32)) -> ([f64; 2], [f64; 2]) {
+    match size {
         (0, _) => {
             let (w, h) = (comp.width as f64, comp.height as f64);
             ([w, h], [-w / 2.0, -h / 2.0])

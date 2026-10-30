@@ -1,12 +1,14 @@
 use super::accel::{Accelerator, Backend, CpuFx, FxStep, FxTarget};
 use super::footage::{FootageSource, is_vector_footage};
-use super::frames::{blend_frames, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
+use super::frames::{blend_frames, cineon_frame, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
 use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
 use super::{
     Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
     ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
 };
+use effectcraft_keyframe::Value;
+use effectcraft_project::LayerId;
 
 /// Coordinate space and stack range shared by CPU and accelerated effect evaluation.
 #[derive(Clone, Copy)]
@@ -14,6 +16,88 @@ pub(crate) struct EffectStack {
     pub adjustment: bool,
     pub limit: usize,
     pub origin: [f64; 2],
+}
+
+/// A property value an Essential Properties override gives a layer of a collapsed precomp.
+#[derive(Clone, Debug)]
+pub struct PropertyOverride {
+    pub(crate) layer: LayerId,
+    pub(crate) prop: u64,
+    pub(crate) value: Value,
+    /// A Font control changes only the font of the target text, not its text.
+    pub(crate) font: bool,
+}
+
+/// A Media Replacement an Essential Properties override gives a footage layer of a collapsed
+/// precomp.
+#[derive(Clone, Copy, Debug)]
+pub struct MediaOverride {
+    pub(crate) layer: LayerId,
+    pub(crate) item: ItemId,
+}
+
+impl MediaOverride {
+    /// A Media Replacement of `layer`'s footage by `item`.
+    pub fn new(layer: LayerId, item: ItemId) -> Self {
+        MediaOverride { layer, item }
+    }
+}
+
+/// A collapsed precomp layer: the nested comp and the instance overrides that apply to it.
+pub struct Collapsed {
+    pub item: ItemId,
+    pub(crate) property_overrides: Vec<PropertyOverride>,
+    pub(crate) media_overrides: Vec<MediaOverride>,
+}
+
+/// The property and media overrides of a collapsed precomp layer. `None` when its Essential
+/// Properties group or the source comp's definitions are missing (the flattened path then
+/// preserves the old behaviour).
+fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec<PropertyOverride>, Vec<MediaOverride>)> {
+    use effectcraft_project::essential::{self, ControlType, EgKind};
+    let over = essential::overridden(layer);
+    if over.is_empty() {
+        return Some((vec![], vec![]));
+    }
+    let g = essential::group(layer)?;
+    let eg = ctx.project.comp(item)?.essential.as_ref()?;
+    let mut property = vec![];
+    let mut fonts: Vec<PropertyOverride> = vec![];
+    let mut media = vec![];
+    g.walk("", &mut |_, p| {
+        if !over.contains(&p.uid) {
+            return;
+        }
+        let Some(control) = essential::control_of(&p.match_id) else { return };
+        let Some(ctl) = eg.resolve(control) else { return };
+        let value = ctx.value(layer, p);
+        match &ctl.kind {
+            EgKind::Property { .. } => {
+                let font = ctl.as_type == Some(ControlType::Font);
+                for (layer, prop) in ctl.kind.targets() {
+                    let o = PropertyOverride { layer, prop, value: value.clone(), font };
+                    if font { fonts.push(o) } else { property.push(o) }
+                }
+            }
+            EgKind::Media { layer: target } => {
+                let Value::Scalar(id) = value else { return };
+                let item = ItemId(id.max(0.0) as u64);
+                if matches!(ctx.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(_))) {
+                    media.push(MediaOverride { layer: *target, item });
+                }
+            }
+            _ => {}
+        }
+    });
+    // A Font control merges into the text its instance shows, after a whole-value (Text) override
+    // of the same property, as `essential::with_overrides` does: keep one entry per property.
+    for f in fonts {
+        match property.iter_mut().rev().find(|o| o.layer == f.layer && o.prop == f.prop) {
+            Some(o) => effectcraft_project::essential::merge_font(&mut o.value, &f.value),
+            None => property.push(f),
+        }
+    }
+    Some((property, media))
 }
 
 impl<'a> Renderer<'a> {
@@ -122,8 +206,10 @@ impl<'a> Renderer<'a> {
 
     /// The nested comp of a precomp layer whose transformations collapse into this comp: the
     /// Collapse Transformations switch is on and the layer has no masks, effects or layer
-    /// styles (those force a flattened render of the precomp, as in After Effects).
-    pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<ItemId> {
+    /// styles (those force a flattened render of the precomp, as in After Effects). Essential
+    /// Properties overrides travel with it and are applied as the nested layers are evaluated,
+    /// so the nested comp is not rasterised at its frame.
+    pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Collapsed> {
         if !layer.switches.collapse || layer.switches.adjustment || self.depth > 12 {
             return None;
         }
@@ -140,24 +226,37 @@ impl<'a> Renderer<'a> {
         if styles::active(ctx, layer) {
             return None;
         }
-        // Instance overrides (Essential Properties) need the nested comp rendered on its own.
-        if !effectcraft_project::essential::overridden(layer).is_empty() {
+        // A composition proxy or frame blending is drawn by the flattened path (`precomp_source`);
+        // collapsing renders the nested comp directly and would ignore both.
+        if self.proxy_for(*item).is_some() || frame_blend_mode(ctx, layer) != FrameBlend::Off {
             return None;
         }
-        Some(*item)
+        let (property_overrides, media_overrides) = collapsed_instance(ctx, layer, *item)?;
+        Some(Collapsed { item: *item, property_overrides, media_overrides })
     }
 
     /// A renderer and context that draw a collapsed precomp's layers straight into this comp:
     /// their transforms are concatenated with the precomp layer's (one resample, no
     /// rasterisation at the precomp's bounds), their opacity multiplied by `opacity`, and their
     /// 3D layers use this comp's camera and lights.
-    pub fn collapse_into(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, item: ItemId, opacity: f32) -> Option<(Renderer<'a>, EvalCtx<'a>)> {
+    pub fn collapse_into<'p>(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &'p Collapsed, opacity: f32) -> Option<(Renderer<'p>, EvalCtx<'p>)>
+    where
+        'a: 'p,
+    {
+        let item = collapsed.item;
         let nc = self.project.comp(item)?;
         let t = ctx.nested_time(layer);
         if !nc.covers(t) {
             return None;
         }
-        let nctx = EvalCtx { comp_id: item, comp: nc, time: t, ..*ctx };
+        let nctx = EvalCtx {
+            comp_id: item,
+            comp: nc,
+            time: t,
+            property_overrides: &collapsed.property_overrides,
+            media_overrides: &collapsed.media_overrides,
+            ..*ctx
+        };
         let (l2c, _) = ctx.layer_to_comp(layer);
         let outer = Some(self.outer.map_or(l2c, |o| o * l2c));
         let world = ctx.world_matrix(layer);
@@ -189,19 +288,19 @@ impl<'a> Renderer<'a> {
     /// that then takes the precomp layer's track matte, Preserve Transparency and blend mode.
     /// Returns the region left to re-quantise (nested layers drawn straight into `canvas`
     /// quantise their own footprints).
-    pub(crate) fn draw_collapsed(&self, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut Image, blank: bool) -> Region {
+    pub(crate) fn draw_collapsed(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &Collapsed, canvas: &mut Image, blank: bool) -> Region {
         let opacity = ctx.opacity(layer) as f32 * self.opacity_mul;
         if opacity <= 0.0 {
             return Region::Empty;
         }
         let matte = layer.track_matte.is_some_and(|tm| tm.layer != layer.id && ctx.comp.layer(tm.layer).is_some());
         if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
-            if let Some((sub, nctx)) = self.collapse_into(ctx, layer, item, opacity) {
+            if let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, opacity) {
                 sub.draw_comp(&nctx, canvas, blank);
             }
             return Region::Empty;
         }
-        let Some((sub, nctx)) = self.collapse_into(ctx, layer, item, 1.0) else { return Region::Empty };
+        let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, 1.0) else { return Region::Empty };
         let mut iso = Image::new(canvas.width, canvas.height);
         sub.draw_comp(&nctx, &mut iso, true);
         self.composite_iso(ctx, layer, iso, canvas, opacity);
@@ -230,6 +329,7 @@ impl<'a> Renderer<'a> {
         let continuous = match layer.source {
             LayerSource::Text | LayerSource::Shape => true,
             LayerSource::Footage { item } => {
+                let item = ctx.media_item(layer, item);
                 layer.switches.collapse && matches!(self.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if is_vector_footage(f))
             }
             _ => false,
@@ -267,7 +367,7 @@ impl<'a> Renderer<'a> {
     }
 
     pub(crate) fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
-        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage) }
+        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage), property_overrides: &[], media_overrides: &[] }
     }
 
     /// This renderer with another accelerator (or none): the passes of
@@ -406,7 +506,7 @@ impl<'a> Renderer<'a> {
                 blank = false;
             } else {
                 let changed = match self.collapsed(ctx, visible[i]) {
-                    Some(item) => self.draw_collapsed(ctx, visible[i], item, canvas, blank),
+                    Some(collapsed) => self.draw_collapsed(ctx, visible[i], &collapsed, canvas, blank),
                     None => self.draw_layer(ctx, visible[i], canvas, blank),
                 };
                 i += 1;
@@ -466,14 +566,26 @@ impl<'a> Renderer<'a> {
         let Some(fx) = layer.effects() else { return };
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
-        // #659: an authored layer's buffer spans only its painted content while the stack works
-        // on the layer's whole region (`layer_size`): give the buffer the room a sized source
-        // already has, so tiling or displacement can place pixels outside the content instead
-        // of losing them at its edge. Only when something will actually run, and not for an
-        // adjustment layer, whose buffer is the comp below and already spans it.
-        if !adjustment
-            && fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::find(effect).is_some_and(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)))) {
-            target.cover(layer_size);
+        // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
+        // place pixels outside it grow the buffer themselves, by exactly what they need
+        // (`layer_cover_pad`: CC Tiler, CC Smear, CC Mosaic sharp) instead of a blanket cover of
+        // the whole layer rectangle on every stack — which paid a comp-sized texture per layer,
+        // per frame in flight, for glow and blur that never use the extra room. The buffer still
+        // takes the cover's pixel-grid phase: a downscaled layer resamples along that grid.
+        // Effects not known to stay inside their own margins (Twirl, Bulge, Transform, ...) still
+        // get the cover: they move content past the painted bounds without growing the buffer.
+        let video = || {
+            fx.groups().filter(|g| g.enabled).filter_map(|g| match &g.kind {
+                GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+                _ => None,
+            })
+        };
+        if !adjustment && video().next().is_some() {
+            if video().all(|s| s.skips_cover()) {
+                target.align(layer_size);
+            } else {
+                target.cover(layer_size);
+            }
         }
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {
@@ -594,8 +706,10 @@ impl<'a> Renderer<'a> {
                 if self.project.comp_contains(*item, ctx.comp_id) {
                     return None;
                 }
-                // A composition proxy (a rendered still or movie) stands in for the comp.
-                // Nothing before the nested comp starts or after it ends.
+                // A composition proxy (a rendered still or movie) stands in for the comp. It is
+                // decoded like footage: its Separate Fields, Invert Alpha and Interpret As Linear
+                // Light settings and the layer's Frame Blending apply. Nothing before the nested
+                // comp starts or after it ends.
                 let lt = ctx.nested_time(layer);
                 if !self.project.comp(*item).is_some_and(|nc| nc.covers(lt)) {
                     return None;
@@ -603,7 +717,7 @@ impl<'a> Renderer<'a> {
                 if let Some(pf) = self.proxy_for(*item)
                     && let Some(nc) = self.project.comp(*item)
                 {
-                    let img = self.footage.frame_with(*item, pf, lt, None, self.pipe.float_encoding())?;
+                    let img = self.footage_frame(ctx, layer, *item, pf, lt, None)?;
                     return Some(self.footage_buf(&img, pf, nc.width, nc.height));
                 }
                 // Essential Properties overrides render the nested comp with this instance's
@@ -635,7 +749,8 @@ impl<'a> Renderer<'a> {
                 Some(Buf { img: sub.comp_frame(*item, lt), offset: [0.0; 2], scale: bs })
             }
             LayerSource::Footage { item } => {
-                let it = self.project.item(*item)?;
+                let item = ctx.media_item(layer, *item);
+                let it = self.project.item(item)?;
                 let ItemKind::Footage(f) = &it.kind else { return None };
                 if !f.has_video {
                     return None;
@@ -643,7 +758,7 @@ impl<'a> Renderer<'a> {
                 // Continuously rasterised vector footage: drawn at the on-screen scale.
                 if layer.switches.collapse && is_vector_footage(f) {
                     let k = self.raster_scale(ctx, layer);
-                    if let Some(img) = self.footage.vector_frame(*item, f, k) {
+                    if let Some(img) = self.footage.vector_frame(item, f, k) {
                         let mut buf = Buf { img: (*img).clone(), offset: [0.0; 2], scale: k };
                         if let Some(c) = self.pipe.media_in(f) {
                             color::convert(&mut buf.img, &c);
@@ -653,10 +768,10 @@ impl<'a> Renderer<'a> {
                 }
                 let lt = ctx.source_time(layer);
                 // The proxy is decoded instead, at its own size, and fills the footage's frame.
-                let proxy = self.proxy_for(*item);
+                let proxy = self.proxy_for(item);
                 let pf = proxy.unwrap_or(f);
                 let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-                let img = self.footage_frame(ctx, layer, *item, pf, lt, size)?;
+                let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
             LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
@@ -714,16 +829,17 @@ impl<'a> Renderer<'a> {
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
             let i = field_rate.frame_at(t).max(0);
-            let img = self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f))?;
+            let img = cineon_frame(self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f))?, f);
             let dominant_upper = f.fields == effectcraft_project::FieldOrder::UpperFirst;
             // Upper field = even lines (0, 2, …).
             let parity = if (i % 2 == 0) == dominant_upper { 0 } else { 1 };
             return Some(Arc::new(interpret_pixels(&field_frame(&img, parity), f, self.pipe.linear_footage_space(f))));
         }
         // Interpretation is per pixel but not linear: it runs on the frame before resampling.
-        let size = size.filter(|_| !(f.invert_alpha || f.linear_light_applies()));
+        let per_pixel = f.invert_alpha || f.linear_light_applies();
+        let size = size.filter(|_| !(per_pixel || f.cineon_applies()));
         let img = self.footage_frame_raw(ctx, layer, item, f, t, size)?;
-        if f.invert_alpha || f.linear_light_applies() { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
+        if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
@@ -737,6 +853,14 @@ impl<'a> Renderer<'a> {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
+                    (f.alpha as u8).hash(&mut h);
+                    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
+                        f.premul_color.map(f32::to_bits).hash(&mut h);
+                    }
+                    if f.cineon_applies() {
+                        let c = &f.cineon;
+                        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
+                    }
                     h.finish()
                 });
                 if let (Some(c), Some(k)) = (self.cache, key)
@@ -744,8 +868,9 @@ impl<'a> Renderer<'a> {
                 {
                     return Some(Arc::new(b.img.clone()));
                 }
-                let a = self.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float);
-                let b = self.footage.frame_with(item, f, f.frame_rate.tick_of(i + 1), None, float);
+                // Log scans are converted before they blend: the conversion is not linear.
+                let a = self.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float).map(|a| cineon_frame(a, f));
+                let b = self.footage.frame_with(item, f, f.frame_rate.tick_of(i + 1), None, float).map(|b| cineon_frame(b, f));
                 if let (Some(a), Some(b)) = (a, b) {
                     let img = blend_frames(mode, &a, &b, w as f32);
                     if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
@@ -755,7 +880,7 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
-        self.footage.frame_with(item, f, t, size, float)
+        self.footage.frame_with(item, f, t, size, float).map(|img| cineon_frame(img, f))
     }
 
     /// Source → masks, clamped/quantised to the project depth.
@@ -828,6 +953,30 @@ impl<'a> Renderer<'a> {
     /// without pixels.
     pub fn layer_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
         self.source(ctx, layer)
+    }
+
+    /// A 3D model or primitive layer rendered on its own, through the comp's camera: what an
+    /// effect layer parameter reads when it references one, as After Effects, which renders 3D
+    /// layers through the active camera. The comp's pixels at this render's scale; the layer's
+    /// blend mode, track matte and video switch don't apply (a source read, not a composite —
+    /// the solo clone of a 3D track matte, see `three_d::adv`).
+    pub(crate) fn solo_3d(&self, ctx: &EvalCtx, layer: &Layer) -> Buf {
+        let s = self.opts.scale;
+        let w = ((ctx.comp.width as f64 * s).ceil() as u32).max(1);
+        let h = ((ctx.comp.height as f64 * s).ceil() as u32).max(1);
+        let mut canvas = Image::new(w, h);
+        // Outside the layer's in/out points there is nothing to read: the copy is transparent
+        // there, like any other layer reference (the 3D pipelines don't gate on the range).
+        if !layer.is_active_at(ctx.time) {
+            return Buf { img: canvas, offset: [0.0; 2], scale: s };
+        }
+        let mut solo = layer.clone();
+        solo.track_matte = None;
+        solo.blend_mode = effectcraft_color::BlendMode::Normal;
+        solo.preserve_transparency = false;
+        solo.switches.video = true;
+        three_d::compose::draw_run(self, ctx, &[&solo], &mut canvas);
+        Buf { img: canvas, offset: [0.0; 2], scale: s }
     }
 
     /// Layer pixels after source → masks → effects (no layer styles).

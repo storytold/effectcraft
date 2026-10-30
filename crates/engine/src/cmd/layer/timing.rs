@@ -18,7 +18,7 @@ pub(super) fn timing(s: &mut Session, p: &Value) -> Result<Value> {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let fd = comp.frame_duration();
         let comp_dur = comp.duration;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let shift = |l: &mut Layer, d: Tick| {
                 l.start_time += d;
                 l.in_point += d;
@@ -42,7 +42,9 @@ pub(super) fn timing(s: &mut Session, p: &Value) -> Result<Value> {
                     shift(l, d);
                 }
                 "trimInToTime" => l.in_point = t.min(l.out_point - fd),
-                "trimOutToTime" => l.out_point = t.max(l.in_point + fd),
+                // Alt+]: the Out edge lands one frame after the playhead, so its frame stays the
+                // layer's last visible one (as in After Effects), never before the In point.
+                "trimOutToTime" => l.out_point = t.max(l.in_point) + fd,
                 _ => {
                     if let Some(d) = delta {
                         shift(l, d);
@@ -82,8 +84,9 @@ pub(super) fn move_frames(s: &mut Session, p: &Value, frames: i64) -> Result<Val
 
 /// Slip edit: move a layer's source (footage or precomp) under its fixed in and out points, like
 /// dragging the source-duration bar in After Effects. `delta` in seconds or `frames`; positive
-/// moves the source later. Clamped so the source still covers the in–out span. Keyframes and
-/// layer markers are in layer time, so they travel with the source.
+/// moves the source later. Clamped so the source still covers the in–out span: the result gives
+/// the `requested` shift and, per layer, the `delta` applied and whether it was `clamped` (#2371).
+/// Keyframes and layer markers are in layer time, so they travel with the source.
 pub(super) fn slip(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -128,7 +131,10 @@ pub(super) fn slip(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })?;
-    Ok(json!({"slipped": shifts.iter().map(|(id, d)| json!({"layer": id.0, "delta": d.seconds()})).collect::<Vec<_>>()}))
+    Ok(json!({
+        "requested": delta.seconds(),
+        "slipped": shifts.iter().map(|(id, d)| json!({"layer": id.0, "delta": d.seconds(), "clamped": *d != delta})).collect::<Vec<_>>(),
+    }))
 }
 
 pub(super) fn arrange(s: &mut Session, p: &Value) -> Result<Value> {
@@ -159,14 +165,14 @@ pub(super) fn arrange(s: &mut Session, p: &Value) -> Result<Value> {
                 for i in 1..n {
                     if picked(&comp.layers[i]) && !picked(&comp.layers[i - 1]) {
                         let run_end = (i..n).find(|j| !picked(&comp.layers[*j])).unwrap_or(n);
-                        comp.layers[i - 1..run_end].rotate_left(1);
+                        comp.layers.rotate_range_left(i - 1..run_end, 1);
                     }
                 }
             } else {
                 for i in (0..n.saturating_sub(1)).rev() {
                     if picked(&comp.layers[i]) && !picked(&comp.layers[i + 1]) {
                         let run_start = (0..=i).rev().find(|j| !picked(&comp.layers[*j])).map_or(0, |j| j + 1);
-                        comp.layers[run_start..=i + 1].rotate_right(1);
+                        comp.layers.rotate_range_right(run_start..=i + 1, 1);
                     }
                 }
             }

@@ -83,7 +83,7 @@ fn track_mattes_limit_gpu_adjustments_like_the_cpu() {
             set(&mut matte, "transform/rotation", Value::Scalar(10.0));
             let mid = s.push(matte);
             let c = s.p.comp_mut(s.cid).unwrap();
-            let adj = c.layers.iter_mut().find(|l| l.switches.adjustment).unwrap();
+            let adj = c.layers.find_mut(|l| l.switches.adjustment).unwrap();
             adj.track_matte = Some(TrackMatte { layer: mid, kind });
             check(&format!("matted adjustment {kind:?} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
         }

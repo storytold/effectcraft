@@ -154,7 +154,16 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
     let s = &app.session;
     let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
     let Some(l) = comp.layer(layer) else { return d };
-    let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let ectx = effectcraft_engine::render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
         let v = inv.apply_vec(vec2(d[0], d[1]));
@@ -162,7 +171,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
     })
 }
 
-fn no_params(p: &Value) -> bool {
+pub(super) fn no_params(p: &Value) -> bool {
     p.as_object().is_none_or(|m| m.is_empty())
 }
 
@@ -217,6 +226,21 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             _ => {}
         }
     }
+    // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
+    // leaves the active composition open (it used to close the composition next to it).
+    if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
+        app.apply_dock(craft_ui::docking::Action::Close { panel: PanelKind::RenderQueue })?;
+        // The focus goes to a panel that is still there, so the next Close acts on the composition
+        // instead of on the queue that is gone.
+        let next = [PanelKind::Timeline, PanelKind::Composition, PanelKind::Project].into_iter().find(|p| panel_shown(app, *p)).unwrap_or(PanelKind::Project);
+        app.show_panel(next);
+        app.focus_panel(ctx, next);
+        // Activating a passive viewer emits OpenComp, which raises Timeline. Finish that routing
+        // before restoring the destination panel, including when they share the same tab group.
+        app.handle_events(ctx);
+        app.show_panel(next);
+        return Ok(Value::Null);
+    }
     // Edit ▸ Paste with SVG markup on the system clipboard pastes it as a shape layer (After
     // Effects 26.3). Copying in the app replaces the system clipboard with a note naming what
     // was copied, so SVG there was copied after anything copied in the app.
@@ -226,8 +250,13 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
         }
     }
-    // Clear follows panel focus, including the Edit menu and keyboard shortcut.
+    // Clear follows panel focus, including the Edit menu and keyboard shortcut. An open text
+    // edit stands down: the user is working in a composition, and the Project-panel redirect
+    // would delete it without asking when nothing uses it (#2227).
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::Project {
+        if app.session.state.text_edit.is_some() {
+            return Ok(Value::Null);
+        }
         // Through `invoke`, so deleting items that compositions use still asks first (M3.16).
         return invoke(app, ctx, "project.delete", json!({}));
     }

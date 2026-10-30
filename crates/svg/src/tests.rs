@@ -221,6 +221,18 @@ fn transforms() {
 }
 
 #[test]
+fn nested_entities_are_refused_instead_of_expanding_without_bound() {
+    // #2129: each top-level `&b;` stays under roxmltree's per-reference cap but adds 12 500
+    // nodes, so 40 KB of references expands to 5 million.
+    let dtd = format!("<!ENTITY a \"{}\"><!ENTITY b \"{}\">", "<g/>".repeat(50), "&a;".repeat(250));
+    let bomb = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [{dtd}]><svg xmlns=\"http://www.w3.org/2000/svg\">{}</svg>", "&b;".repeat(400));
+    assert!(matches!(crate::parse(bomb.as_bytes()), Err(crate::Error::Xml(_))));
+    // An ordinary entity, as Illustrator declares them, still parses.
+    let ok = "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY w \"40\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"&w;\" height=\"5\"/></svg>";
+    assert!(crate::parse(ok.as_bytes()).is_ok());
+}
+
+#[test]
 fn deep_nesting_errors_instead_of_overflowing_the_stack() {
     // 100 000 nested groups overflowed the XML parser's stack and aborted the process.
     let deep = |n: usize| format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{}<rect width=\"5\" height=\"5\"/>{}</svg>", "<g>".repeat(n), "</g>".repeat(n));
@@ -421,4 +433,16 @@ fn font_size_percentage_resolves_against_the_parent_font_size() {
         assert_eq!(shapes.len(), 1);
         assert!(matches!(shapes[0].2.geom, Geom::Rect { w, .. } if w == expected), "{body}: {:?}", shapes[0].2.geom);
     }
+}
+
+#[test]
+fn at_rule_blocks_are_skipped_by_brace_depth() {
+    let mut sheet = StyleSheet::default();
+    parse_css("@media print { .a{fill:#ff0000} .b{fill:#0000ff} } .c{fill:red}", &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 1);
+    assert_eq!(sheet.rules[0].classes, vec!["c".to_string()]);
+    let mut sheet = StyleSheet::default();
+    parse_css("@media x { @supports y { .c{} } .d{} } .e{fill:red}", &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 1);
+    assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
 }

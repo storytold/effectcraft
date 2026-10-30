@@ -565,6 +565,34 @@ fn space_item(glyphs: &mut [ShapedGlyph], style: &TextStyle, text: &str, para_st
     }
 }
 
+/// After Effects' first-baseline offset of paragraph (box) text for a face at nominal size
+/// `px`: the height of its lowercase `d`, in whole thousandths of an em. Measured in After
+/// Effects 2026 (case 818): the first baseline sits 69.50 px below the box top for Times New
+/// Roman at 100 px (its `d` is 1422/2048 em, 694.3 thousandths, rounded 695) and 71.60 px for
+/// Arial (1466/2048, 715.8, rounded 716), at 50 px half of that; superscript text keeps the
+/// line where normal text puts it and only raises its glyphs. `None` without a `d` outline.
+fn first_ascent(face: FaceId, px: f32) -> Option<f32> {
+    let f = fonts::face(face);
+    let gid = f.glyph('d')?;
+    let units = crate::outline_units(face, gid)?;
+    let top = kurbo::Shape::bounding_box(&*units).y1 as f32;
+    let em = (top / f.units_per_em() * 1000.0).round() / 1000.0;
+    plausible_first(em, px, f.metrics(px).ascent)
+}
+
+/// A `d` at least this fraction of the font ascent is a Latin lowercase ascender; a shorter one
+/// (a symbol or icon font's `d`) would put the first baseline almost at the box top, so the font
+/// ascent is used instead (the rule before the `d` height).
+const MIN_D_OF_ASCENT: f32 = 0.3;
+
+/// The first baseline `em * px` below the box top, if `em` (the `d` height in em) is plausible:
+/// finite, positive, under 4 em and at least [`MIN_D_OF_ASCENT`] of the font `ascent` (px).
+fn plausible_first(em: f32, px: f32, ascent: f32) -> Option<f32> {
+    let h = em * px;
+    let tall_enough = !(ascent.is_finite() && ascent > 0.0) || h >= MIN_D_OF_ASCENT * ascent;
+    (h.is_finite() && h > 0.0 && em < 4.0 && tall_enough).then_some(h)
+}
+
 struct ParaLine {
     range: Range<usize>,
     glyphs: Vec<Glyph>,
@@ -575,6 +603,9 @@ struct ParaLine {
     hang: (f32, f32),
     ascent: f32,
     descent: f32,
+    /// Where a box's first line puts its baseline below the box top ([`first_ascent`] of the
+    /// line's styles at their nominal size; the font ascent where a face has no `d`).
+    first: f32,
     /// Line advance (largest leading on the line).
     advance: f32,
     align: Align,
@@ -598,20 +629,25 @@ fn run_at(runs: &[(Range<usize>, TextStyle)], b: usize) -> usize {
 
 /// Lay out one paragraph (no newlines) whose text starts at byte `base` of the whole string.
 /// Margins (left, right) of a paragraph's first or later lines.
-fn margins_for(para: &ParagraphStyle, first: bool) -> (f32, f32) {
+/// `rtl` is the resolved paragraph direction (an unset direction follows the text).
+fn margins_for(para: &ParagraphStyle, rtl: bool, first: bool) -> (f32, f32) {
     let fi = if first { para.indent_first } else { 0.0 };
-    if para.rtl == Some(true) { (para.indent_end, para.indent_start + fi) } else { (para.indent_start + fi, para.indent_end) }
+    if rtl { (para.indent_end, para.indent_start + fi) } else { (para.indent_start + fi, para.indent_end) }
 }
 
 /// The width a line may fill (`None` for point text).
-fn avail_for(para: &ParagraphStyle, width: Option<f32>, first: bool) -> Option<f32> {
-    let (l, r) = margins_for(para, first);
+fn avail_for(para: &ParagraphStyle, rtl: bool, width: Option<f32>, first: bool) -> Option<f32> {
+    let (l, r) = margins_for(para, rtl, first);
     width.map(|w| (w - l - r).max(1.0))
 }
 
 /// The alignment of a line, justified lines that cannot stretch falling back to `justify_last`.
-fn align_for(para: &ParagraphStyle, width: Option<f32>, last: bool) -> Align {
-    if (last || width.is_none()) && para.align == Align::Justify {
+fn align_for(para: &ParagraphStyle, rtl: bool, width: Option<f32>, last: bool) -> Align {
+    if rtl && width.is_none() && para.align == Align::Justify {
+        // Right-to-left point text with a justified paragraph sits flush at its start, the
+        // right (After Effects 2026, every justify code; left-to-right not measured).
+        Align::Right
+    } else if (last || width.is_none()) && para.align == Align::Justify {
         if width.is_none() && para.justify_last == Align::Justify { Align::Left } else { para.justify_last }
     } else {
         para.align
@@ -620,6 +656,12 @@ fn align_for(para: &ParagraphStyle, width: Option<f32>, last: bool) -> Align {
 
 fn style_metrics(primaries: &[Resolved], runs: &[(Range<usize>, TextStyle)], si: usize) -> VMetrics {
     fonts::face(primaries[si].face).metrics(runs[si].1.glyph_size())
+}
+
+/// The baseline of a box's first line for style run `si`: the `d` height, else the font ascent.
+fn style_first(primaries: &[Resolved], runs: &[(Range<usize>, TextStyle)], si: usize) -> f32 {
+    let st = &runs[si].1;
+    first_ascent(primaries[si].face, st.size).unwrap_or_else(|| fonts::face(primaries[si].face).metrics(st.size).ascent)
 }
 
 /// A char's shaping inputs: (byte, char, shaped char, face, rtl, form, run).
@@ -719,7 +761,7 @@ impl<'a> Para<'a> {
     }
 
     fn line_avail(&self, line: usize) -> f32 {
-        avail_for(self.para, self.width, line == 0).unwrap_or(f32::MAX)
+        avail_for(self.para, self.base_rtl, self.width, line == 0).unwrap_or(f32::MAX)
     }
 
     /// The byte ranges of the lines, for the wrap width.
@@ -736,8 +778,11 @@ impl<'a> Para<'a> {
         ranges
     }
 
-    /// Minimises the summed squared slack of every line but the last.
+    /// Minimises the summed squared slack of every line but the last; with Justify All the last
+    /// line is stretched too, so its slack counts (After Effects then balances the lines: 4 / 4 / 4
+    /// words where the other modes break 6 / 6 / 1).
     fn optimal_breaks(&self, opps: &[usize]) -> Vec<Range<usize>> {
+        let last_counts = self.para.align == Align::Justify && self.para.justify_last == Align::Justify;
         let nodes: Vec<usize> = std::iter::once(0).chain(opps.iter().copied()).collect();
         let m = nodes.len();
         let mut best = vec![(f32::INFINITY, 0usize); m];
@@ -757,7 +802,7 @@ impl<'a> Para<'a> {
                 let slack = maxw - w;
                 let cost = if over {
                     1e12 + w
-                } else if j == m - 1 {
+                } else if j == m - 1 && !last_counts {
                     0.0
                 } else {
                     slack * slack
@@ -802,8 +847,8 @@ impl<'a> Para<'a> {
 
     /// The line over byte range `r`: the `li`-th of the paragraph, `last` if it is the final one.
     fn place_line(&self, li: usize, r: Range<usize>, last: bool) -> ParaLine {
-        let align = align_for(self.para, self.width, last);
-        let avail = avail_for(self.para, self.width, li == 0);
+        let align = align_for(self.para, self.base_rtl, self.width, last);
+        let avail = avail_for(self.para, self.base_rtl, self.width, li == 0);
         let (ce, tw) = self.trailing_ws(&r);
         let hang = self.hang_of(&r, ce);
         let content = self.range_w(r.start..ce);
@@ -819,7 +864,7 @@ impl<'a> Para<'a> {
         }
         let placed = self.place_glyphs(&r, space_extra, ce);
         let carets = self.carets(&r, &placed.extents, placed.pen);
-        let (asc, desc, adv) = self.line_metrics(&r, &placed.glyphs);
+        let (asc, desc, adv, first) = self.line_metrics(&r, &placed.glyphs);
         let content_w = if space_extra > 0.0 { avail.map_or(content, |a| a + hang.0 + hang.1) } else { content };
         ParaLine {
             range: self.base + r.start..self.base + r.end,
@@ -830,10 +875,11 @@ impl<'a> Para<'a> {
             hang,
             ascent: asc,
             descent: desc,
+            first,
             advance: adv,
             align,
             avail,
-            margins: margins_for(self.para, li == 0),
+            margins: margins_for(self.para, self.base_rtl, li == 0),
             underline: placed.underline,
         }
     }
@@ -938,8 +984,8 @@ impl<'a> Para<'a> {
     }
 
     /// Ascent, descent and advance of the line: the tallest face and the largest leading on it.
-    fn line_metrics(&self, r: &Range<usize>, glyphs: &[Glyph]) -> (f32, f32, f32) {
-        let (mut asc, mut desc, mut adv) = (0.0f32, 0.0f32, 0.0f32);
+    fn line_metrics(&self, r: &Range<usize>, glyphs: &[Glyph]) -> (f32, f32, f32, f32) {
+        let (mut asc, mut desc, mut adv, mut first) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         let char_start = self.chars.partition_point(|c| c.0 < r.start);
         let char_end = self.chars.partition_point(|c| c.0 < r.end);
         let mut seen: Vec<usize> = self.chars[char_start..char_end].iter().map(|c| c.6).collect();
@@ -954,6 +1000,7 @@ impl<'a> Para<'a> {
             asc = asc.max(m.ascent + rise.max(0.0));
             desc = desc.max(m.descent - rise.min(0.0));
             adv = adv.max(self.runs[si].1.line_advance());
+            first = first.max(style_first(self.primaries, self.runs, si));
         }
         for g in glyphs {
             if g.face != self.primaries[g.run].face {
@@ -962,7 +1009,7 @@ impl<'a> Para<'a> {
                 desc = desc.max(m.descent);
             }
         }
-        (asc, desc, adv)
+        (asc, desc, adv, first)
     }
 }
 
@@ -1037,6 +1084,8 @@ fn paragraph(
     if text.is_empty() {
         let si = run_at(runs, base);
         let pm = style_metrics(primaries, runs, si);
+        // No text to resolve a direction from: the explicit one.
+        let rtl = para.rtl == Some(true);
         return vec![ParaLine {
             range: base..base,
             glyphs: vec![],
@@ -1047,9 +1096,10 @@ fn paragraph(
             ascent: pm.ascent,
             descent: pm.descent,
             advance: runs[si].1.line_advance(),
-            align: align_for(para, width, true),
-            avail: avail_for(para, width, true),
-            margins: margins_for(para, true),
+            first: style_first(primaries, runs, si),
+            align: align_for(para, rtl, width, true),
+            avail: avail_for(para, rtl, width, true),
+            margins: margins_for(para, rtl, true),
             underline: None,
         }];
     }
@@ -1120,7 +1170,10 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     for (i, (pi, pl)) in plines.into_iter().enumerate() {
         let para = para_at(pi);
         if i == 0 {
-            baseline = if width.is_some() { pl.ascent } else { 0.0 };
+            // Vertical type keeps its first column at the font ascent (not measured in AE).
+            let vertical = runs.get(run_at(runs, pl.range.start)).is_some_and(|r| r.1.vertical)
+                || runs.iter().any(|r| r.1.vertical && r.0.start < pl.range.end && r.0.end > pl.range.start);
+            baseline = if width.is_some() { if vertical { pl.ascent } else { pl.first } } else { 0.0 };
         } else {
             let prev_para = lay.lines.last().map_or(pi, |l| l.para);
             let mut adv = pl.advance + para.leading;

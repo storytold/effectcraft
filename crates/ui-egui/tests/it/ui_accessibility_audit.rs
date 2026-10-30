@@ -55,7 +55,7 @@ const BASELINE: &[(&str, usize, usize)] = &[
     ("Timeline:default", 89, 42),
     ("Audio:default", 4, 2),
     ("Properties:default", 31, 15),
-    ("Character:default", 42, 21),
+    ("Character:default", 46, 22),
     ("Paragraph:default", 26, 13),
     ("Align:default", 12, 0),
     ("Tracker:default", 11, 3),
@@ -225,7 +225,7 @@ fn audit(h: &Harness<'_, EffectcraftApp>, scenario: &str, scope: Rect, since: Op
         }
         let actionable = a.data().supports_action(Action::Click) || a.data().supports_action(Action::Focus);
         let control = CONTROL_ROLES.contains(&role);
-        if !control && !(actionable && matches!(role, Role::Unknown | Role::GenericContainer)) {
+        if !(control || (actionable && matches!(role, Role::Unknown | Role::GenericContainer))) {
             continue;
         }
         let name = a.label().unwrap_or_default();

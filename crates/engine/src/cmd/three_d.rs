@@ -12,6 +12,7 @@ use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
 use super::layer::{color_p, insert_layer};
+use super::model3d::{report_switch, use_advanced_3d};
 use super::{CommandSpec, b_p, bad, comp_id, f_p, has_comp, layer_mut, layer_p, merge_p, str_p, time_p};
 use crate::{EngineError, Result, Session, cmd, query};
 
@@ -227,12 +228,17 @@ fn new_light(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let name = str_p(p, "name").unwrap_or("Light 1").to_string();
     let t = time_p(s, p, Some(&comp));
-    let id = s.edit("New Light", None, |proj, st| {
+    // Only the Advanced 3D renderer lights with Environment lights, so adding one switches a
+    // Classic 3D comp to it, like After Effects (inside the adding edit: one undo step).
+    let env = kind == LightKind::Environment;
+    let (id, switched) = s.edit("New Light", None, |proj, st| {
         let mut l = build::layer(proj, &comp, &name, LayerSource::Light { kind }, (comp.width, comp.height), None);
         apply_light(&mut l, p, t, "layer.newLight")?;
-        insert_layer(proj, st, cid, l)
+        let id = insert_layer(proj, st, cid, l)?;
+        Ok((id, if env { use_advanced_3d(proj, cid)? } else { false }))
     })?;
-    Ok(json!({"layer": id.0}))
+    report_switch(s, cid, switched, "which Environment lights need to light the scene");
+    Ok(json!({"layer": id.0, "advanced3d": env}))
 }
 
 fn light_settings(s: &mut Session, p: &Value) -> Result<Value> {
@@ -248,7 +254,7 @@ fn light_settings(s: &mut Session, p: &Value) -> Result<Value> {
         ),
         None => None,
     };
-    s.edit("Light Settings", None, |proj, _| {
+    let switched = s.edit("Light Settings", None, |proj, _| {
         let old = proj.comp(cid).and_then(|c| c.layer(lid)).cloned().ok_or(EngineError::NoComp)?;
         let mut l = old.clone();
         if let Some(k) = kind
@@ -288,9 +294,14 @@ fn light_settings(s: &mut Session, p: &Value) -> Result<Value> {
             l.name = n.clone();
         }
         apply_light(&mut l, p, t, "layer.lightSettings")?;
+        // A light that becomes an Environment light switches a Classic 3D comp to Advanced 3D,
+        // like adding one does; editing one that already is leaves the renderer to the user.
+        let was_env = matches!(old.source, LayerSource::Light { kind: LightKind::Environment });
+        let is_env = matches!(l.source, LayerSource::Light { kind: LightKind::Environment });
         *layer_mut(proj, cid, lid)? = l;
-        Ok(())
+        Ok(if !was_env && is_env { use_advanced_3d(proj, cid)? } else { false })
     })?;
+    report_switch(s, cid, switched, "which Environment lights need to light the scene");
     Ok(Value::Null)
 }
 
@@ -413,7 +424,8 @@ fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     let (w, h) = (comp.width as f64, comp.height as f64);
     let vs = s.state.views3d.get(&cid).cloned().unwrap_or_default();
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let cam = vs.override_camera(w, h).unwrap_or_else(|| camera::active_camera(&ctx));
     let f = cam.forward();
     let lights: Vec<Value> = comp
@@ -532,7 +544,7 @@ fn auto_orient(s: &mut Session, p: &Value) -> Result<Value> {
     };
     s.edit("Auto-Orient", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let rig = l.is_camera() || l.is_light();
             let ok = match mode {
                 AutoOrient::Off | AutoOrient::AlongPath => true,
@@ -555,7 +567,8 @@ fn auto_orient(s: &mut Session, p: &Value) -> Result<Value> {
 /// through each layer's world matrix; cameras and lights contribute their position).
 fn layer_points(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<Vec3> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let mut out = vec![];
     for l in comp.layers.iter().filter(|l| ids.contains(&l.id)) {
         let m = ctx.world_matrix(l);
@@ -681,7 +694,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Light...",
             ["Layer", "New"],
             Some("Cmd+Alt+Shift+L"),
-            "{kind?: Parallel|Spot|Point|Ambient|Environment (default Spot; Environment lights and reflects from an equirectangular image layer: prop.set its lightOptions/source to that layer's id, or leave it empty for the comp's Environment Layer, see layer.environment), name?, color?, intensity?, coneAngle?, coneFeather?, falloff?: None|Smooth|Inverse Square Clamped, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position? [x,y,z], poi? [x,y,z]}",
+            "{kind?: Parallel|Spot|Point|Ambient|Environment (default Spot; Environment lights and reflects from an equirectangular image layer: prop.set its lightOptions/source to that layer's id, or leave it empty for the comp's Environment Layer or a flat default environment of its colour and intensity, see layer.environment; an Environment light switches a Classic 3D comp to Advanced 3D), name?, color?, intensity?, coneAngle?, coneFeather?, falloff?: None|Smooth|Inverse Square Clamped, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position? [x,y,z], poi? [x,y,z]}",
             has_comp,
             new_light
         ),
@@ -708,7 +721,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Light Settings...",
             [],
             None,
-            "{layer?, name?, kind?: Parallel|Spot|Point|Ambient|Environment, color?, intensity?, coneAngle?, coneFeather?, falloff?, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position?, poi?}",
+            "{layer?, name?, kind?: Parallel|Spot|Point|Ambient|Environment (changing to Environment switches a Classic 3D comp to Advanced 3D), color?, intensity?, coneAngle?, coneFeather?, falloff?, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position?, poi?}",
             has_comp,
             light_settings
         ),

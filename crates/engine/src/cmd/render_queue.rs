@@ -203,7 +203,7 @@ fn apply_om_template(om: &mut OutputModule, t: &OutputModule) {
 }
 
 /// The `format` parameter's values.
-const FORMATS: &str = "format: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|gif|wav|aiff";
+const FORMATS: &str = "format: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff";
 
 /// `channels` (refusing RGBA where the format has no alpha) and `color`/`alphaMode`.
 fn apply_channels_and_alpha(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
@@ -550,6 +550,9 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         object.remove("template");
     }
     apply_output(&mut it.output, &templates, s.state.region_of_interest, &output_params, "renderQueue.add")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     if let Some(l) = enum_p(p, "log", "renderQueue.add", RenderLog::parse, "errorsOnly|plusSettings|plusPerFrameInfo")? {
         it.log = l;
     }
@@ -619,7 +622,7 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         let (w, h) = item.settings.output_size(comp);
         let mut crop_only = om.clone();
         crop_only.resize.enabled = false;
-        let (cw, ch) = crop_only.frame_size(w, h, item.settings.resolution.clamp(0.01, 4.0));
+        let (cw, ch) = crop_only.frame_size(w, h, item.settings.effective_scale(comp));
         om.resize.width = ((om.resize.height as f64 * cw as f64 / ch as f64).round() as u32).clamp(1, 30_000);
     }
     let post = match str_p(p, "postRenderAction") {
@@ -696,8 +699,18 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     {
         log::warn!("{e}");
     }
+    let queued: std::collections::HashSet<u64> = s.project.render_queue.iter().filter(|i| i.is_queued()).map(|i| i.id).collect();
     let ids = s.start_render(wait).map_err(EngineError::Other)?;
-    let items: Vec<Value> = s.project.render_queue.iter().enumerate().filter(|(_, i)| ids.contains(&i.id)).map(|(k, i)| item_json(s, i, k)).collect();
+    // Source refusals fail before the exporter starts. Report them just like encoding
+    // failures, so CLI/MCP callers do not mistake a partly refused queue for full success.
+    let items: Vec<Value> = s
+        .project
+        .render_queue
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| ids.contains(&i.id) || (queued.contains(&i.id) && matches!(i.status, RenderStatus::Failed(_))))
+        .map(|(k, i)| item_json(s, i, k))
+        .collect();
     Ok(json!({"rendering": s.is_rendering(), "items": items}))
 }
 
@@ -788,6 +801,9 @@ fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
     it.output = templates.default_output_module(TemplateSlot::PreRender);
     it.output.output = "[compName]_prerender.[fileExtension]".into();
     apply_output(&mut it.output, &templates, s.state.region_of_interest, p, "render.preRender")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     it.post_render = PostRenderAction::ImportAndReplace;
     let id = s.edit("Pre-render", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -813,6 +829,9 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
     let mut item = RenderQueueItem::new(0, cid);
     item.output = OutputModule::for_format(format);
     item.output.output = path.clone();
+    if let Some(refusal) = s.check_outputs(&[vec![(item.clone(), path.clone())]]).first() {
+        return Err(EngineError::Other(refusal.reason.clone()));
+    }
     let job = crate::ExportJob {
         project: &s.project,
         footage: s.footage.as_ref(),
@@ -1017,7 +1036,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add to Render Queue",
             ["Composition"],
             ["Cmd+M", "Cmd+Shift+/"],
-            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
+            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
             can_add,
             add
         ),
@@ -1037,7 +1056,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Output Module Settings...",
             [],
             None,
-            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
+            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
             has_items,
             set_output_module
         ),

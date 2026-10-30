@@ -7,7 +7,7 @@ use std::sync::Arc;
 use effectcraft_geom::{Vec3, vec3};
 use effectcraft_keyframe::Value as KV;
 use effectcraft_project::{Footage, FootageKind, GroupKind, ItemId, Layer, LayerId, LayerSource, LightKind, Project};
-use effectcraft_render::three_d::camera::layer_frame;
+use effectcraft_render::three_d::camera::{is_two_node, layer_frame};
 use effectcraft_render::{EvalCtx, FootageSource, RenderOpts};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
@@ -40,7 +40,7 @@ fn close3(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
 fn frame(s: &Session, id: u64) -> (Vec3, Vec3) {
     let c = cid(s);
     let comp = s.project.comp(c).unwrap();
-    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &[], media_overrides: &[] };
     let (e, f, _) = layer_frame(&ctx, comp.layer(LayerId(id)).unwrap());
     (e, f)
 }
@@ -217,7 +217,188 @@ fn control_light_with_camera_follows_and_releases() {
     assert!(s.execute("light.controlWithCamera", json!({"layers": [cam]})).is_err());
 }
 
+/// Parenting keeps a camera where it is (After Effects' Parent & Link): Position and Point of
+/// Interest are re-expressed in the null's space, so the frame does not move.
+#[test]
+fn parented_camera_keeps_its_frame_under_an_offset_null() {
+    let mut s = session();
+    let cam = camera(&mut s);
+    let (eye0, f0) = frame(&s, cam);
+    let nul = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/position", "value": [100, 60, 0]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [cam], "parent": nul})).unwrap();
+    let (eye1, f1) = frame(&s, cam);
+    assert!((eye1 - eye0).length() < 1e-6 && (f1 - f0).length() < 1e-6, "{eye0:?} {eye1:?}");
+    // The null's origin is Position minus its default anchor (50, 50): (50, 10) in the comp.
+    let c = layer_in(&s, cid(&s), cam);
+    assert!(close3(v3(&c, "transform/position"), [270.0, 170.0, -800.0], 1e-6), "{:?}", v3(&c, "transform/position"));
+    assert!(close3(v3(&c, "transform/poi"), [270.0, 170.0, 0.0], 1e-6), "{:?}", v3(&c, "transform/poi"));
+    // Moving the null carries the camera and keeps its aim.
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/position", "value": [140, 90, 0]})).unwrap();
+    let (eye2, f2) = frame(&s, cam);
+    assert!((eye2 - (eye0 + vec3(40.0, 30.0, 0.0))).length() < 1e-6, "{eye2:?}");
+    assert!((f2 - f0).length() < 1e-6, "{f2:?}");
+}
+
+/// World (eye, forward, down) of a layer in the active comp at time `t`.
+fn frame_at(s: &Session, id: u64, t: Tick) -> (Vec3, Vec3, Vec3) {
+    let c = cid(s);
+    let comp = s.project.comp(c).unwrap();
+    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: t, expr: None, footage: None, property_overrides: &[], media_overrides: &[] };
+    layer_frame(&ctx, comp.layer(LayerId(id)).unwrap())
+}
+
+/// Whether two frames agree on eye, forward and down.
+fn frames_match(a: (Vec3, Vec3, Vec3), b: (Vec3, Vec3, Vec3)) -> bool {
+    (a.0 - b.0).length() < 1e-6 && (a.1 - b.1).length() < 1e-6 && (a.2 - b.2).length() < 1e-6
+}
+
+/// A 3D null off-centre in the comp, with an Orientation and a Z rotation.
+fn rotated_null(s: &mut Session, orientation: [f64; 3], turn: f64) -> u64 {
+    let nul = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [nul], "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/position", "value": [100, 60, 40]})).unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/orientation", "value": orientation})).unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/rotation", "value": turn})).unwrap();
+    nul
+}
+
+/// A two-node camera under a rotated null keeps its eye, aim and roll: its Orientation is
+/// re-expressed against the new aim, so Up does not drift.
+#[test]
+fn two_node_camera_under_rotated_null_keeps_its_roll() {
+    let mut s = session();
+    let cam = camera(&mut s);
+    s.execute("prop.set", json!({"layer": cam, "path": "transform/rotation", "value": 25})).unwrap();
+    assert!(is_two_node(&layer_in(&s, cid(&s), cam)));
+    let before = frame_at(&s, cam, Tick::ZERO);
+    let nul = rotated_null(&mut s, [20.0, -35.0, 60.0], 30.0);
+    s.execute("layer.setParent", json!({"layers": [cam], "parent": nul})).unwrap();
+    let after = frame_at(&s, cam, Tick::ZERO);
+    assert!(frames_match(before, after), "{before:?} {after:?}");
+}
+
+#[test]
+fn parented_point_light_keeps_its_direction_under_a_rotated_null() {
+    let mut s = session();
+    let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": light, "path": "transform/orientation", "value": [30, 0, 0]})).unwrap();
+    let (eye0, f0) = frame(&s, light);
+    let nul = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/position", "value": [100, 60, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/rotation", "value": 30})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
+    let (eye1, f1) = frame(&s, light);
+    assert!((eye1 - eye0).length() < 1e-6 && (f1 - f0).length() < 1e-6, "{eye0:?} {eye1:?} {f0:?} {f1:?}");
+}
+
+/// Keyed Orientation under a Z-only turn is shifted exactly, so the light keeps its direction at
+/// every time, between the keys too.
+#[test]
+fn keyed_orientation_under_a_z_turn_keeps_the_direction_at_every_time() {
+    let mut s = session();
+    let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+    for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.0, json!([5.0, 18.0, 14.0]))] {
+        s.execute("prop.addKey", json!({"layer": light, "path": "transform/orientation", "time": time, "value": value})).unwrap();
+    }
+    let times = [0.0, 0.25, 0.5, 0.75, 1.0].map(Tick::from_seconds_f64);
+    let before = times.map(|t| frame_at(&s, light, t));
+    let nul = rotated_null(&mut s, [0.0, 0.0, 0.0], 30.0);
+    s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
+    for (t, b) in times.into_iter().zip(before) {
+        assert!(frames_match(b, frame_at(&s, light, t)), "a Z-only turn keeps the light's direction");
+    }
+}
+
+/// Under a tilted null the keys alone cannot follow (Euler angles are blended between them), so keys are
+/// added between them: the light keeps its direction within a small angle at every time.
+#[test]
+fn keyed_orientation_under_a_tilted_null_follows_between_the_keys() {
+    {
+        let mut s = session();
+        let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+        for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.5, json!([50.0, 118.0, 74.0]))] {
+            s.execute("prop.addKey", json!({"layer": light, "path": "transform/orientation", "time": time, "value": value})).unwrap();
+        }
+        let times = [0.0, 0.2, 0.5, 0.9, 1.3, 1.5].map(Tick::from_seconds_f64);
+        let before = times.map(|t| frame_at(&s, light, t));
+        let nul = rotated_null(&mut s, [20.0, -35.0, 60.0], 30.0);
+        s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
+        for (t, b) in times.into_iter().zip(before) {
+            let a = frame_at(&s, light, t);
+            // 0.05 degrees is about 9e-4 of a radian on a unit vector.
+            assert!((a.0 - b.0).length() < 1e-6 && (a.1 - b.1).length() < 2e-3, "at {t:?}: {:?} vs {:?}", a.1, b.1);
+        }
+        assert!(layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().keys.len() > 2, "keys were added between the two");
+    }
+}
+
+/// A one-node light parented under a mirrored null (Z scale -100%) keeps the Position and
+/// Orientation it was authored with: it has no Scale to carry the mirror, so none of it is
+/// compensated rather than reversing its frame (a half-compensated light would point backwards).
+#[test]
+fn one_node_light_under_a_mirrored_null_keeps_its_authored_values() {
+    let mut s = session();
+    let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": light, "path": "transform/orientation", "value": [30, 0, 0]})).unwrap();
+    let before = layer_in(&s, cid(&s), light);
+    let nul = rotated_null(&mut s, [0.0, 0.0, 0.0], 0.0);
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/scale", "value": [100, 100, -100]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
+    let after = layer_in(&s, cid(&s), light);
+    assert_eq!(after.parent, Some(LayerId(nul)));
+    assert_eq!(v3(&after, "transform/position"), v3(&before, "transform/position"));
+    assert_eq!(v3(&after, "transform/orientation"), v3(&before, "transform/orientation"));
+}
+
+/// The cap on keys added by baking is for the whole Orientation property, not for each segment:
+/// many strongly eased segments under a tilted parent stay within it.
+#[test]
+fn baked_orientation_keys_are_capped_across_the_whole_property() {
+    let mut s = session();
+    let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+    let count = 120;
+    for i in 0..count {
+        let swing = if i % 2 == 0 { json!([0.0, 0.0, 0.0]) } else { json!([170.0, 60.0, 120.0]) };
+        s.execute("prop.addKey", json!({"layer": light, "path": "transform/orientation", "time": i as f64 * 0.05, "value": swing})).unwrap();
+    }
+    let uid = layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().uid;
+    let keys: Vec<_> = (0..count).map(|i| json!({"layer": light, "prop": uid, "time": i as f64 * 0.05})).collect();
+    s.execute("keys.select", json!({"keys": keys})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    let nul = rotated_null(&mut s, [20.0, -35.0, 60.0], 30.0);
+    s.execute("layer.setParent", json!({"layers": [light], "parent": nul})).unwrap();
+    let n = layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().keys.len();
+    assert!(n <= 4096, "{n} keys: the cap is for the property, not per segment");
+    // the segments the cap left unchecked keep their authored easing instead of turning into straight blends
+    let orientation = layer_in(&s, cid(&s), light);
+    let keys = &orientation.props.prop("transform/orientation").unwrap().keys;
+    let last = keys.iter().rev().nth(1).expect("the penultimate key");
+    assert_ne!(last.out_interp, effectcraft_keyframe::Interp::Linear, "the last segment keeps its authored easing");
+}
+
 // ---------------------------------------------------------------- from 3D model
+
+/// Easy Ease agrees with a straight blend at the midpoint, but not at the quarter points.
+#[test]
+fn eased_orientation_under_x_parent_keeps_motion_between_keys() {
+    let mut s = session();
+    let light = s.execute("layer.newLight", json!({"kind": "Point", "position": [320, 180, -500]})).unwrap()["layer"].as_u64().unwrap();
+    for (time, value) in [(0.0, json!([0.0, 0.0, 0.0])), (1.0, json!([90.0, 0.0, 0.0]))] {
+        s.execute("prop.addKey", json!({"layer": light, "path": "transform/orientation", "time": time, "value": value})).unwrap();
+    }
+    let uid = layer_in(&s, cid(&s), light).props.prop("transform/orientation").unwrap().uid;
+    s.execute("keys.select", json!({"keys": [{"layer": light, "prop": uid, "time": 0.0}, {"layer": light, "prop": uid, "time": 1.0}]})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    let times: Vec<_> = (0..=100).map(|i| Tick::from_seconds_f64(i as f64 / 100.0)).collect();
+    let before: Vec<_> = times.iter().map(|t| frame_at(&s, light, *t)).collect();
+    let parent = rotated_null(&mut s, [30.0, 0.0, 0.0], 0.0);
+    s.execute("layer.setParent", json!({"layers": [light], "parent": parent})).unwrap();
+    for (t, b) in times.into_iter().zip(before) {
+        let a = frame_at(&s, light, t);
+        assert!((a.0 - b.0).length() < 1e-6 && (a.1 - b.1).length() < 1e-3, "at {t:?}: {:?} vs {:?}", a.1, b.1);
+    }
+}
 
 struct DiskModels;
 

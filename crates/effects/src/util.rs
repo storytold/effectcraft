@@ -6,6 +6,10 @@ use effectcraft_color::{luminance, rgb_to_hsl};
 use effectcraft_raster::{Image, Px};
 use rayon::prelude::*;
 
+/// Below this many pixels, `Plane::transpose` and `Plane::map_rows` run on the calling thread:
+/// the rayon dispatch costs more than the work on small crops (the Match Grain sample boxes).
+const PAR_MIN: usize = 4096;
+
 /// A single-channel `f32` image (row-major).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Plane {
@@ -62,6 +66,15 @@ impl Plane {
     pub fn transpose(&self) -> Plane {
         let (w, h) = (self.w, self.h);
         let mut out = Plane::new(h, w);
+        if w.saturating_mul(h) < PAR_MIN {
+            // Small planes: the rayon dispatch costs more than the copy itself.
+            for (x, col) in out.data.chunks_mut(h.max(1)).enumerate() {
+                for y in 0..h {
+                    col[y] = self.data[y * w + x];
+                }
+            }
+            return out;
+        }
         out.data.par_chunks_mut(h.max(1)).enumerate().for_each(|(x, col)| {
             for y in 0..h {
                 col[y] = self.data[y * w + x];
@@ -73,6 +86,11 @@ impl Plane {
     pub fn map_rows(&self, f: impl Fn(&[f32], &mut [f32]) + Sync) -> Plane {
         let mut out = Plane::new(self.w, self.h);
         if self.w == 0 {
+            return out;
+        }
+        if self.w.saturating_mul(self.h) < PAR_MIN {
+            // Small planes: the rayon dispatch costs more than the rows themselves.
+            out.data.chunks_mut(self.w).zip(self.data.chunks(self.w)).for_each(|(o, s)| f(s, o));
             return out;
         }
         out.data.par_chunks_mut(self.w).zip(self.data.par_chunks(self.w)).for_each(|(o, s)| f(s, o));
@@ -534,14 +552,29 @@ impl<S: Clone> SimCache<S> {
 
     /// State after `target` steps. `init` builds step 0; `step(state, i)` advances from step
     /// `i` to `i + 1`.
-    pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, mut step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
+    pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
+        self.run_where(key, target, init, step, |_, _| true)
+    }
+
+    /// [`SimCache::run`] for a simulation whose steps also depend on inputs outside `key` (a
+    /// parameter's values over time): a checkpoint after `s` steps is only resumed from when
+    /// `valid(s, state)` says it was reached with the same inputs. Fresh checkpoints replace
+    /// those at the same step.
+    pub fn run_where(
+        &self,
+        key: u64,
+        target: u64,
+        init: impl FnOnce() -> S,
+        mut step: impl FnMut(&mut S, u64),
+        valid: impl Fn(u64, &S) -> bool,
+    ) -> std::sync::Arc<S> {
         use std::sync::Arc;
         let start = {
             let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
             g.iter_mut().find(|e| e.key == key).and_then(|e| {
                 e.used = tick;
-                e.checkpoints.iter().filter(|(s, _)| *s <= target).max_by_key(|(s, _)| *s).map(|(s, st)| (*s, st.clone()))
+                e.checkpoints.iter().filter(|(s, st)| *s <= target && valid(*s, st)).max_by_key(|(s, _)| *s).map(|(s, st)| (*s, st.clone()))
             })
         };
         let had_start = start.is_some();
@@ -579,9 +612,8 @@ impl<S: Clone> SimCache<S> {
         let e = &mut g[idx];
         e.used = tick;
         for (s, st) in fresh {
-            if !e.checkpoints.iter().any(|(c, _)| *c == s) {
-                e.checkpoints.push((s, st));
-            }
+            e.checkpoints.retain(|(c, _)| *c != s);
+            e.checkpoints.push((s, st));
         }
         // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
         if e.checkpoints.len() > 256 {

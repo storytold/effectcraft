@@ -5,7 +5,7 @@
 //! edges may be covered by the other neighbour. Interior pixels agree within 2/255; at most
 //! 1.5 % of pixels (silhouettes) may differ more. Skipped without an adapter.
 
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Gradient, Value};
 use effectcraft_project::build;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, LightKind, PrimitiveKind, Project, Renderer as R3, Solid};
 use effectcraft_render::three_d::adv::{self, Scene};
@@ -38,7 +38,8 @@ fn set(l: &mut effectcraft_project::Layer, path: &str, v: Value) {
 }
 
 /// Primitives with metal/dielectric materials, a shadow-casting spot light and a point light,
-/// an environment light, a semi-transparent textured card.
+/// a shadow-casting Environment light over a sky-gradient environment layer, a semi-transparent
+/// textured card.
 pub(crate) fn scene_project() -> (Project, ItemId) {
     let mut p = Project::default();
     let mut c = Comp::new(240, 160, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
@@ -73,12 +74,29 @@ pub(crate) fn scene_project() -> (Project, ItemId) {
         set(l, "transform/position", Value::Vec3([120.0, 80.0, -60.0]));
         set(l, "transform/rotationY", Value::Scalar(30.0));
     });
-    let env = p.add_item("E", Default::default(), None, ItemKind::Solid(Solid { color: [0.6, 0.7, 1.0], width: 32, height: 16, pixel_aspect: 1.0 }));
-    add(&mut p, cid, LayerSource::Solid { item: env }, |l| {
-        l.environment = true;
+    // The Environment Layer: a sky-to-ground gradient (its dominant region, the bright sky,
+    // shadows the scene from above).
+    add(&mut p, cid, LayerSource::Shape, |l| {
         l.switches.three_d = true;
+        let mut next = 10_000u64;
+        let ids = &mut build::Ids(&mut next);
+        let rect = build::shape_rect(ids, [240.0, 160.0], [0.0, 0.0], 0.0);
+        let gfill = build::shape_gradient_fill(
+            ids,
+            false,
+            [0.0, -80.0],
+            [0.0, 80.0],
+            Gradient { colors: vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.04, 0.05, 0.08, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] },
+        );
+        let g = build::shape_group(ids, "Sky", vec![rect, gfill]);
+        l.props.sub_mut("contents").unwrap().children.push(g.into());
+        l.environment = true;
     });
-    add(&mut p, cid, LayerSource::Light { kind: LightKind::Environment }, |l| set(l, "lightOptions/intensity", Value::Scalar(50.0)));
+    add(&mut p, cid, LayerSource::Light { kind: LightKind::Environment }, |l| {
+        set(l, "lightOptions/intensity", Value::Scalar(50.0));
+        set(l, "lightOptions/castsShadows", Value::Bool(true));
+        set(l, "lightOptions/shadowDiffusion", Value::Scalar(6.0));
+    });
     add(&mut p, cid, LayerSource::Light { kind: LightKind::Spot }, |l| {
         set(l, "transform/position", Value::Vec3([40.0, -120.0, -200.0]));
         set(l, "transform/poi", Value::Vec3([120.0, 100.0, 0.0]));
@@ -96,7 +114,16 @@ pub(crate) fn scene_project() -> (Project, ItemId) {
 
 pub(crate) fn scene(p: &Project, cid: ItemId) -> Scene {
     let r = Renderer::new(p, &NoFootage, RenderOpts::default());
-    let ctx = EvalCtx { project: p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx {
+        project: p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     adv::scene_of(&r, &ctx, &run, (ctx.comp.width, ctx.comp.height))
 }
@@ -135,6 +162,8 @@ fn gpu_matches_cpu_lit_scene() {
     let (p, cid) = scene_project();
     let s = scene(&p, cid);
     assert!(!s.shadows.is_empty() && s.env.is_some() && s.opaque_count < s.indices.len() as u32);
+    // The Environment light casts its shadow (the sky gradient's dominant direction).
+    assert!(s.env.is_some_and(|e| e.shadow >= 0 && e.sun != [0.0; 3]), "the environment shadow map is built");
     compare(&s, &g);
 }
 
@@ -181,7 +210,7 @@ fn gpu_matches_cpu_wide_penumbrae() {
     set(&mut comp.layers[0], "lightOptions/shadowDiffusion", Value::Scalar(30.0));
     let s = scene(&p, cid);
     let (cpu, gt) = (adv::raster::render(&s), g.raster_3d(&s).expect("gpu raster"));
-    for l in &mut p.comp_mut(cid).unwrap().layers[..2] {
+    for l in p.comp_mut(cid).unwrap().layers.iter_mut().take(2) {
         set(l, "lightOptions/castsShadows", Value::Bool(false));
     }
     let unshadowed = adv::raster::render(&scene(&p, cid));
@@ -251,7 +280,7 @@ pub(crate) fn dof_mb_project() -> (Project, ItemId) {
     c.enable_motion_blur = true;
     c.motion_blur_samples = 6;
     // The sphere moves 40 px per frame.
-    let sphere = c.layers.iter_mut().find(|l| matches!(l.source, LayerSource::Primitive { kind: PrimitiveKind::Sphere })).unwrap();
+    let sphere = c.layers.find_mut(|l| matches!(l.source, LayerSource::Primitive { kind: PrimitiveKind::Sphere })).unwrap();
     sphere.switches.motion_blur = true;
     sphere.props.prop_mut("transform/position").unwrap().keys = vec![
         effectcraft_keyframe::Keyframe::new(Tick::ZERO, Value::Vec3([80.0, 95.0, 0.0])),
@@ -277,7 +306,16 @@ pub(crate) fn off_share(a: &[[f32; 4]], b: &[[f32; 4]]) -> (f64, f32) {
 }
 
 pub(crate) fn run_of(p: &Project, cid: ItemId) -> (EvalCtx<'_>, Vec<&effectcraft_project::Layer>) {
-    let ctx = EvalCtx { project: p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx {
+        project: p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     (ctx, run)
 }
@@ -411,7 +449,7 @@ fn gpu_compositor_draws_advanced_3d_runs_on_the_device() {
     eprintln!("walk: {:.3} % beyond 1/255 (max {max:.4})", share * 100.0);
     assert!(share <= 0.01, "{:.3} % of pixels differ", share * 100.0);
     // A blend mode in the run takes the 2D compositing path (`SplitRun`, also on the GPU).
-    p.comp_mut(cid).unwrap().layers.iter_mut().find(|l| l.switches.three_d && !l.is_light() && l.source.is_av()).unwrap().blend_mode =
+    p.comp_mut(cid).unwrap().layers.find_mut(|l| l.switches.three_d && !l.is_light() && l.source.is_av()).unwrap().blend_mode =
         effectcraft_color::BlendMode::Screen;
     let (ctx, run) = run_of(&p, cid);
     assert!(Renderer::new(&p, &NoFootage, RenderOpts::default()).prepare_adv_run(&ctx, &run, (240, 160)).is_none());
@@ -532,12 +570,12 @@ fn gpu_compositor_draws_split_advanced_3d_runs_and_skies() {
             });
         }
         let c = p.comp_mut(cid).unwrap();
-        let env = c.layers.iter_mut().find(|l| l.environment).unwrap();
+        let env = c.layers.find_mut(|l| l.environment).unwrap();
         env.props.sub_mut("effects").unwrap().children.push(ramp.into());
         let ids: Vec<_> = c.layers.iter().filter(|l| l.switches.three_d && !l.is_light() && !l.environment && l.source.is_av()).map(|l| l.id).collect();
         let top = c.layers[0].id;
         fn by_id(c: &mut Comp, id: effectcraft_project::LayerId) -> &mut effectcraft_project::Layer {
-            c.layers.iter_mut().find(|l| l.id == id).unwrap()
+            c.layers.find_mut(|l| l.id == id).unwrap()
         }
         match case {
             0 => by_id(c, ids[1]).blend_mode = effectcraft_color::BlendMode::Screen,
@@ -555,7 +593,7 @@ fn gpu_compositor_draws_split_advanced_3d_runs_and_skies() {
             }
             _ => {
                 // An environment background behind the run, and the 2D track matte.
-                c.layers.iter_mut().find(|l| l.environment).unwrap().environment_background = true;
+                c.layers.find_mut(|l| l.environment).unwrap().environment_background = true;
                 by_id(c, ids[0]).track_matte = Some(effectcraft_project::TrackMatte { layer: top, kind: effectcraft_project::MatteKind::Alpha });
             }
         }

@@ -8,6 +8,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod analysis_cache;
 pub mod audio_fx;
 mod blur2;
 mod blur3;
@@ -78,7 +79,7 @@ pub use color_fx::{
 pub use color_fx::{COLORAMA_PRESETS, ColoramaPalette};
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
-pub use distort::transform_shutter;
+pub use distort::{transform_grow, transform_matrix_px, transform_shutter};
 pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh};
 pub use distort3::{RESHAPE_POINTS, ReshapeSetup, SmearSetup, cc_smear_pad, reshape_setup, smear_setup, warp_inverse_map};
 pub use distort4::liquify_mesh;
@@ -86,7 +87,10 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
-pub use misc::{INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation};
+pub use misc::{
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge, venetian_cover,
+    venetian_origin,
+};
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
@@ -104,7 +108,7 @@ pub use transition::place_layer;
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
-pub use noise3::{FractalGpu, fractal_gpu};
+pub use noise3::{FractalGpu, NOISE_CELL, fractal_gpu};
 pub use stylize3::{BumpLight, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
@@ -113,7 +117,7 @@ pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{CRYPTO_LAYERS, CryptoAux, aux_point, crypto_aux_image, crypto_aux_image_with, id_color, selection_hashes};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
-pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, drizzle_drops, mercury_blobs, sprite_plan};
+pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
@@ -287,15 +291,66 @@ impl Buf {
         self.offset[0] += origin[0] * self.scale;
         self.offset[1] += origin[1] * self.scale;
     }
-    /// Grow by `pad` transparent pixels on every side.
-    pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+    /// Grow by transparent pixels: `sides` = left, top, right, bottom. Content keeps its place.
+    pub fn pad_sides(&mut self, sides: [u32; 4]) {
+        let [l, t, r, b] = sides;
+        if l == 0 && t == 0 && r == 0 && b == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        let (Some(w), Some(h)) = (self.img.width.checked_add(l).and_then(|v| v.checked_add(r)), self.img.height.checked_add(t).and_then(|v| v.checked_add(b)))
+        else {
+            return;
+        };
+        let mut out = Image::new(w, h);
+        let (sw, ow) = (self.img.width as usize, w as usize);
+        for y in 0..self.img.height as usize {
+            let at = (y + t as usize) * ow + l as usize;
+            let (Some(src), Some(dst)) = (self.img.data.get(y * sw..(y + 1) * sw), out.data.get_mut(at..at + sw)) else { continue };
+            dst.copy_from_slice(src);
+        }
+        self.img = out;
+        self.offset[0] += l as f64;
+        self.offset[1] += t as f64;
     }
+    /// Grow by `left` and `top` transparent pixels on those sides only.
+    pub fn grow_left_top(&mut self, left: u32, top: u32) {
+        self.pad_sides([left, top, 0, 0]);
+    }
+    /// Give the buffer the pixel-grid phase (modulo [`GRID_ALIGN`]) that [`Buf::cover`] of
+    /// `size` would, by growing left/top only ([`align_plan`]). A downscaled layer is resampled
+    /// through a pyramid whose 2x2 blocks follow the buffer's grid, so a buffer that starts at
+    /// its content's corner instead of the cover's resamples to different pixels (#1205).
+    pub fn align(&mut self, size: [f64; 2]) {
+        if let Some((l, t)) = align_plan(self.offset, self.scale, size, self.img.width, self.img.height) {
+            self.grow_left_top(l, t);
+        }
+    }
+    /// Grow by `pad` transparent pixels on every side, within [`pad_within_budget`] and as
+    /// clamped by [`Image::effective_pad`].
+    pub fn pad(&mut self, pad: u32) {
+        let eff = self.img.effective_pad(pad_within_budget(self.img.width, self.img.height, pad));
+        if eff == 0 {
+            return;
+        }
+        self.img = self.img.padded(eff);
+        self.offset[0] += eff as f64;
+        self.offset[1] += eff as f64;
+    }
+}
+
+/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
+/// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
+/// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
+pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
+    const MIN_BUDGET: f64 = 16_777_216.0;
+    let (w, h) = (f64::from(w), f64::from(h));
+    let budget = MIN_BUDGET.max(4.0 * w * h);
+    if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
+        return pad;
+    }
+    // (w + 2p)(h + 2p) = budget, solved for p.
+    let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
+    (p.floor().max(0.0) as u32).min(pad)
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
@@ -333,6 +388,33 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
         return None;
     }
     Some((dx as i64, dy as i64))
+}
+
+/// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
+/// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
+/// skips the renderer's cover of the whole layer rectangle (#1205).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+
+/// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
+/// of the resampling pyramid used for downscaled layers.
+pub const GRID_ALIGN: u32 = 64;
+
+/// Left/top growth giving a buffer [`cover_plan`]'s grid phase modulo [`GRID_ALIGN`]; `None`
+/// when there is nothing to add.
+pub fn align_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32)> {
+    let (dx, dy, _, _) = cover_plan(offset, scale, size, width, height)?;
+    let (l, t) = (dx % GRID_ALIGN, dy % GRID_ALIGN);
+    (l != 0 || t != 0).then_some((l, t))
+}
+
+/// Padding for an effect that moves pixels up to `want` past the content (not an adjustment
+/// layer): `want`, capped at what reaches the layer rectangle, in whole [`GRID_ALIGN`] steps so
+/// the grid phase stays. 0 once the buffer covers the layer.
+pub fn cover_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64, want: u32) -> u32 {
+    if ctx.adjustment {
+        return 0;
+    }
+    want.min(util::layer_cover_pad(ctx, size, offset, scale)).div_ceil(GRID_ALIGN) * GRID_ALIGN
 }
 
 /// Where [`Buf::cover`] would take a buffer: shift its pixels by `(dx, dy)` and resize it to
@@ -421,6 +503,18 @@ pub trait EffectHost: Sync {
     fn params_at(&self, _layer_time: f64) -> Option<Params> {
         None
     }
+    /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
+    /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
+    /// time**: CC Particle World samples its Birth Rate at every step it simulates (#1373).
+    /// `None` when unavailable.
+    fn param_at(&self, _effect_index: usize, _id: &str, _layer_time: f64) -> Option<Value> {
+        None
+    }
+    /// Parameter `id` of effect `effect_index` has one value at every time (no keyframes, no
+    /// expression), so sampling it over time can be skipped. `false` when unknown.
+    fn param_is_static(&self, _effect_index: usize, _id: &str) -> bool {
+        false
+    }
     /// A particle simulation backend (GPU particles; see [`psim`]). `None` = simulate on the
     /// CPU.
     fn particles(&self) -> Option<&dyn psim::ParticleSim> {
@@ -499,6 +593,15 @@ pub struct EffectSpec {
     pub gpu: bool,
     /// Supports 32 bpc float (badge).
     pub float: bool,
+}
+
+impl EffectSpec {
+    /// True when this effect grows its own buffer (blur/glow margins, Repeat Edge
+    /// [`Buf::cover`], displacement [`cover_pad`]) so a stack of only these can skip the
+    /// renderer's full-layer cover and keep the pyramid grid phase (#1205).
+    pub fn skips_cover(&self) -> bool {
+        SKIPS_COVER.contains(&self.id)
+    }
 }
 
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {
@@ -1276,6 +1379,13 @@ pub fn is_time_dependent(id: &str) -> bool {
     id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id)
 }
 
+/// Does effect `id` read its own parameters at earlier times (the stepped particle systems sample
+/// their Birth Rate at every step, #1373)? Caches keyed on the current values can't see what an
+/// expression returned then.
+pub fn reads_param_history(id: &str) -> bool {
+    matches!(id, "ec.sim.ccparticleworld" | "ec.sim.ccparticlesystems2" | "ec.sim.ccmrmercury")
+}
+
 /// Run an effect on a buffer.
 pub fn apply(spec: &EffectSpec, ctx: &EffectCtx, buf: Buf) -> Buf {
     (spec.render)(ctx, buf)
@@ -1300,11 +1410,42 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 mod tests {
     use super::*;
 
+    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
+    /// big layers may still grow to four times their area, and small pads are untouched.
+    #[test]
+    fn padded_buffers_stay_within_the_budget() {
+        let area = |w: u32, h: u32, p: u32| (u64::from(w) + 2 * u64::from(p)) * (u64::from(h) + 2 * u64::from(p));
+        let far = radial_fast_pad((6500.0, 6500.0), 20, 20, 0.8);
+        assert_eq!(far, 4096, "the effect asks for its full pad");
+        let mut b = Buf { img: Image::new(20, 20), offset: [0.0; 2], scale: 1.0 };
+        b.pad(far);
+        assert!(area(20, 20, 0) < area(b.img.width, b.img.height, 0) && area(b.img.width, b.img.height, 0) <= 1 << 24, "{}x{}", b.img.width, b.img.height);
+        assert_eq!(b.offset, [f64::from((b.img.width - 20) / 2); 2], "the content keeps its place");
+        let p = pad_within_budget(3840, 2160, 4096);
+        assert!(p > 1000 && area(3840, 2160, p) <= 4 * 3840 * 2160 && area(3840, 2160, p + 1) > 4 * 3840 * 2160);
+        assert_eq!(pad_within_budget(640, 360, 200), 200);
+        assert_eq!(pad_within_budget(20, 20, 0), 0);
+    }
+
     #[test]
     fn run_fx_passthrough() {
         let img = Image::filled(4, 3, [0.5, 0.25, 0.125, 1.0]);
         let out = run_fx("ec.control.slider", &[("slider", num(3.0))], img.clone(), 0.0, EffectEnv::default());
         assert_eq!(out.img.data, img.data);
+    }
+
+    #[test]
+    fn pad_offset_follows_the_clamped_pad() {
+        // Image::padded clamps a hostile pad to keep each side within MAX_PADDED_SIDE; the offset
+        // must move by the pad actually applied, or the content drifts from its layer position.
+        let mut img = Image::new(29_990, 2);
+        img.set(0, 0, [1.0, 0.0, 0.0, 1.0]);
+        let mut buf = Buf { img, offset: [3.0, 4.0], scale: 1.0 };
+        buf.pad(u32::MAX);
+        // Width binds: (MAX_PADDED_SIDE - 29 990) / 2 = 5.
+        assert_eq!(buf.offset, [8.0, 9.0]);
+        let (x, y) = buf.to_px([-3.0, -4.0]);
+        assert_eq!(buf.img.get(x as i64, y as i64), [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -1490,5 +1631,25 @@ mod tests {
         let g = instantiate(find("ec.noise.matchgrain").unwrap(), &mut Ids(&mut next), "Match Grain", [10.0, 10.0]);
         assert_eq!(g.get("noiseSourceLayerSource").map(|p| p.value.clone()), Some(Value::Enum(0)));
         assert_eq!(g.props().filter(|p| p.match_id == "noiseSourceLayerSource").count(), 1);
+    }
+
+    #[test]
+    fn align_plan_is_cover_shift_mod_grid() {
+        // Content inset from the layer origin: pixel 0 maps to layer (50, 30).
+        let offset = [-50.0, -30.0];
+        let scale = 1.0;
+        let size = [1920.0, 1080.0];
+        let (dx, dy, _, _) = cover_plan(offset, scale, size, 80, 40).unwrap();
+        assert_eq!((dx, dy), (50, 30));
+        assert_eq!(align_plan(offset, scale, size, 80, 40), Some((50, 30)));
+        assert_eq!(align_plan([-64.0, -128.0], 1.0, size, 80, 40), None);
+    }
+
+    #[test]
+    fn known_margin_effects_skip_cover_and_twirl_does_not() {
+        for id in SKIPS_COVER {
+            assert!(find(id).expect(id).skips_cover(), "{id}");
+        }
+        assert!(!find("ec.distort.twirl").unwrap().skips_cover());
     }
 }

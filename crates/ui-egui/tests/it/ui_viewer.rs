@@ -2,6 +2,7 @@
 //! interest drawing, rulers and guides, snapping, the shape Pen and motion-path key drags
 //! (egui_kittest, UI logic only).
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::commands::shape_tool::PaintKind;
 use effectcraft_engine::project::LayerId;
@@ -51,6 +52,65 @@ fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
     }
     h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
+}
+
+/// #1218: frame stepping is optional, and consumes the whole wheel gesture including its
+/// smoothed tail. Ctrl/Cmd+wheel still zooms.
+#[test]
+fn mouse_wheel_over_the_monitor_scrubs_frames() {
+    let mut h = harness();
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.viewerWheelScrubbing", "value": true})).unwrap();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let line = |dy: f32, modifiers: egui::Modifiers| Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, dy),
+        modifiers,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(line(1.0, egui::Modifiers::NONE));
+    h.step();
+    let t1 = h.state().session.time();
+    for _ in 0..20 {
+        assert_eq!(h.state().ui.viewer.zoom, z0, "frame wheel must never zoom");
+        h.step();
+    }
+    assert!(t1 > t0, "wheel up advanced the playhead ({t0:?} -> {t1:?})");
+    h.input_mut().events.push(line(-2.0, egui::Modifiers::NONE));
+    h.step();
+    assert!(h.state().session.time() < t1, "two lines back moves before the single line forward");
+    let z0 = h.state().ui.viewer.zoom;
+    let t2 = h.state().session.time();
+    let mods = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(line(3.0, mods));
+    h.step();
+    assert_eq!(h.state().session.time(), t2, "Ctrl+wheel must not scrub");
+    assert_ne!(h.state().ui.viewer.zoom, z0, "Ctrl+wheel still zooms");
+}
+
+#[test]
+fn mouse_wheel_zooms_by_default_without_stepping_frames() {
+    let mut h = harness();
+    assert!(!h.state().session.prefs.general.viewer_wheel_scrubbing);
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, 1.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(20);
+    assert_eq!(h.state().session.time(), t0);
+    assert_ne!(h.state().ui.viewer.zoom, z0);
 }
 
 /// Comp pixel → screen point.
@@ -448,7 +508,7 @@ fn mid_drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, mods: egu
         h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
         h.step();
     }
-    h.render().expect("the mid-drag frame")
+    h.render_serialized().expect("the mid-drag frame")
 }
 
 /// Release the button where the drag left it.
@@ -482,14 +542,15 @@ fn fill_rgb(h: &Harness<'_, EffectcraftApp>) -> [u8; 3] {
 fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
-    // 6 comp px inside the box's top-left corner: inside a rectangle, outside every other kind.
-    let corner = [146.0, 106.0];
+    // 4 comp px inside the box's top-left corner: inside a rectangle, outside every other kind
+    // (a rounded corner of 20 px arcs past this point).
+    let corner = [144.0, 104.0];
     for (tool, fills_corner) in [(Tool::Rectangle, true), (Tool::RoundedRect, false), (Tool::Ellipse, false), (Tool::Polygon, false), (Tool::Star, false)] {
         let mut h = harness();
         h.state_mut().ui.tool = tool;
         settle_viewer(&mut h);
         let (a, b) = (screen(&h, from), screen(&h, to));
-        let before = h.render().expect("the frame before the drag");
+        let before = h.render_serialized().expect("the frame before the drag");
         let mid = mid_drag(&mut h, a, b, egui::Modifiers::default());
         let fill = fill_rgb(&h);
 
@@ -525,7 +586,7 @@ fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
         h.state_mut().ui.tool = Tool::Ellipse;
         settle_viewer(&mut h);
         let (a, b) = (screen(&h, from.map(|v| v as f32)), screen(&h, to.map(|v| v as f32)));
-        let before = h.render().expect("the frame before the drag");
+        let before = h.render_serialized().expect("the frame before the drag");
         // Measured with the button down, so this is the ghost and not the committed shape.
         let mid = mid_drag(&mut h, a, b, mods);
         let on = [centre[0] as f32 + size[0] as f32 / 4.0, centre[1] as f32 + size[1] as f32 / 4.0];
@@ -594,7 +655,7 @@ fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
     h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.step();
     // Where the layer is not (yet): the plate behind it.
-    let plate = px_at(&h.render().unwrap(), &h, [440.0, 200.0]);
+    let plate = px_at(&h.render_serialized().unwrap(), &h, [440.0, 200.0]);
 
     // Drag in small steps, still holding the button, and give the renders a chance to land.
     let mut moved = false;
@@ -605,7 +666,7 @@ fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
         std::thread::sleep(std::time::Duration::from_millis(15));
         // 30 comp px behind the pointer: inside the layer, well away from its outline, its anchor
         // icon and where it started.
-        let at = px_at(&h.render().expect("mid-drag frame"), &h, [320.0 + 200.0 * (i as f32 / 40.0) - 30.0, 200.0]);
+        let at = px_at(&h.render_serialized().expect("mid-drag frame"), &h, [320.0 + 200.0 * (i as f32 / 40.0) - 30.0, 200.0]);
         if i >= 30 && delta(at, plate) > 30 {
             moved = true;
             break;
@@ -800,6 +861,76 @@ fn hidden_shape_layer_keeps_its_controls_and_can_still_scale() {
     let from = rect(&h, &format!("viewer.handle.{layer}.5")).center();
     drag(&mut h, from, from + vec2(24.0, 0.0));
     assert_ne!(scale(&h), before, "a hidden layer's handle still scales it");
+}
+
+/// #1964: Shift-dragging a selected mask vertex keeps it to the axis it moves along most, as a
+/// Shift-dragged layer does; without Shift it moves freely.
+#[test]
+fn shift_drag_keeps_a_mask_vertex_to_one_axis() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let mask = {
+        let s = &mut h.state_mut().session;
+        s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+        let m = s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap()["mask"].as_u64().unwrap();
+        s.execute("mask.selectVertices", json!({"vertices": [{"layer": plate, "mask": m, "index": 0}]})).unwrap();
+        m
+    };
+    h.run_steps(2);
+    let vertex = format!("viewer.mask.{mask}.vertex.0");
+    let before = mask_path(&h, "Plate").vertices[0];
+    let from = rect(&h, &vertex).center();
+    drag_path(&mut h, &[from, from + vec2(30.0, 8.0)], egui::Modifiers::SHIFT);
+    let shifted = mask_path(&h, "Plate").vertices[0];
+    assert!(shifted[0] > before[0], "it moved along x: {before:?} -> {shifted:?}");
+    assert_eq!(shifted[1], before[1], "and not along y");
+    let from = rect(&h, &vertex).center();
+    drag_path(&mut h, &[from, from + vec2(30.0, 8.0)], egui::Modifiers::NONE);
+    let free = mask_path(&h, "Plate").vertices[0];
+    assert!(free[0] > shifted[0] && free[1] > shifted[1], "without Shift both axes move: {shifted:?} -> {free:?}");
+}
+
+/// #999: a mask vertex dragged against the edge of the Composition panel pans the view, and the
+/// vertex keeps moving while the pointer is held there, as in After Effects.
+#[test]
+fn a_vertex_held_at_the_viewer_edge_pans_the_view() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let mask = {
+        let s = &mut h.state_mut().session;
+        s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+        let m = s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap()["mask"].as_u64().unwrap();
+        s.execute("mask.selectVertices", json!({"vertices": [{"layer": plate, "mask": m, "index": 0}]})).unwrap();
+        m
+    };
+    h.run_steps(2);
+    let pan0 = h.state().ui.viewer.pan;
+    let from = rect(&h, &format!("viewer.mask.{mask}.vertex.0")).center();
+    let edge = pos2(2.0, from.y);
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for i in 1..=6 {
+        h.input_mut().events.push(Event::PointerMoved(from + (edge - from) * (i as f32 / 6.0)));
+        h.step();
+    }
+    let reached = mask_path(&h, "Plate").vertices[0];
+    for _ in 0..20 {
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let pan = h.state().ui.viewer.pan;
+    assert!(pan[0] > pan0[0] && pan[1] == pan0[1], "the view panned right to show more on the left: {pan0:?} -> {pan:?}");
+    let after = mask_path(&h, "Plate").vertices[0];
+    assert!(after[0] < reached[0], "the vertex kept moving left with the view: {reached:?} -> {after:?}");
+    // Back inside the view, nothing pans.
+    let still = h.state().ui.viewer.pan;
+    let mid = rect(&h, "viewer.comp").center();
+    drag(&mut h, mid, mid + vec2(5.0, 0.0));
+    assert_eq!(h.state().ui.viewer.pan, still);
 }
 
 /// #1769: a hidden masked layer keeps its mask path and vertices, and they remain editable.
@@ -1718,13 +1849,342 @@ fn timeline_rows_drag_to_reorder_layers() {
     assert_eq!(h.state().session.history.undo.len(), steps + 1);
     // Dropping a layer where it already is changes nothing.
     let b = row(&h, "Box").center();
-    drag(&mut h, b, b + vec2(0.0, 3.0));
+    drag(&mut h, b, b + vec2(20.0, 0.0));
     assert_eq!(names(&h), ["Plate", "Box"]);
     assert_eq!(h.state().session.history.undo.len(), steps + 1);
     // And back to the top.
     let (from, top) = (row(&h, "Box").center(), row(&h, "Plate"));
     drag(&mut h, from, top.center() - vec2(0.0, top.height() * 0.4));
     assert_eq!(names(&h), ["Box", "Plate"]);
+}
+
+fn timeline_layer_order(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
+    h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect()
+}
+
+fn timeline_layer_row(h: &Harness<'_, EffectcraftApp>, layer: u64) -> Rect {
+    rect(h, &format!("timeline.layer.{layer}.row"))
+}
+
+fn start_timeline_row_drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(from + vec2(20.0, 0.0)));
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing, "the row drag started");
+}
+
+fn release_timeline_row_drag(h: &mut Harness<'_, EffectcraftApp>, at: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+fn scroll_timeline(h: &mut Harness<'_, EffectcraftApp>, dy: f32) {
+    let at = rect(h, "timeline.layerMarquee").center();
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, dy),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(20);
+}
+
+/// Wheel-scroll far enough to stop drawing the row that owns the held drag, then drop at
+/// the other end of the stack. The release must work without that row's Response (#2492).
+fn timeline_reorder_after_scroll(down: bool, multiple: bool) {
+    let mut h = harness();
+    for i in 0..38 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#406080", "width": 80, "height": 80})).unwrap();
+    }
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    let before = timeline_layer_order(&h);
+    let count = if multiple { 2 } else { 1 };
+    let moving = if down { before[..count].to_vec() } else { before[before.len() - count..].to_vec() };
+    if multiple {
+        h.state_mut().session.execute("layer.select", json!({"layers": moving})).unwrap();
+        h.run_steps(2);
+    }
+    if !down {
+        scroll_timeline(&mut h, -10_000.0);
+    }
+    let origin = if down { before[0] } else { *before.last().unwrap() };
+    let from = timeline_layer_row(&h, origin).center();
+    // Setup fills the bounded Undo history; reserve room to count this gesture's steps.
+    h.state_mut().session.history.clear();
+    let steps = h.state().session.history.undo.len();
+    start_timeline_row_drag(&mut h, from);
+    scroll_timeline(&mut h, if down { -10_000.0 } else { 10_000.0 });
+    assert!(h.state().auto.find(&format!("timeline.layer.{origin}.row")).is_none(), "the origin row was culled");
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing, "scrolling keeps the held drag active");
+    let target = if down { *before.last().unwrap() } else { before[0] };
+    let row = timeline_layer_row(&h, target);
+    let to = row.center() + vec2(0.0, row.height() * if down { 0.4 } else { -0.4 });
+    release_timeline_row_drag(&mut h, to);
+
+    let mut expected: Vec<u64> = before.iter().copied().filter(|id| !moving.contains(id)).collect();
+    let at = if down { expected.len() } else { 0 };
+    expected.splice(at..at, moving);
+    assert_eq!(timeline_layer_order(&h), expected, "the offscreen origin still completes its drop");
+    assert_eq!(h.state().session.history.undo.len(), steps + 1, "one reorder, including a selected group, is one undo step");
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing, "release clears the drag feedback");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(timeline_layer_order(&h), before);
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(timeline_layer_order(&h), expected);
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+
+    // A later, independent drag must not reuse the old gesture or selected group.
+    let i = if down { expected.len() - 1 } else { 0 };
+    let j = if down { i - 1 } else { 1 };
+    let from = timeline_layer_row(&h, expected[i]).center();
+    let row = timeline_layer_row(&h, expected[j]);
+    drag(&mut h, from, row.center() + vec2(0.0, row.height() * if down { -0.4 } else { 0.4 }));
+    expected.swap(i, j);
+    assert_eq!(timeline_layer_order(&h), expected, "the next drag is independent");
+    assert_eq!(h.state().session.history.undo.len(), steps + 2);
+}
+
+#[test]
+fn timeline_rows_drag_to_bottom_after_scrolling() {
+    for multiple in [false, true] {
+        timeline_reorder_after_scroll(true, multiple);
+    }
+}
+
+#[test]
+fn timeline_rows_drag_to_top_after_scrolling() {
+    for multiple in [false, true] {
+        timeline_reorder_after_scroll(false, multiple);
+    }
+}
+
+/// An intermediate scroll must not turn the viewport's lower edge into the stack's end.
+fn timeline_reorder_at_viewport_edge(below: bool, multiple: bool) {
+    let mut h = harness();
+    for i in 0..38 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#406080", "width": 80, "height": 80})).unwrap();
+    }
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    let before = timeline_layer_order(&h);
+    let moving = before[..if multiple { 2 } else { 1 }].to_vec();
+    h.state_mut().session.execute("layer.select", json!({"layers": moving})).unwrap();
+    h.run_steps(2);
+    h.state_mut().session.history.clear();
+    let from = timeline_layer_row(&h, moving[0]).center();
+    start_timeline_row_drag(&mut h, from);
+    scroll_timeline(&mut h, -200.0);
+    let visible = |h: &Harness<'_, EffectcraftApp>| {
+        before.iter().copied().filter(|id| h.state().auto.find(&format!("timeline.layer.{id}.row")).is_some()).collect::<Vec<_>>()
+    };
+    // Leave space inside the viewport below the last rendered layer's midpoint.
+    for _ in 0..20 {
+        let last = timeline_layer_row(&h, *visible(&h).last().unwrap());
+        if last.center().y < rect(&h, "timeline.layerMarquee").max.y - 3.0 {
+            break;
+        }
+        scroll_timeline(&mut h, -10.0);
+    }
+    let shown = visible(&h);
+    assert!(!shown.contains(&moving[0]), "the drag owner is culled");
+    let last = *shown.last().unwrap();
+    assert_ne!(last, *before.last().unwrap(), "layers remain below the viewport");
+    let row = timeline_layer_row(&h, last);
+    let viewport = rect(&h, "timeline.layerMarquee");
+    let y = if below { (row.center().y + row.height() * 0.4).min(viewport.max.y - 1.0) } else { row.min.y + row.height() * 0.2 };
+    let to = pos2(row.center().x, y);
+    assert!(viewport.contains(to));
+    assert_eq!(to.y > row.center().y, below);
+    let mut expected: Vec<u64> = before.iter().copied().filter(|id| !moving.contains(id)).collect();
+    let at = expected.iter().position(|id| *id == last).unwrap() + usize::from(below);
+    expected.splice(at..at, moving);
+    release_timeline_row_drag(&mut h, to);
+    assert_eq!(timeline_layer_order(&h), expected, "the drop follows the indicated row boundary");
+    assert_eq!(h.state().session.history.undo.len(), 1);
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(timeline_layer_order(&h), before);
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(timeline_layer_order(&h), expected);
+}
+
+#[test]
+fn timeline_rows_drag_after_last_visible_row() {
+    for multiple in [false, true] {
+        timeline_reorder_at_viewport_edge(true, multiple);
+    }
+}
+
+#[test]
+fn timeline_rows_drag_before_last_visible_row() {
+    for multiple in [false, true] {
+        timeline_reorder_at_viewport_edge(false, multiple);
+    }
+}
+
+/// A removed ID must not be reinterpreted as a one-based index by layer.arrange.
+fn timeline_reorder_after_deletion(delete_owner: bool) {
+    let mut h = harness();
+    for i in 0..6 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#406080", "width": 80, "height": 80})).unwrap();
+    }
+    let before = timeline_layer_order(&h);
+    let removed = *before.last().unwrap();
+    assert!(removed > 0 && removed < before.len() as u64, "the missing ID would also resolve as a surviving layer index");
+    let owner = if delete_owner { removed } else { before[0] };
+    let moving = if delete_owner { vec![removed] } else { vec![owner, removed] };
+    h.state_mut().session.execute("layer.select", json!({"layers": moving})).unwrap();
+    h.run_steps(3);
+    h.state_mut().session.history.clear();
+    let from = timeline_layer_row(&h, owner).center();
+    start_timeline_row_drag(&mut h, from);
+    if !delete_owner {
+        // Changing the selection does not change the group captured by the held drag.
+        h.state_mut().session.execute("layer.select", json!({"layers": [removed]})).unwrap();
+        h.run_steps(2);
+    }
+    key(&mut h, egui::Key::Delete, Default::default());
+    assert!(h.ctx.input(|i| i.pointer.primary_down()), "Delete happened during the held drag");
+    let survivors: Vec<u64> = before.iter().copied().filter(|id| *id != removed).collect();
+    assert_eq!(timeline_layer_order(&h), survivors, "Delete removed only the selected layer");
+    let steps = h.state().session.history.undo.len();
+    let row = timeline_layer_row(&h, survivors[0]);
+    release_timeline_row_drag(&mut h, row.center() - vec2(0.0, row.height() * 0.4));
+    assert_eq!(timeline_layer_order(&h), survivors, "a stale drag cannot move any surviving layer");
+    assert_eq!(h.state().session.history.undo.len(), steps, "release adds no undo step");
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    let from = timeline_layer_row(&h, survivors[0]).center();
+    let row = timeline_layer_row(&h, survivors[1]);
+    drag(&mut h, from, row.center() + vec2(0.0, row.height() * 0.4));
+    let mut expected = survivors;
+    expected.swap(0, 1);
+    assert_eq!(timeline_layer_order(&h), expected, "a later independent drag still works");
+    assert_eq!(h.state().session.history.undo.len(), steps + 1);
+}
+
+#[test]
+fn timeline_rows_drag_cancels_when_the_owner_is_deleted() {
+    timeline_reorder_after_deletion(true);
+}
+
+#[test]
+fn timeline_rows_drag_cancels_when_a_group_member_is_deleted() {
+    timeline_reorder_after_deletion(false);
+}
+
+#[test]
+fn timeline_rows_drag_cancels_without_a_primary_release() {
+    for escape in [false, true] {
+        let mut h = harness();
+        let before = timeline_layer_order(&h);
+        let from = timeline_layer_row(&h, before[0]).center();
+        let row = timeline_layer_row(&h, before[1]);
+        let to = row.center() + vec2(0.0, row.height() * 0.4);
+        let steps = h.state().session.history.undo.len();
+        start_timeline_row_drag(&mut h, from);
+        h.input_mut().events.push(Event::PointerMoved(to));
+        h.step();
+        if escape {
+            key(&mut h, egui::Key::Escape, Default::default());
+        } else {
+            // egui stops its drag on another button's release too. It isn't a layer drop.
+            for pressed in [true, false] {
+                h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+                h.step();
+            }
+        }
+        assert_eq!(timeline_layer_order(&h), before, "cancellation must not arrange layers");
+        assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+        release_timeline_row_drag(&mut h, to);
+        assert_eq!(timeline_layer_order(&h), before, "a later release must not replay a cancelled drag");
+        assert_eq!(h.state().session.history.undo.len(), steps);
+    }
+}
+
+#[test]
+fn timeline_rows_drag_cancels_when_a_modal_opens() {
+    let mut h = harness();
+    let before = timeline_layer_order(&h);
+    let from = timeline_layer_row(&h, before[0]).center();
+    let row = timeline_layer_row(&h, before[1]);
+    let to = row.center() + vec2(0.0, row.height() * 0.4);
+    let steps = h.state().session.history.undo.len();
+    start_timeline_row_drag(&mut h, from);
+    let (modifiers, shortcut) = effectcraft_ui_egui::menus::parse_shortcut("Cmd+Alt+;").unwrap();
+    key(&mut h, shortcut, modifiers);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Settings));
+    assert!(!h.ctx.read_response(egui::Id::unique(("row", before[0]))).unwrap().enabled(), "the modal disables the Timeline row");
+    assert!(h.ctx.input(|i| i.pointer.primary_down()), "the modal opened during the held drag");
+    release_timeline_row_drag(&mut h, to);
+    assert_eq!(timeline_layer_order(&h), before, "a release behind the modal must not arrange layers");
+    assert_eq!(h.state().session.history.undo.len(), steps);
+    key(&mut h, egui::Key::Escape, Default::default());
+    assert!(h.state().dialog.is_none());
+    assert_eq!(timeline_layer_order(&h), before, "closing the modal must not replay the drag");
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    let from = timeline_layer_row(&h, before[0]).center();
+    let row = timeline_layer_row(&h, before[1]);
+    drag(&mut h, from, row.center() + vec2(0.0, row.height() * 0.4));
+    assert_eq!(timeline_layer_order(&h), [before[1], before[0]]);
+    assert_eq!(h.state().session.history.undo.len(), steps + 1);
+}
+
+#[test]
+fn timeline_rows_drag_does_not_replay_a_release_while_hidden() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let mut h = harness();
+    let before = timeline_layer_order(&h);
+    let from = timeline_layer_row(&h, before[0]).center();
+    let steps = h.state().session.history.undo.len();
+    start_timeline_row_drag(&mut h, from);
+    h.state_mut().close_panel(PanelKind::Timeline);
+    h.run_steps(2);
+    assert!(h.state().auto.find("timeline.layerMarquee").is_none());
+    release_timeline_row_drag(&mut h, from);
+    h.state_mut().show_panel(PanelKind::Timeline);
+    h.run_steps(3);
+    assert_eq!(timeline_layer_order(&h), before);
+    assert_eq!(h.state().session.history.undo.len(), steps);
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    let from = timeline_layer_row(&h, before[0]).center();
+    let row = timeline_layer_row(&h, before[1]);
+    drag(&mut h, from, row.center() + vec2(0.0, row.height() * 0.4));
+    assert_eq!(timeline_layer_order(&h), [before[1], before[0]]);
+    assert_eq!(h.state().session.history.undo.len(), steps + 1);
+}
+
+#[test]
+fn timeline_rows_drag_cancels_when_the_composition_changes() {
+    let mut h = harness();
+    let original = h.state().session.active_comp_id().unwrap();
+    let before = timeline_layer_order(&h);
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 640, "height": 360, "duration": 4})).unwrap();
+    h.state_mut().session.execute("layer.newSolid", json!({"name": "Other layer", "color": "#406080", "width": 80, "height": 80})).unwrap();
+    let other = h.state().session.active_comp_id().unwrap();
+    let other_before = timeline_layer_order(&h);
+    h.state_mut().session.execute("comp.open", json!({"comp": original.0})).unwrap();
+    h.run_steps(3);
+    let from = timeline_layer_row(&h, before[0]).center();
+    let steps = h.state().session.history.undo.len();
+    start_timeline_row_drag(&mut h, from);
+    h.state_mut().session.execute("comp.open", json!({"comp": other.0})).unwrap();
+    h.run_steps(2);
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    release_timeline_row_drag(&mut h, from);
+    assert_eq!(timeline_layer_order(&h), other_before);
+    h.state_mut().session.execute("comp.open", json!({"comp": original.0})).unwrap();
+    h.run_steps(3);
+    assert_eq!(timeline_layer_order(&h), before);
+    assert_eq!(h.state().session.history.undo.len(), steps);
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
 }
 
 fn layer_id(h: &Harness<'_, EffectcraftApp>, name: &str) -> u64 {

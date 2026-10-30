@@ -7,6 +7,7 @@
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |
 //! | OpenEXR sequence | one file per frame | 32-bit float, linear light, premultiplied | yes | — |
+//! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
 //! | WebM | WebM (Matroska) | VP9 profile 0 (`effectcraft-vp9enc`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`effectcraft-av1enc`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
 //! | HEVC | MP4 (`hvc1`) | `effectcraft-hevcenc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (FilmCraft) |
@@ -335,19 +336,22 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                 .write_image(&rgb, w, h, ExtendedColorType::Rgb8)
                 .map_err(|e| ExportError::Encode(e.to_string()))
         }
-        OutputFormat::PngSequence | OutputFormat::TiffSequence => {
+        OutputFormat::PngSequence | OutputFormat::TiffSequence | OutputFormat::TargaSequence => {
             let px = cx.pixels(img, comp, channels, w, h);
             let (data, ct) = match channels {
                 Channels::Rgba => (px, ExtendedColorType::Rgba8),
                 Channels::Alpha => (px.as_chunks::<4>().0.iter().map(|p| p[0]).collect(), ExtendedColorType::L8),
                 Channels::Rgb => (px.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(), ExtendedColorType::Rgb8),
             };
-            if fmt == OutputFormat::PngSequence {
-                image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct).map_err(|e| ExportError::Encode(e.to_string()))
-            } else {
+            match fmt {
+                OutputFormat::PngSequence => image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct),
+                // Uncompressed (the encoder's run-length compression is off), top-left origin, the
+                // alpha bits in the image descriptor: 8 for RGB + Alpha, 0 otherwise.
+                OutputFormat::TargaSequence => image::codecs::tga::TgaEncoder::new(file).disable_rle().write_image(&data, w, h, ct),
                 // (the TIFF encoder needs Seek)
-                image::codecs::tiff::TiffEncoder::new(file).write_image(&data, w, h, ct).map_err(|e| ExportError::Encode(e.to_string()))
+                _ => image::codecs::tiff::TiffEncoder::new(file).write_image(&data, w, h, ct),
             }
+            .map_err(|e| ExportError::Encode(e.to_string()))
         }
         f => Err(ExportError::Unsupported(format!("{} is not a still format", f.label()))),
     }
@@ -372,7 +376,7 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
         let end = (i + batch).min(st.total);
         let frames: Vec<gif::Frame<'static>> = job
             .frames(comp, (i..end).collect(), |_, img| {
-                let mut px = job.pixels(&img, comp, job.output.channels, w, h);
+                let mut px = job.pixels_with(&img, comp, job.output.channels, w, h, false);
                 gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10)
             })
             .await;

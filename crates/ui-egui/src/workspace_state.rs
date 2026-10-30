@@ -197,8 +197,19 @@ impl WorkspaceStore {
             let path = config.dir().map_or_else(|| FILE.to_string(), |dir| dir.join(FILE).display().to_string());
             return Err(format!("{path} couldn't be loaded at startup, so it is left untouched; fix or move it and restart"));
         }
+        ensure_positions_ready(ui)?;
         self.save(Some(config), ui).map(|_| ())
     }
+}
+
+/// Explicit saves must wait until migrated native-window positions refer to their content.
+/// Check before capturing a named layout too, so a later background save cannot persist
+/// a snapshot made with the old outer-window positions.
+pub(crate) fn ensure_positions_ready(ui: &UiState) -> Result<(), String> {
+    if !ui.native_outer.is_empty() {
+        return Err("workspace window positions are still being restored; try saving again in a moment".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

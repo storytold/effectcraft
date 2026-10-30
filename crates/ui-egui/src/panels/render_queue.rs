@@ -457,6 +457,22 @@ fn queue_drop(app: &EffectcraftApp, ui: &egui::Ui, rect: Rect, p: &egui::Painter
     }
 }
 
+/// Elapsed and estimated remaining seconds at UI time `now`. The job reports them as frames
+/// finish; between reports they count on from the last one, as a clock does, so a slow frame
+/// doesn't read as a stalled render (#2593).
+fn live_times(ctx: &egui::Context, pr: &effectcraft_engine::render_queue::JobState, now: f64) -> (f64, Option<f64>) {
+    let report = (pr.current, pr.done, pr.item_elapsed.to_bits());
+    let since = ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_insert_with(egui::Id::unique("rq-progress-seen"), || (report, now));
+        if seen.0 != report {
+            *seen = (report, now);
+        }
+        seen.1
+    });
+    let dt = if pr.finished { 0.0 } else { (now - since).max(0.0) };
+    (pr.item_elapsed + dt, pr.remaining.map(|r| (r - dt).max(0.0)))
+}
+
 /// The Current Render strip inside `top`: title, elapsed / remaining time, Render, Stop, Notify
 /// and the progress bar.
 fn current_render_strip(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, top: Rect, rq: &RqView, actions: &mut Vec<Action>) {
@@ -467,11 +483,15 @@ fn current_render_strip(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::P
     let cur_item = progress.as_ref().and_then(|p| p.current).and_then(|id| queue.iter().find(|i| i.id == id));
     let cur_name = cur_item.and_then(|i| app.session.project.item(i.comp)).map(|i| i.name.clone());
     if let Some(pr) = &progress {
-        let rem = pr.remaining.map(hms).unwrap_or_else(|| "–".into());
+        let (elapsed, remaining) = live_times(ui.ctx(), pr, ui.input(|i| i.time));
+        if rendering {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        let rem = remaining.map(hms).unwrap_or_else(|| "–".into());
         p.text(
             pos2(top.max.x - 12.0, top.min.y + 16.0),
             Align2::RIGHT_CENTER,
-            format!("Elapsed: {}     Est. Remain: {rem}", hms(pr.item_elapsed)),
+            format!("Elapsed: {}     Est. Remain: {rem}", hms(elapsed)),
             Tokens::ui(11.5),
             t.text_dim,
         );
@@ -480,8 +500,9 @@ fn current_render_strip(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::P
     let render_b = Rect::from_min_size(pos2(top.max.x - 12.0 - bw, top.min.y + 34.0), vec2(bw, 26.0));
     let stop_b = Rect::from_min_size(pos2(render_b.min.x - 8.0 - bw, render_b.min.y), vec2(bw, 26.0));
     let can_render = !rendering && queue.iter().any(RenderQueueItem::is_queued) && !available.is_empty();
-    let render_resp = widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::unique("rq-render"));
-    a11y::button(&render_resp, "Render", can_render);
+    let render_label = tr("Render");
+    let render_resp = widgets::text_button(ui, render_b, render_label, can_render, &t, egui::Id::unique("rq-render"));
+    a11y::button(&render_resp, render_label, can_render);
     if render_resp.clicked() && can_render {
         actions.push(("renderQueue.render", json!({"wait": false})));
     }
@@ -491,13 +512,13 @@ fn current_render_strip(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::P
     let nb = Rect::from_min_size(pos2(render_b.min.x - 8.0 - 2.0 * bw - 8.0, render_b.min.y + 4.0), vec2(18.0, 18.0));
     let notify_resp = widgets::checkbox(ui, nb, notify, &t, egui::Id::unique("rq-notify"));
     a11y::check_box(&notify_resp, tr("Notify"), notify, true);
-    if notify_resp.clicked() {
+    if notify_resp.changed() {
         actions.push(("renderQueue.setNotify", json!({"notify": !notify})));
     }
     p.text(pos2(nb.max.x + 5.0, nb.center().y), Align2::LEFT_CENTER, tr("Notify"), Tokens::ui(11.5), t.text_dim);
     app.auto.add("renderQueue.notify", nb, if notify { "Notify: on" } else { "Notify: off" });
     if rendering {
-        if widgets::text_button(ui, stop_b, "Stop", false, &t, egui::Id::unique("rq-stop")).clicked() {
+        if widgets::text_button(ui, stop_b, crate::i18n::tr("Stop"), false, &t, egui::Id::unique("rq-stop")).clicked() {
             actions.push(("renderQueue.stop", json!({})));
         }
         app.auto.add("renderQueue.stop", stop_b, "Stop");
@@ -913,9 +934,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         app.auto.add(&aid("twirl"), tw, "Twirl");
         let cb = Rect::from_center_size(pos2(cx_render + 20.0, row.center().y), vec2(18.0, 18.0));
-        let cb_resp = widgets::checkbox(ui, cb, it.render, &t, egui::Id::unique(("rq-cb", it.id)));
+        let cb_resp = ui.add_enabled_ui(!rendering, |ui| widgets::checkbox(ui, cb, it.render, &t, egui::Id::unique(("rq-cb", it.id)))).inner;
         a11y::check_box(&cb_resp, &format!("{}: {name}", tr("Render")), it.render, !rendering);
-        if cb_resp.clicked() && !rendering {
+        if cb_resp.changed() && !rendering {
             actions.push(("renderQueue.setRender", json!({"item": it.id, "render": !it.render})));
         }
         app.auto.add(&aid("render"), cb, if it.render { "Render: on" } else { "Render: off" });
@@ -1034,5 +1055,27 @@ mod tests {
         assert_eq!(super::utc_stamp(10_000_000_000_000), "318857-05-20 17:46:40");
         assert_eq!(super::utc_stamp(u64::MAX), "584554051223-11-09 07:00:15");
         assert_eq!(super::hms(3725.4), "1:02:05");
+    }
+
+    /// #2593: between progress reports the times count on from the last report, and a new
+    /// report starts the count again.
+    #[test]
+    fn render_times_tick_between_reports() {
+        let ctx = egui::Context::default();
+        let mut pr = effectcraft_engine::render_queue::JobState {
+            current: Some(1),
+            done: 2,
+            total: 10,
+            item_elapsed: 20.0,
+            remaining: Some(80.0),
+            ..Default::default()
+        };
+        assert_eq!(super::live_times(&ctx, &pr, 100.0), (20.0, Some(80.0)));
+        assert_eq!(super::live_times(&ctx, &pr, 103.0), (23.0, Some(77.0)));
+        assert_eq!(super::live_times(&ctx, &pr, 300.0).1, Some(0.0), "never below zero");
+        (pr.done, pr.item_elapsed, pr.remaining) = (3, 31.0, Some(72.0));
+        assert_eq!(super::live_times(&ctx, &pr, 301.0), (31.0, Some(72.0)));
+        pr.finished = true;
+        assert_eq!(super::live_times(&ctx, &pr, 400.0), (31.0, Some(72.0)), "a finished job stands still");
     }
 }

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use effectcraft_color::{BlendMode, blend_pixel};
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat3, Mat4, Vec3, vec3};
-use effectcraft_project::{Layer, LightKind, MatteKind};
+use effectcraft_project::{Layer, LightKind, MatteKind, limits};
 use effectcraft_raster::{Image, Px, hash_noise};
 use effectcraft_time::Tick;
 use rayon::prelude::*;
@@ -195,13 +195,13 @@ fn mb_samples(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> usize {
 }
 
 /// Prepare a layer (buffer, geometry, material). `None` when it shows nothing.
-pub(crate) fn prepare<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Option<Item<'a>> {
+pub(crate) fn prepare<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Option<Item<'a>> {
     let buf = r.blend_layer_buf(ctx, layer)?;
     prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf, local: Mat4::IDENTITY })
 }
 
 /// Prepare a layer as planes: one per character for per-character 3D text, else one.
-pub(crate) fn prepare_all<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Vec<Item<'a>> {
+pub(crate) fn prepare_all<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Vec<Item<'a>> {
     if crate::text::per_char_3d(ctx, layer) {
         return crate::text::per_char_planes(ctx, layer, r.opts.scale)
             .into_iter()
@@ -218,7 +218,7 @@ struct PlaneInput {
 }
 
 /// Prepare the plane's geometry, motion samples and material.
-fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool, plane: PlaneInput) -> Option<Item<'a>> {
+fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool, plane: PlaneInput) -> Option<Item<'a>> {
     let PlaneInput { mut buf, local } = plane;
     if buf.img.is_empty() {
         return None;
@@ -287,12 +287,45 @@ fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: us
 }
 
 /// Blur radius (buffer pixels) of every buffer pixel of a plane at `world` (layer → world), from
-/// its camera depth: the circle of confusion over the on-screen size of one layer pixel there.
-fn dof_radii(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, buf: &Buf) -> Vec<f32> {
-    dof_radii_at(cam, dof, world, (buf.img.width as usize, buf.img.height as usize), buf.offset, buf.scale)
+/// its camera depth: the circle of confusion over the on-screen size of one layer pixel there, at
+/// most `cap` ([`dof_radius_cap`]).
+fn dof_radii(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, buf: &Buf, cap: f64) -> Vec<f32> {
+    dof_radii_at(cam, dof, world, (buf.img.width as usize, buf.img.height as usize), buf.offset, buf.scale, cap)
 }
 
-fn dof_radii_at(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, (w, h): (usize, usize), offset: [f64; 2], scale: f64) -> Vec<f32> {
+/// Pixels a padded blur buffer may have: the ~16 million layer buffers are held to
+/// ([`crate::Renderer::raster_scale`]), or twice the buffer when that is larger, so a big buffer
+/// can still be blurred. The blur holds a few images of this size at once whatever its level
+/// count ([`super::bokeh::progressive_blur`]), so blurring a small plane costs no more memory than
+/// blurring a large layer.
+const DOF_PAD_BUDGET: f64 = 16.0e6;
+
+/// Comp pixels per buffer pixel below which a plane isn't blurred. Such a plane covers almost no
+/// screen area (a 0%-scaled layer, one at an extreme distance), while its radius in buffer
+/// pixels grows without bound as it shrinks: blurring it would cost the most for the least.
+const DOF_MIN_SCREEN_SCALE: f64 = 1e-3;
+
+/// The largest blur radius (buffer pixels) of a `w`×`h` buffer: the one whose padded copy just
+/// fits [`DOF_PAD_BUDGET`]. The circle of confusion has no bound of its own (a focus distance far
+/// beyond the scene, a near-zero layer scale), so memory sets the limit; ordinary bokeh stays far
+/// below it and is never clamped.
+pub(super) fn dof_radius_cap(dof: &super::camera::Dof, w: u32, h: u32) -> f64 {
+    let (w, h) = (w as f64, h as f64);
+    let budget = DOF_PAD_BUDGET.max(2.0 * w * h);
+    // (w + 2p)·(h + 2p) = budget, solved for the padding p.
+    let pad = (((w - h) * (w - h) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
+    ((pad - 2.0) / iris_stretch(dof)).max(0.0)
+}
+
+pub(super) fn dof_radii_at(
+    cam: &CameraState,
+    dof: &super::camera::Dof,
+    world: Mat4,
+    (w, h): (usize, usize),
+    offset: [f64; 2],
+    scale: f64,
+    cap: f64,
+) -> Vec<f32> {
     let s = scale.max(1e-9);
     let sx = world.apply_vec(vec3(1.0, 0.0, 0.0)).length().max(1e-9);
     let at = |x: f64, y: f64| cam.depth(world.apply(vec3((x - offset[0]) / s, (y - offset[1]) / s, 0.0)));
@@ -306,31 +339,48 @@ fn dof_radii_at(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, (w, h)
             if z <= super::camera::NEAR {
                 continue;
             }
-            // coc · ½ / (zoom / z · sx) · scale
-            *o = (dof.coc(z) * 0.5 * z / (cam.zoom * sx) * s) as f32;
+            // coc · ½ / (zoom / z · sx) · scale. Infinity clamps to the cap like any large radius,
+            // so the blur keeps growing with defocus; only NaN, which has no defocus, stays sharp.
+            let r = dof.coc(z) * 0.5 * z / (cam.zoom * sx) * s;
+            *o = if r.is_nan() || cam.zoom * sx / (z * s) < DOF_MIN_SCREEN_SCALE { 0.0 } else { r.min(cap) as f32 };
         }
     });
     out
 }
 
+/// How much the iris' aspect ratio stretches a blur radius along its longer axis.
+fn iris_stretch(dof: &super::camera::Dof) -> f64 {
+    let a = dof.iris.aspect.clamp(0.01, 100.0).sqrt();
+    a.max(1.0 / a)
+}
+
 /// The padding [`dof_blur`] gives a buffer whose largest blur radius is `rmax`.
 fn dof_pad(dof: &super::camera::Dof, rmax: f64) -> u32 {
-    let a = dof.iris.aspect.clamp(0.01, 100.0).sqrt().max(1.0 / dof.iris.aspect.clamp(0.01, 100.0).sqrt());
-    (rmax * a).ceil() as u32 + 2
+    ((rmax * iris_stretch(dof)).ceil() as u32).saturating_add(2)
+}
+
+/// The size of `img` padded by `pad` on every side, or `None` past [`limits::MAX_SIZE`] on a side:
+/// [`DOF_PAD_BUDGET`] bounds the area, so a long thin buffer could still outgrow a side.
+fn padded_size(img: &Image, pad: u32) -> Option<(u32, u32)> {
+    let grow = |n: u32| n.saturating_add(pad.saturating_mul(2));
+    let (w, h) = (grow(img.width), grow(img.height));
+    (w <= limits::MAX_SIZE && h <= limits::MAX_SIZE).then_some((w, h))
 }
 
 /// [`dof_blur`] planned for an accelerator: the padding, radius map and levels, and the padded
 /// buffer's layer-space bounds. `None` when nothing blurs.
 fn dof_plan(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, buf: &Buf) -> Option<(PlaneDof, [f64; 4])> {
-    let radii = dof_radii(cam, dof, world, buf);
+    let cap = dof_radius_cap(dof, buf.img.width, buf.img.height);
+    let radii = dof_radii(cam, dof, world, buf, cap);
     let rmax = radii.iter().copied().fold(0.0f32, f32::max) as f64;
     if rmax <= 0.3 {
         return None;
     }
     let pad = dof_pad(dof, rmax);
-    let (w, h) = (buf.img.width as usize + 2 * pad as usize, buf.img.height as usize + 2 * pad as usize);
+    let (wp, hp) = padded_size(&buf.img, pad)?;
+    let (w, h) = (wp as usize, hp as usize);
     let offset = [buf.offset[0] + pad as f64, buf.offset[1] + pad as f64];
-    let radius = dof_radii_at(cam, dof, world, (w, h), offset, buf.scale);
+    let radius = dof_radii_at(cam, dof, world, (w, h), offset, buf.scale, cap);
     let levels = super::bokeh::blur_levels(&radius)?;
     let s = buf.scale.max(1e-9);
     let bounds = [-offset[0] / s, -offset[1] / s, (w as f64 - offset[0]) / s, (h as f64 - offset[1]) / s];
@@ -339,16 +389,20 @@ fn dof_plan(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, buf: &Buf)
 
 /// Depth of field for one plane: highlights boosted, then a bokeh-shaped blur by depth.
 fn dof_blur(cam: &CameraState, dof: &super::camera::Dof, world: Mat4, buf: Arc<Buf>) -> Arc<Buf> {
-    let radii = dof_radii(cam, dof, world, &buf);
+    let cap = dof_radius_cap(dof, buf.img.width, buf.img.height);
+    let radii = dof_radii(cam, dof, world, &buf, cap);
     let rmax = radii.iter().copied().fold(0.0f32, f32::max) as f64;
     if rmax <= 0.3 {
         return buf;
     }
     let pad = dof_pad(dof, rmax);
+    if padded_size(&buf.img, pad).is_none() {
+        return buf;
+    }
     let mut padded = buf.img.padded(pad);
     super::bokeh::boost_highlights(&mut padded, &dof.highlight);
     let pbuf = Buf { img: padded, offset: [buf.offset[0] + pad as f64, buf.offset[1] + pad as f64], scale: buf.scale };
-    let pr = dof_radii(cam, dof, world, &pbuf);
+    let pr = dof_radii(cam, dof, world, &pbuf, cap);
     // The (cached, shared) layer buffer stays untouched; the blurred copy is per frame.
     Arc::new(Buf { img: super::bokeh::progressive_blur(&pbuf.img, &dof.iris, &pr), offset: pbuf.offset, scale: pbuf.scale })
 }
@@ -449,8 +503,8 @@ fn gather<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Layer], out: (u32,
         .flat_map_iter(|(i, l)| {
             // Stack order with room for a collapsed precomp's layers in between.
             let i = i * 1024;
-            if let Some(item) = r.collapsed(ctx, l) {
-                return collapsed_items(r, ctx, l, item, i, out);
+            if let Some(collapsed) = r.collapsed(ctx, l) {
+                return collapsed_items(r, ctx, l, &collapsed, i, out);
             }
             let mut its = prepare_all(r, ctx, l, i, out, true);
             if !its.is_empty() {
@@ -469,6 +523,7 @@ fn gather<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Layer], out: (u32,
         extra = ctx
             .comp
             .layers
+            .as_arcs()
             .par_iter()
             .filter(|l| l.switches.three_d && l.has_video() && l.is_active_at(ctx.time) && !in_run.contains(&l.id) && !l.switches.adjustment)
             .filter(|l| Material::of(ctx, l).casts_shadows != 0)
@@ -483,20 +538,13 @@ fn gather<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Layer], out: (u32,
 /// 3D space (world = precomp layer's world × nested world), depth-sorted with the run, so they
 /// intersect the parent's 3D layers; nested 2D layers lie on the precomp layer's plane in stack
 /// order. (Nested adjustment layers are skipped here.)
-fn collapsed_items<'a>(
-    r: &Renderer<'a>,
-    ctx: &EvalCtx<'a>,
-    layer: &'a Layer,
-    item: effectcraft_project::ItemId,
-    order: usize,
-    out: (u32, u32),
-) -> Vec<Item<'a>> {
+fn collapsed_items<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &crate::Collapsed, order: usize, out: (u32, u32)) -> Vec<Item<'a>> {
     let op = ctx.opacity(layer) as f32 * r.opacity_mul();
-    let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, op) else { return vec![] };
+    let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, op) else { return vec![] };
     let t = nctx.time;
-    let any_solo = nctx.comp.any_solo();
-    let nested: Vec<&'a Layer> = nctx
-        .comp
+    let Some(nc) = r.project.comp(collapsed.item) else { return vec![] };
+    let any_solo = nc.any_solo();
+    let nested: Vec<&'a Layer> = nc
         .layers
         .iter()
         .rev()
@@ -645,6 +693,13 @@ fn shade_texel(it: &Item, g: &Geo, u: f64, v: f64, t: Px, lights: &[LightState],
     [lit[0] * a, lit[1] * a, lit[2] * a, a]
 }
 
+/// Samples per side of the Shadow Diffusion kernel for a penumbra radius of `r_px` caster pixels:
+/// odd, at least 3, and enough that neighbouring samples are at most 1.5 pixels apart, up to 15.
+pub(crate) fn shadow_taps(r_px: f64) -> u32 {
+    let n = ((2.0 * r_px / 1.5).ceil() as u32).clamp(3, 15);
+    n | 1
+}
+
 /// RGB transmittance of light `l` reaching `p` past caster `c` (1 = unoccluded).
 fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
     const FAR: f64 = 1.0e6;
@@ -672,11 +727,17 @@ fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
     if r * c.buf.scale < 0.5 {
         px = c.texel(hit.x, hit.y);
     } else {
-        for j in -1..=1 {
-            for i in -1..=1 {
-                let q = c.texel(hit.x + i as f64 * r * 0.66, hit.y + j as f64 * r * 0.66);
+        // Box filter over the penumbra square: n × n cell centres, dense enough that a wide
+        // diffusion blurs the caster instead of stamping copies of it (#2444).
+        let n = shadow_taps(r * c.buf.scale);
+        let step = 2.0 * r / n as f64;
+        let h = (n / 2) as i32;
+        let w = 1.0 / (n * n) as f32;
+        for j in -h..=h {
+            for i in -h..=h {
+                let q = c.texel(hit.x + f64::from(i) * step, hit.y + f64::from(j) * step);
                 for k in 0..4 {
-                    px[k] += q[k] / 9.0;
+                    px[k] += q[k] * w;
                 }
             }
         }
@@ -850,7 +911,7 @@ pub(crate) fn aux_pass(r: &Renderer, ctx: &EvalCtx) -> effectcraft_raster::AuxCh
                     if nv[2] > 0.0 {
                         nv = nv.map(|v| -v);
                     }
-                    let (sw, sh) = crate::source_size(r.project, it.layer);
+                    let (sw, sh) = ctx.source_size(it.layer);
                     let size = if sw == 0 { [ctx.comp.width as f64, ctx.comp.height as f64] } else { [sw as f64, sh as f64] };
                     (number(it.layer), source_id(it.layer), crypto_hash(&it.layer.name), crypto_hash(&source_name(it.layer)), nv, size)
                 })

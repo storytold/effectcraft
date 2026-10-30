@@ -46,6 +46,14 @@ pub trait Accelerator: Send + Sync {
     /// Render a top-level comp frame (what [`Renderer::comp_frame`] returns). `None` = not
     /// handled (the CPU renders it).
     fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image>;
+    /// Render a top-level comp frame like [`Self::comp_frame`], composite it over `bg` and
+    /// convert it to the H.264 export's 8-bit BT.709 limited-range 4:2:0 (Y plane, then U and V
+    /// at half size; see `effectcraft_raster::yuv`). Every byte is within one level of the CPU
+    /// conversion of the same frame (a driver's arithmetic may move a value near a rounding
+    /// boundary). `None` = not handled (the caller renders and converts on the CPU).
+    fn comp_frame_yuv420(&self, _r: &Renderer, _comp: ItemId, _t: Tick, _bg: [f32; 3]) -> Option<Vec<u8>> {
+        None
+    }
     /// The accelerator implements effect `id` with the CPU effect's semantics.
     fn supports_effect(&self, id: &str) -> bool;
     /// Run a chain of supported effects on `buf`, clamping and quantising to `levels` after
@@ -123,6 +131,14 @@ pub trait FxTarget {
             buf
         });
     }
+    /// Give the buffer the pixel-grid phase the layer rectangle's cover would
+    /// ([`effectcraft_effects::Buf::align`]): grows left/top by less than 64 pixels.
+    fn align(&mut self, size: [f64; 2]) {
+        self.cpu(&mut |mut buf| {
+            buf.align(size);
+            buf
+        });
+    }
 }
 
 /// The CPU effect target (GPU chains go through [`Accelerator::effects`]: upload, readback).
@@ -176,8 +192,9 @@ impl<'a> Renderer<'a> {
     pub fn layer_aux(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         match &layer.source {
             LayerSource::Footage { item } => {
-                let ItemKind::Footage(f) = &self.project.item(*item)?.kind else { return None };
-                let a = self.footage.aux(*item, f, ctx.source_time(layer))?;
+                let item = ctx.media_item(layer, *item);
+                let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
+                let a = self.footage.aux(item, f, ctx.source_time(layer))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size). The
                 // planes are only copied when that changes the scale.
                 let scale = a.width as f64 / f.width as f64;
@@ -324,8 +341,8 @@ impl<'a> Renderer<'a> {
     }
 
     /// Draw a collapsed precomp layer into `canvas` on the CPU.
-    pub fn draw_collapsed_cpu(&self, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut Image) {
-        self.draw_collapsed(ctx, layer, item, canvas, false);
+    pub fn draw_collapsed_cpu(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &crate::Collapsed, canvas: &mut Image) {
+        self.draw_collapsed(ctx, layer, collapsed, canvas, false);
     }
 
     /// The layer's finished buffers (styles included) in the blending space.

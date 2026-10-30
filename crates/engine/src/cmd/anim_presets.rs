@@ -1,6 +1,7 @@
 //! EffectCraft's own animation preset library (Effects & Presets ▸ * Animation Presets): the
 //! Transitions category (original presets built on our Transition effects and layer opacity) and
-//! the Backgrounds category (generators, noise and colour effects driven by expressions).
+//! the Backgrounds category (generators, noise and colour effects driven by expressions) and the
+//! Behaviors category (transform and opacity driven by expressions, no effects).
 //!
 //! Each preset adds effects (with values and keyframes) and/or keys layer properties, starting
 //! at the current time, on every selected layer. The library is data
@@ -26,13 +27,17 @@ pub const TRANSITIONS_JSON: &str = include_str!("../../presets/transitions.json"
 /// The original background presets (`presets/backgrounds.json`).
 pub const BACKGROUNDS_JSON: &str = include_str!("../../presets/backgrounds.json");
 
+/// The original behavior presets (`presets/behaviors.json`): expression-driven motion on a layer's
+/// transform and opacity, no effects.
+pub const BEHAVIORS_JSON: &str = include_str!("../../presets/behaviors.json");
+
 /// Keys per animated property, so a hostile inline preset can't allocate without bound.
 const MAX_KEYS: usize = 256;
 /// Longest expression text an inline preset may carry.
 const MAX_EXPR: usize = 4096;
 
 fn presets() -> Vec<Value> {
-    [TRANSITIONS_JSON, BACKGROUNDS_JSON]
+    [TRANSITIONS_JSON, BACKGROUNDS_JSON, BEHAVIORS_JSON]
         .iter()
         .flat_map(|src| serde_json::from_str::<Value>(src).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default())
         .collect()

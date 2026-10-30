@@ -50,6 +50,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("expr", 3),
     ("export", 3),
     ("gpu", 3),
+    ("sam2", 3),
     ("lottie", 3),
     ("format", 3),
     ("plugin", 3),
@@ -407,6 +408,62 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// The guidance printed when the ALSA pkg-config package is missing. Split out so the tests can
+/// check the package names without needing a machine that is actually missing them.
+#[cfg(target_os = "linux")]
+fn audio_backend_missing_hint(pkg_config_stderr: Option<&str>) -> String {
+    let mut hint = String::from(
+        "Linux audio needs the ALSA development package, and pkg-config cannot find it.\n\
+         The desktop app plays preview sound through cpal, whose alsa-sys dependency asks\n\
+         pkg-config for `alsa`; without the package the build dies minutes later with an\n\
+         unrelated-looking linker error.\n\
+         \n\
+         Fedora:         sudo dnf install alsa-lib-devel\n\
+         Debian/Ubuntu:  sudo apt install libasound2-dev\n\
+         Arch:           sudo pacman -S alsa-lib\n\
+         \n\
+         Install one of those and run `cargo xtask ci` again. If you cannot install it, point\n\
+         PKG_CONFIG_PATH at a directory holding an `alsa.pc` whose Libs line names your system's\n\
+         libasound (usually `libasound.so.2`); every CI run will need that variable set.",
+    );
+    if let Some(stderr) = pkg_config_stderr {
+        hint.push_str("\n\npkg-config said: ");
+        hint.push_str(stderr);
+    }
+    hint
+}
+
+/// `cargo xtask ci` builds the desktop app on the host, so on Linux it needs a usable ALSA
+/// pkg-config package before the build dies minutes later at link time. The probe goes through
+/// the same `pkg-config` crate alsa-sys's build script uses, so the executable and search-path
+/// lookup match by construction: `PKG_CONFIG` and its target-scoped variants, then `pkg-config`
+/// on `PATH` with a `pkgconf` fallback, plus the scoped `PKG_CONFIG_PATH`/`LIBDIR`/`SYSROOT_DIR`.
+/// A probe that ran and said no is "ALSA missing"; one that could not run is reported separately,
+/// so a machine with only `pkgconf` does not fail a build that would succeed.
+#[cfg(target_os = "linux")]
+fn audio_backend() -> Result<(), String> {
+    // cargo_metadata off: xtask is not a build script, so the crate's rerun-if-env lines would
+    // only clutter the ci log.
+    match pkg_config::Config::new().cargo_metadata(false).probe("alsa") {
+        Ok(_) => Ok(()),
+        Err(pkg_config::Error::ProbeFailure { output, .. }) | Err(pkg_config::Error::Failure { output, .. }) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            Err(audio_backend_missing_hint((!stderr.is_empty()).then_some(stderr)))
+        }
+        Err(e) => Err(format!(
+            "The pkg-config probe for `alsa` could not be run: {e}. Install pkg-config (or pkgconf), \
+             or point PKG_CONFIG at a working one — it is the same lookup alsa-sys's pkg-config \
+             dependency performs."
+        )),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn audio_backend() -> Result<(), String> {
+    Ok(())
+}
+
 /// Lib, bin and integration tests (examples aren't linked; clippy checked them), then doctests,
 /// which nextest doesn't run.
 ///
@@ -438,7 +495,8 @@ type Stage = fn() -> Result<(), String>;
 
 /// Every stage runs even when an earlier one fails, so one run reports all the problems.
 fn ci() -> Result<(), String> {
-    let stages: [(&str, Stage); 7] = [
+    let stages: [(&str, Stage); 8] = [
+        ("audio backend", audio_backend),
         ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
         ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
         ("tests", tests),
@@ -459,6 +517,7 @@ fn main() -> ExitCode {
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
         "ci" => ci(),
+        "audio-backend" => audio_backend(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ico" => {
@@ -469,7 +528,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -483,4 +542,23 @@ fn main() -> ExitCode {
 /// The workspace root (the parent of `xtask/`).
 pub fn root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent dir").to_path_buf()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::audio_backend_missing_hint;
+
+    #[test]
+    fn alsa_missing_names_the_package_for_each_distro() {
+        let e = audio_backend_missing_hint(None);
+        for want in ["alsa-lib-devel", "libasound2-dev", "alsa-lib", "pkg-config", "PKG_CONFIG_PATH"] {
+            assert!(e.contains(want), "hint lost `{want}`:\n{e}");
+        }
+    }
+
+    #[test]
+    fn alsa_missing_appends_pkg_config_s_own_detail() {
+        let e = audio_backend_missing_hint(Some("Package 'alsa' not found"));
+        assert!(e.contains("pkg-config said: Package 'alsa' not found"), "detail lost:\n{e}");
+    }
 }

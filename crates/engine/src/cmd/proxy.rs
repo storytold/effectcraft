@@ -117,6 +117,7 @@ fn interpret_proxy(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(C, "the selected items have no proxy"));
     }
     let it = super::file_more::Interpretation::parse(p, C)?;
+    it.check(items.iter().filter_map(|i| s.project.item(*i).and_then(|x| x.proxy.as_ref()).map(|px| &px.footage)), C)?;
     let guesses: Vec<_> = items
         .iter()
         .map(|i| {
@@ -190,6 +191,8 @@ fn create_proxy(s: &mut Session, p: &Value) -> Result<Value> {
     it.output.channels = Channels::Rgba;
     if let Some(o) = str_p(p, "path").or(str_p(p, "output")) {
         it.output.output = o.to_string();
+    } else {
+        s.avoid_sources(&mut it);
     }
     it.post_render = PostRenderAction::SetProxy;
     let id = s.edit("Create Proxy", None, |proj, _| {
@@ -229,7 +232,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Proxy...",
             ["File", "Interpret Footage"],
             None,
-            "{items?|item?, alpha?, matteColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?}",
+            "{items?|item?, alpha?, guessAlpha?, matteColor?|premulColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?, preserveRgb?, overrideStart?, startTimecode? (as file.interpretFootage), logConversion?, cineonUnits?, convertedBlack?, convertedWhite?, pointUnits?, tenBitBlack?, tenBitWhite?, currentGamma?, highlightRolloff? (Cineon Settings of DPX and Cineon proxies)}",
             has_proxy,
             interpret_proxy
         ),

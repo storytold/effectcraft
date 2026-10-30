@@ -182,10 +182,8 @@ fn violations(src: &str) -> Vec<(usize, String)> {
         let tok = next_token(&s, &mut i);
         match tok {
             Tok::Open => levels.push(vec![]),
-            Tok::Close => {
-                if levels.len() > 1 {
-                    levels.pop();
-                }
+            Tok::Close if levels.len() > 1 => {
+                levels.pop();
             }
             Tok::Sep => {
                 if let Some(l) = levels.last_mut() {

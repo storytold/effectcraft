@@ -6,6 +6,10 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use egui::FontTweak;
+#[cfg(not(target_arch = "wasm32"))]
+use egui::emath::GuiRounding as _;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +128,16 @@ impl Tokens {
     /// are off.
     pub fn grad_top(&self, c: Color32) -> Color32 {
         if self.gradients { c.lerp_to_gamma(Color32::WHITE, 0.06) } else { c }
+    }
+
+    /// The tokens a property's value fields use (#1306): with an expression driving the property
+    /// (`expression`, [`Property::has_expression`]) its values show in the expression colour, red
+    /// as in After Effects, hovered and dragged too; otherwise these tokens. For the values only:
+    /// the name, stopwatch and swatches keep the ordinary tokens.
+    ///
+    /// [`Property::has_expression`]: effectcraft_engine::project::Property::has_expression
+    pub fn for_value(self, expression: bool) -> Tokens {
+        if expression { Tokens { hot_text: self.expr_text, accent_hover: self.expr_text, ..self } } else { self }
     }
 }
 
@@ -383,6 +397,47 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
     ('ა', "georgian-system"),
 ];
 
+/// The size the fallback baseline correction is derived at. The correction is an em fraction, so the
+/// value holds at every interface size; any size in the interface's range gives the same answer.
+#[cfg(not(target_arch = "wasm32"))]
+const BASELINE_METRICS_PX: f32 = 12.0;
+
+/// A face's ascent and row height at `px`, rounded the way epaint rounds them: ascent, descent and
+/// line gap separately to 1/32, then `ascent + descent + line_gap` (epaint's descent is negative,
+/// this one is positive).
+#[cfg(not(target_arch = "wasm32"))]
+fn ascent_and_height(m: &effectcraft_text::fonts::VMetrics) -> (f32, f32) {
+    let ascent = m.ascent.round_ui();
+    let descent = m.descent.round_ui();
+    let line_gap = m.line_gap.round_ui();
+    (ascent, ascent + descent + line_gap)
+}
+
+/// The `FontTweak` that puts a fallback face's glyphs on the row font's baseline.
+///
+/// epaint draws a glyph at `A_face + 0.5·(H_row − H_face)` (`galley_from_rows` in epaint's
+/// `text_layout.rs`), where `A` and `H` are the ascent and the row height of the face that draws the
+/// glyph and of the row's own font, both from `styled_metrics` in epaint's `font.rs`. Shifting the
+/// face by `(A_row − A_face) − 0.5·(H_row − H_face)` cancels the offset; as an em fraction one
+/// number serves every size, because `FontTweak` applies `size · y_offset_factor`.
+///
+/// The same expression also carries `valign · (max_row_height − line_height)`, which cancels here:
+/// every glyph of a row takes the section font's row height, so it is the same term for the Latin
+/// and the fallback glyph. The remaining `snap_to_pixel` difference is likewise shared and cancels.
+/// (#1309)
+///
+/// The UI families do not share a row font — Proportional uses Inter, Monospace JetBrains Mono —
+/// and their factors differ by 0.0026 em, which is 0.03 px at 12 pt: inside the 1/32 that is already
+/// rounded away above, so one factor per face is enough. The test
+/// `fallback_glyphs_sit_on_the_row_baseline` pins the result.
+#[cfg(not(target_arch = "wasm32"))]
+fn baseline_tweak(row: &effectcraft_text::fonts::Face, face: &effectcraft_text::fonts::Face) -> FontTweak {
+    let px = BASELINE_METRICS_PX;
+    let (a_row, h_row) = ascent_and_height(&row.metrics(px));
+    let (a_face, h_face) = ascent_and_height(&face.metrics(px));
+    FontTweak { y_offset_factor: ((a_row - a_face) - 0.5 * (h_row - h_face)) / px, ..Default::default() }
+}
+
 /// Register the system fallbacks for scripts the bundled fonts lack in every font family, and
 /// return their names in registration order (empty when nothing installed covers a probe, so a
 /// machine without those fonts simply keeps the bundled ones). A face that covers several probes
@@ -415,6 +470,7 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         // Han text follows the interface language, not the operating system's locale.
         fonts::set_cjk_locale(cjk_locale(language));
         let base = fonts::resolve("Inter", "Regular").face;
+        let base_face = fonts::face(base);
         let han = (han_probe(language), "chinese-system");
         let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
         let mut names = Vec::new();
@@ -458,6 +514,7 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
             data.index = face.info.index;
             let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
+            data.tweak = baseline_tweak(&base_face, &face);
             family_fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in family_fonts.families.values_mut() {
                 family.push(name.to_string());
@@ -737,6 +794,64 @@ mod script_font_tests {
                 assert_ne!((uv.min, uv.max), (missing.min, missing.max), "a real glyph, not the replacement");
             }
             assert_ne!((meem.uv_rect.min, meem.uv_rect.max), (isolated.min, isolated.max), "the meem takes its initial form");
+        });
+    }
+
+    /// A fallback face's glyphs sit on the row font's baseline, in every UI family and at every
+    /// interface size. (#1309)
+    ///
+    /// `A` stands in for the row's baseline: epaint exposes none, but a capital without a descender
+    /// has its ink bottom on the baseline, so its ink bottom *is* the row's baseline. A glyph with a
+    /// descender (`g`) or a round one with an overshoot (`O`) would quietly stop holding, so keep `A`
+    /// as the Latin half of this pair.
+    ///
+    /// Both glyphs of `Aあ` end on the baseline, so their ink bottoms agree up to the difference
+    /// between the two outlines themselves - the kana reaches a little below the Latin letter in the
+    /// Japanese faces. Without the correction the kana sits 3 pt high at 12 pt (measured), so the
+    /// tolerance below separates "the correction is applied" from "it is missing"; it is not a claim
+    /// about the outlines. Two pixels per point, because epaint truncates a glyph's box height to
+    /// whole pixels, which would otherwise put up to a point of noise on the measurement.
+    #[test]
+    fn fallback_glyphs_sit_on_the_row_baseline() {
+        if !installed('\u{3042}') {
+            eprintln!("no Japanese system font installed; skipping the baseline check");
+            return;
+        }
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(2.0);
+        super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "ja");
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let bottom = |g: &egui::epaint::text::Glyph| g.pos.y + g.uv_rect.offset.y + g.uv_rect.size.y;
+        ctx.fonts_mut(|fonts| {
+            for family in [
+                egui::FontFamily::Proportional,
+                egui::FontFamily::Monospace,
+                egui::FontFamily::Name("medium".into()),
+                egui::FontFamily::Name("semibold".into()),
+            ] {
+                for size in [12.0_f32, 15.0, 18.0] {
+                    let font = egui::FontId::new(size, family.clone());
+                    let galley = fonts.layout_no_wrap("A\u{3042}".into(), font, egui::Color32::WHITE);
+                    let row = &galley.rows[0].glyphs;
+                    assert_eq!(row.len(), 2, "A\u{3042} should shape to two glyphs");
+                    let (latin, kana) = (bottom(&row[0]), bottom(&row[1]));
+                    let drift = kana - latin;
+                    // Without the correction the kana sits 3-5 pt *above* the Latin ink, so the sign is
+                    // what tells the two apart. With it, the kana reaches a little *below* the Latin
+                    // one, by however far the face's kana overshoot past the baseline - measured at
+                    // 1.94 pt for Noto Sans CJK JP against Yu Gothic's 0.4 - plus up to half a point of
+                    // whole-point rounding in `pos.y` for each glyph.
+                    assert!(
+                        drift > -0.5,
+                        "the kana sits {drift:.2} pt above the Latin baseline at {size} pt in {family:?} (latin {latin}, kana {kana}); the fallback tweak is missing or wrong"
+                    );
+                    assert!(
+                        drift < 2.5,
+                        "the kana sits {drift:.2} pt below the Latin baseline at {size} pt in {family:?} (latin {latin}, kana {kana}); the fallback tweak is too large"
+                    );
+                }
+            }
         });
     }
 }

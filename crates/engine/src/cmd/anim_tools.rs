@@ -213,7 +213,8 @@ fn sample_curve(
 
 fn grouped_selection(s: &Session) -> std::collections::BTreeMap<(LayerId, Uid), Vec<Tick>> {
     let mut g: std::collections::BTreeMap<(LayerId, Uid), Vec<Tick>> = Default::default();
-    for k in &s.state.selected_keys {
+    let Some(comp) = s.active_comp() else { return g };
+    for k in super::prop::editable_keys(comp, &s.state.selected_keys) {
         g.entry((k.layer, k.prop)).or_default().push(k.time);
     }
     for v in g.values_mut() {
@@ -273,7 +274,7 @@ fn run_on_selection(
     s.edit(label, None, |proj, st| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let fr = comp.frame_rate;
-        let mut sel = vec![];
+        let mut sel = super::anim::locked_selection(comp, &st.selected_keys);
         for ((lid, uid), times) in groups {
             let Some(l) = comp.layer_mut(lid) else { continue };
             let lc = l.clone();

@@ -86,7 +86,17 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
             .find(|e| e.id == "viewer.area")
             .map(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])));
 
-        let at = if proj.is_empty() {
+        // Dropping a file on the Timeline adds it to the composition the panel shows, as it does
+        // on the viewer (#2588); the import decides the layer's position.
+        let over_timeline = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+            app.auto
+                .elements
+                .iter()
+                .find(|e| e.id == "panel.Timeline")
+                .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
+        });
+
+        let at = if proj.is_empty() && !over_timeline {
             ctx.input(|i| i.pointer.hover_pos()).filter(|p| viewer.is_some_and(|v| v.contains(*p))).and_then(|p| crate::panels::viewer::screen_to_comp(&ctx, p))
         } else {
             None
@@ -101,7 +111,7 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         let mut params = json!({
             "paths": rest,
             "drag": true,
-            "addToComp": at.is_some(),
+            "addToComp": at.is_some() || over_timeline,
             "position": at,
             "background": true
         });

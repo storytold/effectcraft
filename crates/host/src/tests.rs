@@ -1,6 +1,71 @@
 use serde_json::json;
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn storage_overflow_cannot_bypass_duplicate_output_protection() {
+    for same_folder in [true, false] {
+        refuse_overflow_collision(same_folder);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_overflow_collision(same_folder: bool) {
+    use std::{path::PathBuf, sync::Arc};
+    struct OverflowOnly(PathBuf);
+    impl effectcraft_project::render_queue::StorageQuota for OverflowOnly {
+        fn has_room(&self, path: &str, _: u64) -> bool {
+            std::path::Path::new(path).starts_with(&self.0)
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("ec-duplicate-overflow-{}-{same_folder}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let overflow = dir.join("overflow");
+    std::fs::create_dir_all(&overflow).unwrap();
+    let mut s = effectcraft_engine::Session {
+        exporter: Some(Arc::new(super::FileExporter::default())),
+        storage_quota: Some(Arc::new(OverflowOnly(overflow.clone()))),
+        ..Default::default()
+    };
+    Arc::make_mut(&mut s.project).render_prefs.overflow_folders = vec![overflow.to_string_lossy().into_owned(); 2];
+    s.execute("comp.new", json!({"width": 16, "height": 16, "frameRate": 10, "duration": 0.2})).unwrap();
+    for index in 0..2 {
+        let folder = if same_folder { dir.clone() } else { dir.join(index.to_string()) };
+        s.execute("renderQueue.add", json!({"format": "png", "output": folder.join("frames_[#####].png"), "skipExisting": true, "storageOverflow": true}))
+            .unwrap();
+    }
+    let result = s.execute("renderQueue.render", json!({}));
+    let written = std::fs::read_dir(&overflow).unwrap().count();
+    assert!(result.is_err(), "overflow destinations cannot skip previous frames: {result:?}");
+    assert_eq!(written, 0, "refused before any overflow file is written");
+    s.execute("renderQueue.remove", json!({"index": 2})).unwrap();
+    let result = s.execute("renderQueue.render", json!({})).unwrap();
+    assert_eq!(result["items"][0]["status"], "Done", "one output's alternatives are not separate outputs: {result}");
+    assert_eq!(std::fs::read_dir(&overflow).unwrap().count(), 2);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn memory_sink_cannot_overwrite_a_previous_output_even_with_skip_existing() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let writes = Arc::new(AtomicUsize::new(0));
+    let count = writes.clone();
+    let sink: Arc<effectcraft_export::Sink> = Arc::new(move |_, _| {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    let mut s = effectcraft_engine::Session { exporter: Some(Arc::new(super::FileExporter { sink: Some(sink) })), ..Default::default() };
+    s.execute("comp.new", json!({"name": "Main", "width": 16, "height": 16, "frameRate": 10, "duration": 0.2})).unwrap();
+    for _ in 0..2 {
+        s.execute("renderQueue.add", json!({"format": "png", "output": "/virtual/frames_[#####].png", "skipExisting": true})).unwrap();
+    }
+    let result = s.execute("renderQueue.render", json!({}));
+    assert!(result.is_err(), "a sink cannot skip previous paths: {result:?}");
+    assert_eq!(writes.load(Ordering::Relaxed), 0, "refused before the sink receives bytes");
+}
+
+#[test]
 fn host_runs_tasks_scheduled_by_panel_handlers() {
     let mut s = super::session();
     let result = s.execute("script.run", json!({"code": "var w=new Window('palette','Timer regression'); var b=w.add('button',undefined,'Import'); b.onClick=function(){app.scheduleTask(\"app.project.items.addComp('Scheduled',64,64,1,1,25)\",0,false);};w.show();"})).unwrap();
@@ -269,7 +334,16 @@ fn value(s: &effectcraft_engine::Session, l: u64, path: &str) -> effectcraft_eng
     let cid = s.active_comp_id().unwrap();
     let comp = s.project.comp(cid).unwrap();
     let layer = comp.layer(effectcraft_engine::project::LayerId(l)).unwrap();
-    let ctx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: Default::default(), expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_engine::render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: Default::default(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     ctx.value(layer, layer.props.prop(path).unwrap())
 }
 
@@ -523,8 +597,16 @@ fn stereo_rig_expressions_follow_the_master_camera() {
     let v3 = |s: &effectcraft_engine::Session, path: &str| {
         let comp = s.project.comp(left).unwrap();
         let layer = &comp.layers[0];
-        let ctx =
-            effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: left, comp, time: Default::default(), expr: s.expr.as_deref(), footage: None };
+        let ctx = effectcraft_engine::render::EvalCtx {
+            project: &s.project,
+            comp_id: left,
+            comp,
+            time: Default::default(),
+            expr: s.expr.as_deref(),
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         ctx.value(layer, layer.props.prop(path).unwrap()).as_vec3()
     };
     let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-6);

@@ -8,7 +8,7 @@
 //! numeric value of a `Slider`).
 //!
 //! Names are the same translated strings the panel draws (`i18n::tr`), never hard-coded English.
-//! `tests/ui_accessibility_audit.rs` walks the tree and fails on an unnamed control in the panels
+//! `tests/it/ui_accessibility_audit.rs` walks the tree and fails on an unnamed control in the panels
 //! that have had their pass.
 
 use egui::accesskit::{HasPopup, Role, Toggled};

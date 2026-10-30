@@ -42,7 +42,8 @@ pub struct CharXf {
     pub stroke_hsb: [f64; 3],
     pub stroke_opacity: f64,
     pub stroke_width: f64,
-    /// Tracking (1/1000 em) added before / after the character.
+    /// Tracking (pixels: an animator's Tracking Amount, as After Effects) added before / after
+    /// the character.
     pub track_before: f64,
     pub track_after: f64,
     /// Line Anchor (percent) and the selection weight it was set with.
@@ -509,6 +510,7 @@ pub struct PlacedGlyph {
     pub fill: [f32; 4],
     pub stroke: [f32; 4],
     pub stroke_width: f64,
+    pub join: effectcraft_path::Join,
     /// Faux Bold (or synthetic bold for a family without a bold face): how far the outline grows
     /// on every side, in character space (0 when not bold).
     pub bold: f64,
@@ -694,10 +696,12 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         let (mut la, mut la_k) = (50.0 * f64::from(align_index(justify)), 0.0);
         for gi in li_start..li_end {
             let x = &xfs[gi];
-            let em = lay.styles.get(lay.glyphs[gi].run).map_or(doc.size, |s| s.size) / 1000.0;
-            pen += x.track_before * em;
+            // An animator's Tracking Amount is in pixels, whatever the font size (After Effects
+            // 2026: Amount 30 adds 30 px between selected characters at 80 px and at 40 px), unlike
+            // the Character panel's tracking in 1/1000 em.
+            pen += x.track_before;
             shift[gi] = pen;
-            pen += x.track_after * em + vadv[gi];
+            pen += x.track_after + vadv[gi];
             if x.line_anchor_k > la_k {
                 la = x.line_anchor;
                 la_k = x.line_anchor_k;
@@ -805,9 +809,12 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         };
         // Outline relative to the pivot.
         let local = kurbo::Affine::translate((o[0] - pivot[0], o[1] - pivot[1])) * outline;
-        let char_m = Mat4::rotate_z(x.rotation)
+        // Rx · Ry · Rz (Z turns first): the order After Effects gives a 3D layer's X / Y / Z
+        // Rotation too. #1876 moves layers to it with a helper, `Mat4::rotation_xyz`; once both
+        // land, this should call that helper (one convention, one place).
+        let char_m = Mat4::rotate_x(x.rotation_x)
             * Mat4::rotate_y(x.rotation_y)
-            * Mat4::rotate_x(x.rotation_x)
+            * Mat4::rotate_z(x.rotation)
             * Mat4::from_mat3_affine(&Mat3::skew_deg(-x.skew, x.skew_axis))
             * Mat4::scale(Vec3::from(x.scale) / 100.0)
             * Mat4::translate(-Vec3::from(x.anchor));
@@ -832,6 +839,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
             fill,
             stroke,
             stroke_width: (base_stroke_w + x.stroke_width).max(0.0),
+            join: path_join(doc.line_join),
             bold: if g.synth_bold { FAUX_BOLD_RADIUS * g.size } else { 0.0 },
             apply_fill: st.apply_fill,
             char_index: g.char_index,
@@ -845,6 +853,15 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
 /// and hit testing).
 pub fn glyph_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<(BezPath, CharXf)> {
     text_geom(ctx, layer).map(|t| t.glyphs.iter().map(|g| (g.path(), g.xf)).collect()).unwrap_or_default()
+}
+
+fn path_join(j: effectcraft_keyframe::LineJoin) -> effectcraft_path::Join {
+    use effectcraft_keyframe::LineJoin;
+    match j {
+        LineJoin::Miter => effectcraft_path::Join::Miter,
+        LineJoin::Round => effectcraft_path::Join::Round,
+        LineJoin::Bevel => effectcraft_path::Join::Bevel,
+    }
 }
 
 /// One paint pass of a glyph: fill (false) or stroke (true).
@@ -913,7 +930,7 @@ fn raster_pass(g: &PlacedGlyph, stroke: bool, paths: &[BezPath], m: &Mat3, rect:
         }
         outer
     } else if stroke {
-        let st = StrokeStyle { width: g.stroke_width, join: effectcraft_path::Join::Round, ..Default::default() };
+        let st = StrokeStyle { width: g.stroke_width, join: g.join, ..Default::default() };
         effectcraft_path::stroke_coverage(paths, &st, &mm, w, h)
     } else {
         grown_coverage(paths, &mm, w, h, bold)
