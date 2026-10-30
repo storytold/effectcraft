@@ -122,7 +122,7 @@ pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
 };
-pub use utility::{Lut, load_lut};
+pub use utility::{Lut, cineon_gamma, cineon_gamma_scale, load_lut};
 pub use vr::{equi_dir as vr_equi_dir, rotation as vr_rotation};
 
 /// Effect categories in Effects & Presets order.

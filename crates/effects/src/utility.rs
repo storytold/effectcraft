@@ -10,7 +10,7 @@ use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
 use crate::util::{premul, unpremul};
-use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
+use crate::{Buf, EffectCtx, EffectSpec, Params, col, num, p, popup, slider};
 
 fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Utility", params, render, gpu: false, float: true }
@@ -91,6 +91,7 @@ pub(crate) struct Cineon {
     pub iw: f32,
     pub gamma: f32,
     pub rolloff: f32,
+    pub version_2: bool,
 }
 
 impl Cineon {
@@ -100,14 +101,24 @@ impl Cineon {
     fn knee(&self) -> f32 {
         1.0 - (self.rolloff / 100.0).clamp(0.0, 0.99)
     }
-    /// Normalized code value (code / 1023) → linear, raised to `1.7 / gamma`
-    /// ([`effectcraft_project::cineon_log_to_lin`], which Interpret Footage ▸ Cineon Settings
-    /// also uses with `1 / gamma`).
+    /// Normalized code value (code / 1023) to linear output.
     pub fn log_to_lin(&self, v: f32) -> f32 {
-        let lin = effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff);
+        let lin = if self.version_2 {
+            let offset = self.offset().powf(1.0 / self.gamma.max(0.001));
+            let exposure = 10f32.powf((v * 1023.0 - self.white) * 0.002 / 0.6).powf(1.0 / self.gamma.max(0.001));
+            let mut lin = ((exposure - offset) / (1.0 - offset).max(1e-6)).max(0.0);
+            let k = self.knee();
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k + w * (1.0 - (-(lin - k) / w).exp());
+            }
+            lin
+        } else {
+            effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.0, self.gamma, self.rolloff)
+        };
         self.ib + (self.iw - self.ib) * lin
     }
-    /// Linear → normalised code value.
+    /// Linear to normalized code value.
     pub fn lin_to_log(&self, v: f32) -> f32 {
         let off = self.offset();
         let d = self.iw - self.ib;
@@ -117,10 +128,32 @@ impl Cineon {
             let w = 1.0 - k;
             lin = k - w * (1.0 - (lin - k) / w).max(1e-6).ln();
         }
-        lin = lin.max(0.0).powf(self.gamma.max(0.01) / 1.7);
-        let code = self.white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002;
+        let exposure = if self.version_2 {
+            let root_offset = off.powf(1.0 / self.gamma.max(0.001));
+            (lin.max(0.0) * (1.0 - root_offset) + root_offset).max(0.0).powf(self.gamma.max(0.001))
+        } else {
+            lin.max(0.0).powf(self.gamma.max(0.001)) * (1.0 - off) + off
+        };
+        let code = self.white + exposure.max(1e-9).log10() * 0.6 / 0.002;
         code / 1023.0
     }
+}
+
+/// The Gamma that gives linear output in Cineon Converter version 1.
+pub const CINEON_V1_LINEAR_GAMMA: f64 = 1.7;
+
+/// The Gamma scale used by Cineon Converter version `version`: `1 / 1.7` for version 1, 1 for
+/// version 2. Preset conversion aligns the linear points but not other Gamma values. Version 1
+/// instances (saved before the hidden Version parameter existed; see
+/// [`crate::migrate::legacy_default`]) raised the linear value to `1.7 / gamma`.
+pub fn cineon_gamma_scale(version: f64) -> f64 {
+    if version < 2.0 { 1.0 / CINEON_V1_LINEAR_GAMMA } else { 1.0 }
+}
+
+/// Cineon Converter's Gamma on the version 2 scale ([`cineon_gamma_scale`]), limited to `0.01 /
+/// 1.7` or more: version 1 limited its saved Gamma to 0.01.
+pub fn cineon_gamma(params: &Params) -> f64 {
+    (params.f("gamma") * cineon_gamma_scale(params.f("version"))).max(0.01 * cineon_gamma_scale(1.0))
 }
 
 fn cineon(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -129,15 +162,26 @@ fn cineon(ctx: &EffectCtx, mut b: Buf) -> Buf {
         white: ctx.params.f("tenBitWhitePoint") as f32,
         ib: ctx.params.f("internalBlackPoint") as f32,
         iw: ctx.params.f("internalWhitePoint") as f32,
-        gamma: ctx.params.f("gamma") as f32,
+        gamma: cineon_gamma(ctx.params) as f32,
         rolloff: ctx.params.f("highlightRolloff") as f32,
+        version_2: ctx.params.f("version") >= 2.0,
     };
-    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: c.rolloff };
+    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.0, rolloff: c.rolloff, version_2: false };
     let kind = ctx.params.e("conversionType");
     b.img.map_straight(|v| {
         v.map(|x| match kind {
             0 => c.lin_to_log(x),
             1 => c.log_to_lin(x),
+            _ if c.version_2 => {
+                // Custom points use the Gamma 1 code conversion before the code-value power.
+                let code = if (c.black, c.white, c.ib, c.iw) == (95.0, 685.0, 0.0, 1.0) {
+                    x
+                } else {
+                    let unit = Cineon { gamma: 1.0, ..c };
+                    std.lin_to_log(unit.log_to_lin(x))
+                };
+                code.max(0.0).powf(1.0 / c.gamma.max(0.001))
+            }
             _ => std.lin_to_log(c.log_to_lin(x)),
         })
     });
@@ -374,8 +418,10 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("internalBlackPoint", "Internal Black Point", num(0.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
                 p("tenBitWhitePoint", "10 Bit White Point", num(685.0), slider(0.0, 1023.0, 0.0, 1023.0, 0)),
                 p("internalWhitePoint", "Internal White Point", num(1.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
-                p("gamma", "Gamma", num(1.7), slider(0.1, 5.0, 0.1, 5.0, 2)),
+                p("gamma", "Gamma", num(1.7), slider(0.05, 5.0, 0.1, 5.0, 2)),
                 p("highlightRolloff", "Highlight Rolloff", num(20.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
+                // 2: Gamma 1 gives linear output (`cineon_gamma`).
+                p("version", "Version", num(2.0), ParamUi::Hidden),
             ],
             cineon,
         ),
@@ -480,29 +526,133 @@ mod tests {
 
     #[test]
     fn cineon_round_trip() {
-        let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: 20.0 };
-        for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
-            let v = code / 1023.0;
-            let back = c.lin_to_log(c.log_to_lin(v));
-            assert!((back - v).abs() < 1e-3, "{code}: {back}");
+        for gamma in [1.0, 1.7, 0.6] {
+            let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 20.0, version_2: true };
+            for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
+                let v = code / 1023.0;
+                let back = c.lin_to_log(c.log_to_lin(v));
+                assert!((back - v).abs() < 1e-3, "gamma {gamma}, {code}: {back}");
+            }
+            assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
         }
-        assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
+        let custom = Cineon { black: 120.0, white: 700.0, ib: 0.1, iw: 0.9, gamma: 2.2, rolloff: 35.0, version_2: true };
+        for code in [120.0f32, 250.0, 400.0, 560.0, 700.0] {
+            let value = code / 1023.0;
+            let back = custom.lin_to_log(custom.log_to_lin(value));
+            assert!((back - value).abs() < 1e-5, "code {code}: {back}");
+        }
     }
 
-    /// Interpret Footage ▸ Cineon Settings and the Cineon Converter's Log to Linear give the same
-    /// values for the same points and Highlight Rolloff when the converter's Gamma is 1.7 times
-    /// Cineon Settings' Gamma: the converter's default 1.7 and Cineon Settings' Gamma 1 both give
-    /// linear light (code 400 is 0.10251).
+    /// Gamma 1 gives linear light: Kodak's printing-density curve with nothing
+    /// raised, so code 400 is (10^(-0.95) - 10^(-1.9667)) / (1 - 10^(-1.9667)) = 0.10251. A larger
+    /// Gamma lightens the midtones, and Linear to Log undoes it.
+    #[test]
+    fn cineon_gamma_1_is_linear_and_larger_lightens() {
+        let c = |gamma| Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 0.0, version_2: true };
+        let lin = c(1.0).log_to_lin(400.0 / 1023.0);
+        assert!((lin - 0.10251).abs() < 1e-4, "{lin}");
+        let lighter = c(2.0).log_to_lin(400.0 / 1023.0);
+        let offset = c(2.0).offset().sqrt();
+        let exposure = 10f32.powf((400.0 - 685.0) * 0.002 / 0.6).sqrt();
+        assert!((lighter - (exposure - offset) / (1.0 - offset)).abs() < 1e-4, "{lighter}");
+        assert!((c(2.0).lin_to_log(lighter) - 400.0 / 1023.0).abs() < 1e-4);
+        let out = run("ec.utility.cineon", &[("gamma", num(1.0))], {
+            let mut img = Image::new(1, 1);
+            img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+            img
+        });
+        assert!((out.img.data[0][0] - 0.10251).abs() < 1e-4, "Gamma 1 is linear: {:?}", out.img.data[0]);
+    }
+
+    #[test]
+    fn cineon_log_to_log_gamma_1_keeps_code_values() {
+        let codes = [95.0f32, 250.0, 400.0, 560.0, 685.0, 800.0];
+        let mut img = Image::new(codes.len() as u32, 1);
+        for (x, code) in codes.iter().enumerate() {
+            let value = code / 1023.0;
+            img.set(x as u32, 0, [value, value, value, 1.0]);
+        }
+        for rolloff in [0.0, 20.0] {
+            let out = run("ec.utility.cineon", &[("conversionType", Value::Enum(2)), ("gamma", num(1.0)), ("highlightRolloff", num(rolloff))], img.clone());
+            for (x, code) in codes.iter().enumerate() {
+                assert!((out.img.data[x][0] - code / 1023.0).abs() < 1e-6, "code {code}: {}", out.img.data[x][0]);
+            }
+        }
+    }
+
+    #[test]
+    fn cineon_version_2_log_to_linear_matches_observed_codes() {
+        for (gamma, codes, expected) in [
+            (1.7, &[95.0, 180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0, 685.0][..], &[0, 9, 19, 34, 57, 89, 136, 185, 255][..]),
+            (2.2, &[180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0][..], &[13, 27, 44, 71, 106, 152, 196][..]),
+        ] {
+            let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 0.0, version_2: true };
+            for (&code, &want) in codes.iter().zip(expected) {
+                let got = (c.log_to_lin(code / 1023.0).clamp(0.0, 1.0) * 255.0).round() as i32;
+                assert!((got - want).abs() <= 1, "Gamma {gamma}, code {code}: {got} vs {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn cineon_version_2_log_to_log_matches_observed_codes() {
+        let codes = [95.0f32, 180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0, 685.0, 800.0];
+        let expected = [63, 92, 111, 129, 146, 164, 179, 190, 202, 221];
+        let mut img = Image::new(codes.len() as u32, 1);
+        for (x, code) in codes.iter().enumerate() {
+            let v = code / 1023.0;
+            img.set(x as u32, 0, [v, v, v, 1.0]);
+        }
+        let out = run("ec.utility.cineon", &[("conversionType", Value::Enum(2)), ("gamma", num(1.7))], img);
+        for (x, (&code, &want)) in codes.iter().zip(&expected).enumerate() {
+            let got = (out.img.data[x][0].clamp(0.0, 1.0) * 255.0).round() as i32;
+            assert!((got - want).abs() <= 2, "code {code}: {got} vs {want}");
+        }
+    }
+
+    /// A version 1 instance renders as version 1 did: Gamma 1.7 gives linear light, and a
+    /// version 1 Gamma of 3.4 has the old post-normalization power.
+    #[test]
+    fn cineon_version_1_gamma_17_is_linear() {
+        let px = |vals: &[(&str, Value)]| {
+            let mut img = Image::new(1, 1);
+            img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+            run("ec.utility.cineon", vals, img).img.data[0][0]
+        };
+        let v1 = |gamma: f64| px(&[("version", num(1.0)), ("gamma", num(gamma)), ("highlightRolloff", num(0.0))]);
+        assert!((v1(1.7) - 0.10251).abs() < 1e-4, "{}", v1(1.7));
+        let v2 = px(&[("gamma", num(2.0)), ("highlightRolloff", num(0.0))]);
+        assert!((v1(3.4) - v2).abs() > 1e-3, "{} vs {v2}", v1(3.4));
+        // Version 1 limited the saved Gamma to 0.01: Gamma 0 raised the linear value to 170.
+        let code = 684.0 / 1023.0;
+        let base = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.0, rolloff: 0.0, version_2: false }.log_to_lin(code);
+        let mut img = Image::new(1, 1);
+        img.set(0, 0, [code, code, code, 1.0]);
+        let zero = run("ec.utility.cineon", &[("version", num(1.0)), ("gamma", num(0.0)), ("highlightRolloff", num(0.0))], img).img.data[0][0];
+        assert!((zero - base.powf(170.0)).abs() < 1e-4, "{zero} != {}", base.powf(170.0));
+        // The version 2 formula differs even when Gamma uses the version 1 scale.
+        let mut img = Image::new(1, 1);
+        img.set(0, 0, [code, code, code, 1.0]);
+        let v2_floor = run("ec.utility.cineon", &[("gamma", num(0.01 / 1.7)), ("highlightRolloff", num(0.0))], img).img.data[0][0];
+        assert!((v2_floor - zero).abs() > 1e-4, "{v2_floor} vs {zero}");
+        // An instance without the parameter reads as version 1.
+        let s = crate::find("ec.utility.cineon").unwrap();
+        let mut params = Params { values: s.params.iter().filter(|p| p.id != "version").map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        params.values.insert("gamma".into(), num(1.7));
+        assert!((cineon_gamma(&params) - 1.0).abs() < 1e-12);
+    }
+
+    /// Interpret Footage and version 2 Converter agree at Gamma 1.
     #[test]
     fn cineon_converter_matches_interpret_footage() {
         let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
-        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0), (1.7, 50.0), (2.4, 50.0)] {
+        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0)] {
             let mut img = Image::new(codes.len() as u32, 1);
             for (x, code) in codes.iter().enumerate() {
                 let v = code / 1023.0;
                 img.set(x as u32, 0, [v, v, v, 1.0]);
             }
-            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma * 1.7)), ("highlightRolloff", num(rolloff))];
+            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma)), ("highlightRolloff", num(rolloff))];
             let out = run("ec.utility.cineon", &vals, img);
             let settings = effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
             for (x, code) in codes.iter().enumerate() {
@@ -515,9 +665,8 @@ mod tests {
         assert!((linear.convert(400.0 / 1023.0) - 0.10251).abs() < 1e-4);
     }
 
-    /// The Cineon Converter gives the same values as before Cineon Settings shared its
-    /// log-to-linear function, at the default Gamma (1.7) and at Gamma 2.4, for all three
-    /// conversion types.
+    /// Saved version 1 Cineon Converter effects retain their previous values at Gamma 1.7 and
+    /// Gamma 2.4, for all three conversion types.
     #[test]
     fn cineon_converter_output_is_unchanged() {
         fn log_to_lin(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
@@ -550,12 +699,10 @@ mod tests {
                     let v = code / 1023.0;
                     img.set(x as u32, 0, [v, v, v, 1.0]);
                 }
-                let mut vals = vec![("conversionType", Value::Enum(kind))];
-                if let Some(g) = gamma {
-                    vals.push(("gamma", num(g)));
-                }
+                let g = gamma.unwrap_or(1.7);
+                let vals = [("version", num(1.0)), ("conversionType", Value::Enum(kind)), ("gamma", num(g))];
                 let out = run("ec.utility.cineon", &vals, img);
-                let g = gamma.unwrap_or(1.7) as f32;
+                let g = g as f32;
                 for (x, code) in codes.iter().enumerate() {
                     let v = code / 1023.0;
                     let want = match kind {
