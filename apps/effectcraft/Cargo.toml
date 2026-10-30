@@ -26,10 +26,24 @@ pollster = { workspace = true }
 cpal = { workspace = true }
 log = { workspace = true }
 
+# Settings ▸ Import ▸ Enable Hardware Accelerated Decoding: the operating system's H.264 / HEVC
+# decoders (VideoToolbox, Media Foundation / DXVA, NVDEC, VA-API), registered at startup in front of
+# FilmCraft's software decoders. All OS FFI lives in this FilmCraft crate; libva and the NVIDIA
+# driver are loaded at run time, so building needs no SDK and a system without them decodes in
+# software.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+filmcraft-platform = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Settings ▸ Appearance ▸ Sync with System: the XDG desktop portal's colour scheme. Already in
 # Cargo.lock (accesskit, through eframe), so it adds no new crates.
 zbus = "5.19"
+
+[dev-dependencies]
+# tests/hardware_decoding.rs: footage decoded with the registered hardware decoders
+effectcraft-media = { workspace = true }
+effectcraft-raster = { workspace = true }
+effectcraft-render = { workspace = true }
 
 [build-dependencies]
 # Icon + VERSIONINFO for effectcraft.exe; build.rs only uses it when targeting Windows.

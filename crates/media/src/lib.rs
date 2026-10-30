@@ -21,6 +21,7 @@ pub mod downmix;
 mod dpx;
 pub mod exr_channels;
 mod gif_anim;
+pub mod hw;
 mod layered;
 pub use layered::vector_doc;
 mod pool;

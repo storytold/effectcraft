@@ -256,6 +256,8 @@ pub fn pages() -> Vec<Page> {
                     Kind::Choice(&[("Footage", "footage"), ("Composition", "comp"), ("Composition - Retain Layer Sizes", "compLayerSizes")]),
                     true,
                 ),
+                Section("Video Footage"),
+                s("import.hardwareDecoding", "Enable Hardware Accelerated Decoding", B, true),
             ],
         },
         Page {
