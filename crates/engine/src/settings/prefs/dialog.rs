@@ -53,6 +53,9 @@ pub enum Item {
     /// A task's trained models (`roto.models`, `face.models`): authors, licence, size, install,
     /// choose.
     Models(effectcraft_segment::Task),
+    /// The Plug-in Library (`library.*`): the community catalog's packages, installed ones,
+    /// install / update / remove.
+    PluginLibrary,
 }
 
 /// One page of the Settings dialog.
@@ -371,6 +374,17 @@ pub fn pages() -> Vec<Page> {
                 Models(effectcraft_segment::Task::Face),
             ],
         },
+        Page {
+            id: "library",
+            title: "Plug-in Library",
+            items: vec![
+                Section("Community Effect Plug-ins"),
+                Note(
+                    "Effect plug-ins published by the community and reviewed into one catalog. They are WebAssembly modules that run in a sandbox (no files, network or clock), downloaded only when you ask and checked against the catalog's SHA-256.",
+                ),
+                PluginLibrary,
+            ],
+        },
     ]
 }
 
@@ -423,6 +437,7 @@ pub fn pages_json() -> Value {
                     Item::AudioDevices { key } => json!({"type": "device", "key": key, "label": "Default Output"}),
                     Item::Note(t) => json!({"note": t}),
                     Item::BrowserStorage => json!({"browserStorage": "storage.info / storage.persist / storage.clear (web app)"}),
+                    Item::PluginLibrary => json!({"pluginLibrary": "library.list / library.refresh / library.install / library.update / library.uninstall"}),
                     Item::Models(task) => {
                         let p = if *task == effectcraft_segment::Task::Face { "face" } else { "roto" };
                         json!({"models": format!("{p}.models / {p}.model.select / {p}.model.download / {p}.model.install / {p}.model.remove"), "key": format!("{p}.model")})

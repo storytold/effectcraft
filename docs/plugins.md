@@ -270,7 +270,7 @@ impl EffectPlugin for Swap {
 register_plugin(Arc::new(Swap(manifest)))?; // before the UI builds its menus
 ```
 
-`PluginParams` reads values by parameter id (`f`, `b`, `point`, `color`). At most 64 plug-in
+`PluginParams` reads values by parameter id (`f`, `b`, `point`, `color`). At most 256 plug-in
 effects can be registered per process.
 
 ### Compatibility
@@ -278,3 +278,48 @@ effects can be registered per process.
 The API version is checked when a plug-in loads: a manifest or module for another version is
 refused with a message. Within a version the contract above does not change; additions (new
 parameter types, new optional exports) bump the version.
+
+## Plug-in Library
+
+Settings ▸ Plug-in Library (also Effect ▸ Plug-in Library…) lists WebAssembly effect plug-ins
+published by the community, and installs, updates and removes them without bundling them into
+the app. Only WebAssembly effects are listed: they run in the same sandbox as any plug-in, so a
+package can't read files, open the network or crash the app.
+
+* **One reviewed catalog.** The list comes from one `index.json` in the
+  [`storytold/effectcraft-plugins`](https://github.com/storytold/effectcraft-plugins) repository;
+  packages are added by pull request and reviewed there. The app has no field for another
+  catalog; `library.refresh {catalog}` (for plug-in authors testing an entry) takes an `index.json`
+  on GitHub or a local file, and the page then says it shows a test catalog until Refresh.
+* **Nothing is downloaded until you ask.** Fetch Catalog (`library.refresh`) reads the catalog;
+  Install (`library.install`) downloads the package's `.wasm`, checks its SHA-256 (and its size, when the
+  catalog gives one) against the catalog and loads it. Downloads use the system's `curl`,
+  `https://` only and starting on GitHub's hosts (redirects stay on `https://`; the SHA-256 check
+  is what guarantees the file).
+* **Where it goes.** `<Plug-ins>/Library/<id>/<version>/<id>.wasm` (the `Plug-ins` folder next to
+  the settings), listed in `Library/installed.json`. Installed packages load at start-up, each
+  checked against the SHA-256 it was installed with. The catalog last fetched is kept as
+  `Library/catalog.json`, so the list works offline.
+* **Restart after removing or updating.** Registered effects can't be unloaded: removing or
+  updating a package whose effects are loaded takes effect at the next start, and the list says
+  "Restart EffectCraft to finish".
+* **Preview before installing.** Preview (`library.preview`) downloads the package's module
+  (checked against the catalog's size and SHA-256) without installing it, and renders its
+  effect in the sandbox on a built-in sample frame with default parameters: 2 seconds at 12 fps,
+  with a Before/After split. The details show it playing, the effects with their parameter names,
+  "Open on GitHub" (the package's `repo`) and, when the package has a `preview.video` link (an
+  `https://` YouTube, Vimeo or GitHub URL), "Watch video".
+* **Missing effects.** `library.missing` lists the effects a project uses that aren't installed,
+  and the catalog packages that provide them.
+
+Commands (UI, CLI, control channel and MCP): `library.list {query?, tag?, installed?}`,
+`library.refresh {catalog?, wait?}`, `library.preview {id, version?, wait?}`,
+`library.install {id, version?, wait?}`, `library.update {id?, wait?}`, `library.uninstall {id}`,
+`library.missing`, `library.loadInstalled`. Downloads run in the background; `wait: true` runs
+them to the end (scripts and tests).
+
+### Publishing a plug-in
+
+[publishing-plugins.md](publishing-plugins.md) walks through it from an empty folder to a listed
+package: build, test, release on GitHub, the catalog entry and its fields, testing the entry with a
+local `file://` catalog, the pull request and its review, updates and removal.

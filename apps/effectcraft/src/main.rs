@@ -256,6 +256,8 @@ fn main() -> eframe::Result {
                 let plugins = dir.join("Plug-ins");
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
+                    // Packages installed from the Plug-in Library (<config>/Plug-ins/Library).
+                    let _ = session.execute("library.loadInstalled", json!({}));
                 }
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
