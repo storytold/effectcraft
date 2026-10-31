@@ -79,6 +79,7 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod inpaint;
 mod ops;
 mod particles;
 mod readback;
@@ -413,6 +414,17 @@ impl Accelerator for Gpu {
     fn particles(&self) -> Option<&dyn effectcraft_effects::psim::ParticleSim> {
         self.ctx.check_health().ok()?;
         self.ctx.can_readback().then_some(self as &dyn effectcraft_effects::psim::ParticleSim)
+    }
+
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        self.ctx.check_health().ok()?;
+        // Readback is synchronous-only, and a kernel that failed to build would make every stage
+        // fall back to the CPU *after* paying the upload and a failed dispatch (and the fill
+        // would still report the GPU path). Neither is a backend at all.
+        if !self.ctx.can_wait() || self.ctx.unavailable_kernels().iter().any(|(e, _)| crate::inpaint::KERNELS.contains(e)) {
+            return None;
+        }
+        Some(self as &dyn effectcraft_raster::inpaint::FillBackend)
     }
 
     fn auto_pick(&self) -> Option<&effectcraft_render::AutoPick> {
