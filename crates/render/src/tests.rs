@@ -1541,3 +1541,189 @@ fn an_environment_light_makes_the_copy_uncached() {
     q.comp_mut(cid).unwrap().layers[0].switches.video = false;
     assert!(key_at(&q).is_some(), "the light off, the read is cached again");
 }
+
+// ------------------------------------------------------------------- keyed model animation clips
+
+/// [`TRIANGLE`] with one 1 s clip: its node slides from x = -1 to x = +1 (linear).
+const SLIDING_TRIANGLE: &str = r#"{
+  "asset": {"version": "2.0"},
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "material": 0}]}],
+  "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.0, 1.0]}}],
+  "animations": [{"samplers": [{"input": 2, "output": 3, "interpolation": "LINEAR"}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]}],
+  "buffers": [{"byteLength": 104, "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAACAPwAAgL8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIC/AAAAAAAAAAAAAIA/AAAAAAAAAAA="}],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 72, "byteLength": 8},
+    {"buffer": 0, "byteOffset": 80, "byteLength": 24}
+  ],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3, "min": [-1.0, -1.0, 0.0], "max": [1.0, 1.0, 0.0]},
+    {"bufferView": 1, "componentType": 5126, "type": "VEC3", "count": 3},
+    {"bufferView": 2, "componentType": 5126, "type": "SCALAR", "count": 2, "min": [0.0], "max": [1.0]},
+    {"bufferView": 3, "componentType": 5126, "type": "VEC3", "count": 2}
+  ]
+}"#;
+
+struct SlidingModels;
+
+impl crate::FootageSource for SlidingModels {
+    fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<std::sync::Arc<crate::Image>> {
+        None
+    }
+    fn model(&self, _: ItemId, f: &effectcraft_project::Footage) -> Option<std::sync::Arc<effectcraft_model::Model>> {
+        effectcraft_model::load(&f.path, SLIDING_TRIANGLE.as_bytes(), &|_| None).ok().map(std::sync::Arc::new)
+    }
+}
+
+fn clip_comp() -> Comp {
+    let mut c = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(6.0));
+    c.renderer = effectcraft_project::Renderer::Advanced3D;
+    c
+}
+
+/// The sliding triangle at 20 px a model unit. `keys` key Geometry Options ▸ Animation as
+/// (layer seconds, popup value); with none, clip 1 is selected statically.
+fn sliding_model(p: &mut Project, comp: &Comp, keys: &[(f64, u32)], looping: bool) -> effectcraft_project::Layer {
+    let footage = effectcraft_project::Footage {
+        path: "Sliding.gltf".into(),
+        kind: effectcraft_project::FootageKind::Model,
+        frame_rate: FrameRate::FPS_30,
+        codec: "glTF".into(),
+        ..Default::default()
+    };
+    let mid = p.add_item("Sliding", Label::Red, None, ItemKind::Footage(footage));
+    let mut l = build::layer(p, comp, "Sliding", LayerSource::Model { item: mid }, (200, 100), None);
+    l.props.prop_mut("geometryOptions/unitScale").unwrap().value = Value::Scalar(20.0);
+    l.props.prop_mut("geometryOptions/loopAnimation").unwrap().value = Value::Bool(looping);
+    let clip = l.props.prop_mut("geometryOptions/animation").unwrap();
+    clip.value = Value::Enum(1);
+    clip.keys = keys.iter().map(|&(t, v)| Keyframe::new(Tick::from_seconds_f64(t), Value::Enum(v)).hold()).collect();
+    l
+}
+
+fn clip_scene(keys: &[(f64, u32)], looping: bool, stretch: f64, start: f64) -> (Project, ItemId) {
+    let (mut p, mut comp) = (Project::default(), clip_comp());
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let mut l = sliding_model(&mut p, &comp, keys, looping);
+    l.stretch = stretch;
+    l.start_time = Tick::from_seconds_f64(start);
+    comp.layers = vec![l].into();
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+    (p, cid)
+}
+
+fn clip_frame(p: &Project, cid: ItemId, t: Tick) -> crate::Image {
+    crate::Renderer::new(p, &SlidingModels, crate::RenderOpts::default()).comp_frame(cid, t)
+}
+
+/// The pose of the clip `elapsed` seconds in: clip 1 selected statically, played on the layer
+/// clock.
+fn clip_pose(looping: bool, elapsed: f64) -> crate::Image {
+    let (p, cid) = clip_scene(&[], looping, 100.0, 0.0);
+    clip_frame(&p, cid, Tick::from_seconds_f64(elapsed))
+}
+
+fn assert_poses(p: &Project, cid: ItemId, looping: bool, cases: &[(f64, f64)]) {
+    for &(t, elapsed) in cases {
+        let at = clip_frame(p, cid, Tick::from_seconds_f64(t));
+        assert_same(&at, &clip_pose(looping, elapsed), &format!("at {t}s the clip is {elapsed}s in"));
+    }
+}
+
+#[test]
+fn a_static_clip_plays_on_the_layer_clock() {
+    let xs: Vec<f32> = [0.0, 0.25, 0.75, 1.0].iter().map(|&e| cover_x(&clip_pose(false, e))).collect();
+    assert!(xs.windows(2).all(|w| w[1] > w[0] + 5.0), "the clip slides the triangle right: {xs:?}");
+    assert_same(&clip_pose(true, 1.25), &clip_pose(true, 0.25), "a looping clip wraps on the layer clock");
+}
+
+#[test]
+fn a_clip_keyed_on_later_starts_from_its_first_frame() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(3.0, 0.0), (3.25, 0.25), (3.75, 0.75), (4.0, 1.0), (5.0, 1.0)]);
+}
+
+#[test]
+fn a_looping_clip_keyed_on_later_loops_from_its_activation() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (2.5, 1)], true, 100.0, 0.0);
+    assert_poses(&p, cid, true, &[(2.75, 0.25), (3.75, 0.25)]);
+}
+
+#[test]
+fn a_clip_reselected_after_none_restarts() {
+    let (p, cid) = clip_scene(&[(0.0, 1), (1.5, 0), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(0.5, 0.5), (3.25, 0.25)]);
+}
+
+#[test]
+fn a_repeated_key_of_the_same_clip_does_not_restart_it() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (2.0, 1), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(2.5, 0.5), (3.25, 1.25)]);
+}
+
+#[test]
+fn seeking_a_keyed_clip_poses_it_the_same_in_any_order() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, 100.0, 0.0);
+    let cache = crate::LayerCache::default();
+    let mut r = crate::Renderer::new(&p, &SlidingModels, crate::RenderOpts::default());
+    r.cache = Some(&cache);
+    for (t, elapsed) in [(4.0, 1.0), (3.25, 0.25), (3.0, 0.0), (3.75, 0.75), (3.25, 0.25), (4.0, 1.0)] {
+        let at = r.comp_frame(cid, Tick::from_seconds_f64(t));
+        assert_same(&at, &clip_pose(false, elapsed), &format!("seek to {t}s: the clip is {elapsed}s in"));
+    }
+}
+
+#[test]
+fn a_stretched_layer_times_its_clip_from_activation_in_layer_time() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (1.5, 1)], false, 200.0, 0.0);
+    let t = p.comp(cid).unwrap().layers[0].comp_time(Tick::from_seconds_f64(1.75));
+    assert_same(&clip_frame(&p, cid, t), &clip_pose(false, 0.25), "layer time 1.75 s: the clip is 0.25 s in");
+}
+
+#[test]
+fn a_reversed_layer_times_its_clip_from_activation_in_layer_time() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, -100.0, 5.0);
+    let l = &p.comp(cid).unwrap().layers[0];
+    let t = l.comp_time(Tick::from_seconds_f64(3.25));
+    assert!(l.is_active_at(t), "the reversed layer is on at {t:?}");
+    assert_same(&clip_frame(&p, cid, t), &clip_pose(false, 0.25), "layer time 3.25 s: the clip is 0.25 s in");
+}
+
+#[test]
+fn an_expression_driven_clip_keeps_the_layer_clock() {
+    let (mut p, cid) = clip_scene(&[(0.0, 0), (2.5, 1)], true, 100.0, 0.0);
+    let clip = p.comp_mut(cid).unwrap().layers[0].props.prop_mut("geometryOptions/animation").unwrap();
+    clip.expr = Some(effectcraft_project::Expression { text: "value".into(), enabled: true });
+    assert_poses(&p, cid, true, &[(3.25, 3.25)]);
+    assert!((cover_x(&clip_pose(true, 3.25)) - cover_x(&clip_pose(true, 0.75))).abs() > 5.0, "the layer clock and the activation clock disagree");
+}
+
+#[test]
+fn an_essential_property_override_of_the_clip_keeps_the_layer_clock() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let (mut inner, mut outer) = (clip_comp(), clip_comp());
+    let model = sliding_model(&mut p, &inner, &[(0.0, 0), (3.0, 1)], false);
+    let prop = model.props.prop("geometryOptions/animation").unwrap().uid;
+    let kind = EgKind::Property { layer: model.id, prop, links: vec![] };
+    inner.essential = Some(EssentialGraphics { controls: vec![EgControl { id: 1, name: "Clip".into(), kind, as_type: None }], ..Default::default() });
+    inner.layers = vec![model].into();
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
+    pre.switches.three_d = true;
+    pre.switches.collapse = true;
+    let mut ids = Ids(&mut p.next_id);
+    let control = ids.prop(&essential::match_id(1), "Clip", Value::Enum(1));
+    let mut group = ids.group(essential::GROUP, "Essential Properties");
+    group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+    group.children.push(control.into());
+    pre.props.children.push(group.into());
+    outer.layers = vec![pre].into();
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+    assert_poses(&p, cid, false, &[(1.0, 1.0), (3.25, 3.25)]);
+    assert!((cover_x(&clip_pose(false, 3.25)) - cover_x(&clip_pose(false, 0.25))).abs() > 5.0, "the layer clock and the activation clock disagree");
+}
