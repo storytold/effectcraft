@@ -6,11 +6,12 @@
 //! `engine.batch`) is checked before it runs: its file parameters must be absolute paths inside
 //! the roots (symbolic links resolved, no `..`), any other absolute path in its parameters too,
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
-//! Render Queue) are checked against where they would write. Queueing a render without naming
-//! its output needs a saved project, because the default output of an unsaved one is the home
-//! folder. Commands that run code or open other applications (scripts, ScriptUI panels and the
-//! events that reach them, Execute File, Reveal in Finder…) are refused while confined, as is
-//! granting scripts the file and network access the user withheld.
+//! Render Queue, a template's extracted media) are checked against where they would write.
+//! Queueing a render without naming its output needs a saved project, because the default
+//! output of an unsaved one is the home folder. Commands that run code or open other
+//! applications (scripts, ScriptUI panels and the events that reach them, Execute File, Reveal
+//! in Finder…) are refused while confined, as is granting scripts the file and network access
+//! the user withheld.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -140,6 +141,9 @@ pub enum Lookup {
     /// `output` (Render Queue, Pre-render, Create Proxy) writes beside it, or to the home folder
     /// before the first save.
     QueueDefault,
+    /// Where importing the template at this path writes its media
+    /// (`essential.templateInfo` → `mediaFolder`, when `mediaFiles` > 0).
+    TemplateMedia(String),
 }
 
 impl Confinement {
@@ -202,7 +206,9 @@ impl Confinement {
                     return Err(Error::BadArgs(format!("`{inner}` in a batch: file paths can't be `$N` references while file access is confined")));
                 }
                 if !self.check_command(inner, &inner_params)?.is_empty() {
-                    return Err(Error::BadArgs(format!("`{inner}` writes to its project's or queue's files: run it on its own while file access is confined")));
+                    return Err(Error::BadArgs(format!(
+                        "`{inner}` writes files it isn't given (its project's, the queue's or a template's media): run it on its own while file access is confined"
+                    )));
                 }
             }
             return Ok(vec![]);
@@ -265,6 +271,12 @@ impl Confinement {
         if QUEUES_AN_OUTPUT.contains(&id) && !gave_a_file {
             lookups.push(Lookup::QueueDefault);
         }
+        // Importing a template extracts its media into a folder next to it (#1227).
+        if id == "essential.importTemplate"
+            && let Some(path) = params.get("path").and_then(Value::as_str)
+        {
+            lookups.push(Lookup::TemplateMedia(path.to_string()));
+        }
         if IMPLICIT_WRITES.contains(&id) && !(given && id == "file.save") {
             lookups.push(if id == "file.save" || id == "file.incrementAndSave" { Lookup::ProjectFile } else { Lookup::RenderOutputs });
         }
@@ -297,6 +309,15 @@ impl Confinement {
                     }
                 }
                 Ok(())
+            }
+            Lookup::TemplateMedia(_) => {
+                if found.get("mediaFiles").and_then(Value::as_u64).unwrap_or(0) == 0 {
+                    return Ok(());
+                }
+                match found.get("mediaFolder").and_then(Value::as_str) {
+                    Some(dir) => self.check(dir, Access::Write).map(drop),
+                    None => Err(Error::BadArgs("the template's media folder is unknown: it can't be imported while file access is confined".into())),
+                }
             }
         }
     }
