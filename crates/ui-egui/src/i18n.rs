@@ -1927,7 +1927,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.reset", "Reset Mask", "マスクをリセット"),
     ("layer.mask.remove", "Remove Mask", "マスクを削除"),
     ("layer.mask.removeAll", "Remove All Masks", "すべてのマスクを削除"),
-    ("track.mask", "Track Mask", "マスクをトラッキング"),
+    ("track.mask", "Track Mask", "マスクをトラック"),
     ("", "Mode", "モード"),
     ("layer.mask.mode", "None", "なし"),
     ("layer.mask.mode", "Add", "加算"),
@@ -1992,8 +1992,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.transform", "Fit to Comp Height", "コンポジションの高さに合わせる"),
     ("layer.autoOrient", "Auto-Orient...", "自動方向..."),
     ("", "Time", "時間"),
-    ("layer.enableTimeRemap", "Enable Time Remapping", "時間リマップを有効化"),
-    ("layer.timeReverse", "Time-Reverse Layer", "レイヤーを時間反転"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップを有効にする"),
+    ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
     ("layer.timeStretch", "Time Stretch...", "時間伸縮..."),
     ("layer.freezeFrame", "Freeze Frame", "フレームを固定"),
     ("layer.freezeOnLastFrame", "Freeze On Last Frame", "最後のフレームで固定"),
@@ -2090,7 +2090,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.create", "Convert to Editable Text", "編集可能なテキストに変換"),
     ("layer.create", "Create Shapes from Text", "テキストからシェイプを作成"),
     ("layer.create", "Create Masks from Text", "テキストからマスクを作成"),
-    ("layer.create", "Create Shapes from Vector Layer", "ベクターレイヤーからシェイプを作成"),
+    ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
     ("layer.create", "Create Keyframes from Data", "データからキーフレームを作成"),
     ("layer.create", "Null Controllers for Positional Points", "位置のポイント用ヌルコントローラー"),
     ("layer.create", "Null Controllers for Path Points", "パスのポイント用ヌルコントローラー"),
@@ -2140,7 +2140,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Jitter", "ジッター"),
     ("layer.applyTextPreset", "Drop In Lines", "行をドロップイン"),
     ("anim.addKeyframe", "Add Keyframe", "キーフレームを追加"),
-    ("keys.toggleHold", "Toggle Hold Keyframe", "ホールドキーフレームの切り替え"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "停止したキーフレームの切り替え"),
     ("keys.setMuted", "Mute Keyframes", "キーフレームをミュート"),
     ("keys.setMuted", "Unmute Keyframes", "キーフレームのミュートを解除"),
     ("keys.interpolation", "Keyframe Interpolation...", "キーフレーム補間法..."),
@@ -2191,11 +2191,11 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("prop.setExpression", "Add Expression", "エクスプレッションを追加"),
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
     ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
-    ("track.camera", "Track Camera", "カメラをトラッキング"),
+    ("track.camera", "Track Camera", "カメラをトラック"),
     ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
-    ("track.motion", "Track Motion", "モーションをトラッキング"),
+    ("track.motion", "Track Motion", "モーションをトラック"),
     ("track.stabilize", "Stabilize Motion", "モーションを安定化"),
-    ("track.property", "Track this Property", "このプロパティをトラッキング"),
+    ("track.property", "Track this Property", "このプロパティをトラック"),
     ("anim.reveal", "Reveal Properties with Keyframes", "キーフレームのあるプロパティを表示"),
     ("anim.reveal", "Reveal Properties with Animation", "アニメーションのあるプロパティを表示"),
     ("anim.reveal", "Reveal All Modified Properties", "変更されたすべてのプロパティを表示"),
@@ -8088,6 +8088,31 @@ mod tests {
     use effectcraft_engine::menus::{MenuNode, TREE, parse};
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    /// Words read from the installed After Effects 2026 Japanese interface on 2026-10-31: its
+    /// Animation menu, its Layer ▸ Time submenu and its Layer ▸ Masks submenu. These rows had been rewritten to closer
+    /// synonyms — トラッキング for トラック, 時間リマップ for タイムリマップ — which reads fine in
+    /// English and is wrong for anyone who knows that interface.
+    #[test]
+    fn the_animation_and_time_commands_use_after_effects_words() {
+        ui::set_current("ja");
+        for (id, en, ja) in [
+            ("keys.toggleHold", "Toggle Hold Keyframe", "停止したキーフレームの切り替え"),
+            ("track.motion", "Track Motion", "モーションをトラック"),
+            ("track.mask", "Track Mask", "マスクをトラック"),
+            ("track.property", "Track this Property", "このプロパティをトラック"),
+            ("track.camera", "Track Camera", "カメラをトラック"),
+            ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップを有効にする"),
+            ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
+            ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
+        ] {
+            // The menu row is the source of truth: \`command_label\` also falls back to the panel
+            // catalog, which would hide a row naming the wrong command or English source.
+            assert!(JAPANESE.iter().any(|(c, e, _)| *c == id && *e == en), "{id} has no menu row");
+            assert_eq!(command_label(id, en), ja, "{id}");
+        }
+        ui::set_current("en");
+    }
 
     /// Labels drawn outside the menu bar take the menu bar's row for their command (with `…` for
     /// `...`), else the panel catalog's row, else stay as they are.
