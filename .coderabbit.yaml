@@ -4,3 +4,20 @@ reviews:
     # Dependabot bumps are checked by CI; skip CodeRabbit reviews on them.
     ignore_usernames:
       - "dependabot[bot]"
+  path_instructions:
+    # Japanese wording follows the reference application's own Japanese interface rather than a
+    # paraphrase, because people arrive from that application and look for its words. The tests in
+    # `ui.rs` hold the rows that have been read off it, so the burden of proof belongs to whoever
+    # changes a row, not to whoever wrote it.
+    - path: "crates/ui-egui/src/i18n/**"
+      instructions: |
+        Japanese rows that name a command, panel, control or dialog are taken from the reference
+        application's own Japanese interface; `crates/ui-egui/src/i18n/ui.rs` has exact-value tests
+        for selected rows. If a pull request changes one of those, ask the author for a screenshot
+        of the window that shows the new wording, and for the name of that window. A paraphrase
+        that reads well in English is still wrong for someone who knows that interface, so ask for
+        the screenshot before the rewrite is merged; a rewrite that comes with one is fine.
+
+        Strings that exist only in this application - このアプリについて and the crash dialog, for
+        example - have no counterpart to read off. For those, ask for a screenshot of this
+        application showing the string, and review the wording rather than any match.
