@@ -17,12 +17,32 @@ use crate::EvalCtx;
 /// Closest a perspective camera renders (camera-space z, pixels).
 pub const NEAR: f64 = 1.0;
 
+/// How much of the Aperture property becomes the blur aperture. After Effects blurs far less than
+/// a lens of that diameter would. Fitted on After Effects renders of one production project with
+/// four depth-of-field cameras sharing one zoom (apertures of about 100 to 300 at two focus
+/// distances): layers fitted with a disk blur kept one ratio to [`blur_aperture`]'s circle of
+/// confusion, 0.11–0.115 of the property, for all four. Two apertures at nearly the same focus
+/// scaled linearly with the aperture, and the cameras focused about 1.5x further needed
+/// `zoom / focus` less blur (a constant scale left them 1.7x too blurry). Measured on that one
+/// project only; not sampled for other zooms.
+pub const APERTURE_BLUR_SCALE: f64 = 0.115;
+
+/// The blur aperture (pixels, see [`Dof::aperture`]) of a camera with Aperture property
+/// `aperture`, Zoom `zoom` and Focus Distance `focus`. A point at depth `z` spreads over
+/// `A · |z − focus| / z` on the plane in focus, which the camera shows `zoom / focus` times
+/// larger on screen.
+/// An overflowing product saturates to the largest finite blur.
+pub fn blur_aperture(aperture: f64, zoom: f64, focus: f64) -> f64 {
+    (aperture.max(0.0) * (APERTURE_BLUR_SCALE * zoom / focus.max(1e-3))).min(f64::MAX)
+}
+
 /// Depth of field settings of a camera.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dof {
     /// Distance from the eye to the plane in focus (pixels).
     pub focus: f64,
-    /// Aperture diameter (pixels).
+    /// Blur aperture diameter (pixels): what a circle of confusion on the plane in focus scales
+    /// with on screen, from the Aperture property by [`blur_aperture`].
     pub aperture: f64,
     /// Blur Level (1.0 = 100%).
     pub blur_level: f64,
@@ -365,9 +385,10 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
         // A non-finite Focus Distance would make every blur radius non-finite; use the value the
         // property defaults to (the zoom plane) instead.
         let focus = ctx.f(cam, g, "focusDistance", zoom);
+        let focus = if focus.is_finite() { focus } else { zoom };
         Dof {
-            focus: if focus.is_finite() { focus } else { zoom },
-            aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
+            focus,
+            aperture: blur_aperture(ctx.f(cam, g, "aperture", default_aperture(w)), zoom, focus),
             blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
             iris: super::bokeh::Iris {
                 sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),

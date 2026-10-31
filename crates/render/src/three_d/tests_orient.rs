@@ -181,7 +181,7 @@ fn layer_cache_is_independent_of_camera_lights_and_view() {
     let (mut p, cid, comp) = setup();
     let mut cam = build::layer(&mut p, &comp, "Camera", LayerSource::Camera, (200, 100), None);
     cam.props.prop_mut("cameraOptions/dof").unwrap().value = Value::Bool(true);
-    cam.props.prop_mut("cameraOptions/aperture").unwrap().value = Value::Scalar(40.0);
+    cam.props.prop_mut("cameraOptions/aperture").unwrap().value = Value::Scalar(40.0 / crate::three_d::camera::APERTURE_BLUR_SCALE);
     let light = build::layer(&mut p, &comp, "Light", LayerSource::Light { kind: effectcraft_project::LightKind::Point }, (200, 100), None);
     let a = solid(&mut p, &comp, true, [80.0, 50.0, 0.0]);
     let b = solid(&mut p, &comp, true, [120.0, 50.0, 150.0]);

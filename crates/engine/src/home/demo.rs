@@ -227,7 +227,8 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     let zoom = 1920.0 * 35.0 / 36.0;
     set(&mut cam, "cameraOptions/zoom", Value::Scalar(zoom));
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(40.0));
+    // About a 40 px blur aperture on the plane in focus (Aperture × 0.115 there).
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(350.0));
     set(&mut cam, "cameraOptions/blurLevel", Value::Scalar(100.0));
     set(&mut cam, "transform/poi", Value::Vec3([960.0, 560.0, 150.0]));
     anim(

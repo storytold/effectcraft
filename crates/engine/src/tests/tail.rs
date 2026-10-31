@@ -445,7 +445,9 @@ fn camera_set_focus_to_layer_degenerate_targets_and_dof_frame() {
     assert!((d - 900.0).abs() < 1e-6, "{d}");
     // An out-of-focus 3D layer, which must visibly blur, and a 0%-scaled one, whose pixels cover
     // ~0 screen pixels and so turn an ordinary defocus into a radius of ~1e9 buffer pixels.
-    s.execute("prop.set", json!({"layer": cam, "path": "cameraOptions/aperture", "value": 120})).unwrap();
+    // Aperture 1200: about a 120 px lens at this zoom and focus (the blur aperture is Aperture ×
+    // 0.115 × zoom / focus, `effectcraft_render::three_d::camera::blur_aperture`).
+    s.execute("prop.set", json!({"layer": cam, "path": "cameraOptions/aperture", "value": 1200})).unwrap();
     let blur = s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 60, "height": 60})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setSwitch", json!({"layers": [blur], "switch": "threeD", "value": true})).unwrap();
     s.execute("layer.setTransform", json!({"layer": blur, "prop": "position", "value": [200, 150, 1200]})).unwrap();

@@ -39,7 +39,7 @@ fn camera(s: &mut Scene, pos: [f64; 3], dof: Option<(f64, f64)>) {
     if let Some((focus, aperture)) = dof {
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(aperture));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(aperture / effectcraft_render::three_d::camera::APERTURE_BLUR_SCALE));
     }
     s.push(cam);
 }

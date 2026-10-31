@@ -152,7 +152,8 @@ fn stage_3d(qa: &mut Qa) -> Value {
     qa.tool("set_property", json!({"layer": cam.clone(), "path": "cameraOptions/dof", "value": true}));
     let zoom = qa.tool("get_property", json!({"layer": cam.clone(), "path": "cameraOptions/zoom"}))["value"].as_f64().unwrap();
     qa.tool("set_property", json!({"layer": cam.clone(), "path": "cameraOptions/focusDistance", "value": zoom}));
-    qa.tool("set_property", json!({"layer": cam.clone(), "path": "cameraOptions/aperture", "value": 40}));
+    // Aperture 400: the blur aperture is Aperture × 0.115 at the zoom plane (about 46 px).
+    qa.tool("set_property", json!({"layer": cam.clone(), "path": "cameraOptions/aperture", "value": 400}));
     let dof = qa.frame(None, 0.0);
     let green = |p: &image::Rgba<u8>| p[1] > 200 && p[0] < 120;
     let red = |p: &image::Rgba<u8>| p[0] > 200 && p[1] < 120;

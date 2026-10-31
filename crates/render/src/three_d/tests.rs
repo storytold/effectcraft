@@ -440,7 +440,7 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0 / crate::three_d::camera::APERTURE_BLUR_SCALE));
     let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
     push(&mut p, cid, cam);
     push(&mut p, cid, s);
@@ -455,6 +455,28 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     assert!(b.get(66, 50)[3] > 0.01);
 }
 
+#[test]
+fn blur_aperture_scales_with_zoom_over_focus() {
+    // The circle of confusion on the plane in focus shows zoom / focus times larger on screen:
+    // doubling the focus distance halves the blur aperture; doubling the zoom doubles it.
+    let (mut p, cid, comp) = setup();
+    let mut cam = camera(&mut p, &comp);
+    set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(100.0));
+    let dof_at = |cam: &Layer, focus: f64| {
+        let mut cam = cam.clone();
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+        let c = p.comp(cid).unwrap();
+        camera::layer_camera(&crate::EvalCtx::new(&p, cid, c, Tick::ZERO), &cam).dof.unwrap()
+    };
+    let near = dof_at(&cam, zoom());
+    assert!(close(near.aperture as f32, (100.0 * camera::APERTURE_BLUR_SCALE) as f32, 1e-6), "{}", near.aperture);
+    assert!(close(dof_at(&cam, 2.0 * zoom()).aperture as f32, near.aperture as f32 * 0.5, 1e-6));
+    set(&mut cam, "cameraOptions/zoom", Value::Scalar(2.0 * zoom()));
+    assert!(close(dof_at(&cam, zoom()).aperture as f32, near.aperture as f32 * 2.0, 1e-6));
+    assert_eq!(camera::blur_aperture(100.0, zoom(), zoom()), near.aperture);
+}
+
 /// A non-finite Focus Distance doesn't reach the blur: the camera focuses on the property's
 /// default plane (`zoom`) instead.
 #[test]
@@ -463,7 +485,7 @@ fn dof_falls_back_when_focus_distance_is_not_finite() {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0 / camera::APERTURE_BLUR_SCALE));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(bad));
         let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
         push(&mut p, cid, cam);
@@ -489,7 +511,8 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        // A 60 px blur aperture at this focus.
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0 / camera::blur_aperture(1.0, zoom(), focus)));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
@@ -518,7 +541,8 @@ fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        // A 60 px blur aperture at this focus.
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0 / camera::blur_aperture(1.0, zoom(), focus)));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
@@ -547,9 +571,11 @@ fn dof_blur_is_independent_of_layer_scale() {
         let zoom = 800.0 * 50.0 / 36.0;
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
-        // coc = aperture·|z − f| / z: a 40 px comp radius on the z = 0 plane (depth = zoom).
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(zoom + 2.0 * 40.0 * zoom / 200.0));
+        // coc = aperture·|z − f| / z with a 200 px blur aperture: a 40 px comp radius on the z = 0
+        // plane (depth = zoom).
+        let focus = zoom + 2.0 * 40.0 * zoom / 200.0;
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0 / camera::blur_aperture(1.0, zoom, focus)));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], w, h, [400.0, 200.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
         push(&mut p, cid, cam);
@@ -570,7 +596,8 @@ fn dof_blur_matches_across_render_resolutions() {
     let zoom = 800.0 * 50.0 / 36.0;
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
+    // A 200 px blur aperture at this focus.
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0 / camera::blur_aperture(1.0, zoom, 2.0 * zoom)));
     set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(2.0 * zoom));
     let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 400, 100, [400.0, 200.0, 0.0]);
     push(&mut p, cid, cam);
@@ -611,7 +638,7 @@ fn tilted_layer_blurs_progressively_with_depth() {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(80.0));
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(80.0 / crate::three_d::camera::APERTURE_BLUR_SCALE));
     set(&mut cam, "cameraOptions/irisShape", Value::Enum(4)); // Hexagon
     let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 160, 40, [100.0, 50.0, 0.0]);
     set(&mut s, "transform/rotationY", Value::Scalar(60.0));
@@ -635,7 +662,8 @@ fn iris_shape_and_highlights_shape_the_bokeh() {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(120.0));
+        // A 120 px blur aperture at this zoom and focus.
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(120.0 / crate::three_d::camera::blur_aperture(1.0, zoom(), zoom() * 0.5)));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(zoom() * 0.5));
         set(&mut cam, "cameraOptions/irisShape", Value::Enum(shape));
         set(&mut cam, "cameraOptions/highlightGain", Value::Scalar(gain));

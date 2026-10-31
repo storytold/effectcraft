@@ -269,7 +269,7 @@ pub(crate) fn dof_mb_project() -> (Project, ItemId) {
         };
         set(l, "cameraOptions/dof", Value::Bool(true));
         set(l, "cameraOptions/focusDistance", Value::Scalar(zoom - 60.0));
-        set(l, "cameraOptions/aperture", Value::Scalar(160.0));
+        set(l, "cameraOptions/aperture", Value::Scalar(160.0 / effectcraft_render::three_d::camera::APERTURE_BLUR_SCALE));
         set(l, "cameraOptions/irisShape", Value::Enum(4));
         set(l, "cameraOptions/irisRotation", Value::Scalar(15.0));
         set(l, "cameraOptions/irisDiffractionFringe", Value::Scalar(50.0));
@@ -492,7 +492,7 @@ fn gpu_dof_with_capped_radii() {
     let (mut p, cid) = dof_mb_project();
     for l in &mut p.comp_mut(cid).unwrap().layers {
         if let Some(pr) = l.props.prop_mut("cameraOptions/aperture") {
-            pr.value = Value::Scalar(1500.0);
+            pr.value = Value::Scalar(1500.0 / effectcraft_render::three_d::camera::APERTURE_BLUR_SCALE);
         }
         l.switches.motion_blur = false;
     }
