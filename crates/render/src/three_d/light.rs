@@ -1,11 +1,13 @@
 //! Lights and Classic 3D shading.
 //!
-//! Shading model (per light, Blinn-Phong on the layer plane, lit from both sides):
+//! Shading model (per light, Phong on the layer plane, lit from both sides):
 //! `colour = texture · (ambient_mat · Σ ambient + diffuse_mat · Σ diffuse) + specular`, where a
 //! light's diffuse term is `colour · intensity · max(N·L, 0) · falloff · cone · shadow` (falloff by
 //! the distance from the light's position, for parallel lights too), light from
 //! behind the layer passes through by Light Transmission, and the specular highlight
-//! `(N·H)^shininess` takes the light's colour mixed towards the layer's colour by Metal.
+//! `(R·V)^shininess` (R the light direction mirrored about the normal, V towards the viewer;
+//! After Effects' highlight is this narrow Phong lobe, not the wider Blinn `(N·H)` one) takes the
+//! light's colour mixed towards the layer's colour by Metal.
 //! A comp without lights shows 3D layers unlit.
 
 use effectcraft_geom::{Vec3, vec3};
@@ -186,7 +188,7 @@ impl Material {
             metal: pct("metal", d.metal).clamp(0.0, 1.0),
         }
     }
-    /// Blinn-Phong exponent for Specular Shininess (0% → 1, 100% → 256).
+    /// Phong exponent for Specular Shininess (0% → 1, 100% → 256).
     pub fn exponent(&self) -> f64 {
         256f64.powf(self.shininess as f64).max(1.0)
     }
@@ -240,8 +242,9 @@ pub fn shade(
             diff[c] += l.color[c] * kd * sh[c];
         }
         if front && mat.specular > 0.0 {
-            let h = (lv + to_viewer).normalize();
-            let s = (n.dot(h).max(0.0).powf(exp) * k) as f32;
+            // Phong: the light mirrored about the normal against the view direction.
+            let r = n * (2.0 * ndl) - lv;
+            let s = (r.dot(to_viewer).max(0.0).powf(exp) * k) as f32;
             for c in 0..3 {
                 // Metal: highlight colour from the light (0%) to the layer colour (100%).
                 let tint = 1.0 + (rgb[c] - 1.0) * mat.metal;

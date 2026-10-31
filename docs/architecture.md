@@ -303,7 +303,7 @@ and colour-space conversions run on the GPU. Classic 3D runs composite on the GP
 (`gpu::classic3d`): the render crate prepares the planes (`Renderer::prepare_3d_run`: layer buffers
 with their bokeh depth of field, homographies per motion-blur sub-sample, materials, lights, track
 mattes), the GPU packs the buffers into one atlas texture and one kernel does the per-pixel
-fragment sort (intersecting planes, coplanar stack order), Blinn-Phong lighting, ray-cast shadows
+fragment sort (intersecting planes, coplanar stack order), Phong lighting, ray-cast shadows
 against the caster planes (Shadow Diffusion, Light Transmission) and blending. Adjustment layers
 run their effect stacks on the GPU-resident comp (`Renderer::run_effects_on` with an `FxTarget`):
 runs of GPU effects stay on the device and only non-GPU effects read back and upload. Advanced 3D

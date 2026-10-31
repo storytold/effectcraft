@@ -2,7 +2,7 @@
 //
 // Every plane covering an output pixel is inverse-mapped through its homography (one per
 // motion-blur sub-sample), sampled from the plane atlas (`src`), shaded by the comp's lights
-// (Blinn-Phong, ray-cast shadows against the caster planes) and multiplied by its track matte;
+// (Phong, ray-cast shadows against the caster planes) and multiplied by its track matte;
 // the pixel's fragments are insertion-sorted far → near (coplanar fragments in stack order) and
 // blended over the canvas (`aux`) with each layer's mode and opacity.
 //
@@ -23,7 +23,7 @@ struct Plane {
     winv0: vec4<f32>,
     winv1: vec4<f32>,
     winv2: vec4<f32>,
-    // Ambient, diffuse, specular, Blinn-Phong exponent.
+    // Ambient, diffuse, specular, Phong exponent.
     mat0: vec4<f32>,
     // Metal, light transmission, opacity.
     mat1: vec4<f32>,
@@ -354,8 +354,9 @@ fn shade_texel(it: u32, g: u32, u: f32, v: f32, t: vec4<f32>) -> vec4<f32> {
         shadow_amt = max(shadow_amt, 1.0 - (sh.x + sh.y + sh.z) / 3.0);
         diff += li.color.xyz * (lambert * k) * sh;
         if (front && specular > 0.0) {
-            let h = normalize(lv + to_viewer);
-            let s = powz(max(dot(n, h), 0.0), ex) * k;
+            // Phong (as the CPU shade): the light mirrored about the normal against the view.
+            let r = n * (2.0 * ndl) - lv;
+            let s = powz(max(dot(r, to_viewer), 0.0), ex) * k;
             let tint = vec3<f32>(1.0) + (rgb - vec3<f32>(1.0)) * metal;
             spec += li.color.xyz * s * sh * tint;
         }

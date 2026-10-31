@@ -769,3 +769,40 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
     let off = r.eye - r.poi;
     assert!(off.y.abs() / off.length() < 0.9999);
 }
+
+/// The specular highlight is Phong, `(R·V)^shininess`: After Effects' highlight on lit 3D layers
+/// of a production project (a parallel light along the view axis, low Shininess, Metal 100 %)
+/// narrows towards the frame edges as the mirrored light leaves the view direction; the Blinn
+/// `(N·H)` lobe, whose angle is half as wide, left off-axis layers up to 6 % brighter than After
+/// Effects' render.
+#[test]
+fn specular_is_the_phong_lobe() {
+    use super::light::{LightState, Material, shade};
+    let light = |dir: Vec3| LightState {
+        kind: LightKind::Parallel,
+        pos: vec3(0.0, 0.0, -1000.0),
+        dir,
+        color: [1.0; 3],
+        cone_half: 0.0,
+        feather: 0.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        casts_shadows: false,
+        shadow_darkness: 1.0,
+        shadow_diffusion: 0.0,
+    };
+    // Specular only, white, exponent 4 (Shininess 25 %), no metal tint.
+    let mat = Material { ambient: 0.0, diffuse: 0.0, specular: 1.0, shininess: 0.25, metal: 0.0, ..Material::default() };
+    let n = vec3(0.0, 0.0, -1.0);
+    // Light 30° off the normal, viewer on the normal: R·V = cos 30°, while N·H would be cos 15°.
+    let t = 30f64.to_radians();
+    let lv = vec3(t.sin(), 0.0, -t.cos());
+    let (out, _) = shade([1.0; 3], vec3(0.0, 0.0, 0.0), n, vec3(0.0, 0.0, -1.0), &mat, &[light(-lv)], &|_, _| [1.0; 3]);
+    let want = t.cos().powi(4) as f32;
+    assert!((out[0] - want).abs() < 1e-5, "{} vs Phong {want} (Blinn {})", out[0], (t / 2.0).cos().powi(4));
+    // Viewer on the mirror direction: the full highlight.
+    let mirror = vec3(-t.sin(), 0.0, -t.cos());
+    let (out, _) = shade([1.0; 3], vec3(0.0, 0.0, 0.0), n, mirror, &mat, &[light(-lv)], &|_, _| [1.0; 3]);
+    assert!((out[0] - 1.0).abs() < 1e-5, "{}", out[0]);
+}
