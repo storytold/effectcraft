@@ -8764,7 +8764,7 @@ mod tests {
     }
 
     /// Words read from the installed After Effects 2026 Japanese interface on 2026-10-31: its
-    /// Animation menu and its Layer ▸ Time submenu. These rows had been rewritten to closer
+    /// Animation menu, its Layer ▸ Time submenu and its Layer ▸ Masks submenu. These rows had been rewritten to closer
     /// synonyms — トラッキング for トラック, 時間リマップ for タイムリマップ — which reads fine in
     /// English and is wrong for anyone who knows that interface.
     #[test]
@@ -8779,6 +8779,9 @@ mod tests {
             ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップを有効にする"),
             ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
         ] {
+            // The menu row is the source of truth: \`command_label\` also falls back to the panel
+            // catalog, which would hide a row naming the wrong command or English source.
+            assert!(JAPANESE.iter().any(|(c, e, _)| *c == id && *e == en), "{id} has no menu row");
             assert_eq!(command_label(id, en), ja, "{id}");
         }
         ui::set_current("en");
