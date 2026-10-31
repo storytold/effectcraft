@@ -667,8 +667,17 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
-    if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        app.ui.status = e;
+    match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
+        Ok(result) => {
+            // Same as in the menus' direct dispatch: a successful command can still report
+            // per-item problems in an `errors` array (Effect ▸ Install Effect Plug-in Bundle
+            // does) — show them, without turning the success into an error.
+            let errors: Vec<String> = result.get("errors").and_then(Value::as_array).map(|a| a.iter().map(Value::to_string).collect()).unwrap_or_default();
+            if !errors.is_empty() {
+                app.ui.status = errors.join("\n");
+            }
+        }
+        Err(e) => app.ui.status = e,
     }
 }
 
