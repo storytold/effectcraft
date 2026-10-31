@@ -168,6 +168,75 @@ pub struct FillPlan {
     pub reference: Option<(LayerId, Tick)>,
     /// Folder of the PNG sequence.
     pub dir: String,
+    /// Working memory the fill may use, in bytes (0: [`DEFAULT_FILL_MEMORY`]). A range that needs
+    /// more is filled in windows of frames ([`fill_window`]).
+    #[serde(default)]
+    pub memory: u64,
+}
+
+/// Working memory a fill needs per pixel of each frame it holds: the frame and its hole, and in
+/// the fill the copies, membrane fills, flows and results it keeps for every frame (about 115
+/// bytes measured, rounded up).
+const FILL_BYTES_PER_PIXEL: u64 = 128;
+
+/// The fill's working memory when the plan names none (2 GiB).
+pub const DEFAULT_FILL_MEMORY: u64 = 2 << 30;
+
+/// How many frames one fill window holds at most: as many as `memory` bytes (0: the default)
+/// allow for `width` × `height` frames. `None` when not even two frames fit (a window needs a
+/// frame to carry the fill on from): filling a whole range at once held every frame several
+/// times over, ten seconds of 1080p needed about 70 GB, and the app was killed for running out
+/// of memory.
+pub fn fill_window(width: u32, height: u32, memory: u64) -> Option<usize> {
+    let budget = if memory > 0 { memory } else { DEFAULT_FILL_MEMORY };
+    let per_frame = (u64::from(width) * u64::from(height)).saturating_mul(FILL_BYTES_PER_PIXEL).max(1);
+    let frames = usize::try_from(budget / per_frame).unwrap_or(usize::MAX);
+    (frames >= 2).then_some(frames)
+}
+
+/// The error for a fill whose frames are too large for even a two-frame window.
+fn window_error(w: u32, h: u32) -> String {
+    format!("Content-Aware Fill can't hold two {w}×{h} frames in the memory it may use: close other applications or fill a smaller layer")
+}
+
+/// The working memory a fill started in this session may use: half of what the system has
+/// available when that is known (0, the default, when it isn't).
+fn fill_memory(s: &Session) -> u64 {
+    s.sys_memory.filter(|m| m.available > 1).map_or(0, |m| m.available / 2)
+}
+
+/// The windows a fill of `count` frames runs in, `window` frames each, in order: first the one
+/// holding the reference frame `anchor`, then those after it, then those before it. Neighbouring
+/// windows share a frame, which the window filled first carries into the next (`backward`: the
+/// shared frame is the window's last, carried back from the window after it).
+fn fill_windows(count: usize, window: usize, anchor: usize) -> Vec<Window> {
+    let window = window.max(2);
+    let end = anchor.saturating_add(window / 2 + 1).min(count).max(window.min(count));
+    let start = end.saturating_sub(window);
+    let mut out = vec![Window { start, end, backward: false }];
+    let mut s = end;
+    while s < count {
+        let a = s - 1;
+        let b = a.saturating_add(window).min(count);
+        out.push(Window { start: a, end: b, backward: false });
+        s = b;
+    }
+    let mut e = start;
+    while e > 0 {
+        let b = e + 1;
+        let a = b.saturating_sub(window);
+        out.push(Window { start: a, end: b, backward: true });
+        e = a;
+    }
+    out
+}
+
+/// One window of a fill: frames `start..end`; see [`fill_windows`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Window {
+    start: usize,
+    end: usize,
+    backward: bool,
 }
 
 /// The fill holds every frame as float RGBA (16 bytes a pixel), its hole mask (1) and the filled
@@ -183,6 +252,32 @@ fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<Str
             gb(available)
         )
     })
+}
+
+/// The frames a fill has written so far: removed when it's dropped before [`Written::keep`]
+/// (the fill failed, was cancelled or was dropped), so a fill leaves all of its sequence or
+/// none of it.
+struct Written<'a> {
+    services: &'a dyn crate::Services,
+    paths: Vec<String>,
+    keep: bool,
+}
+
+impl Written<'_> {
+    /// The fill finished: its frames stay.
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for Written<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            for p in &self.paths {
+                let _ = self.services.remove_file(p);
+            }
+        }
+    }
 }
 
 /// Run a fill: the layer's frames (rendered in passes with a job worker's GPU), the fill, the
@@ -209,46 +304,113 @@ pub(crate) async fn run_plan(
     let r = &r;
     let ctx0 = EvalCtx { expr, ..EvalCtx::new(project, cid, comp, Tick::ZERO) };
     let times = &plan.times;
-    let n = times.len() as u64;
-    let mut frames = Vec::with_capacity(times.len());
-    let mut holes = Vec::with_capacity(times.len());
-    for (k, t) in times.iter().enumerate() {
-        let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(*t), layer, w, h)).await;
-        holes.push(dilate(&hole, w as usize, h as usize, plan.expand));
-        frames.push(img);
-        if !progress(k as u64 + 1, n * 3) {
-            return Err(crate::render_queue::CANCELLED.into());
-        }
+    let count = times.len();
+    if count == 0 {
+        return Err("the range holds no whole frame to fill".into());
     }
-    if !holes.iter().any(|h| h.iter().any(|b| *b)) {
-        return Err("the layer has no transparent area to fill: draw a mask (Subtract) around what to remove".into());
-    }
-    let mut references = vec![];
+    let n = count as u64;
+    // The reference frame (a complete picture of one frame), at the filled frame nearest it.
+    let mut reference = None;
     if let Some((rl, rt)) = plan.reference
         && let Some(l) = comp.layer(rl)
     {
         let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(rt), l, w, h)).await;
         if hole.iter().all(|b| !*b) {
             let k = times.iter().enumerate().min_by_key(|(_, t)| (t.0 - rt.0).abs()).map(|(k, _)| k).unwrap_or(0);
-            references.push((k, img));
+            reference = Some((k, img));
         }
     }
-    message("Filling");
     let opts = FillOpts { method: FillMethod::from_name(&plan.method).unwrap_or_default(), lighting: plan.lighting, ..Default::default() };
-    let input = FillInput { frames, holes, references };
-    let out = fill_sequence(&input, &opts, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3)).ok_or(crate::render_queue::CANCELLED)?;
-    message("Writing the fill layer");
+    // A range too long to hold at once is filled in windows, outward from the reference frame.
+    // Each window starts (or, going back, ends) with a frame its neighbour filled, as a
+    // reference frame, so the fill carries on across them both ways.
+    let window = fill_window(w, h, plan.memory).ok_or_else(|| window_error(w, h))?;
+    let windows = fill_windows(count, window, reference.as_ref().map_or(0, |(k, _)| *k));
+    let last = windows.len().saturating_sub(1);
     let dir = &plan.dir;
-    let mut paths = vec![];
-    for (k, img) in out.iter().enumerate() {
-        let path = std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string();
-        services.store_file(&path, &png(img)?).map_err(|e| format!("{path}: {e}"))?;
-        paths.push(path);
-        if !progress(2 * n + k as u64 + 1, n * 3) {
-            return Err(crate::render_queue::CANCELLED.into());
+    let mut paths: Vec<Option<String>> = vec![None; count];
+    let mut files = Written { services, paths: vec![], keep: false };
+    let (mut forward, mut back): (Option<Image>, Option<Image>) = (None, None);
+    let mut any_hole = false;
+    let (mut read, mut filled, mut written) = (0u64, 0u64, 0u64);
+    for (wi, win) in windows.iter().enumerate() {
+        let Window { start, end, backward } = *win;
+        let len = end - start;
+        // The frame shared with the window filled before, and where it sits in this one.
+        let carried = if wi == 0 {
+            None
+        } else if backward {
+            back.take().map(|img| (len - 1, img))
+        } else {
+            forward.take().map(|img| (0, img))
+        };
+        let mut frames = Vec::with_capacity(len);
+        let mut holes = Vec::with_capacity(len);
+        let mut references = vec![];
+        for i in 0..len {
+            if let Some((ci, img)) = &carried
+                && *ci == i
+            {
+                holes.push(vec![false; w as usize * h as usize]);
+                frames.push(img.clone());
+                references.push((i, img.clone()));
+                continue;
+            }
+            let Some(t) = times.get(start + i) else { break };
+            let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(*t), layer, w, h)).await;
+            holes.push(dilate(&hole, w as usize, h as usize, plan.expand));
+            frames.push(img);
+            read += 1;
+            if !progress(read.min(n), n * 3) {
+                return Err(crate::render_queue::CANCELLED.into());
+            }
+        }
+        any_hole |= holes.iter().any(|h| h.iter().any(|b| *b));
+        // (checked before anything is written when the range fits in one window)
+        if wi == last && !any_hole {
+            return Err("the layer has no transparent area to fill: draw a mask (Subtract) around what to remove".into());
+        }
+        if let Some((k, img)) = &reference
+            && (start..end).contains(k)
+            && carried.as_ref().is_none_or(|(ci, _)| start + ci != *k)
+        {
+            references.push((k - start, img.clone()));
+        }
+        message("Filling");
+        let (f0, l) = (filled, len as u64);
+        let input = FillInput { frames, holes, references };
+        let out = fill_sequence(&input, &opts, &mut |d, t| progress(n + (f0 + d as u64 * l / t.max(1) as u64).min(n), n * 3))
+            .ok_or(crate::render_queue::CANCELLED)?;
+        filled += l;
+        drop(input);
+        message("Writing the fill layer");
+        for (i, img) in out.iter().enumerate() {
+            // The shared frame was written by the window that filled it.
+            if carried.as_ref().is_some_and(|(ci, _)| *ci == i) {
+                continue;
+            }
+            let k = start + i;
+            let path = std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string();
+            services.store_file(&path, &png(img)?).map_err(|e| format!("{path}: {e}"))?;
+            files.paths.push(path.clone());
+            if let Some(slot) = paths.get_mut(k) {
+                *slot = Some(path);
+            }
+            written += 1;
+            if !progress(2 * n + written.min(n), n * 3) {
+                return Err(crate::render_queue::CANCELLED.into());
+            }
+        }
+        // The window holding the reference carries both ways; the others in their direction.
+        if wi == 0 || backward {
+            back = out.first().cloned();
+        }
+        if !backward {
+            forward = out.into_iter().last();
         }
     }
-    Ok(paths)
+    files.keep();
+    Ok(paths.into_iter().flatten().collect())
 }
 
 /// Add the fill layer of a finished plan (one undo step).
@@ -257,7 +419,9 @@ pub(crate) fn apply_plan(s: &mut Session, plan: &FillPlan, paths: Vec<String>) -
     add_fill_layer(s, plan.comp, plan.layer, &plan.name, paths, (plan.width, plan.height), plan.times[0], plan.times.len(), importer)
 }
 
-fn generate(s: &mut Session, p: &Value) -> Result<Value> {
+/// The fill `contentFill.generate` would run with parameters `p` (they override the panel's
+/// settings).
+pub(crate) fn make_plan(s: &mut Session, p: &Value) -> Result<FillPlan> {
     let c = "contentFill.generate";
     let (cid, lid) = layer_p(s, p, c)?;
     // Parameters override the panel settings.
@@ -290,7 +454,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let (fa, fb) = (fr.frame_at(fr.snap_nearest(a)), fr.frame_at(b - Tick(1)));
     let times: Vec<Tick> = (fa..=fb).map(|f| fr.tick_of(f)).collect();
-    if let Some(e) = crate::sysinfo::memory().and_then(|m| memory_shortfall(times.len(), w, h, m.available)) {
+    if times.is_empty() {
+        return Err(bad(c, "the range holds no whole frame to fill"));
+    }
+    // The fill holds one window of frames at a time.
+    let window = fill_window(w, h, fill_memory(s)).ok_or_else(|| bad(c, window_error(w, h)))?;
+    if let Some(e) = crate::sysinfo::memory().and_then(|m| memory_shortfall(times.len().min(window), w, h, m.available)) {
         return Err(bad(c, e));
     }
     let opts = FillOpts {
@@ -313,7 +482,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         expand,
         reference,
         dir,
+        memory: fill_memory(s),
     };
+    Ok(plan)
+}
+
+fn generate(s: &mut Session, p: &Value) -> Result<Value> {
+    let plan = make_plan(s, p)?;
+    let (cid, lid, (w, h)) = (plan.comp, plan.layer, (plan.width, plan.height));
     let wait = b_p(p, "wait").unwrap_or(false);
     // The browser: a job worker (its own GPU), the page keeps running.
     if !wait && s.offloads() {
@@ -323,7 +499,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let lf = LayerFrames::new(s, cid, lid);
     let services = s.services.clone();
     let importer = s.importer.clone();
-    let name = layer.name.clone();
+    let name = plan.name.clone();
     s.spawn_task("contentFill", format!("Content-Aware Fill: {name}"), wait, move |ctl| {
         let paths = effectcraft_render::passes::block_on(run_plan(
             &plan,
@@ -445,7 +621,30 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::memory_shortfall;
+    use super::{Window, fill_windows, memory_shortfall};
+
+    /// Windows run outward from the reference frame, so its fill reaches the frames before it
+    /// too (they used to start at frame 0, and a reference only reached its own window and the
+    /// later ones). Each frame is in a window, and neighbours share one frame.
+    #[test]
+    fn fill_windows_run_outward_from_the_reference() {
+        let w = |start, end, backward| Window { start, end, backward };
+        assert_eq!(fill_windows(12, 3, 0), vec![w(0, 3, false), w(2, 5, false), w(4, 7, false), w(6, 9, false), w(8, 11, false), w(10, 12, false)]);
+        assert_eq!(fill_windows(12, 3, 7), vec![w(6, 9, false), w(8, 11, false), w(10, 12, false), w(4, 7, true), w(2, 5, true), w(0, 3, true)]);
+        assert_eq!(fill_windows(12, 3, 11), vec![w(9, 12, false), w(7, 10, true), w(5, 8, true), w(3, 6, true), w(1, 4, true), w(0, 2, true)]);
+        assert_eq!(fill_windows(5, 30, 2), vec![w(0, 5, false)], "a range that fits is one window");
+        assert_eq!(fill_windows(1, 2, 0), vec![w(0, 1, false)]);
+        for (count, window, anchor) in [(12, 3, 7), (100, 7, 50), (9, 2, 4), (40, 9, 39), (3, usize::MAX, 1)] {
+            let ws = fill_windows(count, window, anchor);
+            assert!(ws[0].start <= anchor && anchor < ws[0].end, "{ws:?}");
+            assert!(ws.iter().all(|x| x.end - x.start <= window.max(2) && x.start < x.end && x.end <= count), "{ws:?}");
+            let mut seen = vec![false; count];
+            for x in &ws {
+                seen[x.start..x.end].iter_mut().for_each(|b| *b = true);
+            }
+            assert!(seen.iter().all(|b| *b), "{count} {window} {anchor}: {ws:?}");
+        }
+    }
 
     /// #1789: 10 s of 1080p30 (300 frames) needs at least 20 GB, which 4 GB free can't hold.
     #[test]

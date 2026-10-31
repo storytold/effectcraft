@@ -24,6 +24,11 @@ pub trait Services: Send + Sync {
         }
         self.write_file(path, data)
     }
+    /// Remove a file the app stored ([`Services::store_file`]) and no longer needs: the frames of
+    /// a fill that failed partway.
+    fn remove_file(&self, path: &str) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
     /// The files in folder `dir` (full paths; no folders, no hidden files), for image-sequence
     /// detection on import. Empty when it can't be read.
     fn list_dir(&self, dir: &str) -> Vec<String> {

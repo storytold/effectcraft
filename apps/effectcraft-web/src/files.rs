@@ -138,6 +138,16 @@ impl Services for WebServices {
         }
         Ok(())
     }
+    /// Drop a stored file from the table (and so from browser storage); a job worker's go from
+    /// the page's storage too. The default asks `std::fs`, which has no files on wasm32, so a
+    /// failed fill's frames stayed in browser storage.
+    fn remove_file(&self, path: &str) -> std::io::Result<()> {
+        STORE.remove_file(path);
+        if crate::is_worker() {
+            crate::worker::post_unstore(path);
+        }
+        Ok(())
+    }
     /// The table's files in `dir` (picked and dropped files sit in `/`): picking or dropping a
     /// numbered file finds the other frames of its image sequence loaded before.
     fn list_dir(&self, dir: &str) -> Vec<String> {

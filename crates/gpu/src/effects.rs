@@ -58,6 +58,16 @@ impl GBuf {
         Some(())
     }
 
+    /// Buf::pad_xy: grow by `px` transparent pixels sideways and `py` up and down, within the
+    /// CPU's budget.
+    pub fn pad_xy(&mut self, e: &mut Enc, px: u32, py: u32) -> Option<()> {
+        let (px, py) = effectcraft_effects::pad_xy_within_budget(self.img.width, self.img.height, px, py);
+        // As `Buf::pad_xy`: neither side past the largest supported image.
+        let side = |len: u32, p: u32| p.min(effectcraft_raster::MAX_PADDED_SIDE.saturating_sub(len) / 2);
+        let (px, py) = (side(self.img.width, px), side(self.img.height, py));
+        self.pad_sides(e, [px, py, px, py])
+    }
+
     /// Buf::pad: grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, e: &mut Enc, pad: u32) -> Option<()> {
         let pad = effectcraft_effects::pad_within_budget(self.img.width, self.img.height, pad);
@@ -339,7 +349,9 @@ fn box_blur(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
-        b.pad(e, (r * it) as u32 + 1)?;
+        // As on the CPU: the blur's visible reach, on the blurred axes only.
+        let reach = effectcraft_effects::box_reach(r, it);
+        b.pad_xy(e, if kx > 0.0 { reach } else { 0 }, if ky > 0.0 { reach } else { 0 })?;
     } else if repeat && !ctx.adjustment {
         // The edge it repeats is the layer's, not the painted content's (#1205).
         b.cover(e, ctx.layer_size)?;

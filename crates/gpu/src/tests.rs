@@ -610,6 +610,10 @@ fn gpu_effects_match_cpu() {
     effect_case("ec.blur.gaussian", &[("blurriness", n(12.0)), ("dimensions", Value::Enum(1)), ("repeatEdge", Value::Bool(true))]);
     effect_case("ec.blur.fastbox", &[("radius", n(6.0)), ("iterations", n(2.0))]);
     effect_case("ec.blur.fastbox", &[("radius", n(4.0)), ("dimensions", Value::Enum(2)), ("repeatEdge", Value::Bool(true))]);
+    // Past three passes the growth is the blur's visible reach (`box_reach`), on both paths; one
+    // axis grows only that axis.
+    effect_case("ec.blur.fastbox", &[("radius", n(6.0)), ("iterations", n(8.0))]);
+    effect_case("ec.blur.fastbox", &[("radius", n(6.0)), ("iterations", n(5.0)), ("dimensions", Value::Enum(1))]);
     effect_case("ec.blur.directional", &[("direction", n(30.0)), ("length", n(12.0))]);
     effect_case("ec.stylize.glow", &[("threshold", n(40.0)), ("radius", n(14.0)), ("intensity", n(1.5))]);
     effect_case("ec.stylize.glow", &[("colors", Value::Enum(1)), ("operation", Value::Enum(1)), ("colorA", c(1.0, 0.8, 0.1))]);

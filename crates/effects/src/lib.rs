@@ -88,14 +88,14 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
-    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge, venetian_cover,
-    venetian_origin,
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, box_reach, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge,
+    venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
 // CPU helpers the GPU kernels share (effectcraft-gpu).
-pub use blur2::{camera_lens_plain, camera_lens_spans, radial_fast_pad};
+pub use blur2::{camera_lens_plain, camera_lens_spans, lens_reach, radial_fast_pad};
 pub use generate::{four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
@@ -312,6 +312,14 @@ impl Buf {
         self.offset[0] += l as f64;
         self.offset[1] += t as f64;
     }
+    /// Grow by `px` transparent pixels on the left and right and `py` above and below, within
+    /// the same budget as [`Buf::pad`] ([`pad_xy_within_budget`]) and the largest supported side.
+    pub fn pad_xy(&mut self, px: u32, py: u32) {
+        let (px, py) = pad_xy_within_budget(self.img.width, self.img.height, px, py);
+        let side = |len: u32, p: u32| p.min(effectcraft_raster::MAX_PADDED_SIDE.saturating_sub(len) / 2);
+        let (px, py) = (side(self.img.width, px), side(self.img.height, py));
+        self.pad_sides([px, py, px, py]);
+    }
     /// Grow by `left` and `top` transparent pixels on those sides only.
     pub fn grow_left_top(&mut self, left: u32, top: u32) {
         self.pad_sides([left, top, 0, 0]);
@@ -342,15 +350,39 @@ impl Buf {
 /// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
 /// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
 pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
-    const MIN_BUDGET: f64 = 16_777_216.0;
     let (w, h) = (f64::from(w), f64::from(h));
-    let budget = MIN_BUDGET.max(4.0 * w * h);
+    let budget = pad_budget(w, h);
     if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
         return pad;
     }
     // (w + 2p)(h + 2p) = budget, solved for p.
     let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
     (p.floor().max(0.0) as u32).min(pad)
+}
+
+/// The most pixels a `w` × `h` buffer may be padded to: 16 Mpx or four times its area.
+fn pad_budget(w: f64, h: f64) -> f64 {
+    16_777_216.0f64.max(4.0 * w * h)
+}
+
+/// [`pad_within_budget`] for a pad of `px` sideways and `py` up and down: both shrunk by the same
+/// factor until the padded buffer fits the budget.
+pub fn pad_xy_within_budget(w: u32, h: u32, px: u32, py: u32) -> (u32, u32) {
+    if px == py {
+        let p = pad_within_budget(w, h, px);
+        return (p, p);
+    }
+    let area = |k: f64| (f64::from(w) + 2.0 * k * f64::from(px)) * (f64::from(h) + 2.0 * k * f64::from(py));
+    let budget = pad_budget(f64::from(w), f64::from(h));
+    if area(1.0) <= budget {
+        return (px, py);
+    }
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        if area(mid) <= budget { lo = mid } else { hi = mid }
+    }
+    ((f64::from(px) * lo).floor() as u32, (f64::from(py) * lo).floor() as u32)
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
