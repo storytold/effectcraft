@@ -95,11 +95,15 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             let mut v = Vec::new();
             for entry in read {
                 match entry {
-                    Ok(e) if e.path().is_file() => v.push(e.path()),
-                    // A vanished or unreadable entry is a bundle problem: report it rather
-                    // than installing a bundle that silently misses files.
+                    Ok(e) => match e.path().metadata() {
+                        Ok(m) if m.is_file() => v.push(e.path()),
+                        // A vanished or unreadable entry is a bundle problem: report it rather
+                        // than installing a bundle that silently misses files. (`is_file()`
+                        // alone would treat unreadable metadata as "not a file" and skip it.)
+                        Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                        Ok(_) => {}
+                    },
                     Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
-                    Ok(_) => {}
                 }
             }
             v.sort();
