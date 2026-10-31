@@ -21,6 +21,8 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
         n(st.effect_clipboard.len(), "effect", "effects")
     } else if !st.contents_clipboard.is_empty() {
         n(st.contents_clipboard.len(), "shape item", "shape items")
+    } else if !st.mask_clipboard.is_empty() {
+        n(st.mask_clipboard.len(), "mask", "masks")
     } else if st.link_clipboard.is_some() {
         "EffectCraft: property links".into()
     } else {

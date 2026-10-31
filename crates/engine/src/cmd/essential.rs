@@ -807,6 +807,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.exportTemplate";
     let cid = eg_comp(s, p)?;
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ectemplate)"))?.to_string();
+    s.refuse_export(&path)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let eg = comp.essential.clone().filter(|e| !e.controls.is_empty()).ok_or_else(|| bad(C, "the composition has no Essential Graphics controls"))?;
     let comp_name = s.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
@@ -868,7 +869,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     entries.insert(0, ("project.ecproj".into(), sub.to_json().into_bytes()));
     entries.insert(0, ("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap_or_default()));
     let bytes = effectcraft_lottie::zip::store(&entries);
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &bytes)?;
     s.toast(format!("Exported template “{name}” to {path}"));
     Ok(json!({"path": path, "name": name, "bytes": bytes.len(), "controls": eg.flat().len(), "items": deps.len()}))
 }

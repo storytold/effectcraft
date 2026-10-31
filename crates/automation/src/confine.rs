@@ -89,6 +89,8 @@ const READS: &[(&str, &[&str])] = &[
     ("mediaBrowser.removeFavorite", &["path"]),
     ("face.model.install", &["path"]),
     ("roto.model.install", &["path"]),
+    // Looks up what the file at `path` is (writable roots are readable too).
+    ("file.checkOutput", &["path"]),
     // Reads the template at `path`; what it writes is in `MIXED_WRITES`.
     ("templates.create", &["path"]),
 ];
@@ -104,6 +106,8 @@ const WRITES: &[(&str, &[&str])] = &[
     ("file.saveCopy", &["path"]),
     ("file.saveCopyAsXml", &["path"]),
     ("file.collectFiles", &["folder"]),
+    // This query checks a proposed write destination, so it follows write confinement.
+    ("file.checkOutput", &["path"]),
     ("file.exportLottie", &["path"]),
     ("comp.saveFrameAs", &["path"]),
     ("comp.saveFrameAsPsd", &["path"]),
@@ -493,8 +497,12 @@ mod tests {
         let steps = serde_json::json!({"steps": [{"command": "essential.templateInfo", "params": {"path": "t.ectemplate"}}]});
         assert!(c.check_command("engine.batch", &steps).is_err());
         // Writes: into a write root only.
-        assert!(c.check_command("file.exportTimeline", &serde_json::json!({"path": p(&read, "cut.xml")})).is_err());
-        assert!(c.check_command("file.exportTimeline", &serde_json::json!({"path": p(&write, "cut.xml")})).is_ok());
+        for id in ["file.exportTimeline", "file.checkOutput"] {
+            for bad in ["cut.xml".to_string(), p(&read, "cut.xml"), p(&outside, "cut.xml")] {
+                assert!(c.check_command(id, &serde_json::json!({"path": bad})).is_err(), "{id} {bad}");
+            }
+            assert!(c.check_command(id, &serde_json::json!({"path": p(&write, "cut.xml")})).is_ok());
+        }
         let create = |project: String| serde_json::json!({"path": p(&read, "t.ectemplate"), "projectPath": project});
         assert!(c.check_command("templates.create", &create(p(&read, "new.ecproj"))).is_err(), "templates.create writes projectPath");
         assert!(c.check_command("templates.create", &create(p(&write, "new.ecproj"))).is_ok());

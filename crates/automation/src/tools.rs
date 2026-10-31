@@ -406,13 +406,15 @@ fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
 fn render_frame(b: &mut Backend, a: &Value) -> Result<Reply> {
     let max_side = get(a, "max_side").and_then(Value::as_u64).unwrap_or(960) as u32;
     let transparent = get(a, "transparent").and_then(Value::as_bool).unwrap_or(false);
-    let f = b.render_with(get(a, "comp"), get(a, "time").and_then(Value::as_f64), max_side, transparent)?;
+    let path = get(a, "path").and_then(Value::as_str);
+    let comp = get(a, "comp");
+    let time = get(a, "time").and_then(Value::as_f64);
+    let f = match path {
+        Some(path) => b.render_to_file(comp, time, max_side, transparent, path)?,
+        None => b.render_with(comp, time, max_side, transparent)?,
+    };
     let mut info = json!({"comp": f.comp, "time": f.time, "width": f.width, "height": f.height});
-    if let Some(p) = get(a, "path").and_then(Value::as_str) {
-        if let Some(c) = b.confinement() {
-            c.check(p, crate::confine::Access::Write)?;
-        }
-        std::fs::write(p, &f.png).map_err(|e| Error::Other(format!("cannot write {p}: {e}")))?;
+    if let Some(p) = path {
         info["path"] = json!(p);
     }
     if get(a, "inline").and_then(Value::as_bool) == Some(false) {

@@ -155,7 +155,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
   design — alongside its 618/618 menus.
 - 2026-10-10: Full parity re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5
   release notes, repository counts): breadth ≈ 91%, ready ≈ 45%, stage alpha. Progress docs
-  follow the shared standard: `docs/parity.md` became `docs/target-app-parity.md`; new
+  restructured: `docs/parity.md` became `docs/target-app-parity.md`; new
   `docs/roadmap.md`, `localization-parity.md`, `file-format-parity.md`, `hardware-parity.md`,
   `ui-parity.md`, `effects-parity.md` and `scripting-parity.md`.
 - 2026-10-10: Spanish (#460) and Brazilian Portuguese (#217) menu translations.
@@ -184,6 +184,6 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
-| 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
+| 2026-10-10 | major | Progress docs restructured: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

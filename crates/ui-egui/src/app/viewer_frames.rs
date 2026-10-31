@@ -84,8 +84,18 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp(),
         }
+    }
+
+    /// Changes when the Roto Brush model in use does: a frame drawn with the classic fallback while the model loaded
+    /// is not the frame the model gives, so the two must not share a cache entry.
+    fn roto_model_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(id) = self.session.models_roto_active() else { return 0 };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish() | 1
     }
 
     /// The frame series the viewer of `comp` shows now (its scale, view and options, for the

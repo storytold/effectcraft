@@ -60,7 +60,8 @@ fn a_selection_holding_the_drop_target_does_not_fail_the_drop() {
     assert!(!h.state().ui.status.contains("contain itself"), "the drop did not fail: {}", h.state().ui.status);
 }
 
-/// Dragging the composition's own row onto its Timeline adds nothing and reports nothing.
+/// Dragging the composition's own row onto its Timeline adds nothing and reports nothing, whether
+/// the row was selected first or the drag started on an unselected row (#2589).
 #[test]
 fn the_composition_dropped_on_itself_adds_nothing() {
     let (mut h, main, _clip) = harness();
@@ -71,5 +72,17 @@ fn the_composition_dropped_on_itself_adds_nothing() {
     let row = rect(&h, &format!("timeline.layer.{}.row", layer_id(&h, "Bottom")));
     drag(&mut h, from, row.center());
     assert_eq!(stack(&h), before, "nothing is added");
+    assert!(!h.state().ui.status.contains("contain itself"), "no error: {}", h.state().ui.status);
+
+    // The same row dragged while something else is selected: the early return for a single
+    // unselected item must not hand the composition to the engine either.
+    let (mut h, main, clip) = harness();
+    h.state_mut().session.execute("project.select", json!({"items": [clip]})).unwrap();
+    h.run_steps(2);
+    let before = stack(&h);
+    let from = rect(&h, &format!("project.item.{main}.name")).center();
+    let row = rect(&h, &format!("timeline.layer.{}.row", layer_id(&h, "Bottom")));
+    drag(&mut h, from, row.center());
+    assert_eq!(stack(&h), before, "nothing is added from an unselected row either");
     assert!(!h.state().ui.status.contains("contain itself"), "no error: {}", h.state().ui.status);
 }
