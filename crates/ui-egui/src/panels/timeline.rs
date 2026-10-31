@@ -5254,9 +5254,11 @@ fn text_anim_popups(
         opts.push("-".into());
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
-            // The engine names these; the menu catalog holds their Japanese, so the pop-up reads
-            // what Animation ▸ Animate Text reads. A separator is not a label.
-            opts.push(if *k == "-" { "-".into() } else { crate::i18n::label(app, "layer.addTextAnimator", l).to_string() });
+            // The engine names these. `command_label` asks the menu for the row Animation ▸ Animate
+            // Text uses and falls back to the panel catalog, which holds the split names the menu
+            // does not list (`Fill Color: RGB` and the other colour rows), so no item is left in
+            // English. A separator is not a label.
+            opts.push(if *k == "-" { "-".into() } else { crate::i18n::command_label("layer.addTextAnimator", l).to_string() });
             acts.push(if *k == "-" { (String::new(), json!(null)) } else { ("layer.addTextAnimator".into(), json!({"layer": layer.id.0, "property": k})) });
         }
         // Variable Font Axes of the layer's font.
@@ -5280,7 +5282,7 @@ fn text_anim_popups(
         opts.push("-".into());
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
-            opts.push(if *k == "-" { "-".into() } else { tr_args("Property: {}", &[&crate::i18n::label(app, "layer.addTextAnimator", l)]) });
+            opts.push(if *k == "-" { "-".into() } else { tr_args("Property: {}", &[&crate::i18n::command_label("layer.addTextAnimator", l)]) });
             acts.push(if *k == "-" {
                 (String::new(), json!(null))
             } else {
