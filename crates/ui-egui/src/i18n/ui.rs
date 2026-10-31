@@ -1073,7 +1073,6 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Anchor Point", "アンカーポイント"),
     ("All Transform Properties", "すべてのトランスフォームプロパティ"),
     ("Animate:", "アニメーター："),
-    ("Add:", "追加："),
     ("Add property or selector", "プロパティまたはセレクターを追加"),
     ("Animate text", "テキストをアニメート"),
     ("Line Anchor", "ラインアンカー"),
