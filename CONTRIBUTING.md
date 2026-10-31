@@ -102,6 +102,12 @@ rustflags = ["-C", "link-self-contained=yes", "-L", "native=C:/gnu-import-libs"]
   tree in `crates/engine/src/menus.rs`, and test it including undo.
 - **A panel or dialog:** `crates/ui-egui/src/panels/`; look at the result with the headless
   snapshot tool described in [docs/testing.md](docs/testing.md).
+- **A translation:** read the wording off the installed After Effects' own Japanese interface
+  rather than translating from scratch — people arrive knowing those words, and the Japanese
+  tutorials they follow use them, so a synonym costs a reader a second look every time. Add the
+  row to the catalog that draws the string, pin it with a test, and carry the window and its
+  version into the pull request. [docs/localization-parity.md](docs/localization-parity.md) has the
+  rule, the catalogs and where each language stands.
 
 ## Talk to us
 

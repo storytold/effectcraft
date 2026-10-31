@@ -76,6 +76,13 @@ One rule, and the consequences that follow from it: **a Japanese word comes from
 After Effects 2026 interface, not from a dictionary.** Where that interface has no such word, the
 catalog says what it did instead.
 
+The reason is not aesthetic. Two audiences read this interface, and both learned the words
+somewhere else: people arriving from After Effects look for the menu item they already know by
+name, and the Japanese After Effects tutorials they follow call it the same thing. A synonym makes
+the video say タイムリマップ while the menu says 時間リマップ, and the reader translates mid-sentence.
+Matching the interface is what lets someone move over and keep using the tutorials they already
+have.
+
 | Situation | What the catalog does | Why |
 |---|---|---|
 | After Effects has the string | Takes its word character for character | Someone moving from After Effects reads the menu without stopping only if the words match |
