@@ -27,6 +27,7 @@ impl EffectcraftApp {
     pub fn new(session: Session) -> Self {
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
+        ui.show_menu_bar = session.prefs.appearance.menu_bar_shown();
         EffectcraftApp {
             session,
             ui,

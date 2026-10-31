@@ -31,7 +31,7 @@ pub use queries::{CacheBudgets, WEB_LAYER_CACHE, WEB_MEDIA_CACHE, mask_color};
 pub use recent::{MAX_RECENT_SCRIPTS, RecentScript};
 pub use sections::{
     Appearance, Audio, AutoSave, CompPreset, CompositionPrefs, Disk, Export, FacePrefs, General, Grids, Import, LabelPref, Memory, Previews, ProjectPrefs,
-    RotoPrefs, Scripting, Startup, ThreeD, TypePrefs, Video,
+    RotoPrefs, Scripting, Startup, ThreeD, TypePrefs, Video, menu_bar_shown,
 };
 use sections::{Extra, default_labels, lenient_comp_presets};
 

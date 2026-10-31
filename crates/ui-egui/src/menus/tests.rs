@@ -592,3 +592,56 @@ fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
+
+#[test]
+fn view_menu_bar_toggles_show_menu_bar() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    assert_eq!(app.session.shortcuts().shortcut_of("view.menuBar", &Value::Null), Some("Cmd+Alt+M"));
+    let initial = app.session.prefs.appearance.menu_bar_shown();
+    assert_eq!(app.ui.show_menu_bar, initial);
+    let ctx = egui::Context::default();
+    invoke(&mut app, &ctx, "view.menuBar", json!({})).unwrap();
+    assert_eq!(app.ui.show_menu_bar, !initial);
+    assert_eq!(app.session.prefs.appearance.menu_bar_shown(), !initial);
+    invoke(&mut app, &ctx, "view.menuBar", json!({})).unwrap();
+    assert_eq!(app.ui.show_menu_bar, initial);
+    assert_eq!(app.session.prefs.appearance.menu_bar_shown(), initial);
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": false})).unwrap();
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.menu_bar_shown());
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": true})).unwrap();
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.menu_bar_shown());
+}
+
+#[test]
+fn view_menu_bar_macos_default() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    // On macOS with default settings, in-window menu bar is hidden:
+    assert!(!app.session.prefs.appearance.menu_bar_shown_on(true));
+
+    // First toggle on macOS: sets in_window_menu_bar_mac to true and shows the menu bar:
+    let shown = app.set_menu_bar_on(None, true);
+    assert!(shown);
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.in_window_menu_bar_mac);
+    assert!(app.session.prefs.appearance.menu_bar_shown_on(true));
+
+    // Second toggle hides it again:
+    let shown = app.set_menu_bar_on(None, true);
+    assert!(!shown);
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.in_window_menu_bar_mac);
+    assert!(!app.session.prefs.appearance.menu_bar_shown_on(true));
+
+    // Explicit value setting:
+    let shown = app.set_menu_bar_on(Some(true), true);
+    assert!(shown);
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.in_window_menu_bar_mac);
+
+    let shown = app.set_menu_bar_on(Some(false), true);
+    assert!(!shown);
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.in_window_menu_bar_mac);
+}

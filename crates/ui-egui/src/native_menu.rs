@@ -372,7 +372,16 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.keymaps.active.hash(&mut h);
     let v = &app.ui.viewer;
     (v.rulers, v.guides, v.snap_guides, v.lock_guides, v.grid, v.snap_grid, v.show_layer_controls, v.pasteboard).hash(&mut h);
-    (app.ui.cache_when_idle, app.session.prefs.preview.active().include_audio, &app.ui.workspace, app.dialog.is_some()).hash(&mut h);
+    (
+        app.ui.cache_when_idle,
+        app.session.prefs.preview.active().include_audio,
+        &app.ui.workspace,
+        app.dialog.is_some(),
+        app.ui.show_menu_bar,
+        app.session.prefs.appearance.show_menu_bar,
+        app.session.prefs.appearance.in_window_menu_bar_mac,
+    )
+        .hash(&mut h);
     // Window menu check marks: the panels on screen.
     crate::dock::PanelKind::ALL.iter().filter(|p| crate::menus::panel_shown(app, **p)).for_each(|p| p.hash(&mut h));
     h.finish()
