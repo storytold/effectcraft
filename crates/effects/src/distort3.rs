@@ -773,7 +773,12 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
         (c.0 + x1 * hx, c.1 + y1 * hy)
     };
     move |x, y| {
+        let resid = |sx: f64, sy: f64| -> f64 {
+            let (fx, fy) = fwd(sx, sy);
+            (fx - x).abs() + (fy - y).abs()
+        };
         let (mut sx, mut sy) = (x, y);
+        let mut newton_ok = true;
         for _ in 0..12 {
             let (fx, fy) = fwd(sx, sy);
             let (rx, ry) = (fx - x, fy - y);
@@ -786,13 +791,48 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
             let (j00, j10, j01, j11) = ((ax - fx) / e, (ay - fy) / e, (bx - fx) / e, (by - fy) / e);
             let det = j00 * j11 - j01 * j10;
             if det.abs() < 1e-9 {
-                return None;
+                newton_ok = false;
+                break;
             }
             sx -= (j11 * rx - j01 * ry) / det;
             sy -= (-j10 * rx + j00 * ry) / det;
         }
-        let (fx, fy) = fwd(sx, sy);
-        if (fx - x).abs() + (fy - y).abs() > 0.5 {
+        if !newton_ok || !resid(sx, sy).le(&0.5) {
+            // Newton fails where the forward map is singular (Fisheye / Twist at -100 % squeeze
+            // the centre to a point) or overshoots: damped Levenberg-Marquardt from the output
+            // point finds the source instead of leaving a transparent hole.
+            (sx, sy) = (x, y);
+            let mut lambda = 1e-2;
+            let mut cur = resid(sx, sy);
+            for _ in 0..200 {
+                if cur < 1e-7 {
+                    break;
+                }
+                let (fx, fy) = fwd(sx, sy);
+                let (rx, ry) = (fx - x, fy - y);
+                let e = 0.01;
+                let (ax, ay) = fwd(sx + e, sy);
+                let (bx, by) = fwd(sx, sy + e);
+                let (j00, j10, j01, j11) = ((ax - fx) / e, (ay - fy) / e, (bx - fx) / e, (by - fy) / e);
+                // (JtJ + lambda I) d = -Jt r
+                let (a00, a01, a11) = (j00 * j00 + j10 * j10 + lambda, j00 * j01 + j10 * j11, j01 * j01 + j11 * j11 + lambda);
+                let (g0, g1) = (j00 * rx + j10 * ry, j01 * rx + j11 * ry);
+                let det = a00 * a11 - a01 * a01;
+                if det.abs().is_nan() || det.abs() <= 1e-300 {
+                    break;
+                }
+                let (dx, dy) = (-(a11 * g0 - a01 * g1) / det, -(-a01 * g0 + a00 * g1) / det);
+                let (nx, ny) = (sx + dx, sy + dy);
+                let next = resid(nx, ny);
+                if next < cur {
+                    (sx, sy, cur) = (nx, ny, next);
+                    lambda = (lambda * 0.3).max(1e-12);
+                } else {
+                    lambda = (lambda * 10.0).min(1e12);
+                }
+            }
+        }
+        if !resid(sx, sy).le(&0.5) {
             return None;
         }
         Some((sx, sy))
