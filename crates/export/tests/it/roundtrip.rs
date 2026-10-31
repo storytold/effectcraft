@@ -394,6 +394,156 @@ fn gif_roundtrip() {
     }
 }
 
+/// An animated WebP's frames (composited, as a player shows them) with their durations in ms,
+/// and the `VP8X` flags and `ANIM` loop count from its headers.
+fn decode_webp(path: &Path) -> (Vec<(Image, u32)>, u8, u16) {
+    use image::AnimationDecoder;
+    let bytes = std::fs::read(path).expect("read webp");
+    assert_eq!((&bytes[0..4], &bytes[8..16]), (&b"RIFF"[..], &b"WEBPVP8X"[..]));
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8, "RIFF size");
+    assert_eq!(&bytes[30..34], b"ANIM");
+    let (flags, loops) = (bytes[20], u16::from_le_bytes([bytes[42], bytes[43]]));
+    let dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).expect("webp header");
+    let frames = dec
+        .into_frames()
+        .map(|f| {
+            let f = f.expect("webp frame");
+            let (n, d) = f.delay().numer_denom_ms();
+            let buf = f.into_buffer();
+            assert_eq!(buf.dimensions(), (W, H));
+            (Image::from_rgba8(W, H, buf.as_raw()), n / d)
+        })
+        .collect();
+    (frames, flags, loops)
+}
+
+/// The decoded frames as the comp's 100 ms frames.
+fn webp_timeline(frames: &[(Image, u32)]) -> Vec<&Image> {
+    frames
+        .iter()
+        .flat_map(|(img, ms)| {
+            assert_eq!(ms % 100, 0, "{ms} ms is not whole comp frames");
+            std::iter::repeat_n(img, (ms / 100) as usize)
+        })
+        .collect()
+}
+
+/// The fourcc of every `ANMF` frame's image chunk, in order (`ALPH` first when there is one).
+fn webp_frame_chunks(path: &Path) -> Vec<Vec<[u8; 4]>> {
+    let b = std::fs::read(path).expect("read webp");
+    let chunks = |data: &[u8]| {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            out.push((<[u8; 4]>::try_from(&data[pos..pos + 4]).unwrap(), pos + 8, size));
+            pos += 8 + size + size % 2;
+        }
+        out
+    };
+    chunks(&b[12..])
+        .into_iter()
+        .filter(|(f, _, _)| f == b"ANMF")
+        .map(|(_, at, size)| chunks(&b[12 + at + 16..12 + at + size]).into_iter().map(|(f, _, _)| f).collect())
+        .collect()
+}
+
+/// Lossless WebP: held frames are merged, the timeline matches the comp and it reads back as footage.
+#[test]
+fn webp_roundtrip() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp");
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.webp_lossless = true;
+    let path = d.join("anim.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    let (frames, flags, loops) = decode_webp(&path);
+    assert_eq!(flags, 0x02, "animation, no alpha");
+    assert_eq!(loops, 0, "loop forever");
+    // Five frames of background, then seven of the red solid: two pictures, each held.
+    assert_eq!(frames.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), [500, 700]);
+    let timeline = webp_timeline(&frames);
+    assert_eq!(timeline.len() as u64, FRAMES);
+    for (k, img) in timeline.into_iter().enumerate() {
+        check_frame(img, k as u64, 0.01);
+    }
+    // EffectCraft reads it back as footage: 12 frames at 10 fps.
+    decode_movie(&path, FRAMES, 0.01);
+    assert!(webp_frame_chunks(&path).iter().all(|c| c == &[*b"VP8L"]), "lossless frames are VP8L");
+}
+
+/// Lossless WebP with RGB + Alpha keeps transparency and plays once when looping is off.
+#[test]
+fn webp_keeps_alpha() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-alpha");
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.webp_lossless = true;
+    om.channels = Channels::Rgba;
+    om.gif_loop = false;
+    let path = d.join("alpha.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    let (frames, flags, loops) = decode_webp(&path);
+    assert_eq!(flags, 0x12, "animation and alpha");
+    assert_eq!(loops, 1, "play once");
+    let timeline = webp_timeline(&frames);
+    assert_eq!(timeline.len() as u64, FRAMES);
+    for (k, img) in timeline.into_iter().enumerate() {
+        assert_eq!(px(img, 2, 2)[3], 0.0, "frame {k}: the corner is transparent");
+        let c = px(img, W / 2, H / 2);
+        let want = if k >= 5 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0, 0.0] };
+        assert!(c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01), "frame {k} centre {c:?} want {want:?}");
+    }
+}
+
+/// WebP output is lossy by default; opaque frames are `VP8 ` alone and still decode close to the source.
+#[test]
+fn webp_lossy_by_default() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-lossy");
+    let om = OutputModule::for_format(OutputFormat::WebP);
+    assert!(!om.webp_lossless, "lossy is the default");
+    let path = d.join("lossy.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    assert!(webp_frame_chunks(&path).iter().all(|c| c == &[*b"VP8 "]), "opaque lossy frames are VP8 alone: {:?}", webp_frame_chunks(&path));
+    let (frames, flags, _) = decode_webp(&path);
+    assert_eq!(flags, 0x02);
+    assert_eq!(frames.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), [500, 700], "held frames still merge");
+    for (k, img) in webp_timeline(&frames).into_iter().enumerate() {
+        check_frame(img, k as u64, 0.05);
+    }
+    decode_movie(&path, FRAMES, 0.05);
+}
+
+/// Lossy WebP with alpha keeps the alpha exact while the colour is lossy.
+#[test]
+fn webp_lossy_keeps_alpha_exactly() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-lossy-alpha");
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.channels = Channels::Rgba;
+    om.quality = 50;
+    let path = d.join("alpha.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    // The first frame is all transparent, so it carries its alpha; the next stores only the
+    // area that changed, the solid, which is opaque and so needs none.
+    let kinds = webp_frame_chunks(&path);
+    assert_eq!(kinds.first().map(Vec::as_slice), Some(&[*b"ALPH", *b"VP8 "][..]), "{kinds:?}");
+    assert!(kinds.iter().all(|c| c.last() == Some(b"VP8 ")), "{kinds:?}");
+    let (frames, flags, _) = decode_webp(&path);
+    assert_eq!(flags, 0x12);
+    for (k, img) in webp_timeline(&frames).into_iter().enumerate() {
+        assert_eq!(px(img, 2, 2)[3], 0.0, "frame {k}: the corner is transparent");
+        let c = px(img, W / 2, H / 2);
+        if k >= 5 {
+            assert_eq!(c[3], 1.0, "frame {k}: the solid is opaque");
+            assert!(c[0] > 0.9 && c[1] < 0.1 && c[2] < 0.1, "frame {k} centre {c:?}");
+        } else {
+            assert_eq!(c[3], 0.0, "frame {k}: nothing there yet");
+        }
+    }
+}
+
 #[test]
 fn cancel_stops_early() {
     let (p, cid) = project(None);
