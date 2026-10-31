@@ -21,7 +21,7 @@ use crate::import::camera::{import_camera_options, import_light_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
 use crate::import::masks::{MaskLayer, import_masks};
-use crate::import::props::{AnchorUnit, import_transform};
+use crate::import::props::{AnchorUnit, import_separated_position, import_transform};
 use crate::import::report::{Collector, ImportReport, LossCategory};
 use crate::import::shapes::import_shapes;
 use crate::import::styles::import_layer_styles;
@@ -512,6 +512,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, view: &AepProject<'_, '
         let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, size);
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
+            import_separated_position(&layer, &name, &tm, tr, &mut Ids(&mut project.next_id), &mut cx.col);
         }
         if is_camera || light.is_some() {
             // Byte 38 bit 0x40: a two-node camera and every light aim at the point of interest; a

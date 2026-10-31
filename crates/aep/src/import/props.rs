@@ -8,7 +8,8 @@
 
 use crate::{Interpolation, Keyframe as AepKey, KeyframeKind, Layer as AepLayer, PropGroup, PropNode, Property as AepProp, ValueSource};
 use effectcraft_keyframe::{Ease, Interp, Keyframe, Value};
-use effectcraft_project::{Expression, PropGroup as EcGroup, Property as EcProp};
+use effectcraft_project::build::Ids;
+use effectcraft_project::{Expression, Node, ParamUi, PropGroup as EcGroup, Property as EcProp};
 
 use crate::import::report::{Collector, LossCategory};
 use crate::import::time::TimeMap;
@@ -129,6 +130,17 @@ pub(crate) fn sane(v: &Value) -> bool {
 const SPECS: [(&str, &str); 5] =
     [("ADBE Anchor Point", "anchor"), ("ADBE Position", "position"), ("ADBE Scale", "scale"), ("ADBE Rotate Z", "rotation"), ("ADBE Opacity", "opacity")];
 
+/// The separated position dimensions: stored match name, project property id and name (the ids
+/// and names of `prop.separateDimensions`).
+const DIMENSIONS: [(&str, &str, &str); 3] =
+    [("ADBE Position_0", "positionX", "X Position"), ("ADBE Position_1", "positionY", "Y Position"), ("ADBE Position_2", "positionZ", "Z Position")];
+
+/// Bit of the `tdsb` flags of `ADBE Position` set while its dimensions are separated. In a
+/// production project every transform group whose `ADBE Position_0` was written (`tdsb` 1) has it
+/// (`tdsb` 0x803), and none of the thousands of groups with a plain Position (`tdsb` 1) does. The
+/// combined Position then keeps stale keys and the dimensions hold the value.
+const SEPARATED: u32 = 0x800;
+
 /// Match names of the transform group that are always present and carry nothing in their default
 /// state (the separated position dimensions and the reflection switch).
 const IGNORED: [&str; 4] = ["ADBE Position_0", "ADBE Position_1", "ADBE Position_2", "ADBE Envir Appear in Reflect"];
@@ -152,7 +164,7 @@ const ROTATIONS: [(&str, &str); 2] = [("ADBE Rotate X", "rotationX"), ("ADBE Rot
 /// Imports the transform of `layer` into `target` (the layer's `transform` group).
 ///
 /// `comp` is the composition size in pixels; `anchor` says how the stored Anchor Point becomes
-/// pixels.
+/// pixels. Separated position dimensions are left to [`import_separated_position`].
 pub(crate) fn import_transform(
     layer: &AepLayer<'_, '_>,
     layer_name: &str,
@@ -172,6 +184,7 @@ pub(crate) fn import_transform(
         AnchorUnit::Pixels | AnchorUnit::PointOfInterest => (Kind::Anchor(1.0, 1.0), tr.text_anchor_px()),
     };
     let poi = anchor == AnchorUnit::PointOfInterest;
+    let separated = position_separated(&group);
     for (match_name, id) in SPECS {
         let (kind, base, source_of) = match id {
             "anchor" => (anchor_kind, Value::Vec3(anchor_px), tr.anchor_fraction.source),
@@ -190,6 +203,10 @@ pub(crate) fn import_transform(
             prop.value = base;
         } else {
             col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
+        }
+        if separated && id == "position" {
+            // The dimensions hold the value (see [`import_separated_position`]).
+            continue;
         }
         let Some(PropNode::Property(node)) = group.get(match_name) else { continue };
         if source_of == ValueSource::Keyframed {
@@ -227,7 +244,69 @@ pub(crate) fn import_transform(
             _ => col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation")),
         }
     }
-    report_other_properties(&group, layer_name, col);
+    report_other_properties(&group, separated, layer_name, col);
+}
+
+/// True when the Position of this transform group has separated dimensions (see [`SEPARATED`]).
+fn position_separated(group: &PropGroup<'_, '_>) -> bool {
+    matches!(group.get("ADBE Position"), Some(PropNode::Property(p)) if p.flags().is_some_and(|f| f & SEPARATED != 0))
+}
+
+/// Imports the separated position dimensions of `layer`, if its Position has them, into `target`
+/// (the layer's `transform` group, after [`import_transform`]); `ids` gives their uids.
+pub(crate) fn import_separated_position(
+    layer: &AepLayer<'_, '_>,
+    layer_name: &str,
+    tm: &TimeMap,
+    target: &mut EcGroup,
+    ids: &mut Ids<'_>,
+    col: &mut Collector,
+) {
+    let Some(PropNode::Group(group)) = layer.properties().and_then(|p| p.get("ADBE Transform Group")) else { return };
+    if position_separated(&group) {
+        separated_position(&group, layer_name, tm, target, ids, col);
+    }
+}
+
+/// Imports `ADBE Position_0/1/2` as X/Y/Z Position, laid out as `prop.separateDimensions` does
+/// (right after Position, Z only on 3D layers). Each dimension is a one-component property with
+/// its own keys (plain records: temporal ease in pixels per second, no spatial tangents) and
+/// expression. The combined Position keeps no keys and holds the dimensions' first values. A
+/// missing dimension (Z on a 2D layer) is 0 for Z and the combined Position's value for X and Y.
+fn separated_position(group: &PropGroup<'_, '_>, layer_name: &str, tm: &TimeMap, target: &mut EcGroup, ids: &mut Ids<'_>, col: &mut Collector) {
+    let Some(at) = target.children.iter().position(|c| c.match_id() == "position") else { return };
+    let combined = target.get("position").map(|p| p.value.components()).unwrap_or_default();
+    let mut first = [0.0; 3];
+    let mut dims: Vec<EcProp> = Vec::with_capacity(3);
+    for (d, (match_name, id, name)) in DIMENSIONS.iter().enumerate() {
+        let fallback = if d == 2 { 0.0 } else { combined.get(d).copied().unwrap_or(0.0) };
+        let mut prop = ids.prop(id, name, Value::Scalar(fallback)).with_ui(ParamUi::Number);
+        prop.three_d_only = d == 2;
+        if let Some(PropNode::Property(node)) = group.get(match_name) {
+            if node.is_animated() {
+                import_keys(&node, Kind::Number, layer_name, match_name, tm, &mut prop, col);
+                if prop.keys.is_empty() {
+                    col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} keys unreadable, default used"));
+                }
+            } else {
+                match node.static_value().and_then(|v| Kind::Number.value(&v)) {
+                    Some(v) => prop.value = v,
+                    None => col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} holds a number that is not valid, default used")),
+                }
+            }
+            import_expression(&node, &mut prop, col);
+        }
+        first[d] = prop.value.as_f64();
+        dims.push(prop);
+    }
+    if let Some(position) = target.get_mut("position") {
+        position.value = Value::Vec3(first);
+        position.keys.clear();
+        position.expr = None;
+    }
+    for (i, prop) in dims.into_iter().enumerate() {
+        target.children.insert(at + 1 + i, Node::Prop(prop));
+    }
 }
 
 /// The keys of a keyed Orientation (703). Linear and hold sides arrive as they are; the ease of a
@@ -276,10 +355,13 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
 }
 
 /// Stored transform properties that are not imported are reported.
-fn report_other_properties(group: &PropGroup<'_, '_>, layer_name: &str, col: &mut Collector) {
+fn report_other_properties(group: &PropGroup<'_, '_>, separated: bool, layer_name: &str, col: &mut Collector) {
     for entry in group.entries() {
         let name = entry.match_name.as_str();
         if SPECS.iter().chain(ROTATIONS.iter()).any(|(m, _)| *m == name) || name == "ADBE Group End" {
+            continue;
+        }
+        if separated && DIMENSIONS.iter().any(|(m, _, _)| *m == name) {
             continue;
         }
         let PropNode::Property(p) = entry.node else { continue };
@@ -433,4 +515,210 @@ pub(crate) fn import_keys(node: &AepProp<'_, '_>, kind: Kind, layer_name: &str, 
         prop.value = first.value.clone();
     }
     prop.keys = keys;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use effectcraft_project::build;
+    use effectcraft_time::{TICKS_PER_SECOND, Tick};
+
+    use super::*;
+    use crate::import::time::frame_rate;
+    use crate::{Body, Chunk, LIST};
+
+    const SCALE: u32 = 30720;
+
+    fn data(id: &[u8; 4], bytes: Vec<u8>) -> Chunk<'static> {
+        Chunk { id: *id, body: Body::Data(Cow::Owned(bytes)), pad: None }
+    }
+
+    fn list(kind: &[u8; 4], children: Vec<Chunk<'static>>) -> Chunk<'static> {
+        Chunk { id: LIST, body: Body::List { list_type: *kind, children }, pad: None }
+    }
+
+    fn name(n: &str) -> Chunk<'static> {
+        let mut b = n.as_bytes().to_vec();
+        b.resize(40, 0);
+        data(b"tdmn", b)
+    }
+
+    fn tdb4(dims: u8, spatial: bool) -> Chunk<'static> {
+        let mut h = vec![0u8; 124];
+        h[3] = dims;
+        h[7] = u8::from(spatial);
+        h[12..16].copy_from_slice(&SCALE.to_be_bytes());
+        data(b"tdb4", h)
+    }
+
+    fn doubles(values: &[f64], len: usize) -> Vec<u8> {
+        let mut b: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        b.resize(len, 0);
+        b
+    }
+
+    /// A static property with `values` and these `tdsb` flags.
+    fn static_prop(flags: u32, values: &[f64]) -> Chunk<'static> {
+        let n = u8::try_from(values.len()).unwrap_or(0);
+        list(b"tdbs", vec![data(b"tdsb", flags.to_be_bytes().to_vec()), tdb4(n, n == 3), data(b"cdat", doubles(values, 8 * values.len().max(5)))])
+    }
+
+    /// One plain one-component key: seconds, interpolation in/out (1 linear, 2 bezier, 3 hold),
+    /// value, ease `[in speed, in influence, out speed, out influence]`.
+    type Key = (f64, u8, u8, f64, [f64; 4]);
+
+    /// A keyed one-component property (48-byte plain records).
+    fn keyed_scalar(keys: &[Key]) -> Chunk<'static> {
+        let mut ldat = Vec::new();
+        for (t, i, o, v, e) in keys {
+            let units = (t * f64::from(SCALE)).round() as i32;
+            ldat.extend(units.to_be_bytes());
+            ldat.extend([*i, *o, 0, 0]);
+            ldat.extend(doubles(&[*v, e[0], e[1], e[2], e[3]], 40));
+        }
+        let mut lhd3 = vec![0u8; 52];
+        lhd3[0..4].copy_from_slice(&0x00d0_0beeu32.to_be_bytes());
+        lhd3[8..12].copy_from_slice(&u32::try_from(keys.len()).unwrap_or(0).to_be_bytes());
+        lhd3[16..20].copy_from_slice(&48u32.to_be_bytes());
+        list(b"tdbs", vec![data(b"tdsb", 1u32.to_be_bytes().to_vec()), tdb4(1, false), list(b"list", vec![data(b"lhd3", lhd3), data(b"ldat", ldat)])])
+    }
+
+    fn group(entries: Vec<(&str, Chunk<'static>)>) -> Chunk<'static> {
+        let mut children = vec![data(b"tdsb", 1u32.to_be_bytes().to_vec())];
+        for (n, c) in entries {
+            children.push(name(n));
+            children.push(c);
+        }
+        children.push(name("ADBE Group End"));
+        list(b"tdgp", children)
+    }
+
+    fn tm() -> TimeMap {
+        TimeMap { timescale: SCALE, frame_duration: 512, rate: frame_rate(SCALE, 512).unwrap_or_default() }
+    }
+
+    /// Runs the separated-position import on a transform whose combined Position is `[960, 540, 0]`.
+    fn run(chunk: &Chunk<'static>) -> (bool, EcGroup, crate::import::ImportReport) {
+        let g = PropGroup::from_chunk(chunk).unwrap_or_else(|| panic!("not a group"));
+        let mut next = 1u64;
+        let mut ids = Ids(&mut next);
+        let mut target = build::transform(&mut ids, [0.0, 0.0], [960.0, 540.0]);
+        let mut col = Collector::default();
+        let separated = position_separated(&g);
+        if separated {
+            separated_position(&g, "L", &tm(), &mut target, &mut ids, &mut col);
+        }
+        report_other_properties(&g, separated, "L", &mut col);
+        (separated, target, col.finish())
+    }
+
+    fn ids_in_order(g: &EcGroup) -> Vec<&str> {
+        g.children.iter().map(|c| c.match_id()).collect()
+    }
+
+    fn at(p: &EcProp, seconds: f64) -> f64 {
+        p.value_at(Tick::from_seconds_f64(seconds)).as_f64()
+    }
+
+    #[test]
+    fn static_separated_3d_position() {
+        let c = group(vec![
+            ("ADBE Position", static_prop(0x803, &[1.0, 2.0, 3.0])),
+            ("ADBE Position_0", static_prop(1, &[100.0])),
+            ("ADBE Position_1", static_prop(1, &[200.0])),
+            ("ADBE Position_2", static_prop(1, &[-300.0])),
+        ]);
+        let (separated, tr, report) = run(&c);
+        assert!(separated);
+        assert_eq!(&ids_in_order(&tr)[..5], ["anchor", "position", "positionX", "positionY", "positionZ"]);
+        let v = |m: &str| tr.get(m).map(|p| p.value.as_f64()).unwrap_or(f64::NAN);
+        assert_eq!((v("positionX"), v("positionY"), v("positionZ")), (100.0, 200.0, -300.0));
+        assert_eq!(tr.get("position").map(|p| p.value.clone()), Some(Value::Vec3([100.0, 200.0, -300.0])));
+        assert!(tr.get("positionZ").is_some_and(|p| p.three_d_only) && tr.get("positionX").is_some_and(|p| !p.three_d_only));
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+    }
+
+    #[test]
+    fn keyed_dimension_keeps_ease_and_hold() {
+        // X eases from 0 to 1000 over 2 s (out speed 0 / influence 75 %, in speed 0 / 50 %), then
+        // holds; Y is static; Z is keyed linearly.
+        let c = group(vec![
+            ("ADBE Position", static_prop(0x803, &[0.0, 0.0, 0.0])),
+            (
+                "ADBE Position_0",
+                keyed_scalar(&[(0.0, 2, 2, 0.0, [0.0, 0.0, 0.0, 0.75]), (2.0, 2, 3, 1000.0, [0.0, 0.5, 0.0, 0.0]), (3.0, 3, 3, -50.0, [0.0; 4])]),
+            ),
+            ("ADBE Position_1", static_prop(1, &[540.0])),
+            ("ADBE Position_2", keyed_scalar(&[(0.0, 1, 1, 0.0, [0.0; 4]), (1.0, 1, 1, 100.0, [0.0; 4])])),
+        ]);
+        let (_, tr, report) = run(&c);
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+        let x = tr.get("positionX").unwrap_or_else(|| panic!("no X"));
+        assert_eq!(x.keys.len(), 3);
+        assert_eq!(x.keys[1].time, Tick(2 * TICKS_PER_SECOND));
+        assert_eq!((x.keys[0].out_interp, x.keys[1].in_interp, x.keys[1].out_interp), (Interp::Bezier, Interp::Bezier, Interp::Hold));
+        assert_eq!(x.keys[0].out_ease, vec![Ease { speed: 0.0, influence: 0.75 }]);
+        assert_eq!(x.keys[1].in_ease, vec![Ease { speed: 0.0, influence: 0.5 }]);
+        // Eased: slow at both ends, so the midpoint value is not the linear 500 but still between.
+        let mid = at(x, 1.0);
+        assert!(mid > 0.0 && mid < 1000.0 && (mid - 500.0).abs() > 1.0, "{mid}");
+        // Speed 0 out of the first key: slower than the linear 50 px after 0.1 s.
+        assert!(at(x, 0.1) < 50.0);
+        assert_eq!(at(x, 2.5), 1000.0);
+        assert_eq!(at(x, 3.5), -50.0);
+        let z = tr.get("positionZ").unwrap_or_else(|| panic!("no Z"));
+        assert!((at(z, 0.5) - 50.0).abs() < 1e-9);
+        assert_eq!(tr.get("positionY").map(|p| p.value.as_f64()), Some(540.0));
+        // The combined Position holds the first values and no keys.
+        let p = tr.get("position").unwrap_or_else(|| panic!("no Position"));
+        assert!(p.keys.is_empty());
+        assert_eq!(p.value, Value::Vec3([0.0, 540.0, 0.0]));
+    }
+
+    #[test]
+    fn two_d_layer_without_z_dimension() {
+        let c = group(vec![
+            ("ADBE Position", static_prop(0x803, &[960.0, 540.0, 0.0])),
+            ("ADBE Position_0", static_prop(1, &[10.0])),
+            ("ADBE Position_1", keyed_scalar(&[(0.0, 1, 1, 20.0, [0.0; 4]), (1.0, 1, 1, 40.0, [0.0; 4])])),
+        ]);
+        let (_, tr, report) = run(&c);
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+        assert_eq!(tr.get("positionZ").map(|p| (p.value.as_f64(), p.keys.len())), Some((0.0, 0)));
+        assert!((at(tr.get("positionY").unwrap_or_else(|| panic!("no Y")), 0.5) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn default_dimensions_under_a_plain_position_are_not_imported() {
+        // Every transform group carries the dimensions; under a plain Position they are inert.
+        let c = group(vec![
+            ("ADBE Position", static_prop(1, &[960.0, 540.0, 0.0])),
+            ("ADBE Position_0", static_prop(3, &[0.0])),
+            ("ADBE Position_1", static_prop(3, &[0.0])),
+        ]);
+        let (separated, tr, report) = run(&c);
+        assert!(!separated);
+        assert!(tr.get("positionX").is_none());
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+    }
+
+    #[test]
+    fn stale_combined_keys_are_dropped() {
+        // A separated Position keeps the keys it had before the split.
+        let mut keyed_combined = static_prop(0x803, &[0.0, 0.0, 0.0]);
+        if let Body::List { children, .. } = &mut keyed_combined.body {
+            children.retain(|c| !c.is(b"cdat"));
+        }
+        let c = group(vec![
+            ("ADBE Position", keyed_combined),
+            ("ADBE Position_0", static_prop(1, &[5.0])),
+            ("ADBE Position_1", static_prop(1, &[6.0])),
+            ("ADBE Position_2", static_prop(3, &[0.0])),
+        ]);
+        let (_, tr, _) = run(&c);
+        let p = tr.get("position").unwrap_or_else(|| panic!("no Position"));
+        assert!(p.keys.is_empty() && p.expr.is_none());
+        assert_eq!(p.value, Value::Vec3([5.0, 6.0, 0.0]));
+    }
 }
