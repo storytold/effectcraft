@@ -718,7 +718,9 @@ impl crate::config::FileOps for AutosaveTestStore {
         crate::config::StdFiles.list(dir)
     }
     fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        if let Some((started, release)) = self.gate.lock().unwrap().take() {
+        // The lock is released before the write parks, so a second write is not held up by it.
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((started, release)) = gate {
             started.send(()).unwrap();
             release.recv().unwrap();
         }
@@ -878,6 +880,25 @@ fn reopening_the_same_path_during_autosave_keeps_recovery_consistent_if_the_rese
 #[test]
 fn save_as_during_autosave_keeps_recovery_consistent_if_the_reset_fails() {
     autosave_project_transition_with_failed_reset("file.saveAs", false);
+}
+
+#[test]
+fn new_project_keeps_its_own_copy_while_a_background_autosave_is_in_flight() {
+    // The in-flight write could still fail, so it is not the copy that makes replacing safe.
+    let dir = tmp("autosave-new-in-flight");
+    let (mut s, store) = background_autosave_session(&dir);
+    s.execute("layer.newNull", json!({"name": "unsaved work"})).unwrap();
+    let (started, started_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *store.gate.lock().unwrap() = Some((started, release_rx));
+    let pending = s.autosave_now().unwrap();
+    started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let snapshot = s.execute("file.newProject", json!({})).unwrap()["snapshot"].as_str().unwrap().to_string();
+    assert_ne!(snapshot, pending, "a separate copy is written");
+    assert!(std::fs::read_to_string(&snapshot).unwrap().contains("unsaved work"));
+    release.send(()).unwrap();
+    let _ = s.autosave_wait();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

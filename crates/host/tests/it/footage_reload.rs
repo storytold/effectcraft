@@ -236,7 +236,7 @@ fn a_new_project_importing_an_overwritten_file_shows_the_new_pixels() {
     assert!(near(pixel(&s, cid, 32, 24), RED));
     // Another app overwrites the file with the same number of bytes.
     save(&path, &flat(BLUE, false));
-    s.execute_checked("file.newProject", json!({})).unwrap();
+    s.execute_checked("file.newProject", json!({"discard": true})).unwrap();
     let r = s.execute_checked("file.import", json!({"paths": [path.clone()]})).unwrap();
     let item = r["items"][0].as_u64().unwrap();
     s.execute_checked("comp.new", json!({"name": "C", "width": 64, "height": 48, "frameRate": 30, "duration": 1})).unwrap();
@@ -261,7 +261,7 @@ fn fresh_layered_composition_import_refreshes_its_sources() {
         let mut s = effectcraft_host::session();
         let old_comp = layered_comp(&mut s, &path, import_as);
         assert!(near(pixel(&s, old_comp, 32, 24), RED));
-        s.execute_checked("file.newProject", json!({})).unwrap();
+        s.execute_checked("file.newProject", json!({"discard": true})).unwrap();
         save(&path, &blue);
         s.drain_events();
         let comp = layered_comp(&mut s, &path, import_as);
