@@ -112,8 +112,9 @@ catalog says what it did instead.
 
 These are the interface's words, not necessarily the catalog's rows at this tree: some of them
 still differ in `crates/ui-egui/src/i18n/**`, and where they do, the row is the defect and the
-table is what it should read. That is also why every row arrives with a test: a corrected row
-stays corrected only if something fails when it is rewritten into a near synonym.
+table is what it should read. A row that was read off the interface should arrive with a test
+that pins it: a corrected row stays corrected only if something fails when it is rewritten into a
+near synonym, and today only some rows have one.
 
 ### Adding a row
 
@@ -177,7 +178,7 @@ Other languages EffectCraft ships (5):
 | Ukrainian | `uk` | 1,160 (≈ 28%): menus 633 rows, panels 527 | partial | 6–9 h + review |
 | Polish | `pl` | 1,327 (≈ 32%): menus 631 rows, panels 696 | partial; unwrapped UI, effects and engine text still in English; AI-drafted, native review welcome | Remaining strings + native review |
 | Czech | `cs` | 1,154 (≈ 27%): menus 633 rows, panels 521 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
-| Georgian | `ka` | 1,519 (≈ 36%): menus 632 rows, panels 887 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
+| Georgian | `ka` | 1,827 (≈ 44%): menus 632 rows, panels 887 (the Simplified Chinese catalog's 695 plus 192 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 (the 21 category labels are separate); native-speaker reviewed | partial | 5–8 h |
 
 Russian (`ru`) has a menu catalog (633 rows, ≈ 15%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
