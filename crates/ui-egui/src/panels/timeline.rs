@@ -5227,13 +5227,15 @@ fn text_anim_popups(
         "animator" => ("Add:", "add"),
         _ => return,
     };
-    p.text(pos2(x + 6.0, cy), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
+    // The label is the English source; the drawn text is the catalog's, so the row reads
+    // アニメーター： as Animation ▸ Animate Text does.
+    p.text(pos2(x + 6.0, cy), Align2::LEFT_CENTER, tr(label), Tokens::ui(11.5), t.text_dim);
     let br = Rect::from_center_size(pos2(x + 6.0 + if key == "add" { 34.0 } else { 62.0 }, cy), vec2(16.0, 16.0));
-    let resp = ui.interact(br, egui::Id::unique(("tl-textanim", uid)), Sense::click()).on_hover_text(if key == "add" {
+    let resp = ui.interact(br, egui::Id::unique(("tl-textanim", uid)), Sense::click()).on_hover_text(tr(if key == "add" {
         "Add property or selector"
     } else {
         "Animate text"
-    });
+    }));
     icons::paint(p, br.shrink(3.0), Icon::ChevronRight, if resp.hovered() { t.text } else { t.text_dim });
     app.auto.add(&format!("timeline.group.{uid}.{key}"), br, label);
     let pop = egui::Id::unique(("tl-textanim-pop", uid));
@@ -5250,8 +5252,8 @@ fn text_anim_popups(
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
             // The engine names these; the menu catalog holds their Japanese, so the pop-up reads
-            // what Animation ▸ Animate Text reads.
-            opts.push(crate::i18n::label(app, "layer.addTextAnimator", l).to_string());
+            // what Animation ▸ Animate Text reads. A separator is not a label.
+            opts.push(if *k == "-" { "-".into() } else { crate::i18n::label(app, "layer.addTextAnimator", l).to_string() });
             acts.push(if *k == "-" { (String::new(), json!(null)) } else { ("layer.addTextAnimator".into(), json!({"layer": layer.id.0, "property": k})) });
         }
         // Variable Font Axes of the layer's font.
@@ -5275,7 +5277,7 @@ fn text_anim_popups(
         opts.push("-".into());
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
-            opts.push(if *k == "-" { "-".into() } else { tr_args("Property: {}", &[&l]) });
+            opts.push(if *k == "-" { "-".into() } else { tr_args("Property: {}", &[&crate::i18n::label(app, "layer.addTextAnimator", l)]) });
             acts.push(if *k == "-" {
                 (String::new(), json!(null))
             } else {

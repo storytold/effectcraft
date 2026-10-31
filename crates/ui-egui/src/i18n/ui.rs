@@ -1072,10 +1072,14 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Rove Across Time", "時間をまたいで移動"),
     ("Anchor Point", "アンカーポイント"),
     ("All Transform Properties", "すべてのトランスフォームプロパティ"),
-    ("Line Anchor", "行のアンカー"),
-    ("Line Spacing", "行間"),
+    ("Animate:", "アニメーター："),
+    ("Add:", "追加："),
+    ("Add property or selector", "プロパティまたはセレクターを追加"),
+    ("Animate text", "テキストをアニメート"),
+    ("Line Anchor", "ラインアンカー"),
+    ("Line Spacing", "ラインスペース"),
     ("Character Offset", "文字のオフセット"),
-    ("Character Value", "文字の値"),
+    ("Character Value", "文字コード"),
     ("Fill Color: RGB", "塗りのカラー: RGB"),
     ("Fill Color: Hue", "塗りのカラー: 色相"),
     ("Fill Color: Saturation", "塗りのカラー: 彩度"),
@@ -7823,7 +7827,7 @@ mod tests {
         assert_eq!(tr("Media Duration"), "メディアの長さ");
         assert_eq!(tr("Bring Layer to Front"), "レイヤーを最前面へ");
         assert_eq!(tr("All Transform Properties"), "すべてのトランスフォームプロパティ");
-        assert_eq!(tr("Fill Color: RGB"), "塗りの色: RGB");
+        assert_eq!(tr("Fill Color: RGB"), "塗りのカラー: RGB");
         assert_eq!(tr("Lines added"), "追加行数");
         // The composition-settings tabs and the Preview transport pass these through `tr` as
         // variables, so a missing row would fall back to English unnoticed.
