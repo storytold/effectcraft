@@ -2182,7 +2182,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.addTextAnimator", "Character Offset", "文字のオフセット"),
     ("layer.addTextAnimator", "Character Value", "文字コード"),
     ("layer.addTextAnimator", "Blur", "ブラー"),
-    ("text.animatorFontAxes", "Variable Font Axes", "可変フォントの軸"),
+    ("text.animatorFontAxes", "Variable Font Axes", "バリアブルフォント軸"),
     ("", "Add Text Selector", "テキストセレクターを追加"),
     ("text.addSelector", "Range", "範囲"),
     ("text.addSelector", "Wiggly", "ウィグリー"),
