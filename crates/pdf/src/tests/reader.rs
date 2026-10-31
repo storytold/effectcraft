@@ -74,3 +74,51 @@ fn duplicate_unreferenced_compressed_objects_do_not_block_repair() {
     assert!(doc.skipped.iter().any(|warning| warning.contains("recovered PDF object from an object stream: 10 0")));
     assert!(matches!(parse(&document("/Missing 30 0 R", &objects)), Err(Error::Read(message)) if message.contains("ambiguous recovered object 30")));
 }
+
+#[test]
+fn many_trailer_markers_with_unterminated_objects_do_not_rescan_the_file() {
+    // The encryption pre-scan lexes after every `trailer` marker. Unbounded, each unterminated
+    // string or dictionary here ran to the end of the file: about 10^11 bytes lexed (minutes),
+    // against 2 × 10^8 within the window. The markers sit in an unreferenced stream, so the
+    // file still opens as the plain document.
+    let junk = "trailer(trailer<<".repeat(25_000) + &" ".repeat(2 << 20);
+    let stream = (6, 0, format!("<< /Length {} >>\nstream\n{junk}\nendstream", junk.len()));
+    let plain = parse(&document("", &[])).unwrap();
+    assert_eq!(parse(&document("", &[stream])), Ok(plain));
+}
+
+#[test]
+fn a_classic_trailer_with_an_encrypt_entry_is_refused() {
+    let plain = String::from_utf8(document("", &[])).unwrap();
+    let encrypted = plain.replace("/Root 1 0 R >>", "/Root 1 0 R /Encrypt 9 0 R >>");
+    assert_ne!(encrypted, plain);
+    // Object 9 does not exist: the trailer pre-scan refuses the file before the shared parser runs.
+    assert_eq!(parse(encrypted.as_bytes()), Err(Error::Encrypted));
+}
+
+#[test]
+fn an_encrypt_entry_past_the_trailer_window_is_refused() {
+    // The filler pushes /Encrypt past the pre-scan's 4 KiB window. Object 9 does not exist, and the
+    // shared parser reads /Encrypt only as a dictionary, so it alone would open the file.
+    let plain = String::from_utf8(document("", &[])).unwrap();
+    let filler = "x".repeat(8 * 1024);
+    let long = plain.replace("/Root 1 0 R >>", &format!("/Root 1 0 R /Filler ({filler}) >>"));
+    let encrypted = plain.replace("/Root 1 0 R >>", &format!("/Root 1 0 R /Filler ({filler}) /Encrypt 9 0 R >>"));
+    let doc = parse(plain.as_bytes()).unwrap();
+    assert_eq!(parse(long.as_bytes()), Ok(doc));
+    assert_eq!(parse(encrypted.as_bytes()), Err(Error::Encrypted));
+}
+
+#[test]
+fn an_encrypt_entry_after_a_window_cut_before_the_trailer_dictionary_is_refused() {
+    // The 4 KiB pre-scan window ends in the whitespace before the trailer dictionary (the lexer
+    // returns nothing) or between the two `<` of its `<<` (the lexer reads a hex string).
+    let plain = String::from_utf8(document("", &[])).unwrap();
+    let doc = parse(plain.as_bytes()).unwrap();
+    for pad in [4 * 1024, 4 * 1024 - 2] {
+        let spaced = plain.replace("trailer\n<<", &format!("trailer\n{}<<", " ".repeat(pad)));
+        let encrypted = spaced.replace("/Root 1 0 R >>", "/Root 1 0 R /Encrypt 9 0 R >>");
+        assert_eq!(parse(spaced.as_bytes()).as_ref(), Ok(&doc));
+        assert_eq!(parse(encrypted.as_bytes()), Err(Error::Encrypted));
+    }
+}
