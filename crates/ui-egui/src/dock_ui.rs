@@ -514,9 +514,12 @@ impl EffectcraftApp {
                 self.ui.status = error;
             }
         }
-        if let Some((panel, pos)) = menu {
-            ctx.data_mut(|d| d.insert_temp(egui::Id::unique("panel-menu"), (panel, pos)));
+        if let Some(open) = menu {
+            ctx.data_mut(|d| d.insert_temp::<panels::OpenPanelMenu>(egui::Id::unique("panel-menu"), open));
+            // the owner window draws it on its next pass
+            ctx.request_repaint();
         }
+        drop_menu_of_closed_window(&ctx, &self.native_viewports);
         let hits = DockArea::<PanelKind>::hit_rects(&ctx, area_id());
         self.register_dock_hits(&hits);
         panels::panel_menu_popup(self, ui);
@@ -651,8 +654,8 @@ struct EffectContent<'a> {
     doc_actions: Vec<DocAction>,
     /// Viewer locks clicked.
     locks: Vec<PanelKind>,
-    /// The ≡ button clicked: its panel and where its menu opens.
-    menu: Option<(PanelKind, egui::Pos2)>,
+    /// The ≡ button clicked: its panel, where its menu opens and the viewport it was clicked in.
+    menu: Option<panels::OpenPanelMenu>,
     /// Where each panel body was drawn, in drawing order (floating windows last).
     bodies: Vec<(PanelKind, Rect)>,
     /// Where each native window's IME descriptor is set up and published.
@@ -672,6 +675,8 @@ pub(crate) struct NativeIme {
     expected: Vec<(egui::ViewportId, usize)>,
     /// The bodies each native window has drawn so far, in the order the windows began.
     drawn: Vec<(egui::ViewportId, usize)>,
+    /// Windows that drew their panel menu this pass.
+    menu_drawn: Vec<egui::ViewportId>,
     /// Windows that published this pass.
     published: Vec<egui::ViewportId>,
 }
@@ -688,7 +693,7 @@ impl NativeIme {
                 Some((viewport, count))
             })
             .collect();
-        Self { expected, drawn: Vec::new(), published: Vec::new() }
+        Self { expected, drawn: Vec::new(), menu_drawn: Vec::new(), published: Vec::new() }
     }
 
     /// Count a body of `viewport` that starts drawing. True for the window's first body: its
@@ -719,6 +724,18 @@ impl NativeIme {
         publishes
     }
 
+    /// Whether the body of `viewport` that just drew is the one that draws the window's panel
+    /// menu: after the window's last body, once per pass.
+    pub(crate) fn menu_turn(&mut self, viewport: egui::ViewportId) -> bool {
+        let drawn = self.drawn.iter().find(|(v, _)| *v == viewport).map_or(0, |(_, n)| *n);
+        let expected = self.expected.iter().find(|(v, _)| *v == viewport).map_or(0, |(_, n)| *n);
+        let turn = drawn >= expected && !self.menu_drawn.contains(&viewport);
+        if turn {
+            self.menu_drawn.push(viewport);
+        }
+        turn
+    }
+
     /// The native windows whose pass began.
     pub(crate) fn begun(&self) -> Vec<egui::ViewportId> {
         self.drawn.iter().map(|(v, _)| *v).collect()
@@ -728,6 +745,17 @@ impl NativeIme {
     pub(crate) fn unpublished(&self) -> Vec<egui::ViewportId> {
         self.drawn.iter().map(|(v, _)| *v).filter(|v| !self.published.contains(v)).collect()
     }
+}
+
+/// A panel menu left open by a panel window that has since closed has nowhere to draw: drop it.
+/// `windows` are the panel windows that drew this pass.
+pub(crate) fn drop_menu_of_closed_window(ctx: &egui::Context, windows: &[egui::ViewportId]) {
+    let id = egui::Id::unique("panel-menu");
+    ctx.data_mut(|d| {
+        if d.get_temp::<panels::OpenPanelMenu>(id).is_some_and(|(_, _, owner)| owner != egui::ViewportId::ROOT && !windows.contains(&owner)) {
+            d.remove::<panels::OpenPanelMenu>(id);
+        }
+    });
 }
 
 /// The OS window craft-ui opens for the floating window `id`.
@@ -790,6 +818,11 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         if native && self.ime.publishes(viewport, panels::viewer_text::ime_recorded(ui.ctx())) {
             panels::viewer_text::finish_ime(self.app, ui);
         }
+        // The ≡ menu of a panel in its own OS window is drawn by that window's pass, after its
+        // last body, at that window's coordinates.
+        if native && self.ime.menu_turn(viewport) {
+            panels::panel_menu_area(self.app, ui);
+        }
         // The body fills its frame; allocating it lets a floated panel keep its full size.
         ui.allocate_rect(rect, Sense::hover());
         // Painted after the body so child backgrounds cannot hide the focus outline.
@@ -843,7 +876,7 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         crate::widgets::focus_outline(ui, &response, &t);
         if response.clicked() {
             self.app.ui.focused = *active;
-            self.menu = Some((*active, rect.left_bottom()));
+            self.menu = Some((*active, rect.left_bottom(), ui.ctx().viewport_id()));
         }
     }
 

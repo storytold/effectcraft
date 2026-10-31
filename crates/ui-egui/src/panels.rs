@@ -300,14 +300,35 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
     }
 }
 
-/// The ≡ panel menu (opened from a tab).
+/// The open ≡ panel menu: the panel, where it opens and the viewport that owns the click.
+pub(crate) type OpenPanelMenu = (PanelKind, egui::Pos2, egui::ViewportId);
+
+/// The main window's pass of the ≡ panel menu (opened from a tab).
 pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+    panel_menu_area(app, ui);
+}
+
+/// The ≡ panel menu, drawn in the viewport that owns the click that opened it: a panel in its own
+/// OS window opens its menu in that window, at that window's coordinates, instead of in the main
+/// window.
+pub(crate) fn panel_menu_area(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let id = egui::Id::unique("panel-menu");
-    let Some((panel, pos)) = ui.ctx().data(|d| d.get_temp::<(PanelKind, egui::Pos2)>(id)) else { return };
+    let viewport = ui.ctx().viewport_id();
+    let Some((panel, pos, owner)) = ui.ctx().data(|d| d.get_temp::<OpenPanelMenu>(id)) else { return };
+    if owner != viewport {
+        // a press in another window dismisses the menu, as a press elsewhere in its own does
+        if ui.ctx().input(|i| i.pointer.any_pressed()) {
+            ui.ctx().data_mut(|d| d.remove::<OpenPanelMenu>(id));
+        }
+        return;
+    }
     let mut close = false;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_min_width(200.0);
+            // a small window (a floated panel can be narrower than the menu) gets the menu at its width
+            let width = (ui.ctx().content_rect().width() - 16.0).max(0.0);
+            ui.set_min_width(200.0_f32.min(width));
+            ui.set_max_width(width);
             if ui.button(tr("Close Panel")).clicked() {
                 let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Close { panel });
                 close = true;
@@ -371,7 +392,7 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         });
     });
     if close || crate::widgets::pressed_outside(ui.ctx(), &area.response) {
-        ui.ctx().data_mut(|d| d.remove::<(PanelKind, egui::Pos2)>(id));
+        ui.ctx().data_mut(|d| d.remove::<OpenPanelMenu>(id));
     }
 }
 
@@ -387,5 +408,110 @@ mod preset_drop_tests {
         assert_eq!(PresetRef::File("/p/a.ecpreset".into()).apply_to(7), ("anim.applyPreset", json!({"path": "/p/a.ecpreset", "layers": [7]})));
         // Double-click applies to the selection: no layer given.
         assert_eq!(PresetRef::Text("typewriter".into()).command(), ("layer.applyTextPreset", json!({"preset": "typewriter"})));
+    }
+}
+
+#[cfg(test)]
+mod panel_menu_viewport_tests {
+    use super::*;
+    use effectcraft_engine::Session;
+
+    fn menu_id() -> egui::Id {
+        egui::Id::unique("panel-menu")
+    }
+
+    fn open(ctx: &egui::Context, owner: egui::ViewportId) {
+        ctx.data_mut(|d| d.insert_temp::<OpenPanelMenu>(menu_id(), (PanelKind::Timeline, egui::pos2(20.0, 20.0), owner)));
+    }
+
+    fn is_open(ctx: &egui::Context) -> bool {
+        ctx.data(|d| d.get_temp::<OpenPanelMenu>(menu_id())).is_some()
+    }
+
+    /// One pass of `viewport` (a window `width` wide) that draws the menu as the app does: the
+    /// main window through `panel_menu_popup`, a panel's own window through `panel_menu_area`.
+    /// Returns where the menu was drawn in that pass.
+    fn pass(app: &mut EffectcraftApp, ctx: &egui::Context, viewport: egui::ViewportId, width: f32, events: Vec<egui::Event>) -> Option<egui::Rect> {
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(viewport, egui::ViewportInfo::default());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0));
+        let raw = egui::RawInput { viewport_id: viewport, viewports, screen_rect: Some(screen), events, ..Default::default() };
+        let mut drawn = None;
+        let mut out = ctx.run_ui(raw, |ui| {
+            if viewport == egui::ViewportId::ROOT {
+                panel_menu_popup(app, ui);
+            } else {
+                panel_menu_area(app, ui);
+            }
+            drawn = ui.ctx().memory(|m| m.area_rect(menu_id().with("area")));
+        });
+        out.textures_delta.clear();
+        drawn
+    }
+
+    fn window() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("panel-window")
+    }
+
+    fn press(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        ]
+    }
+
+    #[test]
+    fn a_floating_panels_menu_is_drawn_in_its_own_window_not_the_main_one() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        assert_eq!(pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, vec![]), None, "the main window does not draw it");
+        assert!(is_open(&ctx), "and does not drop it");
+        let rect = pass(&mut app, &ctx, window(), 1000.0, vec![]).expect("the panel's window draws it");
+        assert!((rect.min.x - 20.0).abs() < 1.0, "it opens at the window-local position: {rect:?}");
+    }
+
+    #[test]
+    fn a_main_window_panels_menu_stays_in_the_main_window() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, egui::ViewportId::ROOT);
+        assert!(pass(&mut app, &ctx, window(), 1000.0, vec![]).is_none());
+        assert!(pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, vec![]).is_some());
+    }
+
+    #[test]
+    fn a_floating_panels_menu_fits_a_window_narrower_than_the_menu() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        let rect = pass(&mut app, &ctx, window(), 160.0, vec![]).unwrap();
+        assert!(rect.max.x <= 160.5, "the menu fits the 160 pt window: {rect:?}");
+    }
+
+    #[test]
+    fn a_press_in_another_window_closes_a_floating_panels_menu() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        pass(&mut app, &ctx, window(), 1000.0, vec![]);
+        assert!(is_open(&ctx));
+        pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, press(egui::pos2(600.0, 300.0)));
+        assert!(!is_open(&ctx), "a click in the main window dismisses it");
+    }
+
+    #[test]
+    fn a_menu_left_in_a_closed_window_is_dropped() {
+        let ctx = egui::Context::default();
+        let other = egui::ViewportId::from_hash_of("other-window");
+        open(&ctx, window());
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[other]);
+        assert!(!is_open(&ctx), "its window is gone");
+        open(&ctx, window());
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[window()]);
+        assert!(is_open(&ctx), "its window is still there");
+        open(&ctx, egui::ViewportId::ROOT);
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[]);
+        assert!(is_open(&ctx), "the main window is always there");
     }
 }
