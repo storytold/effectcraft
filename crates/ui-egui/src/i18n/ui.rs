@@ -1052,7 +1052,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Flip Horizontal", "水平方向に反転"),
     ("Flip Vertical", "垂直方向に反転"),
     ("Enable Time Remapping", "タイムリマップを有効にする"),
-    ("Time-Reverse Layer", "レイヤーを時間反転"),
+    ("Time-Reverse Layer", "時間反転レイヤー"),
     ("Freeze Frame", "フレームを固定"),
     ("Freeze On Last Frame", "最後のフレームで固定"),
     ("Add Marker", "マーカーを追加"),

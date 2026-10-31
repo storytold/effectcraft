@@ -8784,6 +8784,10 @@ mod tests {
             // catalog, which would hide a row naming the wrong command or English source.
             assert!(JAPANESE.iter().any(|(c, e, _)| *c == id && *e == en), "{id} has no menu row");
             assert_eq!(command_label(id, en), ja, "{id}");
+            // Panels that draw the label themselves ask the panel catalog, so the two tables have
+            // to agree too; a row left behind there reads as a different word in the Timeline.
+            let panel = ui::tr(en);
+            assert!(panel == ja || panel == en, "{id}: the panel catalog says {panel}");
         }
         ui::set_current("en");
     }
