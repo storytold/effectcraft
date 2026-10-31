@@ -57,6 +57,12 @@ pub struct ExportResult {
 pub trait Exporter: Send + Sync {
     /// Formats this build can write.
     fn formats(&self) -> Vec<OutputFormat>;
+    /// Whether Skip Existing Files preserves sequence frames written by earlier items. Exporters
+    /// without an existence check (such as memory sinks) must keep the conservative default.
+    /// The check must cover the final destination for these settings, including any overflow.
+    fn supports_skip_existing(&self, _settings: &effectcraft_project::render_queue::RenderSettings) -> bool {
+        false
+    }
     /// Render and write one item (blocking). `progress(done, total)` returns `false` to cancel;
     /// a cancelled export removes the files it opened for that output and returns `Err("cancelled")`.
     /// Completed earlier queue items and unrelated files must be preserved.
@@ -493,6 +499,11 @@ impl Session {
         let formats = exporter.formats();
         let (mut items, mut problems) = self.queued_outputs(&formats);
         let refused = self.check_outputs(&items);
+        // Two outputs of this job on one file: the render would replace its own output, so it is
+        // refused before anything is written (the items refused above take no part).
+        if let Some(refusal) = crate::output_guard::duplicate_refusal(&self.duplicate_outputs(&items, &refused)?) {
+            return Err(refusal);
+        }
         items.retain(|modules| modules.first().is_none_or(|(it, _)| !refused.iter().any(|r| r.item == it.id)));
         problems.extend(refused.iter().map(|r| (r.item, RenderStatus::Failed(r.reason.clone()))));
         if !problems.is_empty() {

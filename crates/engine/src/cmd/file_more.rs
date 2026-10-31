@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, f_p, has_comp, has_project_selection, str_p};
 use crate::sequence::SequenceOptions;
-use crate::{EngineError, Result, Session, cmd};
+use crate::{EngineError, Result, Session, cmd, query};
 
 fn has_footage_selection(s: &Session) -> std::result::Result<(), String> {
     if selected_footage(s).is_empty() { Err("select footage in the Project panel".into()) } else { Ok(()) }
@@ -78,9 +78,17 @@ fn close_project(s: &mut Session, _: &Value) -> Result<Value> {
 
 fn save_copy(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.saveCopy", "missing `path`"))?;
+    s.refuse_export(path)?;
     let json = super::file::file_text(s, path)?;
-    s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(path, json.as_bytes())?;
     Ok(json!({"path": path, "bytes": json.len()}))
+}
+
+/// `file.checkOutput {path}`: the commands that write to a path never replace footage, a proxy
+/// or the project file; this says beforehand, for callers that write the file themselves.
+fn check_output(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = str_p(p, "path").ok_or_else(|| bad("file.checkOutput", "missing `path`"))?;
+    Ok(s.output_status(path))
 }
 
 fn rate_of(p: &Value) -> FrameRate {
@@ -376,41 +384,6 @@ fn find_missing(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     let folder = str_p(p, "folder").ok_or_else(|| bad("file.collectFiles", "missing `folder`"))?.trim_end_matches('/').to_string();
-    // Collect Files makes its folder (and the footage folder inside it).
-    #[cfg(not(target_arch = "wasm32"))]
-    std::fs::create_dir_all(format!("{folder}/(Footage)")).map_err(|e| EngineError::Other(format!("cannot create {folder}: {e}")))?;
-    let mut proj = (*s.project).clone();
-    let mut copied = 0;
-    let mut errors = vec![];
-    let mut used_names = BTreeSet::new();
-    for it in proj.items.values_mut() {
-        let ItemKind::Footage(f) = &mut it.kind else { continue };
-        if f.path.is_empty() {
-            continue;
-        }
-        let files: Vec<String> = if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() };
-        let mut new_paths = vec![];
-        for src in &files {
-            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
-            let mut k = 2;
-            while !used_names.insert(name.clone()) {
-                name = format!("{k}_{name}");
-                k += 1;
-            }
-            let dst = format!("{folder}/(Footage)/{name}");
-            match s.services.read_file(src).and_then(|bytes| s.services.write_file(&dst, &bytes)) {
-                Ok(()) => copied += 1,
-                Err(e) => errors.push(format!("{src}: {e}")),
-            }
-            new_paths.push(dst);
-        }
-        if f.sequence.is_empty() {
-            f.path = new_paths.remove(0);
-        } else {
-            f.path = new_paths.first().cloned().unwrap_or_default();
-            f.sequence = new_paths;
-        }
-    }
     let stem = s
         .path
         .as_deref()
@@ -418,7 +391,67 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Untitled Project".into());
     let out = format!("{folder}/{stem}.ecproj");
-    s.services.write_file(&out, proj.to_json().as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {out}: {e}")))?;
+    // Where every copy goes, before anything is made: a copy never lands on a file the project
+    // reads (other footage, a proxy, the project file itself), and then nothing is written.
+    let protected = s.protected_files();
+    let mut used_names = BTreeSet::new();
+    let mut plan: Vec<(ItemId, Vec<(String, String)>)> = vec![];
+    for it in s.project.items.values() {
+        let ItemKind::Footage(f) = &it.kind else { continue };
+        if f.path.is_empty() {
+            continue;
+        }
+        let files: Vec<&String> = if f.sequence.is_empty() { vec![&f.path] } else { f.sequence.iter().collect() };
+        let mut pairs = vec![];
+        for src in files {
+            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
+            let mut k = 2;
+            while !used_names.insert(name.clone()) {
+                name = format!("{k}_{name}");
+                k += 1;
+            }
+            let dst = format!("{folder}/(Footage)/{name}");
+            // A file that is already where its copy goes stays (it is not copied onto itself).
+            if !crate::output_guard::same_file(std::path::Path::new(src), std::path::Path::new(&dst))
+                && let Some(source) = protected.find(std::path::Path::new(&dst))
+            {
+                return Err(EngineError::Other(format!("Nothing was collected. {}", source.refusal(&dst, crate::output_guard::Use::Export))));
+            }
+            pairs.push((src.clone(), dst));
+        }
+        plan.push((it.id, pairs));
+    }
+    if let Some(source) = protected.find(std::path::Path::new(&out)) {
+        return Err(EngineError::Other(format!("Nothing was collected. {}", source.refusal(&out, crate::output_guard::Use::Export))));
+    }
+    // Collect Files makes its folder (and the footage folder inside it).
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::create_dir_all(format!("{folder}/(Footage)")).map_err(|e| EngineError::Other(format!("cannot create {folder}: {e}")))?;
+    let mut proj = (*s.project).clone();
+    let mut copied = 0;
+    let mut errors = vec![];
+    for (id, pairs) in plan {
+        let mut new_paths = vec![];
+        for (src, dst) in &pairs {
+            if crate::output_guard::same_file(std::path::Path::new(src), std::path::Path::new(dst)) {
+                copied += 1;
+            } else {
+                match s.services.read_file(src).and_then(|bytes| s.write_output_with(&protected, dst, &bytes).map_err(std::io::Error::other)) {
+                    Ok(()) => copied += 1,
+                    Err(e) => errors.push(format!("{src}: {e}")),
+                }
+            }
+            new_paths.push(dst.clone());
+        }
+        let Some(ItemKind::Footage(f)) = proj.items.get_mut(&id).map(|it| &mut it.kind) else { continue };
+        if f.sequence.is_empty() {
+            f.path = new_paths.pop().unwrap_or_default();
+        } else {
+            f.path = new_paths.first().cloned().unwrap_or_default();
+            f.sequence = new_paths;
+        }
+    }
+    s.write_output_with(&protected, &out, proj.to_json().as_bytes())?;
     s.toast(format!("Collected {copied} file(s) into {folder}"));
     Ok(json!({"project": out, "copied": copied, "errors": errors}))
 }
@@ -1173,6 +1206,12 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("file.close", "Close", ["File"], Some("Cmd+W"), "{comp?}", has_comp, close),
         cmd!("file.closeProject", "Close Project", ["File"], None, "{}", always, close_project),
         cmd!("file.saveCopy", "Save a Copy...", ["File", "Save As"], None, "{path}", always, save_copy),
+        query!(
+            "file.checkOutput",
+            "Check Output File",
+            "{path} → {path, blocked, source?: footage|proxy|project, reason?}: whether an export may be written to path (it may not replace a file the project reads)",
+            check_output
+        ),
         cmd!("file.importMultiple", "Multiple Files...", ["File", "Import"], Some("Cmd+Alt+I"), "{paths: [string]}", always, |s, p| s
             .execute("file.import", p.clone())),
         cmd!(

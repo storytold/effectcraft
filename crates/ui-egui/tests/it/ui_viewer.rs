@@ -54,6 +54,65 @@ fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
     h.run_steps(2);
 }
 
+/// #1218: frame stepping is optional, and consumes the whole wheel gesture including its
+/// smoothed tail. Ctrl/Cmd+wheel still zooms.
+#[test]
+fn mouse_wheel_over_the_monitor_scrubs_frames() {
+    let mut h = harness();
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.viewerWheelScrubbing", "value": true})).unwrap();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let line = |dy: f32, modifiers: egui::Modifiers| Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, dy),
+        modifiers,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(line(1.0, egui::Modifiers::NONE));
+    h.step();
+    let t1 = h.state().session.time();
+    for _ in 0..20 {
+        assert_eq!(h.state().ui.viewer.zoom, z0, "frame wheel must never zoom");
+        h.step();
+    }
+    assert!(t1 > t0, "wheel up advanced the playhead ({t0:?} -> {t1:?})");
+    h.input_mut().events.push(line(-2.0, egui::Modifiers::NONE));
+    h.step();
+    assert!(h.state().session.time() < t1, "two lines back moves before the single line forward");
+    let z0 = h.state().ui.viewer.zoom;
+    let t2 = h.state().session.time();
+    let mods = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(line(3.0, mods));
+    h.step();
+    assert_eq!(h.state().session.time(), t2, "Ctrl+wheel must not scrub");
+    assert_ne!(h.state().ui.viewer.zoom, z0, "Ctrl+wheel still zooms");
+}
+
+#[test]
+fn mouse_wheel_zooms_by_default_without_stepping_frames() {
+    let mut h = harness();
+    assert!(!h.state().session.prefs.general.viewer_wheel_scrubbing);
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, 1.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(20);
+    assert_eq!(h.state().session.time(), t0);
+    assert_ne!(h.state().ui.viewer.zoom, z0);
+}
+
 /// Comp pixel → screen point.
 fn screen(h: &Harness<'_, EffectcraftApp>, p: [f32; 2]) -> Pos2 {
     let c = rect(h, "viewer.comp");

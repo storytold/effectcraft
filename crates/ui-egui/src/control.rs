@@ -619,6 +619,12 @@ fn playback(app: &mut EffectcraftApp, p: &Value, now: f64) -> Outcome {
 /// when the capture is issued.
 fn screenshot(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
+    // A file the project reads is never the output.
+    if let Some(path) = s("path")
+        && let Err(e) = app.session.refuse_export(path)
+    {
+        return err(e);
+    }
     // The panel/element is an identity, not a rectangle: it is resolved when the capture
     // is issued (after the UI settles), so a panel that moves meanwhile is not cropped
     // with its old rectangle.
@@ -667,11 +673,17 @@ fn quit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     ok(Value::Null)
 }
 
-/// `render.frame {comp?, time?, max_side?, path?, base64?}`: render a comp frame through the session
+/// `render.frame {comp?, time?, max_side?, path?, base64?, write?}`: render a comp frame through the session
 /// (independent of the viewer zoom/resolution) and return it as PNG, written to `path` (default a
-/// temp file) or inline as base64 when `base64: true`.
+/// temp file) or inline as base64 when `base64: true`. `write: true` with `base64: true` does both.
 fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let s = &app.session;
+    // A file the project reads is never the output (checked before rendering).
+    if let Some(path) = p.get("path").and_then(Value::as_str)
+        && let Err(e) = s.refuse_export(path)
+    {
+        return err(e);
+    }
     let cid = match s.resolve_comp(p.get("comp")) {
         Ok(c) => c,
         Err(e) => return err(e),
@@ -690,7 +702,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let mut out = json!({"comp": cid.0, "time": t.seconds(), "width": w, "height": h});
     // (the web has no file system: inline unless a path is given)
     let inline = p.get("base64").and_then(Value::as_bool).unwrap_or(cfg!(target_arch = "wasm32") && p.get("path").is_none());
-    if inline {
+    if inline && !p.get("write").and_then(Value::as_bool).unwrap_or(false) {
         out["png"] = json!(base64(&png));
         return ok(out);
     }
@@ -699,7 +711,10 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| std::env::temp_dir().join(format!("effectcraft-frame-{}.png", std::process::id())).to_string_lossy().to_string());
-    match std::fs::write(&path, png) {
+    if inline {
+        out["png"] = json!(base64(&png));
+    }
+    match s.write_output(&path, &png) {
         Ok(()) => {
             out["path"] = json!(path);
             ok(out)

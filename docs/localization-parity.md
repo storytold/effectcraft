@@ -109,7 +109,7 @@ average). This is the localization row in [target-app-parity.md](target-app-pari
 **Effort.** One-time work first: route parameter names and engine messages through
 a catalog, wrap the remaining panel literals, and add a Hangul probe (10–20 h). Then each language
 needs ≈ 2,600 more strings (≈ 5–9 h per language at the pace of #398 and #401). Parity with After
-Effects' 10 non-English languages: **≈ 60–110 h**; the four extra languages of the standard list
+Effects' 10 non-English languages: **≈ 60–110 h**; the four extra languages
 (Hindi, Arabic, Indonesian, Vietnamese) add ≈ 50–80 h, most of it right-to-left layout and
 complex shaping in the interface. Every language needs native-speaker review, which only a human
 can give; only Georgian, contributed by a native speaker (#1843), has had it.

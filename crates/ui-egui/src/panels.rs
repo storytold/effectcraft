@@ -135,8 +135,9 @@ pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64, target: Opt
         selected.iter().map(|id| id.0).collect()
     } else {
         // One unselected item goes through as is, so a folder or data file still gets the
-        // engine's error instead of a silent no-op.
-        return vec![dragged];
+        // engine's error instead of a silent no-op. The composition the drop lands in is the
+        // one case that never reaches it, selected or not (#2589).
+        return if Some(ItemId(dragged)) == target { Vec::new() } else { vec![dragged] };
     };
     candidates
         .into_iter()
@@ -189,6 +190,13 @@ pub(crate) struct ViewerScroll {
     /// Factor to zoom by around the pointer: a pinch, Ctrl/Cmd+scroll, a mouse wheel, or
     /// Alt + a trackpad scroll.
     pub zoom: f32,
+    /// The gesture came from a trackpad (or is still the smoothed tail of one).
+    pub trackpad: bool,
+    /// Unmodified mouse-wheel lines this frame. Zero for a trackpad, a point-unit wheel, or
+    /// Ctrl/Cmd/Alt+wheel.
+    pub wheel_lines: f32,
+    /// This frame has a Ctrl/Cmd/Alt mouse-wheel event, which keeps zooming.
+    pub wheel_modified: bool,
 }
 
 /// Splits the frame's scroll input into a viewer pan and a zoom: a mouse wheel zooms and a
@@ -223,13 +231,32 @@ pub(crate) fn viewer_scroll(ctx: &egui::Context) -> ViewerScroll {
     let (scroll, pinch, alt) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt));
     let pinch = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
     let scroll = if scroll.x.is_finite() && scroll.y.is_finite() { scroll } else { egui::Vec2::ZERO };
-    if trackpad && !alt {
-        ViewerScroll { pan: scroll, zoom: pinch }
+    let (wheel_lines, wheel_modified) = ctx.input(|i| {
+        let mut lines = 0.0;
+        let mut modified = false;
+        if !trackpad {
+            for event in &i.events {
+                if let egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, modifiers, source, .. } = event
+                    && !matches!(source, egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum)
+                {
+                    if modifiers.command || modifiers.ctrl || modifiers.alt {
+                        modified = true;
+                    } else {
+                        lines += delta.y;
+                    }
+                }
+            }
+        }
+        (lines, modified)
+    });
+    let (pan, zoom) = if trackpad && !alt {
+        (scroll, pinch)
     } else if alt {
-        ViewerScroll { pan: egui::Vec2::ZERO, zoom: pinch * (scroll.y / 300.0).exp() }
+        (egui::Vec2::ZERO, pinch * (scroll.y / 300.0).exp())
     } else {
-        ViewerScroll { pan: egui::vec2(scroll.x, 0.0), zoom: pinch * (scroll.y / 300.0).exp() }
-    }
+        (egui::vec2(scroll.x, 0.0), pinch * (scroll.y / 300.0).exp())
+    };
+    ViewerScroll { pan, zoom, trackpad, wheel_lines, wheel_modified }
 }
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {

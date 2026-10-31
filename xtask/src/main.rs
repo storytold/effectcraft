@@ -50,6 +50,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("expr", 3),
     ("export", 3),
     ("gpu", 3),
+    ("sam2", 3),
     ("lottie", 3),
     ("format", 3),
     ("plugin", 3),

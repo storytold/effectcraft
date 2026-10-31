@@ -6,9 +6,15 @@ use crate::EvalCtx;
 use effectcraft_project::{ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, Node, PropGroup};
 use std::hash::Hash;
 
-pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: Option<usize>) -> Option<()> {
+pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: super::EffectScope) -> Option<()> {
+    // A footprint runs no effects: nothing they read is in its pixels or its key.
+    let limit = match effects {
+        super::EffectScope::Footprint => return Some(()),
+        super::EffectScope::All => None,
+        super::EffectScope::First(n) => Some(n),
+    };
     let mut deps = Dependencies { h, path: vec![(ctx.comp_id, layer.id)], remaining: 1024, other_times: super::reads_other_times(layer, None) };
-    deps.effects(ctx, layer, effects)
+    deps.effects(ctx, layer, limit)
 }
 
 struct Dependencies<'a> {

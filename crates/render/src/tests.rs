@@ -929,6 +929,54 @@ fn default_effect_points_sit_at_the_centre_of_a_shape_layer() {
     }
 }
 
+/// #687: an adjustment layer's footprint (its source through its masks) must not be keyed by
+/// its effect stack. Noise on a finishing adjustment changes every frame, and letting that
+/// reach the key re-rendered and re-uploaded a full-frame buffer every frame. A moving mask
+/// must still re-key it, and the cached buffer must follow the mask.
+#[test]
+fn adjustment_footprint_key_ignores_the_effect_stack() {
+    let (mut p, cid, comp) = setup();
+    let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    adj.switches.adjustment = true;
+    add_effect_200(&mut p, &mut adj, "ec.noise.noise", &[("amount", Value::Scalar(50.0))]);
+    let key = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::footprint_key(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &c.layers[0], 1.0, false, false).unwrap()
+    };
+    let mut next = p.next_id;
+    let mut m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    m.prop_mut("path").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Path(ShapePath::rect([50.0, 50.0], 40.0, 40.0))),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Path(ShapePath::rect([150.0, 50.0], 40.0, 40.0))),
+    ];
+    // Effects alone must not put the shutter in the footprint key. Masks, added below, may.
+    p.comp_mut(cid).unwrap().layers.push(adj.clone());
+    let bare = key(&p, 0.0);
+    p.comp_mut(cid).unwrap().shutter_angle = 90.0;
+    assert_eq!(bare, key(&p, 0.0), "the comp shutter must not re-key a footprint");
+    p.comp_mut(cid).unwrap().shutter_angle = 180.0;
+    p.comp_mut(cid).unwrap().layers[0].props.sub_mut("masks").unwrap().children.push(m.into());
+    let foot = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
+        let cache = crate::LayerCache::default();
+        r.cache = Some(&cache);
+        let layer = c.layers[0].clone();
+        let b = r.adjustment_footprint(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &layer).unwrap();
+        b.img.get(50, 50)
+    };
+    assert_ne!(key(&p, 0.0), key(&p, 0.5), "an animated mask path must re-key the footprint");
+    assert_ne!(key(&p, 0.0), key(&p, 1.0));
+    assert_ne!(foot(&p, 0.0), foot(&p, 1.0), "the moved mask must reach the cached footprint");
+    assert_eq!(key(&p, 1.0), key(&p, 1.5), "a per-frame effect on the adjustment re-keyed its footprint");
+    assert_eq!(key(&p, 1.0), key(&p, 3.5), "the footprint key followed the clock past the mask");
+    assert_eq!(foot(&p, 1.0), foot(&p, 3.5));
+    let before = key(&p, 0.0);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("effects/#1/amount").unwrap().value = Value::Scalar(90.0);
+    assert_eq!(before, key(&p, 0.0), "editing an effect parameter must not re-key the footprint");
+}
+
 /// #659: a tiling effect on a text layer tiles across the layer's whole region. The glyphs
 /// were cut off at their own bounding box: the effect computed over the comp-sized layer rect
 /// but wrote into the painted (glyph-bounds) buffer alone. Tiling shrinks each copy, so the

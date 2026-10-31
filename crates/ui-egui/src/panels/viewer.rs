@@ -870,6 +870,24 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     resp
 }
 
+/// Frames to step when wheel scrubbing is on, or `None` when this gesture should zoom or pan.
+/// A scrub notch's smoothed tail stays a scrub after the wheel event itself is gone, so that
+/// tail does not zoom or pan (#1218).
+fn wheel_scrub_frames(ctx: &egui::Context, pref: bool, scroll: &super::ViewerScroll) -> Option<i64> {
+    let tail_id = egui::Id::unique("viewer-wheel-scrub-tail");
+    let was_tail: bool = ctx.data(|d| d.get_temp(tail_id)).unwrap_or(false);
+    let moving = scroll.pan != egui::Vec2::ZERO || (scroll.zoom - 1.0).abs() > 3e-4;
+    let scrub = pref && !scroll.trackpad && !scroll.wheel_modified && (scroll.wheel_lines.abs() >= 0.01 || (was_tail && moving));
+    ctx.data_mut(|d| {
+        if scrub {
+            d.insert_temp(tail_id, true);
+        } else {
+            d.remove::<bool>(tail_id);
+        }
+    });
+    scrub.then_some((scroll.wheel_lines.round() as i64).clamp(-30, 30))
+}
+
 fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -951,12 +969,21 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
         };
         ctx.set_cursor_icon(cursor);
         // The mouse wheel and a trackpad pinch zoom around the pointer; a two-finger trackpad
-        // scroll pans.
+        // scroll pans. With general.viewerWheelScrubbing, an unmodified wheel steps frames
+        // instead, including the smoothed tail of that notch so it does not zoom or pan (#1218).
         let scroll = super::viewer_scroll(&ctx);
-        if scroll.pan != egui::Vec2::ZERO && area.contains(hp) {
+        let scrub = wheel_scrub_frames(&ctx, app.session.prefs.general.viewer_wheel_scrubbing, &scroll);
+        if let Some(frames) = scrub {
+            if frames != 0 && area.contains(hp) {
+                if app.playback.playing {
+                    let _ = crate::menus::invoke(app, &ctx, "playback.stop", json!({}));
+                }
+                let _ = app.session.execute("time.step", json!({"frames": frames}));
+            }
+        } else if scroll.pan != egui::Vec2::ZERO && area.contains(hp) {
             app.ui.viewer.pan = [app.ui.viewer.pan[0] + scroll.pan.x, app.ui.viewer.pan[1] + scroll.pan.y];
         }
-        if (scroll.zoom - 1.0).abs() > 3e-4 && area.contains(hp) {
+        if scrub.is_none() && (scroll.zoom - 1.0).abs() > 3e-4 && area.contains(hp) {
             let nz = (zoom * scroll.zoom).clamp(0.01, 32.0);
             let before = map.to_comp(hp);
             let new_origin = hp - vec2(before[0] as f32 * nz, before[1] as f32 * nz);

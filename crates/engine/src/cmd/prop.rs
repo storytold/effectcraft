@@ -794,6 +794,8 @@ fn select_prop(s: &mut Session, p: &Value) -> Result<Value> {
     if !add {
         s.state.selected_props.clear();
         s.state.selected_vertices.clear();
+        // Groups (masks, effects) have no keys of their own: don't leave the old selection's behind.
+        s.state.selected_keys.clear();
     }
     if !s.state.selected_layers.contains(&lid) {
         s.state.selected_layers = vec![lid];
@@ -811,9 +813,6 @@ fn select_prop(s: &mut Session, p: &Value) -> Result<Value> {
         && let Some(pr) = s.active_comp().and_then(|c| c.layer(lid)).and_then(|l| l.props.find(uid))
     {
         let keys: Vec<KeyRef> = pr.keys.iter().map(|k| KeyRef { layer: lid, prop: uid, time: k.time }).collect();
-        if !add {
-            s.state.selected_keys.clear();
-        }
         s.state.selected_keys.extend(keys);
     }
     Ok(Value::Null)

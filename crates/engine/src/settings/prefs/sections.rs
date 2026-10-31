@@ -31,6 +31,9 @@ page!(General {
     /// Path Point and Handle Size (px).
     path_point_size: u32 = 5,
     show_tool_tips: bool = true,
+    /// Step frames with an unmodified mouse wheel over the Composition viewer.
+    /// Off: the wheel zooms, which is what current After Effects does.
+    viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
     switches_affect_nested_comps: bool = true,
