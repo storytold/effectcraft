@@ -10,10 +10,6 @@ use effectcraft_engine::offload::{Inbox, Offload, Post, WorkerReply, WorkerReque
 use effectcraft_gpu::Gpu;
 use serde_json::json;
 
-/// One device at a time in this test binary: wgpu's OpenGL backend (Mesa llvmpipe on FreeBSD,
-/// Linux without Vulkan) panics or crashes when tests create and drive devices concurrently.
-static GPU_LOCK: Mutex<()> = Mutex::new(());
-
 /// Holds offloaded jobs until the test runs them.
 #[derive(Default)]
 struct Manual(Mutex<Vec<(WorkerRequest, Arc<Inbox>)>>);
@@ -57,13 +53,13 @@ fn page() -> (Session, Arc<Manual>) {
     s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/transform/offset", "time": 0.0, "value": [0.5, 0.5]})).unwrap();
     s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/transform/offset", "time": 0.5, "value": [0.6, 0.56]})).unwrap();
     s.execute("effect.apply", json!({"layers": [l], "effect": "ec.blur.gaussian"})).unwrap();
-    s.execute("prop.set", json!({"layer": l, "path": "effects/#2/blurriness", "value": 3.0})).unwrap();
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#2/blurriness", "value": 12.0})).unwrap();
     (s, off)
 }
 
 #[test]
 fn render_queue_jobs_render_on_the_worker_gpu() {
-    let _gpu = GPU_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gpu = crate::gpu_test::lock();
     let Some(g) = Gpu::headless_deferred() else {
         eprintln!("no GPU adapter: skipped");
         return;
@@ -102,7 +98,7 @@ fn render_queue_jobs_render_on_the_worker_gpu() {
 
 #[test]
 fn analyses_render_their_input_on_the_worker_gpu() {
-    let _gpu = GPU_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gpu = crate::gpu_test::lock();
     let Some(g) = Gpu::headless_deferred() else {
         eprintln!("no GPU adapter: skipped");
         return;

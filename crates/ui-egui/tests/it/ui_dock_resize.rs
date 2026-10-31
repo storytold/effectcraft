@@ -1,10 +1,12 @@
 //! Shared pane resizing in the full application, including application shortcut ownership.
 
+use crate::gpu_test::RenderSerial;
+use craft_ui::docking::{Divider, DockArea, Hit};
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::EffectcraftApp;
-use effectcraft_ui_egui::dock::{DockNode, PanelKind, SplitSize};
+use effectcraft_ui_egui::dock::{self, Node, PanelKind, SplitSize};
 use effectcraft_ui_egui::theme::ThemeKind;
-use egui::{Event, Id, Key, Modifiers, PointerButton, Rect, pos2, vec2};
+use egui::{Event, Key, Modifiers, PointerButton, Rect, pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
 
@@ -15,7 +17,7 @@ fn snapshots(h: &mut Harness<'_, EffectcraftApp>, directory: Option<&std::path::
         let ctx = h.ctx.clone();
         h.state_mut().set_theme(&ctx, theme);
         h.run_steps(3);
-        h.render().unwrap().save(directory.join(format!("effectcraft-{phase}-{name}.png"))).unwrap();
+        h.render_serialized().unwrap().save(directory.join(format!("effectcraft-{phase}-{name}.png"))).unwrap();
     }
     let ctx = h.ctx.clone();
     h.state_mut().set_theme(&ctx, ThemeKind::Dark);
@@ -23,14 +25,15 @@ fn snapshots(h: &mut Harness<'_, EffectcraftApp>, directory: Option<&std::path::
 }
 
 fn first_size(h: &Harness<'_, EffectcraftApp>) -> f32 {
-    match h.state().ui.dock {
-        DockNode::Split { size: SplitSize::FixedA(value), .. } => value,
+    match &h.state().ui.dock.layout.root {
+        Some(Node::Split { size: SplitSize::FixedFirst(value), .. }) => *value,
         ref other => panic!("fixed-size mode changed: {other:?}"),
     }
 }
 
 #[test]
 fn focused_dock_resize_owns_arrows_and_keeps_pointer_dragging() {
+    let _device = crate::gpu_test::lock();
     let mut session = Session::default();
     session.execute("comp.new", json!({"name": "Split test", "width": 160, "height": 90, "duration": 1})).unwrap();
     session.execute("layer.newSolid", json!({"name": "Selected", "color": [1.0, 0.0, 0.0, 1.0]})).unwrap();
@@ -45,16 +48,12 @@ fn focused_dock_resize_owns_arrows_and_keeps_pointer_dragging() {
     h.run_steps(4);
     snapshots(&mut h, directory.as_deref(), "workspace");
     h.state_mut().ui.focused = PanelKind::Composition;
-    h.state_mut().ui.dock = DockNode::Split {
-        vertical: false,
-        size: SplitSize::FixedA(400.0),
-        a: Box::new(DockNode::Tabs { panels: vec![PanelKind::Project], active: 0 }),
-        b: Box::new(DockNode::Tabs { panels: vec![PanelKind::Composition], active: 0 }),
-    };
+    h.state_mut().ui.dock =
+        dock::docked(dock::hsplit(SplitSize::FixedFirst(400.0), dock::tabs(&[PanelKind::Project], 0), dock::tabs(&[PanelKind::Composition], 0)));
     h.run_steps(3);
     let before_project = h.state().session.project.clone();
     let before_times = h.state().session.state.times.clone();
-    let id = Id::new(("dock-gutter", String::new()));
+    let id = DockArea::<PanelKind>::hit_id(effectcraft_ui_egui::dock_ui::area_id(), &Hit::Divider(Divider::Split(Vec::new())));
     h.ctx.memory_mut(|memory| memory.request_focus(id));
     h.run_steps(2);
     assert_eq!(h.ctx.memory(|memory| memory.focused()), Some(id));

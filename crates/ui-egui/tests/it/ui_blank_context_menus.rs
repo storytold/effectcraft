@@ -1,5 +1,8 @@
 //! Right-click actions in the blank Project and Timeline areas, and on Timeline property names.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
+use effectcraft_engine::project::ItemKind;
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::{Harness, kittest::Queryable as _};
@@ -18,7 +21,7 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
 }
 fn snapshot(h: &mut Harness<'_, EffectcraftApp>, name: &str) {
     if let Ok(dir) = std::env::var("BLANK_CONTEXT_MENU_SNAPSHOTS") {
-        h.render().unwrap().save(format!("{dir}/{name}.png")).unwrap();
+        h.render_serialized().unwrap().save(format!("{dir}/{name}.png")).unwrap();
     }
 }
 fn right_click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
@@ -64,7 +67,7 @@ fn timeline_blank_outline_and_time_graph_create_layers() {
         let area = rect(&h, "timeline.layerMarquee");
         let p = if graph { pos2(area.max.x + 150.0, area.center().y) } else { area.center() };
         right_click(&mut h, p);
-        h.get_by_label("New ⏵").click();
+        h.get_by_label("New").click();
         h.run_steps(3);
         snapshot(&mut h, if graph { "timeline-graph" } else { "timeline-outline" });
         h.get_by_label("Null Object").click();
@@ -80,7 +83,7 @@ fn timeline_blank_menu_opens_solid_settings() {
     let mut h = harness();
     let p = rect(&h, "timeline.layerMarquee").center();
     right_click(&mut h, p);
-    h.get_by_label("New ⏵").click();
+    h.get_by_label("New").click();
     h.run_steps(3);
     h.get_by_label("Solid…").click();
     h.run_steps(3);
@@ -159,7 +162,7 @@ fn timeline_blank_menu_opens_current_comp_in_essential_graphics() {
         h.get_by_label("Open in Essential Graphics").click();
         h.run_steps(3);
         assert_eq!(h.state().session.state.essential_primary, Some(comp));
-        assert!(h.state().ui.dock.contains(PanelKind::EssentialGraphics));
+        assert!(h.state().ui.dock.is_docked(PanelKind::EssentialGraphics));
     }
 }
 
@@ -251,13 +254,13 @@ fn timeline_layer_context_menu_has_the_effects_submenu_and_applies_an_effect() {
     let r = rect(&h, &format!("timeline.layer.{layer}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
     // The palette sits between Blending Mode and Arrange, as After Effects' layer menu does.
-    let blending = h.get_by_label("Blending Mode ⏵").rect();
-    let effects = h.get_by_label("Effects ⏵").rect();
-    let arrange = h.get_by_label("Arrange ⏵").rect();
+    let blending = h.get_by_label("Blending Mode").rect();
+    let effects = h.get_by_label("Effects").rect();
+    let arrange = h.get_by_label("Arrange").rect();
     assert!(blending.bottom() <= effects.top() && effects.bottom() <= arrange.top(), "Effects between Blending Mode and Arrange");
-    h.get_by_label("Effects ⏵").click();
+    h.get_by_label("Effects").click();
     h.run_steps(3);
-    h.get_by_label("Blur & Sharpen ⏵").click();
+    h.get_by_label("Blur & Sharpen").click();
     h.run_steps(3);
     h.get_by_label("Gaussian Blur").click();
     h.run_steps(3);
@@ -282,11 +285,11 @@ fn timeline_layer_context_menu_has_layer_styles_submenu() {
     h.run_steps(3);
     let r = rect(&h, &format!("timeline.layer.{solid}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
-    let blending = h.get_by_label("Blending Mode ⏵").rect();
-    let styles = h.get_by_label("Layer Styles ⏵").rect();
-    let effects = h.get_by_label("Effects ⏵").rect();
+    let blending = h.get_by_label("Blending Mode").rect();
+    let styles = h.get_by_label("Layer Styles").rect();
+    let effects = h.get_by_label("Effects").rect();
     assert!(blending.bottom() <= styles.top() && styles.bottom() <= effects.top(), "Layer Styles between Blending Mode and Effects");
-    h.get_by_label("Layer Styles ⏵").click();
+    h.get_by_label("Layer Styles").click();
     h.run_steps(3);
     assert!(h.query_by_label("Layer Style Options...").is_some());
     assert!(h.query_by_label("Drop Shadow").is_some());
@@ -297,6 +300,43 @@ fn timeline_layer_context_menu_has_layer_styles_submenu() {
     let comp = h.state().session.active_comp().unwrap();
     let l = comp.layer(effectcraft_engine::project::LayerId(solid)).unwrap();
     assert!(l.layer_styles().is_some_and(|g| g.sub("dropShadow").is_some()));
+}
+
+/// #1809: Reveal Layer Source in Project shows the source in a large project: it clears the
+/// Project panel's search, opens the folders holding the item and selects it.
+#[test]
+fn timeline_layer_context_menu_reveals_the_source_in_project() {
+    let mut h = harness();
+    let layer = h.state_mut().session.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let solid = h.state().session.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
+    let outer = h.state_mut().session.execute("project.newFolder", json!({"name": "Assets"})).unwrap()["item"].as_u64().unwrap();
+    let inner = h.state_mut().session.execute("project.newFolder", json!({"name": "Plates"})).unwrap()["item"].as_u64().unwrap();
+    h.state_mut().session.execute("project.move", json!({"items": [inner], "folder": outer})).unwrap();
+    h.state_mut().session.execute("project.move", json!({"items": [solid.0], "folder": inner})).unwrap();
+    h.state_mut().session.execute("project.select", json!({"items": []})).unwrap();
+    h.state_mut().ui.project_open_folders.clear();
+    h.state_mut().ui.project_search = "no such item".into();
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("project.item.{}", solid.0)).is_none(), "the source starts hidden");
+    let r = rect(&h, &format!("timeline.layer.{layer}.row"));
+    right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
+    h.get_by_label("Reveal Layer Source in Project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.project_selection, vec![solid]);
+    assert_eq!(h.state().ui.focused, PanelKind::Project);
+    assert!(h.state().ui.project_search.is_empty(), "the search is cleared");
+    assert!([outer, inner].iter().all(|folder| h.state().ui.project_open_folders.contains(folder)), "the folders holding the source open");
+    assert!(h.state().auto.find(&format!("project.item.{}", solid.0)).is_some(), "the source row is visible");
+    // In a mixed selection the command still appears when the right-clicked layer has no source,
+    // because the menu acts on the solid layer too.
+    let shape = h.state_mut().session.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [shape, layer]})).unwrap();
+    h.run_steps(3);
+    let r = rect(&h, &format!("timeline.layer.{shape}.row"));
+    right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
+    h.get_by_label("Reveal Layer Source in Project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.project_selection, vec![solid], "the solid's source, not the shape");
 }
 
 /// #976: a layer's context menu has After Effects' Markers ▸ Add Marker, which marks the layer that
@@ -313,7 +353,7 @@ fn layer_context_menu_adds_a_layer_marker() {
     h.run_steps(3);
     let r = rect(&h, &format!("timeline.layer.{top}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
-    h.get_by_label("Markers ⏵").click();
+    h.get_by_label("Markers").click();
     h.run_steps(3);
     snapshot(&mut h, "layer-markers");
     h.get_by_label("Add Marker").click();

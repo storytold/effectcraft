@@ -111,6 +111,7 @@ pub const COMPLETIONS: &[&str] = &[
     "ease",
     "easeIn",
     "easeOut",
+    "bezier",
     "clamp",
     "random",
     "gaussRandom",
@@ -331,19 +332,18 @@ fn layout(text: &str, font: FontId, base: Color32, sx: &Syntax, p: &Scripting, b
     job
 }
 
-/// The editor in `rect`, centred in Timeline rows `room` tall (the field's background fills
-/// them): returns the response, and whether its text is wider and taller than it can show (it
-/// then scrolls that way inside `rect`); `buf` is edited in place.
-pub fn editor(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    buf: &mut String,
-    rect: Rect,
-    p: &Scripting,
-    color: Color32,
-    room: f32,
-    t: &Tokens,
-) -> (egui::Response, [bool; 2]) {
+/// The scripting preferences, text colour and room an [`editor`] is drawn with.
+pub struct EditorOpts<'a> {
+    pub prefs: &'a Scripting,
+    pub color: Color32,
+    /// The height of the Timeline rows the field is centred in (its background fills them).
+    pub room: f32,
+}
+
+/// The editor in `rect`: returns the response, and whether its text is wider and taller than it
+/// can show (it then scrolls that way inside `rect`); `buf` is edited in place.
+pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, opts: EditorOpts, t: &Tokens) -> (egui::Response, [bool; 2]) {
+    let EditorOpts { prefs: p, color, room } = opts;
     let size = (p.editor_font_size.clamp(8, 40) as f32) * 0.9;
     let font = Tokens::mono(size);
     // Line numbers in a gutter on the left.

@@ -15,8 +15,6 @@
 //! ```
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
-// Index loops over fixed-size blocks read more clearly than iterator chains in codec code.
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 mod bitstream;
 mod cabac;
@@ -311,7 +309,7 @@ impl Encoder {
         let kind = if idr { SliceKind::I } else { SliceKind::P };
         let me = if idr { None } else { self.reference.as_ref().map(|r| me::MeRef::new(&r[0], w, h, bd)) };
         let refp = if idr { None } else { self.reference.as_ref() };
-        let mut fc = FrameCoder::new(bd, w, h, kind, qp, &src, refp, me.as_ref());
+        let mut fc = FrameCoder::new(frame::FrameConfig { bit_depth: bd, width: w, height: h, kind, slice_qp: qp }, &src, refp, me.as_ref());
 
         // slice_segment_header() (7.3.6.1)
         let mut bw = BitWriter::new();

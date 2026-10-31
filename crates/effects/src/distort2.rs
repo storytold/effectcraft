@@ -19,7 +19,7 @@ use effectcraft_project::ParamUi;
 use effectcraft_raster::{Image, Px};
 use rayon::prelude::*;
 
-use crate::generate::value_noise;
+use crate::generate::value_noise_linear_z;
 use crate::util::{SRC_NAMES, Src, fit_layer, layer_cover_pad, layer_rect, lerp4, map_xy, pick, premul, remap, smoothstep, src_at, unpremul};
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
@@ -37,13 +37,15 @@ fn pct(max: f64) -> ParamUi {
 
 // ---------------------------------------------------------------- Turbulent Displace
 
+/// Fractional-octave fBm of value noise in 0..1. Evolution (`z`) is linear: with the eased z of
+/// plain value noise a few degrees of Evolution barely moved the pattern (#943).
 fn fbm(u: f64, v: f64, z: f64, seed: u32, octaves: f64, falloff: f32) -> f32 {
     let n = octaves.ceil().max(1.0) as usize;
     let frac = (octaves - octaves.floor()) as f32;
     let (mut sum, mut norm, mut amp, mut f) = (0.0f32, 0.0f32, 1.0f32, 1.0f32);
     for o in 0..n {
         let w = if o + 1 == n && frac > 0.0 { frac } else { 1.0 };
-        sum += value_noise(u as f32 * f, v as f32 * f, z as f32 + o as f32 * 5.17, seed.wrapping_add(o as u32 * 101)) * amp * w;
+        sum += value_noise_linear_z(u as f32 * f, v as f32 * f, z as f32 + o as f32 * 5.17, seed.wrapping_add(o as u32 * 101)) * amp * w;
         norm += amp * w;
         amp *= falloff;
         f *= 2.0;
@@ -93,6 +95,9 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let size = (ctx.params.f("size") * b.scale).max(1.0);
     if ctx.params.b("resizeLayer") && !ctx.adjustment {
         b.pad(amount.abs().ceil() as u32 + 1);
+    } else {
+        // Room for pixels displaced past the content, up to the layer's edge (#1205).
+        b.pad(crate::cover_pad(ctx, [b.img.width, b.img.height], b.offset, b.scale, amount.abs().ceil() as u32 + 1));
     }
     let off = b.to_px(ctx.params.v2("offset"));
     let oct = ctx.params.f("complexity").clamp(1.0, 10.0);
@@ -1113,6 +1118,45 @@ mod tests {
         assert!(left.img.data.iter().any(|p| p[3] < 0.99), "plain pin lets edges pull in");
         assert!(locked.img.data.iter().all(|p| p[3] > 0.999), "locked keeps everything inside");
         assert_eq!(TURBULENT_PINNING[11], "Pin Left Locked");
+    }
+
+    /// #943: every non-equivalent Evolution value renders a visibly different frame. The eased
+    /// evolution axis left 0 and 37 degrees (or 360 and 400) within a hundredth of each other.
+    #[test]
+    fn turbulent_displace_evolution_changes_the_output() {
+        // A smooth ramp (red = x, green = y) with Pin All Locked, so the frame stays opaque and
+        // the difference is purely how far the pattern moved.
+        let mut ramp = Image::new(64, 64);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                ramp.set(x, y, [x as f32 / 63.0, y as f32 / 63.0, 0.25, 1.0]);
+            }
+        }
+        let render = |evo: f64, extra: &[(&str, Value)]| {
+            let base = [("evolution", num(evo)), ("size", num(10.0)), ("pinning", Value::Enum(8))];
+            run("ec.distort.turbulentdisplace", &[base.as_slice(), extra].concat(), ramp.clone()).img
+        };
+        let evolutions = [0.0, 37.0, 90.5, 180.0, 360.0, 400.25, 725.0, 1000.5];
+        let frames: Vec<Image> = evolutions.iter().map(|&e| render(e, &[])).collect();
+        for (i, a) in frames.iter().enumerate() {
+            for (j, b) in frames.iter().enumerate().skip(i + 1) {
+                let d = max_diff(a, b);
+                assert!(d > 0.01, "evolution {} and {} differ by only {d}", evolutions[i], evolutions[j]);
+            }
+        }
+        // Constant rate: 20 degrees next to a whole revolution (from either side) is a visible
+        // step, not the rounding-error size the eased axis gave (under 0.001).
+        assert!(max_diff(&frames[0], &render(20.0, &[])) > 0.02);
+        assert!(max_diff(&render(340.0, &[]), &frames[4]) > 0.02);
+        // 0 and 360 degrees are different frames without Cycle Evolution, and the same frame with
+        // Cycle (in Revolutions) = 1, at any starting angle.
+        assert!(max_diff(&frames[0], &frames[4]) > 0.01);
+        let cycle = [("evolutionOptions/cycleEvolution", Value::Bool(true)), ("evolutionOptions/cycle", num(1.0))];
+        assert!(max_diff(&render(0.0, &cycle), &render(360.0, &cycle)) < 1e-4);
+        assert!(max_diff(&render(37.0, &cycle), &render(397.0, &cycle)) < 1e-4);
+        assert!(max_diff(&render(0.0, &cycle), &render(37.0, &cycle)) > 0.01);
+        // Random Seed still gives a different pattern at the same Evolution.
+        assert!(max_diff(&frames[1], &render(37.0, &[("evolutionOptions/randomSeed", num(5.0))])) > 0.01);
     }
 
     #[test]

@@ -438,8 +438,10 @@ fn refine(e: &mut Enc, ctx: &EffectCtx, b: GBuf, hard: bool) -> Option<GBuf> {
 
 const SET_CHANNEL_LAYERS: [&str; 4] = ["sourceLayer1", "sourceLayer2", "sourceLayer3", "sourceLayer4"];
 
+/// Shift Channels' Take … From menu, in the order of `effects`' `SHIFT_ORDER`: the two must agree,
+/// or the source depends on whether the effect renders on the GPU.
 const SHIFT_ORDER: [Src; 11] =
-    [Src::Alpha, Src::Red, Src::Green, Src::Blue, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Half, Src::Off];
+    [Src::Alpha, Src::Red, Src::Green, Src::Blue, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Off, Src::Half];
 
 const MATTE_ORDER: [Src; 10] = [Src::Red, Src::Green, Src::Blue, Src::Alpha, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Off];
 
@@ -527,7 +529,8 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             p.f[0] = [level, pr.f("softness").clamp(0.0, 100.0) as f32 / 100.0, 0.0, 0.0];
         }
         "ec.channel.shiftchannels" => {
-            let s = ["takeRedFrom", "takeGreenFrom", "takeBlueFrom", "takeAlphaFrom"].map(|id| src_index(SHIFT_ORDER[(pr.e(id) as usize).min(10)]));
+            let s = ["takeRedFrom", "takeGreenFrom", "takeBlueFrom", "takeAlphaFrom"]
+                .map(|id| src_index(SHIFT_ORDER[(pr.e(id) as usize).min(SHIFT_ORDER.len() - 1)]));
             return route(e, b, s);
         }
         "ec.channel.removecolormatting" => {

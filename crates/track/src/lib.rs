@@ -201,7 +201,7 @@ fn ncc(plane: &Plane, p: &Patch, c: [f64; 2], a: [f64; 2]) -> f64 {
     }
     let ch = p.ch;
     let (mut s, mut s2, mut st) = (0.0f64, 0.0f64, 0.0f64);
-    let identity = (a[0] - 1.0).abs() < 1e-9 && a[1].abs() < 1e-9;
+    let identity = is_identity(a);
     let fx = c[0] - 0.5;
     let fy = c[1] - 0.5;
     let (bx, by) = (fx.floor(), fy.floor());
@@ -256,12 +256,114 @@ fn ncc(plane: &Plane, p: &Patch, c: [f64; 2], a: [f64; 2]) -> f64 {
     (st / (var * p.ss).sqrt()).clamp(-1.0, 1.0)
 }
 
+fn is_identity(a: [f64; 2]) -> bool {
+    (a[0] - 1.0).abs() < 1e-9 && a[1].abs() < 1e-9
+}
+
+/// The bilinear taps of every template pixel at `c + A u`. Candidates `c + (i, j)` with integer
+/// `(i, j)` give each pixel the same fractional offsets, so one table serves them all and a
+/// candidate is integer-indexed lerps (the arithmetic of `Plane::sample`) with one bounds check.
+struct Taps {
+    /// Offset (in samples) of the top-left tap per template pixel from the one at `base`.
+    off: Vec<isize>,
+    w: Vec<[f32; 2]>,
+    base: isize,
+    /// Tap bounding box (x0, y0, x1, y1) in plane pixels at the reference, `+1` taps included.
+    bb: [isize; 4],
+}
+
+impl Taps {
+    fn new(plane: &Plane, p: &Patch, c: [f64; 2], a: [f64; 2]) -> Option<Taps> {
+        let n = ((2 * p.r[0] + 1) * (2 * p.r[1] + 1)) as usize;
+        let (mut off, mut w) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (rx, ry) = ((c[0] - 0.5).floor(), (c[1] - 0.5).floor());
+        if !(rx.abs() < 1e9 && ry.abs() < 1e9) {
+            return None;
+        }
+        let (rx, ry) = (rx as isize, ry as isize);
+        let mut bb = [isize::MAX, isize::MAX, isize::MIN, isize::MIN];
+        for gy in -p.r[1]..=p.r[1] {
+            for gx in -p.r[0]..=p.r[0] {
+                let (ux, uy) = (gx as f64, gy as f64);
+                let fx = c[0] + a[0] * ux - a[1] * uy - 0.5;
+                let fy = c[1] + a[1] * ux + a[0] * uy - 0.5;
+                let (x0, y0) = (fx.floor(), fy.floor());
+                if !(x0.abs() < 1e9 && y0.abs() < 1e9) {
+                    return None;
+                }
+                let (dx, dy) = (x0 as isize - rx, y0 as isize - ry);
+                bb = [bb[0].min(dx), bb[1].min(dy), bb[2].max(dx + 1), bb[3].max(dy + 1)];
+                off.push((dy * plane.w as isize + dx) * plane.ch as isize);
+                w.push([(fx - x0) as f32, (fy - y0) as f32]);
+            }
+        }
+        let base = (ry * plane.w as isize + rx) * plane.ch as isize;
+        Some(Taps { off, w, base, bb: [bb[0] + rx, bb[1] + ry, bb[2] + rx, bb[3] + ry] })
+    }
+
+    /// The correlation at `c + (i, j)`, or `None` when a tap leaves the plane.
+    fn ncc(&self, plane: &Plane, p: &Patch, i: isize, j: isize) -> Option<f64> {
+        if self.bb[0] + i < 0 || self.bb[1] + j < 0 || self.bb[2] + i >= plane.w as isize || self.bb[3] + j >= plane.h as isize {
+            return None;
+        }
+        let ch = p.ch;
+        let row = plane.w * ch;
+        let b = self.base + (j * plane.w as isize + i) * ch as isize;
+        let d = &plane.data;
+        let (mut s, mut s2, mut st) = (0.0f64, 0.0f64, 0.0f64);
+        let mut k = 0;
+        for (o, t) in self.off.iter().zip(&self.w) {
+            let i00 = (b + o) as usize;
+            let (i10, i01) = (i00 + ch, i00 + row);
+            for cc in 0..ch {
+                let top = d[i00 + cc] + (d[i10 + cc] - d[i00 + cc]) * t[0];
+                let bot = d[i01 + cc] + (d[i01 + ch + cc] - d[i01 + cc]) * t[0];
+                let x = (top + (bot - top) * t[1]) as f64;
+                s += x;
+                s2 += x * x;
+                st += x * p.zm[k] as f64;
+                k += 1;
+            }
+        }
+        let n = p.zm.len() as f64;
+        let var = s2 - s * s / n;
+        if var <= 1e-12 {
+            return Some(0.0);
+        }
+        Some((st / (var * p.ss).sqrt()).clamp(-1.0, 1.0))
+    }
+}
+
+/// `ncc` of one template at integer offsets from a reference centre, through a [`Taps`] table
+/// when the shape is not the identity (the identity has its own fast path in `ncc`).
+struct Scorer<'a> {
+    plane: &'a Plane,
+    p: &'a Patch,
+    c: [f64; 2],
+    a: [f64; 2],
+    taps: Option<Taps>,
+}
+
+impl<'a> Scorer<'a> {
+    fn new(plane: &'a Plane, p: &'a Patch, c: [f64; 2], a: [f64; 2]) -> Scorer<'a> {
+        let taps = if is_identity(a) || p.ss <= 1e-12 { None } else { Taps::new(plane, p, c, a) };
+        Scorer { plane, p, c, a, taps }
+    }
+
+    /// The correlation at the reference centre plus `(i, j)` pixels.
+    fn at(&self, i: i32, j: i32) -> f64 {
+        self.taps
+            .as_ref()
+            .and_then(|t| t.ncc(self.plane, self.p, i as isize, j as isize))
+            .unwrap_or_else(|| ncc(self.plane, self.p, [self.c[0] + i as f64, self.c[1] + j as f64], self.a))
+    }
+}
+
 /// The pre-processed pixels around one point: a pyramid of a crop. Plane coordinates are image
 /// pixels minus `origin`, divided by `2^level`.
 struct Crop {
     origin: [f64; 2],
     levels: Vec<Plane>,
-    grad0: (Plane, Plane),
 }
 
 impl Crop {
@@ -280,13 +382,12 @@ impl Crop {
         if opts.enhance {
             p = p.enhance();
         }
-        let grad0 = p.gradients();
         let mut lv = vec![p];
         for _ in 0..levels {
             let d = lv.last().map(Plane::downsample).unwrap_or_default();
             lv.push(d);
         }
-        Crop { origin: [x0, y0], levels: lv, grad0 }
+        Crop { origin: [x0, y0], levels: lv }
     }
     fn to_level(&self, p: [f64; 2], k: usize) -> [f64; 2] {
         let s = (1u32 << k) as f64;
@@ -297,6 +398,12 @@ impl Crop {
         [p[0] * s + self.origin[0], p[1] * s + self.origin[1]]
     }
 }
+
+/// Largest distance (in top-level pixels, per axis) between the best coarse match and the
+/// motion prediction for which the fine stage searches only ±1 pixel per level.
+const SMALL_MOTION: f64 = 1.0;
+/// Lowest coarse NCC score of the best match for which the fine stage may search only ±1.
+const RELIABLE_SCORE: f64 = 0.8;
 
 /// Per-point tracking state.
 #[derive(Clone, Debug)]
@@ -372,13 +479,15 @@ impl PointState {
         let (rx, ry) = ((range[0] / s).ceil() as i32, (range[1] / s).ceil() as i32);
         let plane = &crop.levels[top];
         let tpl = &self.templates[top];
+        let scorer = Scorer::new(plane, tpl, ctop, self.shape);
         let shape = self.shape;
         let mut cands: Vec<(f64, [f64; 2])> = (-ry..=ry)
             .into_par_iter()
             .flat_map_iter(|j| {
+                let scorer = &scorer;
                 (-rx..=rx).map(move |i| {
                     let c = [ctop[0] + i as f64, ctop[1] + j as f64];
-                    (ncc(plane, tpl, c, shape), c)
+                    (scorer.at(i, j), c)
                 })
             })
             .collect();
@@ -396,7 +505,10 @@ impl PointState {
                 break;
             }
         }
-        // Fine: refine each seed down the pyramid in a 5 × 5 neighbourhood.
+        // Fine: refine each seed down the pyramid. A good motion prediction plus a reliable coarse
+        // match only needs a 3 × 3 neighbourhood per level; otherwise keep 5 × 5.
+        let near = cands[0].0 >= RELIABLE_SCORE && seeds.first().is_some_and(|c| (c[0] - cp[0]).abs() <= SMALL_MOTION && (c[1] - cp[1]).abs() <= SMALL_MOTION);
+        let rr: i32 = if near { 1 } else { 2 };
         let mut best = (f64::MIN, sc);
         for seed in seeds {
             let mut c = seed;
@@ -405,14 +517,15 @@ impl PointState {
                 c = [c[0] * 2.0, c[1] * 2.0];
                 let (pl, tp) = (&crop.levels[k], &self.templates[k]);
                 // Start from the projected match; neighbours must beat it (no drift on ties).
-                let mut lb = (ncc(pl, tp, c, shape), c);
-                for j in -2..=2 {
-                    for i in -2..=2 {
+                let scorer = Scorer::new(pl, tp, c, shape);
+                let mut lb = (scorer.at(0, 0), c);
+                for j in -rr..=rr {
+                    for i in -rr..=rr {
                         if i == 0 && j == 0 {
                             continue;
                         }
                         let q = [c[0] + i as f64, c[1] + j as f64];
-                        let v = ncc(pl, tp, q, shape);
+                        let v = scorer.at(i, j);
                         if v > lb.0 + 1e-9 {
                             lb = (v, q);
                         }
@@ -431,15 +544,16 @@ impl PointState {
         // Sub-pixel (and shape) refinement.
         let (mut c, mut a) = (c0, shape);
         if opts.subpixel {
+            let mut grad = Grad::around(&crop.levels[0], c0, shape, self.templates[0].r);
             let mut ok = false;
             if opts.track_shape
-                && let Some((cr, ar)) = lk_refine(&crop, &self.templates[0], c0, shape, true)
+                && let Some((cr, ar)) = lk_refine(&crop, &mut grad, &self.templates[0], c0, shape, true)
             {
                 (c, a) = (cr, ar);
                 ok = true;
             }
             if !ok {
-                if let Some((cr, _)) = lk_refine(&crop, &self.templates[0], c0, shape, false) {
+                if let Some((cr, _)) = lk_refine(&crop, &mut grad, &self.templates[0], c0, shape, false) {
                     c = cr;
                 } else {
                     c = parabolic(&crop.levels[0], &self.templates[0], c0, shape);
@@ -506,12 +620,52 @@ fn parabolic(plane: &Plane, p: &Patch, c: [f64; 2], a: [f64; 2]) -> [f64; 2] {
     [c[0] + off(f(-1.0, 0.0), f(1.0, 0.0)), c[1] + off(f(0.0, -1.0), f(0.0, 1.0))]
 }
 
+/// Level-0 gradients of a crop, computed only where `lk_refine` reads them: valid on the pixel
+/// rectangle `valid` (x0, y0, x1, y1, inclusive) and zero elsewhere.
+struct Grad {
+    gx: Plane,
+    gy: Plane,
+    valid: [isize; 4],
+}
+
+impl Grad {
+    /// Extra pixels around the first window of taps, for the drift of the refinement. A window that
+    /// still runs out is replaced by the full gradients.
+    const MARGIN: isize = 6;
+
+    fn full(plane: &Plane) -> Grad {
+        let (gx, gy) = plane.gradients();
+        Grad { gx, gy, valid: [isize::MIN, isize::MIN, isize::MAX, isize::MAX] }
+    }
+
+    fn around(plane: &Plane, c: [f64; 2], a: [f64; 2], r: [i32; 2]) -> Grad {
+        let [x0, y0, x1, y1] = Grad::taps(c, a, r);
+        let m = Grad::MARGIN;
+        let clip = |v: isize, hi: usize| v.clamp(0, (hi as isize - 1).max(0)) as usize;
+        let rect = [clip(x0 - m, plane.w), clip(y0 - m, plane.h), clip(x1 + m, plane.w), clip(y1 + m, plane.h)];
+        let (gx, gy) = plane.gradients_in(rect);
+        Grad { gx, gy, valid: rect.map(|v| v as isize) }
+    }
+
+    /// The pixels read by sampling the template window at `c` with shape `a` (bilinear taps).
+    fn taps(c: [f64; 2], a: [f64; 2], r: [i32; 2]) -> [isize; 4] {
+        let ex = (a[0].abs() * r[0] as f64 + a[1].abs() * r[1] as f64) * (1.0 + 1e-9) + 1e-9;
+        let ey = (a[1].abs() * r[0] as f64 + a[0].abs() * r[1] as f64) * (1.0 + 1e-9) + 1e-9;
+        let px = |v: f64| v.clamp(-1e9, 1e9).floor() as isize;
+        [px(c[0] - ex - 0.5), px(c[1] - ey - 0.5), px(c[0] + ex - 0.5) + 1, px(c[1] + ey - 0.5) + 1]
+    }
+
+    fn covers(&self, c: [f64; 2], a: [f64; 2], r: [i32; 2]) -> bool {
+        let t = Grad::taps(c, a, r);
+        t[0] >= self.valid[0] && t[1] >= self.valid[1] && t[2] <= self.valid[2] && t[3] <= self.valid[3]
+    }
+}
+
 /// Forward-additive Lucas–Kanade (Gauss–Newton) alignment of the level-0 template with gain and
 /// bias: minimise Σ (I(c + A u) − g T(u) − b)² over the centre `c` and, with `shape`, the
 /// similarity `A`. Returns `None` when it diverges.
-fn lk_refine(crop: &Crop, p: &Patch, c0: [f64; 2], a0: [f64; 2], shape: bool) -> Option<([f64; 2], [f64; 2])> {
+fn lk_refine(crop: &Crop, grad: &mut Grad, p: &Patch, c0: [f64; 2], a0: [f64; 2], shape: bool) -> Option<([f64; 2], [f64; 2])> {
     let plane = &crop.levels[0];
-    let (gxp, gyp) = &crop.grad0;
     let ch = p.ch;
     let (mut c, mut a) = (c0, a0);
     let mut g = 1.0f64;
@@ -546,6 +700,10 @@ fn lk_refine(crop: &Crop, p: &Patch, c0: [f64; 2], a0: [f64; 2], shape: bool) ->
     let np = if shape { 6 } else { 4 };
     let (mut v, mut vx, mut vy) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
     for _ in 0..30 {
+        if !grad.covers(c, a, p.r) {
+            *grad = Grad::full(plane);
+        }
+        let (gxp, gyp) = (&grad.gx, &grad.gy);
         let mut h = [[0.0f64; 6]; 6];
         let mut rhs = [0.0f64; 6];
         let mut k = 0;

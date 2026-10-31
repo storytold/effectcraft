@@ -1,10 +1,13 @@
 //! The desktop binary rejects a bad command line before it starts anything (#997).
-// Integration tests: unwrapping and panicking on failure is fine here.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Nextest archives relocate binaries; plain Cargo keeps the compile-time path valid.
+fn binary() -> std::ffi::OsString {
+    std::env::var_os("NEXTEST_BIN_EXE_effectcraft").unwrap_or_else(|| env!("CARGO_BIN_EXE_effectcraft").into())
+}
 
 /// A settings folder of its own, so a launch that got past the arguments would show up as
 /// preferences (Recent Footage) written there instead of in the user's settings.
@@ -19,7 +22,7 @@ fn config_dir(name: &str) -> PathBuf {
 /// regression fails instead of leaving a window open: the process is killed after 5 s.
 fn rejects(name: &str, args: &[&str], env: &[(&str, &str)], message: &str) {
     let config = config_dir(name);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_effectcraft"));
+    let mut cmd = Command::new(binary());
     cmd.args(args).env_remove("EFFECTCRAFT_CONTROL_PORT").env_remove("RUST_LOG").env("EFFECTCRAFT_CONFIG_DIR", &config);
     for (k, v) in env {
         cmd.env(k, v);
@@ -67,7 +70,7 @@ fn a_bad_control_port_stops_the_launch() {
 
 #[test]
 fn version_still_prints_with_a_bad_port_variable() {
-    let out = Command::new(env!("CARGO_BIN_EXE_effectcraft")).arg("--version").env("EFFECTCRAFT_CONTROL_PORT", "abc").output().unwrap();
+    let out = Command::new(binary()).arg("--version").env("EFFECTCRAFT_CONTROL_PORT", "abc").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("effectcraft {}\n", env!("CARGO_PKG_VERSION")));
 }

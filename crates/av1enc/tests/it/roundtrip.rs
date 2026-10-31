@@ -80,6 +80,23 @@ fn bitrate_mode_tracks_target() {
     assert!(kbps > 400.0 / 2.0 && kbps < 400.0 * 2.0, "{kbps} kbit/s");
 }
 
+/// Over several key frame intervals the average rate stays within 5 % of the target, for a
+/// range of targets (the key frame budget is taken out of the inter frames of its group).
+#[test]
+fn bitrate_mode_is_accurate_over_many_groups() {
+    let n = 180;
+    for (kbps, keyint, bd) in [(40, 30, 8), (100, 30, 8), (200, 60, 8), (150, 20, 10)] {
+        let pics: Vec<Pic> = (0..n).map(|t| synth(192, 128, bd, t)).collect();
+        let mut c = cfg(192, 128, bd as u8, 0, keyint);
+        c.rate = RateControl::Bitrate { kbps };
+        let mut enc = effectcraft_av1enc::Encoder::new(c).unwrap();
+        let bits: usize = pics.iter().map(|p| enc.encode(&p.frame()).data.len() * 8).sum();
+        let got = bits as f64 / (n as f64 / 30.0) / 1000.0;
+        eprintln!("{bd} bit, keyint {keyint}: {got:.1} kbit/s for {kbps}");
+        assert!((got / kbps as f64 - 1.0).abs() < 0.05, "{got:.1} kbit/s for a {kbps} kbit/s target ({bd} bit, keyint {keyint})");
+    }
+}
+
 #[test]
 fn headers() {
     let enc = effectcraft_av1enc::Encoder::new(cfg(1920, 1080, 10, 100, 60)).unwrap();

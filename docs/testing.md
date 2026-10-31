@@ -5,8 +5,14 @@ cargo test --workspace     # everything
 cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
 ```
 
+The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
+interactively — local variables, parameters, column breakpoints — build with the `dev-full`
+profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).
+
 `cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
-`cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise.
+`cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
+runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
+language has no translation for. Those strings show in English; the report always passes.
 
 Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
 modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`

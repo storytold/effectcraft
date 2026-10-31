@@ -259,6 +259,49 @@ fn cache_frames_when_idle_fills_the_work_area() {
     assert_eq!(n, 240, "the work area is cached while idle");
 }
 
+/// A preview that plays into frames it already cached (after a loop) keeps rendering the next
+/// uncached ones: the prefetch window used to end within the cached run, and the workers stood
+/// idle until the playhead came near its end.
+#[test]
+fn playback_prefetches_past_the_cached_frames_ahead() {
+    let mut h = harness();
+    let cid = h.state().session.active_comp_id().unwrap();
+    let series = h.state().shown_series(cid);
+    let scale = series.scale as f64 / 1000.0;
+    // The first 120 frames (5 s) are cached: more than the widest old window (16 workers × 6).
+    for f in 0..120 {
+        h.state().request_frame(cid, f, scale);
+    }
+    for _ in 0..4000 {
+        if h.state().frames.cached_frames(&series).len() >= 120 && h.state().frames.inflight() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(h.state().frames.cached_frames(&series), (0..120).collect::<Vec<_>>());
+    // Rendering/instrumentation time must not move the playhead near the end of the
+    // cached run. Exercise real prefetch workers while holding playback in its first second.
+    h.state_mut().use_manual_clock();
+    h.state_mut().session.set_time(Tick::ZERO);
+    invoke(&mut h, "playback.toggle", json!({}));
+    h.state_mut().clock_mut().advance(0.25);
+    h.run_steps(2);
+    assert!(h.state().playback.playing);
+    let cur = h.state().session.time();
+    assert!(cur > Tick::ZERO, "playback advances with the manual clock");
+    assert!(cur < Tick::from_seconds_f64(1.0), "{cur:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if h.state().frames.cached_frames(&series).iter().any(|&f| f >= 120) {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert_eq!(h.state().session.time(), cur, "worker waits do not advance playback");
+    }
+    assert!(h.state().frames.cached_frames(&series).iter().any(|&f| f >= 120), "frames past the cached run render while it plays the first second");
+}
+
 #[test]
 fn cache_frames_when_idle_survives_an_inverted_work_area() {
     let mut h = harness();
