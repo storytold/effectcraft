@@ -193,14 +193,16 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
         "gpu": s.accel.is_some(),
         "parity": {
             "target": "Adobe After Effects 2026",
-            "summary": PARITY,
+            "summary": format!("{PARITY}; all After Effects effects present ({} registered)", fx.len()),
             "doc": "docs/target-app-parity.md",
         },
     }))
 }
 
-/// The headline of `docs/target-app-parity.md` (kept in sync by hand at each re-measure).
-const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (307 registered)";
+/// The headline of `docs/target-app-parity.md` (kept in sync by hand at each re-measure); the
+/// summary adds the number of registered effects, which EffectCraft's own effects take past
+/// After Effects' set.
+const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha)";
 
 fn state(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.state).unwrap_or_default())
