@@ -97,6 +97,11 @@ pub struct Renderer<'a> {
     through: [Option<Through<'a>>; MAX_THROUGH],
     /// More collapsed levels than [`MAX_THROUGH`]: their motion is not blurred.
     through_lost: bool,
+    /// Seconds of this comp's time per second of the rendered frame's time: the product of the
+    /// time-stretch / time-remap rates of the (non-collapsed) precomp layers it is rendered
+    /// through. Motion blur opens the shutter over the rendered frame, so a nested comp shown at
+    /// 75 % stretch spans 1/0.75 of its shutter in its own time (as After Effects does).
+    pub(crate) time_rate: f64,
 }
 
 #[cfg(test)]

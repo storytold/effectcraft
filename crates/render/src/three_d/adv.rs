@@ -145,7 +145,7 @@ impl<'p, 'a> Prepared<'p, 'a> {
             return scene::build(self.r, self.ctx, self.layers, self.out);
         }
         let ctx = self.ctx;
-        let fd = ctx.comp.frame_duration().seconds();
+        let fd = ctx.comp.frame_duration().seconds() * self.r.time_rate;
         let (angle, phase) = (ctx.comp.shutter_angle / 360.0, ctx.comp.shutter_phase / 360.0);
         let f = phase + angle * i as f64 / (n - 1) as f64;
         let sub = ctx.at(ctx.time + effectcraft_time::Tick::from_seconds_f64(f * fd));

@@ -120,6 +120,7 @@ impl<'a> Renderer<'a> {
             top: true,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            time_rate: 1.0,
         }
     }
 
@@ -152,13 +153,21 @@ impl<'a> Renderer<'a> {
     }
 
     /// The renderer for the nested comp of precomp layer `layer`: its Quality switch passes
-    /// down when [`RenderOpts::nested_switches`] is on.
-    fn nested_through(&self, layer: &Layer) -> Renderer<'a> {
+    /// down when [`RenderOpts::nested_switches`] is on, and its time runs at the layer's
+    /// stretch / time-remap rate (see [`Renderer::time_rate`]).
+    fn nested_through(&self, ctx: &EvalCtx, layer: &Layer) -> Renderer<'a> {
         let mut sub = self.nested();
         if self.opts.nested_switches {
             sub.inherited = Some(self.quality(layer));
         }
+        sub.time_rate = self.time_rate * ctx.source_rate(layer);
         sub
+    }
+
+    /// A processed-layer cache key that also covers [`Renderer::time_rate`] (mask motion blur and
+    /// effects that read the shutter span it), unchanged at the usual rate 1.
+    fn rate_key(&self, key: Option<u64>) -> Option<u64> {
+        if self.time_rate == 1.0 { key } else { key.map(|k| cache::derive(k, self.time_rate.to_bits())) }
     }
 
     /// The render options one level down (precomps, collapsed precomps, comps read by effects):
@@ -203,7 +212,7 @@ impl<'a> Renderer<'a> {
         }
         let s = self.opts.scale;
         let bs = if s < 1.0 && nc.preserve_resolution { 1.0 } else { s };
-        let base = self.nested_through(layer);
+        let base = self.nested_through(ctx, layer);
         Some((Renderer { opts: RenderOpts { scale: bs, ..base.opts }, ..base }, item, lt, bs))
     }
 
@@ -617,7 +626,12 @@ impl<'a> Renderer<'a> {
             working_space: self.pipe.space,
             working_linear: self.pipe.linear,
             float_depth: self.pipe.levels.is_none(),
-            shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
+            // Scaled by the time rate: the same shutter in seconds of the rendered frame.
+            shutter: self.mb_on(ctx, layer).then_some((
+                ctx.comp.shutter_angle * self.time_rate,
+                ctx.comp.shutter_phase * self.time_rate,
+                ctx.comp.motion_blur_samples,
+            )),
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx
@@ -731,7 +745,7 @@ impl<'a> Renderer<'a> {
                 // smaller (the buffer's scale places it).
                 let full = s < 1.0 && self.project.comp(*item).is_some_and(|nc| nc.preserve_resolution);
                 let bs = if full { 1.0 } else { s };
-                let base = self.nested_through(layer);
+                let base = self.nested_through(ctx, layer);
                 let base = Renderer { opts: RenderOpts { scale: bs, ..base.opts }, ..base };
                 let sub = match &tmp {
                     Some(p) => Renderer { project: p, ..base },
@@ -989,7 +1003,7 @@ impl<'a> Renderer<'a> {
 
     pub(crate) fn content_buf_timed(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<(Arc<Buf>, Option<u64>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.rate_key(self.content_key(ctx, layer, key));
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
         {
@@ -1014,7 +1028,7 @@ impl<'a> Renderer<'a> {
     /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.rate_key(self.content_key(ctx, layer, key));
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
         {

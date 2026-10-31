@@ -150,7 +150,7 @@ impl<'a> Renderer<'a> {
         Shutter {
             angle: c.shutter_angle / 360.0,
             phase: c.shutter_phase / 360.0,
-            frame: c.frame_duration().seconds(),
+            frame: c.frame_duration().seconds() * self.time_rate,
             samples: c.motion_blur_samples,
             limit: c.motion_blur_adaptive_limit,
         }
@@ -254,6 +254,7 @@ impl<'a> Renderer<'a> {
             allowed: self.opts.motion_blur && ctx.comp.enable_motion_blur,
             layer: self.layer_motion_blur(layer),
             samples: if self.opts.draft { 4 } else { ctx.comp.motion_blur_samples as usize },
+            time_rate: self.time_rate,
         }
     }
 

@@ -248,7 +248,7 @@ fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: us
     let geos: Vec<Geo> = if n <= 1 {
         geo(&cam, world, bounds, comp, s, out, r.out_offset()).into_iter().collect()
     } else {
-        let fd = ctx.comp.frame_duration().seconds();
+        let fd = ctx.comp.frame_duration().seconds() * r.time_rate;
         let angle = ctx.comp.shutter_angle / 360.0;
         let phase = ctx.comp.shutter_phase / 360.0;
         (0..n)

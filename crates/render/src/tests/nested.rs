@@ -88,3 +88,45 @@ fn a_nested_comp_shows_nothing_past_its_end() {
         assert!(render_frame(&p, cid, s(2.0), 1.0).get(50, 50)[3] < 0.01, "collapse {collapse}: past its end");
     }
 }
+
+/// A 30 fps outer comp nesting a 30 fps comp whose motion-blurred 10×10 solid crosses x=50 at
+/// 1 s moving 1200 px/s; the precomp layer is time-stretched to `stretch` % and the nested comp
+/// opens its shutter `angle` degrees (phase 0).
+fn stretched_blur(stretch: f64, angle: f64) -> (Project, ItemId) {
+    let mut p = Project::default();
+    let mut outer = Comp::new(100, 100, FrameRate::FPS_30, s(4.0));
+    outer.enable_motion_blur = true;
+    let mut inner = Comp::new(100, 100, FrameRate::FPS_30, s(4.0));
+    inner.enable_motion_blur = true;
+    inner.shutter_angle = angle;
+    inner.shutter_phase = 0.0;
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 10, height: 10, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &inner, "S", LayerSource::Solid { item: sid }, (10, 10), None);
+    l.switches.motion_blur = true;
+    l.props.prop_mut("transform/position").unwrap().keys =
+        vec![Keyframe::new(Tick::ZERO, Value::Vec3([-1150.0, 50.0, 0.0])), Keyframe::new(s(2.0), Value::Vec3([1250.0, 50.0, 0.0]))];
+    inner.layers.push(l);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.clone().into()));
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (100, 100), None);
+    pre.stretch = stretch;
+    p.comp_mut(cid).unwrap().layers.push(pre);
+    (p, cid)
+}
+
+#[test]
+fn a_time_stretched_precomp_spans_its_shutter_in_the_rendered_frames_time() {
+    // At 50 % stretch the nested comp runs twice as fast: one outer frame's 180° shutter covers
+    // a whole frame of the nested comp's time, as a 360° shutter does unstretched.
+    let (p, cid) = stretched_blur(50.0, 180.0);
+    let half = render_frame(&p, cid, s(0.5), 1.0);
+    let (p, cid) = stretched_blur(100.0, 360.0);
+    let full = render_frame(&p, cid, s(1.0), 1.0);
+    let (p, cid) = stretched_blur(100.0, 180.0);
+    let plain = render_frame(&p, cid, s(1.0), 1.0);
+    let diff = |a: &crate::Image, b: &crate::Image| {
+        a.data.iter().zip(&b.data).map(|(x, y)| (0..4).map(|k| (x[k] - y[k]).abs()).fold(0.0f32, f32::max)).fold(0.0f32, f32::max)
+    };
+    assert!(diff(&plain, &full) > 0.1, "the shutters differ: {}", diff(&plain, &full));
+    assert!(diff(&half, &full) < 0.02, "stretched 50 % = twice the shutter: {}", diff(&half, &full));
+}

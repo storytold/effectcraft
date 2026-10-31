@@ -443,7 +443,10 @@ Blur, previews), the comp's switch and the layer's switch. A precomp layer's swi
 turn off motion blur inside the nested comp (only Quality passes down when switches affect nested
 comps). Layer motion, mask motion blur (the comp's Samples Per Frame,
 four in Draft), effects that read the shutter and Advanced 3D all follow it, and the layer cache
-key of a layer with masks or effects records it.
+key of a layer with masks or effects records it. The shutter opens over the rendered frame: a comp
+shown through a time-stretched or time-remapped precomp layer spans its shutter in its own time
+times `Renderer::time_rate` (the product of the precomp layers' source rates, `EvalCtx::source_rate`),
+so at 50 % stretch one frame's shutter covers twice the nested comp's own.
 
 **Motion tracking** (Animation ▸ Track Motion / Stabilize Motion, Window ▸ Tracker): a tracker
 is a `Tracker` group under the layer's Motion Trackers group, with Track Point groups (Feature
