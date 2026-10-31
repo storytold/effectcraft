@@ -132,7 +132,9 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
   text does not have; the runs are cut to the text. A range style splits `Hello` into runs of 1,
   2 and 2 characters (248, 340).
 - **Null objects.** The hidden placeholder solid of a null object is not an item (null layers
-  have no source item here).
+  have no source item here). A stored Anchor Point is a fraction of that solid like any other;
+  an absent one is the null's top-left corner `[0, 0, 0]`, where After Effects puts it (children
+  of such nulls in a production project render where an origin anchor puts them; 022).
 - **Track mattes.** The mode and the matte layer's id are in the target layer's header
   (aep-format.md 3.1). The matte layer can be any layer of the composition (407: below its
   target); it keeps its stored video switch (After Effects switches it off when the matte is set,

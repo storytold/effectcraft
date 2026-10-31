@@ -389,8 +389,10 @@ fn camera_light_orient(auto_oriented: bool, light: Option<LightKind>) -> AutoOri
 }
 
 /// The unit a layer's anchor is stored in.
-fn anchor_unit(camera_or_light: bool, text_or_shape: bool, size: (u32, u32)) -> AnchorUnit {
-    if camera_or_light {
+fn anchor_unit(camera_or_light: bool, text_or_shape: bool, null: bool, size: (u32, u32)) -> AnchorUnit {
+    if null {
+        AnchorUnit::Null(size.0, size.1)
+    } else if camera_or_light {
         AnchorUnit::PointOfInterest
     } else if text_or_shape {
         AnchorUnit::Pixels
@@ -509,7 +511,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, view: &AepProject<'_, '
         import_layer_styles(&layer, &mut l, &comp.global_light, &mut Ids(&mut project.next_id), &tm, &what, &mut cx.col);
         // Text and shape layers store their anchor in pixels (385, 462); cameras and lights their
         // point of interest.
-        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, size);
+        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, matches!(source, LayerSource::Null), size);
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
             import_separated_position(&layer, &name, &tm, tr, &mut Ids(&mut project.next_id), &mut cx.col);

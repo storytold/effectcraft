@@ -150,6 +150,12 @@ const IGNORED: [&str; 4] = ["ADBE Position_0", "ADBE Position_1", "ADBE Position
 pub(crate) enum AnchorUnit {
     /// A fraction of a source this big (pixels): AV layers.
     Source(u32, u32),
+    /// A null object: a fraction of its placeholder solid this big when stored, and the layer's
+    /// top-left corner `[0, 0, 0]` when absent. None of the nulls of a production project stores
+    /// an Anchor Point, and After Effects' render puts their children where an origin anchor does
+    /// (a child 100 px below a 100 x 100 null sits 100 px below the null's Position, not 50), as
+    /// case 022 does (a centred layer parented to a null created at the centre reads back `0, 0`).
+    Null(u32, u32),
     /// Pixels as stored, the origin when absent: text (385) and shape (462) layers, which have no
     /// source.
     Pixels,
@@ -176,13 +182,7 @@ pub(crate) fn import_transform(
 ) {
     let Some(tr) = layer.transform(comp.0, comp.1) else { return };
     let Some(PropNode::Group(group)) = layer.properties().and_then(|p| p.get("ADBE Transform Group")) else { return };
-    let (anchor_kind, anchor_px) = match anchor {
-        AnchorUnit::Source(w, h) => {
-            let (sw, sh) = (f64::from(w), f64::from(h));
-            (Kind::Anchor(sw, sh), tr.anchor_px(sw, sh))
-        }
-        AnchorUnit::Pixels | AnchorUnit::PointOfInterest => (Kind::Anchor(1.0, 1.0), tr.text_anchor_px()),
-    };
+    let (anchor_kind, anchor_px) = anchor_pixels(anchor, &tr);
     let poi = anchor == AnchorUnit::PointOfInterest;
     let separated = position_separated(&group);
     for (match_name, id) in SPECS {
@@ -245,6 +245,25 @@ pub(crate) fn import_transform(
         }
     }
     report_other_properties(&group, separated, layer_name, col);
+}
+
+/// The unit and the pixel value of the stored Anchor Point of a layer whose anchor is `anchor`.
+fn anchor_pixels(anchor: AnchorUnit, tr: &crate::Transform) -> (Kind, [f64; 3]) {
+    match anchor {
+        AnchorUnit::Source(w, h) => {
+            let (sw, sh) = (f64::from(w), f64::from(h));
+            (Kind::Anchor(sw, sh), tr.anchor_px(sw, sh))
+        }
+        AnchorUnit::Null(w, h) => {
+            let (sw, sh) = (f64::from(w), f64::from(h));
+            let px = match tr.anchor_fraction.source {
+                ValueSource::Stored | ValueSource::Keyframed => tr.anchor_px(sw, sh),
+                ValueSource::Default | ValueSource::Unreadable => [0.0; 3],
+            };
+            (Kind::Anchor(sw, sh), px)
+        }
+        AnchorUnit::Pixels | AnchorUnit::PointOfInterest => (Kind::Anchor(1.0, 1.0), tr.text_anchor_px()),
+    }
 }
 
 /// True when the Position of this transform group has separated dimensions (see [`SEPARATED`]).
@@ -619,6 +638,26 @@ mod tests {
 
     fn at(p: &EcProp, seconds: f64) -> f64 {
         p.value_at(Tick::from_seconds_f64(seconds)).as_f64()
+    }
+
+    #[test]
+    fn null_anchor_is_the_corner_unless_stored() {
+        let tracked = |value: [f64; 3], source| crate::Tracked { value, source };
+        let tr = |anchor| crate::Transform {
+            position: tracked([960.0, 540.0, 0.0], ValueSource::Stored),
+            anchor_fraction: anchor,
+            scale_percent: tracked([100.0; 3], ValueSource::Default),
+            rotation_degrees: crate::Tracked { value: 0.0, source: ValueSource::Default },
+            opacity_percent: crate::Tracked { value: 100.0, source: ValueSource::Default },
+        };
+        let absent = tr(tracked([0.5, 0.5, 0.0], ValueSource::Default));
+        // A null without a stored Anchor Point anchors at its top-left corner...
+        assert_eq!(anchor_pixels(AnchorUnit::Null(100, 100), &absent).1, [0.0; 3]);
+        // ...while any other AV layer anchors at its source's centre.
+        assert_eq!(anchor_pixels(AnchorUnit::Source(100, 100), &absent).1, [50.0, 50.0, 0.0]);
+        // A stored null anchor is a fraction of the placeholder solid like any other.
+        let stored = tr(tracked([0.25, 0.5, 3.0], ValueSource::Stored));
+        assert_eq!(anchor_pixels(AnchorUnit::Null(100, 100), &stored).1, [25.0, 50.0, 3.0]);
     }
 
     #[test]
