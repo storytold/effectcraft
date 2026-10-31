@@ -53,6 +53,9 @@ effectcraft-plugin = { path = "crates/plugin" }
 
 # foundation
 thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6.11"
+clap_mangen = "0.3.3"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
