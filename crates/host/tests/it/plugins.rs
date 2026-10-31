@@ -130,6 +130,39 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
 }
 
 #[test]
+fn plugin_install_never_replaces_an_installed_plugin() {
+    let config = std::env::temp_dir().join(format!("effectcraft-plugin-replace-{}", std::process::id()));
+    let plug_dir = config.join("Plug-ins");
+    let _ = std::fs::remove_dir_all(&config);
+    let src = std::env::temp_dir().join(format!("effectcraft-plugin-replace-src-{}", std::process::id()));
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a-good.wasm"), wat_plugin("org.test.host.replace", 1, "i32.const 0")).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    s.execute("effect.plugins.install", json!({"path": src.join("a-good.wasm").to_string_lossy()})).unwrap();
+    let installed = std::fs::read(plug_dir.join("a-good.wasm")).unwrap();
+
+    // Same file name, a different plug-in: installing over the existing one must be refused,
+    // not quietly swap it — and the first plug-in's bytes on disk stay exactly what they were.
+    let attack = std::env::temp_dir().join(format!("effectcraft-plugin-replace-attack-{}", std::process::id()));
+    std::fs::create_dir_all(&attack).unwrap();
+    std::fs::write(attack.join("a-good.wasm"), wat_plugin("org.test.host.hack", 1, "i32.const 0")).unwrap();
+    let r = s.execute("effect.plugins.install", json!({"folder": attack.to_string_lossy()})).unwrap();
+    assert!(r["installed"].as_array().unwrap().is_empty(), "{r}");
+    let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["error"].as_str().unwrap().to_string()).collect();
+    assert!(errs.iter().any(|e| e.contains("already installed")), "{r}");
+    assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
+
+    // The same through a single-file install: a command error, disk untouched.
+    assert!(s.execute("effect.plugins.install", json!({"path": attack.join("a-good.wasm").to_string_lossy()})).is_err());
+    assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
+    let _ = std::fs::remove_dir_all(&config);
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&attack);
+}
+
+#[test]
 fn example_wasm_plugin_loads_and_renders() {
     let Some(wasm) = build_example() else { return };
     let (mut s, l) = setup();

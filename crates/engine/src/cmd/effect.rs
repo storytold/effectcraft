@@ -87,18 +87,30 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
     let root = cfg.dir().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
     let plug_dir = root.join(PLUGINS_DIR);
     let single = str_p(p, "path").is_some();
+    let mut listing_errors: Vec<Value> = Vec::new();
     let sources: Vec<std::path::PathBuf> = match (str_p(p, "path"), str_p(p, "folder")) {
         (Some(path), _) => vec![std::path::PathBuf::from(path)],
         (None, Some(dir)) => {
             let read = std::fs::read_dir(dir).map_err(|e| bad(c, format!("cannot list {dir}: {e}")))?;
-            read.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect()
+            let mut v = Vec::new();
+            for entry in read {
+                match entry {
+                    Ok(e) if e.path().is_file() => v.push(e.path()),
+                    // A vanished or unreadable entry is a bundle problem: report it rather
+                    // than installing a bundle that silently misses files.
+                    Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                    Ok(_) => {}
+                }
+            }
+            v.sort();
+            v
         }
         _ => return Err(bad(c, "give `path` (a .wasm plug-in) or `folder` (a plug-in bundle)")),
     };
+    let mut errors = listing_errors;
     let mut installed = Vec::new();
     let mut loaded = Vec::new();
     let mut panels = Vec::new();
-    let mut errors: Vec<Value> = Vec::new();
     for src in &sources {
         let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if name.is_empty() || name.starts_with('.') {
@@ -122,6 +134,11 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
                 return Ok(());
             }
             let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
+            // Never silently replace an installed plug-in: a failed re-install of the same file
+            // name must not destroy (or roll back) the installation that already works.
+            if plug_dir.join(&name).is_file() {
+                return Err(format!("{name} is already installed; remove it from the Plug-ins folder first to update"));
+            }
             cfg.files().write(&plug_dir.join(&name), &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
             // Load in-session now: a plug-in that cannot load is rolled back, so a broken
             // plug-in never makes every start fail.
