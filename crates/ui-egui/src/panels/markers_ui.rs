@@ -373,6 +373,8 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
         run(ui, "Delete This Marker", "markers.delete", r.params(), app);
         if let Some(l) = r.layer {
             run(ui, "Delete All Markers", "layer.deleteAllMarkers", json!({"layers": [l]}), app);
+        } else {
+            run(ui, "Delete All Markers", "comp.deleteAllMarkers", json!({}), app);
         }
     });
 }

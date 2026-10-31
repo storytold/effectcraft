@@ -5,4 +5,4 @@ source:       original work
 license:      MIT OR Apache-2.0
 license-file: assets/app-icon/LICENSE.txt
 added:        2026-10-02 by EffectCraft contributors (Claude agent, app icon)
-notes:        The same drawing vectorised at 1024 px with craftrules vectorize_tile.py, about 350 KB, for places where size matters.
+notes:        The same drawing vectorised at 1024 px, about 350 KB, for places where size matters.

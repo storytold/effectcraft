@@ -1123,6 +1123,23 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"en"}}"#).general.language, "en", "a chosen language stays");
 }
 
+/// Swedish is stored as `sv` rather than a locale tag, and persists like every other catalog.
+#[test]
+fn swedish_interface_language_is_validated_and_persisted() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(crate::prefs::LANGUAGES.contains(&("Svenska", "sv")));
+    for value in ["sv-SE", "sv_SE", "SV"] {
+        assert!(s.execute("prefs.set", json!({"key": "general.language", "value": value})).is_err(), "{value}");
+    }
+    s.execute("prefs.set", json!({"key": "general.language", "value": "sv"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("sv"));
+    let mut sv = Session { config: Some(store), ..Default::default() };
+    sv.load_settings();
+    assert_eq!(sv.prefs.general.language, "sv");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"sv"}}"#).general.language, "sv");
+}
+
 #[test]
 fn unicode_label_colors_fall_back_without_panicking() {
     use effectcraft_color::Label;

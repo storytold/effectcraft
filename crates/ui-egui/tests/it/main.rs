@@ -106,6 +106,7 @@ mod ui_visual_review;
 mod ui_web_gpu_storage;
 mod ui_web_job_gpu;
 mod ui_web_offload;
+mod ui_window_title;
 mod ui_workflow_selection;
 mod ui_workspace_focus;
 mod viewer_geometry;

@@ -20,6 +20,13 @@ pub use gpu::{GPU_PREPARING, GpuBuild};
 pub(crate) use screenshot::{MAX_PENDING_SHOTS, SCREENSHOT_SETTLE_PASSES, SCREENSHOT_SETTLE_S, SCREENSHOT_TIMEOUT_S};
 
 impl EffectcraftApp {
+    /// The window title as of the last tick (`EffectCraft - <project>`, ` *` while modified). The
+    /// app sends it as `ViewportCommand::Title`, which eframe on the web ignores: that host writes
+    /// it to `document.title`.
+    pub fn window_title(&self) -> &str {
+        &self.window_title
+    }
+
     /// Build the app around `session`.
     /// Loads and applies the workspaces saved in the session's config directory (a failed load is reported in
     /// `ui.status`), initializes the default UI, playback and render state, and registers the frontend's commands as

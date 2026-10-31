@@ -841,7 +841,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-3";
+const RENDER_VERSION: &str = "effectcraft-render-4";
 
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
@@ -1091,7 +1091,7 @@ mod tests {
         let comp = Comp::new(2, 2, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
         let id = project.add_item("Cached composition", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
         let key = frame_key(comp_content_key(&project, id), 0, 1000, 0);
-        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-2"), 0, 1000, 0);
+        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-3"), 0, 1000, 0);
         let dir = tmpdir("previous-renderer");
         {
             let cache = DiskCache::open(&dir, 1 << 30).unwrap();

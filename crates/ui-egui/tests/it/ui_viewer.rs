@@ -281,6 +281,7 @@ fn bottom_bar_in_after_effects_order() {
     let order = [
         "viewer.magnification",
         "viewer.resolution",
+        "viewer.fastPreviews",
         "viewer.transparency",
         "viewer.masks",
         "viewer.roi",
@@ -290,7 +291,6 @@ fn bottom_bar_in_after_effects_order() {
         "viewer.exposure",
         "viewer.snapshot",
         "viewer.showSnapshot",
-        "viewer.fastPreviews",
         "viewer.timecode",
     ];
     let xs: Vec<f32> = order.iter().map(|id| rect(&h, id).min.x).collect();

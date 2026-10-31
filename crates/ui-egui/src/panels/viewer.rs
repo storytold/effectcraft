@@ -18,6 +18,27 @@ use crate::state::Tool;
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
+/// A 3D view's name in the interface's language: the View menu's row for its `view.3d.*` command,
+/// else the panel catalog, else the English source. The menu's rows carry After Effects' words —
+/// フロントビュー rather than フロント — so the viewer's dropdown and the comp's view label read
+/// the same names as View ▸ Switch 3D View.
+pub(crate) fn view3d_label(v: View3D) -> &'static str {
+    let id = match v {
+        View3D::ActiveCamera => "view.3d.activeCamera",
+        View3D::Default => "view.3d.default",
+        View3D::Front => "view.3d.front",
+        View3D::Left => "view.3d.left",
+        View3D::Top => "view.3d.top",
+        View3D::Back => "view.3d.back",
+        View3D::Right => "view.3d.right",
+        View3D::Bottom => "view.3d.bottom",
+        View3D::Custom1 => "view.3d.custom1",
+        View3D::Custom2 => "view.3d.custom2",
+        View3D::Custom3 => "view.3d.custom3",
+    };
+    crate::i18n::command_label(id, v.label())
+}
+
 /// Viewer mapping published each frame (for the control channel and other panels).
 #[derive(Clone, Copy, Debug)]
 pub struct ViewerMap {
@@ -756,8 +777,8 @@ fn phase_rigs(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
         draw_rigs(app, &painter, &map, ectx, &selected, cam_state(ectx), through_active, None);
         let view = app.session.state.views3d.get(&cid).map(|v| v.current).unwrap_or_default();
         let label = match (view, comp.active_camera(time)) {
-            (View3D::ActiveCamera, Some(c)) => format!("Active Camera ({})", c.name),
-            (v, _) => v.label().to_string(),
+            (View3D::ActiveCamera, Some(c)) => crate::i18n::tr_args("Active Camera ({})", &[&c.name]),
+            (v, _) => view3d_label(v).to_string(),
         };
         painter.text(area.left_top() + vec2(12.0, 10.0), Align2::LEFT_TOP, label, Tokens::ui(12.0), t.text_dim);
     }
