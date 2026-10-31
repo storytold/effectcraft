@@ -89,7 +89,7 @@ pub(crate) fn text_doc(doc: &TextDocument, what: &str, has_font: &dyn Fn(&str) -
         }
     }
     if !doc.kerning.is_empty() {
-        col.lose(LossCategory::TextLayers, format!("{what}: manual kerning is not imported"));
+        apply_manual_kerning(&mut out, &doc.kerning, what, col);
     }
     match doc.line_orientation {
         None => {}
@@ -256,6 +256,61 @@ fn para_style(p: &ParagraphRun, what: &str, col: &mut Collector) -> ParaStyle {
     }
 }
 
+/// Manual kerning (`RUN/8/0`). The amount stored on character `i` is the space between `i` and
+/// the character after it: a production project's rotated body text kerns each paragraph-ending
+/// `\r` by a negative amount, which pulls the start of the next line left so the lines of the
+/// paragraph share one left edge in After Effects' render. EffectCraft's manual kerning is the
+/// space before a character and is not applied at a paragraph start, so the gap before a
+/// paragraph's first character becomes that paragraph's first-line indent (the same shift for
+/// left-aligned text), and any other gap the kerning of the character after it.
+fn apply_manual_kerning(out: &mut TextDoc, kerning: &[crate::KernRun], what: &str, col: &mut Collector) {
+    let chars: Vec<char> = out.text.chars().collect();
+    let mut amounts = vec![None; chars.len()];
+    let mut at = 0usize;
+    for run in kerning {
+        for a in amounts.iter_mut().skip(at).take(run.length) {
+            *a = run.amount.filter(|v| v.is_finite() && v.abs() <= 100_000.0);
+        }
+        at = at.saturating_add(run.length);
+    }
+    let mut paras = out.paras();
+    let mut para = 0usize;
+    let mut unmapped = false;
+    for (i, amount) in amounts.iter().enumerate() {
+        let next = i + 1;
+        // The `\r` of a CRLF does not end the paragraph, its `\n` does.
+        let crlf = chars[i] == '\r' && chars.get(next) == Some(&'\n');
+        let breaks = (chars[i] == '\r' && !crlf) || chars[i] == '\n';
+        if breaks {
+            para += 1;
+        }
+        let Some(a) = *amount else { continue };
+        if next >= chars.len() || crlf {
+            // After the last character, or between the two halves of a CRLF: no visible gap.
+            continue;
+        }
+        if breaks {
+            // `para` is now the paragraph the gap opens.
+            let size = out.style_at(i).size;
+            match paras.get_mut(para) {
+                Some(p) if matches!(p.justify, Justify::Left | Justify::JustifyLastLeft | Justify::JustifyAll) && p.direction == Direction::Ltr => {
+                    p.indent_first += a * size / 1000.0;
+                }
+                _ => unmapped = true,
+            }
+        } else {
+            out.apply_style(next..next + 1, |s| s.kerning = Kerning::Manual(a));
+        }
+    }
+    out.set_paras(paras);
+    if unmapped {
+        col.lose(
+            LossCategory::TextLayers,
+            format!("{what}: manual kerning before the first character of a centred, right-aligned or right-to-left paragraph is not imported"),
+        );
+    }
+}
+
 /// Character settings EffectCraft has no field for, reported once per text.
 fn report_character_extras(doc: &TextDocument, what: &str, col: &mut Collector) {
     let runs = &doc.style_runs;
@@ -334,5 +389,54 @@ pub(crate) fn report_text_extras(layer: &AepLayer<'_, '_>, what: &str, col: &mut
             "ADBE Text More Options" if has_stored(&g, 0) => col.lose(LossCategory::TextLayers, format!("{what}: More Options are not imported")),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KernRun;
+
+    fn kern(text: &str, runs: &[(usize, Option<f64>)], justify: Justify) -> (TextDoc, Collector) {
+        let mut d = TextDoc { text: text.to_string(), size: 50.0, ..TextDoc::default() };
+        let n = d.para_count();
+        d.set_paras(vec![ParaStyle { justify, ..ParaStyle::default() }; n]);
+        let runs: Vec<KernRun> = runs.iter().map(|&(length, amount)| KernRun { length, amount }).collect();
+        let mut col = Collector::default();
+        apply_manual_kerning(&mut d, &runs, "T", &mut col);
+        (d, col)
+    }
+
+    /// Body text whose kerning stored on each paragraph-ending `\r` pulls the
+    /// next line left, so it becomes that paragraph's first-line indent (amount × size / 1000).
+    #[test]
+    fn kerning_on_a_paragraph_break_indents_the_next_paragraph() {
+        let (d, col) = kern("ab\rcd\ref", &[(2, None), (1, Some(-120.0)), (2, None), (1, Some(-340.0)), (2, None)], Justify::Left);
+        let firsts: Vec<f64> = d.paras().iter().map(|p| p.indent_first).collect();
+        assert_eq!(firsts, vec![0.0, -6.0, -17.0]);
+        assert!((0..d.char_len()).all(|i| d.style_at(i).kerning == Kerning::Metrics));
+        assert!(col.finish().losses.is_empty());
+    }
+
+    /// Inside a paragraph the amount on a character is the gap after it: the next character gets it.
+    #[test]
+    fn kerning_inside_a_paragraph_moves_to_the_next_character() {
+        let (d, col) = kern("AVA", &[(1, Some(-80.0)), (2, None)], Justify::Left);
+        let k: Vec<Kerning> = (0..3).map(|i| d.style_at(i).kerning).collect();
+        assert_eq!(k, vec![Kerning::Metrics, Kerning::Manual(-80.0), Kerning::Metrics]);
+        assert!(d.paras().iter().all(|p| p.indent_first == 0.0));
+        assert!(col.finish().losses.is_empty());
+        // After the last character there is no gap; CRLF counts as one break.
+        let (d, _) = kern("ab\r\ncd", &[(1, None), (1, Some(30.0)), (1, Some(-100.0)), (1, Some(-200.0)), (2, Some(10.0))], Justify::Left);
+        assert_eq!(d.paras().iter().map(|p| p.indent_first).collect::<Vec<_>>(), vec![0.0, -10.0]);
+        assert_eq!(d.style_at(5).kerning, Kerning::Manual(10.0));
+        assert_eq!(d.style_at(2).kerning, Kerning::Manual(30.0), "the gap before the break");
+    }
+
+    #[test]
+    fn kerning_before_a_centred_paragraph_is_reported() {
+        let (d, col) = kern("ab\rcd", &[(2, None), (1, Some(-120.0)), (2, None)], Justify::Center);
+        assert!(d.paras().iter().all(|p| p.indent_first == 0.0));
+        assert!(!col.finish().losses.is_empty());
     }
 }

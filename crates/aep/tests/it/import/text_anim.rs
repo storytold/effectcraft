@@ -199,7 +199,6 @@ fn settings_without_an_effectcraft_field_are_reported() {
     for (name, what) in [
         ("548-text-linejoin-round.aep", None),
         ("552-text-nobreak-on.aep", Some("No Break")),
-        ("554-text-kerning-50.aep", Some("manual kerning")),
         ("572-text-leadingtype-japanese.aep", Some("Japanese leading")),
         ("578-text-digitset-hindi.aep", Some("digit set")),
     ] {
@@ -213,6 +212,16 @@ fn settings_without_an_effectcraft_field_are_reported() {
             }
         }
     }
+}
+
+#[test]
+fn manual_kerning_imports() {
+    // 554: kerning 50 on "HHHH" is stored on each H (the gap after it): the second to fourth H
+    // are kerned by 50 before them; the first keeps the "no automatic kerning" amount 0.
+    let (d, r) = skip!(doc("554-text-kerning-50.aep"));
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let k: Vec<Kerning> = (0..4).map(|i| d.style_at(i).kerning).collect();
+    assert_eq!(k, vec![Kerning::Manual(0.0), Kerning::Manual(50.0), Kerning::Manual(50.0), Kerning::Manual(50.0)]);
 }
 
 #[test]
