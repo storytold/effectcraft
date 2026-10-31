@@ -1,0 +1,46 @@
+{
+  "aep": "collect/My Project.aep",
+  "work_dir": "parity-work",
+  "relink": [
+    {"from": "/Volumes/Projects/My Project/", "to": "/data/collect/"}
+  ],
+  "scripts": [],
+  "entries": [
+    {
+      "name": "main-loop",
+      "comp": "Main Loop",
+      "reference": "refs/loop.mp4",
+      "offset": 0,
+      "frames": 8
+    },
+    {
+      "name": "main-loop-720p",
+      "comp": "Main Loop",
+      "reference": "refs/loop-720p.mp4",
+      "offset": 0,
+      "frames": 8,
+      "vf": "scale=1280:720"
+    },
+    {
+      "name": "intro",
+      "comp": "Intro Portrait",
+      "reference": "refs/intro.mp4",
+      "offset": -12,
+      "frames": [0, 60, 120, 240, 480],
+      "project_scripts": ["older-footage.jsx"]
+    }
+  ],
+  "glow_fit": {
+    "select": {"layer_name": "Black Solid", "effect_match_name": "ADBE Fractal Noise"},
+    "targets": ["main-loop", "intro"],
+    "step": 10,
+    "downscale": 4,
+    "fit_downscale": 2,
+    "unit_level": 0.25,
+    "lambda": 50,
+    "smooth": 1,
+    "grid": {"spacing": [160, 160], "radius": 320},
+    "xfade": {"step": 2, "pad": 24, "lambda": 500},
+    "overrides": "glow_overrides.jsx"
+  }
+}
