@@ -6,7 +6,9 @@ reviews:
       - "dependabot[bot]"
   path_instructions:
     # Japanese wording follows the reference application's own Japanese interface rather than a
-    # paraphrase, because people arrive from that application and look for its words. Exact-value
+    # paraphrase. Two audiences read it and both learned the words elsewhere: people arriving from
+    # that application look for the menu item they already know by name, and the Japanese tutorials
+    # they follow use the same names, so a synonym makes the video and the menu disagree. Exact-value
     # tests in `ui.rs` hold selected rows, so the burden of proof belongs to whoever changes a row,
     # not to whoever wrote it.
     #
