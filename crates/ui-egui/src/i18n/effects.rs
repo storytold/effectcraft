@@ -469,6 +469,20 @@ const TRADITIONAL_CHINESE: &[Row] = &[];
 /// typography (half-width parentheses where AE draws full-width) and still carries CS6-era names for
 /// the `CC` series, which AE 2026 leaves in English.
 const JAPANESE_EFFECTS: &[Row] = &[
+    // Effects this application adds itself have no interface to read a name from, so they follow
+    // the Chinese catalog's choice to translate them (顔の計測, 顔のトラックポイント) rather than
+    // staying English. Unmult stays English: that is what the interface it comes from shows.
+    ("ec.3d.instance3d", "3D Layer Instance", "3Dレイヤーインスタンス"),
+    ("ec.color.broadcast", "Broadcast Colors", "ブロードキャストカラー"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "ステレオ3Dコントロール"),
+    ("ec.distort.puppet", "Puppet", "パペット"),
+    ("ec.key.screen", "Screen Key", "スクリーンキー"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.matte.objectmatte", "Object Matte", "オブジェクトマット"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "ロトブラシとエッジの調整"),
+    ("ec.paint.paint", "Paint", "ペイント"),
+    ("ec.utility.facemeasurements", "Face Measurements", "顔の測定"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "顔のトラッキングポイント"),
     ("ec.3d.channelextract", "3D Channel Extract", "3Dチャンネル抽出"),
     ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
     ("ec.3d.depthmatte", "Depth Matte", "デプスマット"),
