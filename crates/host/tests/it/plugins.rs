@@ -86,11 +86,11 @@ fn build_example() -> Option<std::path::PathBuf> {
 
 #[test]
 fn plugin_bundle_install_copies_wasm_and_installs_panels() {
-    let config = std::env::temp_dir().join(format!("effectcraft-plugin-install-{}", std::process::id()));
+    let config = tempfile::TempDir::new().unwrap();
+    let config = config.path();
     let plug_dir = config.join("Plug-ins");
-    let _ = std::fs::remove_dir_all(&config);
-    let bundle = std::env::temp_dir().join(format!("effectcraft-plugin-bundle-{}", std::process::id()));
-    std::fs::create_dir_all(&bundle).unwrap();
+    let bundle = tempfile::TempDir::new().unwrap();
+    let bundle = bundle.path();
     std::fs::write(bundle.join("a-good.wasm"), wat_plugin("org.test.host.install", 1, "i32.const 0")).unwrap();
     std::fs::write(bundle.join("My Panel.jsx"), "1".as_bytes()).unwrap();
     std::fs::write(bundle.join("notes.txt"), b"not a plug-in".to_vec()).unwrap();
@@ -111,8 +111,8 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
     s.execute("effect.apply", json!({"layer": l, "effect": "Host org.test.host.install"})).unwrap();
 
     // A load failure rolls the copy back: nothing left behind to fail every start.
-    let bad = std::env::temp_dir().join(format!("effectcraft-plugin-badday-{}", std::process::id()));
-    std::fs::create_dir_all(&bad).unwrap();
+    let bad = tempfile::TempDir::new().unwrap();
+    let bad = bad.path();
     std::fs::write(bad.join("b-garbage.wasm"), b"\0asm\x01\0\0\0garbage".to_vec()).unwrap();
     let r2 = s.execute("effect.plugins.install", json!({"folder": bad.to_string_lossy()})).unwrap();
     assert_eq!(r2["errors"].as_array().unwrap().len(), 1, "{r2}");
@@ -121,21 +121,25 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
 
     // A single-file install: non-wasm paths are refused, and good files land on disk.
     assert!(s.execute("effect.plugins.install", json!({"path": bundle.join("My Panel.jsx").to_string_lossy()})).is_err());
+    // A single-file success: the file lands in the Plug-ins folder and is reported installed.
+    let fresh = bundle.join("fresh.wasm");
+    std::fs::write(&fresh, wat_plugin("org.test.host.fresh", 1, "i32.const 0")).unwrap();
+    let r3 = s.execute("effect.plugins.install", json!({"path": fresh.to_string_lossy()})).unwrap();
+    assert_eq!(r3["installed"].as_array().unwrap()[0], json!("fresh.wasm"), "{r3}");
+    assert!(plug_dir.join("fresh.wasm").is_file(), "{r3}");
+    // Again from `config`: an already-registered (in-session) id fails as a duplicate.
     let again = config.join("keep.wasm");
     std::fs::copy(bundle.join("a-good.wasm"), &again).unwrap();
-    assert!(s.execute("effect.plugins.install", json!({"path": again.to_string_lossy()})).is_err()); // already registered in-session
-    let _ = std::fs::remove_dir_all(&config);
-    let _ = std::fs::remove_dir_all(&bundle);
-    let _ = std::fs::remove_dir_all(&bad);
+    assert!(s.execute("effect.plugins.install", json!({"path": again.to_string_lossy()})).is_err());
 }
 
 #[test]
 fn plugin_install_never_replaces_an_installed_plugin() {
-    let config = std::env::temp_dir().join(format!("effectcraft-plugin-replace-{}", std::process::id()));
+    let config = tempfile::TempDir::new().unwrap();
+    let config = config.path();
     let plug_dir = config.join("Plug-ins");
-    let _ = std::fs::remove_dir_all(&config);
-    let src = std::env::temp_dir().join(format!("effectcraft-plugin-replace-src-{}", std::process::id()));
-    std::fs::create_dir_all(&src).unwrap();
+    let src = tempfile::TempDir::new().unwrap();
+    let src = src.path();
     std::fs::write(src.join("a-good.wasm"), wat_plugin("org.test.host.replace", 1, "i32.const 0")).unwrap();
 
     let mut s = effectcraft_host::session();
@@ -145,8 +149,8 @@ fn plugin_install_never_replaces_an_installed_plugin() {
 
     // Same file name, a different plug-in: installing over the existing one must be refused,
     // not quietly swap it — and the first plug-in's bytes on disk stay exactly what they were.
-    let attack = std::env::temp_dir().join(format!("effectcraft-plugin-replace-attack-{}", std::process::id()));
-    std::fs::create_dir_all(&attack).unwrap();
+    let attack = tempfile::TempDir::new().unwrap();
+    let attack = attack.path();
     std::fs::write(attack.join("a-good.wasm"), wat_plugin("org.test.host.hack", 1, "i32.const 0")).unwrap();
     let r = s.execute("effect.plugins.install", json!({"folder": attack.to_string_lossy()})).unwrap();
     assert!(r["installed"].as_array().unwrap().is_empty(), "{r}");
@@ -157,9 +161,6 @@ fn plugin_install_never_replaces_an_installed_plugin() {
     // The same through a single-file install: a command error, disk untouched.
     assert!(s.execute("effect.plugins.install", json!({"path": attack.join("a-good.wasm").to_string_lossy()})).is_err());
     assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
-    let _ = std::fs::remove_dir_all(&config);
-    let _ = std::fs::remove_dir_all(&src);
-    let _ = std::fs::remove_dir_all(&attack);
 }
 
 #[test]

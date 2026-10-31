@@ -115,10 +115,19 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
             egui::Popup::close_id(&ctx, top);
         }
     }
-    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params))
-        && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
-    {
-        app.ui.status = e;
+    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params)) {
+        match invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params }) {
+            Ok(result) => {
+                // A successful command can still report per-item problems in an `errors` array
+                // (Effect ▸ Install Effect Plug-in Bundle does): show them, without turning the
+                // success into an error.
+                let errors: Vec<String> = result.get("errors").and_then(Value::as_array).map(|a| a.iter().map(Value::to_string).collect()).unwrap_or_default();
+                if !errors.is_empty() {
+                    app.ui.status = errors.join("\n");
+                }
+            }
+            Err(e) => app.ui.status = e,
+        }
     }
     // What the next frame starts from: the open title, and a title press still in progress.
     let open = nav.open_index(&ctx);
