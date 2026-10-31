@@ -48,9 +48,17 @@ impl<'a> Io<'a> {
         self.out_failed.is_some_and(|k| k != ErrorKind::BrokenPipe)
     }
 
-    /// Flush stdout at the end of the run.
+    /// Flush stdout at the end of the run; a failure is recorded like a failed write.
     pub fn flush(&mut self) {
-        let _ = self.out.flush();
+        if self.out_failed.is_some() {
+            return;
+        }
+        if let Err(e) = self.out.flush() {
+            self.out_failed = Some(e.kind());
+            if e.kind() != ErrorKind::BrokenPipe {
+                self.note(format_args!("effectcraft-cli: cannot write to stdout: {e}"));
+            }
+        }
     }
 }
 

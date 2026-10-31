@@ -255,3 +255,31 @@ fn help_is_the_named_subcommands_even_after_global_flags_and_mistakes() {
     assert_eq!(r.code, 0);
     assert!(r.stdout.contains("Usage: effectcraft-cli [OPTIONS] <COMMAND>"), "{}", r.stdout);
 }
+
+/// A writer whose writes are buffered and whose flush fails, like a full disk behind a buffer.
+struct FlushFails;
+
+impl Write for FlushFails {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::StorageFull.into())
+    }
+}
+
+#[test]
+fn a_failed_final_flush_is_an_error() {
+    let mut err = Vec::new();
+    let code = effectcraft_cli::run(["commands", "--filter", "layer.new"], &mut FlushFails, &mut err);
+    assert_eq!(code, 1);
+    assert!(String::from_utf8_lossy(&err).contains("cannot write to stdout"), "{}", String::from_utf8_lossy(&err));
+}
+
+/// With `--project`, an argument that ends `.ecproj` is a value, not a second project.
+#[test]
+fn a_project_flag_leaves_the_positionals_alone() {
+    let r = invoke(&["set", "--project", "work.ecproj", "Main", "#1", "text/sourceText", "caption.ecproj"]);
+    assert_ne!(r.code, 2, "{}", r.stderr);
+    usage_error(&["run", "a.ecproj", "b.ecproj", "project.summary"], "two projects given");
+}

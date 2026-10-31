@@ -78,7 +78,6 @@ where
         Command::Mcp(a) => commands::mcp(a),
     };
     let code = match result {
-        Ok(()) if io.stdout_broken() => 1,
         Ok(()) => 0,
         Err(CliError::Reported) => 1,
         Err(e) => {
@@ -90,5 +89,5 @@ where
         }
     };
     io.flush();
-    code
+    if code == 0 && io.stdout_broken() { 1 } else { code }
 }

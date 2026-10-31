@@ -612,21 +612,18 @@ fn json(s: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str(s)
 }
 
-/// Take the project out of the positionals: the one ending `.ecproj` (the first), unless
-/// `--project` named it.
+/// Take the project out of the positionals: the one ending `.ecproj` (the first). With `--project`
+/// the positionals are left alone, so a value that ends `.ecproj` (a text layer's caption) stays one.
 fn take_project(pos: &mut Vec<String>, flag: Option<&String>) -> Result<Option<String>, UsageError> {
+    if let Some(flag) = flag {
+        return Ok(Some(flag.clone()));
+    }
     let mut found = pos.iter().enumerate().filter(|(_, p)| p.ends_with(".ecproj")).map(|(i, _)| i);
     let first = found.next();
-    if let (Some(flag), Some(_)) = (flag, first) {
-        return Err(UsageError::TwoProjects(flag.clone(), pos.get(first.unwrap_or(0)).cloned().unwrap_or_default()));
+    if let (Some(first), Some(second)) = (first, found.next()) {
+        return Err(UsageError::TwoProjects(pos.get(first).cloned().unwrap_or_default(), pos.get(second).cloned().unwrap_or_default()));
     }
-    if let Some(second) = found.next() {
-        return Err(UsageError::TwoProjects(pos.get(first.unwrap_or(0)).cloned().unwrap_or_default(), pos.get(second).cloned().unwrap_or_default()));
-    }
-    Ok(match first {
-        Some(i) => Some(pos.remove(i)),
-        None => flag.cloned(),
-    })
+    Ok(first.map(|i| pos.remove(i)))
 }
 
 /// The project of a command with at most one positional, which is the project.
