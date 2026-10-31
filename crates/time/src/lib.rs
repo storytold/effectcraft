@@ -47,7 +47,8 @@ impl Tick {
     /// Conversion from a rational timestamp `pts * num / den` seconds (container timebases).
     pub fn from_rational(pts: i64, num: i64, den: i64) -> Tick {
         let t = (pts as i128).saturating_mul(num as i128).saturating_mul(TICKS_PER_SECOND as i128);
-        Tick(clamp128(t.div_euclid(nonzero(den))))
+        // i128::MIN / -1 does not fit; the true quotient is far above Tick's range, so saturate.
+        Tick(clamp128(t.checked_div_euclid(nonzero(den)).unwrap_or(i128::MAX)))
     }
     /// Inverse of [`Tick::from_rational`], floored to the timebase.
     pub fn to_rational_floor(self, num: i64, den: i64) -> i64 {
@@ -732,6 +733,12 @@ mod tests {
         assert_eq!(fmt(-3700.0), "-01:01:40:00000");
     }
 
+    #[test]
+    fn from_rational_extreme_values_do_not_overflow() {
+        // The saturated numerator is i128::MIN; dividing it by -1 used to overflow.
+        assert_eq!(Tick::from_rational(i64::MIN, i64::MAX, -1), Tick(i64::MAX));
+        assert_eq!(Tick::from_rational(i64::MAX, i64::MAX, -1), Tick(i64::MIN));
+    }
     #[test]
     fn rational_conversions() {
         // 90 kHz MPEG timebase
