@@ -148,10 +148,14 @@ impl<'a> EvalCtx<'a> {
         if !remap && !matches!(layer.source, LayerSource::Comp { .. }) {
             return 100.0 / layer.stretch;
         }
-        // A central difference over a millisecond (time remap keys are interpolated piecewise).
+        // The median slope of three adjacent millisecond intervals around the time: a Hold key's
+        // jump falls in one interval at most, and it is a cut, not a rate. On smooth or piecewise
+        // linear mappings this is the central difference (a kink at the time averages its sides).
         let h = 1e-3;
         let at = |dt: f64| self.at(self.time + Tick::from_seconds_f64(dt)).source_time(layer).seconds();
-        (at(h) - at(-h)) / (2.0 * h)
+        let (a, b, c, d) = (at(-1.5 * h), at(-0.5 * h), at(0.5 * h), at(1.5 * h));
+        let (s0, s1, s2) = ((b - a) / h, (c - b) / h, (d - c) / h);
+        s0.max(s1).min(s0.min(s1).max(s2))
     }
 
     /// The time a precomp layer's nested comp is shown at: [`Self::source_time`], floored to

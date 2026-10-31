@@ -63,3 +63,36 @@ fn time_remap_picks_the_source_frame() {
     assert!(img.get(90, 50)[3] > 0.99, "frozen at the end position");
     assert!(img.get(10, 50)[3] < 0.01);
 }
+
+/// `source_rate` of a layer whose Time Remap has `keys`, at comp time `t`.
+fn remap_rate(keys: Vec<Keyframe>, t: f64) -> f64 {
+    let mut p = Project::default();
+    let comp = Comp::new(100, 100, FrameRate::FPS_30, s(4.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 10, height: 10, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &comp, "S", LayerSource::Solid { item: sid }, (10, 10), None);
+    let mut next = p.next_id;
+    let mut tr = Ids(&mut next).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+    p.next_id = next;
+    tr.keys = keys;
+    l.props.children.push(Node::Prop(tr));
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    crate::EvalCtx::new(&p, cid, c, s(t)).source_rate(&c.layers[0])
+}
+
+#[test]
+fn a_time_remap_cut_is_not_a_source_rate() {
+    // Hold keys jump 3 s of source time at 1 s: the source stands still on both sides. As a
+    // difference across the cut the rate read about 1,500, and a nested shutter that many
+    // frames long sampled far outside the frame.
+    let hold = || vec![Keyframe::new(Tick::ZERO, Value::Scalar(0.0)).hold(), Keyframe::new(s(1.0), Value::Scalar(3.0)).hold()];
+    for t in [1.0, 1.0002, 0.9998, 1.001] {
+        assert!(remap_rate(hold(), t).abs() < 1e-6, "at {t}: {}", remap_rate(hold(), t));
+    }
+    // A ramp keeps its slope, also right after a cut.
+    let ramp = || vec![Keyframe::new(Tick::ZERO, Value::Scalar(0.0)), Keyframe::new(s(2.0), Value::Scalar(4.0))];
+    assert!((remap_rate(ramp(), 1.0) - 2.0).abs() < 1e-3, "{}", remap_rate(ramp(), 1.0));
+    let cut = vec![Keyframe::new(Tick::ZERO, Value::Scalar(0.0)).hold(), Keyframe::new(s(1.0), Value::Scalar(3.0)), Keyframe::new(s(2.0), Value::Scalar(5.0))];
+    assert!((remap_rate(cut, 1.0002) - 2.0).abs() < 1e-3);
+}
