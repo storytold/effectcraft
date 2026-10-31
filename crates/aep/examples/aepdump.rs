@@ -1,4 +1,6 @@
 //! Developer tool: prints the chunk tree of an .aep (ids, sizes, short data), match names inline.
+//!
+//! Usage: `cargo run -p effectcraft-aep --example aepdump -- FILE.aep [max depth, default 4] [hex bytes, default 32]`
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{Body, Chunk};
 
