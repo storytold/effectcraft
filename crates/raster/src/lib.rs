@@ -296,7 +296,7 @@ impl Image {
     /// From straight-alpha 8-bit RGBA.
     pub fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Image {
         let mut img = Image::new(width, height);
-        img.data.par_iter_mut().zip(rgba.par_chunks(4)).for_each(|(p, s)| {
+        img.data.par_iter_mut().zip(rgba.par_chunks_exact(4)).for_each(|(p, s)| {
             let a = s[3] as f32 / 255.0;
             *p = [s[0] as f32 / 255.0 * a, s[1] as f32 / 255.0 * a, s[2] as f32 / 255.0 * a, a];
         });
@@ -430,6 +430,15 @@ mod tests {
         let img = Image::from_rgba8(2, 2, &src);
         assert_eq!(img.to_rgba8_dithered(), img.to_rgba8());
         assert_eq!(img.to_rgba8_over_dithered([0.0; 3]), img.to_rgba8_over([0.0; 3]));
+    }
+
+    #[test]
+    fn from_rgba8_ignores_a_truncated_trailing_pixel() {
+        let img = Image::from_rgba8(1, 1, &[255, 0]);
+        assert_eq!(img.get(0, 0), [0.0; 4]);
+        let img = Image::from_rgba8(2, 1, &[255, 255, 255, 255, 9, 9]);
+        assert_eq!(img.get(0, 0), [1.0; 4]);
+        assert_eq!(img.get(1, 0), [0.0; 4]);
     }
 
     #[test]
