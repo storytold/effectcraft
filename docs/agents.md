@@ -461,11 +461,24 @@ scenes with depth stabilise where one perspective transform cannot;
 `effects/#1/advanced/rollingShutterRipple` (0 Automatic Reduction, 1 Enhanced Reduction: a finer,
 softer mesh) tunes it.
 
+`warp.applyToTransform {layer?, effect?}` (the effect's **Apply to Transform** button) bakes an
+analysed stabilization into the layer and removes the Warp Stabilizer, as one undo step.
+Position and Position, Scale, Rotation become one Position / Rotation / Scale keyframe per
+analysed frame on top of the layer's own transform (the Anchor Point is kept). Perspective, and
+layers whose transform can't carry the warp exactly (non-square pixels, non-uniform scale with a
+rotating warp, X/Y Rotation, Auto-Orient, expressions on Transform), get a keyframed Corner Pin
+in the Warp Stabilizer's place instead (`target: "cornerPin"` and a `reason`). Stabilize, Crop
+and Crop, Auto-scale add a keyframed "Warp Stabilizer Crop" mask. Subspace Warp and Synthesize
+Edges are refused. With the Transform target, effects below the Warp Stabilizer now render before
+the stabilization (`effectsAfter`), and the layer isn't clipped to its frame any more.
+
 ```sh
 effectcraft-cli run shaky.ecproj track.warpStabilizer '{"layer":"#1","wait":true}' \
   prop.set '{"layer":"#1","path":"effects/#1/stabilization/result","value":1}' --save
 effectcraft-cli exec warp.analyze '{"layer":"#1","wait":true}' shaky.ecproj --save --json
 effectcraft-cli exec warp.status '{"layer":"#1"}' shaky.ecproj --json
+effectcraft-cli run shaky.ecproj prop.set '{"layer":"#1","path":"effects/#1/stabilization/method","value":1}' \
+  warp.applyToTransform '{"layer":"#1"}' --save
 ```
 
 ### 3D Camera Tracker

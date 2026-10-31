@@ -477,7 +477,10 @@ translation / similarity / homography fits) as JSON in the effect's hidden Analy
 with a key of the layer's source, In/Out, start, stretch and Time Remap. `Session::edit` clears
 analyses whose key no longer matches and queues them; the desktop app re-analyses them in the
 background. Rendering derives the stabilization plan (smoothed camera path or No Motion, framing,
-auto-scale; cached per analysis and settings) and warps each frame. Subspace Warp also stores long
+auto-scale; cached per analysis and settings) and warps each frame. `warp.applyToTransform`
+(`engine::warp::apply_to_transform`) bakes a non-mesh plan into Position / Rotation / Scale keys
+(L' = L · W per frame, keeping the Anchor Point) or a keyed Corner Pin when W or the layer needs
+more than a similarity, plus a keyed mask for the crop. Subspace Warp also stores long
 feature trajectories in the analysis, smooths them in a low-rank subspace (Liu et al. 2011) and
 warps each frame with a content-preserving mesh (Liu et al. 2009) fitted to the smoothed
 positions, rendered as a per-pixel mesh lookup; Synthesize Edges fills the
