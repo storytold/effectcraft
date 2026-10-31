@@ -451,3 +451,34 @@ fn mute_round_trips_and_survives_value_replacement() {
     assert!(keys[0].muted);
     assert_eq!(keys[0].value, Value::Scalar(2.0));
 }
+
+#[test]
+fn linear_side_facing_an_ease_in_uses_a_sixth_influence() {
+    // A 1000 px slide-in over 1 s: linear out, then speed 0 at 100 % influence in. The progress
+    // curve has its time handles at 1/6 and 0 and its value handles at 1/6 and 1, so at t = 0.25 s
+    // it has covered 67.578 % of the way (675.78 px). A 1/3 linear handle would give exactly 62.5 %
+    // (625 px), 51 px behind.
+    let t = 0.25;
+    let mut a = Keyframe::new(s(0.0), Value::Vec2([-1000.0, 360.0]));
+    let mut b = Keyframe::new(s(1.0), Value::Vec2([0.0, 360.0]));
+    a.spatial_auto = false;
+    b.spatial_auto = false;
+    b.in_interp = Interp::Bezier;
+    b.out_interp = Interp::Bezier;
+    b.in_ease = vec![Ease { speed: 0.0, influence: 1.0 }];
+    let x = evaluate(&[a.clone(), b.clone()], s(t), true).unwrap().components()[0];
+    assert!((x - (-1000.0 + 675.78)).abs() < 0.05, "{x}");
+    // The same rule for a plain number (one dimension), and the mirrored segment.
+    let mut p = Keyframe::new(s(0.0), Value::Scalar(0.0));
+    let mut q = Keyframe::new(s(1.0), Value::Scalar(1000.0));
+    q.in_interp = Interp::Bezier;
+    q.in_ease = vec![Ease { speed: 0.0, influence: 1.0 }];
+    let v = evaluate(&[p.clone(), q.clone()], s(t), false).unwrap().as_f64();
+    assert!((v - 675.78).abs() < 0.05, "{v}");
+    p.out_interp = Interp::Bezier;
+    p.out_ease = vec![Ease { speed: 0.0, influence: 1.0 }];
+    q.in_interp = Interp::Linear;
+    q.in_ease.clear();
+    let w = evaluate(&[p, q], s(1.0 - t), false).unwrap().as_f64();
+    assert!((w - (1000.0 - 675.78)).abs() < 0.05, "{w}");
+}

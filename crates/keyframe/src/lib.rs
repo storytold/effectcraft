@@ -546,6 +546,12 @@ fn evaluate_active<K: Borrow<Keyframe>>(keys: &[K], t: Tick, spatial: bool) -> O
     Some(segment_value_of(keys, i, t, spatial))
 }
 
+/// Influence of a linear side in a segment whose other side is Bezier: the handle lies on the
+/// chord's slope and reaches 1/6 of the segment, as After Effects renders it. Observed on Position
+/// keys that slide in linearly and ease in fully: with a 1/3 handle the layer sat visibly off After
+/// Effects' frames during the move, with a 1/6 handle it matched them.
+pub const LINEAR_SIDE_INFLUENCE: f64 = 1.0 / 6.0;
+
 /// Value inside segment `i` → `i+1` at time `t`.
 pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Value {
     segment_value_of(keys, i, t, spatial)
@@ -561,6 +567,9 @@ fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial:
     let (t0, t1) = (secs(a.time), secs(b.time));
     let dur = (t1 - t0).max(1e-12);
     let x = ((secs(t) - t0) / dur).clamp(0.0, 1.0);
+    // A linear side facing a Bezier side is a handle on the straight segment's slope (its speed)
+    // with After Effects' default 16.67 % influence, not 33.3 %: measured on Position keys that
+    // slide in linearly and ease in fully (LINEAR_SIDE_INFLUENCE). Two linear sides are a lerp.
     let lin_out = a.out_interp == Interp::Linear;
     // A Hold in-side only matters for the segment it ends, which the out side above decides:
     // it shapes the incoming segment like a linear side, as in the Graph Editor and Lottie export.
@@ -576,8 +585,8 @@ fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial:
         let f = if lin_out && lin_in || len <= 1e-12 {
             x
         } else {
-            let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, true, true) };
-            let ei = if lin_in { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, true, false) };
+            let eo = if lin_out { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, true, true) };
+            let ei = if lin_in { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, true, false) };
             ease_progress(eo.speed * dur / len, eo.influence, ei.speed * dur / len, ei.influence, x)
         };
         // A straight path (both handles on the chord, as auto-Bezier keys on a line have) is the
@@ -596,16 +605,16 @@ fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial:
     let cb = b.value.components();
     if ca.is_empty() || ca.len() != cb.len() {
         // Paths, gradients: ease on dimension 0 as overall progress.
-        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, false, true) };
-        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, false, false) };
+        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, false, true) };
+        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, false, false) };
         let f = ease_progress(eo.speed * dur, eo.influence, ei.speed * dur, ei.influence, x);
         return a.value.lerp(&b.value, f);
     }
     let mut out = Vec::with_capacity(ca.len());
     for d in 0..ca.len() {
         let dv = cb[d] - ca[d];
-        let eo = if lin_out { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, d, false, true) };
-        let ei = if lin_in { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, d, false, false) };
+        let eo = if lin_out { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, d, false, true) };
+        let ei = if lin_in { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, d, false, false) };
         // Bezier in (time, value) space directly: P1 = (i0, v0 + s0*i0*dur), P2 = (1-i1, v1 - s1*i1*dur).
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
         let u = solve_u(0.0, i0, 1.0 - i1, 1.0, x);
