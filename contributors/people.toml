@@ -117,3 +117,8 @@ real_name = "Ashok Ram"
 
 [people.dylanmtaylor]
 sync_github_name = true
+
+[people.marshiyar]
+real_name = "Arshiya Rahgozar"
+display_name = "Arshiya"
+sync_github_name = false
