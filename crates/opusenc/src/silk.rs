@@ -233,7 +233,12 @@ impl Channel {
         let sub = self.sub;
         let order = self.order;
         let st = &mut self.dec;
-        let nf = &mut self.nf;
+        // Noise-feedback history, most recent first, as a double-length ring: `ring[pos..pos + 16]`
+        // is always the contiguous window (a new sample goes to `pos` and `pos + 16`).
+        let mut ring = [0f64; 2 * MAX_LPC_ORDER];
+        ring[..MAX_LPC_ORDER].copy_from_slice(&self.nf);
+        ring[MAX_LPC_ORDER..].copy_from_slice(&self.nf);
+        let mut pos = 0usize;
         let off = if p.signal_type == 0 { offset + INACTIVE_OFFSET } else { offset };
         let gamma = nf_gamma(off);
         let mut nf_c = [0f64; MAX_LPC_ORDER];
@@ -351,7 +356,7 @@ impl Channel {
                 }
                 let lpc_q14 = lpc_pred.saturating_mul(16);
                 // Target excitation (Q14) for this sample.
-                let fb: f64 = (0..order).map(|j| nf_c[j] * nf[j]).sum();
+                let fb: f64 = (0..order).map(|j| nf_c[j] * ring[pos + j]).sum();
                 let tgt = (x[n] as f64 + fb).clamp(-32768.0, 32767.0) * inv_g - lpc_q14 as f64 - ltp_q14 as f64;
                 let sgn = if seed_v < 0 { -1.0 } else { 1.0 };
                 let u = sgn * tgt;
@@ -390,11 +395,14 @@ impl Channel {
                 let v = res.saturating_add(lpc_q14);
                 s_lpc[MAX_LPC_ORDER + i] = v;
                 xq[n] = sat16(rshift_round(smulww(v, gain_q10), 8)) as i16;
-                nf.copy_within(0..MAX_LPC_ORDER - 1, 1);
-                nf[0] = xq[n] as f64 - x[n] as f64;
+                pos = if pos == 0 { MAX_LPC_ORDER - 1 } else { pos - 1 };
+                let err = xq[n] as f64 - x[n] as f64;
+                ring[pos] = err;
+                ring[pos + MAX_LPC_ORDER] = err;
             }
             s_lpc.copy_within(sub..sub + MAX_LPC_ORDER, 0);
         }
+        self.nf.copy_from_slice(&ring[pos..pos + MAX_LPC_ORDER]);
         st.s_lpc_q14.copy_from_slice(&s_lpc[..MAX_LPC_ORDER]);
         st.out_buf[..l].copy_from_slice(&xq);
         (Coded { gain_ix, gains_q16, seed, pulses }, xq)
@@ -479,6 +487,14 @@ struct Prep {
     mid_only: bool,
     pred_ix: [[usize; 3]; 2],
     pred_q13: [i32; 2],
+}
+
+/// One rate-loop trial: the frame coded at gain offset `offset`.
+struct Trial {
+    offset: f64,
+    bits: i32,
+    state: SilkEncoder,
+    coder: RangeEncoder,
 }
 
 /// SILK encoder for one mono or stereo (mid/side) stream.
@@ -631,11 +647,20 @@ impl SilkEncoder {
     pub fn encode(&mut self, input: &[Vec<f32>], target_bits: f64, max_bits: i32, enc: &mut RangeEncoder) {
         let prep = self.prepare(input);
         let start_bits = enc.tell();
-        let trial = |s: &Self, o: f64| -> i32 {
-            let mut t = s.clone();
-            let mut e = enc.clone();
-            t.code(&prep, o, &mut e);
-            e.tell() - start_bits
+        // Every trial codes the frame into a clone of the encoder and the range coder. The result
+        // is kept per offset: the hard-limit check below hits the memo for the chosen offset, and
+        // the final step adopts that trial instead of coding the frame once more.
+        let mut trials: Vec<Trial> = Vec::new();
+        let mut trial = |s: &Self, o: f64| -> i32 {
+            if let Some(t) = trials.iter().find(|t| t.offset == o) {
+                return t.bits;
+            }
+            let mut state = s.clone();
+            let mut coder = enc.clone();
+            state.code(&prep, o, &mut coder);
+            let bits = coder.tell() - start_bits;
+            trials.push(Trial { offset: o, bits, state, coder });
+            bits
         };
         // Bisection on the gain offset: the smallest offset (finest quantisation) within budget.
         let target = target_bits.min(max_bits as f64);
@@ -697,8 +722,15 @@ impl SilkEncoder {
         while trial(self, o) > max_bits && o < 12.0 {
             o += 1.0;
         }
+        match trials.iter().position(|t| t.offset == o) {
+            Some(i) => {
+                let t = trials.swap_remove(i);
+                *self = t.state;
+                *enc = t.coder;
+            }
+            None => self.code(&prep, o, enc),
+        }
         self.last_offset = o;
-        self.code(&prep, o, enc);
         for ch in 0..self.channels {
             self.ch[ch].push_history(&prep.x[ch]);
         }
