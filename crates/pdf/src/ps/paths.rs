@@ -22,7 +22,7 @@ impl Interp {
     }
 
     /// Stop the program when a path of `len` elements would be longer than [`MAX_PATH`].
-    fn path_fits(&mut self, len: usize) -> Result<(), Flow> {
+    pub(super) fn path_fits(&mut self, len: usize) -> Result<(), Flow> {
         if len <= MAX_PATH {
             return Ok(());
         }
@@ -124,7 +124,12 @@ impl Interp {
         Ok(())
     }
 
-    pub(super) fn paint(&mut self, fill: Option<FillRule>, stroke: bool) {
+    pub(super) fn paint(&mut self, fill: Option<FillRule>, stroke: bool) -> Result<(), Flow> {
+        if stroke && let Some((a, _)) = &self.gs.dash {
+            // Each stroke keeps its own scaled copy of the dash array in the output; charge it so a
+            // large dash painted in a loop is bounded. Ordinary dashes are a handful of numbers.
+            self.allocate(a.len().saturating_mul(std::mem::size_of::<f64>()))?;
+        }
         let path = std::mem::take(&mut self.gs.path);
         self.gs.cur = None;
         self.gs.start = None;
@@ -139,14 +144,16 @@ impl Interp {
             dash: self.gs.dash.as_ref().map(|(a, o)| (a.iter().map(|v| v * s).collect(), o * s)),
         });
         self.b.fill_stroke(path, Affine::IDENTITY, fill.map(|r| (Paint::Color(self.gs.color), 1.0, r)), st);
+        Ok(())
     }
 
+    /// Read scalar or array rectangle operands, charging array snapshots and generated path work.
     pub(super) fn rect_path(&mut self) -> Result<Vec<BezPath>, Flow> {
         // x y w h, or an array / string of numbers.
         let top = self.pop();
         let nums: Vec<f64> = match &top {
             V::Array(_) | V::Proc(_) => {
-                let items = top.items().unwrap_or_default();
+                let items = self.items(&top)?;
                 // An array's rectangles count against the budget, five path elements each.
                 self.spend(items.len() / 4 * 5)?;
                 items.iter().filter_map(V::num).collect()
