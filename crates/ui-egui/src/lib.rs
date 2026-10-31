@@ -340,6 +340,9 @@ pub struct EffectcraftApp {
     pub(crate) dialog_answers: (Sender<DialogAnswer>, Receiver<DialogAnswer>),
     /// Those dialogs that are up, for blocking floating panels' OS windows meanwhile.
     pub(crate) file_dialogs: FileDialogsUp,
+    /// How many of those dialogs are on screen. While one is, the Edit menu is disabled so its
+    /// Cmd+A / Cmd+C / Cmd+V reach the dialog instead of the window behind it (#1986).
+    pub(crate) native_dialogs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Commands from the native menu bar.
     pub command_inbox: Option<Receiver<String>>,
     /// Pointer position in comp pixels (Info panel).

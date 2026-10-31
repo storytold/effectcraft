@@ -29,6 +29,14 @@ pub enum Role {
     Hide,
     HideOthers,
     ShowAll,
+    /// Edit's text commands while a native file dialog is up: AppKit sends `undo:`, `cut:`,
+    /// `copy:`, `paste:` and `selectAll:` to the key window, i.e. the dialog (#1986).
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
 }
 
 /// One node of the native menu.
@@ -225,6 +233,26 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                         "app.showAll" => Some(Role::ShowAll),
                         _ => None,
                     };
+                    // While a native file dialog is up, its Cmd+A / C / V / X / Z are the Edit menu's
+                    // own: the dialog has no key equivalents, it relies on the menu bar sending
+                    // `selectAll:` & co. down the responder chain. A disabled item does nothing.
+                    let dialog_role = if cfg!(target_os = "macos") && app.native_dialogs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                        match e.command.as_str() {
+                            "edit.undo" => Some(Role::Undo),
+                            "edit.redo" => Some(Role::Redo),
+                            "edit.cut" => Some(Role::Cut),
+                            "edit.copy" => Some(Role::Copy),
+                            "edit.paste" => Some(Role::Paste),
+                            "edit.selectAll" => Some(Role::SelectAll),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(role) = dialog_role {
+                        out.push(NativeNode::Predefined { role, label: crate::menus::entry_label(app, e), command: e.command.clone() });
+                        continue;
+                    }
                     if let Some(role) = role {
                         // Services sits just above Hide, as in every Mac app.
                         if role == Role::Hide && !services_added {
@@ -372,7 +400,14 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.keymaps.active.hash(&mut h);
     let v = &app.ui.viewer;
     (v.rulers, v.guides, v.snap_guides, v.lock_guides, v.grid, v.snap_grid, v.show_layer_controls, v.pasteboard).hash(&mut h);
-    (app.ui.cache_when_idle, app.session.prefs.preview.active().include_audio, &app.ui.workspace, app.dialog.is_some()).hash(&mut h);
+    (
+        app.ui.cache_when_idle,
+        app.session.prefs.preview.active().include_audio,
+        &app.ui.workspace,
+        app.dialog.is_some(),
+        app.native_dialogs.load(std::sync::atomic::Ordering::Relaxed),
+    )
+        .hash(&mut h);
     // Window menu check marks: the panels on screen.
     crate::dock::PanelKind::ALL.iter().filter(|p| crate::menus::panel_shown(app, **p)).for_each(|p| p.hash(&mut h));
     h.finish()
@@ -584,6 +619,40 @@ mod tests {
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
         assert_eq!(translated, ["Služby", "Skrýt EffectCraft", "Skrýt ostatní", "Zobrazit vše"]);
+    }
+
+    /// While a native file dialog is up, Edit's text commands are macOS' own items so Cmd+A
+    /// reaches the dialog (#1986); the other Edit items are disabled.
+    #[test]
+    fn edit_text_commands_are_predefined_while_a_file_dialog_is_open() {
+        let app = app();
+        let roles = |spec: &NativeMenu| {
+            fn rec(n: &[NativeNode], out: &mut Vec<Role>) {
+                for x in n {
+                    match x {
+                        NativeNode::Predefined { role, .. } => out.push(*role),
+                        NativeNode::Submenu { children, .. } => rec(children, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = vec![];
+            rec(&spec.menus, &mut out);
+            out
+        };
+        let before = build(&app);
+        app.native_dialogs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let during = build(&app);
+        if cfg!(target_os = "macos") {
+            let r = roles(&during);
+            for role in [Role::Undo, Role::Cut, Role::Copy, Role::Paste, Role::SelectAll] {
+                assert!(r.contains(&role), "{role:?} must be a predefined item");
+            }
+            assert_ne!(before.structure(), during.structure(), "the native menu is rebuilt");
+            assert!(during.items().iter().all(|i| i.command != "edit.selectAll"));
+        } else {
+            assert_eq!(roles(&before), roles(&during));
+        }
     }
 
     #[test]

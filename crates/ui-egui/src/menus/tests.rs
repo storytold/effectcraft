@@ -592,3 +592,35 @@ fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
+
+/// While a native file dialog is up, the Edit menu is disabled on macOS so the OS hands Cmd+A
+/// to the dialog instead of selecting in the Project panel behind it (#1986). Elsewhere the
+/// menu stays as it was.
+#[test]
+fn edit_menu_is_disabled_while_a_file_dialog_is_open() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("file.openDemoProject", json!({})).unwrap();
+    app.ui.focused = PanelKind::Project;
+    let ctx = egui::Context::default();
+    let entries = effectcraft_engine::menus::entries();
+    let select_all = entries.iter().map(|(_, e)| e).find(|e| e.command == "edit.selectAll").expect("Select All is in the menu");
+    let import = entries.iter().map(|(_, e)| e).find(|e| e.command == "file.import").expect("Import is in the menu");
+    assert!(entry_enabled(&app, select_all));
+    let steps_aside = cfg!(target_os = "macos");
+    let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |_, done| queue.lock().unwrap().push(done)));
+    invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+    assert_eq!(!entry_enabled(&app, select_all), steps_aside, "Cmd+A must reach the dialog on macOS only");
+    assert!(entry_enabled(&app, import), "only the Edit menu steps aside");
+    // Cancelled: the menu is back.
+    let done = pending.lock().unwrap().pop().expect("a dialog was shown");
+    done(Vec::new());
+    assert!(entry_enabled(&app, select_all));
+    // Discarded unanswered: the menu is back too.
+    invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+    assert_eq!(!entry_enabled(&app, select_all), steps_aside);
+    drop(pending.lock().unwrap().pop());
+    assert!(entry_enabled(&app, select_all));
+}

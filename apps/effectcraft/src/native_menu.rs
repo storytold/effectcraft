@@ -118,6 +118,12 @@ impl NativeBar {
                         Role::Hide => PredefinedMenuItem::hide(Some(label)),
                         Role::HideOthers => PredefinedMenuItem::hide_others(Some(label)),
                         Role::ShowAll => PredefinedMenuItem::show_all(Some(label)),
+                        Role::Undo => PredefinedMenuItem::undo(Some(label)),
+                        Role::Redo => PredefinedMenuItem::redo(Some(label)),
+                        Role::Cut => PredefinedMenuItem::cut(Some(label)),
+                        Role::Copy => PredefinedMenuItem::copy(Some(label)),
+                        Role::Paste => PredefinedMenuItem::paste(Some(label)),
+                        Role::SelectAll => PredefinedMenuItem::select_all(Some(label)),
                     };
                     parent.append(&item)
                 }

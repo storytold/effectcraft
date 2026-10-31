@@ -34,13 +34,23 @@ pub fn show_asked(asked: &std::sync::mpsc::Receiver<Asked>, frame: &eframe::Fram
 }
 
 fn show(dialog: FileDialog, done: DialogDone, frame: &eframe::Frame, ctx: egui::Context) {
-    let answer = open(dialog, frame);
+    // The dialog was counted after this frame updated the native menu, which must step aside
+    // before the next key (#1986).
+    ctx.request_repaint();
+    // The worker exists before the sheet opens: if it can't be created, `done` (and the guard it
+    // carries) drops with no sheet on screen, instead of leaving an interactive sheet nobody awaits.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Answer>(1);
     let spawned = std::thread::Builder::new().name("ec-file-dialog".into()).spawn(move || {
+        let Ok(answer) = rx.recv() else { return };
         done(pollster::block_on(answer));
         ctx.request_repaint();
     });
     if let Err(e) = spawned {
         log::error!("file dialog: {e}");
+        return;
+    }
+    if tx.send(open(dialog, frame)).is_err() {
+        log::error!("file dialog: worker exited before receiving the dialog");
     }
 }
 
