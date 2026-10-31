@@ -202,9 +202,12 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
             _ => rows.push(three(&mut it)?),
         }
     }
+    if lut.n3 > 256 {
+        return None;
+    }
     let need1 = lut.n1;
     let need3 = lut.n3 * lut.n3 * lut.n3;
-    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || rows.len() != need1 + need3 || lut.n3 > 256 {
+    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || Some(rows.len()) != need1.checked_add(need3) {
         return None;
     }
     lut.d1 = rows[..need1].to_vec();
@@ -464,6 +467,10 @@ mod tests {
     fn bad_cube_is_passthrough() {
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").is_none());
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 zz\n").is_none());
+        // A hostile size must be rejected, not overflow `n3^3` or `n1 + n3^3`.
+        assert!(parse_cube("LUT_3D_SIZE 4294967296\n0 0 0\n").is_none());
+        assert!(parse_cube(&format!("LUT_3D_SIZE {}\n0 0 0\n", usize::MAX)).is_none());
+        assert!(parse_cube(&format!("LUT_1D_SIZE {}\nLUT_3D_SIZE 2\n0 0 0\n", usize::MAX)).is_none());
         let img = test_img();
         let out = run("ec.utility.applylut", &[("lut", Value::Str("LUT_3D_SIZE 3\n0 0 0\n".into()))], img.clone());
         assert_eq!(out.img, img);
