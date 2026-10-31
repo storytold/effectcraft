@@ -63,6 +63,13 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
 
 ## Choosing a Japanese word
 
+This section is about Japanese, and only Japanese. What a Simplified Chinese, Traditional
+Chinese or any other catalog says is for the people who read that language to decide; a change to
+one of those catalogs belongs with them, and this document records the reasoning for Japanese
+rather than setting a standard another language should follow. A contributor who does not read a
+language has no standing to choose its words, which is the same courtesy this catalog asks for
+itself.
+
 One rule, and the consequences that follow from it: **a Japanese word comes from the installed
 After Effects 2026 interface, not from a dictionary.** Where that interface has no such word, the
 catalog says what it did instead.
