@@ -25,7 +25,7 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   below.
 - **Panels, dialogs, buttons, tooltips:** `crates/ui-egui/src/i18n/ui.rs`, keyed by the English
   source string, with English fallback. Catalogs exist for Japanese (1,065 rows), Simplified
-  Chinese (1,068), Traditional Chinese (1,019), Ukrainian (530), Brazilian Portuguese (699),
+  Chinese (1,064), Traditional Chinese (1,017), Ukrainian (527), Brazilian Portuguese (699),
   Czech (521) and Spanish (516); counted at this tree. Georgian has
   the Simplified Chinese catalog's 694 rows, plus 191 for panels converted to the catalog since
   (885 in all).
@@ -57,7 +57,7 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   (`match_system_uses_the_system_language_where_there_is_a_catalog`).
 - **Fonts:** no bundled CJK font; the UI installs system fallbacks probed by script (Kana, Han,
   Arabic, Hebrew, Devanagari, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam,
-  Thai and Hangul: `crates/ui-egui/src/theme.rs`; the Hangul probe was added for #599, closed). The web build has no system fonts.
+  Thai, Georgian and Hangul: `crates/ui-egui/src/theme.rs`; the Hangul probe was added for #599, closed). The web build has no system fonts.
 - **Script support in the interface:** egui draws text without complex shaping or right-to-left
   layout, so an Arabic or Hindi interface would render unshaped and left to right. **In text
   layers** (`crates/text`) shaping (harfrust), bidi (UAX #9), vertical text and Tate-Chu-Yoko
@@ -91,7 +91,7 @@ catalog says what it did instead.
 |---|---|---|---|
 | Take Snapshot | 拍摄快照 | スナップショット | the viewer's snapshot button, by its accessible name |
 | Toggle Transparency Grid | 切换透明网格 | 透明グリッド | viewer footer |
-| Half / Third / Quarter | 二分之一 | 1/2 画質 / 1/3 画質 / 1/4 画質 | resolution menu, with the space: `1/2画質` is the near miss a later edit introduced |
+| Half / Third / Quarter | 二分之一 / 三分之一 / 四分之一 | 1/2 画質 / 1/3 画質 / 1/4 画質 | resolution menu, with the space: `1/2画質` is the near miss a later edit introduced |
 | Anchor Point | 锚点 | アンカーポイント | the animator pop-up and the properties group |
 | Line Spacing | 行距 | ラインスペース | the animator pop-up |
 | Character Value | 字符值 | 文字コード | the animator pop-up |
@@ -101,7 +101,7 @@ catalog says what it did instead.
 | 3D Renderer | 3D 渲染器 | 3D レンダラー | Composition Settings; the space is part of it |
 | Fit selection to view | 使所选内容适合视图 | 選択範囲に合わせて表示 | the magnification menu |
 | Extended Viewer | 扩展查看器 | 拡張ビューア | the view menu |
-| Toggle Hold Keyframe | — | 停止したキーフレームの切り替え | Animation ▸ Keyframe |
+| Toggle Hold Keyframe | 切换定格关键帧 | 停止したキーフレームの切り替え | Animation ▸ Keyframe |
 | Enable Time Remapping | 启用时间重映射 | タイムリマップを有効にする | Layer ▸ Time |
 | Time-Reverse Layer | 时间反向图层 | 時間反転レイヤー | Layer ▸ Time |
 | Create Shapes from Vector Layer | 从矢量图层创建形状 | ベクトルレイヤーからシェイプを作成 | Layer ▸ Create |
@@ -145,11 +145,11 @@ stronger evidence than a draft, but it is not proofreading.
 
 Measured 10 October 2026 at `origin/main` 1446e27, recounted on 22 October 2026 at `ad8b6acb`,
 and recounted again at `origin/main` a926aa91
-by counting the entries of each `const` table (one entry per row, whether it is written on one
-line or wrapped), in `crates/ui-egui/src/i18n.rs`, `i18n/ui.rs` and `i18n/effects.rs`: 633 menu rows, 1,068
-panel/dialog sources in Simplified Chinese, 1,019 in Traditional Chinese and 1,065 in Japanese). The
-denominator, **≈ 4,200 user-visible strings**, is a rounded estimate: the 633 fixed menu entries,
-the 1,068 panel/dialog sources, 308 effect names, ≈ 1,650 distinct effect parameter names and
+by counting the entries of each `const` table (one entry per row, whether it is written on one line
+or wrapped) in `crates/ui-egui/src/i18n.rs`, `i18n/ui.rs` and `i18n/effects.rs`. At that revision
+the menu catalogs hold 633 rows, the panel catalogs 1,064 in Simplified Chinese, 1,017 in
+Traditional Chinese and 1,065 in Japanese. The denominator, **≈ 4,200 user-visible strings**, is a
+rounded estimate: the 633 fixed menu entries, the 1,064 panel/dialog sources, 308 effect names, ≈ 1,650 distinct effect parameter names and
 ≈ 620 other unwrapped interface strings (Home screen literals, engine-built tooltips, error and
 status messages). It counts distinct strings, not catalog rows; engine messages are only partly
 counted, so the true percentages are slightly lower.
@@ -157,7 +157,7 @@ counted, so the true percentages are slightly lower.
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | To `full` |
 |---|---|---|---|---|---|---|---|
 | English | `en` | ≈ 4,200 (100%, source) | All; docs in English | — | yes | full | — |
-| Simplified Chinese | `zh-hans` | 2,009 (≈ 48%): menus 633 rows, panels 1,068, effect names 308 | Panels and dialogs partly; no help, effect names translated and their parameter names not; Home screen literals unwrapped (#574, closed) | System CJK fallback; Han follows the UI language; CJK text in comps renders wrongly (#453); IME in text layers | no | partial | 6–9 h + review |
+| Simplified Chinese | `zh-hans` | 2,005 (≈ 48%): menus 633 rows, panels 1,064, effect names 308 | Panels and dialogs partly; no help, effect names translated and their parameter names not; Home screen literals unwrapped (#574, closed) | System CJK fallback; Han follows the UI language; CJK text in comps renders wrongly (#453); IME in text layers | no | partial | 6–9 h + review |
 | Spanish | `es` | 1,149 (≈ 27%): menus 633 rows, panels 516 | Menus only; the panel catalog from #996 | Latin, fine | no | partial | 9–12 h + review |
 | Hindi | `hi` | 0 | — | UI: Devanagari fallback font but no shaping; text layers shape Devanagari | no | none (After Effects: none) | 9–13 h + shaping in the UI |
 | Arabic | `ar` | 0 | — | UI: Arabic fallback font but no shaping and no RTL layout; text layers: bidi + shaping | no | none (After Effects: none) | 9–13 h + 15–25 h RTL UI |
@@ -173,8 +173,8 @@ Other languages EffectCraft ships (5):
 
 | Language | Code | UI strings translated | Status | To `full` |
 |---|---|---|---|---|
-| Traditional Chinese | `zh-hant` | 1,652 (≈ 39%): menus 633 rows, panels 1,019 | partial | 6–9 h + review |
-| Ukrainian | `uk` | 1,163 (≈ 28%): menus 633 rows, panels 530 | partial | 6–9 h + review |
+| Traditional Chinese | `zh-hant` | 1,650 (≈ 39%): menus 633 rows, panels 1,017 | partial | 6–9 h + review |
+| Ukrainian | `uk` | 1,160 (≈ 28%): menus 633 rows, panels 527 | partial | 6–9 h + review |
 | Polish | `pl` | 1,327 (≈ 32%): menus 631 rows, panels 696 | partial; unwrapped UI, effects and engine text still in English; AI-drafted, native review welcome | Remaining strings + native review |
 | Czech | `cs` | 1,154 (≈ 27%): menus 633 rows, panels 521 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
 | Georgian | `ka` | 1,519 (≈ 36%): menus 632 rows, panels 887 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
@@ -199,7 +199,7 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-31 | minor | Japanese: how a word is chosen (the installed interface's own; a translation where it has none; English where Adobe's Japanese interface keeps it English), 19 strings side by side in English, Simplified Chinese and Japanese, the procedure for adding a row with the screenshot or accessible name it was read from, and this tree recounted (menus 632, panels 1,063, effect names 308 in Simplified Chinese and 297 in Japanese; overall ≈ 24%) |
+| 2026-10-31 | minor | Japanese: how a word is chosen (the installed interface's own; a translation where it has none; English where Adobe's Japanese interface keeps it English), 20 strings side by side in English, Simplified Chinese and Japanese, the procedure for adding a row with the screenshot or accessible name it was read from, and this tree recounted (menus 632, panels 1,063, effect names 308 in Simplified Chinese and 297 in Japanese; overall ≈ 24%) |
 | 2026-10-30 | minor | Recounted on the merged tree after #1774: Japanese 1,923 (46%, 297 effect names), Simplified Chinese 1,935 (46%, 307 effect names), Traditional Chinese 1,581 (38%, 951 panel rows after #2244's prune); overall ≈ 24% |
 | 2026-10-22 | minor | Panel/dialog second step: 300 more catalog rows in Japanese, Simplified Chinese and Traditional Chinese, plus the three rows the review found missing (Basic, Advanced and Play/Stop) — panel tabs, form and dialog labels, panel context menus, the tracker and graph controls, text-panel options, File-panel footers and credits; the panel tables are now 996 Japanese and 998 Simplified Chinese rows, all drawn through `tr`/`tr_args`, with the tests keeping the three catalogs listing the same sources; the 30 October recount above carries the share |
 | 2026-10-18 | minor | Brazilian Portuguese completes its panel catalog (278 new rows, 417 → 695, the Chinese catalogs' source list); the doc recount closes the drift the batch merges left in every language's panel count; AI-assisted, not yet native-speaker proofread |
