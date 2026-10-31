@@ -573,6 +573,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
+        "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
+        "effect.plugins.install" if params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files")),

@@ -85,6 +85,51 @@ fn build_example() -> Option<std::path::PathBuf> {
 }
 
 #[test]
+fn plugin_bundle_install_copies_wasm_and_installs_panels() {
+    let config = std::env::temp_dir().join(format!("effectcraft-plugin-install-{}", std::process::id()));
+    let plug_dir = config.join("Plug-ins");
+    let _ = std::fs::remove_dir_all(&config);
+    let bundle = std::env::temp_dir().join(format!("effectcraft-plugin-bundle-{}", std::process::id()));
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("a-good.wasm"), wat_plugin("org.test.host.install", 1, "i32.const 0")).unwrap();
+    std::fs::write(bundle.join("My Panel.jsx"), "1".as_bytes()).unwrap();
+    std::fs::write(bundle.join("notes.txt"), b"not a plug-in".to_vec()).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    let r = s.execute("effect.plugins.install", json!({"folder": bundle.to_string_lossy()})).unwrap();
+    assert_eq!(r["installed"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["errors"].as_array().unwrap().len(), 0, "{r}");
+    assert_eq!(r["panels"].as_array().unwrap()[0], json!("My Panel.jsx"), "{r}");
+    // The plug-in is on disk where the start-up scan looks, and the panel is listable like an
+    // installed one.
+    assert!(plug_dir.join("a-good.wasm").is_file(), "{r}");
+    assert!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/My Panel.jsx").as_deref() == Some("1"), "{r}");
+    // The effect is usable in this session already.
+    s.execute("comp.new", json!({"name": "I", "width": 40, "height": 20, "duration": 1})).unwrap();
+    let l = s.execute("layer.newSolid", json!({"color": [1.0, 0.5, 0.0], "width": 40, "height": 20})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "Host org.test.host.install"})).unwrap();
+
+    // A load failure rolls the copy back: nothing left behind to fail every start.
+    let bad = std::env::temp_dir().join(format!("effectcraft-plugin-badday-{}", std::process::id()));
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("b-garbage.wasm"), b"\0asm\x01\0\0\0garbage".to_vec()).unwrap();
+    let r2 = s.execute("effect.plugins.install", json!({"folder": bad.to_string_lossy()})).unwrap();
+    assert_eq!(r2["errors"].as_array().unwrap().len(), 1, "{r2}");
+    assert!(r2["installed"].as_array().unwrap().is_empty(), "{r2}");
+    assert!(!plug_dir.join("b-garbage.wasm").exists(), "{r2}");
+
+    // A single-file install: non-wasm paths are refused, and good files land on disk.
+    assert!(s.execute("effect.plugins.install", json!({"path": bundle.join("My Panel.jsx").to_string_lossy()})).is_err());
+    let again = config.join("keep.wasm");
+    std::fs::copy(bundle.join("a-good.wasm"), &again).unwrap();
+    assert!(s.execute("effect.plugins.install", json!({"path": again.to_string_lossy()})).is_err()); // already registered in-session
+    let _ = std::fs::remove_dir_all(&config);
+    let _ = std::fs::remove_dir_all(&bundle);
+    let _ = std::fs::remove_dir_all(&bad);
+}
+
+#[test]
 fn example_wasm_plugin_loads_and_renders() {
     let Some(wasm) = build_example() else { return };
     let (mut s, l) = setup();

@@ -1014,6 +1014,8 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Install Effect Plug-in... | effect.plugins.install
+  Install Effect Plug-in Bundle (Folder)... | effect.plugins.install {"bundle": true}
   ---
   @effects
 Animation
