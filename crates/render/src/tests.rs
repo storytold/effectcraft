@@ -1701,8 +1701,9 @@ fn an_expression_driven_clip_keeps_the_layer_clock() {
     assert!((cover_x(&clip_pose(true, 3.25)) - cover_x(&clip_pose(true, 0.75))).abs() > 5.0, "the layer clock and the activation clock disagree");
 }
 
-#[test]
-fn an_essential_property_override_of_the_clip_keeps_the_layer_clock() {
+/// The sliding model keyed None, then clip 1 at 3 s, in a collapsed 3D precomp; `overridden`
+/// sets the clip through its Essential Property, and `copy` adds a 3D Layer Instance of it.
+fn collapsed_clip_scene(overridden: bool, copy: bool) -> (Project, ItemId) {
     use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
     let mut p = Project::default();
     p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
@@ -1711,19 +1712,50 @@ fn an_essential_property_override_of_the_clip_keeps_the_layer_clock() {
     let prop = model.props.prop("geometryOptions/animation").unwrap().uid;
     let kind = EgKind::Property { layer: model.id, prop, links: vec![] };
     inner.essential = Some(EssentialGraphics { controls: vec![EgControl { id: 1, name: "Clip".into(), kind, as_type: None }], ..Default::default() });
-    inner.layers = vec![model].into();
+    let mut layers = vec![];
+    if copy {
+        let mut owner = solid(&mut p, &inner, [1.0, 1.0, 1.0], 200, 100);
+        add_effect_200(&mut p, &mut owner, "ec.3d.instance3d", &[("layer", Value::Layer(Some(model.id.0)))]);
+        layers.push(owner);
+    }
+    layers.push(model);
+    inner.layers = layers.into();
     let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
     let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
     pre.switches.three_d = true;
     pre.switches.collapse = true;
-    let mut ids = Ids(&mut p.next_id);
-    let control = ids.prop(&essential::match_id(1), "Clip", Value::Enum(1));
-    let mut group = ids.group(essential::GROUP, "Essential Properties");
-    group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
-    group.children.push(control.into());
-    pre.props.children.push(group.into());
+    if overridden {
+        let mut ids = Ids(&mut p.next_id);
+        let control = ids.prop(&essential::match_id(1), "Clip", Value::Enum(1));
+        let mut group = ids.group(essential::GROUP, "Essential Properties");
+        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+        group.children.push(control.into());
+        pre.props.children.push(group.into());
+    }
     outer.layers = vec![pre].into();
     let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+    (p, cid)
+}
+
+#[test]
+fn an_essential_property_override_of_the_clip_keeps_the_layer_clock() {
+    let (p, cid) = collapsed_clip_scene(true, false);
     assert_poses(&p, cid, false, &[(1.0, 1.0), (3.25, 3.25)]);
     assert!((cover_x(&clip_pose(false, 3.25)) - cover_x(&clip_pose(false, 0.25))).abs() > 5.0, "the layer clock and the activation clock disagree");
+}
+
+/// The keyed clip and its override select the same clip at 3.25 s but pose it 0.25 s and
+/// 3.25 s in: a 3D Layer Instance of one is not served the other's pixels.
+#[test]
+fn a_copy_of_an_overridden_clip_is_not_served_the_keyed_clips_pixels() {
+    let t = Tick::from_seconds_f64(3.25);
+    let cache = crate::LayerCache::default();
+    let render = |(p, cid): &(Project, ItemId), cache: Option<&crate::LayerCache>| {
+        let mut r = crate::Renderer::new(p, &SlidingModels, crate::RenderOpts::default());
+        r.cache = cache;
+        r.comp_frame(*cid, t)
+    };
+    let (keyed, overridden) = (collapsed_clip_scene(false, true), collapsed_clip_scene(true, true));
+    assert_same(&render(&keyed, Some(&cache)), &render(&keyed, None), "the keyed clip's copy");
+    assert_same(&render(&overridden, Some(&cache)), &render(&overridden, None), "the overridden clip's copy");
 }
