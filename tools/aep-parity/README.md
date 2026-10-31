@@ -243,6 +243,8 @@ What `rerender.py` does:
   score.
 - **Resuming.** Projects and PNG frames already rendered are kept. A lock on `work_dir` refuses a
   second run on the same folder, because two runs would wipe each other's chunk folders.
+  `--reimport` deletes the frames too. After an engine rebuild without `--reimport` they are stale:
+  delete `work_dir/frames` yourself before re-rendering.
 
 `full_scores.py` re-encodes each reference with x264 for its ceiling, so its gap compares like with
 like only for videos from `--encoder ffmpeg`. Videos from EffectCraft's own exporter also carry the

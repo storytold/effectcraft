@@ -131,7 +131,7 @@ class Ctx:
         p = self.work / "probe.json"
         if not p.exists():
             pc.die("run the `probe` step first")
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
 
     def targets(self):
         if self._targets is None:
@@ -300,7 +300,7 @@ def step_probe(ctx, a):
                               layers=[l["index"] for l in ls])
         out["slugs"][pc.slug(g)] = g
     out["tops"] = pc.comp_info(ctx.cli, base, [e["comp"] for e in ctx.entries.values()], ctx.work)
-    (ctx.work / "probe.json").write_text(json.dumps(out, indent=1))
+    (ctx.work / "probe.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     for g, d in out["glow"].items():
         print(f"glow comp {g}: {len(d['layers'])} layer(s), source {d['source'][0]}x{d['source'][1]}, start {d['start']:.3f} s")
     for h in out["hosts"]:
@@ -359,7 +359,7 @@ def target_rows(ctx, key, refine):
 
 def step_fit(ctx, a):
     pfile = ctx.work / "params.json"
-    params = json.loads(pfile.read_text()) if a.refine else {}
+    params = json.loads(pfile.read_text(encoding="utf-8")) if a.refine else {}
     lam = float(ctx.g["lambda"])
     k2 = ctx.Q * ctx.FDS
     out = {}
@@ -395,7 +395,7 @@ def step_fit(ctx, a):
                 byf.update({round(tau * fps_g): (tau, c) for tau, c in ks})
                 out[g] = list(byf.values())
             print("xfade", key, {g: len(v) for g, v in xk.items()}, flush=True)
-    res = json.loads(pfile.read_text()) if (a.only and pfile.exists()) else {}
+    res = json.loads(pfile.read_text(encoding="utf-8")) if (a.only and pfile.exists()) else {}
     for g, ks in out.items():
         ks = sorted(ks, key=lambda x: x[0])
         taus = np.array([k[0] for k in ks])
@@ -407,13 +407,13 @@ def step_fit(ctx, a):
         size = glow_size(ctx, g)
         res[g] = dict(grid=grid(ctx, size).tolist(), radius=ctx.R, size=list(size),
                       start=ctx.probe()["glow"][g]["start"], taus=taus.round(5).tolist(), colors=C.round(5).tolist())
-    pfile.write_text(json.dumps(res))
+    pfile.write_text(json.dumps(res), encoding="utf-8")
     print("wrote", pfile, {g: len(v["taus"]) for g, v in res.items()})
     step_emit(ctx, a)
 
 
 def step_emit(ctx, a):
-    p = json.loads((ctx.work / "params.json").read_text())
+    p = json.loads((ctx.work / "params.json").read_text(encoding="utf-8"))
     fields = {}
     for g, d in p.items():
         C = np.array(d["colors"])
@@ -427,7 +427,7 @@ def step_emit(ctx, a):
 
 def step_check(ctx, a):
     pfile = ctx.work / "params.json"
-    p = json.loads(pfile.read_text()) if pfile.exists() else None
+    p = json.loads(pfile.read_text(encoding="utf-8")) if pfile.exists() else None
     for key, t in ctx.targets().items():
         acc = {"nn": [], "pred": [], "fit": []}
         for r in target_rows(ctx, key, a.with_fit):
@@ -538,7 +538,7 @@ def xfit(ctx, key, prior):
 
 
 def step_xcheck(ctx, a):
-    p = json.loads((ctx.work / "params.json").read_text())
+    p = json.loads((ctx.work / "params.json").read_text(encoding="utf-8"))
     for key, t in ctx.targets().items():
         res = {}
         for r in xrows(ctx, key, a.with_fit):

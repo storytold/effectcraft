@@ -216,7 +216,7 @@ def measure(args, cfg, cli):
         rec.update({"frames": scores, "project": p["project"].name, "notes": args.notes,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
         results[name] = rec
-        with open(cfg["work_dir"] / "scores.jsonl", "a") as f:
+        with open(cfg["work_dir"] / "scores.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
     print(f"{'entry':28} {'plain':>7} {'min':>7} {'psnr':>6}" + ("" if not enc else f" {'enc':>7} {'ceil':>7} {'gap':>7} {'maxgap':>7} {'self':>7}"))
     for r in results.values():

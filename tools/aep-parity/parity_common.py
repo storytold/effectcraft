@@ -44,7 +44,7 @@ def die(msg):
 
 def run(cmd, check=True, **kw):
     cmd = [str(c) for c in cmd]
-    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
     if check and r.returncode != 0:
         tail = (r.stderr or r.stdout).strip()[-1500:]
         raise ParityError(f"command failed ({r.returncode}): {' '.join(cmd[:6])} ...\n{tail}")
@@ -63,7 +63,7 @@ def load_config(path):
     """Read the JSON config; relative paths in it are relative to the config file's folder."""
     path = Path(path).resolve()
     try:
-        cfg = json.loads(path.read_text())
+        cfg = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         die(f"cannot read config {path}: {e}")
     base = path.parent
@@ -125,9 +125,9 @@ def find_cli(cfg=None, arg=None):
 
 def jsx_with_data(template, data, out):
     """Write `out`: `var CFG = <data>;`, the shared selection helper, then the template body."""
-    body = (JSX / template).read_text()
-    head = (JSX / "_select.jsx").read_text()
-    Path(out).write_text(f"var CFG = {json.dumps(data, separators=(',', ':'))};\n" + head + "\n" + body)
+    body = (JSX / template).read_text(encoding="utf-8")
+    head = (JSX / "_select.jsx").read_text(encoding="utf-8")
+    Path(out).write_text(f"var CFG = {json.dumps(data, separators=(',', ':'))};\n" + head + "\n" + body, encoding="utf-8")
     return Path(out)
 
 
@@ -183,9 +183,10 @@ def base_project(cfg, cli, reimport=False):
         js = jsx_with_data("relink.jsx", {"pairs": cfg["relink"]}, work / "_relink.jsx")
         print((run_script(cli, js, tmp).strip().splitlines() or [""])[-1], flush=True)
     os.replace(tmp, dest)
-    # Every derived project depends on the base: drop the cached ones.
+    # Every derived project and every frame rendered from one depends on the base: drop them.
     for p in work.glob("project-*.ecproj"):
         p.unlink()
+    shutil.rmtree(work / "frames", ignore_errors=True)
     return dest
 
 

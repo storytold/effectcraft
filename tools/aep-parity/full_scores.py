@@ -82,9 +82,9 @@ def main():
     except pc.ParityError as err:
         pc.die(str(err))
     f = cfg["work_dir"] / "full-scores.json"
-    old = json.loads(f.read_text()) if f.exists() else {}
+    old = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
     old.update(res)
-    f.write_text(json.dumps(old, indent=1))
+    f.write_text(json.dumps(old, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":
