@@ -31,12 +31,21 @@ const CAMERA: [(&str, &str, Kind); 5] = [
 
 /// Light Options of a spot or point light (254, 343-345). Every light stores Casts Shadows as a
 /// set record holding 0 (off, 252, 254, 255).
-const LIGHT: [(&str, &str, Kind); 5] = [
+///
+/// Falloff Type is a popup stored 1-based (None, Smooth, Inverse Square Clamped), like the
+/// project's `falloff`; Falloff Start is the project's Radius and Falloff Distance its
+/// `falloffDistance`, both in pixels. In a production project every light that set a falloff
+/// stored Smooth (2.0) with a Start and Distance of thousands of pixels; rendered without the
+/// falloff, far layers were lit at full intensity where After Effects' render dims them.
+const LIGHT: [(&str, &str, Kind); 8] = [
     ("ADBE Casts Shadows", "castsShadows", Kind::EffectBool),
     ("ADBE Light Intensity", "intensity", Kind::Number),
     ("ADBE Light Color", "color", Kind::EffectColor),
     ("ADBE Light Cone Angle", "coneAngle", Kind::Number),
     ("ADBE Light Cone Feather 2", "coneFeather", Kind::Number),
+    ("ADBE Light Falloff Type", "falloff", Kind::EffectPopup(3)),
+    ("ADBE Light Falloff Start", "radius", Kind::Number),
+    ("ADBE Light Falloff Distance", "falloffDistance", Kind::Number),
 ];
 
 /// Imports the Camera Options of `layer` into `options` (the layer's `cameraOptions` group).
@@ -162,6 +171,30 @@ mod tests {
         assert_eq!(v("blurLevel"), Some(Value::Scalar(150.0)));
         assert_eq!(v("aperture"), Some(Value::Scalar(120.0)));
         assert_eq!(v("focusDistance"), Some(Value::Scalar(3000.0)));
+        let report = col.finish();
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+    }
+
+    #[test]
+    fn light_falloff_is_imported() {
+        // A point light: Smooth falloff (stored 2.0, 1-based), Start 10000, Distance 40000.
+        let mut children = vec![data(b"tdsb", 1u32.to_be_bytes().to_vec())];
+        for (n, v) in [("ADBE Light Falloff Type", 2.0), ("ADBE Light Falloff Start", 10000.0), ("ADBE Light Falloff Distance", 40000.0)] {
+            children.push(name(n));
+            children.push(scalar(v));
+        }
+        children.push(name("ADBE Group End"));
+        let chunk = list(b"tdgp", children);
+        let g = AepGroup::from_chunk(&chunk).unwrap_or_else(|| panic!("not a group"));
+        let mut next = 1u64;
+        let mut options = build::light_options(&mut Ids(&mut next), effectcraft_project::LightKind::Point);
+        let tm = TimeMap { timescale: 30720, frame_duration: 512, rate: frame_rate(30720, 512).unwrap_or_default() };
+        let mut col = Collector::default();
+        import_group(&g, &LIGHT, "Point Light 8", &tm, &mut options, &mut col);
+        let v = |id: &str| options.prop(id).map(|p| p.value.clone());
+        assert_eq!(v("falloff"), Some(Value::Enum(1)));
+        assert_eq!(v("radius"), Some(Value::Scalar(10000.0)));
+        assert_eq!(v("falloffDistance"), Some(Value::Scalar(40000.0)));
         let report = col.finish();
         assert!(report.losses.is_empty(), "{:?}", report.losses);
     }
