@@ -62,6 +62,134 @@ fn position_keyframes_move_layer() {
     assert!(b.get(100, 50)[3] > 0.99 && b.get(20, 50)[3] < 0.01);
 }
 
+/// Renders `cid` twice: normally (with the drawn layers' names) and with a full-frame region of
+/// interest, which never culls.
+fn occlusion_render(p: &Project, cid: ItemId) -> (crate::Image, Vec<String>, crate::Image) {
+    let log = std::sync::Mutex::new(Vec::new());
+    let img = {
+        let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
+        r.profile = Some(&log);
+        r.comp_frame(cid, Tick::ZERO)
+    };
+    let drawn = log.into_inner().unwrap().into_iter().map(|t| t.layer).collect();
+    let roi = crate::RenderOpts { roi: Some([0.0, 0.0, 200.0, 100.0]), ..Default::default() };
+    let reference = crate::Renderer::new(p, &crate::NoFootage, roi).comp_frame(cid, Tick::ZERO);
+    (img, drawn, reference)
+}
+
+fn assert_same_bits(a: &crate::Image, b: &crate::Image) {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    for (x, y) in a.data.iter().zip(&b.data) {
+        assert_eq!(x.map(f32::to_bits), y.map(f32::to_bits));
+    }
+}
+
+#[test]
+fn occlusion_skips_layers_under_an_opaque_full_frame_solid() {
+    for depth in [effectcraft_project::BitDepth::Bpc8, effectcraft_project::BitDepth::Bpc16] {
+        for (w, h, scale) in [(200, 100, 100.0), (200, 100, 200.0), (300, 150, 100.0)] {
+            let (mut p, cid, comp) = setup();
+            p.settings.bit_depth = depth;
+            let bottom = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+            let mut top = solid(&mut p, &comp, [0.0, 1.0, 0.0], w, h);
+            top.name = "Top".into();
+            top.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([scale; 3]);
+            p.comp_mut(cid).unwrap().layers = vec![top, bottom].into();
+            let (img, drawn, reference) = occlusion_render(&p, cid);
+            assert_eq!(drawn, vec!["Top".to_string()], "{depth:?} {w}x{h} {scale}%");
+            assert_eq!(img.get(0, 0), [0.0, 1.0, 0.0, 1.0]);
+            assert_eq!(img.get(199, 99), [0.0, 1.0, 0.0, 1.0]);
+            assert_same_bits(&img, &reference);
+        }
+    }
+}
+
+#[test]
+fn occlusion_draws_everything_when_the_top_solid_may_not_cover() {
+    type Edit = fn(&mut effectcraft_project::Layer, effectcraft_project::LayerId);
+    let edits: [(&str, Edit); 7] = [
+        ("opacity", |l, _| l.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(99.0)),
+        ("rotation", |l, _| l.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(1.0)),
+        ("subpixel", |l, _| l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.5, 50.0, 0.0])),
+        ("scale", |l, _| l.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([99.0, 100.0, 100.0])),
+        ("blend", |l, _| l.blend_mode = BlendMode::Multiply),
+        ("parent", |l, below| l.parent = Some(below)),
+        ("mask", |l, _| {
+            let mut next = l.id.0 + 7;
+            let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([0.0, 0.0], 100.0, 50.0), MaskMode::Add, [255, 255, 0]);
+            l.props.sub_mut("masks").unwrap().children.push(m.into());
+        }),
+    ];
+    for (name, edit) in edits {
+        let (mut p, cid, comp) = setup();
+        p.settings.bit_depth = effectcraft_project::BitDepth::Bpc8;
+        let bottom = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        let mut top = solid(&mut p, &comp, [0.0, 1.0, 0.0], 200, 100);
+        edit(&mut top, bottom.id);
+        p.comp_mut(cid).unwrap().layers = vec![top, bottom].into();
+        let (img, drawn, reference) = occlusion_render(&p, cid);
+        assert_eq!(drawn.len(), 2, "{name}");
+        assert_same_bits(&img, &reference);
+    }
+    // 32 bpc never culls (non-finite values below survive Normal blending).
+    let (mut p, cid, comp) = setup();
+    let bottom = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let top = solid(&mut p, &comp, [0.0, 1.0, 0.0], 200, 100);
+    p.comp_mut(cid).unwrap().layers = vec![top, bottom].into();
+    assert_eq!(occlusion_render(&p, cid).1.len(), 2);
+}
+
+/// CPU fallback frames under Backend::Auto (and Backend::Cpu) skip the layers under an opaque
+/// full-frame solid, with the same pixels; a full-frame region of interest never culls.
+#[test]
+fn cpu_and_auto_fallback_frames_cull_occluded_layers() {
+    struct CountAccel(std::sync::atomic::AtomicUsize);
+    impl crate::Accelerator for CountAccel {
+        fn name(&self) -> String {
+            "count".into()
+        }
+        fn comp_frame(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None // fall back to the CPU result
+        }
+        fn supports_effect(&self, _id: &str) -> bool {
+            false
+        }
+        fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
+            None
+        }
+    }
+    for gpu in [false, true] {
+        let (mut p, cid, comp) = setup();
+        p.settings.bit_depth = effectcraft_project::BitDepth::Bpc8;
+        p.settings.gpu_acceleration = gpu;
+        let bottom = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        let mut top = solid(&mut p, &comp, [0.0, 1.0, 0.0], 200, 100);
+        top.name = "Top".into();
+        p.comp_mut(cid).unwrap().layers = vec![top, bottom].into();
+        let log = std::sync::Mutex::new(Vec::new());
+        let a = CountAccel(Default::default());
+        let img = {
+            let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { backend: crate::Backend::Auto, ..Default::default() });
+            r.accel = Some(&a);
+            r.profile = Some(&log);
+            r.comp_frame(cid, Tick::ZERO)
+        };
+        let drawn: Vec<String> = log.into_inner().unwrap().into_iter().map(|t| t.layer).collect();
+        assert_eq!(drawn, vec!["Top".to_string()], "gpu_acceleration = {gpu}");
+        assert_eq!(a.0.load(std::sync::atomic::Ordering::SeqCst), usize::from(gpu));
+        // A full-frame region of interest never culls.
+        let roi = crate::RenderOpts { backend: crate::Backend::Auto, roi: Some([0.0, 0.0, 200.0, 100.0]), ..Default::default() };
+        let reference = {
+            let mut r = crate::Renderer::new(&p, &crate::NoFootage, roi);
+            r.accel = Some(&a);
+            r.comp_frame(cid, Tick::ZERO)
+        };
+        assert_same_bits(&img, &reference);
+        assert_eq!(img.get(0, 0), [0.0, 1.0, 0.0, 1.0]);
+    }
+}
+
 #[test]
 fn opacity_and_blend_modes() {
     let (mut p, cid, comp) = setup();

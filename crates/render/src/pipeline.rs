@@ -5,7 +5,8 @@ use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
 use super::{
     Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
-    ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
+    ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Sampling, Tick, cache, color, masks, shapes, styles, text, three_d,
+    vec2,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::LayerId;
@@ -493,7 +494,11 @@ impl<'a> Renderer<'a> {
     fn draw_comp(&self, ctx: &EvalCtx<'a>, canvas: &mut Image, mut blank: bool) {
         // Bottom-to-top, with runs of consecutive 3D layers depth-sorted (farthest first).
         let visible = self.visible_layers(ctx);
-        let mut i = 0;
+        let start = visible.iter().rposition(|layer| self.covers_frame(ctx, layer)).unwrap_or(0);
+        if start > 0 {
+            blank = false;
+        }
+        let mut i = start;
         while i < visible.len() {
             if visible[i].is_3d() {
                 let mut j = i;
@@ -516,6 +521,98 @@ impl<'a> Renderer<'a> {
                 blank = false;
             }
         }
+    }
+
+    /// A bottom-to-top index start: this layer draws opaque Normal over the whole canvas, so
+    /// everything below cannot show. Only runs inside the CPU compositor (nested or top-level).
+    fn covers_frame(&self, ctx: &EvalCtx<'a>, layer: &Layer) -> bool {
+        if !self.top
+            || self.opts.scale != 1.0
+            || self.opts.roi.is_some()
+            || self.outer.is_some()
+            || self.opacity_mul != 1.0
+            || self.inherited.is_some()
+            || self.collapse3d.is_some()
+            || self.project.settings.bit_depth == effectcraft_project::BitDepth::Bpc32
+            || ctx.comp.layers.iter().any(|l| l.is_3d())
+            || !matches!(layer.source, LayerSource::Solid { .. })
+            || layer.switches.three_d
+            || layer.switches.adjustment
+            || layer.switches.motion_blur
+            || layer.switches.quality != Quality::Best
+            || layer.switches.sampling != Sampling::Bilinear
+            || layer.blend_mode != BlendMode::Normal
+            || layer.preserve_transparency
+            || layer.track_matte.is_some()
+            || layer.parent.is_some()
+            || layer.auto_orient != effectcraft_project::AutoOrient::Off
+            || !layer.stretch.is_finite()
+            || layer.stretch <= 0.0
+        {
+            return false;
+        }
+        let Some(masks) = layer.props.sub("masks") else { return false };
+        let Some(effects) = layer.props.sub("effects") else { return false };
+        if !masks.children.is_empty() || !effects.children.is_empty() || layer.props.sub("layerStyles").is_some() {
+            return false;
+        }
+        let Some(transform) = layer.transform() else { return false };
+        if transform.get("skew").is_some() || transform.get("positionX").is_some() {
+            return false;
+        }
+        for (name, expected) in [("rotation", 0.0), ("opacity", 100.0)] {
+            let Some(prop) = transform.get(name) else { return false };
+            let Value::Scalar(value) = &prop.value else { return false };
+            if !value.is_finite() || *value != expected || !prop.keys.is_empty() || prop.expr.is_some() {
+                return false;
+            }
+        }
+        let Some(scale) = transform.get("scale") else { return false };
+        let Value::Vec3(value) = &scale.value else { return false };
+        if value.iter().any(|v| !v.is_finite() || *v < 100.0) || !scale.keys.is_empty() || scale.expr.is_some() {
+            return false;
+        }
+        for name in ["anchor", "position"] {
+            let Some(prop) = transform.get(name) else { return false };
+            let Value::Vec3(value) = &prop.value else { return false };
+            if value.iter().any(|v| !v.is_finite()) || !prop.keys.is_empty() || prop.expr.is_some() {
+                return false;
+            }
+        }
+        let Some(item_id) = layer.source.item() else { return false };
+        let Some(item) = self.project.item(item_id) else { return false };
+        let ItemKind::Solid(solid) = &item.kind else { return false };
+        if solid.width == 0
+            || solid.height == 0
+            || solid.color.iter().any(|c| !c.is_finite())
+            || !solid.pixel_aspect.is_finite()
+            || solid.pixel_aspect != 1.0
+            || ctx.comp.width == 0
+            || ctx.comp.height == 0
+            || !ctx.comp.pixel_aspect.is_finite()
+            || ctx.comp.pixel_aspect != 1.0
+        {
+            return false;
+        }
+        let (matrix, _) = ctx.layer_to_comp(layer);
+        let m = matrix.0;
+        if m.iter().flatten().any(|v| !v.is_finite())
+            || m[0][1] != 0.0
+            || m[1][0] != 0.0
+            || m[0][0] <= 0.0
+            || m[1][1] <= 0.0
+            || m[0][2].fract() != 0.0
+            || m[1][2].fract() != 0.0
+        {
+            return false;
+        }
+        let Some(inverse) = matrix.inverse() else { return false };
+        let w = ctx.comp.width as f64;
+        let h = ctx.comp.height as f64;
+        [(0.5, 0.5), (w - 0.5, 0.5), (0.5, h - 0.5), (w - 0.5, h - 0.5)].into_iter().all(|(x, y)| {
+            let p = inverse.apply(vec2(x, y));
+            p.x >= 0.5 && p.y >= 0.5 && p.x <= solid.width as f64 - 0.5 && p.y <= solid.height as f64 - 0.5
+        })
     }
 
     /// Evaluate an effect instance's parameters.
