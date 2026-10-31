@@ -79,10 +79,27 @@ fn reset_peak() -> Option<u64> {
     status_kib("VmHWM:").map(|k| k * 1024)
 }
 
+/// Set in the child process that does the measuring (see below).
+const ALONE: &str = "EFFECTCRAFT_TEST_RSS_ALONE";
+
 #[test]
 fn a_long_movie_is_read_in_place_not_whole() {
     if !cfg!(target_os = "linux") {
         eprintln!("peak RSS is read from /proc: skipping");
+        return;
+    }
+    // Peak RSS is per process, and the other tests in this binary run on parallel threads, so
+    // their allocations would count against this one. Measure in a child running only this test.
+    if std::env::var_os(ALONE).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "open_in_place::a_long_movie_is_read_in_place_not_whole", "--test-threads=1", "--nocapture"])
+            .env(ALONE, "1")
+            .output()
+            .unwrap();
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "the measuring child failed:\n{log}");
+        assert!(log.contains("1 passed"), "the measuring child ran no test:\n{log}");
+        eprintln!("{log}");
         return;
     }
     let Some(small) = small_mp4() else {

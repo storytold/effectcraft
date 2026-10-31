@@ -327,8 +327,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 - Localisation of the interface ([localization-parity.md](localization-parity.md)): since 6–12
   October the menus are translated into Japanese, Simplified and Traditional Chinese, Ukrainian,
-  Spanish, Brazilian Portuguese, Russian, French, German, Czech and Georgian, and the panel catalog covers
-  Japanese, both Chinese, Ukrainian, Brazilian Portuguese, Czech and Georgian. Next: effect and parameter
+  Spanish, Brazilian Portuguese, Russian, French, German, Czech, Georgian and Swedish, and the panel catalog covers
+  Japanese, both Chinese, Ukrainian, Brazilian Portuguese, Czech, Georgian and Swedish. Next: effect and parameter
   names, the remaining panel strings (Spanish, Russian, French, German), Korean and Italian, and
   native-speaker review of all of them.
 - Accessibility (keyboard navigation, screen readers, contrast), user documentation and

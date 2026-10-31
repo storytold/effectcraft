@@ -80,6 +80,10 @@ pub(crate) fn frame_blend_mode(ctx: &EvalCtx, layer: &Layer) -> FrameBlend {
 /// fraction (0..1) of the way to the next frame. Exact (integer tick arithmetic), so frames that
 /// line up exactly report a fraction of 0.
 pub fn frame_position(t: Tick, rate: FrameRate) -> (i64, f64) {
+    // A project file can carry a zero or negative rate; there are no frames to land between.
+    if rate.num <= 0 || rate.den <= 0 {
+        return (0, 0.0);
+    }
     let num = t.0 as i128 * rate.num as i128;
     let den = TICKS_PER_SECOND as i128 * rate.den as i128;
     (num.div_euclid(den) as i64, num.rem_euclid(den) as f64 / den as f64)

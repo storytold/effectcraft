@@ -4,7 +4,7 @@ use effectcraft_engine::Session;
 use effectcraft_engine::time::Tick;
 use serde_json::{Value, json};
 
-use crate::confine::{Confinement, Lookup};
+use crate::confine::{ConfinedFootage, ConfinedServices, Confinement, Lookup};
 use crate::{BridgeClient, Error, Result, base64, encode_png, recompress_png};
 
 pub struct Backend {
@@ -39,8 +39,14 @@ impl Backend {
         Ok(Backend { target: Target::Bridge(BridgeClient::new(addr)?), confinement: None })
     }
 
-    /// Confine the files the commands run here may read and write ([`Confinement`]).
+    /// Confine the files the commands run here may read and write ([`Confinement`]). In-process,
+    /// the session's own footage and file reads are confined too, so a project from a read root
+    /// can't show footage from outside it.
     pub fn confine(&mut self, confinement: Confinement) {
+        if let Target::Headless(s) = &mut self.target {
+            s.footage = std::sync::Arc::new(ConfinedFootage::new(s.footage.clone(), confinement.clone()));
+            s.services = std::sync::Arc::new(ConfinedServices::new(s.services.clone(), confinement.clone()));
+        }
         self.confinement = Some(confinement);
     }
 

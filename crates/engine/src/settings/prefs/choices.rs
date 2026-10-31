@@ -10,6 +10,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("Français", "fr"),
     ("Polski", "pl"),
     ("Português (Brasil)", "pt-br"),
+    ("Svenska", "sv"),
     ("Русский", "ru"),
     ("Українська", "uk"),
     ("ქართული", "ka"),
