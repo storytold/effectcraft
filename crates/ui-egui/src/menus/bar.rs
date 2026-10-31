@@ -117,15 +117,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     }
     if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params)) {
         match invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params }) {
-            Ok(result) => {
-                // A successful command can still report per-item problems in an `errors` array
-                // (Effect ▸ Install Effect Plug-in Bundle does): show them, without turning the
-                // success into an error.
-                let errors: Vec<String> = result.get("errors").and_then(Value::as_array).map(|a| a.iter().map(Value::to_string).collect()).unwrap_or_default();
-                if !errors.is_empty() {
-                    app.ui.status = errors.join("\n");
-                }
-            }
+            Ok(result) => super::frontend::show_result_errors(app, &result),
             Err(e) => app.ui.status = e,
         }
     }

@@ -668,17 +668,31 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
     match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        Ok(result) => {
-            // Same as in the menus' direct dispatch: a successful command can still report
-            // per-item problems in an `errors` array (Effect ▸ Install Effect Plug-in Bundle
-            // does) — show them, without turning the success into an error.
-            let errors: Vec<String> = result.get("errors").and_then(Value::as_array).map(|a| a.iter().map(Value::to_string).collect()).unwrap_or_default();
-            if !errors.is_empty() {
-                app.ui.status = errors.join("\n");
-            }
-        }
+        Ok(result) => show_result_errors(app, &result),
         Err(e) => app.ui.status = e,
     }
+}
+
+/// A successful command can still report per-item problems in an `errors` array (Effect ▸
+/// Install Effect Plug-in Bundle does): show a short, readable report in the status line,
+/// without turning the success into an error. The full structured array stays in the result
+/// for scripts; the status line is single-line and short-lived, so it lists the first few
+/// problems and counts the rest instead of printing raw JSON.
+pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
+    let Some(errors) = result.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) else { return };
+    let parts: Vec<String> = errors
+        .iter()
+        .map(|e| match (e.get("file").and_then(Value::as_str), e.get("error").and_then(Value::as_str)) {
+            (Some(file), Some(error)) => format!("{file}: {error}"),
+            (_, Some(error)) => error.to_string(),
+            _ => e.to_string(),
+        })
+        .collect();
+    let mut msg = parts.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    if parts.len() > 3 {
+        msg.push_str(&format!("; +{} more", parts.len() - 3));
+    }
+    app.ui.status = msg;
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.

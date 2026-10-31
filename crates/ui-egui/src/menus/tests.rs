@@ -593,6 +593,24 @@ fn menu_items_cover_the_tree() {
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
 
+/// A successful command that reports per-item problems (`errors`) shows a compact, readable
+/// report in the status line: `file: error; …`, first three and a count, never raw JSON.
+#[test]
+fn bundle_result_errors_show_compactly_in_the_status_line() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let result = json!({"installed": [], "errors": [
+        {"file": "a.wasm", "error": "already installed"},
+        {"file": "b.wasm", "error": "does not load"},
+        {"file": "c.wasm", "error": "cannot read it"},
+        {"error": "cannot read the bundle folder"},
+    ]});
+    super::frontend::show_result_errors(&mut app, &result);
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+    // A clean success leaves the status line alone.
+    super::frontend::show_result_errors(&mut app, &json!({"installed": ["x.wasm"], "errors": []}));
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+}
+
 /// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,
 /// a plain install asks for a `.wasm`, and with both given inline nothing asks at all.
 #[test]
