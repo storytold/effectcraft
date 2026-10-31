@@ -21,6 +21,8 @@ pub enum UsageError {
     BridgeWithProject,
     #[error("--template renders a new instance; it cannot be combined with a project, --demo, --bridge, --queue or --comp")]
     TemplateWithProject,
+    #[error("--ops and --roto run on generated projects: they take no project")]
+    BenchModeWithProject,
     #[error("params are given twice, as --params and as an argument: use one")]
     TwoParams,
     #[error("params are not valid JSON: {0}")]

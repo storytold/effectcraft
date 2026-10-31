@@ -144,6 +144,8 @@ fn conflicting_flags_are_usage_errors() {
     usage_error(&["render", "--out", "x.mp4", "--work-area", "--start", "1"], "--work-area");
     usage_error(&["render", "--out", "x.mp4", "--resolution", "half", "--scale", "0.5"], "--resolution");
     usage_error(&["bench", "--ops", "--roto"], "--ops");
+    usage_error(&["bench", "--ops", "a.ecproj"], "take no project");
+    usage_error(&["bench", "--roto", "a.ecproj"], "take no project");
     usage_error(&["bench", "--small"], "--ops");
     usage_error(&["bench", "--fixes"], "--roto");
     usage_error(&["bench", "--adv3d"], "--gpu");
@@ -238,4 +240,18 @@ fn an_empty_expression_and_an_empty_filter_are_values() {
     assert_ne!(r.code, 2, "{}", r.stderr);
     let r = invoke(&["commands", "--filter", "", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
+}
+
+#[test]
+fn help_is_the_named_subcommands_even_after_global_flags_and_mistakes() {
+    for args in
+        [vec!["--json", "render-frame", "--out", "--help"], vec!["--json", "render-frame", "--help"], vec!["--json", "render-frame", "--bogus", "--help"]]
+    {
+        let r = invoke(&args);
+        assert_eq!(r.code, 0, "{args:?}: {}", r.stderr);
+        assert!(r.stdout.contains("Usage: effectcraft-cli render-frame"), "{args:?}: {}", r.stdout);
+    }
+    let r = invoke(&["--json", "--bogus", "--help"]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("Usage: effectcraft-cli [OPTIONS] <COMMAND>"), "{}", r.stdout);
 }

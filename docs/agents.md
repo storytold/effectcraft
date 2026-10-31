@@ -21,7 +21,7 @@ Follows [RFC-0012](https://github.com/storytold/craft-contrib/pull/18). `effectc
 not repeat them. `effectcraft-cli --version` (or `-V`) prints the version.
 
 - **Exit codes:** 0 success, 1 the command failed, 2 a usage error. A usage error (an unknown or
-  repeated flag, a conflicting pair such as `--demo --empty`, a value that is not a number or valid
+  repeated flag, a conflicting pair such as `--bridge` with `--demo`, a value that is not a number or valid
   JSON, a missing argument) is reported on stderr before any work starts, so nothing is opened,
   rendered or saved.
 - **Streams:** results go to stdout; diagnostics, progress and errors (`error: …`) to stderr. With

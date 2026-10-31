@@ -731,6 +731,9 @@ impl Cli {
             }
             Command::Bench(a) => {
                 a.project_file = single_project(a.project.as_ref(), &a.file)?;
+                if (a.ops || a.roto) && a.project_file.is_some() {
+                    return Err(UsageError::BenchModeWithProject);
+                }
             }
             Command::Script(a) => {
                 let mut pos = std::mem::take(&mut a.args);
@@ -782,7 +785,10 @@ pub fn parse(args: &[OsString]) -> Result<Cli, clap::Error> {
     let argv = std::iter::once(OsString::from("effectcraft-cli")).chain(args.iter().cloned());
     let matches = match cmd.try_get_matches_from_mut(argv) {
         Err(e) if args.iter().take_while(|a| *a != "--").any(|a| *a == "--help" || *a == "-h") => {
-            let help = [OsString::from("effectcraft-cli"), args.first().cloned().unwrap_or_default(), OsString::from("--help")];
+            // The help of the subcommand named first among the arguments (global flags may come
+            // before it), else the command's.
+            let sub = args.iter().take_while(|a| *a != "--").find(|a| a.to_str().is_some_and(|a| cmd.find_subcommand(a).is_some())).cloned();
+            let help: Vec<OsString> = ["effectcraft-cli"].map(OsString::from).into_iter().chain(sub).chain([OsString::from("--help")]).collect();
             return Err(cmd.try_get_matches_from_mut(help).err().unwrap_or(e));
         }
         matches => matches?,
@@ -805,7 +811,9 @@ impl UsageError {
             Self::NotAProject(_) | Self::NotANumber(_) | Self::BadParams(_) | Self::BadCommands(_) | Self::BadValue { .. } => ErrorKind::ValueValidation,
             Self::Missing(_) | Self::NoSteps => ErrorKind::MissingRequiredArgument,
             Self::Extra(_) => ErrorKind::TooManyValues,
-            Self::TwoProjects(..) | Self::TwoParams | Self::StdinTwice | Self::BridgeWithProject | Self::TemplateWithProject => ErrorKind::ArgumentConflict,
+            Self::TwoProjects(..) | Self::TwoParams | Self::StdinTwice | Self::BridgeWithProject | Self::TemplateWithProject | Self::BenchModeWithProject => {
+                ErrorKind::ArgumentConflict
+            }
         };
         cmd.error(kind, self)
     }
