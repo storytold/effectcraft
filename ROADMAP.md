@@ -182,6 +182,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
+| 2026-10-30 | trivial | Native window geometry uses the existing window.json/Tracker store only. Control sessions skip saved geometry; native GNOME Wayland windows get standard caption controls through storytold/egui#3. Scores and estimates unchanged. |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
