@@ -17,7 +17,7 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
@@ -5249,7 +5249,9 @@ fn text_anim_popups(
         opts.push("-".into());
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
-            opts.push(l.to_string());
+            // The engine names these; the menu catalog holds their Japanese, so the pop-up reads
+            // what Animation ▸ Animate Text reads.
+            opts.push(crate::i18n::label(app, "layer.addTextAnimator", l).to_string());
             acts.push(if *k == "-" { (String::new(), json!(null)) } else { ("layer.addTextAnimator".into(), json!({"layer": layer.id.0, "property": k})) });
         }
         // Variable Font Axes of the layer's font.
@@ -5261,19 +5263,19 @@ fn text_anim_popups(
                 acts.push((String::new(), json!(null)));
             }
             for a in axes {
-                opts.push(format!("Variable Font Axes: {}", a.name));
+                opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
                 acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "axis": a.tag})));
             }
         }
     } else {
         for (kind, l) in [("range", "Selector: Range"), ("wiggly", "Selector: Wiggly"), ("expression", "Selector: Expression")] {
-            opts.push(l.into());
+            opts.push(tr(l).to_string());
             acts.push(("layer.addTextSelector".into(), json!({"layer": layer.id.0, "animator": uid, "kind": kind})));
         }
         opts.push("-".into());
         acts.push((String::new(), json!(null)));
         for (k, l) in TEXT_ANIMATOR_KINDS {
-            opts.push(if *k == "-" { "-".into() } else { format!("Property: {l}") });
+            opts.push(if *k == "-" { "-".into() } else { tr_args("Property: {}", &[&l]) });
             acts.push(if *k == "-" {
                 (String::new(), json!(null))
             } else {
