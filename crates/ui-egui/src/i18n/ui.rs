@@ -191,6 +191,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("About...", "情報..."),
     ("Active", "使用中"),
     ("Active Camera", "アクティブカメラ"),
+    ("Active Camera ({})", "アクティブカメラ（{}）"),
     ("Alpha", "アルファ"),
     ("Adapt Feature On Every Frame", "フレームごとに特徴を更新"),
     ("Adaptive Sample Limit:", "適応サンプル数の上限:"),

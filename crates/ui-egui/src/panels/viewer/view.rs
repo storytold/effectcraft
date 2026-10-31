@@ -101,7 +101,7 @@ pub(super) fn aux_views(
             let map = ViewerMap { origin: cr.min, zoom: fit, comp: [cw, ch], area: r };
             draw_rigs(app, &p.with_clip_rect(r), &map, &ectx, &selected, cam, through_active, Some(v.id()));
         }
-        let label = if comp.has_3d() { v.label() } else { crate::i18n::tr("Active Camera") };
+        let label = if comp.has_3d() { super::view3d_label(v) } else { crate::i18n::tr("Active Camera") };
         p.text(r.left_bottom() + vec2(8.0, -8.0), Align2::LEFT_BOTTOM, label, Tokens::ui(11.0), Color32::from_white_alpha(200));
         app.auto.add(&format!("viewer.view.{}", v.id()), r, label);
         if comp.has_3d()
@@ -124,7 +124,7 @@ fn pane_selector(app: &mut EffectcraftApp, ui: &mut egui::Ui, pane: usize, area:
     let t = app.tokens;
     let r = Rect::from_min_size(area.min + vec2(6.0, 6.0), vec2(124.0, 20.0));
     let pid = egui::Id::unique(("viewer-pane-view", pane));
-    let response = widgets::dropdown(ui, r, crate::i18n::tr(current.label()), &t, pid);
+    let response = widgets::dropdown(ui, r, super::view3d_label(current), &t, pid);
     if response.clicked() {
         let open = widgets::popup_is_open(ui, pid);
         ui.data_mut(|d| d.insert_temp(pid.with("open"), !open));
@@ -137,7 +137,7 @@ fn pane_selector(app: &mut EffectcraftApp, ui: &mut egui::Ui, pane: usize, area:
         ui.set_min_width(124.0);
         let mut chosen = None;
         for (k, v) in View3D::ALL.iter().enumerate() {
-            let item = ui.selectable_label(*v == current, crate::i18n::tr(v.label()));
+            let item = ui.selectable_label(*v == current, super::view3d_label(*v));
             app.auto.add(&format!("viewer.view.{pane}.typeItem.{k}"), item.rect, v.label());
             if item.clicked() {
                 chosen = Some(*v);

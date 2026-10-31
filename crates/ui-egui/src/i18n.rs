@@ -8,7 +8,7 @@ use crate::EffectcraftApp;
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
-mod ui;
+pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use ui::catalog_characters;
@@ -2254,16 +2254,16 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.shareViewOptions", "Share View Options", "表示オプションを共有"),
     ("", "Switch 3D View", "3Dビューを切り替え"),
     ("view.3d.activeCamera", "Active Camera", "アクティブカメラ"),
-    ("view.3d.default", "Default", "初期設定"),
-    ("view.3d.front", "Front", "フロント"),
-    ("view.3d.left", "Left", "レフト"),
-    ("view.3d.top", "Top", "トップ"),
-    ("view.3d.back", "Back", "バック"),
-    ("view.3d.right", "Right", "ライト"),
-    ("view.3d.bottom", "Bottom", "ボトム"),
-    ("view.3d.custom1", "Custom View 1", "カスタムビュー1"),
-    ("view.3d.custom2", "Custom View 2", "カスタムビュー2"),
-    ("view.3d.custom3", "Custom View 3", "カスタムビュー3"),
+    ("view.3d.default", "Default", "デフォルト"),
+    ("view.3d.front", "Front", "フロントビュー"),
+    ("view.3d.left", "Left", "レフトビュー"),
+    ("view.3d.top", "Top", "トップビュー"),
+    ("view.3d.back", "Back", "バックビュー"),
+    ("view.3d.right", "Right", "ライトビュー"),
+    ("view.3d.bottom", "Bottom", "ボトムビュー"),
+    ("view.3d.custom1", "Custom View 1", "カスタムビュー 1"),
+    ("view.3d.custom2", "Custom View 2", "カスタムビュー 2"),
+    ("view.3d.custom3", "Custom View 3", "カスタムビュー 3"),
     ("", "Assign Shortcut to 3D View", "3Dビューにショートカットを割り当て"),
     ("view.3d.last", "Switch to Last 3D View", "最後の3Dビューに切り替え"),
     ("view.lookAtSelected", "Look at Selected Layers", "選択したレイヤーを見る"),

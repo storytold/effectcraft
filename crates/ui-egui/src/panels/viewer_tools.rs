@@ -895,13 +895,13 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let cid = app.session.active_comp_id();
         let cur = cid.and_then(|c| app.session.state.views3d.get(&c)).map(|v| v.current).unwrap_or_default();
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(118.0, 20.0));
-        let response = widgets::dropdown(ui, r, cur.label(), &t, egui::Id::unique("vw-cam"));
+        let response = widgets::dropdown(ui, r, crate::panels::viewer::view3d_label(cur), &t, egui::Id::unique("vw-cam"));
         if response.clicked() {
             toggle_popup(ui, "vw-cam-pop");
         }
         app.auto.add_response("viewer.view3d", &response, "3D View");
         use effectcraft_engine::render::three_d::View3D;
-        let items: Vec<(String, bool)> = View3D::ALL.iter().map(|v| (v.label().to_string(), *v == cur)).collect();
+        let items: Vec<(String, bool)> = View3D::ALL.iter().map(|v| (crate::panels::viewer::view3d_label(*v).to_string(), *v == cur)).collect();
         if let Some(i) = popup(app, ui, "vw-cam-pop", r, &items, "view3dItem") {
             let _ = app.session.execute("view.set3DView", json!({"view": View3D::ALL[i].id()}));
         }
