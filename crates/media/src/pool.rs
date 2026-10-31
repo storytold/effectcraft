@@ -695,6 +695,9 @@ impl Inner {
     /// Number of frames in `d` at `rate` (rounded).
     fn frame_count(rate: FrameRate, d: Tick) -> i64 {
         let den = TICKS_PER_SECOND as i128 * rate.den as i128;
+        if den == 0 {
+            return 0; // a project file can carry a zero denominator
+        }
         ((d.0 as i128 * rate.num as i128 + den / 2) / den) as i64
     }
 
@@ -1149,6 +1152,13 @@ mod tests {
         assert_eq!(Inner::frame_index(r, r.tick_of(25), 10, 3), 5);
         assert_eq!(Inner::frame_index(r, r.tick_of(45), 10, 3), 9);
         assert_eq!(Inner::frame_count(r, Tick(2 * TICKS_PER_SECOND)), 60);
+    }
+
+    #[test]
+    fn frame_count_tolerates_zero_denominator() {
+        let r = FrameRate { num: 30, den: 0 };
+        assert_eq!(Inner::frame_count(r, Tick(2 * TICKS_PER_SECOND)), 0);
+        assert_eq!(Inner::frame_index(r, Tick(0), 0, 1), 0);
     }
 
     #[test]
