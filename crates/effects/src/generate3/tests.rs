@@ -395,3 +395,44 @@ fn scribble_caps_and_start_end_apply_to() {
     let each = run_env("ec.generate.scribble", &[base.as_slice(), &seq, &[("startEndApplyTo", Value::Enum(1))]].concat(), img, 0.0, env2);
     assert_ne!(all.img.data, each.img.data);
 }
+
+#[test]
+fn vegas_long_segments_are_sampled_finely() {
+    // A short segment keeps the 12 samples; a long one gets more so it bends smoothly round rounded corners.
+    assert_eq!(super::paths::vegas_substeps(10.0, 4.0), 12);
+    let n = super::paths::vegas_substeps(400.0, 4.0);
+    assert!(n > 12, "{n}");
+    assert!(400.0 / n as f64 <= 4.0 + 1e-9);
+    assert_eq!(super::paths::vegas_substeps(1.0e9, 4.0), 512);
+}
+
+#[test]
+fn vegas_long_segment_follows_curved_mask() {
+    // One segment as long as a round mask (radius 90 px): with only 12 straight pieces the
+    // chords cut ~3 px inside the curve, leaving gaps on the mask outline.
+    let (c, r) = (100.0, 90.0);
+    let mut points = Vec::new();
+    for i in 0..256 {
+        let a = i as f64 / 256.0 * std::f64::consts::TAU;
+        points.push([c + r * a.cos(), c + r * a.sin()]);
+    }
+    let masks = vec![MaskShape { name: "Mask 1".into(), points, closed: true, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [
+        ("stroke", Value::Enum(1)),
+        ("segments", num(1.0)),
+        ("length", num(1.0)),
+        ("segmentDistribution", Value::Enum(1)),
+        ("blendMode", Value::Enum(0)),
+        ("hardness", num(1.0)),
+        ("midpointOpacity", num(1.0)),
+        ("endOpacity", num(1.0)),
+    ];
+    let out = run_env("ec.generate.vegas", &set, Image::new(200, 200), 0.5, env);
+    for k in 0..720 {
+        let a = k as f64 / 720.0 * std::f64::consts::TAU;
+        let (x, y) = ((c + r * a.cos()).floor() as usize, (c + r * a.sin()).floor() as usize);
+        let alpha = out.img.data[y * 200 + x][3];
+        assert!(alpha > 0.5, "gap on the curve at {k}/720 turn: alpha {alpha}");
+    }
+}
