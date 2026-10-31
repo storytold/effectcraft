@@ -17,9 +17,10 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
 ## How EffectCraft translates
 
 - **Menus:** `crates/ui-egui/src/i18n.rs`, one catalog per language keyed by
-  `(command, English label)`. A test (`menu_catalogs_have_no_stale_or_duplicate_rows`) fails on a
-  row whose entry left the menu tree or on a repeated row, so every catalog covers all fixed
-  entries (632 catalog rows each at this tree, counted; 689 in Georgian). The generated Effect menu is not part of
+  `(command, English label)`. A test (`menu_catalogs_have_no_stale_or_duplicate_rows`) fails on a row
+  whose entry left the menu tree, on a repeated row, and on an empty translation; it does not
+  check that every entry has a row — `missing_translations_report` lists those and always passes.
+  Each catalog carries 632 rows at this tree, counted (689 in Georgian). The generated Effect menu is not part of
   that fixed tree: its entries and category submenus take their labels from the effect catalog
   below.
 - **Panels, dialogs, buttons, tooltips:** `crates/ui-egui/src/i18n/ui.rs`, keyed by the English
@@ -125,8 +126,8 @@ stays corrected only if something fails when it is rewritten into a near synonym
 3. Pin it in the test that belongs to it, keyed by the command and the English source rather than
    by the Japanese alone, so a row moved to another command fails as well.
 4. The pull request carries the screenshot, or the accessible name, the word was read from.
-   `.coderabbit.yaml` asks every change under `crates/ui-egui/src/i18n/**` for that evidence, so the
-   burden sits with whoever proposes the change, not with whoever wrote the row.
+   Nothing fails when that evidence is missing: it is a convention, so the burden sits with
+   whoever proposes the change rather than with whoever wrote the row.
 
 ### Where Japanese stands at this tree
 
@@ -175,7 +176,7 @@ Other languages EffectCraft ships (5):
 | Ukrainian | `uk` | 1,158 (≈ 28%): menus 632 rows, panels 526 | partial | 6–9 h + review |
 | Polish | `pl` | 1,325 (≈ 32%): menus 630 rows, panels 695 | partial; unwrapped UI, effects and engine text still in English; AI-drafted, native review welcome | Remaining strings + native review |
 | Czech | `cs` | 1,152 (≈ 27%): menus 632 rows, panels 520 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
-| Georgian | `ka` | 1,574 (≈ 37%): menus 689 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 307 + 21 categories; native-speaker reviewed | partial | 5–8 h |
+| Georgian | `ka` | 1,574 (≈ 37%): menus 689 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
 
 Russian (`ru`) has a menu catalog (632 rows, ≈ 15%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
