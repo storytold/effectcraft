@@ -90,6 +90,8 @@ pub struct WebApp {
     /// Started on the demo by the config: the snapshot stays off, so the demo never replaces the
     /// last visit's project, until the user opens a project from a file or edits the demo.
     pub demo_start: bool,
+    /// The last title written to `document.title`.
+    pub document_title: String,
 }
 
 impl eframe::App for WebApp {
@@ -119,6 +121,11 @@ impl eframe::App for WebApp {
             f(&mut self.app);
         }
         self.app.tick(ctx, frame);
+        // eframe on the web ignores `ViewportCommand::Title`: the tab title follows the open document here.
+        if self.app.window_title() != self.document_title {
+            self.document_title = self.app.window_title().to_owned();
+            set_document_title(&self.document_title);
+        }
         api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
@@ -143,6 +150,13 @@ impl eframe::App for WebApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+    }
+}
+
+/// The browser tab's title.
+fn set_document_title(title: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        doc.set_title(title);
     }
 }
 
@@ -305,7 +319,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session }))
+                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session, document_title: String::new() }))
             }),
         )
         .await?;
