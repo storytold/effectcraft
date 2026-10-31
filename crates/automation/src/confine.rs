@@ -8,12 +8,21 @@
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
 //! Render Queue) are checked against where they would write. Queueing a render without naming
 //! its output needs a saved project, because the default output of an unsaved one is the home
-//! folder. Commands that run code or open other applications (scripts, ScriptUI panels and the
-//! events that reach them, Execute File, Reveal in Finder…) are refused while confined, as is
-//! granting scripts the file and network access the user withheld.
+//! folder. In a headless session the footage and other files a project or an imported file names
+//! are read only inside the roots ([`ConfinedFootage`], [`ConfinedServices`]). Commands that run
+//! code or open other applications (scripts, ScriptUI panels and the events that reach them,
+//! Execute File, Reveal in Finder…) are refused while confined, as is granting scripts the file
+//! and network access the user withheld.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use effectcraft_engine::Services;
+use effectcraft_engine::project::{Footage, ItemId};
+use effectcraft_engine::raster::{AuxChannels, Image};
+use effectcraft_engine::render::{FloatCurve, FootageSource};
+use effectcraft_engine::time::Tick;
 use serde_json::Value;
 
 use crate::{Error, Result};
@@ -299,6 +308,126 @@ impl Confinement {
                 Ok(())
             }
         }
+    }
+}
+
+/// The session's footage, read only inside the read roots (#2131 F-11, "Indirect reads"). The
+/// commands an agent runs are checked by the paths they are given, but a project opened or
+/// imported from a read root names its own footage, which is read when it renders: a file
+/// outside the roots shows as missing footage instead.
+pub struct ConfinedFootage {
+    inner: Arc<dyn FootageSource>,
+    confinement: Confinement,
+}
+
+impl ConfinedFootage {
+    pub fn new(inner: Arc<dyn FootageSource>, confinement: Confinement) -> Self {
+        Self { inner, confinement }
+    }
+
+    /// Whether every file of `f` (its file and each frame of a sequence) is inside the roots.
+    /// Checked on every read, not remembered: a symbolic link inside a root can be pointed
+    /// elsewhere after it was first read.
+    fn inside(&self, f: &Footage) -> bool {
+        std::iter::once(&f.path).chain(&f.sequence).filter(|p| !p.is_empty()).all(|p| self.confinement.check(p, Access::Read).is_ok())
+    }
+}
+
+impl FootageSource for ConfinedFootage {
+    fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
+        self.inside(footage).then(|| self.inner.frame(item, footage, t)).flatten()
+    }
+    fn frame_at_size(&self, item: ItemId, footage: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
+        self.inside(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
+    }
+    fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
+        self.inside(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
+    }
+    fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
+        self.inside(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
+    }
+    fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        self.inside(footage).then(|| self.inner.aux(item, footage, t)).flatten()
+    }
+    fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
+        self.inside(footage).then(|| self.inner.model(item, footage)).flatten()
+    }
+    fn vector_frame(&self, item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
+        self.inside(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
+    }
+    /// Says why footage outside the roots shows nothing, so the agent can act on it.
+    fn problem(&self, footage: &Footage) -> Option<String> {
+        if !self.inside(footage) {
+            return Some(format!("{} is outside the automation read roots, so it is not read", footage.path));
+        }
+        self.inner.problem(footage)
+    }
+    fn set_cache_budget(&self, bytes: usize) {
+        self.inner.set_cache_budget(bytes)
+    }
+    fn purge(&self) {
+        self.inner.purge()
+    }
+    fn forget(&self, path: &str) {
+        self.inner.forget(path)
+    }
+    fn set_conform_folder(&self, folder: Option<PathBuf>) {
+        self.inner.set_conform_folder(folder)
+    }
+    fn cache_budget(&self) -> Option<usize> {
+        self.inner.cache_budget()
+    }
+    fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
+        self.inner.cancellable(cancel, f)
+    }
+    fn called_off(&self) -> bool {
+        self.inner.called_off()
+    }
+}
+
+/// The session's file reads, only inside the read roots: what a project or an imported file
+/// pulls in by itself (an SVG's or Lottie's images, a timeline's media) is checked like a path
+/// the agent gives. Writes are left to the command checks.
+pub struct ConfinedServices {
+    inner: Arc<dyn Services>,
+    confinement: Confinement,
+}
+
+impl ConfinedServices {
+    pub fn new(inner: Arc<dyn Services>, confinement: Confinement) -> Self {
+        Self { inner, confinement }
+    }
+
+    fn inside(&self, path: &str) -> bool {
+        self.confinement.check(path, Access::Read).is_ok()
+    }
+}
+
+impl Services for ConfinedServices {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.confinement.check(path, Access::Read).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
+        self.inner.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.inner.write_file(path, data)
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.inside(path) && self.inner.exists(path)
+    }
+    fn stamp(&self, path: &str) -> Option<(u64, u128)> {
+        if self.inside(path) { self.inner.stamp(path) } else { None }
+    }
+    fn store_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.inner.store_file(path, data)
+    }
+    fn list_dir(&self, dir: &str) -> Vec<String> {
+        if self.inside(dir) { self.inner.list_dir(dir) } else { vec![] }
+    }
+    fn is_dir(&self, path: &str) -> bool {
+        self.inside(path) && self.inner.is_dir(path)
+    }
+    fn full_path(&self, path: &str) -> Option<String> {
+        self.inner.full_path(path)
     }
 }
 

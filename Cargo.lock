@@ -1432,6 +1432,7 @@ version = "0.19.0"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-host",
+ "effectcraft-model",
  "effectcraft-script",
  "image",
  "serde_json",
