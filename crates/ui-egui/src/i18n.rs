@@ -8784,10 +8784,12 @@ mod tests {
             // catalog, which would hide a row naming the wrong command or English source.
             assert!(JAPANESE.iter().any(|(c, e, _)| *c == id && *e == en), "{id} has no menu row");
             assert_eq!(command_label(id, en), ja, "{id}");
-            // Panels that draw the label themselves ask the panel catalog, so the two tables have
-            // to agree too; a row left behind there reads as a different word in the Timeline.
+            // Panels that draw the label themselves ask the panel catalog, so those rows have to
+            // agree too — strictly, because `tr` falls back to the English source and would let a
+            // deleted panel row pass. Rows no panel draws stay English there by design.
+            let drawn_by_a_panel = matches!(id, "layer.enableTimeRemap" | "layer.timeReverse" | "layer.create" | "track.motion" | "track.camera");
             let panel = ui::tr(en);
-            assert!(panel == ja || panel == en, "{id}: the panel catalog says {panel}");
+            assert!(!drawn_by_a_panel || panel == ja, "{id}: the panel catalog says {panel}, the menu says {ja}");
         }
         ui::set_current("en");
     }
