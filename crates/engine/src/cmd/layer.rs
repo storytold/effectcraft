@@ -79,7 +79,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Footage to Comp",
             ["File"],
             Some("Cmd+/"),
-            "{item: id|name, time? (s, the In point), index? (1-based stack position; default above the selected layer), position? ([x, y] comp px; default the centre), duration? (s, for a still)}",
+            "{item: id|name, time? (s, where the layer starts), index? (1-based stack position; default above the selected layer), position? ([x, y] comp px; default the centre), duration? (s, for a still), in? (s, the In point in comp time; default the start), out? (s, the Out point; default the end of the footage or the comp; in must be before out), anchor? ([x, y] layer px; default the centre)}",
             has_comp,
             add_item
         ),

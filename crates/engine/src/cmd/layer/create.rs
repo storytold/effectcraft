@@ -258,6 +258,47 @@ pub(super) fn new_null(s: &mut Session, p: &Value) -> Result<Value> {
     new_simple(s, p, LayerSource::Null, "Null 1", "New Null Object")
 }
 
+/// Largest `in` / `out` (s) and `anchor` coordinate (px) a command accepts.
+const MAX_PLACEMENT: f64 = 1.0e6;
+
+/// An `in` / `out` parameter: comp time in seconds, finite and within `0..=MAX_PLACEMENT`.
+fn time_param(p: &Value, key: &str, cmd: &str) -> Result<Option<Tick>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|t| t.is_finite() && (0.0..=MAX_PLACEMENT).contains(t))
+            .map(|t| Some(Tick::from_seconds_f64(t)))
+            .ok_or_else(|| bad(cmd, format!("{key}: seconds in the composition, 0 to {MAX_PLACEMENT}"))),
+    }
+}
+
+/// An `anchor` parameter: `[x, y]` in layer pixels (finite, within `MAX_PLACEMENT`).
+fn anchor_param(p: &Value, cmd: &str) -> Result<Option<[f64; 2]>> {
+    match p.get("anchor") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_array()
+            .and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]))
+            .filter(|c| c.iter().all(|x| x.is_finite() && x.abs() <= MAX_PLACEMENT))
+            .map(Some)
+            .ok_or_else(|| bad(cmd, "anchor: [x, y] in layer pixels")),
+    }
+}
+
+/// Put a new layer's Anchor Point at `pos` (layer pixels), keeping its z.
+fn set_anchor(l: &mut Layer, pos: Option<[f64; 2]>) {
+    if let Some([x, y]) = pos
+        && let Some(pr) = l.props.prop_mut("transform/anchor")
+    {
+        let z = match pr.value {
+            KV::Vec3(v) => v[2],
+            _ => 0.0,
+        };
+        pr.value = KV::Vec3([x, y, z]);
+    }
+}
+
 pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let item = match p.get("item") {
@@ -270,6 +311,13 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let it = s.project.item(item).ok_or_else(|| bad("layer.addItem", "no such item"))?.clone();
+    let (in_p, out_p) = (time_param(p, "in", "layer.addItem")?, time_param(p, "out", "layer.addItem")?);
+    if let (Some(i), Some(o)) = (in_p, out_p)
+        && i >= o
+    {
+        return Err(bad("layer.addItem", "in must be before out"));
+    }
+    let anchor = anchor_param(p, "layer.addItem")?;
     let (src, size, dur) = match &it.kind {
         ItemKind::Comp(c) => (LayerSource::Comp { item }, (c.width, c.height), Some(c.duration)),
         ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Still => {
@@ -285,6 +333,9 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad("layer.addItem", "data files can't be layers; read them in expressions with footage(\"name\").sourceData"));
         }
         ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Model => {
+            if in_p.is_some() || out_p.is_some() || anchor.is_some() {
+                return Err(bad("layer.addItem", "in, out and anchor aren't supported for 3D models"));
+            }
             return crate::cmd::model3d::new_model(
                 s,
                 &serde_json::json!({"comp": cid.0, "item": item.0, "time": f_p(p, "time"), "index": p.get("index"), "position": p.get("position")}),
@@ -308,7 +359,16 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
         // without a duration (solids, comp-length stills) end with the comp.
         let end = dur.map_or((start + comp.duration).min(comp.duration), |d| start + d);
         l.out_point = fr.snap_nearest(end).max(start + fr.frame_duration());
+        // `in` / `out` are comp times like `layer.timing`'s; each keeps at least one frame.
+        let fd = fr.frame_duration();
+        if let Some(o) = out_p {
+            l.out_point = fr.snap_nearest(o).max(l.in_point + fd);
+        }
+        if let Some(i) = in_p {
+            l.in_point = fr.snap_nearest(i).min(l.out_point - fd);
+        }
         place(&mut l, position);
+        set_anchor(&mut l, anchor);
         insert_layer_at(proj, st, cid, l, index)
     })?;
     Ok(json!({"layer": id.0}))
