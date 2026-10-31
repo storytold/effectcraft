@@ -479,3 +479,37 @@ fn pointer_reentering_over_another_title_switches_menus() {
     assert!(shown(&h, "Keyboard Shortcuts"), "coming back over Edit opened it");
     assert!(!shown(&h, "Open Project"), "and closed File");
 }
+
+/// Cmd+Option+Up / Down move the selected layers one step in the stacking order, and with Shift
+/// to the top / bottom (After Effects). The chords come from the menu bar, so this presses them
+/// for real rather than only checking that they are listed.
+#[test]
+fn layer_order_shortcuts_match_after_effects() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Order", "width": 320, "height": 180, "duration": 4})).unwrap();
+    for name in ["A", "B", "C"] {
+        s.execute("layer.newSolid", json!({"name": name, "color": "#406080", "width": 40, "height": 40})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": ["B"]})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let order = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    assert_eq!(order(&h), ["C", "B", "A"], "new layers stack on top");
+    let chord = |h: &mut Harness<'_, EffectcraftApp>, keys: &str| {
+        let (modifiers, key) = effectcraft_ui_egui::menus::parse_shortcut(keys).expect("a chord");
+        h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        h.step();
+        h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+        h.run_steps(3);
+    };
+    chord(&mut h, "Cmd+Alt+ArrowUp");
+    assert_eq!(order(&h), ["B", "C", "A"], "B moves forward one place");
+    chord(&mut h, "Cmd+Alt+ArrowDown");
+    assert_eq!(order(&h), ["C", "B", "A"], "and back again");
+    chord(&mut h, "Cmd+Alt+Shift+ArrowUp");
+    assert_eq!(order(&h), ["B", "C", "A"], "Shift sends it to the front");
+    chord(&mut h, "Cmd+Alt+Shift+ArrowUp");
+    assert_eq!(order(&h), ["B", "C", "A"], "already at the front");
+    chord(&mut h, "Cmd+Alt+Shift+ArrowDown");
+    assert_eq!(order(&h), ["C", "A", "B"], "and to the back");
+}

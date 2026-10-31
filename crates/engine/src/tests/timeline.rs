@@ -1556,3 +1556,34 @@ fn a_typed_component_moves_its_follow_components_by_each_layers_own_change() {
     let keys: Vec<Vec<f64>> = prop(&s, b, "audio/levels").keys.iter().map(|k| k.value.components()).collect();
     assert_eq!(keys, vec![vec![-20.0, -30.0], vec![-4.0, -34.0]], "B's 1 s key rises 6 dB on both channels");
 }
+
+/// A pick whip pulled on a selected layer links every selected layer (#2111), and the layer
+/// dropped on is linked too when its matching property is a different one: with A's Position
+/// and B's Position + Opacity selected, dropping on B's Opacity links Position on both. Only the
+/// very property dropped on would reference itself, and that is skipped.
+#[test]
+fn multi_selection_pick_whip_links_every_selected_layer() {
+    let (mut s, a) = setup();
+    let b = s.execute("layer.newSolid", json!({"name": "B", "color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    let whip = |s: &mut Session| {
+        s.execute("prop.pickWhip", json!({"layer": a, "path": "transform/position", "target": {"layer": b, "path": "transform/opacity"}, "layers": [a, b]}))
+    };
+    whip(&mut s).unwrap();
+    let pa = prop(&s, a, "transform/position").expr.expect("A's Position links").text;
+    let pb = prop(&s, b, "transform/position").expr.expect("B's Position links too").text;
+    assert!(pa.contains("opacity"), "{pa}");
+    assert!(pb.contains("opacity"), "{pb}");
+    // One undo step takes both links away.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(prop(&s, a, "transform/position").expr.is_none());
+    assert!(prop(&s, b, "transform/position").expr.is_none());
+
+    // A layer whose matching property *is* the drop target is skipped: Position onto Position on
+    // the same layer would reference itself.
+    let c = s.execute("layer.newSolid", json!({"name": "C", "color": "#0000ff"})).unwrap()["layer"].as_u64().unwrap();
+    let target = prop(&s, c, "transform/position").uid;
+    s.execute("layer.select", json!({"layers": [a, c]})).unwrap();
+    s.execute("prop.pickWhip", json!({"layer": a, "path": "transform/position", "target": {"layer": c, "prop": target}, "layers": [a, c]})).unwrap();
+    assert!(prop(&s, c, "transform/position").expr.is_none(), "no self reference");
+}

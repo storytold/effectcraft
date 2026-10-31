@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_color::{ColorSpace, space};
 use effectcraft_geom::{Mat3, vec2};
-use effectcraft_keyframe::Value;
-use effectcraft_project::{Layer, LayerId, Property};
+use effectcraft_keyframe::{ShapePath, Value};
+use effectcraft_project::{Layer, LayerId, PropGroup, Property};
 use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
@@ -262,6 +262,25 @@ pub fn shape_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<(u64, effectcraft_keyfra
         }
     }
     walk(ctx, layer, c, &mut out);
+    out
+}
+
+/// A shape layer's parametric primitives as Bezier paths, in contents order (the topmost first).
+/// Converting one to a Path (After Effects' Convert to Bezier Path) makes it point-editable.
+pub fn shape_primitives(ctx: &EvalCtx, layer: &Layer) -> Vec<(u64, ShapePath)> {
+    fn walk(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, out: &mut Vec<(u64, ShapePath)>) {
+        for sub in g.groups() {
+            match crate::cmd::paths::parametric_path(ctx, layer, sub).filter(|p| !p.vertices.is_empty()) {
+                Some(sp) => out.push((sub.uid, sp)),
+                None if sub.match_id == "group" || sub.match_id == "contents" => walk(ctx, layer, sub, out),
+                None => {}
+            }
+        }
+    }
+    let mut out = vec![];
+    if let Some(c) = layer.props.sub("contents") {
+        walk(ctx, layer, c, &mut out);
+    }
     out
 }
 

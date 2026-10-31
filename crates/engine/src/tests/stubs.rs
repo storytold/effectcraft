@@ -496,6 +496,31 @@ fn shape_path_of(s: &Session, l: u64, uid: u64) -> effectcraft_keyframe::ShapePa
     g.get("path").unwrap().value.as_path().unwrap().clone()
 }
 
+/// `mask` names the one primitive to convert, so a double-click on it in the Viewer converts that
+/// one even with nothing selected, which is what the Viewer sends. The group is replaced by a
+/// fresh one, so the command reports the new uid for the caller to edit; naming something that
+/// is not a parametric primitive is an error rather than a RotoBezier mask conversion.
+#[test]
+fn convert_to_bezier_with_a_mask_converts_just_that_primitive() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (uid, was) = first_shape(&s, l);
+    assert_ne!(was, "path", "it starts out parametric");
+    // Nothing selected: only the named primitive is converted.
+    s.state.selected_props.clear();
+    let out = s.execute("path.convertToBezier", json!({"layer": l, "mask": uid})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1));
+    let made = out["made"].as_array().expect("the new path's uid");
+    let new_uid = made[0]["uid"].as_u64().expect("a uid");
+    assert_eq!(made[0]["layer"].as_u64(), Some(l));
+    assert_ne!(new_uid, uid, "the group is replaced by a new one");
+    assert_eq!(first_shape(&s, l), (new_uid, "path".to_string()));
+    assert_eq!(s.state.selected_props, vec![(LayerId(l), new_uid)], "the new path is selected");
+    // The primitive's uid is gone, and a path is not parametric: neither converts a mask.
+    assert!(s.execute("path.convertToBezier", json!({"layer": l, "mask": uid})).is_err());
+    assert!(s.execute("path.convertToBezier", json!({"layer": l, "mask": new_uid})).is_err());
+}
+
 /// Convert To Bezier Path on a shape layer's parametric path gives an editable Path 1 with the
 /// same geometry, as After Effects does (#932). The command only turned RotoBezier off for masks,
 /// so a Rectangle, Ellipse or Polystar path could not be converted at all.

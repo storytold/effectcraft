@@ -1,12 +1,12 @@
 //! Separate Dimensions and the property pick-whip (AE-style reference expressions).
 
 use effectcraft_keyframe::{Ease, Interp, Keyframe, Value as KV};
-use effectcraft_project::{Comp, Layer, Node, ParamUi, Property, Uid};
+use effectcraft_project::{Comp, Layer, LayerId, Node, ParamUi, Property, Uid};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 use serde_json::{Value, json};
 
 use super::prop::prop_ref;
-use super::{CommandSpec, b_p, bad, has_layers, layer_mut, layer_p, str_p};
+use super::{CommandSpec, b_p, bad, has_layers, layer_mut, layer_p, resolve_layer, str_p};
 use crate::{EngineError, Result, Session, cmd};
 
 const AXES: [(&str, &str); 3] = [("positionX", "X Position"), ("positionY", "Y Position"), ("positionZ", "Z Position")];
@@ -178,12 +178,81 @@ fn dims(l: &Layer, p: &Property) -> usize {
     }
 }
 
+/// The expression text linking `from`'s `uid` to the target property, with the source and target
+/// dimension handling (a scalar target repeats, a vector source onto a scalar takes `[0]`).
+fn linked_expression(comp: &Comp, from: &Layer, uid: Uid, target: &Layer, tu: Uid, dimension: Option<u64>, compact: bool) -> Option<String> {
+    let r = reference(comp, from, target, tu, compact)?;
+    let (me, them) = (from.props.find(uid)?, target.props.find(tu)?);
+    let (dm, dt) = (dims(from, me), dims(target, them));
+    let (r, dt) = match dimension {
+        Some(d) if d < dt as u64 => (format!("{r}[{d}]"), 1),
+        Some(_) => return None,
+        None => (r, dt),
+    };
+    Some(if dt == 1 && dm > 1 {
+        format!("temp = {r};\n[{}]", vec!["temp"; dm].join(", "))
+    } else if dt > 1 && dm == 1 {
+        format!("{r}[0]")
+    } else {
+        r
+    })
+}
+
 fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.pickWhip")?;
     let t = p.get("target").ok_or_else(|| bad("prop.pickWhip", "missing `target` {layer, path|prop}"))?;
     let (_, tl, tu) = prop_ref(s, t, "prop.pickWhip")?;
     if (tl, tu) == (lid, uid) {
         return Err(bad("prop.pickWhip", "a property can't reference itself"));
+    }
+    // Several layers (a multi-selection pick whip): the same property on each, found by its
+    // match path, all in one undo step. Self-editing (`expression`) stays on its own layer.
+    if p.get("expression").is_none()
+        && let Some(Value::Array(list)) = p.get("layers")
+    {
+        let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+        let path = comp.layer(lid).and_then(|l| l.props.match_path_of(uid));
+        let target = comp.layer(tl).ok_or(EngineError::NoComp)?;
+        let mut wanted: Vec<(LayerId, Uid)> = vec![(lid, uid)];
+        for v in list {
+            let Some(olid) = resolve_layer(comp, v) else { continue };
+            if olid == lid {
+                // The source layer's own property is already in `wanted`.
+                continue;
+            }
+            let Some(ol) = comp.layer(olid) else { continue };
+            let Some(ouid) = path.as_deref().and_then(|path| ol.props.prop(path)).map(|pr| pr.uid) else { continue };
+            // Skipping the drop target before resolving its property dropped a selected target
+            // layer whose matching property is a different one: with A Position and B Position +
+            // Opacity selected, dragging A's Position whip onto B's Opacity links Position on
+            // both. Only the very property dropped on would reference itself.
+            if (olid, ouid) == (tl, tu) {
+                continue;
+            }
+            if !wanted.iter().any(|(l, _)| *l == olid) {
+                wanted.push((olid, ouid));
+            }
+        }
+        let compact = s.prefs.general.expression_pick_whip_compact;
+        let texts: Vec<(LayerId, Uid, String)> = wanted
+            .into_iter()
+            .filter_map(|(olid, ouid)| {
+                let from = comp.layer(olid)?;
+                let text = linked_expression(comp, from, ouid, target, tu, t.get("dimension").and_then(Value::as_u64), compact)?;
+                Some((olid, ouid, text))
+            })
+            .collect();
+        if texts.is_empty() {
+            return Err(bad("prop.pickWhip", "no selected layer has this property"));
+        }
+        let first = texts[0].2.clone();
+        super::app_more::grouped(s, "Pick Whip", |s| {
+            for (olid, ouid, text) in &texts {
+                s.execute("prop.setExpression", json!({"layer": olid.0, "prop": ouid, "expression": text}))?;
+            }
+            Ok(())
+        })?;
+        return Ok(json!(first));
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let from = comp.layer(lid).ok_or(EngineError::NoComp)?;
@@ -235,7 +304,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Whip (Link Property)",
             [],
             None,
-            "{layer?, path|prop, target: {layer, path|prop, dimension?}, expression?, range?: [start, end], byIndex?: bool} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; with `expression`: inserts it there, replacing the characters in `range`, default the end; `byIndex`: an effect's properties by their index, `effect(\"Color Control\")(1)`, as an Alt pick whip does)",
+            "{layer?, path|prop, target: {layer, path|prop, dimension?}, layers?: [layer…], expression?, range?: [start, end], byIndex?: bool} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; `layers`: the same property on each selected layer, all in one undo step; with `expression`: inserts it there, replacing the characters in `range`, default the end; `byIndex`: an effect's properties by their index, `effect(\"Color Control\")(1)`, as an Alt pick whip does)",
             has_layers,
             pick_whip
         ),

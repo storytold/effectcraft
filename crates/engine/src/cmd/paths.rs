@@ -117,7 +117,7 @@ const PARAMETRIC: [&str; 3] = ["rect", "ellipse", "star"];
 /// converted path is the shape that was on screen rather than an approximation of it; the defaults
 /// match that code for a property a group doesn't carry (a polygon has no inner radius or
 /// roundness).
-fn parametric_path(ctx: &EvalCtx, layer: &effectcraft_project::Layer, g: &PropGroup) -> Option<ShapePath> {
+pub(crate) fn parametric_path(ctx: &EvalCtx, layer: &effectcraft_project::Layer, g: &PropGroup) -> Option<ShapePath> {
     let f = |id: &str, d: f64| ctx.f(layer, g, id, d);
     let v2 = |id: &str, d: [f64; 2]| ctx.v2(layer, g, id, d);
     let path = match g.match_id.as_str() {
@@ -155,7 +155,16 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     // Path 1 of the same geometry, as After Effects does (#932). The parametric properties are
     // read at the current time and the path that comes out is static: a size or roundness
     // animation cannot survive the conversion, in After Effects either.
-    let (cid, items) = selected_shape_items(s, p)?;
+    // `mask` names the one primitive to convert (a double-click on it in the Viewer); without it
+    // the Timeline selection decides, as the menu command does.
+    let masked = p.get("mask").and_then(Value::as_u64);
+    let (cid, items) = match masked {
+        Some(uid) => {
+            let (cid, lid) = layer_p(s, p, "path.convertToBezier")?;
+            (cid, vec![(lid, uid)])
+        }
+        None => selected_shape_items(s, p)?,
+    };
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let shapes: Vec<(LayerId, Uid)> = items
         .into_iter()
@@ -164,6 +173,10 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .collect();
     if shapes.is_empty() {
+        // A named primitive that isn't one is an error, not a reason to convert masks.
+        if masked.is_some() {
+            return Err(bad("path.convertToBezier", "not a Rectangle, Ellipse or Polystar path"));
+        }
         return edit_mask_groups(s, p, "Convert To Bezier Path", |g| {
             if let GroupKind::Mask { roto_bezier, .. } = &mut g.kind {
                 *roto_bezier = false;
@@ -213,7 +226,10 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(made)
     })?;
-    Ok(json!({"paths": made.len(), "of": n}))
+    // `made` is the new paths' uids: a group is replaced by a fresh one, so a caller that held
+    // the primitive's uid (the Viewer's double-click) needs the new one to edit its points.
+    let made: Vec<Value> = made.iter().map(|(l, u)| json!({"layer": l.0, "uid": u})).collect();
+    Ok(json!({"paths": made.len(), "of": n, "made": made}))
 }
 
 // ---------------------------------------------------------------- mask options
@@ -548,7 +564,15 @@ fn ungroup_shapes(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("path.rotoBezier", "RotoBezier", ["Layer", "Mask and Shape Path"], None, "{layer?, mask?, value?}", has_layers, roto_bezier),
-        cmd!("path.convertToBezier", "Convert To Bezier Path", ["Layer", "Mask and Shape Path"], None, "{layer?, mask?}", has_layers, convert_to_bezier),
+        cmd!(
+            "path.convertToBezier",
+            "Convert To Bezier Path",
+            ["Layer", "Mask and Shape Path"],
+            None,
+            "{layer?, mask?} → a parametric shape primitive (Rectangle, Ellipse, Polystar; `mask` = its group uid) becomes an editable Path at the current time; without `mask`, every primitive on the selected shape layer(s). A RotoBezier mask becomes an ordinary Bezier mask. Returns `made` [[{layer, uid}]]: the new paths' uids, since the group is replaced by a new one",
+            has_layers,
+            convert_to_bezier
+        ),
         cmd!("path.groupShapes", "Group Shapes", ["Layer"], Some("Cmd+G"), "{layer?, items?: [uid]}", has_shape_items, group_shapes),
         cmd!("path.ungroupShapes", "Ungroup Shapes", ["Layer"], Some("Cmd+Shift+G"), "{layer?, items?: [group uid]}", has_shape_items, ungroup_shapes),
         cmd!(

@@ -4420,6 +4420,13 @@ fn pick_whip_drag(g: &mut Rw) {
                         params["range"] = json!([a, b]);
                         let after = text.chars().count().saturating_sub(b);
                         focus_expression(&ctx, src_prop, [after, after]);
+                    } else {
+                        // The same property on every selected layer (the engine finds it by its
+                        // match path; layers without it are skipped).
+                        let layers = linked(tl);
+                        if !layers.is_empty() {
+                            params["layers"] = json!(layers);
+                        }
                     }
                     actions.push(("prop.pickWhip".into(), params));
                 }
