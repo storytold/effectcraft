@@ -582,6 +582,7 @@ File
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
     Lottie... | file.importLottie
+    Apple Motion... | file.importMotion
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
   Import Recent Footage
@@ -592,6 +593,7 @@ File
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
     Lottie JSON... | file.exportLottie
+    Apple Motion Project... | file.exportMotion
     Essential Graphics Template... | essential.exportTemplate
   ---
   Find | app.find

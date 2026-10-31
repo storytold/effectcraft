@@ -295,3 +295,58 @@ fn edits_keep_the_disk_salt_and_reload_stamps_the_files_again() {
     assert_ne!(s.refresh_disk_salt(false), Some(reloaded), "new footage counts");
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+/// An Apple Motion document using `shot_0001.png` and `shot_0002.png` as two separate stills.
+fn motion_two_stills(dir: &str) -> String {
+    let clip = |id: u32, n: u32| {
+        format!(
+            r#"<clip name="Shot {n}" id="{id}"><pathURL>file://{}</pathURL><missingWidth>64</missingWidth><missingHeight>32</missingHeight><missingDuration>0.0333</missingDuration><creationDuration>1</creationDuration></clip>"#,
+            at(dir, &format!("shot_000{n}.png"))
+        )
+    };
+    let node = |id: u32, clip: u32| {
+        format!(
+            r#"<scenenode name="Image {clip}" id="{id}" factoryID="5" version="5"><parameter name="Properties" id="1"><parameter name="Media" id="324"><parameter name="Source Media" id="300" value="{clip}"/></parameter></parameter></scenenode>"#
+        )
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ozml version="5.2">
+<factory id="5" uuid="66fc0d6af6a911d6a7a7000393670732"><description>Image</description><manufacturer>Apple</manufacturer><version>1</version></factory>
+<scene>
+<sceneSettings><width>640</width><height>360</height><duration>30</duration><frameRate>30</frameRate></sceneSettings>
+<layer name="Group" id="2">{}{}</layer>
+<footage name="Media Layer" id="900">{}{}</footage>
+</scene>
+</ozml>"#,
+        node(11, 901),
+        node(12, 902),
+        clip(901, 1),
+        clip(902, 2)
+    )
+}
+
+/// Motion stills used to go through the default probe, which turns a numbered still into its
+/// whole run: both clips became the same `shot_[0001-0002]` sequence.
+#[test]
+fn motion_stills_with_numbered_siblings_stay_single_images() {
+    let dir = folder(&["shot_0001.png", "shot_0002.png"]);
+    // Different byte lengths, so the probed widths tell the two files apart.
+    std::fs::write(at(&dir, "shot_0002.png"), b"xx").unwrap();
+    let doc = at(&dir, "two.motn");
+    std::fs::write(&doc, motion_two_stills(&dir)).unwrap();
+    let mut s = session();
+    let r = s.execute("file.importMotion", json!({"path": doc})).unwrap();
+    let mut stills: Vec<(String, FootageKind, usize, u32)> = r["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| {
+            let it = s.project.item(ItemId(i.as_u64()?))?;
+            let ItemKind::Footage(f) = &it.kind else { return None };
+            Some((f.path.clone(), f.kind, f.sequence.len(), f.width))
+        })
+        .collect();
+    stills.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(stills, [(at(&dir, "shot_0001.png"), FootageKind::Still, 0, 64), (at(&dir, "shot_0002.png"), FootageKind::Still, 0, 66)], "{r}");
+}
