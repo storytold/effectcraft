@@ -914,13 +914,67 @@ pub fn propagate(prev_img: &Image, prev: &FrameSeg, next_img: &Image, strokes: &
     let mut labels: Vec<u8> = prior.soft.iter().map(|v| (*v >= 0.5) as u8).collect();
     let sd = matting::signed_distance(&labels, w, h);
     let r = (opts.search_radius * opts.scale).max(2.0) as f32;
-    let free: Vec<bool> = sd.iter().map(|d| d.abs() <= r).collect();
-    let hard = vec![0u8; w * h];
-    let soft = matting::gauss(&prior.soft, w, h, (r as f64 / 4.0).max(1.0));
-    let (fg, bg) = if prev.fg.is_empty() || prev.bg.is_empty() { fit_models(&rgb, &labels) } else { (prev.fg.clone(), prev.bg.clone()) };
-    cut(&rgb, (w, h), &mut labels, &free, &hard, (&fg, &bg), Some((&soft, PRIOR)));
-    let seeds = core_of(&prior.soft, w, h, r as f64);
-    clean(&mut labels, &seeds, &vec![false; w * h], w, h);
+    // Band bbox: |sd| <= r. Outside the band the labels are fixed by the prior, so the cut's
+    // fixed-neighbour weights and the seeds/core inside the bbox + margin give the same
+    // solution as the full frame; work on the crop. (Lombaert et al. 2005 style band crop.)
+    let band = sd.iter().map(|d| d.abs() <= r).collect::<Vec<bool>>();
+    let core = sd.iter().map(|d| *d > r).collect::<Vec<bool>>();
+    let bbox = |sel: &[bool], pad: f32| -> Option<(usize, usize, usize, usize)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        for i in 0..w * h {
+            if sel[i] {
+                let (x, y) = (i % w, i / w);
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+        if x0 > x1 {
+            return None;
+        }
+        Some((
+            (x0 as f32 - pad).max(0.0) as usize,
+            (y0 as f32 - pad).max(0.0) as usize,
+            (x1 as f32 + pad).min(w as f32 - 1.0) as usize,
+            (y1 as f32 + pad).min(h as f32 - 1.0) as usize,
+        ))
+    };
+    let (bx0, by0, bx1, by1) = match (bbox(&band, 1.0), bbox(&core, 1.0)) {
+        (Some((x0, y0, x1, y1)), Some((cx0, cy0, cx1, cy1))) => (x0.min(cx0), y0.min(cy0), x1.max(cx1), y1.max(cy1)),
+        (Some((x0, y0, x1, y1)), None) => (x0, y0, x1, y1),
+        (None, Some((x0, y0, x1, y1))) => (x0, y0, x1, y1),
+        (None, None) => (0, 0, w - 1, h - 1),
+    };
+    let (cw, ch) = (bx1 - bx0 + 1, by1 - by0 + 1);
+    if cw * ch >= w * h {
+        let hard = vec![0u8; w * h];
+        let soft = matting::gauss(&prior.soft, w, h, (r as f64 / 4.0).max(1.0));
+        let free: Vec<bool> = sd.iter().map(|d| d.abs() <= r).collect();
+        let (fg, bg) = if prev.fg.is_empty() || prev.bg.is_empty() { fit_models(&rgb, &labels) } else { (prev.fg.clone(), prev.bg.clone()) };
+        cut(&rgb, (w, h), &mut labels, &free, &hard, (&fg, &bg), Some((&soft, PRIOR)));
+        let seeds = core_of(&prior.soft, w, h, r as f64);
+        clean(&mut labels, &seeds, &vec![false; w * h], w, h);
+        return finish(next_img, &rgb, labels, strokes, Some(&prior.refine), opts, refine_radius);
+    }
+    let crop_u8 = |src: &[u8]| -> Vec<u8> { (0..cw * ch).map(|j| src[(by0 + j / cw) * w + bx0 + j % cw]).collect() };
+    let crop_f32 = |src: &[f32]| -> Vec<f32> { (0..cw * ch).map(|j| src[(by0 + j / cw) * w + bx0 + j % cw]).collect() };
+    let rgb_c: Vec<[f32; 3]> = (0..cw * ch).map(|j| rgb[(by0 + j / cw) * w + bx0 + j % cw]).collect();
+    let mut cl: Vec<u8> = crop_u8(&labels);
+    let soft_c = crop_f32(&prior.soft);
+    let hard = vec![0u8; cw * ch];
+    let sd_c = matting::signed_distance(&cl, cw, ch);
+    let free: Vec<bool> = sd_c.iter().map(|d| d.abs() <= r).collect();
+    let soft = matting::gauss(&soft_c, cw, ch, (r as f64 / 4.0).max(1.0));
+    let (fg, bg) = if prev.fg.is_empty() || prev.bg.is_empty() { fit_models(&rgb_c, &cl) } else { (prev.fg.clone(), prev.bg.clone()) };
+    cut(&rgb_c, (cw, ch), &mut cl, &free, &hard, (&fg, &bg), Some((&soft, PRIOR)));
+    // Seeds: the core within the crop (same pixels as the full frame: the crop covers the
+    // core's bbox, and any pixel outside the core has its nearest background inside the crop).
+    let seeds_c = core_of(&soft_c, cw, ch, r as f64);
+    clean(&mut cl, &seeds_c, &vec![false; cw * ch], cw, ch);
+    for (j, &v) in cl.iter().enumerate() {
+        labels[(by0 + j / cw) * w + bx0 + j % cw] = v;
+    }
     finish(next_img, &rgb, labels, strokes, Some(&prior.refine), opts, refine_radius)
 }
 
