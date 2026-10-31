@@ -633,6 +633,19 @@ impl Inner {
             // whole; in-memory files (`add_bytes`) and wasm32 builds open from bytes.
             let in_memory = lock(&self.files).contains_key(&**path);
             let file = std::path::Path::new(&**path);
+            if !in_memory {
+                match crate::qt_anim::open(file) {
+                    Ok(Some(src)) => {
+                        let turn = crate::stream::movie_header(file).map_or(Orientation::NoTransforms, |h| crate::probe::video_turn(&h));
+                        return Some((src, turn));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.note_problem(path, "Animation", &e);
+                        return None;
+                    }
+                }
+            }
             let in_place = if in_memory { None } else { crate::stream::open_source(file) };
             let in_place = in_place.map(|src| {
                 let (header, reader) = (crate::stream::movie_header(file), crate::stream::file_reader(file));
