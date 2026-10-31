@@ -11,7 +11,7 @@ mod color;
 mod pathdata;
 mod raster;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub use color::parse_color;
 pub use kurbo::{Affine, BezPath};
@@ -73,6 +73,14 @@ pub enum Spread {
     Repeat,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternUnits {
+    /// Coordinates are fractions of the painted shape's bounding box.
+    ObjectBoundingBox,
+    /// Coordinates are expressed in the current user space.
+    UserSpaceOnUse,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GradientKind {
     Linear { x1: f64, y1: f64, x2: f64, y2: f64 },
@@ -92,9 +100,29 @@ pub struct Gradient {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Pattern {
+    /// Tile origin and size in `pattern_units` coordinates.
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Coordinate system used for the tile origin and size.
+    pub pattern_units: PatternUnits,
+    /// Coordinate system used by the tile's child shapes.
+    pub content_units: PatternUnits,
+    /// Transform applied to the repeating tile.
+    pub transform: Affine,
+    /// Immutable tile content shared by every use of the resolved pattern.
+    pub content: Arc<Group>,
+    /// The fallback from `url(#id) fallback`, used if the target bbox or tile is invalid.
+    pub fallback: Option<[f64; 4]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
     Color([f64; 3]),
     Gradient(Gradient),
+    Pattern(Pattern),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -603,6 +631,15 @@ struct Parser<'a, 'i> {
     /// The `<use>` targets being expanded, outermost first: a reference back into one is a
     /// cycle and is skipped.
     using: Vec<roxmltree::NodeId>,
+    /// Pattern contents may use only solid paints; nested paint servers invalidate that pattern.
+    in_pattern_content: bool,
+    invalid_pattern_content: bool,
+    /// Attribute bytes revisited while resolving patterns, bounded across all references.
+    pattern_work: usize,
+    pattern_work_budget: usize,
+    pattern_work_exceeded: bool,
+    /// Parsed pattern content is viewport-dependent because lengths may be percentages.
+    pattern_cache: HashMap<(String, u64, u64), Option<Pattern>>,
 }
 
 fn is_svg_ns(n: &roxmltree::Node) -> bool {
@@ -633,6 +670,17 @@ impl<'a, 'i> Parser<'a, 'i> {
         let w = self.css_work.get().saturating_add(n);
         self.css_work.set(w);
         w <= MAX_CSS_WORK
+    }
+
+    /// Charge attribute bytes re-read while resolving a pattern reference.
+    fn charge_pattern_attributes(&mut self, n: roxmltree::Node) -> bool {
+        let bytes = n.attributes().map(|attribute| attribute.name().len().saturating_add(attribute.value().len())).fold(0usize, usize::saturating_add);
+        self.pattern_work = self.pattern_work.saturating_add(bytes);
+        if self.pattern_work > self.pattern_work_budget {
+            self.pattern_work_exceeded = true;
+            return false;
+        }
+        true
     }
 
     /// Apply the matching `<style>` rules to `out`, by specificity then source order.
@@ -726,7 +774,8 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
         if let Some(rest) = v.strip_prefix("url(") {
             let (url, fallback) = rest.split_once(')').unwrap_or((rest, ""));
-            let id = url.trim().trim_matches(['"', '\'']).trim_start_matches('#').to_string();
+            let url = url.trim().trim_matches(['"', '\'']);
+            let id = url.strip_prefix('#').filter(|id| !id.is_empty()).unwrap_or_default().to_string();
             let fb = fallback.trim();
             let fb = if fb.is_empty() || fb == "none" { None } else { parse_color(fb) };
             return Some(Some(PaintRef::Url(id, fb)));
@@ -806,25 +855,50 @@ impl<'a, 'i> Parser<'a, 'i> {
         (num("opacity").unwrap_or(1.0).clamp(0.0, 1.0), display)
     }
 
-    fn resolve_paint(&self, p: &PaintRef, st: &Style) -> Option<(Paint, f64)> {
+    /// Resolve a paint reference, retaining a per-reference fallback for patterns.
+    fn resolve_paint(&mut self, p: &PaintRef, st: &Style) -> Option<(Paint, f64)> {
+        if self.in_pattern_content && matches!(p, PaintRef::Url(..)) {
+            self.invalid_pattern_content = true;
+            return None;
+        }
         match p {
             PaintRef::Color(c) => Some((Paint::Color([c[0], c[1], c[2]]), c[3])),
             PaintRef::Current => Some((Paint::Color([st.color[0], st.color[1], st.color[2]]), st.color[3])),
-            PaintRef::Url(id, fb) => match self.gradient(id, 0) {
+            PaintRef::Url(id, fallback) => match self.gradient(id, 0) {
                 Some(g) if g.stops.len() == 1 => {
                     let c = g.stops[0].1;
                     Some((Paint::Color([c[0], c[1], c[2]]), c[3]))
                 }
                 Some(g) if !g.stops.is_empty() => Some((Paint::Gradient(g), 1.0)),
                 Some(_) => None,
-                None => fb.map(|c| (Paint::Color([c[0], c[1], c[2]]), c[3])),
+                None => match self.pattern(id) {
+                    Some(mut pattern) => {
+                        pattern.fallback = *fallback;
+                        Some((Paint::Pattern(pattern), 1.0))
+                    }
+                    None => fallback.map(|c| (Paint::Color([c[0], c[1], c[2]]), c[3])),
+                },
             },
         }
     }
 
+    /// Read a local `href` or namespaced `xlink:href` value from an SVG element.
+    fn href_value(n: roxmltree::Node<'a, 'i>) -> Option<String> {
+        const XLINK: &str = "http://www.w3.org/1999/xlink";
+        let href = n
+            .attributes()
+            .find(|a| a.name() == "href" && a.namespace().is_none())
+            .or_else(|| n.attributes().find(|a| a.name() == "href" && a.namespace() == Some(XLINK)))?;
+        Some(href.value().to_string())
+    }
+
     fn href(&self, n: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<'a, 'i>> {
-        let h = n.attributes().find(|a| a.name() == "href").map(|a| a.value())?;
-        self.ids.get(h.trim().trim_start_matches('#')).copied()
+        let h = Self::href_value(n)?;
+        let id = h.trim().strip_prefix('#')?;
+        if id.is_empty() {
+            return None;
+        }
+        self.ids.get(id).copied()
     }
 
     /// A gradient by id, with `href` inheritance of attributes and stops.
@@ -899,6 +973,163 @@ impl<'a, 'i> Parser<'a, 'i> {
         Some(Gradient { kind, stops, bbox_units, transform, spread })
     }
 
+    /// Parse a pattern length using the coordinate system selected by its units attribute.
+    fn pattern_length(&self, value: &str, axis: char, font: f64, units: PatternUnits) -> Option<f64> {
+        let value = value.trim();
+        let length = match units {
+            PatternUnits::ObjectBoundingBox => match value.strip_suffix('%') {
+                Some(percent) => percent.trim().parse::<f64>().ok()? / 100.0,
+                None => value.parse::<f64>().ok()?,
+            },
+            PatternUnits::UserSpaceOnUse => {
+                let number_end = value.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(value.len());
+                let (mut number, mut unit) = (&value[..number_end], &value[number_end..]);
+                // The length scanner admits `e` for exponents; back it off when it starts `em` or
+                // `ex`, or follows a complete exponent (for example `1e2em`).
+                if number.parse::<f64>().is_err() && (number.ends_with('e') || number.ends_with('E')) {
+                    number = &number[..number.len().saturating_sub(1)];
+                    unit = &value[number_end.saturating_sub(1)..];
+                }
+                number.parse::<f64>().ok()?;
+                let unit = unit.trim();
+                if !matches!(unit, "" | "px" | "pt" | "pc" | "mm" | "cm" | "in" | "em" | "ex" | "%") {
+                    return None;
+                }
+                self.length(value, axis, font)?
+            }
+        };
+        length.is_finite().then_some(length)
+    }
+
+    /// Resolve a local static pattern. The nearest chain member supplies each attribute;
+    /// child content comes from the first member with element children.
+    fn pattern(&mut self, id: &str) -> Option<Pattern> {
+        let key = (id.to_string(), self.vw.to_bits(), self.vh.to_bits());
+        if let Some(pattern) = self.pattern_cache.get(&key) {
+            return pattern.clone();
+        }
+        let pattern = self.parse_pattern(id);
+        self.pattern_cache.insert(key, pattern.clone());
+        pattern
+    }
+
+    /// Parse one pattern and account for all work done while resolving its inheritance chain.
+    fn parse_pattern(&mut self, id: &str) -> Option<Pattern> {
+        const MAX_PATTERN_HREF_DEPTH: usize = 16;
+        let first = *self.ids.get(id)?;
+        if first.tag_name().name() != "pattern" {
+            return None;
+        }
+        let mut chain = vec![first];
+        loop {
+            let current = *chain.last()?;
+            if !self.charge_pattern_attributes(current) {
+                return None;
+            }
+            let Some(href) = Self::href_value(current) else { break };
+            if chain.len() >= MAX_PATTERN_HREF_DEPTH {
+                return None;
+            }
+            let target_id = href.trim().strip_prefix('#')?;
+            if target_id.is_empty() {
+                return None;
+            }
+            let target = *self.ids.get(target_id)?;
+            if target.tag_name().name() != "pattern" || chain.iter().any(|seen| seen.id() == target.id()) {
+                return None;
+            }
+            chain.push(target);
+        }
+        // This implementation has no viewBox mapper for pattern contents; don't silently paint
+        // them in the wrong coordinate system.
+        if chain.iter().any(|node| node.attribute("viewBox").is_some()) {
+            return None;
+        }
+
+        let attr = |name: &str| chain.iter().find_map(|node| node.attribute(name).map(str::to_string));
+        let mut content_style = Style::default();
+        let (content_opacity, _) = self.cascade(first, &mut content_style);
+        let font_size = content_style.font_size;
+        let units = match attr("patternUnits").as_deref() {
+            None | Some("objectBoundingBox") => PatternUnits::ObjectBoundingBox,
+            Some("userSpaceOnUse") => PatternUnits::UserSpaceOnUse,
+            Some(_) => return None,
+        };
+        let content_units = match attr("patternContentUnits").as_deref() {
+            None | Some("userSpaceOnUse") => PatternUnits::UserSpaceOnUse,
+            Some("objectBoundingBox") => PatternUnits::ObjectBoundingBox,
+            Some(_) => return None,
+        };
+        let x = match attr("x").as_deref() {
+            Some(value) => self.pattern_length(value, 'x', font_size, units)?,
+            None => 0.0,
+        };
+        let y = match attr("y").as_deref() {
+            Some(value) => self.pattern_length(value, 'y', font_size, units)?,
+            None => 0.0,
+        };
+        let width = self.pattern_length(attr("width")?.as_str(), 'x', font_size, units)?;
+        let height = self.pattern_length(attr("height")?.as_str(), 'y', font_size, units)?;
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let transform = attr("patternTransform").as_deref().map(parse_transform).unwrap_or(Affine::IDENTITY);
+        let coeffs = transform.as_coeffs();
+        let determinant = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        if !coeffs.iter().all(|v| v.is_finite())
+            || !determinant.is_finite()
+            || determinant == 0.0
+            || !transform.inverse().as_coeffs().iter().all(|v| v.is_finite())
+        {
+            return None;
+        }
+        let (old_pattern_content, old_invalid) = (self.in_pattern_content, self.invalid_pattern_content);
+        let (old_vw, old_vh) = (self.vw, self.vh);
+        self.in_pattern_content = true;
+        self.invalid_pattern_content = false;
+        if content_units == PatternUnits::ObjectBoundingBox {
+            self.vw = 1.0;
+            self.vh = 1.0;
+        }
+        let source = chain.iter().copied().find(|node| node.children().any(|child| child.is_element()));
+        let mut children = Vec::new();
+        if let Some(source) = source {
+            for child in source.children() {
+                self.node(child, &content_style, &mut children, 1);
+            }
+        }
+        let invalid = self.invalid_pattern_content;
+        self.in_pattern_content = old_pattern_content;
+        self.invalid_pattern_content = old_invalid;
+        self.vw = old_vw;
+        self.vh = old_vh;
+        if invalid {
+            return None;
+        }
+        let content = Group {
+            name: source.map_or_else(|| Self::element_name(first), Self::element_name),
+            transform: Affine::IDENTITY,
+            opacity: content_opacity,
+            children,
+            clip: vec![],
+            blend: BlendMode::Normal,
+            mask: None,
+            isolated: true,
+            knockout: false,
+        };
+        Some(Pattern {
+            x,
+            y,
+            width,
+            height,
+            pattern_units: units,
+            content_units,
+            transform,
+            content: Arc::new(content),
+            fallback: None,
+        })
+    }
+
     fn element_name(n: roxmltree::Node) -> String {
         n.attribute("id").map(str::to_string).unwrap_or_else(|| n.tag_name().name().to_string())
     }
@@ -908,10 +1139,19 @@ impl<'a, 'i> Parser<'a, 'i> {
         if depth > 64 || !is_svg_ns(&n) || self.work > self.budget {
             return;
         }
+        if self.in_pattern_content && !self.charge_pattern_attributes(n) {
+            return;
+        }
         // Every element converted counts, each `<use>` copy again: a few references to groups
         // that reference each other several times can multiply into billions (#1236).
         self.work += 1;
         let tag = n.tag_name().name();
+        if self.in_pattern_content
+            && !matches!(tag, "g" | "rect" | "circle" | "ellipse" | "path" | "line" | "polyline" | "polygon" | "defs" | "title" | "desc" | "metadata" | "style")
+        {
+            self.invalid_pattern_content = true;
+            return;
+        }
         match tag {
             "defs" | "title" | "desc" | "metadata" | "style" | "linearGradient" | "radialGradient" | "symbol" | "clipPath" | "mask" | "pattern" | "marker"
             | "script" => return,
@@ -1213,6 +1453,10 @@ const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
+/// Aggregate attribute bytes that pattern references may revisit, even when many shapes share one
+/// large pattern definition.
+const MAX_PATTERN_WORK_BYTES: usize = 256 * 1024 * 1024;
+const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 
 /// The deepest element nesting of `text` (a quick scan that skips comments, CDATA, processing
 /// instructions, declarations and quoted attribute values).
@@ -1294,6 +1538,7 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let vb = viewbox(root);
     // Room for generous reuse, and always for every element of the file itself.
     let budget = MAX_EXPANDED_ELEMENTS.max(root.descendants().filter(|n| n.is_element()).count().saturating_mul(2));
+    let pattern_work_budget = bytes.len().saturating_mul(8).clamp(MIN_PATTERN_WORK_BYTES, MAX_PATTERN_WORK_BYTES);
     let mut p = Parser {
         ids,
         css,
@@ -1304,6 +1549,12 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         work: 0,
         budget,
         using: vec![],
+        in_pattern_content: false,
+        invalid_pattern_content: false,
+        pattern_work: 0,
+        pattern_work_budget,
+        pattern_work_exceeded: false,
+        pattern_cache: HashMap::new(),
     };
     let st = Style::default();
     let pct_or = |name: &str, axis: char, def: f64| -> f64 {
@@ -1343,6 +1594,9 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     if p.work > p.budget {
         // Never a silently partial drawing.
         return Err(Error::Xml(format!("its <use> references expand to more than {} elements", p.budget)));
+    }
+    if p.pattern_work_exceeded {
+        return Err(Error::Xml(format!("resolving its <pattern> references scans more than {} attribute bytes", p.pattern_work_budget)));
     }
     if p.css_work.get() > MAX_CSS_WORK {
         // Never a silently unstyled drawing.

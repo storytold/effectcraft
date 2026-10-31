@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-svg"
-description = "SVG import: parses SVG 1.1 / SVG 2 static vector content (paths, basic shapes, groups, transforms, use, CSS styles, solid and gradient fills/strokes, opacity) and rasterises it at any scale"
+description = "SVG import: parses SVG 1.1 / SVG 2 static vector content (paths, basic shapes, groups, transforms, use, CSS styles, solid, gradient and pattern fills/strokes, opacity) and rasterises it at any scale"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

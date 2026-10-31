@@ -6,7 +6,7 @@ use effectcraft_raster::{Image, Mask};
 use kurbo::{Affine, Point, Shape as _};
 use rayon::prelude::*;
 
-use crate::{BlendMode, Doc, FillRule, Gradient, GradientKind, Group, Node, Paint, Shape, SoftMask, Spread};
+use crate::{BlendMode, Doc, FillRule, Gradient, GradientKind, Group, Node, Paint, Pattern, PatternUnits, Shape, SoftMask, Spread};
 
 fn mat3(a: Affine) -> Mat3 {
     let c = a.as_coeffs();
@@ -399,11 +399,11 @@ fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image, budget: &mut Su
         Node::Shape(s) => {
             if s.opacity < 1.0 && s.fill.is_some() && s.stroke.is_some() {
                 let Some(mut tmp) = budget.image(dst.width, dst.height, None) else { return };
-                draw_shape(s, m, 1.0, &mut tmp);
+                draw_shape(s, m, 1.0, &mut tmp, budget);
                 over(dst, &tmp, (opacity * s.opacity) as f32);
                 budget.release(&tmp);
             } else {
-                draw_shape(s, m, opacity * s.opacity, dst);
+                draw_shape(s, m, opacity * s.opacity, dst, budget);
             }
         }
         Node::Image(im) => draw_image(im, m, opacity * im.opacity, dst),
@@ -486,7 +486,7 @@ fn over(dst: &mut Image, src: &Image, k: f32) {
     });
 }
 
-fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
+fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let m = m * s.transform;
     let path = s.geom.to_path();
     let bbox = path.bounding_box();
@@ -497,19 +497,19 @@ fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
             FillRule::EvenOdd => effectcraft_path::FillRule::EvenOdd,
         };
         let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&path), &mat3(m), w, h, rule);
-        paint(dst, &cov, fill, (opacity * s.fill_opacity) as f32, m, bbox);
+        paint(dst, &cov, fill, (opacity * s.fill_opacity) as f32, m, bbox, budget);
     }
     if let Some(st) = &s.stroke {
         let style = st.style();
         let cov = effectcraft_path::stroke_coverage(std::slice::from_ref(&path), &style, &mat3(m), w, h);
-        paint(dst, &cov, &st.paint, (opacity * st.opacity) as f32, m, bbox);
+        paint(dst, &cov, &st.paint, (opacity * st.opacity) as f32, m, bbox, budget);
     }
 }
 
 /// Composite paint through coverage.
-fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect) {
-    let w = dst.width as usize;
-    if w == 0 {
+fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect, budget: &mut SurfaceBudget) {
+    if let Paint::Pattern(pattern) = p {
+        paint_pattern(dst, cov, pattern, opacity, m, bbox, budget);
         return;
     }
     let shader = match p {
@@ -522,10 +522,101 @@ fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: 
             }
             Shader::Gradient(g, to_grad)
         }
+        Paint::Pattern(_) => return,
     };
+    paint_shader(dst, cov, &shader, opacity);
+}
+
+/// Render a pattern tile once for this paint operation, then sample it repeatedly over the mask.
+fn paint_pattern(dst: &mut Image, cov: &Mask, pattern: &Pattern, opacity: f32, m: Affine, bbox: kurbo::Rect, budget: &mut SurfaceBudget) {
+    let fallback = || pattern.fallback.map(|c| Shader::Solid(c.map(|v| v as f32)));
+    let fallback_paint = |dst: &mut Image| {
+        if let Some(shader) = fallback() {
+            paint_shader(dst, cov, &shader, opacity);
+        }
+    };
+    if opacity <= 0.0 {
+        return;
+    }
+
+    let bbox_transform = || {
+        let (x, y, width, height) = (bbox.x0, bbox.y0, bbox.width(), bbox.height());
+        (x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0)
+            .then(|| Affine::new([width, 0.0, 0.0, height, x, y]))
+    };
+    let units = match pattern.pattern_units {
+        PatternUnits::ObjectBoundingBox => match bbox_transform() {
+            Some(transform) => transform,
+            None => {
+                fallback_paint(dst);
+                return;
+            }
+        },
+        PatternUnits::UserSpaceOnUse => Affine::IDENTITY,
+    };
+    let content_units = match pattern.content_units {
+        PatternUnits::ObjectBoundingBox => match bbox_transform() {
+            Some(transform) => transform,
+            None => {
+                fallback_paint(dst);
+                return;
+            }
+        },
+        PatternUnits::UserSpaceOnUse => Affine::IDENTITY,
+    };
+    let tile_to_device = m * units * pattern.transform;
+    let device_to_pattern = tile_to_device.inverse();
+    let pattern_to_content = units.inverse() * content_units;
+    if !tile_to_device.as_coeffs().iter().all(|v| v.is_finite())
+        || !device_to_pattern.as_coeffs().iter().all(|v| v.is_finite())
+        || !pattern_to_content.as_coeffs().iter().all(|v| v.is_finite())
+    {
+        fallback_paint(dst);
+        return;
+    }
+
+    let c = tile_to_device.as_coeffs();
+    let pixel_extent = |tile: f64, scale: f64| -> Option<u32> {
+        let pixels = tile * scale;
+        if !pixels.is_finite() || pixels <= 0.0 || pixels.ceil() > u32::MAX as f64 {
+            return None;
+        }
+        Some(pixels.ceil().max(1.0) as u32)
+    };
+    let Some(tile_width) = pixel_extent(pattern.width, c[0].hypot(c[1])) else {
+        fallback_paint(dst);
+        return;
+    };
+    let Some(tile_height) = pixel_extent(pattern.height, c[2].hypot(c[3])) else {
+        fallback_paint(dst);
+        return;
+    };
+    let Some(mut tile) = budget.image(tile_width, tile_height, None) else {
+        fallback_paint(dst);
+        return;
+    };
+    let tile_scale = Affine::scale_non_uniform(tile_width as f64 / pattern.width, tile_height as f64 / pattern.height);
+    let content_to_tile = tile_scale * Affine::translate((-pattern.x, -pattern.y)) * pattern_to_content;
+    if !tile_scale.as_coeffs().iter().all(|v| v.is_finite()) || !content_to_tile.as_coeffs().iter().all(|v| v.is_finite()) {
+        budget.release(&tile);
+        fallback_paint(dst);
+        return;
+    }
+    draw_group(&pattern.content, content_to_tile, 1.0, &mut tile, budget);
+    let shader = Shader::Pattern(pattern, &tile, device_to_pattern);
+    paint_shader(dst, cov, &shader, opacity);
+    budget.release(&tile);
+}
+
+/// Composite a shader through a coverage mask using premultiplied destination pixels.
+fn paint_shader(dst: &mut Image, cov: &Mask, shader: &Shader<'_>, opacity: f32) {
+    let w = dst.width as usize;
+    if w == 0 {
+        return;
+    }
     dst.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, d) in row.iter_mut().enumerate() {
-            let c = cov.data[y * w + x];
+            let Some(c) = cov.data.get(y.saturating_mul(w).saturating_add(x)).copied() else { continue };
             if c <= 0.0 {
                 continue;
             }
@@ -545,6 +636,7 @@ fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: 
 enum Shader<'a> {
     Solid([f32; 4]),
     Gradient(&'a Gradient, Affine),
+    Pattern(&'a Pattern, &'a Image, Affine),
 }
 
 impl Shader<'_> {
@@ -564,8 +656,48 @@ impl Shader<'_> {
                 };
                 eval_stops(&g.stops, spread(t, g.spread))
             }
+            Shader::Pattern(pattern, tile, inv) => sample_pattern(pattern, tile, *inv, x, y),
         }
     }
+}
+
+/// Bilinearly sample a repeating pattern tile. Coordinates are transformed into pattern space,
+/// shifted by the tile origin, then wrapped in both dimensions before filtering across seams.
+fn sample_pattern(pattern: &Pattern, tile: &Image, inv: Affine, x: f64, y: f64) -> [f32; 4] {
+    if tile.width == 0 || tile.height == 0 || pattern.width <= 0.0 || pattern.height <= 0.0 {
+        return [0.0; 4];
+    }
+    let p = inv * Point::new(x, y);
+    let (width, height) = (pattern.width, pattern.height);
+    if !p.x.is_finite() || !p.y.is_finite() {
+        return [0.0; 4];
+    }
+    let u = (p.x - pattern.x).rem_euclid(width) / width * tile.width as f64 - 0.5;
+    let v = (p.y - pattern.y).rem_euclid(height) / height * tile.height as f64 - 0.5;
+    if !u.is_finite() || !v.is_finite() {
+        return [0.0; 4];
+    }
+
+    let x0 = u.floor() as i64;
+    let y0 = v.floor() as i64;
+    let (fx, fy) = ((u - x0 as f64) as f32, (v - y0 as f64) as f32);
+    let wrap = |i: i64, size: u32| -> usize { i.rem_euclid(i64::from(size)) as usize };
+    let (x0, x1) = (wrap(x0, tile.width), wrap(x0.saturating_add(1), tile.width));
+    let (y0, y1) = (wrap(y0, tile.height), wrap(y0.saturating_add(1), tile.height));
+    let pixel = |px: usize, py: usize| -> [f32; 4] {
+        let index = py.saturating_mul(tile.width as usize).saturating_add(px);
+        tile.data.get(index).copied().unwrap_or([0.0; 4])
+    };
+    let (p00, p10, p01, p11) = (pixel(x0, y0), pixel(x1, y0), pixel(x0, y1), pixel(x1, y1));
+    let mut premultiplied = [0.0; 4];
+    for i in 0..4 {
+        premultiplied[i] = (p00[i] * (1.0 - fx) + p10[i] * fx) * (1.0 - fy) + (p01[i] * (1.0 - fx) + p11[i] * fx) * fy;
+    }
+    let alpha = premultiplied[3];
+    if alpha <= 0.0 || !alpha.is_finite() {
+        return [0.0; 4];
+    }
+    [(premultiplied[0] / alpha).clamp(0.0, 1.0), (premultiplied[1] / alpha).clamp(0.0, 1.0), (premultiplied[2] / alpha).clamp(0.0, 1.0), alpha.clamp(0.0, 1.0)]
 }
 
 /// Radial gradient parameter with a focal point: the circle through `p` from the focus.

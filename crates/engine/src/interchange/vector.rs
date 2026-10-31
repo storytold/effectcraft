@@ -72,38 +72,47 @@ fn shape_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine) -> Vec<Prop
     let bbox = s.geom.to_path().bounding_box();
     if let Some(st) = &s.stroke {
         let width = st.width * det_scale(m);
-        let mut g = match &st.paint {
-            Paint::Color(c) => build::shape_stroke(ids, [c[0], c[1], c[2], 1.0], width),
+        let paint = match &st.paint {
+            Paint::Color(c) => Some(build::shape_stroke(ids, [c[0], c[1], c[2], 1.0], width)),
             Paint::Gradient(gr) => {
                 let (radial, a, b) = gradient_points(gr, m, bbox);
-                build::shape_gradient_stroke(ids, radial, a, b, gradient_value(gr), width)
+                Some(build::shape_gradient_stroke(ids, radial, a, b, gradient_value(gr), width))
             }
+            // Editable shape layers do not yet have a pattern paint operator. Keep the geometry
+            // and omit only this paint; SVG footage retains the correctly rasterised pattern.
+            Paint::Pattern(_) => None,
         };
-        set(&mut g, "opacity", Value::Scalar(st.opacity * 100.0));
-        set(&mut g, "cap", Value::Enum(st.cap as u32));
-        set(&mut g, "join", Value::Enum(st.join as u32));
-        set(&mut g, "miter", Value::Scalar(st.miter));
-        if let Some((d, off)) = &st.dash
-            && let Some(dg) = g.sub_mut("dashes")
-        {
-            let k = det_scale(m);
-            set(dg, "dash", Value::Scalar(d.first().copied().unwrap_or(0.0) * k));
-            set(dg, "gap", Value::Scalar(d.get(1).or(d.first()).copied().unwrap_or(0.0) * k));
-            set(dg, "offset", Value::Scalar(off * k));
+        if let Some(mut g) = paint {
+            set(&mut g, "opacity", Value::Scalar(st.opacity * 100.0));
+            set(&mut g, "cap", Value::Enum(st.cap as u32));
+            set(&mut g, "join", Value::Enum(st.join as u32));
+            set(&mut g, "miter", Value::Scalar(st.miter));
+            if let Some((d, off)) = &st.dash
+                && let Some(dg) = g.sub_mut("dashes")
+            {
+                let k = det_scale(m);
+                set(dg, "dash", Value::Scalar(d.first().copied().unwrap_or(0.0) * k));
+                set(dg, "gap", Value::Scalar(d.get(1).or(d.first()).copied().unwrap_or(0.0) * k));
+                set(dg, "offset", Value::Scalar(off * k));
+            }
+            items.push(g);
         }
-        items.push(g);
     }
     if let Some(f) = &s.fill {
-        let mut g = match f {
-            Paint::Color(c) => build::shape_fill(ids, [c[0], c[1], c[2], 1.0]),
+        let paint = match f {
+            Paint::Color(c) => Some(build::shape_fill(ids, [c[0], c[1], c[2], 1.0])),
             Paint::Gradient(gr) => {
                 let (radial, a, b) = gradient_points(gr, m, bbox);
-                build::shape_gradient_fill(ids, radial, a, b, gradient_value(gr))
+                Some(build::shape_gradient_fill(ids, radial, a, b, gradient_value(gr)))
             }
+            // Pattern fills are preserved in rasterised SVG footage, but not editable vector paint.
+            Paint::Pattern(_) => None,
         };
-        set(&mut g, "opacity", Value::Scalar(s.fill_opacity * 100.0));
-        set(&mut g, "rule", Value::Enum(u32::from(s.fill_rule == effectcraft_svg::FillRule::EvenOdd)));
-        items.push(g);
+        if let Some(mut g) = paint {
+            set(&mut g, "opacity", Value::Scalar(s.fill_opacity * 100.0));
+            set(&mut g, "rule", Value::Enum(u32::from(s.fill_rule == effectcraft_svg::FillRule::EvenOdd)));
+            items.push(g);
+        }
     }
     items
 }

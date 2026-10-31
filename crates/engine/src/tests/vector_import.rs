@@ -321,6 +321,29 @@ fn paste_svg_markup_as_a_shape_layer() {
 }
 
 #[test]
+fn pasted_svg_pattern_keeps_geometry_when_editable_pattern_paint_is_unavailable() {
+    let (mut s, _) = text_session();
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+        <defs><pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4">
+            <circle cx="2" cy="2" r="1" fill="red"/>
+        </pattern></defs>
+        <rect id="patterned" width="16" height="16" fill="url(#p)"/>
+        <path id="patterned-stroke" d="M0 0 H16" fill="none" stroke="url(#p)" stroke-width="2"/>
+    </svg>"##;
+    let result = s.execute_checked("edit.pasteSvg", json!({"svg": svg})).unwrap();
+    let layer_id = effectcraft_project::LayerId(result["layer"].as_u64().unwrap());
+    let layer = s.active_comp().unwrap().layer(layer_id).unwrap();
+    let shape = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned").unwrap();
+    let items: Vec<_> = shape.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "rect"), "the editable geometry remains");
+    assert!(!items.iter().any(|item| matches!(item.match_id.as_str(), "fill" | "gfill")), "unsupported editable pattern paint is omitted");
+    let stroke = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned-stroke").unwrap();
+    let items: Vec<_> = stroke.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "path"), "the editable stroke path remains");
+    assert!(!items.iter().any(|item| matches!(item.match_id.as_str(), "stroke" | "gstroke")), "unsupported editable pattern stroke is omitted");
+}
+
+#[test]
 fn paste_svg_rejects_text_that_is_not_usable_svg() {
     let (mut s, _) = text_session();
     for bad in ["hello", "<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"></svg>", "<html><svg></html>"] {

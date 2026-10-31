@@ -31,6 +31,257 @@ fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
 }
 
 #[test]
+fn static_pattern_fill_and_stroke_repeat_with_tile_origin() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" x="1" width="2" height="2">
+                <rect x="1" width="1" height="2" fill="red"/>
+                <rect x="2" width="1" height="2" fill="blue"/>
+            </pattern></defs>
+            <rect id="filled" width="8" height="4" fill="url(#p)"/>
+            <path d="M0 3 H8" fill="none" stroke="url(#p)" stroke-width="2"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert!(matches!(shapes[0].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    assert!(matches!(shapes[1].2.stroke.as_ref().map(|s| &s.paint), Some(Paint::Pattern(_))));
+
+    let img = rasterize(&doc, 8, 4, 1.0);
+    // The tile occupies [1, 3): blue wraps into x=0, red starts at x=1.
+    assert!(near(px(&img, 0, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 1, 1), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 2, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    // The same pattern server paints the stroke.
+    assert!(near(px(&img, 1, 2), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
+fn object_bounding_box_pattern_units_map_tile_and_content_coordinates() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="8">
+            <defs><pattern id="p" width="0.5" height="1" patternContentUnits="objectBoundingBox">
+                <rect width="25%" height="100%" fill="green"/>
+            </pattern></defs>
+            <rect x="10" y="2" width="8" height="4" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 20, 8, 1.0);
+    assert!(near(px(&img, 10, 3), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 12, 3)[3], 0.0);
+    assert!(near(px(&img, 14, 3), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 16, 3)[3], 0.0);
+}
+
+#[test]
+fn pattern_transform_scales_tile_spacing_and_its_content_together() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="2">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="2" height="2" patternTransform="scale(2)">
+                <rect width="1" height="2" fill="red"/>
+            </pattern></defs>
+            <rect width="8" height="2" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 8, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 1, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 2, 0)[3], 0.0);
+    assert_eq!(px(&img, 3, 0)[3], 0.0);
+    assert!(near(px(&img, 4, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
+fn pattern_href_inherits_units_and_content_and_prefers_plain_href() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="2">
+            <defs>
+                <pattern id="base" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="1" height="2" fill="red"/>
+                </pattern>
+                <pattern id="other" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2" fill="blue"/>
+                </pattern>
+                <pattern id="derived" href="#base" xlink:href="#other"/>
+                <pattern id="xlink-derived" xlink:href="#base"/>
+            </defs>
+            <rect width="8" height="2" fill="url(#derived)"/>
+            <rect x="8" width="8" height="2" fill="url(#xlink-derived)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 16, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 1, 0)[3], 0.0);
+    assert!(near(px(&img, 2, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 8, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 9, 0)[3], 0.0);
+}
+
+#[test]
+fn cached_patterns_reuse_same_viewport_but_separate_percentage_sized_viewports() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="10" viewBox="0 0 120 10">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                <rect width="4" height="100%" fill="red"/>
+            </pattern></defs>
+            <svg width="40" height="10" viewBox="0 0 40 10">
+                <rect id="small-one" width="20" height="10" fill="url(#p) blue"/>
+                <rect id="small-two" x="20" width="20" height="10" fill="url(#p) green"/>
+            </svg>
+            <svg x="40" width="80" height="10" viewBox="0 0 80 10">
+                <rect id="large" width="80" height="10" fill="url(#p) yellow"/>
+            </svg>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small_one)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-one") else { panic!("small-one expected") };
+    let Some(Paint::Pattern(small_one)) = small_one.fill.as_ref() else { panic!("small-one pattern expected") };
+    let Some((_, _, small_two)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-two") else { panic!("small-two expected") };
+    let Some(Paint::Pattern(small_two)) = small_two.fill.as_ref() else { panic!("small-two pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large") else { panic!("large expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large pattern expected") };
+    assert_eq!(small_one.width, 20.0);
+    assert_eq!(small_two.width, 20.0);
+    assert_eq!(large.width, 40.0);
+    assert_eq!(small_one.fallback, Some([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(small_two.fallback, Some([0.0, 128.0 / 255.0, 0.0, 1.0]));
+    assert_eq!(large.fallback, Some([1.0, 1.0, 0.0, 1.0]));
+    assert!(std::sync::Arc::ptr_eq(&small_one.content, &small_two.content));
+    assert!(!std::sync::Arc::ptr_eq(&small_one.content, &large.content));
+
+    let img = rasterize(&doc, 120, 10, 1.0);
+    for x in [1, 21, 41, 81] {
+        assert!(near(px(&img, x, 5), [1.0, 0.0, 0.0, 1.0], 1e-3), "x={x}");
+    }
+    for x in [5, 25, 45, 85] {
+        assert_eq!(px(&img, x, 5)[3], 0.0, "x={x}");
+    }
+}
+
+#[test]
+fn bare_urls_and_hrefs_do_not_resolve_as_local_pattern_ids() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="2">
+            <defs>
+                <pattern id="target" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2" fill="red"/>
+                </pattern>
+                <pattern id="bare-href" href="target" width="2" height="2"/>
+            </defs>
+            <rect width="2" height="2" fill="url(target) blue"/>
+            <rect x="2" width="2" height="2" fill="url(#bare-href) green"/>
+            <rect x="4" width="2" height="2" fill="url(#target)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+    assert_eq!(shapes[1].2.fill, Some(Paint::Color([0.0, 128.0 / 255.0, 0.0])));
+    assert!(matches!(shapes[2].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    let img = rasterize(&doc, 6, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 2, 0), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 4, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
+fn empty_valid_pattern_is_transparent_instead_of_using_its_fallback() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+            <defs><pattern id="empty" patternUnits="userSpaceOnUse" width="2" height="2"/></defs>
+            <rect width="4" height="2" fill="url(#empty) red"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let Some(Paint::Pattern(pattern)) = doc.flatten()[0].2.fill.as_ref() else { panic!("valid pattern expected") };
+    assert_eq!(pattern.fallback, Some([1.0, 0.0, 0.0, 1.0]));
+    let img = rasterize(&doc, 4, 2, 1.0);
+    assert_eq!(px(&img, 0, 0)[3], 0.0);
+    assert_eq!(px(&img, 3, 0)[3], 0.0);
+}
+
+#[test]
+fn pattern_content_attribute_work_is_bounded_across_distinct_viewports() {
+    let large_attribute = "x".repeat(2 * 1024 * 1024);
+    let shapes: String = (0..12)
+        .map(|index| format!(r##"<svg x="{index}" width="1" height="1" viewBox="0 0 {} 1"><rect width="1" height="1" fill="url(#p)"/></svg>"##, index + 1))
+        .collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="1"><defs>
+            <pattern id="p" data-repeat="{large_attribute}" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>{shapes}</svg>"##
+    );
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("<pattern> references scans more than"), "{error}");
+}
+
+#[test]
+fn pattern_tile_alpha_composites_as_premultiplied_color() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1">
+                <rect width="1" height="1" fill="red" fill-opacity="0.5"/>
+            </pattern></defs>
+            <rect width="2" height="2" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 2, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.5, 0.0, 0.0, 0.5], 1e-3));
+    assert!(near(px(&img, 1, 1), [0.5, 0.0, 0.0, 0.5], 1e-3));
+}
+
+#[test]
+fn oversized_pattern_tile_falls_back_without_allocating() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">
+            <defs><pattern id="huge" patternUnits="userSpaceOnUse" width="1e300" height="1e300">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>
+            <rect width="1" height="1" fill="url(#huge) gold"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 1, 1, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 215.0 / 255.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
+fn invalid_pattern_uses_paint_fallback_without_expanding_cycles() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="2">
+            <defs>
+                <pattern id="bad" width="0" height="1"/>
+                <pattern id="viewbox" width="1" height="1" viewBox="0 0 1 1"/>
+                <pattern id="collapsed" patternUnits="userSpaceOnUse" width="1" height="1" patternTransform="scale(0)"/>
+                <pattern id="a" href="#b"/>
+                <pattern id="b" href="#a"/>
+            </defs>
+            <rect width="2" height="2" fill="url(#bad) blue"/>
+            <rect x="2" width="2" height="2" fill="url(#viewbox) red"/>
+            <rect x="4" width="2" height="2" fill="url(#collapsed) yellow"/>
+            <rect x="6" width="2" height="2" fill="url(#a) green"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+    assert_eq!(shapes[1].2.fill, Some(Paint::Color([1.0, 0.0, 0.0])));
+    assert_eq!(shapes[2].2.fill, Some(Paint::Color([1.0, 1.0, 0.0])));
+    assert_eq!(shapes[3].2.fill, Some(Paint::Color([0.0, 128.0 / 255.0, 0.0])));
+    let img = rasterize(&doc, 8, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 3, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 5, 0), [1.0, 1.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 7, 0), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
 fn basic_shapes_structure() {
     let d = parse(BASIC).unwrap();
     assert_eq!((d.width, d.height), (200.0, 100.0));

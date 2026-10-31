@@ -18,9 +18,15 @@ here, plus **CSS Color Module Level 3** for colour keywords and functions:
   `stroke-opacity`, `opacity`, `display`, `visibility`, `color`/`currentColor`;
 - `linearGradient` and `radialGradient` (with `fx`/`fy` focal point), `gradientUnits`,
   `gradientTransform`, `spreadMethod`, `href` inheritance of stops and attributes;
+- static `<pattern>` fill/stroke with `patternUnits`, `patternContentUnits`, `patternTransform`,
+  tile `x`/`y`/`width`/`height`, local `href`/`xlink:href` inheritance and solid paints on
+  supported shape/group children;
 - styling through presentation attributes, the `style` attribute and `<style>` sheets with
   type, class, id and universal selectors (simple selectors and selector lists).
 
-Not supported (ignored): text, images, filters, clip paths, masks, patterns, markers, animation.
+Pattern `viewBox`, external pattern references, nested paint servers and non-shape pattern content
+are unsupported; invalid patterns use a `url(...)` fallback when present. Pattern paints are
+rasterised in SVG footage but omitted when converting to editable shape layers. Other unsupported
+content (ignored): text, images, filters, clip paths, masks, markers and animation.
 XML parsing uses `roxmltree` (MIT/Apache-2.0). Test fixtures are original work (see
 `tests/fixtures/*.attribution`).
