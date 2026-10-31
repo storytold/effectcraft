@@ -2,7 +2,8 @@
 //!
 //! Shading model (per light, Blinn-Phong on the layer plane, lit from both sides):
 //! `colour = texture · (ambient_mat · Σ ambient + diffuse_mat · Σ diffuse) + specular`, where a
-//! light's diffuse term is `colour · intensity · max(N·L, 0) · falloff · cone · shadow`, light from
+//! light's diffuse term is `colour · intensity · max(N·L, 0) · falloff · cone · shadow` (falloff by
+//! the distance from the light's position, for parallel lights too), light from
 //! behind the layer passes through by Light Transmission, and the specular highlight
 //! `(N·H)^shininess` takes the light's colour mixed towards the layer's colour by Metal.
 //! A comp without lights shows 3D layers unlit.
@@ -79,6 +80,9 @@ impl LightState {
     /// Distance attenuation × spot cone factor at `p` (0..1).
     pub fn attenuation(&self, p: Vec3) -> f64 {
         let (l, dist) = self.to_light(p);
+        // A parallel light's rays all share one direction, but its falloff is still measured
+        // from the light's position, as for a point light.
+        let dist = if self.kind == LightKind::Parallel { (p - self.pos).length() } else { dist };
         let mut k = match self.falloff {
             1 if dist.is_finite() => {
                 // Smooth: full within Radius, smooth to zero over Falloff Distance.

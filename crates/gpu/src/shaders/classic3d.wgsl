@@ -163,7 +163,11 @@ fn smoothstep01(t: f32) -> f32 {
 fn attenuation(l: u32, p: vec3<f32>) -> f32 {
     let li = lights[l];
     let tl = to_light(l, p);
-    let dist = tl.w;
+    // Parallel lights fall off with the distance from the light's position too.
+    var dist = tl.w;
+    if (li.ints.x == 1u) {
+        dist = length(li.pos.xyz - p);
+    }
     let finite = dist >= 0.0;
     let radius = li.cone.z;
     let fd = li.cone.w;

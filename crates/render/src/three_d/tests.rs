@@ -295,6 +295,28 @@ fn falloff_inverse_square_clamped() {
     assert_eq!(ls.attenuation(vec3(250.0, 0.0, 0.0)), 0.0);
 }
 
+#[test]
+fn parallel_light_falls_off_from_its_position() {
+    // The rays keep the light's direction, but Smooth falloff is measured from its position.
+    let mut ls = LightState::from_layer(&crate::EvalCtx::new(&Project::default(), ItemId(0), &Comp::new(W, H, FrameRate::FPS_30, Tick::ZERO), Tick::ZERO), &{
+        let (mut p, _, comp) = setup();
+        light(&mut p, &comp, LightKind::Parallel, [0.0, 0.0, 0.0])
+    })
+    .unwrap();
+    assert!(ls.to_light(vec3(0.0, 0.0, 500.0)).1.is_infinite());
+    ls.falloff = 1;
+    ls.radius = 100.0;
+    ls.falloff_distance = 100.0;
+    let p = ls.pos;
+    assert_eq!(ls.attenuation(p + vec3(0.0, 0.0, 50.0)), 1.0);
+    assert!((ls.attenuation(p + vec3(0.0, 0.0, 150.0)) - 0.5).abs() < 1e-12);
+    // Off to the side counts too: the distance is from the position, not along the rays.
+    assert!((ls.attenuation(p + vec3(150.0, 0.0, 0.0)) - 0.5).abs() < 1e-12);
+    assert_eq!(ls.attenuation(p + vec3(0.0, 250.0, 0.0)), 0.0);
+    ls.falloff = 0;
+    assert_eq!(ls.attenuation(p + vec3(0.0, 0.0, 5000.0)), 1.0);
+}
+
 // ---------------------------------------------------------------- shadows
 
 #[test]
