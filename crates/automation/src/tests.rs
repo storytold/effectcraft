@@ -1628,6 +1628,21 @@ fn blender_export_requires_an_absolute_path_in_a_write_root() {
     std::fs::remove_dir_all(&base).unwrap();
 }
 
+/// What confinement knows writes files or runs other applications is also what an atomic
+/// `engine.batch` refuses, since a rollback can't undo it.
+#[test]
+fn atomic_batches_refuse_every_command_confinement_treats_as_writing_or_external() {
+    use crate::confine::{IMPLICIT_WRITES, REFUSED, WRITES};
+    use effectcraft_engine::commands::batch::NOT_IN_ATOMIC;
+    // Adding a Render Queue item only changes the project; an auto-save writes a recovery copy
+    // the next one replaces; scripts can't run in a batch at all. `file.checkOutput` only
+    // reports whether a path may be written — it writes nothing a rollback would have to undo.
+    let allowed = ["renderQueue.add", "file.autoSave", "script.run", "file.runScript", "file.checkOutput"];
+    for id in WRITES.iter().map(|(c, _)| *c).chain(IMPLICIT_WRITES.iter().copied()).chain(REFUSED.iter().copied()) {
+        assert!(NOT_IN_ATOMIC.contains(&id) || allowed.contains(&id), "{id} should be in engine::commands::batch::NOT_IN_ATOMIC");
+    }
+}
+
 /// `render_frame` writes the frame to the `path` it is given, and never over a file the open
 /// project reads (#1743): footage, a proxy or the project file. The refusal comes before the
 /// frame is rendered, and the file is untouched.
