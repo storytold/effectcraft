@@ -18,10 +18,16 @@
 //! | cpal audio output | Web Audio: an AudioWorklet fed from the preview mixdown (`audio`) |
 //! | TCP control channel / MCP | `window.effectcraft` JavaScript API (`api`) |
 //!
-//! [`store`] and [`startup`] are portable (unit-tested natively); everything else is `wasm32`-only.
+//! With `?host=parent` inside an `<iframe>` whose parent page is on the same origin (such as a
+//! Nextcloud app), that page sends the files to open and stores what EffectCraft saves and renders
+//! ([`host`]).
+//!
+//! [`store`], [`startup`] and [`embed`] are portable (unit-tested natively); everything else is
+//! `wasm32`-only.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod embed;
 pub mod startup;
 pub mod store;
 
@@ -41,6 +47,8 @@ pub mod diskcache;
 pub mod files;
 #[cfg(target_arch = "wasm32")]
 pub mod frames;
+#[cfg(target_arch = "wasm32")]
+pub mod host;
 #[cfg(target_arch = "wasm32")]
 pub mod persist;
 #[cfg(target_arch = "wasm32")]
