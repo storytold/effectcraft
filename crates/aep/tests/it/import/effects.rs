@@ -69,10 +69,11 @@ fn the_table_names_tint_gradient_ramp_and_exposure() {
         ("ADBE Glo2", "ec.stylize.glow"),
         ("ADBE Easy Levels2", "ec.color.levels"),
         ("ADBE Timewarp", "ec.time.timewarp"),
+        ("ADBE Camera Lens Blur", "ec.blur.cameralens"),
     ] {
         assert!(t.contains(&want), "{want:?}");
     }
-    assert_eq!(t.len(), 57);
+    assert_eq!(t.len(), 58);
     for (_, id) in t {
         assert!(effectcraft_effects::find(id).is_some(), "{id}");
     }

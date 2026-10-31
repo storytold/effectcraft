@@ -63,6 +63,8 @@ pub const INVERT_CHANNEL: &[&str] = &[
 ];
 /// 412, 417, 427.
 pub const BLUR_DIMENSIONS: &[&str] = &["Horizontal and Vertical", "Horizontal", "Vertical"];
+/// Camera Lens Blur's Shape (`pdnm` of a 2026 project; EffectCraft also has Circle).
+pub const LENS_IRIS_SHAPE: &[&str] = &["Triangle", "Square", "Pentagon", "Hexagon", "Heptagon", "Octagon", "Nonagon", "Decagon"];
 /// 529.
 pub const TIMEWARP_METHOD: &[&str] = &["Whole Frames", "Frame Mix", "Pixel Motion"];
 /// 529.
@@ -409,6 +411,30 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(1, K::FloatSlider, "blurriness", Conv::Plain { valid_max: 30000.0 }),
             pm(2, K::Popup, "dimensions", Conv::Popup { default: 1, items: BLUR_DIMENSIONS }),
             pm(3, K::Checkbox, "repeatEdge", Conv::Checkbox),
+        ],
+    ),
+    // Camera Lens Blur. `parT` (a 2026 project's definitions): 1 Blur Radius (float, valid max 500),
+    // 2-8 the Iris Properties group (3 Shape popup Triangle..Decagon, default Hexagon; 4 Roundness,
+    // 5 Aspect Ratio, both float with valid max 100; 6 Rotation angle; 7 Diffraction Fringe float,
+    // valid max 500), 9-15 the Blur Map group, 16-20 the Highlight group (17 Gain, 19 Saturation,
+    // float, valid max 100), 21 Repeat Edge Pixels, 22 Use Linear Working Space. Not mapped
+    // (reported when stored): the Blur Map's Layer, Channel and Placement (their popup items differ
+    // from EffectCraft's) and Focal Distance, and the Highlight Threshold (stored as a 0..1 fraction,
+    // EffectCraft's is 0..255 levels; the scale is unverified).
+    fx(
+        "ADBE Camera Lens Blur",
+        "ec.blur.cameralens",
+        &[
+            pm(1, K::FloatSlider, "blurRadius", Conv::Plain { valid_max: 500.0 }),
+            pm(3, K::Popup, "irisProperties/irisShape", Conv::Popup { default: 4, items: LENS_IRIS_SHAPE }),
+            pm(4, K::FloatSlider, "irisProperties/irisRoundness", Conv::Plain { valid_max: 100.0 }),
+            pm(5, K::FloatSlider, "irisProperties/irisAspectRatio", Conv::Plain { valid_max: 100.0 }),
+            pm(6, K::Angle, "irisProperties/irisRotation", Conv::Angle),
+            pm(7, K::FloatSlider, "irisProperties/diffractionFringe", Conv::Plain { valid_max: 500.0 }),
+            pm(17, K::FloatSlider, "highlight/specularBrightness", Conv::Plain { valid_max: 100.0 }),
+            pm(19, K::FloatSlider, "highlight/highlightSaturation", Conv::Plain { valid_max: 100.0 }),
+            pm(21, K::Checkbox, "repeatEdge", Conv::Checkbox),
+            pm(22, K::Checkbox, "useLinear", Conv::Checkbox),
         ],
     ),
     // Drop Shadow (080, 420-426).
