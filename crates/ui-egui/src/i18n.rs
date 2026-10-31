@@ -2748,7 +2748,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.create", "Convert to Editable Text", "編集可能なテキストに変換"),
     ("layer.create", "Create Shapes from Text", "テキストからシェイプを作成"),
     ("layer.create", "Create Masks from Text", "テキストからマスクを作成"),
-    ("layer.create", "Create Shapes from Vector Layer", "ベクターレイヤーからシェイプを作成"),
+    ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
     ("layer.create", "Create Keyframes from Data", "データからキーフレームを作成"),
     ("layer.create", "Null Controllers for Positional Points", "位置のポイント用ヌルコントローラー"),
     ("layer.create", "Null Controllers for Path Points", "パスのポイント用ヌルコントローラー"),
@@ -8778,6 +8778,7 @@ mod tests {
             ("track.camera", "Track Camera", "カメラをトラック"),
             ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップを有効にする"),
             ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
+            ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
         ] {
             // The menu row is the source of truth: \`command_label\` also falls back to the panel
             // catalog, which would hide a row naming the wrong command or English source.
