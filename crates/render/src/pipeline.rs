@@ -166,7 +166,7 @@ impl<'a> Renderer<'a> {
 
     /// A processed-layer cache key that also covers [`Renderer::time_rate`] (mask motion blur and
     /// effects that read the shutter span it), unchanged at the usual rate 1.
-    fn rate_key(&self, key: Option<u64>) -> Option<u64> {
+    pub(crate) fn rate_key(&self, key: Option<u64>) -> Option<u64> {
         if self.time_rate == 1.0 { key } else { key.map(|k| cache::derive(k, self.time_rate.to_bits())) }
     }
 

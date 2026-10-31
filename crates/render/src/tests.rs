@@ -977,6 +977,42 @@ fn adjustment_footprint_key_ignores_the_effect_stack() {
     assert_eq!(before, key(&p, 0.0), "editing an effect parameter must not re-key the footprint");
 }
 
+/// An adjustment layer's animated mask blurs over the shutter, which a nested comp's time rate
+/// stretches, so a footprint cached at one rate is not the footprint at another.
+#[test]
+fn adjustment_footprint_cache_separates_time_rates() {
+    let (mut p, cid, comp) = setup();
+    let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    adj.switches.adjustment = true;
+    adj.switches.motion_blur = true;
+    let mut next = p.next_id;
+    let mut m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    m.prop_mut("path").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Path(ShapePath::rect([50.0, 50.0], 40.0, 40.0))),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Path(ShapePath::rect([150.0, 50.0], 40.0, 40.0))),
+    ];
+    adj.props.sub_mut("masks").unwrap().children.push(m.into());
+    let c = p.comp_mut(cid).unwrap();
+    c.enable_motion_blur = true;
+    c.shutter_angle = 180.0;
+    c.layers.push(adj);
+    let c = p.comp(cid).unwrap();
+    let layer = c.layers[0].clone();
+    let ctx = crate::EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(0.5));
+    let cache = crate::LayerCache::default();
+    let foot = |rate: f64| {
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+        r.cache = Some(&cache);
+        r.time_rate = rate;
+        r.adjustment_footprint(&ctx, &layer).unwrap()
+    };
+    let (plain, fast) = (foot(1.0), foot(4.0));
+    let differ = plain.img.data.iter().zip(&fast.img.data).any(|(a, b)| (a[3] - b[3]).abs() > 0.01);
+    assert!(differ, "a footprint at another time rate read the cached one");
+    assert!(std::sync::Arc::ptr_eq(&plain, &foot(1.0)), "the same rate still reads the cache");
+}
+
 /// #659: a tiling effect on a text layer tiles across the layer's whole region. The glyphs
 /// were cut off at their own bounding box: the effect computed over the comp-sized layer rect
 /// but wrote into the painted (glyph-bounds) buffer alone. Tiling shrinks each copy, so the
