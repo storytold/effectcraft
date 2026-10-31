@@ -52,28 +52,29 @@ pub fn distance(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
         return vec![];
     }
     let mut g: Vec<f32> = seed.iter().map(|s| if *s { 0.0 } else { BIG }).collect();
+    // dt1 needs `f` intact while pass 2 writes `d`, so transform one line at a time through
+    // shared scratch (four vectors total, reused for every column and row). The line scan is
+    // O(n) scalar work; parallelising it copies 4 vectors per line, which costs more than it
+    // saves on one thread (measured: dt1 self time 17.5 % of propagate).
+    let m = w.max(h);
+    let (mut f, mut d, mut v, mut z) = (vec![0.0f32; m], vec![0.0f32; m], vec![0usize; m], vec![0.0f64; m + 1]);
     // Columns.
-    let cols: Vec<Vec<f32>> = (0..w)
-        .into_par_iter()
-        .map(|x| {
-            let f: Vec<f32> = (0..h).map(|y| g[y * w + x]).collect();
-            let mut d = vec![0.0; h];
-            let (mut v, mut z) = (vec![0usize; h], vec![0.0f64; h + 1]);
-            dt1(&f, &mut d, &mut v, &mut z);
-            d
-        })
-        .collect();
-    for (x, c) in cols.iter().enumerate() {
-        for y in 0..h {
-            g[y * w + x] = c[y];
+    for x in 0..w {
+        for (q, fv) in f[..h].iter_mut().enumerate() {
+            *fv = g[q * w + x];
+        }
+        dt1(&f[..h], &mut d[..h], &mut v[..h], &mut z[..h + 1]);
+        for (q, &dv) in d[..h].iter().enumerate() {
+            g[q * w + x] = dv;
         }
     }
     // Rows.
-    g.par_chunks_mut(w).for_each(|row| {
-        let f = row.to_vec();
-        let (mut v, mut z) = (vec![0usize; w], vec![0.0f64; w + 1]);
-        dt1(&f, row, &mut v, &mut z);
-    });
+    for y in 0..h {
+        let row = &mut g[y * w..y * w + w];
+        f[..w].copy_from_slice(row);
+        dt1(&f[..w], &mut d[..w], &mut v[..w], &mut z[..w + 1]);
+        row.copy_from_slice(&d[..w]);
+    }
     g.par_iter_mut().for_each(|v| *v = v.sqrt());
     g
 }
