@@ -194,6 +194,236 @@ fn functions_and_let_are_reusable_across_evaluations() {
 }
 
 #[test]
+fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
+    let f = fx();
+    // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
+    // a write to a prelude name used to outlive the expression that made it and poison every later
+    // one — in this session's other projects too.
+    assert_close!(f.num("linear = function () { return 777 };\n50", 0.0), 50.0);
+    assert_close!(f.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    assert_close!(f.num("var clamp = 5;\n10", 0.0), 10.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("Math.sin = function () { return 9 };\n1", 0.0), 1.0);
+    assert_close!(f.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(f.num("Object.prototype.leak = 9;\n2", 0.0), 2.0);
+    assert_close!(f.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
+    // The runtime is one thread-local singleton, so a second project on this thread meets the same
+    // objects: the isolation has to hold between projects, not only between the evaluations of one.
+    let g = fx();
+    assert_close!(g.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    assert_close!(g.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(g.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(g.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+/// The same leak, reached through the objects instead of the names: a prelude constructor keeps its
+/// methods on its `prototype`, the prelude itself calls `Array.isArray` and `Object.setPrototypeOf`
+/// while it answers an expression, and `thisProject` is reachable surface that holds no function at
+/// all (#2133).
+#[test]
+fn an_expression_cannot_tamper_with_a_prelude_object_for_the_next_one() {
+    let f = fx();
+    // An unqualified name is an accessor, so it takes a `defineProperty` or a `delete` rather than
+    // an assignment; the setter an assignment goes through writes per-evaluation state.
+    assert_close!(f.num("try { Object.defineProperty(globalThis, 'width', { value: 777 }) } catch (e) {}\n1", 0.0), 1.0);
+    assert_close!(f.num("delete width;\n2", 0.0), 2.0);
+    assert_close!(f.num("width", 0.0), 20.0);
+    assert_close!(f.num("Comp.prototype = {};\n3", 0.0), 3.0);
+    assert_close!(f.num("Comp.prototype.leak = 9;\n4", 0.0), 4.0);
+    assert_close!(f.num("thisComp.width", 0.0), 200.0);
+    // `add` reads its arguments through `Array.isArray`, and reaching an effect builds a group with
+    // `Object.setPrototypeOf`, so a replacement for either would change the answers below.
+    assert_close!(f.num("Array.isArray = function () { return false };\n5", 0.0), 5.0);
+    assert_close!(f.num("Object.setPrototypeOf = function (o) { return o };\n6", 0.0), 6.0);
+    assert_close!(f.num("add([1, 2], [3, 4])[0]", 0.0), 4.0);
+    assert_close!(f.num("effect(\"Slider Control\")(\"Slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisProject = 5;\nthisProject.leak = 9;\n7", 0.0), 7.0);
+    assert_close!(f.num("typeof thisProject === 'object' && thisProject.leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+/// Closing the prototypes must not cost an expression its own objects: once an inherited data
+/// property is non-writable, an assignment meaning to shadow it on an instance is dropped in sloppy
+/// mode rather than creating an own property, and using an object as a dictionary runs into exactly
+/// those names (#2133).
+#[test]
+fn an_expression_can_shadow_an_inherited_name_on_its_own_object() {
+    let f = fx();
+    assert_close!(f.num("var o = {}; o.toString = function () { return 'x' }; o.toString() === 'x' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var d = {}; d.constructor = 3; d.constructor", 0.0), 3.0);
+    assert_close!(f.num("var c = {}; c['valueOf'] = 2; c['valueOf']", 0.0), 2.0);
+    // The shared prototype itself still cannot be written through, which is the point of freezing.
+    assert_close!(f.num("Object.prototype.toString = function () { return 'z' };\n1", 0.0), 1.0);
+    assert_close!(f.num("({}).toString() === 'z' ? 0 : 1", 0.0), 1.0);
+}
+
+/// The names an expression shadows are not only `Object.prototype`'s: giving one array its own
+/// `map` or one function its own `call` is ordinary JavaScript, and a prototype frozen without the
+/// repair takes it away. The two halves fail differently, which is why both are checked here —
+/// `map`, `forEach` and `filter` throw, while `push` and `join` silently run the native method and
+/// return its answer, so an expression using them keeps working and quietly computes something
+/// else (#2133).
+#[test]
+fn an_expression_can_shadow_an_inherited_method_on_its_own_array_or_function() {
+    let f = fx();
+    assert_close!(f.num("var a = []; a.map = function () { return 42 }; a.map()", 0.0), 42.0);
+    assert_close!(f.num("var a = [1, 2]; a.forEach = function () { return 5 }; a.forEach()", 0.0), 5.0);
+    assert_close!(f.num("var a = [1, 2]; a.filter = function () { return 6 }; a.filter()", 0.0), 6.0);
+    // `push` returned the native length and `join` the native string before the repair.
+    assert_close!(f.num("var a = [1]; a.push = function () { return 99 }; a.push(2)", 0.0), 99.0);
+    assert_close!(f.num("var a = [1]; a.push = function () { return 99 }; a.push(2); a.length", 0.0), 1.0);
+    assert_close!(f.num("var a = [1]; a.join = function () { return 'J' }; a.join() === 'J' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var fn = function () {}; fn.call = function () { return 7 }; fn.call()", 0.0), 7.0);
+    assert_close!(f.num("var fn = function () {}; fn.apply = function () { return 8 }; fn.apply()", 0.0), 8.0);
+    // A symbol key on a prototype the loop reaches goes the same way.
+    assert_close!(f.num("var a = [1]; a[Symbol.toPrimitive] = function () { return 11 }; +a", 0.0), 11.0);
+    // Reading an unshadowed method still answers with the native one, through the repair.
+    assert_close!(f.num("[1, 2, 3].map(function (x) { return x * 2 })[2]", 0.0), 6.0);
+    assert_close!(f.num("[1, 2, 3].filter(function (x) { return x > 1 }).length", 0.0), 2.0);
+    assert_close!(f.num("[3, 1, 2].sort()[0]", 0.0), 1.0);
+    assert_close!(f.num("[1, 2].concat([3]).length", 0.0), 3.0);
+    // The shared prototype itself still cannot be written through, which is the point of freezing.
+    assert_close!(f.num("Array.prototype.map = function () { return 0 };\n1", 0.0), 1.0);
+    assert_close!(f.num("[1].map(function (x) { return x + 1 })[0]", 0.0), 2.0);
+    assert_close!(f.num("Function.prototype.call = function () { return 0 };\n1", 0.0), 1.0);
+    assert_close!(f.num("(function () { return 4 }).call(null)", 0.0), 4.0);
+}
+
+/// `name` and `message` on an error's prototype are the one exception to the repair, because the
+/// host reads both off a thrown object to render it and has no context to call a getter with, nor
+/// anywhere safe to call one: formatting happens after the evaluation's time budget stops being
+/// checked. What matters is that the message still names the error and the line, and that the
+/// assignment the exception costs is dropped in silence rather than failing the expression (#2133).
+#[test]
+fn an_error_still_renders_with_its_name_and_the_users_line() {
+    let f = fx();
+    // The write the exception costs: a no-op, not a throw, and the next statement still runs.
+    assert_close!(f.num("var e = new Error('x'); e.name = 'MyError'; 1", 0.0), 1.0);
+    assert_close!(f.num("var e = new Error('x'); e.name === 'Error' ? 1 : 0", 0.0), 1.0);
+    // An own `message` is the instance's, so it is untouched by any of this.
+    assert_close!(f.num("new Error('x').message === 'x' ? 1 : 0", 0.0), 1.0);
+    // The prototype itself still cannot be rebound for the next expression, which is the point.
+    assert_close!(f.num("Error.prototype.name = 'Hacked';\n1", 0.0), 1.0);
+    assert_close!(f.num("new Error('x').name === 'Error' ? 1 : 0", 0.0), 1.0);
+    // A getter the expression installs on its own error is reached through its own property, so it
+    // never goes near the host's read of the prototype.
+    assert_close!(f.num("var e = new Error('x'); Object.defineProperty(e, 'name', { get: function () { return 'Own' } }); e.name === 'Own' ? 1 : 0", 0.0), 1.0);
+}
+
+/// The repair must not turn a dropped assignment into a failed expression: in sloppy mode a write
+/// to a frozen target is ignored, and the setter runs for every receiver that inherits the name,
+/// including the other frozen prototypes and an object the expression froze itself.
+#[test]
+fn assigning_a_repaired_name_on_a_frozen_object_is_dropped_not_an_error() {
+    let f = fx();
+    // `hasOwnProperty` is `Object.prototype`'s, so this runs the repaired setter with a frozen
+    // `Array.prototype` as the receiver.
+    assert_close!(f.num("Array.prototype.hasOwnProperty = function () { return true };\n1", 0.0), 1.0);
+    assert_close!(f.num("[].hasOwnProperty('length') ? 1 : 0", 0.0), 1.0);
+    // The prelude freezes these, and each inherits the repaired names.
+    assert_close!(f.num("Math.toString = function () { return 'm' };\n2", 0.0), 2.0);
+    assert_close!(f.num("JSON.valueOf = 3;\n3", 0.0), 3.0);
+    assert_close!(f.num("thisProject.toLocaleString = 4;\n4", 0.0), 4.0);
+    // An object the expression froze itself behaves as it does outside the prelude.
+    assert_close!(f.num("var o = {}; Object.freeze(o); o.toString = function () { return 'x' };\n5", 0.0), 5.0);
+    assert_close!(f.num("var s = {}; Object.seal(s); s.constructor = 6;\n6", 0.0), 6.0);
+    // Still a no-op where it has to be, and still working where it has to work.
+    assert_close!(f.num("({}).toString() === '[object Object]' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var k = {}; k.toString = function () { return 'y' }; k.toString() === 'y' ? 1 : 0", 0.0), 1.0);
+    // A primitive target boxes into a throwaway wrapper, and `null` is not extensible, which is why
+    // the receiver check alone is enough.
+    assert_close!(f.num("'abc'.toString = function () { return 'q' };\n7", 0.0), 7.0);
+    assert_close!(f.num("(5).constructor = 8;\n8", 0.0), 8.0);
+    assert_close!(f.num("Object.isExtensible(null) === false && Object.isExtensible(undefined) === false ? 1 : 0", 0.0), 1.0);
+}
+
+/// The repaired name is an accessor standing in for a data property, and an accessor is handed the
+/// receiver while a data property has the receiver's own property consulted first, so the setter
+/// has to do that itself or the substitution shows through. An ordinary assignment finds the own
+/// property and never reaches the setter, so these call it with the receiver directly, which is
+/// what `Reflect.set(Object.prototype, name, v, o)` would do; `Reflect` is not available to
+/// expressions. Every expected value is what that `Reflect.set` answers in node, where the name
+/// is still the data property this one stands in for.
+#[test]
+fn the_repair_answers_a_write_as_the_data_property_it_replaced_would() {
+    let f = fx();
+    let set = "var put = Object.getOwnPropertyDescriptor(Object.prototype, 'toString').set;";
+    // An own writable property is updated in place, even when the receiver takes no new ones.
+    assert_close!(f.num(&format!("{set} var o = {{ toString: 1 }}; Object.preventExtensions(o); put.call(o, 2); o.toString"), 0.0), 2.0);
+    assert_close!(f.num(&format!("{set} var o = {{ toString: 1 }}; put.call(o, 2); o.toString"), 0.0), 2.0);
+    // ... and keeps the attributes it had, rather than being redefined as a fresh enumerable one.
+    assert_close!(
+        f.num(
+            &format!(
+                "{set} var o = {{}}; Object.defineProperty(o, 'toString', {{ value: 1, writable: true, enumerable: false, configurable: true }});
+                 put.call(o, 2); Object.getOwnPropertyDescriptor(o, 'toString').enumerable ? 1 : 0"
+            ),
+            0.0
+        ),
+        0.0
+    );
+    // An own non-writable property drops the write instead of being overwritten.
+    assert_close!(
+        f.num(
+            &format!(
+                "{set} var o = {{}}; Object.defineProperty(o, 'toString', {{ value: 1, writable: false, enumerable: false, configurable: true }});
+                 put.call(o, 2); o.toString"
+            ),
+            0.0
+        ),
+        1.0
+    );
+    // Writing through the prototype itself changes nothing for anyone.
+    assert_close!(f.num(&format!("{set} put.call(Object.prototype, 2); ({{}}).toString === undefined ? 0 : 1"), 0.0), 1.0);
+    // An ordinary assignment finds the own property first and never reaches the setter at all.
+    assert_close!(f.num("var o = { toString: 1 }; o.toString = 2; o.toString", 0.0), 2.0);
+}
+
+/// `for…of`, destructuring and spread all go through the iterator intrinsics, and those are the
+/// `prototype` of no global function, so freezing what the globals reach never touched them (#2133).
+#[test]
+fn an_expression_cannot_poison_iteration_for_the_next_one() {
+    let f = fx();
+    assert_close!(f.num("Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true } };\n1", 0.0), 1.0);
+    assert_close!(f.num("var s = 0; for (var x of [1, 2, 3]) s += x; s", 0.0), 6.0);
+    assert_close!(f.num("var [a, b] = [4, 5]; a + b", 0.0), 9.0);
+    assert_close!(f.num("Math.max(...[1, 7, 3])", 0.0), 7.0);
+}
+
+/// Shadowing an inherited name on an instance has to keep working for symbol keys too: making an
+/// object iterable by assigning `Symbol.iterator` is ordinary JavaScript, and a frozen
+/// `Array.prototype` drops that write in silence, so `for…of` walks the array's own elements and
+/// quietly returns a different number rather than failing (#2133).
+#[test]
+fn an_expression_can_give_its_own_array_an_iterator() {
+    let f = fx();
+    assert_close!(
+        f.num(
+            "var a = [1, 2];
+             a[Symbol.iterator] = function () { var d = false; return { next: function () { if (d) return { done: true }; d = true; return { value: 9, done: false } } } };
+             var s = 0; for (var x of a) s += x; s",
+            0.0
+        ),
+        9.0
+    );
+    assert_close!(f.num("var a = [1, 2]; a[Symbol.iterator] = 1; a[Symbol.iterator] === 1 ? 1 : 0", 0.0), 1.0);
+    // `Object.prototype` carries no symbol keys, so a plain object was never affected.
+    assert_close!(f.num("var o = {}; o[Symbol.iterator] = 1; o[Symbol.iterator] === 1 ? 1 : 0", 0.0), 1.0);
+    // An inherited name that is already non-writable is left alone, as it is outside the prelude:
+    // `Date.prototype[Symbol.toPrimitive]` drops the write on `main` and in node as well.
+    assert_close!(f.num("var d = new Date(0); d[Symbol.toPrimitive] = 1; d[Symbol.toPrimitive] === 1 ? 1 : 0", 0.0), 0.0);
+    // Repairing the key must not reopen it: the shared prototype still cannot be written through.
+    assert_close!(
+        f.num(
+            "Array.prototype[Symbol.iterator] = function () { return { next: function () { return { done: true } } } };
+1",
+            0.0
+        ),
+        1.0
+    );
+    assert_close!(f.num("var s = 0; for (var x of [1, 2, 3]) s += x; s", 0.0), 6.0);
+}
+
+#[test]
 fn comments_are_ignored() {
     let f = fx();
     assert_close!(f.num("// spin\n/* fast */ time * 100 // per second", 1.0), 100.0);
@@ -1589,3 +1819,47 @@ fn an_expression_cant_change_the_prelude_for_the_next() {
 }
 
 mod property_group;
+
+/// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not
+/// an assertion. `cargo test -p effectcraft-expr --release --lib bench_evaluation -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "timing measurement, not a test"]
+fn bench_evaluation() {
+    let f = fx();
+    // Each case runs on a property whose dimension its answer fits: a scalar handed to `position`
+    // is rejected after the script has already run, so the case would be timing an error path.
+    // Ordinary expressions first, then three that read an inherited name in a loop: the repair
+    // turns each of those reads into an accessor call, and `Array.prototype.map` is the one an
+    // expression is most likely to reach for in quantity.
+    let cases: [(&str, &str, &str, u32); 10] = [
+        ("array maths", POS, "value + [10, 0]", 2500),
+        ("scalar maths", ROT, "time * 100 + 5", 3000),
+        ("prelude call", ROT, "linear(time, 0, 1, 0, 100)", 2500),
+        ("cross-layer read", ROT, "thisComp.layer(\"B\").transform.position[0]", 200),
+        ("effect read", ROT, "effect(\"Slider Control\")(\"Slider\")", 150),
+        ("wiggle", POS, "wiggle(2, 10)", 800),
+        ("dictionary", ROT, "var c = {}; var k = 'constructor'; c[k] = 1; c[k] + value", 2500),
+        ("toString x100", ROT, "var o = {}; var n = 0; for (var i = 0; i < 100; i++) { if (o.toString) n++; } n", 250),
+        ("hasOwnProperty x100", ROT, "var o = {}; var n = 0; for (var i = 0; i < 100; i++) { if (o.hasOwnProperty) n++; } n", 250),
+        ("array method x100", ROT, "var a = [1]; var n = 0; for (var i = 0; i < 100; i++) { if (a.map) n++; } n", 250),
+    ];
+    for (label, path, text, iters) in cases {
+        let mut best = u128::MAX;
+        // Three passes, keeping the fastest: a slower pass is scheduling noise, not the prelude.
+        for _ in 0..3 {
+            // The warm-up checks as it goes, at every time the measured loop uses: that loop drops
+            // its answer by design, so a case that had started failing would be timed on its error
+            // path and still print a number.
+            for i in 0..50 {
+                assert!(f.ev(f.a, path, text, f64::from(i % 10) * 0.1).is_ok(), "{label}");
+            }
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let _ = f.ev(f.a, path, text, f64::from(i % 10) * 0.1);
+            }
+            best = best.min(start.elapsed().as_nanos() / u128::from(iters));
+        }
+        println!("BENCH {best:>9} ns/eval  {label} (min of 3 x {iters})");
+    }
+}

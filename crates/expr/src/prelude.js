@@ -1295,3 +1295,151 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
     if ('value' in Object.getOwnPropertyDescriptor(globalThis, k)) Object.defineProperty(globalThis, k, { writable: false, configurable: false });
   });
 })();
+
+// ---------------------------------------------------------------------------------------------
+// One runtime serves every expression on a thread, and user code runs as a script at global
+// scope, so `linear = …` or a top-level `var clamp` would otherwise rebind a prelude name for
+// every later expression, and for every later project in the session (#2133). The block above
+// closes the `__` globals, the model constructors and the prelude's own prototypes; what is left
+// is the rest of the global surface: the prelude's own helpers (`linear`, `clamp`, `wiggle`), the
+// JavaScript built-ins that an expression and the prelude both call, and the prototypes those
+// hang off. A non-writable, non-configurable binding makes such a write a silent no-op in sloppy
+// mode, and `var` leaves an existing global property alone. A name the user introduces is not
+// frozen, so an expression that declares its own functions still works.
+(function () {
+  var g = globalThis;
+  // Every intrinsic this block needs, read once before the first prototype is rewritten. The
+  // block turns `Array.prototype.concat` and `forEach` into accessors as it goes, so reaching for
+  // them through a prototype part-way down the list would be reaching for something it has just
+  // changed under itself: the loops below index arrays directly for the same reason.
+  var describe = Object.getOwnPropertyDescriptor, define = Object.defineProperty;
+  var getNames = Object.getOwnPropertyNames, getSyms = Object.getOwnPropertySymbols;
+  var freeze = Object.freeze, isFrozen = Object.isFrozen, isExtensible = Object.isExtensible;
+  var protoOf = Object.getPrototypeOf;
+
+  var lock = function (n) {
+    var d = describe(g, n);
+    if (!d || !d.writable) return;
+    define(g, n, { value: d.value, writable: false, enumerable: d.enumerable, configurable: false });
+  };
+
+  // `name` and `message` on an error's prototype are the two names the repair below has to leave
+  // alone. The host renders a thrown error by reading both straight off the object, with no
+  // context to call a getter with, and it has no way to run one safely either: the time budget is
+  // checked between polls of the evaluation, and formatting happens after that returns, so a
+  // getter of the expression's own would run outside it — bounded by the loop and recursion limits
+  // at some hundreds of millions of iterations, which is a hang. Left as data properties they are
+  // frozen rather than repaired, so `e.name = 'MyError'` on an expression's own error is dropped
+  // in silence. That is the cost; an unbounded getter in the failure path is not worth paying to
+  // avoid it.
+  var HOST_READ = ['name', 'message'];
+  var hostRead = [];
+  var errorNames = ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError',
+    'URIError', 'AggregateError'];
+  for (var e = 0; e < errorNames.length; e++) {
+    var C = g[errorNames[e]];
+    if (typeof C === 'function') {
+      var cd = describe(C, 'prototype');
+      if (cd && 'value' in cd) hostRead.push(cd.value);
+    }
+  }
+  var readByHost = function (p, n) {
+    for (var i = 0; i < HOST_READ.length; i++) {
+      if (n !== HOST_READ[i]) continue;
+      for (var j = 0; j < hostRead.length; j++) if (hostRead[j] === p) return true;
+    }
+    return false;
+  };
+
+  // Freezing a prototype costs an expression the right to shadow an inherited name on its own
+  // object: once the inherited data property is non-writable, `o.toString = …` is dropped in
+  // sloppy mode rather than creating an own property — the "override mistake". That is ordinary
+  // expression code: `counts[w]` with `w` of "constructor" or "valueOf" uses an object as a
+  // dictionary, and `a.map = …` gives one array its own version of a method. So every name that
+  // was shadowable before the freeze becomes an accessor whose setter writes an own property on
+  // the instance, which leaves the shadowing that worked before this block working after it.
+  var tolerate = function (p, n) {
+    var d = describe(p, n);
+    // An accessor has no value to stand in for, and a name already non-writable or
+    // non-configurable could not be shadowed before this ran either: no regression to repair.
+    if (!d || !d.configurable || !('value' in d) || !d.writable) return;
+    var v = d.value;
+    define(p, n, {
+      get: function () { return v; },
+      set: function (nv) {
+        // This setter stands in for the data property it replaced, so it answers a write the way
+        // that property would: an accessor is handed the receiver and nothing else, while a data
+        // property has the receiver's own property consulted first
+        // (OrdinarySetWithOwnDescriptor). Doing that here keeps the repair invisible — an own
+        // writable property is updated in place and keeps its other attributes, an own
+        // non-writable one drops the write rather than being overwritten, and a target that
+        // cannot take a new property is left alone instead of being handed to `defineProperty`,
+        // which would throw. That last case covers a frozen prototype, an object the expression
+        // froze itself, and `null` or `undefined`.
+        if (this === p || this === null || this === undefined) return;
+        var own = describe(this, n);
+        if (own) {
+          if (own.writable) define(this, n, { value: nv });
+          return;
+        }
+        if (!isExtensible(this)) return;
+        define(this, n, { value: nv, writable: true, enumerable: true, configurable: true });
+      },
+      enumerable: d.enumerable,
+      configurable: false,
+    });
+  };
+
+  var freezeProto = function (p) {
+    if (p === null || (typeof p !== 'object' && typeof p !== 'function') || isFrozen(p)) return;
+    var names = getNames(p);
+    for (var i = 0; i < names.length; i++) if (!readByHost(p, names[i])) tolerate(p, names[i]);
+    // Symbol keys go the same way: `a[Symbol.iterator] = …` on an expression's own array is an
+    // ordinary way to make something iterable, and left frozen it is dropped in silence while
+    // `for…of` quietly walks the array's own elements instead.
+    var syms = getSyms(p);
+    for (var j = 0; j < syms.length; j++) tolerate(p, syms[j]);
+    freeze(p);
+  };
+
+  // Freezing a function also makes its own `prototype` property non-writable, so `Comp.prototype =
+  // {}` is a no-op; freezing that prototype object closes the methods hanging off it.
+  var shut = function (o) {
+    var d = describe(o, 'prototype');
+    if (d && 'value' in d) freezeProto(d.value);
+    freeze(o);
+  };
+
+  var globals = getNames(g);
+  for (var k = 0; k < globals.length; k++) {
+    var n = globals[k];
+    var d = describe(g, n);
+    if (!d || !('value' in d) || typeof d.value !== 'function') continue;
+    // The function object as well as the binding: the prelude calls `Array.isArray` and
+    // `Object.setPrototypeOf` while it answers an expression, so a replacement for one of those
+    // would not merely shadow a name, it would change what a later expression computes.
+    shut(d.value);
+    lock(n);
+  }
+  // `Math.sin = …` goes the same way, and the prelude leans on both of these itself. They are the
+  // `prototype` of no function, so the loop above never reaches them.
+  freezeProto(Math);
+  freezeProto(JSON);
+  // The iterator intrinsics are the `prototype` of no global function either, and `for…of`,
+  // destructuring and spread all run through them: replacing `next` on the array iterator left
+  // every later expression on the thread unable to iterate at all.
+  var walk = function (o) {
+    for (var p = o; p !== null && p !== undefined; p = protoOf(p)) freezeProto(p);
+  };
+  var probes = [function () { return [][Symbol.iterator](); },
+    function () { return ''[Symbol.iterator](); },
+    function () { return new Map()[Symbol.iterator](); },
+    function () { return new Set()[Symbol.iterator](); },
+    function () { return (function* () {})(); },
+    function () { return 'a'.matchAll(/a/g); },
+    function () { return Int8Array.prototype; }];
+  for (var m = 0; m < probes.length; m++) {
+    // Each one is a probe for an intrinsic this engine may not have at all.
+    try { walk(protoOf(probes[m]())); } catch (e) { /* not present */ }
+  }
+})();
