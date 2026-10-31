@@ -81,6 +81,7 @@ mod ui_scrolling;
 mod ui_self_drop;
 mod ui_settings_info;
 mod ui_settings_keyboard;
+mod ui_shortcut_scopes;
 mod ui_tabs;
 mod ui_tail;
 mod ui_text_edit;

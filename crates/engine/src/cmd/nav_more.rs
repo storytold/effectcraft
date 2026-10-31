@@ -39,6 +39,18 @@ fn deselect_keys(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+impl Session {
+    /// The selected mask (its group, or a property inside it) of a selected layer, the first
+    /// one: (layer, mask group).
+    pub fn selected_mask(&self) -> Option<(effectcraft_project::LayerId, effectcraft_project::Uid)> {
+        let comp = self.active_comp()?;
+        self.state.selected_props.iter().find_map(|(lid, uid)| {
+            let masks = comp.layer(*lid)?.masks()?;
+            masks.groups().find(|g| g.uid == *uid || g.find_group(*uid).is_some() || g.find(*uid).is_some()).map(|g| (*lid, g.uid))
+        })
+    }
+}
+
 /// Alt+` / Alt+Shift+`: select the next (previous) mask of the layer, wrapping around; the first
 /// (last) one when none is selected.
 fn step_mask(s: &mut Session, p: &Value, dir: i64) -> Result<Value> {

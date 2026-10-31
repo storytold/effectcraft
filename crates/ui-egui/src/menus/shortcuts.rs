@@ -1,6 +1,7 @@
 use super::frontend::run_engine;
 use super::invoke::invoke;
 use super::{EffectcraftApp, PanelKind, Value, json};
+use crate::state::Tool;
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
 pub fn shortcut_text(s: &str) -> String {
@@ -177,6 +178,24 @@ pub(super) fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers>
         d.insert_temp(id, (pass, now, start));
         start
     })
+}
+
+/// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
+/// being edited in the viewer, a paint tool or a camera tool active, a mask selected.
+pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
+    let mut out = vec![];
+    if app.session.state.text_edit.is_some() {
+        out.push("TextEditing");
+    }
+    match app.ui.tool {
+        Tool::Brush | Tool::Clone | Tool::Eraser => out.push("Paint"),
+        Tool::Orbit | Tool::PanCamera | Tool::Dolly => out.push("Camera"),
+        _ => {}
+    }
+    if app.session.selected_mask().is_some() {
+        out.push("Mask");
+    }
+    out
 }
 
 /// Only Shift held (Shift+Delete, not Ctrl/Alt+Shift+Delete).
@@ -361,6 +380,13 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     let binds = bindings(&app.session);
     for (key, mods, pressed, physical_key) in events {
+        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
+        let (focused, contexts) = (app.ui.focused.id(), active_contexts(app));
+        let rank = |id: &str, params: &Value| {
+            let key = effectcraft_engine::shortcuts::binding_key(id, params);
+            let scope = app.session.shortcuts().find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str());
+            effectcraft_engine::shortcuts::scope_rank(scope, &focused, &contexts)
+        };
         // Plain Spacebar runs its shortcut (Play Current Preview) on the release: held, it is
         // the Hand tool (After Effects), and a drag with it must not start or stop playback.
         if key == egui::Key::Space && (!pressed || !mods.any()) {
@@ -408,10 +434,17 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         // Explicit physical bindings distinguish keys that a layout reports with the same
         // logical name (for example AZERTY's minus and right parenthesis).
         let physical = physical_key.and_then(|key| {
-            app.session.shortcuts().bindings().into_iter().find_map(|(sc, b)| {
-                let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-                (k == key && mods_match(m, mods)).then(|| (b.command.clone(), b.params.clone()))
-            })
+            app.session
+                .shortcuts()
+                .bindings()
+                .into_iter()
+                .filter_map(|(sc, b)| {
+                    let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
+                    (k == key && mods_match(m, mods)).then_some(b)
+                })
+                .filter_map(|b| rank(&b.command, &b.params).map(|r| (r, b)))
+                .min_by_key(|(r, _)| *r)
+                .map(|(_, b)| (b.command.clone(), b.params.clone()))
         });
         if let Some((id, params)) = physical {
             if let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params }) {
@@ -419,11 +452,14 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             }
             continue;
         }
-        if let Some((_, _, id, params)) = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).min_by_key(|(_, _, id, params)| {
-            // The focused panel wins over an application command sharing its chord.
-            let key = effectcraft_engine::shortcuts::binding_key(id, params);
-            app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
-        }) {
+        // The narrowest active scope wins a chord: an active context, the focused panel, the
+        // application. A context's shortcut doesn't run outside it.
+        let chosen = binds
+            .iter()
+            .filter(|(m, k, ..)| *k == key && mods_match(*m, mods))
+            .filter_map(|(_, _, id, params)| rank(id, params).map(|r| (r, id, params)))
+            .min_by_key(|(r, ..)| *r);
+        if let Some((_, id, params)) = chosen {
             let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
             if id == "edit.paste"
                 && let Some(t) = &pasted

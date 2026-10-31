@@ -114,7 +114,7 @@ impl EffectcraftApp {
     fn with_ui_commands(mut self) -> Self {
         let cmds = menus::UI_COMMANDS
             .iter()
-            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string) })
+            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string), scope: None })
             .collect();
         self.session.set_ui_commands(cmds);
         self

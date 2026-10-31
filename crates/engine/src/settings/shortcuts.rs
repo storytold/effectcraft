@@ -9,6 +9,11 @@
 //! (as After Effects asks you to "Save As" a custom set). The shortcut dispatcher and the menus
 //! read the active preset through [`ShortcutTable`].
 //!
+//! Scopes, narrowest first: a *context* ([`CONTEXT_SCOPES`]: a state of the app such as editing
+//! text; its shortcuts work only while it is active), a *panel* (`Project`, `Timeline`,
+//! `RenderQueue`…: the panel with the keyboard) and the application. One chord can be bound once
+//! per scope; the narrowest active scope runs it ([`scope_rank`]).
+//!
 //! Shortcut text is `Ctrl+Cmd+Alt+Shift+Key` (`Cmd` is ⌘ on macOS and Ctrl elsewhere).
 
 use std::collections::{BTreeMap, HashMap};
@@ -29,6 +34,69 @@ pub struct UiCommand {
     pub id: String,
     pub label: String,
     pub shortcut: Option<String>,
+    /// Its scope; none: from its id (`timeline.*` → Timeline, `view.*` → Composition).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// Scopes that are a state of the app rather than a panel: editing text in the viewer, a paint
+/// tool active, a mask selected, a camera tool active.
+pub const CONTEXT_SCOPES: &[&str] = &["TextEditing", "Paint", "Mask", "Camera"];
+
+/// Engine commands and menu entries whose shortcuts belong to one panel or context (binding key
+/// → scope). Every other one is application-wide; frontend commands state their own.
+const SCOPES: &[(&str, &str)] = &[
+    ("file.rememberInterpretation", "Project"),
+    ("file.applyInterpretation", "Project"),
+    ("project.deleteWithoutConfirmation", "Project"),
+    ("renderQueue.duplicate", "RenderQueue"),
+];
+
+/// Scope of an engine command or menu entry from its binding key.
+pub fn scope_of(key: &str) -> &'static str {
+    SCOPES.iter().find(|(k, _)| *k == key).map_or(APP_SCOPE, |(_, s)| s)
+}
+
+pub fn is_context(scope: &str) -> bool {
+    CONTEXT_SCOPES.contains(&scope)
+}
+
+/// The Timeline and the Composition panel show the same composition and share their shortcuts:
+/// the layer keys work with either one focused.
+pub fn panels_share(a: &str, b: &str) -> bool {
+    matches!((a, b), ("Timeline", "Composition") | ("Composition", "Timeline"))
+}
+
+/// A scope as shown to people (`RenderQueue` → `Render Queue`).
+pub fn scope_label(scope: &str) -> String {
+    let mut out = String::with_capacity(scope.len() + 2);
+    for (i, c) in scope.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How strongly a binding in `scope` claims a chord while the panel `focused` has the keyboard
+/// and `contexts` are active: lower wins, `None` doesn't run at all. An active context, then the
+/// focused panel, then the panel sharing its shortcuts, then the application. A shortcut of
+/// another panel still runs when nothing nearer claims the chord (the reveal keys work from the
+/// Effect Controls panel too); a context's shortcuts never run outside it.
+pub fn scope_rank(scope: &str, focused: &str, contexts: &[&str]) -> Option<u8> {
+    if is_context(scope) {
+        return contexts.contains(&scope).then_some(0);
+    }
+    Some(if scope == focused {
+        1
+    } else if panels_share(scope, focused) {
+        2
+    } else if scope == APP_SCOPE {
+        3
+    } else {
+        4
+    })
 }
 
 /// One thing a shortcut can run.
@@ -95,12 +163,12 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
             e.shortcut.as_deref().into_iter().chain(e.alt_shortcuts.iter().map(String::as_str)).chain(alt.iter().copied()).filter_map(normalize).collect();
         push(
             Bindable {
+                scope: scope_of(&key).into(),
                 key,
                 command: e.command.clone(),
                 params: e.params.clone(),
                 label: e.label.clone(),
                 path: path.clone(),
-                scope: APP_SCOPE.into(),
                 defaults,
             },
             &mut out,
@@ -133,22 +201,22 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
                 params: Value::Null,
                 label: c.label.to_string(),
                 path: vec!["Commands".into()],
-                scope: APP_SCOPE.into(),
+                scope: scope_of(c.id).into(),
                 defaults,
             },
             &mut out,
         );
     }
     for c in ui {
-        let scope = ui_scope(&c.id);
-        let cat = if scope == APP_SCOPE { "Tools & Panels" } else { scope };
+        let scope = c.scope.as_deref().unwrap_or_else(|| ui_scope(&c.id));
+        let cat = if scope == APP_SCOPE { "Tools & Panels".to_string() } else { scope_label(scope) };
         push(
             Bindable {
                 key: c.id.clone(),
                 command: c.id.clone(),
                 params: Value::Null,
                 label: c.label.clone(),
-                path: vec![cat.into()],
+                path: vec![cat],
                 scope: scope.into(),
                 defaults: c.shortcut.as_deref().and_then(normalize).into_iter().collect(),
             },
@@ -290,10 +358,16 @@ pub struct Conflict {
     pub key: String,
     pub label: String,
     pub scope: String,
+    /// The two are in different scopes, so both keep working: the narrower one runs while its
+    /// panel or context is active and the other one everywhere else. `false`: the same scope,
+    /// where only one of them can run.
+    pub overrides: bool,
 }
 
+/// Whether shortcuts of these scopes can be active at once. Two different panels can't, except
+/// the pair sharing theirs; a context can be active in any panel.
 fn scopes_overlap(a: &str, b: &str) -> bool {
-    a == b || a == APP_SCOPE || b == APP_SCOPE
+    a == b || a == APP_SCOPE || b == APP_SCOPE || panels_share(a, b) || is_context(a) || is_context(b)
 }
 
 impl Keymaps {
@@ -492,11 +566,12 @@ impl ShortcutTable {
         self.bindings()
             .into_iter()
             .filter(|(k, o)| *k == keys && o.key != b.key && scopes_overlap(&o.scope, &b.scope))
-            .map(|(k, o)| Conflict { keys: k.to_string(), key: o.key.clone(), label: o.label.clone(), scope: o.scope.clone() })
+            .map(|(k, o)| Conflict { keys: k.to_string(), key: o.key.clone(), label: o.label.clone(), scope: o.scope.clone(), overrides: o.scope != b.scope })
             .collect()
     }
 
-    /// Every pair of commands sharing keys in an overlapping scope.
+    /// Every pair of commands sharing keys in the same scope: only one of the two can run.
+    /// (Pairs in different scopes are intended, see [`Conflict::overrides`].)
     pub fn all_conflicts(&self) -> Vec<(String, Conflict)> {
         let mut by_keys: BTreeMap<&str, Vec<&Bindable>> = BTreeMap::new();
         for (k, b) in self.bindings() {
@@ -508,8 +583,11 @@ impl ShortcutTable {
         for (k, bs) in by_keys {
             for (i, a) in bs.iter().enumerate() {
                 for b in &bs[i + 1..] {
-                    if scopes_overlap(&a.scope, &b.scope) {
-                        out.push((a.key.clone(), Conflict { keys: k.to_string(), key: b.key.clone(), label: b.label.clone(), scope: b.scope.clone() }));
+                    if a.scope == b.scope {
+                        out.push((
+                            a.key.clone(),
+                            Conflict { keys: k.to_string(), key: b.key.clone(), label: b.label.clone(), scope: b.scope.clone(), overrides: false },
+                        ));
                     }
                 }
             }

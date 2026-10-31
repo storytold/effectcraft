@@ -597,8 +597,8 @@ fn shortcut_presets_duplicate_rename_delete_export_import() {
 fn frontend_commands_are_bindable_with_panel_scope() {
     let mut s = Session::default();
     s.set_ui_commands(vec![
-        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()) },
-        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()) },
+        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()), scope: None },
+        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()), scope: None },
     ]);
     let b = s.shortcuts().find("timeline.zoomIn").unwrap().clone();
     assert_eq!(b.scope, "Timeline");
