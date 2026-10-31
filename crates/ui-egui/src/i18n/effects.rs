@@ -19,8 +19,8 @@
 //! `missing_translations_report` test (run by `cargo xtask ci`) lists those per language.
 //!
 //! A language decides for itself which names stay English: After Effects' Japanese interface
-//! leaves the `CC` series, the `VR` set and the `OCIO` set in English, while its Simplified
-//! Chinese one translates them (the `CC` names come from Adobe's Chinese *documentation*, which
+//! leaves the `CC` series in English and gives the `VR` and `OCIO` sets a Japanese tail
+//! (`VR ブラー`, `OCIO CDL 変換`), while its Simplified Chinese one translates them (the `CC` names come from Adobe's Chinese *documentation*, which
 //! names 68 of the 69). Repeating the English name is therefore a language-level choice, not a
 //! missing row.
 //!
@@ -471,8 +471,10 @@ const TRADITIONAL_CHINESE: &[Row] = &[];
 /// one catalog instead of inventing a second mechanism. A translator fills one row per effect,
 /// ids from [`SIMPLIFIED_CHINESE`]; the names Adobe's Japanese interface leaves in English (the
 /// `CC` series, `Cryptomatte`, `EXtractoR`, `IDentifier` and `Key Light`) repeat that English name
-/// here rather than being left out. An effect with no row draws its English name anyway, which is
-/// what the `OCIO` set, `Unmult`, `Twirl (Legacy)` and the two EffectCraft-only effects do.
+/// here rather than being left out; the `VR` and `OCIO` sets take a Japanese tail instead, and
+/// `Unmult` keeps its English name in both catalogs. An effect with no row draws its English name
+/// anyway, which is what `Twirl (Legacy)` and the two EffectCraft-only effects would do without
+/// their rows.
 ///
 /// The rows below come from AE 2026's Japanese interface where it was read directly (its Effect menu
 /// and its Effects & Presets panel) and from Adobe's own Japanese help where the panel was not to
