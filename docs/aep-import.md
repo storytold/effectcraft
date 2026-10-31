@@ -373,6 +373,10 @@ No Adobe project or asset is used: the tests read only the generated fixtures. T
 above compare EffectCraft with After Effects on the same generated cases; they are made by hand
 and are not part of the tests.
 
+[aep-import-parity.md](aep-import-parity.md) describes a parity check on a production project: the
+delivered After Effects videos against EffectCraft's renders, the importer and engine fixes it led
+to, and the scripts in `tools/aep-parity` that repeat it on another project.
+
 ## Clean-room method
 
 The importer reads the file only through `effectcraft-aep`, whose every field was established by
