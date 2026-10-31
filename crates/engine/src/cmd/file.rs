@@ -155,8 +155,7 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             ctl.progress(total as u64, total as u64);
             let apply: crate::jobs::Apply = Box::new(move |s: &mut Session| {
                 let made = pending.comps.len() + probed.iter().filter(|r| r.is_ok()).count();
-                let mut r = add_footage(s, pending, probed)?;
-                finish_import(s, &mut r, target, &p);
+                let mut r = apply_import(s, pending, probed, target, &p)?;
                 let mut toast = format!("Imported {made} item{}", if made == 1 { "" } else { "s" });
                 let errors: Vec<&str> = r["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                 match errors.as_slice() {
@@ -171,9 +170,18 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         });
     }
     let probed = pending.sources.iter().map(|src| pending.prober.probe(src)).collect();
-    let mut r = add_footage(s, pending, probed)?;
-    finish_import(s, &mut r, target, p);
-    Ok(r)
+    apply_import(s, pending, probed, target, p)
+}
+
+/// Importing footage and making its composition is one undo step. For background
+/// probes, take the snapshot when applying the result, preserving intervening edits.
+fn apply_import(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>, target: Option<ItemId>, p: &Value) -> Result<Value> {
+    let apply = |s: &mut Session| {
+        let mut r = add_footage(s, pending, probed)?;
+        finish_import(s, &mut r, target, p);
+        Ok(r)
+    };
+    if b_p(p, "newComp").unwrap_or(false) { super::app_more::grouped(s, "Import", apply) } else { apply(s) }
 }
 
 /// After an import (its result `r`): with `newComp`, the new items become one new composition;
