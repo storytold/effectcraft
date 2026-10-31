@@ -689,7 +689,7 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     }
     // An After Effects import that loses something asks first (`panels::aep_losses`).
     match crate::panels::aep_losses::guard(app, id, &picked) {
-        Ok(true) => return Ok(json!({"dialog": id})),
+        Ok(true) => return Ok(json!({"dialog": "aepLosses"})),
         Ok(false) => {}
         Err(e) => {
             app.ui.status = e.clone();
