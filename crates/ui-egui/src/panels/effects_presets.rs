@@ -760,10 +760,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let mut cats: Vec<&str> = effectcraft_engine::effects::categories();
         cats.retain(|c| reg.iter().any(|e| e.category == *c));
         for cat in cats {
-            let items: Vec<_> = reg.iter().filter(|e| e.category == cat && keep(e)).collect();
+            let mut items: Vec<_> = reg.iter().filter(|e| e.category == cat && keep(e)).collect();
             if items.is_empty() {
                 continue;
             }
+            // After Effects lists a category by the effect's English name, whatever the interface
+            // language draws; the registry's own order is packing order, which reads as random.
+            items.sort_by_key(|e| e.name.to_lowercase());
             // The folder draws the category in the interface language; `cat` stays the key (the
             // open/closed state and the automation id are the registry's English name).
             if !folder_row(app, ui, &lp, list, &mut y, &mut nav, cat, &crate::i18n::effects::category(cat), 1, 0.0, searching, None) {
