@@ -1078,8 +1078,8 @@ mod tests {
         assert!(j.as_array().unwrap().iter().all(|t| t["thumbnail"].is_string()));
         // Overwrite protection.
         assert!(s.execute("templates.saveAs", json!({"name": "My Promo", "overwrite": false})).is_err());
-        // Open: an untitled copy with the added layer.
-        s.execute("file.newProject", json!({})).unwrap();
+        // Open: an untitled copy with the added layer (the edits above are dropped on purpose).
+        s.execute("file.newProject", json!({"discard": true})).unwrap();
         s.execute("templates.create", json!({"id": mine.id})).unwrap();
         assert!(s.path.is_none());
         assert!(s.active_comp().unwrap().layers.iter().any(|l| l.name == "Mine"));

@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use effectcraft_project::{ItemKind, Project};
+
 use crate::autosave::{self, Sentinel};
 use crate::prefs::{PREFS_FILE, Prefs};
 use crate::shortcuts::{Keymaps, SHORTCUTS_FILE, ShortcutTable, UiCommand};
@@ -287,6 +289,63 @@ impl Session {
             self.commit_autosave(path.clone(), plan.slot, self.revision);
         }
         Ok(path)
+    }
+
+    /// Keep a copy of the project before New or Open replaces it. A project without unsaved
+    /// changes needs none (`Ok(None)`); a dirty one is written, on this thread, as the next
+    /// auto-save version, and the path is returned. With `discard` set, a copy that cannot be
+    /// kept is skipped; otherwise it refuses, so unsaved work is never dropped silently.
+    ///
+    /// The browser is exempt: its own recovery snapshots cover it.
+    pub(crate) fn snapshot_before_replace(&mut self, discard: bool) -> Result<Option<String>> {
+        if cfg!(target_arch = "wasm32") || !self.is_dirty() {
+            return Ok(None);
+        }
+        let kept = self.write_snapshot();
+        match kept {
+            Ok(path) => Ok(Some(path)),
+            Err(_) if discard => Ok(None),
+            Err(e) => Err(EngineError::Other(format!(
+                "the project has unsaved changes and a copy could not be kept ({e}): save it first, or pass `discard: true` to drop them"
+            ))),
+        }
+    }
+
+    fn write_snapshot(&mut self) -> std::io::Result<String> {
+        let root = self.default_autosave_root();
+        let prefs = self.autosave_prefs();
+        // A background auto-save in flight could still fail, so it is not the copy: this one is
+        // written beside it, in the next slot. With a single version both want the same slot, so
+        // the earlier one lands first.
+        let mut after = self.autosave.last_slot;
+        if let Some(w) = &self.autosave.pending {
+            after = Some(w.slot);
+        }
+        let mut plan = autosave::plan_in(self.file_ops(), &prefs, self.path.as_deref(), root.as_deref(), after)?;
+        if self.autosave.pending.as_ref().is_some_and(|w| w.path == plan.path) {
+            self.autosave_wait().map_err(std::io::Error::other)?;
+            plan = autosave::plan_in(self.file_ops(), &prefs, self.path.as_deref(), root.as_deref(), self.autosave.last_slot)?;
+        }
+        plan.write(self.file_ops(), self.project_with_absolute_footage().to_json_compact().as_bytes())?;
+        // The next snapshot (a New Project keeps the session's auto-save state) takes the next slot.
+        self.autosave.last_slot = Some(plan.slot);
+        Ok(plan.path.to_string_lossy().into_owned())
+    }
+
+    /// The project with its footage paths made absolute. A snapshot lives in the auto-save
+    /// folder, not beside the project file, so a document-relative path would resolve to the
+    /// wrong place when it is opened. Paths that are not followed stay as they are.
+    fn project_with_absolute_footage(&self) -> Project {
+        let mut project = (*self.project).clone();
+        for item in project.items.values_mut() {
+            let ItemKind::Footage(f) = &mut item.kind else { continue };
+            for q in std::iter::once(&mut f.path).chain(f.sequence.iter_mut()).filter(|q| !q.is_empty()) {
+                if let Some(abs) = self.stored_paths.follow(q).ok().and_then(|p| p.to_str().map(str::to_string)) {
+                    *q = abs;
+                }
+            }
+        }
+        project
     }
 
     /// Advance recovery bookkeeping only for a successfully written snapshot.
