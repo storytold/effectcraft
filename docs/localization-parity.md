@@ -123,6 +123,24 @@ table is what it should read. A row that was read off the interface should arriv
 that pins it: a corrected row stays corrected only if something fails when it is rewritten into a
 near synonym, and today only some rows have one.
 
+Which rows still differ, and where each correction lives:
+
+| English | Catalog today | Corrected in |
+|---|---|---|
+| Half / Third / Quarter | `1/2画質` | #2680 (the space) |
+| Enable Time Remapping | `時間リマップを有効化` | #2738 |
+| Time-Reverse Layer | `レイヤーを時間反転` | #2738 |
+| Create Shapes from Vector Layer | `ベクターレイヤーから…` | #2738 |
+| Toggle Hold Keyframe | `ホールドキーフレームの切り替え` | #2738 |
+| Anchor Point / Skew / Line Spacing / Character Value | `傾斜`, `行間`, `文字の値` in the animator pop-up | #2742 |
+| Take Snapshot | `スナップショットを取得` | #2680 |
+| Layer Transform | `レイヤーのトランスフォーム` | #2680 |
+| Separate Dimensions | `次元を分離` | #2680 |
+
+The pull requests are listed because the correction is the evidence for the table, not because
+this document depends on them: once they land the rows match, and the tests named in
+[Adding a row](#adding-a-row) keep them matched.
+
 ### Adding a row
 
 1. Open the string in the installed After Effects — the panel, the menu, or its accessible name
