@@ -25,7 +25,6 @@ effectcraft-engine = { workspace = true }
 effectcraft-gpu = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -37,6 +36,16 @@ image = { workspace = true }
 # Half-float viewer frames of 32 bpc projects (F16C is picked at run time).
 half = { workspace = true }
 bytemuck = { workspace = true }
+
+# AccessKit's winit glue has no NativeActivity backend, so eframe `compile_error!`s when
+# `accesskit` meets `android-native-activity` (it needs `android-game-activity`, which needs
+# Java/Kotlin and Gradle). Android builds therefore take the feature off; everywhere else,
+# including wasm32, it stays on.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Floating panels open in OS windows of their own on desktop; the web keeps them in the page.

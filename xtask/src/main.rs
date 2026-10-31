@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus|wasm|web|ico|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus|wasm|web|android|ico|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -7,6 +7,8 @@
 //! - `web [--dev] [--serve PORT]`: build the web app (`apps/effectcraft-web`) into
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `lock-patches`: `Cargo.lock` records no unused `[patch]` entry (the Nix build cannot vendor one).
+//! - `android [--release] [--target TRIPLE] [--install] [--launch]`: build the Android APK
+//!   (`apps/effectcraft-android`) with `cargo apk` (docs/android.md), install and launch it.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `aep-corpus [--dir DIR]`: fetch the After Effects test corpus at the commit pinned in
@@ -69,6 +71,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("effectcraft", 6),
     ("cli", 6),
     ("web", 6),
+    ("android", 6),
 ];
 
 /// Allowed same-layer edges (from, to).
@@ -262,6 +265,10 @@ fn wasm() -> Result<(), String> {
 /// The wasm-bindgen CLI must match the `wasm-bindgen` crate version exactly.
 const WASM_BINDGEN: &str = "0.2.129";
 
+/// The package id and `NativeActivity` of the Android app (`apps/effectcraft-android`).
+const ANDROID_PACKAGE: &str = "ai.storyteller.effectcraft";
+const ANDROID_ACTIVITY: &str = "android.app.NativeActivity";
+
 fn target_dir() -> std::path::PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("target"))
 }
@@ -320,6 +327,78 @@ fn web(args: &[String]) -> Result<(), String> {
     println!("web: {} ({:.1} MB wasm, {:.1} MB total)", dist.display(), size(&bg) as f64 / 1e6, total as f64 / 1e6);
     if let Some(port) = serve {
         serve_dir(&dist, port)?;
+    }
+    Ok(())
+}
+
+/// The Android NDK: `ANDROID_NDK_ROOT` / `ANDROID_NDK_HOME`, else the newest under the SDK's
+/// `ndk/` folder (`ANDROID_HOME` or `ANDROID_SDK_ROOT`).
+fn android_ndk() -> Result<std::ffi::OsString, String> {
+    if let Some(ndk) = std::env::var_os("ANDROID_NDK_ROOT").or_else(|| std::env::var_os("ANDROID_NDK_HOME")) {
+        return Ok(ndk);
+    }
+    let sdk = std::env::var_os("ANDROID_HOME")
+        .or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
+        .map(std::path::PathBuf::from)
+        .ok_or("no Android NDK: set ANDROID_NDK_ROOT, or ANDROID_HOME with an NDK in <sdk>/ndk")?;
+    let mut versions: Vec<_> = std::fs::read_dir(sdk.join("ndk")).map_err(|e| format!("{}: {e}", sdk.display()))?.flatten().map(|e| e.file_name()).collect();
+    versions.sort();
+    versions.pop().map(|v| sdk.join("ndk").join(v).into_os_string()).ok_or_else(|| format!("{}: no NDK installed (sdkmanager --install ndk;…)", sdk.display()))
+}
+
+/// Build the Android APK with `cargo apk` (`apps/effectcraft-android`, docs/android.md):
+/// `cargo xtask android [--release] [--target TRIPLE] [--install] [--launch]`. The default
+/// target is `aarch64-linux-android` (a device); an emulator wants `--target
+/// x86_64-linux-android`.
+fn android(args: &[String]) -> Result<(), String> {
+    let release = args.iter().any(|a| a == "--release");
+    let target = match args.iter().position(|a| a == "--target") {
+        Some(i) => args.get(i + 1).cloned().ok_or("--target needs a Rust triple")?,
+        None => "aarch64-linux-android".to_string(),
+    };
+    let install = args.iter().any(|a| a == "--install");
+    let launch = args.iter().any(|a| a == "--launch");
+    // cargo-apk is the Android twin of the web build's wasm-bindgen CLI: installed once. Its
+    // version subcommand is `cargo apk version` (`--version` is not one of its arguments).
+    let version = Command::new(env!("CARGO")).args(["apk", "version"]).output().map_err(|e| e.to_string())?;
+    if !version.status.success() {
+        return Err("cargo-apk not found: cargo install cargo-apk --locked (docs/android.md)".into());
+    }
+    let ndk = android_ndk()?;
+    let mut build = Command::new(env!("CARGO"));
+    build.current_dir(root().join("apps/effectcraft-android"));
+    build.args(["apk", "build", "--target", &target]);
+    if release {
+        build.arg("--release");
+    }
+    // cargo-apk reads the NDK from the environment; both names are accepted by its NDK lookup.
+    build.env("ANDROID_NDK_ROOT", &ndk).env("ANDROID_NDK_HOME", &ndk);
+    // Incremental compilation's hardlinked artifacts corrupt easily on network filesystems and
+    // WSL (`corrupt incremental compilation artifact … dep-graph.bin`, then `E0463: can't find
+    // crate for idna_adapter` / `crate ndk required to be available in rlib format`). Android
+    // target dirs are slow to link anyway; disable incremental for reliable APK builds.
+    build.env("CARGO_INCREMENTAL", "0");
+    run(&mut build)?;
+    let dir = target_dir();
+    let dir = if dir.is_absolute() { dir } else { root().join(dir) };
+    let profile = if release { "release" } else { "debug" };
+    let apk = dir.join(profile).join("apk").join("effectcraft.apk");
+    if !apk.is_file() {
+        return Err(format!("{} was not produced", apk.display()));
+    }
+    // `cargo apk` always writes the same path, so a device (arm64) build overwrites an emulator
+    // (x86_64) one and vice versa. Keep a target-specific copy beside it.
+    let tagged = dir.join(profile).join("apk").join(format!("effectcraft-{target}.apk"));
+    if std::fs::copy(&apk, &tagged).is_ok() {
+        println!("android: {} (also {})", apk.display(), tagged.display());
+    } else {
+        println!("android: {}", apk.display());
+    }
+    if install || launch {
+        run(Command::new("adb").args(["install", "-r"]).arg(&apk))?;
+    }
+    if launch {
+        run(Command::new("adb").args(["shell", "am", "start", "-n"]).arg(format!("{ANDROID_PACKAGE}/{ANDROID_ACTIVITY}")))?;
     }
     Ok(())
 }
@@ -604,6 +683,7 @@ fn main() -> ExitCode {
         }
         "audio-backend" => audio_backend(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "android" => android(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ico" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -613,7 +693,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci [--affected [--base REV] [--dry-run]]|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|android [--release] [--target TRIPLE] [--install] [--launch]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci [--affected [--base REV] [--dry-run]]|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

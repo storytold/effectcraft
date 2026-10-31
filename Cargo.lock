@@ -1976,6 +1976,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-android"
+version = "0.25.1"
+dependencies = [
+ "cpal",
+ "effectcraft-engine",
+ "effectcraft-host",
+ "effectcraft-ui-egui",
+ "eframe",
+ "egui",
+ "log",
+ "pollster 1.0.1",
+ "serde_json",
+ "winit",
+]
+
+[[package]]
 name = "effectcraft-automation"
 version = "0.25.1"
 dependencies = [

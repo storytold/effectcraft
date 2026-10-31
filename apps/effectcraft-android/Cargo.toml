@@ -1,0 +1,80 @@
+[package]
+name = "effectcraft-android"
+description = "EffectCraft on Android: the shared engine and egui UI in a winit NativeActivity shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The workspace's lints, restated because cargo cannot override an inherited `unsafe_code =
+# "forbid"`. This is the one crate that cannot forbid it (`deny` instead): Android's
+# `native_app_glue` calls the entry point by symbol name, and Rust can only export a symbol with
+# `#[unsafe(no_mangle)]`. That single attribute in `src/lib.rs` carries the one
+# `#[allow(unsafe_code)]`; every other unsafe construct stays an error here as everywhere else,
+# and this crate holds no unsafe code besides it.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+
+# `cargo apk` ships `libeffectcraft_android.so` and points `android.app.lib_name` at it.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The in-app file browser and the preview audio the shell wires up: platform-neutral, so they
+# compile (and their tests run) on the host too — `cargo xtask ci` lints and tests them there.
+# The shell itself is Android-only below.
+[dependencies]
+effectcraft-ui-egui = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+# Preview audio through the device's output (AAudio via cpal, same as the desktop app's
+# `audio_out.rs`): the UI stays silent without it. cpal 0.16 supports Android (MIT/Apache-2.0).
+cpal = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+effectcraft-engine = { workspace = true }
+effectcraft-host = { workspace = true }
+serde_json = { workspace = true }
+# Blocking on the Vulkan adapter probe of `gpu_backends` before the event loop starts.
+pollster = { workspace = true }
+# `android-native-activity`: a plain `android.app.NativeActivity`, no Java/Kotlin and no Gradle
+# (AGENTS.md §2: dependencies must be permissively licensed). `accesskit` must stay off with it.
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "links", "android-native-activity"] }
+# The `AndroidApp` of `android_main`; the same `android-activity` glue eframe/winit use, taken
+# from winit's re-export so the versions cannot diverge.
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+
+[package.metadata.android]
+# The desktop app's id, so the package reads as the same application.
+package = "ai.storyteller.effectcraft"
+build_targets = ["x86_64-linux-android", "aarch64-linux-android"]
+apk_name = "effectcraft"
+strip = "default"
+
+[package.metadata.android.sdk]
+# AAudio (preview audio via cpal) needs API 26 (Android 8.0); older tablets stay on the web build.
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "EffectCraft"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+extract_native_libs = true
+debuggable = true
+
+# A tablet app: landscape in either orientation (both landscape directions follow the sensor),
+# resizable so split-screen and freeform windows work, and rotating or resizing re-lays the UI
+# out instead of restarting the activity. `exported` is required for a launcher activity on
+# Android 12+ (target SDK 34).
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|density|uiMode"
+always_retain_task_state = true
+orientation = "sensorLandscape"
+resizeable_activity = true
+exported = true

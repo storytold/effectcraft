@@ -29,6 +29,11 @@
 //!   ([`rewrite::MAX_NESTING`]); a seeded fuzzer (`tests/fuzz.rs`) keeps all of this honest.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+// Clippy 1.99's `missing_const_for_thread_local` fires on Android even when the
+// initializers already use `const { … }` (a minimal `thread_local!` crate reproduces it for
+// `x86_64-linux-android` while host clippy passes). Allow it on Android only so the host
+// lint still catches a missing `const`.
+#![cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
 
 pub mod host;
 mod noise;
