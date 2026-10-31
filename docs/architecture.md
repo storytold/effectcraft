@@ -439,8 +439,9 @@ one with **Preserve resolution when nested** renders at full size inside a comp 
 resolution (the buffer's scale places it).
 
 **Motion blur** has one gate, `Renderer::mb_on`: the render options (Render Settings ▸ Motion
-Blur, previews), the comp's switch and the layer's switch, limited by the precomp layers above
-when switches affect nested comps. Layer motion, mask motion blur (the comp's Samples Per Frame,
+Blur, previews), the comp's switch and the layer's switch. A precomp layer's switch off does not
+turn off motion blur inside the nested comp (only Quality passes down when switches affect nested
+comps). Layer motion, mask motion blur (the comp's Samples Per Frame,
 four in Draft), effects that read the shutter and Advanced 3D all follow it, and the layer cache
 key of a layer with masks or effects records it.
 

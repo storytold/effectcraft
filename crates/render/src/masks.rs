@@ -13,10 +13,9 @@ use crate::eval::EvalCtx;
 /// What mask motion blur may do in a render (from the renderer's motion blur gate).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MaskBlur {
-    /// Motion blur is on in this render: the render options, the comp's switch and the Motion
-    /// Blur switches of the precomp layers above (when switches affect nested comps).
+    /// Motion blur is on in this render: the render options and the comp's switch.
     pub allowed: bool,
-    /// The layer's own Motion Blur switch, as those precomp layers limit it (Same As Layer).
+    /// The layer's own Motion Blur switch (Same As Layer).
     pub layer: bool,
     /// Sub-frame samples (the comp's Samples Per Frame; fewer in Draft).
     pub samples: usize,

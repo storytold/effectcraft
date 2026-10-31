@@ -138,22 +138,25 @@ impl<'a> Renderer<'a> {
             Quality::Wireframe => 2,
         };
         match self.inherited {
-            Some((q, _)) if rank(q) > rank(layer.switches.quality) => q,
+            Some(q) if rank(q) > rank(layer.switches.quality) => q,
             _ => layer.switches.quality,
         }
     }
 
-    /// A layer's Motion Blur switch, limited by the precomp layers above it.
+    /// A layer's Motion Blur switch. A precomp layer's own switch blurs only the precomp
+    /// layer's motion: it never turns off motion blur that layers inside the nested comp ask
+    /// for (After Effects renders a nested comp's blurred layers under a precomp layer whose
+    /// switch is off, with or without Switches Affect Nested Comps).
     pub(crate) fn layer_motion_blur(&self, layer: &Layer) -> bool {
-        layer.switches.motion_blur && self.inherited.is_none_or(|(_, mb)| mb)
+        layer.switches.motion_blur
     }
 
-    /// The renderer for the nested comp of precomp layer `layer`: its switches pass down when
-    /// [`RenderOpts::nested_switches`] is on.
+    /// The renderer for the nested comp of precomp layer `layer`: its Quality switch passes
+    /// down when [`RenderOpts::nested_switches`] is on.
     fn nested_through(&self, layer: &Layer) -> Renderer<'a> {
         let mut sub = self.nested();
         if self.opts.nested_switches {
-            sub.inherited = Some((self.quality(layer), self.layer_motion_blur(layer)));
+            sub.inherited = Some(self.quality(layer));
         }
         sub
     }

@@ -242,7 +242,7 @@ impl<'a> Renderer<'a> {
     }
 
     /// Whether a layer is motion blurred: the render options, the comp's switch and the layer's
-    /// switch (limited by the precomp layers above when switches affect nested comps). Layer
+    /// switch (precomp layers above do not limit it, see [`Renderer::layer_motion_blur`]). Layer
     /// motion, mask motion blur, effects that read the shutter and Advanced 3D all ask this.
     pub(crate) fn mb_on(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
         self.opts.motion_blur && ctx.comp.enable_motion_blur && self.layer_motion_blur(layer)
@@ -251,7 +251,7 @@ impl<'a> Renderer<'a> {
     /// What a layer's mask motion blur may do in this render (see [`masks::MaskBlur`]).
     pub(crate) fn mask_blur(&self, ctx: &EvalCtx, layer: &Layer) -> masks::MaskBlur {
         masks::MaskBlur {
-            allowed: self.opts.motion_blur && ctx.comp.enable_motion_blur && self.inherited.is_none_or(|(_, mb)| mb),
+            allowed: self.opts.motion_blur && ctx.comp.enable_motion_blur,
             layer: self.layer_motion_blur(layer),
             samples: if self.opts.draft { 4 } else { ctx.comp.motion_blur_samples as usize },
         }

@@ -84,9 +84,9 @@ pub struct Renderer<'a> {
     opacity_mul: f32,
     /// Collapsed precomp: nested 3D layers join the parent's 3D space.
     pub(crate) collapse3d: Option<Collapse3d<'a>>,
-    /// Switches inherited from the precomp layers this comp is rendered through (see
-    /// [`RenderOpts::nested_switches`]): the worst quality and whether motion blur is allowed.
-    pub(crate) inherited: Option<(Quality, bool)>,
+    /// Quality inherited from the precomp layers this comp is rendered through (see
+    /// [`RenderOpts::nested_switches`]): the worst of them.
+    pub(crate) inherited: Option<Quality>,
     /// Classic 3D depth of field is left to an accelerator ([`three_d::Plane3d::dof`]).
     pub(crate) defer_dof: bool,
     /// This renderer draws into the top-level frame's canvas (the top comp, or a collapsed

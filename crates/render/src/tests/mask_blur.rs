@@ -1,5 +1,5 @@
 //! Mask motion blur follows the renderer's motion blur gate: the render options (Render
-//! Settings ▸ Motion Blur, previews), the comp's switch and the precomp layers above.
+//! Settings ▸ Motion Blur, previews), the comp's switch.
 
 use effectcraft_color::Label;
 use effectcraft_keyframe::{Keyframe, ShapePath, Value};

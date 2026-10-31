@@ -22,9 +22,10 @@ pub struct RenderOpts {
     pub roi: Option<[f64; 4]>,
     /// Which proxies stand in for footage and compositions (Render Settings ▸ Proxy Use).
     pub proxy: effectcraft_project::render_queue::ProxyUse,
-    /// Switches Affect Nested Comps (Settings ▸ General): a precomp layer's Quality and Motion
-    /// Blur switches also limit the layers of the nested comp (Draft/Wireframe or motion blur off
-    /// propagate down; they never raise a nested layer's own setting).
+    /// Switches Affect Nested Comps (Settings ▸ General): a precomp layer's Quality switch also
+    /// limits the layers of the nested comp (Draft/Wireframe propagate down; it never raises a
+    /// nested layer's own setting). Its Motion Blur switch does not: layers inside the nested comp
+    /// keep the motion blur they ask for under a precomp layer whose switch is off.
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,

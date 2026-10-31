@@ -142,6 +142,32 @@ fn switches_affect_nested_comps_passes_quality_down() {
     assert_eq!(draw(&s).data, on.data);
 }
 
+/// A precomp layer with its Motion Blur switch off still shows the motion blur of the layers
+/// inside the nested comp, whatever Switches Affect Nested Comps says.
+#[test]
+fn a_precomp_layers_motion_blur_switch_off_keeps_nested_motion_blur() {
+    let mut s = Session::default();
+    let inner = s.execute("comp.new", json!({"name": "Inner", "width": 64, "height": 16, "duration": 1, "frameRate": 10})).unwrap()["comp"].as_u64().unwrap();
+    let a = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 8, "height": 16})).unwrap()["layer"].as_u64().unwrap();
+    for (t, x) in [(0.0, 8.0), (1.0, 56.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": t, "value": [x, 8.0]})).unwrap();
+    }
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "motionBlur", "value": true})).unwrap();
+    let outer = s.execute("comp.new", json!({"name": "Outer", "width": 64, "height": 16, "duration": 1, "frameRate": 10})).unwrap()["comp"].as_u64().unwrap();
+    let pre = s.execute("layer.addItem", json!({"item": inner})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [pre], "switch": "motionBlur", "value": false})).unwrap();
+    let t = Tick::from_seconds_f64(0.5);
+    let draw = |s: &Session| s.render(ItemId(outer), t, RenderOpts::default());
+    let nested_on = draw(&s);
+    s.execute("prefs.set", json!({"key": "general.switchesAffectNestedComps", "value": false})).unwrap();
+    assert_eq!(draw(&s).data, nested_on.data, "the preference does not change nested motion blur");
+    // Without the inner layer's switch the solid renders sharp: the blur above came from it.
+    s.execute("prefs.set", json!({"key": "general.switchesAffectNestedComps", "value": true})).unwrap();
+    s.open_comp(ItemId(inner));
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "motionBlur", "value": false})).unwrap();
+    assert_ne!(draw(&s).data, nested_on.data, "the nested layer is motion blurred under a precomp layer whose switch is off");
+}
+
 #[test]
 fn related_comps_share_the_current_time() {
     let mut s = Session::default();
