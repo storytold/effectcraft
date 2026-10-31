@@ -5228,9 +5228,12 @@ fn text_anim_popups(
         _ => return,
     };
     // The label is the English source; the drawn text is the catalog's, so the row reads
-    // アニメーター： as Animation ▸ Animate Text does.
-    p.text(pos2(x + 6.0, cy), Align2::LEFT_CENTER, tr(label), Tokens::ui(11.5), t.text_dim);
-    let br = Rect::from_center_size(pos2(x + 6.0 + if key == "add" { 34.0 } else { 62.0 }, cy), vec2(16.0, 16.0));
+    // アニメーター： as Animation ▸ Animate Text does. The button follows the width the label
+    // actually takes, since a translation is rarely as wide as the English it replaces.
+    let galley = p.layout_no_wrap(tr(label).to_string(), Tokens::ui(11.5), t.text_dim);
+    let text_w = galley.size().x;
+    p.galley(pos2(x + 6.0, cy - galley.size().y / 2.0), galley, t.text_dim);
+    let br = Rect::from_center_size(pos2(x + 6.0 + text_w + 10.0, cy), vec2(16.0, 16.0));
     let resp = ui.interact(br, egui::Id::unique(("tl-textanim", uid)), Sense::click()).on_hover_text(tr(if key == "add" {
         "Add property or selector"
     } else {
