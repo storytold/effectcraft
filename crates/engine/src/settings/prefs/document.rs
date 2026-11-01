@@ -294,6 +294,7 @@ pub fn page_id(name: &str) -> Option<&'static str> {
         "scripting" | "scriptingexpressions" => "scripting",
         "roto" | "rotobrush" | "models" => "roto",
         "face" | "facetracking" => "face",
+        "library" | "pluginlibrary" | "plugins" | "plugin" => "library",
         _ => return None,
     };
     Some(id)

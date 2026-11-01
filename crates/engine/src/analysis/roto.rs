@@ -852,6 +852,7 @@ impl Session {
     /// instances in the background.
     pub fn poll_roto(&mut self, auto: bool) -> bool {
         self.poll_models();
+        self.poll_library();
         let changed = self.poll_roto_job();
         // Edited instances stay pending while the model they will segment with is still loading.
         let loading = self.roto_model_loading();

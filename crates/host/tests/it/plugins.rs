@@ -106,7 +106,7 @@ fn example_wasm_plugin_loads_and_renders() {
 }
 
 /// A parameterless plug-in module (WebAssembly text): `render` is `ec_render`'s body.
-fn wat_plugin(id: &str, api: i32, render: &str) -> String {
+pub(super) fn wat_plugin(id: &str, api: i32, render: &str) -> String {
     let manifest = format!(r#"{{"api":1,"id":"{id}","name":"Host {id}","category":"Test Plug-ins","version":"1","params":[]}}"#);
     let len = manifest.len();
     let escaped = manifest.replace('"', "\\\"");

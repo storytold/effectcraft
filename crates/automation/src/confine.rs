@@ -60,6 +60,13 @@ const REFUSED: &[&str] = &[
     "layer.openSource",
     "help.revealLogFile",
     "file.autoSave",
+    // The Plug-in Library downloads code, installs it to load at start-up and reads `file://` catalogs.
+    "library.refresh",
+    "library.install",
+    "library.update",
+    "library.uninstall",
+    "library.loadInstalled",
+    "library.preview",
 ];
 
 /// Commands that read files named by these parameters.
