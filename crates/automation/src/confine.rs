@@ -42,7 +42,7 @@ pub struct Confinement {
 
 /// Commands that run code, act outside the project or open other applications, besides the
 /// commands that run scripts ([`effectcraft_engine::commands::scripts::RUNS_SCRIPTS`]).
-const REFUSED: &[&str] = &[
+pub(crate) const REFUSED: &[&str] = &[
     "file.installScript",
     "file.installScriptUIPanel",
     "file.uninstallScript",
@@ -107,7 +107,7 @@ const READS: &[(&str, &[&str])] = &[
 const MIXED_WRITES: &[(&str, &[&str])] = &[("templates.create", &["projectPath", "footageDir"])];
 
 /// Commands that write files named by these parameters.
-const WRITES: &[(&str, &[&str])] = &[
+pub(crate) const WRITES: &[(&str, &[&str])] = &[
     ("camera.exportBlender", &["path"]),
     ("file.save", &["path"]),
     ("file.saveAs", &["path"]),
@@ -133,7 +133,7 @@ const WRITES: &[(&str, &[&str])] = &[
 ];
 
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
-const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
+pub(crate) const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
 
 /// Commands that queue a render, whose output defaults to the project's folder when not given.
 const QUEUES_AN_OUTPUT: &[&str] = &["renderQueue.add", "render.preRender", "file.createProxy"];
