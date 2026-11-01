@@ -596,12 +596,12 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
                     let w = ectx.world_matrix(l);
                     let pc = cam_state(ectx).projection(cw as f64, ch as f64) * w;
                     let a3 = effectcraft_engine::geom::vec3(a[0], a[1], a[2]);
-                    let len = 60.0 / zoom as f64;
+                    let lens = gizmo_axis_lengths(&w, zoom as f64);
                     let pinv = parent_world_inverse(ectx, l);
                     for (axis, col, name) in [
-                        (effectcraft_engine::geom::vec3(len, 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
-                        (effectcraft_engine::geom::vec3(0.0, len, 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
-                        (effectcraft_engine::geom::vec3(0.0, 0.0, len), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
+                        (effectcraft_engine::geom::vec3(lens[0], 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
+                        (effectcraft_engine::geom::vec3(0.0, lens[1], 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
+                        (effectcraft_engine::geom::vec3(0.0, 0.0, lens[2]), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
                     ] {
                         // (clipped at the camera's near plane, #572)
                         let Some([o, e]) = project_segment(&pc, a3, a3 + axis) else { continue };
@@ -1904,8 +1904,8 @@ pub(crate) use frame::{extended_region, minify_factor, snap_to_pixels, styled_li
 #[cfg(test)]
 use geometry::{box_corners, project_clipped};
 use geometry::{
-    cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value, selected_others,
-    snap_handle, turn_delta,
+    cam_state, drag_ratio, gizmo_axis_lengths, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
+    selected_others, snap_handle, turn_delta,
 };
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};

@@ -130,6 +130,20 @@ fn axis_drag_follows_the_arrow_and_ignores_drag_across_it() {
     assert_eq!(at([10.0, 10.0]), [0.0, 0.0, 0.0]);
 }
 
+/// #1910: the gizmo arrows keep their 60 px length when the layer (or a parent) is scaled, also per axis.
+#[test]
+fn gizmo_arrows_keep_their_length_when_the_layer_is_scaled() {
+    let scaled = |k: f64| Mat4([[k, 0.0, 0.0, 0.0], [0.0, k, 0.0, 0.0], [0.0, 0.0, k, 0.0], [0.0, 0.0, 0.0, 1.0]]);
+    let l = gizmo_axis_lengths(&scaled(0.1), 1.0);
+    for v in l {
+        assert!((v * 0.1 - 60.0).abs() < 1e-9, "{l:?}");
+    }
+    assert_eq!(gizmo_axis_lengths(&scaled(1.0), 2.0), [30.0; 3]);
+    assert_eq!(gizmo_axis_lengths(&scaled(0.0), 1.0), [60.0; 3]);
+    let uneven = Mat4([[2.0, 0.0, 0.0, 0.0], [0.0, 0.5, 0.0, 0.0], [0.0, 0.0, 4.0, 0.0], [0.0, 0.0, 0.0, 1.0]]);
+    assert_eq!(gizmo_axis_lengths(&uneven, 1.0), [30.0, 120.0, 15.0]);
+}
+
 #[test]
 fn gizmo_segments_clip_at_the_near_plane() {
     // w = 100 + z.

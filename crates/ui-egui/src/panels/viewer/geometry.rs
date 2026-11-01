@@ -65,6 +65,17 @@ pub(super) fn project_clipped(m: &Mat3, poly: &[[f64; 2]]) -> Vec<[f64; 2]> {
     out.iter().map(|q| [q[0] / q[2], q[1] / q[2]]).filter(|q| q[0].is_finite() && q[1].is_finite()).collect()
 }
 
+/// Length of each 3D gizmo arrow in layer units, so it spans 60 screen px whatever the layer's net
+/// scale (its own and its parents') is (#1910). `w` is the layer's world matrix.
+pub(super) fn gizmo_axis_lengths(w: &effectcraft_engine::geom::Mat4, zoom: f64) -> [f64; 3] {
+    use effectcraft_engine::geom::vec3;
+    let base = 60.0 / zoom;
+    [vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0)].map(|u| {
+        let k = w.apply_vec(u).length();
+        if k.is_finite() && k > 1e-9 { base / k } else { base }
+    })
+}
+
 /// The segment a → b (world space) through the projection `pc`, clipped at the near plane.
 pub(super) fn project_segment(
     pc: &effectcraft_engine::geom::Mat4,
