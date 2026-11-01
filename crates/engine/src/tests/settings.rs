@@ -597,8 +597,8 @@ fn shortcut_presets_duplicate_rename_delete_export_import() {
 fn frontend_commands_are_bindable_with_panel_scope() {
     let mut s = Session::default();
     s.set_ui_commands(vec![
-        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()) },
-        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()) },
+        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()), scope: None },
+        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()), scope: None },
     ]);
     let b = s.shortcuts().find("timeline.zoomIn").unwrap().clone();
     assert_eq!(b.scope, "Timeline");
@@ -606,6 +606,49 @@ fn frontend_commands_are_bindable_with_panel_scope() {
     // A panel shortcut conflicts with an application shortcut on the same keys.
     let c = s.shortcuts().conflicts(&b, "H");
     assert!(c.iter().any(|c| c.key == "tool.hand"));
+    // A registry command that only the Project panel runs is scoped to it.
+    assert_eq!(s.shortcuts().find("project.deleteWithoutConfirmation").unwrap().scope, "Project");
+}
+
+/// The binding that runs a key press: the narrowest scope; a physical binding at the same rank;
+/// nothing when two other panels (or two active contexts) claim it at the same rank.
+#[test]
+fn shortcut_dispatch_picks_the_narrowest_scope_deterministically() {
+    use crate::shortcuts::pick;
+    // Two unrelated panels, neither focused: neither runs, in either order.
+    let both = [("Project", false, "delete"), ("RenderQueue", false, "duplicate")];
+    assert_eq!(pick(both, "Timeline", &[]), Err(vec!["Project".to_string(), "RenderQueue".into()]));
+    assert_eq!(pick([both[1], both[0]], "Timeline", &[]), Err(vec!["RenderQueue".to_string(), "Project".into()]));
+    // The focused one of them wins.
+    assert_eq!(pick(both, "RenderQueue", &[]), Ok(Some("duplicate")));
+    // A single other panel's shortcut runs when nothing nearer claims the chord.
+    assert_eq!(pick([("Project", false, "delete")], "Timeline", &[]), Ok(Some("delete")));
+    // An application binding beats an unrelated panel's binding, also a physical one.
+    assert_eq!(pick([("RenderQueue", true, "duplicate"), ("Application", false, "app")], "Timeline", &[]), Ok(Some("app")));
+    // At the same rank a physical binding wins, in either order.
+    assert_eq!(pick([("Application", false, "logical"), ("Application", true, "physical")], "Timeline", &[]), Ok(Some("physical")));
+    assert_eq!(pick([("Application", true, "physical"), ("Application", false, "logical")], "Timeline", &[]), Ok(Some("physical")));
+    // A Composition binding runs in the Composition panel over the application's.
+    assert_eq!(pick([("Application", false, "app"), ("Composition", false, "comp")], "Composition", &[]), Ok(Some("comp")));
+    // Two active contexts tie; an inactive one doesn't run.
+    assert_eq!(pick([("Mask", false, "mask"), ("Paint", false, "paint")], "Composition", &["Paint", "Mask"]), Err(vec!["Mask".to_string(), "Paint".into()]));
+    assert_eq!(pick([("Mask", false, "mask"), ("Paint", false, "paint")], "Composition", &["Paint"]), Ok(Some("paint")));
+    // The same scope twice (a reported conflict): the first one.
+    assert_eq!(pick([("Timeline", false, "a"), ("Timeline", false, "b")], "Timeline", &[]), Ok(Some("a")));
+}
+
+/// Two contexts can be active at once, so their shortcuts on the same keys conflict.
+#[test]
+fn context_shortcuts_on_the_same_keys_conflict() {
+    let mut s = Session::default();
+    s.set_ui_commands(vec![
+        crate::shortcuts::UiCommand { id: "test.mask".into(), label: "Mask".into(), shortcut: Some("F9".into()), scope: Some("Mask".into()) },
+        crate::shortcuts::UiCommand { id: "test.paint".into(), label: "Paint".into(), shortcut: Some("F9".into()), scope: Some("Paint".into()) },
+    ]);
+    let t = s.shortcuts();
+    assert!(t.all_conflicts().iter().any(|(a, c)| a == "test.mask" && c.key == "test.paint" && !c.overrides), "{:?}", t.all_conflicts());
+    let b = t.find("test.mask").unwrap();
+    assert!(t.conflicts(b, "F9").iter().any(|c| c.key == "test.paint" && !c.overrides));
 }
 
 // ---------------------------------------------------------------- auto-save / recovery
