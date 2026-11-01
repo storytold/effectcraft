@@ -162,6 +162,8 @@ fn project_files_name_their_version_and_always_read_back() {
     assert!(text.trim_start().starts_with("{\n  \"savedBy\""), "the version comes first");
     assert_eq!(Project::from_json(&text).unwrap(), p);
     assert_eq!(crate::saved_by(&p.to_json()), None, "plain JSON (worker hand-offs) has none");
+    assert_eq!(crate::saved_by(r#"{"savedBy": "999.0.0", "schema": 3}"#).as_deref(), Some("999.0.0"), "a newer schema still names its version");
+    assert_eq!(crate::saved_by(r#"[2, {}, {}, 1]"#), None, "the array form has none");
     // JSON can't hold NaN: saving refuses instead of writing a file that can't be opened.
     p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(f64::NAN);
     let e = p.to_file_json().unwrap_err().to_string();
@@ -191,6 +193,22 @@ fn saved_files_reopen_in_pretty_and_compact_form() {
     let (p, _cid) = project_with_layer();
     assert_eq!(Project::from_json(&p.to_file_json().unwrap()).unwrap(), p, "the pretty project file");
     assert_eq!(Project::from_json(&p.to_json_compact()).unwrap(), p, "compact JSON");
+}
+
+/// A project file read back and saved again is the same text, indented and compact (Save Compact
+/// Project Files), with its saved view.
+#[test]
+fn project_files_save_again_byte_for_byte() {
+    let (p, cid) = project_with_layer();
+    let view = crate::SavedView { active_comp: Some(cid), open_comps: vec![cid], comp_times: [(cid, effectcraft_time::Tick(4_237_833_600))].into() };
+    for compact in [false, true] {
+        let text = p.to_file_json_with_view(&view, compact).unwrap();
+        let prefix = if compact { "{\"savedBy\":\"" } else { "{\n  \"savedBy\": \"" };
+        assert!(text.starts_with(&format!("{prefix}{}\"", crate::APP_VERSION)), "compact {compact}: {text}");
+        assert_eq!(text.contains('\n'), !compact);
+        let again = Project::from_json(&text).unwrap().to_file_json_with_view(&crate::saved_view(&text), compact).unwrap();
+        assert_eq!(again, text, "compact {compact}");
+    }
 }
 
 #[test]
