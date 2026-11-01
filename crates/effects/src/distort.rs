@@ -384,6 +384,18 @@ fn transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 fn corner_pin(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (w, h) = (b.layer_w(ctx), b.layer_h(ctx));
+    // The warped layer is drawn wherever the corners are, so grow the buffer to hold the quad;
+    // an adjustment layer keeps the size of the comp below it.
+    if !ctx.adjustment {
+        let pts = ["ul", "ur", "lr", "ll"].map(|k| {
+            let p = b.to_px(ctx.params.v2(k));
+            [p.0, p.1]
+        });
+        let (lo, hi) = crate::quad_bounds(&pts);
+        if let Some(sides) = crate::grow_sides(lo, hi, b.img.width, b.img.height) {
+            b.pad_sides(sides);
+        }
+    }
     let q = ["ul", "ur", "lr", "ll"].map(|k| {
         let p = b.to_px(ctx.params.v2(k));
         vec2(p.0, p.1)
@@ -540,6 +552,35 @@ mod tests {
         }
         let ctx = EffectCtx { params: &params, time: 0.0, layer_size: ls, seed: 3, adjustment: false, env: Default::default() };
         crate::apply(s, &ctx, Buf { img: im, offset: [0.0, 0.0], scale: 1.0 })
+    }
+
+    #[test]
+    fn corner_pin_draws_outside_the_layer_rectangle() {
+        // A 20×10 layer pinned to a quad that lies entirely right of and below it.
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let set = [("ul", Value::Vec2([40.0, 30.0])), ("ur", Value::Vec2([60.0, 30.0])), ("lr", Value::Vec2([60.0, 40.0])), ("ll", Value::Vec2([40.0, 40.0]))];
+        let o = run("ec.distort.cornerpin", &set, im);
+        assert!(o.img.width >= 60 && o.img.height >= 40, "{}x{}", o.img.width, o.img.height);
+        let (cx, cy) = (o.offset[0] as i64 + 50, o.offset[1] as i64 + 35);
+        assert!(o.img.get(cx, cy)[0] > 0.9);
+    }
+
+    #[test]
+    fn corner_pin_keeps_the_size_on_an_adjustment_layer() {
+        let s = crate::find("ec.distort.cornerpin").unwrap();
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [20.0, 10.0]))).collect() };
+        params.values.insert("lr".to_string(), Value::Vec2([400.0, 300.0]));
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [20.0, 10.0], seed: 3, adjustment: true, env: Default::default() };
+        let o = crate::apply(s, &ctx, Buf { img: im, offset: [0.0, 0.0], scale: 1.0 });
+        assert_eq!((o.img.width, o.img.height, o.offset), (20, 10, [0.0, 0.0]));
+    }
+
+    #[test]
+    fn corner_pin_with_a_far_pin_grows_to_it() {
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let o = run("ec.distort.cornerpin", &[("lr", Value::Vec2([1500.0, 1000.0]))], im);
+        assert!(o.img.width >= 1500 && o.img.height >= 1000, "{}x{}", o.img.width, o.img.height);
     }
 
     fn differs(a: Px4, b: Px4) -> bool {

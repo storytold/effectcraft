@@ -114,6 +114,7 @@ fn mirror_offset_polar_spherize_corner_pin() {
     effect_case("ec.distort.spherize", &[("radius", n(35.0)), ("center", pt(30.0, 25.0))]);
     effect_case("ec.distort.cornerpin", &[("ul", pt(5.0, 3.0)), ("ur", pt(60.0, 8.0)), ("lr", pt(66.0, 40.0)), ("ll", pt(2.0, 44.0))]);
     effect_case("ec.distort.cornerpin", &[("ul", pt(-8.0, 6.0)), ("ur", pt(75.0, -4.0)), ("lr", pt(50.0, 30.0)), ("ll", pt(12.0, 50.0))]);
+    effect_case("ec.distort.cornerpin", &[("ul", pt(70.0, 55.0)), ("ur", pt(120.0, 55.0)), ("lr", pt(120.0, 90.0)), ("ll", pt(70.0, 90.0))]);
 }
 
 #[test]
