@@ -214,7 +214,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Add:", "追加:"),
     ("Adjust Exposure (stops)", "露出を調整（段単位）"),
     ("Adjust composition duration to the time span of the selected layers", "コンポジションのデュレーションを、選択したレイヤーの時間範囲に合わせる"),
-    ("Advanced", "詳細"),
+    ("Advanced", "高度"),
     ("Advanced 3D", "アドバンスド3D"),
     ("Align Layers to:", "レイヤーの整列基準:"),
     ("All six face cameras turn together; the scene is not changed.", "6つの面のカメラがすべて一緒に回転します。シーンは変更されません。"),
@@ -1137,7 +1137,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Real name", "本名"),
     ("ArtCraft website", "ArtCraftのウェブサイト"),
     ("Source code on GitHub", "GitHubのソースコード"),
-    ("3D Renderer", "3Dレンダラー"),
+    ("3D Renderer", "3D レンダラー"),
     ("Black", "黒"),
     ("White", "白"),
     ("Composition Settings", "コンポジション設定"),
@@ -1273,7 +1273,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Fast Previews", "高速プレビュー"),
     ("3D View", "3Dビュー"),
     ("Current time", "現在の時間"),
-    ("Layer Transform", "レイヤーのトランスフォーム"),
+    ("Layer Transform", "レイヤートランスフォーム"),
     ("Reset Transform", "トランスフォームをリセット"),
     ("Text Animation", "テキストアニメーション"),
     ("Text Animation Presets", "テキストアニメーションのプリセット"),
@@ -10167,6 +10167,17 @@ mod tests {
         );
     }
 
+    /// Composition Settings' heading and its three tabs, read from the installed After Effects
+    /// 2026 Japanese interface: 基本, 高度 and 3D レンダラー.
+    #[test]
+    fn the_composition_settings_tabs_use_after_effects_words() {
+        set_current("ja");
+        for (en, ja) in [("Composition Settings", "コンポジション設定"), ("Basic", "基本"), ("Advanced", "高度"), ("3D Renderer", "3D レンダラー")]
+        {
+            assert_eq!(tr(en), ja, "{en}");
+        }
+    }
+
     #[test]
     fn the_preview_panel_labels_are_translated() {
         // The Preview panel draws these from a local closure, a check table and a roll tuple, none of
@@ -10303,12 +10314,14 @@ mod tests {
         assert_eq!(tr("Media Duration"), "メディアの長さ");
         assert_eq!(tr("Bring Layer to Front"), "レイヤーを最前面へ");
         assert_eq!(tr("All Transform Properties"), "すべてのトランスフォームプロパティ");
+        assert_eq!(tr("Layer Transform"), "レイヤートランスフォーム");
         assert_eq!(tr("Fill Color: RGB"), "塗りの色: RGB");
         assert_eq!(tr("Lines added"), "追加行数");
         // The composition-settings tabs and the Preview transport pass these through `tr` as
         // variables, so a missing row would fall back to English unnoticed.
         assert_eq!(tr("Basic"), "基本");
-        assert_eq!(tr("Advanced"), "詳細");
+        assert_eq!(tr("Advanced"), "高度");
+        assert_eq!(tr("3D Renderer"), "3D レンダラー");
         assert_eq!(tr("Play/Stop"), "再生/停止");
         assert_eq!(tr("my layer.mp4"), "my layer.mp4");
         assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "プロキシの使用：Best");
