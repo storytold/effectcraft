@@ -571,6 +571,7 @@ impl GpuContext {
             include_str!("shaders/fx_time.wgsl"),
             include_str!("shaders/fx_pixel2.wgsl"),
             include_str!("shaders/fx_gen2.wgsl"),
+            include_str!("shaders/inpaint.wgsl"),
             include_str!("shaders/sky.wgsl"),
         ]
         .concat();
@@ -679,6 +680,7 @@ impl GpuContext {
             .chain(crate::fx_time::KERNELS)
             .chain(crate::fx_pixel2::KERNELS)
             .chain(crate::fx_gen2::KERNELS)
+            .chain(crate::inpaint::KERNELS)
         {
             match build(e, &layout) {
                 Ok(p) => {
@@ -1401,23 +1403,31 @@ impl<'g> Enc<'g> {
         data.resize(layout.len / 16, [0.0; 4]);
         let mut out = Image { width: img.width, height: img.height, data };
         let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out.data);
-        self.read_texture_into(&img.texture, img.width, img.height, 16, dst)?;
+        self.read_texture_into(&img.texture, [0, 0, img.width, img.height], 16, dst)?;
         Some(out)
     }
 
     /// Tightly packed texel bytes of a texture (`bpp` bytes per pixel).
     pub fn read_texture(&mut self, texture: &wgpu::Texture, w: u32, h: u32, bpp: u32) -> Option<Vec<u8>> {
+        self.read_rect(texture, 0, 0, w, h, bpp)
+    }
+
+    /// [`Enc::read_texture`] of a sub-rectangle at (`x`, `y`): a fill only changes its hole, so
+    /// only the hole's bounds need to cross back (`bytes_per_row` is still row-aligned inside).
+    pub fn read_rect(&mut self, texture: &wgpu::Texture, x: u32, y: u32, w: u32, h: u32, bpp: u32) -> Option<Vec<u8>> {
         let layout =
             crate::readback::Layout::new(w, h, bpp, self.g.device.limits().max_buffer_size).map_err(|e| log::error!("gpu texture readback: {e}")).ok()?;
         let mut out = Vec::new();
         out.try_reserve_exact(layout.len).map_err(|e| log::error!("gpu readback allocation: {e}")).ok()?;
         out.resize(layout.len, 0);
-        self.read_texture_into(texture, w, h, bpp, &mut out)?;
+        self.read_texture_into(texture, [x, y, w, h], bpp, &mut out)?;
         Some(out)
     }
 
-    /// [`Enc::read_texture`] into `out` (`w × bpp × h` bytes), through a reused staging buffer.
-    fn read_texture_into(&mut self, texture: &wgpu::Texture, w: u32, h: u32, bpp: u32, out: &mut [u8]) -> Option<()> {
+    /// [`Enc::read_rect`] into `out` (`w × bpp × h` bytes), through a reused staging buffer.
+    /// `rect` is `[x, y, w, h]`.
+    fn read_texture_into(&mut self, texture: &wgpu::Texture, rect: [u32; 4], bpp: u32, out: &mut [u8]) -> Option<()> {
+        let [x, y, w, h] = rect;
         if !self.g.can_wait() {
             return None;
         }
@@ -1440,7 +1450,7 @@ impl<'g> Enc<'g> {
             })
         });
         self.encoder().copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );

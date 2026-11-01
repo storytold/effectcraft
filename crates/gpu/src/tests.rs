@@ -52,6 +52,7 @@ mod fx_vr;
 mod fx_warp;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod init;
+mod inpaint;
 mod particles;
 mod three_d;
 mod wgsl_grammar;
