@@ -3159,7 +3159,8 @@ fn layer_parent_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc
         },
     );
     let pr_rect = Rect::from_min_size(pos2(cw.parent + 20.0, cy - 9.0), vec2(94.0, 18.0));
-    let plabel = layer.parent.and_then(|p| comp.layer(p)).map(|l| format!("{}. {}", comp.index_of(l.id).unwrap_or(0), l.name)).unwrap_or_else(|| "None".into());
+    let none = crate::i18n::tr("None");
+    let plabel = layer.parent.and_then(|p| comp.layer(p)).map(|l| format!("{}. {}", comp.index_of(l.id).unwrap_or(0), l.name)).unwrap_or_else(|| none.into());
     let presp = widgets::dropdown(ui, pr_rect, &plabel, &t, egui::Id::unique(("parent", layer.id.0)));
     app.auto.add(&format!("timeline.layer.{}.parent", layer.id.0), pr_rect, "Parent");
     let pop = egui::Id::unique(("par-pop", layer.id.0));
@@ -3167,7 +3168,7 @@ fn layer_parent_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc
         widgets::open_popup(ui, pop);
     }
     let mut cands: Vec<&Layer> = vec![];
-    let mut popts = vec!["None".to_string(), "-".to_string()];
+    let mut popts = vec![none.to_string(), "-".to_string()];
     if widgets::popup_is_open(ui, pop) {
         for (i, l) in comp.layers.iter().enumerate().filter(|(_, l)| l.id != layer.id) {
             popts.push(format!("{}. {}", i + 1, l.name));
