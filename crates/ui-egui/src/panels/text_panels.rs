@@ -156,12 +156,10 @@ fn stroke_width_presets(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, en
     let t = app.tokens;
     let br = Rect::from_min_size(pos2(r.max.x + 4.0, r.min.y + 2.0), vec2(16.0, 16.0));
     let pop = egui::Id::unique("char-stroke-width-pop");
-    if widgets::icon_button(ui, br, crate::icons::Icon::ChevronDown, false, &t, egui::Id::unique("char-stroke-width-presets"))
-        .on_hover_text(tr("Stroke width presets"))
-        .clicked()
-        && enabled
-    {
-        widgets::open_popup(ui, pop);
+    let resp = widgets::icon_button(ui, br, crate::icons::Icon::ChevronDown, false, &t, egui::Id::unique("char-stroke-width-presets"))
+        .on_hover_text(tr("Stroke width presets"));
+    if enabled {
+        widgets::open_on_press(ui, &resp, pop);
     }
     app.auto.add("character.strokeWidth.presets", br, "Stroke width presets");
     let labels: Vec<String> = PRESETS.iter().map(|v| format!("{v} px")).collect();
@@ -183,8 +181,9 @@ fn kerning_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     };
     let kr = Rect::from_min_size(pos2(x0 + 26.0, fy), vec2((w / 2.0 - 32.0).max(50.0), 20.0));
     let kpop = egui::Id::unique("char-kerning-pop");
-    if widgets::dropdown(ui, kr, &label, &t, egui::Id::unique("char-kerning")).clicked() && enabled {
-        widgets::open_popup(ui, kpop);
+    let kresp = widgets::dropdown(ui, kr, &label, &t, egui::Id::unique("char-kerning"));
+    if enabled {
+        widgets::open_on_press(ui, &kresp, kpop);
     }
     app.auto.add("character.kerning", kr, "Kerning");
     let opts: Vec<String> = ["Metrics", "Optical", "0", "-50", "-25", "-10", "10", "25", "50", "100"].iter().map(|s| s.to_string()).collect();
@@ -222,8 +221,9 @@ fn stroke_order_field(
         _ => doc.stroke_over_fill as usize,
     };
     let pop = egui::Id::unique("char-stroke-order-pop");
-    if widgets::dropdown(ui, dr, &labels[current], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
-        widgets::open_popup(ui, pop);
+    let resp = widgets::dropdown(ui, dr, &labels[current], &t, egui::Id::unique("char-stroke-order"));
+    if enabled {
+        widgets::open_on_press(ui, &resp, pop);
     }
     app.auto.add("character.strokeOverFill", dr, "Stroke order");
     match widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(current)) {
@@ -301,8 +301,9 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += 28.0;
     let sr = Rect::from_min_size(pos2(x0, y), vec2(w - 84.0, 22.0));
     let spop = egui::Id::unique("char-style-pop");
-    if widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::unique("char-style")).clicked() && enabled {
-        widgets::open_popup(ui, spop);
+    let sresp = widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::unique("char-style"));
+    if enabled {
+        widgets::open_on_press(ui, &sresp, spop);
     }
     app.auto.add("character.style", sr, "Font style");
     // The family's own styles.
@@ -328,8 +329,9 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("character.{key}.enabled"), cr, label);
         let fs = Rect::from_min_size(pos2(fx + 20.0, y), vec2(26.0, 20.0));
         let pop = egui::Id::unique(("char-color-pop", key));
-        if widgets::swatch(ui, fs, c, egui::Id::unique(("char-color", key)), &t).clicked() && enabled {
-            widgets::open_popup(ui, pop);
+        let sresp = widgets::swatch(ui, fs, c, egui::Id::unique(("char-color", key)), &t);
+        if enabled {
+            widgets::open_on_press(ui, &sresp, pop);
         }
         app.auto.add(&format!("character.{key}"), fs, label);
         let mut rgb = [c[0], c[1], c[2]];
@@ -385,8 +387,9 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let opop = egui::Id::unique("char-opentype-pop");
     let n_on = doc.opentype.feature_settings().len();
     let olabel = if n_on > 0 { format!("OT ({n_on})") } else { "OpenType".to_string() };
-    if widgets::dropdown(ui, or, &olabel, &t, egui::Id::unique("char-opentype")).clicked() && enabled {
-        widgets::open_popup(ui, opop);
+    let oresp = widgets::dropdown(ui, or, &olabel, &t, egui::Id::unique("char-opentype"));
+    if enabled {
+        widgets::open_on_press(ui, &oresp, opop);
     }
     app.auto.add("character.opentype", or, "OpenType");
     opentype_popup(app, ui, opop, pos2((or.max.x - 300.0).max(rect.min.x), or.max.y), &doc, &mut actions);
@@ -677,8 +680,9 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let dr = Rect::from_min_size(pos2(x0, y), vec2(w / 2.0 - 4.0, 22.0));
         let dirs = vec!["Left-to-Right Text".to_string(), "Right-to-Left Text".to_string()];
         let dpop = egui::Id::unique("para-direction-pop");
-        if widgets::dropdown(ui, dr, &dirs[rtl as usize], &t, egui::Id::unique("para-direction")).clicked() && enabled {
-            widgets::open_popup(ui, dpop);
+        let dresp = widgets::dropdown(ui, dr, &dirs[rtl as usize], &t, egui::Id::unique("para-direction"));
+        if enabled {
+            widgets::open_on_press(ui, &dresp, dpop);
         }
         app.auto.add("paragraph.direction", dr, "Text direction");
         if let Some(i) = widgets::popup_menu(ui, dpop, dr.left_bottom(), &dirs, Some(rtl as usize)) {
@@ -693,8 +697,9 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     let cpop = egui::Id::unique("para-composer-pop");
     let single = doc.composer == Composer::SingleLine;
-    if widgets::dropdown(ui, cr, &comps[single as usize], &t, egui::Id::unique("para-composer")).clicked() && enabled {
-        widgets::open_popup(ui, cpop);
+    let cresp = widgets::dropdown(ui, cr, &comps[single as usize], &t, egui::Id::unique("para-composer"));
+    if enabled {
+        widgets::open_on_press(ui, &cresp, cpop);
     }
     app.auto.add("paragraph.composer", cr, "Composer");
     if let Some(i) = widgets::popup_menu(ui, cpop, cr.left_bottom(), &comps, Some(single as usize)) {
@@ -944,9 +949,8 @@ pub fn align(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let dr = Rect::from_min_size(pos2(x0 + 100.0, y), vec2(110.0, 20.0));
     let to_sel = app.ui.align_to_selection;
     let pid = egui::Id::unique("align-to-pop");
-    if widgets::dropdown(ui, dr, if to_sel { "Selection" } else { "Composition" }, &t, pid.with("btn")).clicked() {
-        widgets::open_popup(ui, pid);
-    }
+    let aresp = widgets::dropdown(ui, dr, if to_sel { "Selection" } else { "Composition" }, &t, pid.with("btn"));
+    widgets::open_on_press(ui, &aresp, pid);
     app.auto.add("align.to", dr, if to_sel { "Selection" } else { "Composition" });
     if let Some(i) =
         widgets::popup_menu(ui, pid, dr.left_bottom() + vec2(0.0, 2.0), &["Selection".to_string(), "Composition".to_string()], Some(if to_sel { 0 } else { 1 }))

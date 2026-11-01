@@ -144,9 +144,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(pos2(br.min.x + 26.0, br.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Add Animator"), Tokens::ui(12.0), t.text);
         app.auto.add("properties.addAnimator", br, "Add Animator");
         let pop = egui::Id::unique("props-add-animator-pop");
-        if resp.clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        widgets::open_on_press(ui, &resp, pop);
         let per_char = layer.props.prop("text/perChar3d").is_some_and(|q| q.value.as_bool());
         let entries = animator_entries(per_char);
         // The entries are the English source strings; the menu draws them translated.
@@ -165,9 +163,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(pr.center(), Align2::CENTER_CENTER, crate::i18n::tr("Presets"), Tokens::ui(12.0), t.text);
         app.auto.add("properties.textPresets", pr, "Text Animation Presets");
         let ppop = egui::Id::unique("props-text-presets-pop");
-        if presp.clicked() {
-            widgets::open_popup(ui, ppop);
-        }
+        widgets::open_on_press(ui, &presp, ppop);
         let presets = effectcraft_engine::text_presets();
         let names: Vec<String> = presets.iter().map(|(_, n)| n.clone()).collect();
         if let Some(i) = widgets::popup_menu(ui, ppop, pr.left_bottom(), &names, None) {
@@ -393,9 +389,8 @@ fn text_section(
     y += 28.0;
     let sr = Rect::from_min_size(pos2(x0, y), vec2(w, 22.0));
     let spop = egui::Id::unique("props-style-pop");
-    if widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::unique("props-style")).clicked() {
-        widgets::open_popup(ui, spop);
-    }
+    let sresp = widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::unique("props-style"));
+    widgets::open_on_press(ui, &sresp, spop);
     app.auto.add("properties.text.style", sr, "Font style");
     // The family's own styles.
     let styles: Vec<String> = if widgets::popup_is_open(ui, spop) { effectcraft_engine::font_styles(&doc.font) } else { vec![] };
@@ -464,9 +459,8 @@ fn text_section(
         app.auto.add(&format!("properties.text.{key}.enabled"), cr, label);
         let sw = Rect::from_min_size(pos2(x0 + 24.0, ry + 1.0), vec2(16.0, 16.0));
         let pop = egui::Id::unique(("props-color-pop", key));
-        if widgets::swatch(ui, sw, c, egui::Id::unique(("props-color", key)), &t).clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        let swresp = widgets::swatch(ui, sw, c, egui::Id::unique(("props-color", key)), &t);
+        widgets::open_on_press(ui, &swresp, pop);
         app.auto.add(&format!("properties.text.{key}"), sw, label);
         let mut rgb = [c[0], c[1], c[2]];
         if crate::widgets::color_popup(ui, pop, sw.left_bottom(), &mut rgb) {

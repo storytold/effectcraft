@@ -40,6 +40,39 @@ fn fill_stroke(s: &mut Session, layer: u64) -> serde_json::Value {
     s.execute("prop.get", json!({"layer": layer, "path": "text/moreOptions/fillStroke"})).unwrap()["value"].clone()
 }
 
+/// The list opens on the press and the entry the button comes up over is applied, as After
+/// Effects' menus do (#2686).
+#[test]
+fn the_stroke_order_menu_browses_on_the_press_and_applies_on_the_release() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180, "duration": 2})).unwrap();
+    let text = s.execute("layer.newText", json!({"text": "Caption", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setText", json!({"layer": text, "applyStroke": true, "strokeWidth": 8.0})).unwrap();
+    let mut app = EffectcraftApp::new(s);
+    app.set_workspace("Text");
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1400.0)).build_eframe(|_| app);
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(4);
+
+    let e = h.state().auto.find("character.strokeOverFill").expect("the stroke order field").clone();
+    let trigger = pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5);
+    h.event(Event::PointerMoved(trigger));
+    h.step();
+    h.event(Event::PointerButton { pos: trigger, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    // (The accessibility tree is one pass behind the drawing.)
+    h.run_steps(2);
+    assert!(h.query_by_label("All Fills Over All Strokes").is_some(), "the press opens the list, while the button is still down");
+    assert_eq!(fill_stroke(&mut h.state_mut().session, text), json!(0), "and chooses nothing yet");
+    let row = h.get_by_role_and_label(Role::Button, "All Strokes Over All Fills").rect().center();
+    h.event(Event::PointerMoved(row));
+    h.step();
+    assert!(h.query_by_label("All Strokes Over All Fills").is_some(), "moving onto an entry keeps the list open");
+    h.event(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(fill_stroke(&mut h.state_mut().session, text), json!(2), "the release over the entry applies it");
+    assert!(h.query_by_label("Fill Over Stroke").is_none(), "and closes the list");
+}
+
 #[test]
 fn character_stroke_order_menu_sets_layer_fill_and_stroke() {
     let mut s = Session::default();
