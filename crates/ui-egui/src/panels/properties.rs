@@ -317,16 +317,15 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             // Scale: the chain link (Constrain Proportions, on by default), sharing the
             // Timeline's per-property state so both panels agree (#956).
             let linkable = pr.match_id == "scale";
-            let linked = linkable && !app.ui.timeline.unlinked.contains(&uid);
+            let mut linked = linkable && !app.ui.timeline.unlinked.contains(&uid);
             if linkable {
                 // Constrain Proportions toggle, left of the values.
                 let lr = Rect::from_center_size(pos2(x - 12.0, cy), vec2(12.0, 12.0));
                 let resp = ui.interact(lr, egui::Id::unique(("props-link", uid)), Sense::click()).on_hover_text(tr("Constrain Proportions"));
+                // Toggle first, so the chain is painted in its new state in the same frame.
+                linked = app.ui.timeline.click_link(uid, true, resp.clicked());
                 icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
                 app.auto.add(&format!("{base}.constrain"), lr, "Constrain Proportions");
-                if resp.clicked() && !app.ui.timeline.unlinked.remove(&uid) {
-                    app.ui.timeline.unlinked.insert(uid);
-                }
             }
             for d in 0..n.min(c.len()) {
                 let (vr, nv, _) = widgets::hot_number_at(

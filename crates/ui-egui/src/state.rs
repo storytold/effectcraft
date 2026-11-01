@@ -322,6 +322,15 @@ impl TimelineState {
         }
     }
 
+    /// Apply a click on property `uid`'s chain link (if `clicked`) and return whether it is on
+    /// afterwards, so the icon can be painted in its new state in the frame of the click (#2243).
+    pub fn click_link(&mut self, uid: u64, linked_by_default: bool, clicked: bool) -> bool {
+        if clicked {
+            self.toggle_link(uid, linked_by_default);
+        }
+        self.is_linked(uid, linked_by_default)
+    }
+
     /// Forget the chain links when the project was replaced (new or opened): they are keyed by
     /// property uid, which the next project reuses, so a link turned on must not carry into it.
     pub fn scope_links(&mut self, project_epoch: u64) {
@@ -825,4 +834,23 @@ pub(crate) struct PlaybackPass<'a> {
     pub(crate) looping: bool,
     pub(crate) ahead: i64,
     pub(crate) queued: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimelineState;
+
+    /// #2243: a click on a chain link returns the state after the click, so the icon is painted
+    /// right away instead of after the next hover, for links that start on and links that start off.
+    #[test]
+    fn click_link_returns_the_state_after_the_click() {
+        for by_default in [true, false] {
+            let mut tl = TimelineState::default();
+            assert_eq!(tl.click_link(7, by_default, false), by_default, "no click leaves the default");
+            assert_eq!(tl.click_link(7, by_default, true), !by_default, "the click is already in the returned state");
+            assert_eq!(tl.is_linked(7, by_default), !by_default);
+            assert_eq!(tl.click_link(7, by_default, false), !by_default, "stays put without a click");
+            assert_eq!(tl.click_link(7, by_default, true), by_default, "a second click goes back");
+        }
+    }
 }
