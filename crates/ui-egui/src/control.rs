@@ -290,7 +290,7 @@ fn set_ui_layout(app: &mut EffectcraftApp, p: &Value) -> Outcome {
         apply_timeline(app, tl);
     }
     if let Some(b) = p.get("menuBar").and_then(Value::as_bool) {
-        app.ui.show_menu_bar = b;
+        app.set_menu_bar(Some(b));
     }
     // Project panel optional columns, e.g. ["type", "duration", "path", "comment"].
     if let Some(Value::Array(a)) = p.get("projectColumns") {
@@ -898,5 +898,16 @@ mod tests {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
             assert_eq!(super::base64(i.as_bytes()), o);
         }
+    }
+
+    #[test]
+    fn ui_set_menu_bar() {
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        let _ = super::set_ui_layout(&mut app, &serde_json::json!({"menuBar": true}));
+        assert!(app.ui.show_menu_bar);
+        assert!(app.session.prefs.appearance.menu_bar_shown());
+        let _ = super::set_ui_layout(&mut app, &serde_json::json!({"menuBar": false}));
+        assert!(!app.ui.show_menu_bar);
+        assert!(!app.session.prefs.appearance.menu_bar_shown());
     }
 }

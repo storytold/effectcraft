@@ -1209,6 +1209,7 @@ View
   ---
   Go to Time... | time.set
   Enter Full Screen | view.fullScreen
+  Menu Bar | view.menuBar
 Window
   Workspace
     Default | window.workspace {"name":"Default"} | Shift+F10

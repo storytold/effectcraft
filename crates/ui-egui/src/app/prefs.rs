@@ -24,6 +24,21 @@ impl EffectcraftApp {
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
         self.ui.viewer.fast_preview = p.previews.fast_previews;
         self.frames.set_budget(p.cache_budgets(self.session.sys_memory).preview);
+        self.ui.show_menu_bar = p.appearance.menu_bar_shown();
+    }
+
+    /// Toggle or set in-window menu bar visibility on the given platform, synchronizing
+    /// preferences and the UI state.
+    pub fn set_menu_bar_on(&mut self, value: Option<bool>, macos: bool) -> bool {
+        let shown = self.session.prefs.appearance.toggle_menu_bar_on(value, macos);
+        self.ui.show_menu_bar = shown;
+        self.session.save_prefs();
+        shown
+    }
+
+    /// Toggle or set in-window menu bar visibility on the current platform.
+    pub fn set_menu_bar(&mut self, value: Option<bool>) -> bool {
+        self.set_menu_bar_on(value, cfg!(target_os = "macos"))
     }
 
     /// Change settings from the UI (applied next frame and saved).

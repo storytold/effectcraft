@@ -80,6 +80,7 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
         "view.grid" => Some(v.grid),
         "view.snapToGrid" => Some(v.snap_grid),
         "view.layerControls" => Some(v.show_layer_controls),
+        "view.menuBar" => Some(app.session.prefs.appearance.menu_bar_shown()),
         "playback.cacheWhenIdle" => Some(app.ui.cache_when_idle),
         "playback.audio" => Some(app.session.prefs.preview.active().include_audio),
         "window.workspace" => Some(pstr("name").is_some_and(|n| n == app.ui.workspace)),

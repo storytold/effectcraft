@@ -125,6 +125,8 @@ page!(Appearance {
     use_gradients: bool = true,
     /// macOS: draw the menu bar inside the window instead of the system menu bar.
     in_window_menu_bar_mac: bool = false,
+    /// Draw the top menu bar (shown by default).
+    show_menu_bar: bool = true,
 });
 
 page!(Grids {
@@ -355,5 +357,97 @@ impl Appearance {
             _ => false,
         };
         if light { &self.light_theme } else { &self.dark_theme }
+    }
+
+    /// Whether the in-window menu bar is shown on the given platform (`macos`: true if macOS).
+    pub fn menu_bar_shown_on(&self, macos: bool) -> bool {
+        if macos { self.in_window_menu_bar_mac } else { self.show_menu_bar }
+    }
+
+    /// Whether the in-window menu bar is shown on the current platform.
+    pub fn menu_bar_shown(&self) -> bool {
+        self.menu_bar_shown_on(cfg!(target_os = "macos"))
+    }
+
+    /// Set in-window menu bar visibility on the given platform, updating `in_window_menu_bar_mac`
+    /// on macOS and `show_menu_bar` on other platforms.
+    pub fn set_menu_bar_shown_on(&mut self, shown: bool, macos: bool) {
+        if macos {
+            self.in_window_menu_bar_mac = shown;
+        } else {
+            self.show_menu_bar = shown;
+        }
+    }
+
+    /// Set in-window menu bar visibility on the current platform.
+    pub fn set_menu_bar_shown(&mut self, shown: bool) {
+        self.set_menu_bar_shown_on(shown, cfg!(target_os = "macos"));
+    }
+
+    /// Toggle or set in-window menu bar visibility on the given platform. If `value` is `Some`,
+    /// visibility is set to that value; otherwise the current shown state is inverted. Returns the
+    /// new visibility.
+    pub fn toggle_menu_bar_on(&mut self, value: Option<bool>, macos: bool) -> bool {
+        let next = value.unwrap_or_else(|| !self.menu_bar_shown_on(macos));
+        self.set_menu_bar_shown_on(next, macos);
+        next
+    }
+
+    /// Toggle or set in-window menu bar visibility on the current platform.
+    pub fn toggle_menu_bar(&mut self, value: Option<bool>) -> bool {
+        self.toggle_menu_bar_on(value, cfg!(target_os = "macos"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appearance_menu_bar_shown_macos_defaults() {
+        let mut appearance = Appearance::default();
+        // Defaults: in_window_menu_bar_mac = false, show_menu_bar = true.
+        assert!(!appearance.menu_bar_shown_on(true), "macOS default uses native menu, in-window bar hidden");
+        assert!(appearance.menu_bar_shown_on(false), "non-macOS default shows in-window menu bar");
+
+        // First toggle on macOS should show the menu bar (flips hidden -> shown)
+        let shown = appearance.toggle_menu_bar_on(None, true);
+        assert!(shown);
+        assert!(appearance.in_window_menu_bar_mac);
+        assert!(appearance.menu_bar_shown_on(true));
+
+        // Second toggle flips back to hidden
+        let shown = appearance.toggle_menu_bar_on(None, true);
+        assert!(!shown);
+        assert!(!appearance.in_window_menu_bar_mac);
+        assert!(!appearance.menu_bar_shown_on(true));
+
+        // Explicit boolean setting on macOS
+        appearance.toggle_menu_bar_on(Some(true), true);
+        assert!(appearance.in_window_menu_bar_mac);
+        assert!(appearance.menu_bar_shown_on(true));
+
+        appearance.toggle_menu_bar_on(Some(false), true);
+        assert!(!appearance.in_window_menu_bar_mac);
+        assert!(!appearance.menu_bar_shown_on(true));
+
+        // Non-macOS toggles affect show_menu_bar and leave in_window_menu_bar_mac untouched
+        let mut other = Appearance::default();
+        let shown = other.toggle_menu_bar_on(None, false);
+        assert!(!shown);
+        assert!(!other.show_menu_bar);
+        assert!(!other.in_window_menu_bar_mac);
+    }
+
+    #[test]
+    fn appearance_menu_bar_persistence_roundtrip() {
+        let mut appearance = Appearance::default();
+        appearance.set_menu_bar_shown_on(false, false);
+        appearance.set_menu_bar_shown_on(true, true);
+
+        let raw = serde_json::to_string(&appearance).unwrap();
+        let reloaded: Appearance = serde_json::from_str(&raw).unwrap();
+        assert!(!reloaded.menu_bar_shown_on(false));
+        assert!(reloaded.menu_bar_shown_on(true));
     }
 }

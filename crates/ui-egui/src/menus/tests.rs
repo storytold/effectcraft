@@ -592,3 +592,116 @@ fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
+
+#[test]
+fn view_menu_bar_default_per_platform() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    // Default per platform: hidden in-window on macOS (uses system menu bar), shown on Linux/Windows.
+    assert!(!app.session.prefs.appearance.menu_bar_shown_on(true));
+    assert!(app.session.prefs.appearance.menu_bar_shown_on(false));
+    assert_eq!(app.ui.show_menu_bar, app.session.prefs.appearance.menu_bar_shown());
+    assert_eq!(app.ui.show_menu_bar, !cfg!(target_os = "macos"));
+
+    // First toggle on macOS flips hidden -> shown and sets in_window_menu_bar_mac:
+    let shown = app.set_menu_bar_on(None, true);
+    assert!(shown);
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.in_window_menu_bar_mac);
+    assert!(app.session.prefs.appearance.menu_bar_shown_on(true));
+
+    // Second toggle on macOS hides it again:
+    let shown = app.set_menu_bar_on(None, true);
+    assert!(!shown);
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.in_window_menu_bar_mac);
+    assert!(!app.session.prefs.appearance.menu_bar_shown_on(true));
+
+    // First toggle on non-macOS flips shown -> hidden and updates show_menu_bar:
+    let shown = app.set_menu_bar_on(None, false);
+    assert!(!shown);
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.show_menu_bar);
+    assert!(!app.session.prefs.appearance.menu_bar_shown_on(false));
+
+    // Second toggle on non-macOS restores it:
+    let shown = app.set_menu_bar_on(None, false);
+    assert!(shown);
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.show_menu_bar);
+    assert!(app.session.prefs.appearance.menu_bar_shown_on(false));
+}
+
+#[test]
+fn view_menu_bar_toggles_show_menu_bar() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let entry = entry_for("view.menuBar").expect("View > Menu Bar menu entry exists");
+    let initial = app.session.prefs.appearance.menu_bar_shown();
+    assert_eq!(app.ui.show_menu_bar, initial);
+    assert_eq!(entry_checked(&app, entry), Some(initial));
+
+    let ctx = egui::Context::default();
+    invoke(&mut app, &ctx, "view.menuBar", json!({})).unwrap();
+    assert_eq!(app.ui.show_menu_bar, !initial);
+    assert_eq!(app.session.prefs.appearance.menu_bar_shown(), !initial);
+    assert_eq!(entry_checked(&app, entry), Some(!initial));
+
+    invoke(&mut app, &ctx, "view.menuBar", json!({})).unwrap();
+    assert_eq!(app.ui.show_menu_bar, initial);
+    assert_eq!(app.session.prefs.appearance.menu_bar_shown(), initial);
+    assert_eq!(entry_checked(&app, entry), Some(initial));
+
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": false})).unwrap();
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.menu_bar_shown());
+    assert_eq!(entry_checked(&app, entry), Some(false));
+
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": true})).unwrap();
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.menu_bar_shown());
+    assert_eq!(entry_checked(&app, entry), Some(true));
+}
+
+#[test]
+fn view_menu_bar_persists_across_restart() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+
+    // Toggle menu bar visibility away from the platform default.
+    let toggled = !app.ui.show_menu_bar;
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": toggled})).unwrap();
+    assert_eq!(app.ui.show_menu_bar, toggled);
+    assert_eq!(app.session.prefs.appearance.menu_bar_shown(), toggled);
+
+    // Simulate a restart by round-tripping session preferences through JSON and constructing a new app.
+    let serialized = serde_json::to_string(&app.session.prefs).unwrap();
+    let mut new_session = effectcraft_engine::Session::default();
+    new_session.prefs = serde_json::from_str(&serialized).unwrap();
+
+    let restarted_app = EffectcraftApp::new(new_session);
+    assert_eq!(restarted_app.ui.show_menu_bar, toggled);
+    assert_eq!(restarted_app.session.prefs.appearance.menu_bar_shown(), toggled);
+}
+
+#[test]
+fn view_menu_bar_shortcut_when_hidden() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let entry = entry_for("view.menuBar").expect("View > Menu Bar menu entry exists");
+    let ctx = egui::Context::default();
+
+    // Hide the menu bar.
+    invoke(&mut app, &ctx, "view.menuBar", json!({"value": false})).unwrap();
+    assert!(!app.ui.show_menu_bar);
+    assert!(!app.session.prefs.appearance.menu_bar_shown());
+
+    // Verify the menu entry remains enabled when the menu bar is hidden.
+    assert!(entry_enabled(&app, entry));
+
+    // Verify the shortcut is bound to Cmd+Alt+M and invoking the command when hidden restores it.
+    assert_eq!(
+        app.session.shortcuts().shortcut_of("view.menuBar", &Value::Null),
+        Some("Cmd+Alt+M")
+    );
+    invoke(&mut app, &ctx, "view.menuBar", json!({})).unwrap();
+    assert!(app.ui.show_menu_bar);
+    assert!(app.session.prefs.appearance.menu_bar_shown());
+}
