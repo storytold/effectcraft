@@ -756,17 +756,11 @@
 
   try {
     win.addEventListener("keydown", handleKeyDown);
-    if (searchField) {
-      searchField.addEventListener("keydown", handleKeyDown);
-    }
   } catch (e) { }
 
   win.onClose = function () {
     try {
       win.removeEventListener("keydown", handleKeyDown);
-      if (searchField) {
-        searchField.removeEventListener("keydown", handleKeyDown);
-      }
     } catch (e) { }
     globalScope.__fxConsoleInstance = null;
   };

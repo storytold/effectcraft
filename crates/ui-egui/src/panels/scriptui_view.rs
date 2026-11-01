@@ -552,6 +552,9 @@ fn key_events(ui: &egui::Ui, win: u32, root: &Widget, active: bool, acts: &mut V
         if let Some(target) = find_focused_widget(root, win, fid) {
             target_widget = target.id;
             text_editing_focused = target.kind == WidgetKind::EditText;
+        } else {
+            // The focused widget does not belong to this window; do not route key events here.
+            return;
         }
     }
     let (events, _mods) = ui.input(|i| (i.events.clone(), i.modifiers));
@@ -719,6 +722,7 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
+        key_events(ui, id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();

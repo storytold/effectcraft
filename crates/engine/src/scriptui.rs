@@ -535,10 +535,11 @@ pub fn preferred(w: &Widget) -> [f64; 2] {
             WidgetKind::Button | WidgetKind::IconButton => [(text_w(&w.text) + 24.0).max(80.0), 25.0],
             WidgetKind::StaticText => [text_w(&w.text) + 4.0, LINE_H * lines(&w.text)],
             WidgetKind::EditText => {
+                let measure = if w.text.is_empty() && !w.placeholder.is_empty() { &w.placeholder } else { &w.text };
                 if w.multiline {
-                    [(text_w(&w.text) + 12.0).max(160.0), (LINE_H * lines(&w.text) + 8.0).max(60.0)]
+                    [(text_w(measure) + 12.0).max(160.0), (LINE_H * lines(measure) + 8.0).max(60.0)]
                 } else {
-                    [(text_w(&w.text) + 12.0).max(40.0), 22.0]
+                    [(text_w(measure) + 12.0).max(40.0), 22.0]
                 }
             }
             WidgetKind::Checkbox | WidgetKind::RadioButton => [text_w(&w.text) + 24.0, 18.0],
@@ -870,6 +871,23 @@ mod tests {
         assert_eq!(win.root.lookup(&json!("Cancel")).unwrap().id, 3);
         assert_eq!(win.root.lookup(&json!("#4")).unwrap().id, 4);
         assert_eq!(win.root.lookup(&json!(1)).unwrap().id, 1);
+    }
+
+    #[test]
+    fn preferred_edittext_uses_placeholder_when_empty() {
+        let mut widget = w(WidgetKind::EditText, "");
+        widget.placeholder = "Search effects...".into();
+        let pref = preferred(&widget);
+        let widget_with_text = w(WidgetKind::EditText, "Search effects...");
+        // When text is empty and placeholder is set, preferred width should match
+        // the width we'd get from the placeholder text.
+        assert_eq!(pref[0], preferred(&widget_with_text)[0]);
+        // When text is non-empty, it should use the text, not the placeholder.
+        let mut widget2 = w(WidgetKind::EditText, "Hi");
+        widget2.placeholder = "Search effects...".into();
+        let pref2 = preferred(&widget2);
+        let widget_hi = w(WidgetKind::EditText, "Hi");
+        assert_eq!(pref2[0], preferred(&widget_hi)[0]);
     }
 
     #[test]
