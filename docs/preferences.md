@@ -133,6 +133,13 @@ Commands (CLI, MCP, control channel):
 - `import.unlabeledAlpha`: alpha of TGA / TIFF / movie footage (Ask opens Interpret Footage;
   Guess takes premultiplied for movies, straight for stills)
 - `import.dragImportAs`: layered files dropped on the window import as footage or a comp
+- `import.hardwareDecoding`: Enable Hardware Accelerated Decoding (on by default, as in After
+  Effects). The desktop app decodes H.264 and HEVC footage with the operating system's hardware
+  decoder where it finds one (VideoToolbox on macOS, Media Foundation / DXVA on Windows, NVDEC and
+  VA-API on Linux, through FilmCraft's `filmcraft-platform`); streams the hardware can't take,
+  decoders that fail mid-stream, every other codec, the CLI and the web app decode in software.
+  Footage already open switches with the setting (its decoders reopen); no restart needed. Help ▸
+  GPU Information and the System Compatibility Report show the backend in use
 - `export.defaultOutputFolder`: where relative Render Queue outputs go
 - `export.segmentSequences`, `export.segmentSequenceFiles`: sequences split into numbered
   folders of N files; `export.segmentMovies`, `export.segmentMovieMb`: movies split into

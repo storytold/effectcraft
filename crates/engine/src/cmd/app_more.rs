@@ -448,6 +448,7 @@ pub fn system_report(s: &Session) -> Value {
         "gpu": gpu,
         "gpuNote": if gpu.is_none() { s.accel_note.clone() } else { None },
         "windowGraphics": s.window_adapter,
+        "videoDecoding": s.footage.hardware_decoding().map(|h| json!({"summary": h.summary(), "detail": h})),
         "caches": {"layer": gb(budgets.layer as u64), "footage": gb(budgets.media as u64), "preview": gb(budgets.preview as u64)},
         "import": IMPORT_FORMATS,
         "export": export,
@@ -480,6 +481,9 @@ pub fn report_text(r: &Value) -> String {
     }
     if let Some(w) = r.get("windowGraphics").and_then(Value::as_str) {
         t.push_str(&format!("Window graphics: {w}\n"));
+    }
+    if let Some(v) = r.get("videoDecoding").and_then(|v| v.get("summary")).and_then(Value::as_str) {
+        t.push_str(&format!("Video decoding: {v}\n"));
     }
     let c = &r["caches"];
     t.push_str(&format!(

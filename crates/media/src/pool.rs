@@ -365,6 +365,12 @@ impl MediaPool {
         lock(&self.inner.problems).clear();
     }
 
+    /// Close every open decoder (decoded frames stay cached): the next reads open new ones, under
+    /// the current Hardware Accelerated Decoding setting.
+    pub fn close_decoders(&self) {
+        lock(&self.inner.sources).clear();
+    }
+
     /// Forget a file (after it changed on disk, or to retry a file that failed to open).
     pub fn forget(&self, path: &str) {
         lock(&self.inner.sources).remove(path);
@@ -918,6 +924,14 @@ impl FootageSource for MediaPool {
     }
     fn forget(&self, path: &str) {
         MediaPool::forget(self, path);
+    }
+    fn set_hardware_decoding(&self, on: bool) {
+        if crate::hw::set_hardware_decoding(on) {
+            self.close_decoders();
+        }
+    }
+    fn hardware_decoding(&self) -> Option<effectcraft_render::HardwareDecoding> {
+        Some(crate::hw::hardware_decoding())
     }
     fn cache_budget(&self) -> Option<usize> {
         Some(self.budget())

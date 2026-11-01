@@ -164,6 +164,10 @@ page!(Import {
     unlabeled_alpha: String = "ask".into(),
     /// Default drag import as: `footage`, `comp`, `compLayerSizes`.
     drag_import_as: String = "footage".into(),
+    /// Enable Hardware Accelerated Decoding: H.264 / HEVC footage decodes on the GPU's video
+    /// decoder where the desktop app found one (VideoToolbox, Media Foundation, NVDEC, VA-API);
+    /// everything else, and everything while off, decodes in software.
+    hardware_decoding: bool = true,
 });
 
 page!(Export {

@@ -655,6 +655,8 @@ const JAPANESE: &[(&str, &str)] = &[
     ("⌘/Ctrl-drag a pin to record its motion", "⌘/Ctrl+ドラッグでピンの動きを記録"),
     ("▣ {}", "▣ {}"),
     ("⚠ {} is used by:", "⚠ {}は次のコマンドで使用中:"),
+    ("Video Footage", "ビデオフッテージ"),
+    ("Enable Hardware Accelerated Decoding", "ハードウェアアクセラレーションによるデコードを有効にする"),
     ("3D Reference Axes", "3D参照軸"),
     ("Affect all layers that use this solid", "この平面を使用するすべてのレイヤーに適用"),
     ("Choose grid and guide options", "グリッドとガイドのオプションを選択"),
@@ -1852,6 +1854,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("After Effects project", "After Effects 项目"),
     ("Lottie animation", "Lottie 动画"),
     ("Project", "项目"),
+    ("Video Footage", "视频素材"),
+    ("Enable Hardware Accelerated Decoding", "启用硬件加速解码"),
     // Settings dialog pages (engine schema, #1178).
     ("General", "常规"),
     ("Language", "语言"),
@@ -4072,6 +4076,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("After Effects project", "After Effects 專案"),
     ("Lottie animation", "Lottie 動畫"),
     ("Project", "專案"),
+    ("Video Footage", "視訊素材"),
+    ("Enable Hardware Accelerated Decoding", "啟用硬體加速解碼"),
     // Settings dialog pages (engine schema, #1178).
     ("General", "一般"),
     ("Language", "語言"),
@@ -5108,6 +5114,8 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("⌘/Ctrl-drag a pin to record its motion", "Перетягніть опорну точку з ⌘/Ctrl, щоб записати її рух"),
     ("▣ {}", "▣ {}"),
     ("⚠ {} is used by:", "⚠ {} використовується в:"),
+    ("Video Footage", "Відеоматеріал"),
+    ("Enable Hardware Accelerated Decoding", "Увімкнути апаратно прискорене декодування"),
     ("Track", "Відстежити"),
     // Strings a panel used to hand to a helper as a bare literal: the helper draws them (the
     // viewer's toolbar tooltips and popup items, the solid dialog's checkbox), so the lookup has
