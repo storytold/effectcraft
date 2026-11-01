@@ -275,16 +275,6 @@ impl Buf {
     /// keeps its place; the new area is transparent. No-op when the buffer already covers it.
     pub fn cover(&mut self, size: [f64; 2]) {
         let Some((dx, dy, w, h)) = cover_plan(self.offset, self.scale, size, self.img.width, self.img.height) else { return };
-        self.regrow(dx, dy, w, h);
-    }
-    /// Grow the buffer so it also spans the pixel box `lo`..`hi` (see [`grow_plan`]), like
-    /// [`Buf::cover`] but for an arbitrary region. Content keeps its place; the new area is transparent.
-    pub fn grow_to(&mut self, lo: [f64; 2], hi: [f64; 2]) {
-        let Some((dx, dy, w, h)) = grow_plan(lo, hi, self.img.width, self.img.height) else { return };
-        self.regrow(dx, dy, w, h);
-    }
-    /// Move the pixels to `(dx, dy)` of a new transparent `w` × `h` image, keeping their place.
-    fn regrow(&mut self, dx: u32, dy: u32, w: u32, h: u32) {
         let src = std::mem::replace(&mut self.img, Image::new(w, h));
         let (sw, sh) = (src.width as usize, src.height as usize);
         for y in 0..sh {
@@ -348,19 +338,70 @@ impl Buf {
     }
 }
 
-/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
-/// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
-/// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
-pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
+/// The most pixels a `w` × `h` effect buffer may grow to: 16 Mpx (256 MiB of f32 RGBA) or four
+/// times its own area, whichever is larger. Shared by every effect that grows its buffer.
+fn pixel_budget(w: f64, h: f64) -> f64 {
     const MIN_BUDGET: f64 = 16_777_216.0;
+    MIN_BUDGET.max(4.0 * w * h)
+}
+
+/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
+/// [`pixel_budget`]: a small layer far from an effect's centre can't ask for gigabytes (#2261).
+/// Shared with the GPU path.
+pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
     let (w, h) = (f64::from(w), f64::from(h));
-    let budget = MIN_BUDGET.max(4.0 * w * h);
+    let budget = pixel_budget(w, h);
     if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
         return pad;
     }
     // (w + 2p)(h + 2p) = budget, solved for p.
     let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
     (p.floor().max(0.0) as u32).min(pad)
+}
+
+/// The most pixels on a side that [`grow_sides`] grows a buffer to.
+const MAX_GROWN_SIDE: f64 = 16384.0;
+
+/// The transparent pixels to add (left, top, right, bottom; for [`Buf::pad_sides`]) so a
+/// `width` × `height` buffer also spans the pixel box `lo`..`hi`, in the buffer's own coordinates.
+/// When the full growth would pass [`MAX_GROWN_SIDE`] or the [`pixel_budget`], every side is cut
+/// by the same factor instead of giving up, so the picture shrinks smoothly rather than popping.
+/// `None` when the buffer already spans the box, or the box is not finite.
+pub fn grow_sides(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option<[u32; 4]> {
+    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let (w, h) = (f64::from(width), f64::from(height));
+    let want = |v: f64| v.clamp(0.0, MAX_GROWN_SIDE);
+    let [l, t] = [want(-lo[0].floor()), want(-lo[1].floor())];
+    let [r, b] = [want(hi[0].ceil() - w), want(hi[1].ceil() - h)];
+    let (sx, sy) = (l + r, t + b);
+    if sx == 0.0 && sy == 0.0 {
+        return None;
+    }
+    let mut f = 1.0_f64;
+    if sx > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - w).max(0.0) / sx);
+    }
+    if sy > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - h).max(0.0) / sy);
+    }
+    let budget = pixel_budget(w, h);
+    if (w + sx * f) * (h + sy * f) > budget {
+        // (w + sx·f)(h + sy·f) = budget, solved for f.
+        let (a, bq, c) = (sx * sy, w * sy + h * sx, w * h - budget);
+        let q = if a > 0.0 { (-bq + (bq * bq - 4.0 * a * c).max(0.0).sqrt()) / (2.0 * a) } else { -c / bq };
+        f = f.min(q);
+    }
+    let f = if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 };
+    let sides = [l, t, r, b].map(|v| (v * f).floor() as u32);
+    sides.iter().any(|&v| v != 0).then_some(sides)
+}
+
+/// The pixel box (min, max) enclosing the four points of a quad.
+pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
+    let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
+    ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
@@ -446,31 +487,6 @@ pub fn cover_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, heig
     let (dx, dy) = ((-lo_x) as u32, (-lo_y) as u32);
     let (nw, nh) = (nw_f.round().max(1.0) as u32, nh_f.round().max(1.0) as u32);
     (dx != 0 || dy != 0 || nw != width || nh != height).then_some((dx, dy, nw, nh))
-}
-
-/// Where [`Buf::grow_to`] would take a `width` × `height` buffer: shift its pixels by `(dx, dy)` and
-/// resize it to `width` × `height` so it also spans the pixel box `lo`..`hi` (in the buffer's own
-/// coordinates). `None` when the buffer already spans it, the box is not finite, or the result
-/// would be larger than 16384 pixels on a side.
-pub fn grow_plan(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
-        return None;
-    }
-    let (lo_x, lo_y) = (lo[0].min(0.0).floor(), lo[1].min(0.0).floor());
-    let (hi_x, hi_y) = (hi[0].max(width as f64).ceil(), hi[1].max(height as f64).ceil());
-    let (nw_f, nh_f) = (hi_x - lo_x, hi_y - lo_y);
-    if !(nw_f <= 16384.0 && nh_f <= 16384.0) {
-        return None;
-    }
-    let (dx, dy) = ((-lo_x) as u32, (-lo_y) as u32);
-    let (nw, nh) = (nw_f as u32, nh_f as u32);
-    (dx != 0 || dy != 0 || nw != width || nh != height).then_some((dx, dy, nw, nh))
-}
-
-/// The pixel box (min, max) enclosing the four points of a quad.
-pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
-    let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
-    ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
 }
 
 /// A layer mask at the current time, flattened to a polyline in layer coordinates.
@@ -1447,6 +1463,28 @@ mod tests {
 
     /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
     /// big layers may still grow to four times their area, and small pads are untouched.
+    #[test]
+    fn grow_sides_spans_the_box_and_clamps_instead_of_giving_up() {
+        let area = |w: u32, h: u32, s: [u32; 4]| (u64::from(w) + u64::from(s[0]) + u64::from(s[2])) * (u64::from(h) + u64::from(s[1]) + u64::from(s[3]));
+        assert_eq!(grow_sides([-3.5, 2.0], [30.0, 40.2], 20, 10), Some([4, 0, 10, 31]));
+        assert_eq!(grow_sides([1.0, 1.0], [19.0, 9.0], 20, 10), None, "already inside");
+        assert_eq!(grow_sides([f64::NAN, 0.0], [30.0, 40.0], 20, 10), None);
+        assert_eq!(grow_sides([0.0, 0.0], [f64::INFINITY, 40.0], 20, 10), None);
+        // A pin near (16000, 16000) on a small layer: cut to the budget, still growing, in the same ratio.
+        let s = grow_sides([0.0, 0.0], [16000.0, 16000.0], 20, 10).unwrap();
+        assert!(s[2] > 1000 && s[3] > 1000 && area(20, 10, s) <= 1 << 24, "{s:?}");
+        // An absurdly far pin is still bounded and still grows.
+        let s = grow_sides([-1e12, -1e12], [1e12, 1e12], 1920, 1080).unwrap();
+        assert!(s.iter().all(|&v| v > 0) && area(1920, 1080, s) <= 1 << 24, "{s:?}");
+        assert!(1920 + u64::from(s[0]) + u64::from(s[2]) <= 16384);
+        // A layer already past the side cap does not grow.
+        assert_eq!(grow_sides([0.0, 0.0], [20000.0, 100.0], 17000, 50), None);
+        // A degenerate quad (all four points equal) grows to its point only.
+        let q = [[50.0, 30.0]; 4];
+        let (lo, hi) = quad_bounds(&q);
+        assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
+    }
+
     #[test]
     fn padded_buffers_stay_within_the_budget() {
         let area = |w: u32, h: u32, p: u32| (u64::from(w) + 2 * u64::from(p)) * (u64::from(h) + 2 * u64::from(p));
