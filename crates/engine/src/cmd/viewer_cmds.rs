@@ -292,9 +292,16 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
         proj.next_id = next;
         let group = super::shape_tool::add_to_contents(proj, cid, lid, g, [0.0, 0.0], "shape.newPath")?;
         st.selected_layers = vec![lid];
-        st.selected_vertices = vec![VertexRef { layer: lid, mask: path_uid, index: n - 1 }];
+        st.selected_props = vec![(lid, path_uid)];
+        st.selected_keys.clear();
+        st.selected_vertices = if b_p(p, "closed").unwrap_or(false) {
+            (0..n).map(|index| VertexRef { layer: lid, mask: path_uid, index }).collect()
+        } else {
+            vec![VertexRef { layer: lid, mask: path_uid, index: n - 1 }]
+        };
         Ok((lid, group, path_uid))
     })?;
+    super::shape_tool::reveal_created(s, lid, path_uid);
     Ok(json!({"layer": lid.0, "group": group, "path": path_uid}))
 }
 

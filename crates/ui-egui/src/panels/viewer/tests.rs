@@ -162,3 +162,25 @@ fn every_3d_view_finds_its_japanese_row() {
     }
     crate::i18n::ui::set_current("en");
 }
+
+#[test]
+fn masked_layer_quad_handles_and_picking_follow_the_mask() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", serde_json::json!({"width": 200, "height": 100, "duration": 2})).unwrap();
+    let id = s.execute("layer.newSolid", serde_json::json!({"width": 200, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("mask.new", serde_json::json!({"layer": id, "vertices": [[30,30],[70,30],[70,70],[30,70]], "closed": true})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.active_comp().unwrap();
+    let layer = comp.layer(LayerId(id)).unwrap();
+    let ctx = EvalCtx::new(&s.project, cid, comp, s.time());
+    let (_, quad, b) = layer_quad(&ctx, layer).unwrap();
+    assert_eq!(b, [30.0, 30.0, 70.0, 70.0]);
+    assert_eq!(quad, box_corners(b));
+    assert_eq!(handle_point(b, 0), [30.0, 30.0]);
+    assert_eq!(handle_point(b, 5), [70.0, 50.0]);
+    assert_eq!(layers_at(&ctx, [50.0, 50.0]).count(), 1);
+    assert_eq!(layers_at(&ctx, [150.0, 50.0]).count(), 0);
+    let features = effectcraft_engine::viewer::layer_features(&ctx, layer);
+    assert!(features.contains(&[70.0, 50.0]));
+    assert!(!features.contains(&[200.0, 50.0]));
+}

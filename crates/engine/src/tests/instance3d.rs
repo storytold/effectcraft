@@ -74,7 +74,8 @@ const TRIANGLE: &str = r#"{
 }"#;
 
 fn triangle_model(s: &mut Session) -> u64 {
-    let dir = std::env::temp_dir().join(format!("ec-instance3d-{}", std::process::id()));
+    // Parallel tests must not truncate the model file while another test renders it.
+    let dir = std::env::temp_dir().join(format!("ec-instance3d-{}-{:?}", std::process::id(), std::thread::current().id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("Triangle.gltf");
     std::fs::write(&path, TRIANGLE).unwrap();

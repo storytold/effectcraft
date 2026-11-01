@@ -233,7 +233,7 @@ pub(super) fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
     let id = s.edit("New Shape Layer", None, |proj, st| {
         let lid = crate::cmd::shape_tool::new_shape_layer(proj, st, &comp, cid, Some(&name), pos)?;
         let mut next = proj.next_id;
-        let g = crate::cmd::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint);
+        let g = crate::cmd::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint, &Default::default());
         proj.next_id = next;
         if let Some(g) = g {
             crate::cmd::shape_tool::add_to_contents(proj, cid, lid, g, [0.0, 0.0], "layer.newShape")?;

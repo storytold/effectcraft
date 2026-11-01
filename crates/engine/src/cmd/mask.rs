@@ -5,7 +5,7 @@
 
 use effectcraft_keyframe::{ShapePath, Value as KV};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Layer, MaskMode, PropGroup, Uid};
+use effectcraft_project::{GroupKind, Layer, LayerId, MaskMode, Node, PropGroup, Uid};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, b_p, bad, has_comp, has_layers, layer_mut, layer_p, merge_p, resolve_layer, str_p};
@@ -147,6 +147,59 @@ fn edit_path_counted<T>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(
     })
 }
 
+/// New and duplicated masks are immediately editable; the frontend reveals their row.
+pub(crate) fn reveal(s: &mut Session, lid: LayerId, uid: Uid) {
+    s.events.push(crate::Event::Frontend { command: "timeline.revealMask".into(), params: json!({"layer": lid.0, "mask": uid}) });
+}
+
+pub(crate) fn duplicate_selected(s: &mut Session, masks: &[(LayerId, Uid)]) -> Result<Value> {
+    let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
+    let t = s.time();
+    let copies = s.edit("Duplicate Masks", None, |proj, st| {
+        let mut next = proj.next_id;
+        let mut out = vec![];
+        let mut vertices = vec![];
+        for (lid, uid) in masks {
+            let layer = layer_mut(proj, cid, *lid)?;
+            if layer.switches.locked {
+                return Err(bad("edit.duplicate", "the mask's layer is locked"));
+            }
+            let lt = layer.layer_time(t);
+            let parent = layer.props.sub_mut("masks").ok_or_else(|| bad("edit.duplicate", "the layer has no masks"))?;
+            let (i, original) = parent
+                .children
+                .iter()
+                .enumerate()
+                .find_map(|(i, node)| node.as_group().filter(|g| g.uid == *uid).map(|g| (i, g)))
+                .ok_or_else(|| bad("edit.duplicate", "the selected mask is gone"))?;
+            if matches!(original.kind, GroupKind::Mask { locked: true, .. }) {
+                return Err(bad("edit.duplicate", "the selected mask is locked"));
+            }
+            let mut copy = original.clone();
+            copy.reassign_uids(&mut next);
+            copy.name = super::effect::unique_name(parent, &copy.name);
+            let uid = copy.uid;
+            if let Some(KV::Path(path)) = copy.get("path").map(|p| p.value_at(lt)) {
+                vertices.extend((0..path.vertices.len()).map(|index| VertexRef { layer: *lid, mask: uid, index }));
+            }
+            parent.children.insert(i + 1, Node::Group(copy));
+            out.push((*lid, uid));
+        }
+        proj.next_id = next;
+        st.selected_layers = out.iter().map(|(lid, _)| *lid).collect();
+        st.selected_layers.sort_unstable();
+        st.selected_layers.dedup();
+        st.selected_props = out.clone();
+        st.selected_keys.clear();
+        st.selected_vertices = vertices;
+        Ok(out)
+    })?;
+    for (lid, uid) in &copies {
+        reveal(s, *lid, *uid);
+    }
+    Ok(json!({"masks": copies.iter().map(|(_, uid)| *uid).collect::<Vec<_>>()}))
+}
+
 /// Pen tool: a new (open by default) mask from points.
 fn new_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "mask.new")?;
@@ -160,6 +213,7 @@ fn new_mask(s: &mut Session, p: &Value) -> Result<Value> {
     ins.resize(n, [0.0; 2]);
     outs.resize(n, [0.0; 2]);
     let path = ShapePath { vertices: v, in_tangents: ins, out_tangents: outs, closed: b_p(p, "closed").unwrap_or(false), feather: Vec::new() };
+    let closed = path.closed;
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
     let uid = s.edit("New Mask", None, |proj, st| {
@@ -171,9 +225,17 @@ fn new_mask(s: &mut Session, p: &Value) -> Result<Value> {
         let uid = g.uid;
         masks.children.push(g.into());
         proj.next_id = next;
-        st.selected_vertices = vec![VertexRef { layer: lid, mask: uid, index: n - 1 }];
+        st.selected_layers = vec![lid];
+        st.selected_props = vec![(lid, uid)];
+        st.selected_keys.clear();
+        st.selected_vertices = if closed {
+            (0..n).map(|index| VertexRef { layer: lid, mask: uid, index }).collect()
+        } else {
+            vec![VertexRef { layer: lid, mask: uid, index: n - 1 }]
+        };
         Ok(uid)
     })?;
+    reveal(s, lid, uid);
     Ok(json!({"mask": uid}))
 }
 
@@ -218,10 +280,14 @@ fn set_vertex(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn set_closed(s: &mut Session, p: &Value) -> Result<Value> {
     let c = b_p(p, "closed").unwrap_or(true);
-    edit_path(s, p, "mask.setClosed", |sp| {
+    let (_, lid) = layer_p(s, p, "mask.setClosed")?;
+    let (uid, ()) = edit_path(s, p, "mask.setClosed", |sp| {
         sp.closed = c;
         Ok(())
     })?;
+    if c && s.state.selected_props.contains(&(lid, uid)) {
+        s.execute("prop.select", json!({"layer": lid.0, "prop": uid}))?;
+    }
     Ok(json!(c))
 }
 
@@ -248,6 +314,8 @@ fn select_vertices(s: &mut Session, p: &Value) -> Result<Value> {
     let g = vertex_groups(s, &json!({"vertices": p.get("vertices").cloned().unwrap_or(json!([]))}))?;
     let sel: Vec<VertexRef> =
         g.into_iter().flat_map(|((l, m), is)| is.into_iter().map(move |i| VertexRef { layer: effectcraft_project::LayerId(l), mask: m, index: i })).collect();
+    s.state.selected_props.clear();
+    s.state.selected_keys.clear();
     if b_p(p, "add").unwrap_or(false) {
         for v in sel {
             if let Some(i) = s.state.selected_vertices.iter().position(|x| *x == v) {
@@ -259,6 +327,9 @@ fn select_vertices(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     } else {
+        // Explicit point selection leaves whole-mask selection, so Delete edits vertices.
+        s.state.selected_props.clear();
+        s.state.selected_keys.clear();
         s.state.selected_vertices = sel;
     }
     Ok(json!(s.state.selected_vertices.len()))

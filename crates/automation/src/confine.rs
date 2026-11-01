@@ -523,6 +523,7 @@ mod tests {
         "keys.set",
         "keys.setEase",
         "keys.setSpatialTangents",
+        "path.freeTransform", // `paths` contains layer/mask identities, not filesystem paths.
         "paths.nullsFollowPoints",
         "paths.pointsFollowNulls",
         "paths.tracePath",

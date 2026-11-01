@@ -585,6 +585,157 @@ fn convert_to_bezier_reads_the_shape_as_it_is_set() {
     assert!((mid(&xs) - 10.0).abs() < 1e-6 && (mid(&ys) - 5.0).abs() < 1e-6, "centred on the position: {:?} {:?}", mid(&xs), mid(&ys));
 }
 
+#[test]
+fn free_transform_multiple_layers_uses_one_comp_space_transform() {
+    use effectcraft_geom::{Mat3, vec2};
+    let mut s = comp();
+    let (a, ma) = masked(&mut s);
+    let (b, mb) = masked(&mut s);
+    s.execute("prop.set", json!({"layer":a,"path":"transform/rotation","value":25})).unwrap();
+    s.execute("prop.set", json!({"layer":b,"path":"transform/position","value":[320,180,0]})).unwrap();
+    s.execute("prop.set", json!({"layer":b,"path":"transform/scale","value":[150,60,100]})).unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let originals = [(a, ma, mask_path(&s, a, ma)), (b, mb, mask_path(&s, b, mb))];
+    let before = s.project.clone();
+    let transform = Mat3::translate(vec2(10.0, -5.0)) * Mat3::rotate_deg(30.0) * Mat3::scale(vec2(2.0, 0.5));
+    let expected: Vec<_> = {
+        let cid = s.active_comp_id().unwrap();
+        let comp = s.active_comp().unwrap();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, s.time());
+        originals
+            .iter()
+            .map(|(lid, _, sp)| {
+                let m = ctx.layer_to_comp(comp.layer(LayerId(*lid)).unwrap()).0;
+                sp.vertices.iter().map(|p| transform.apply(m.apply(vec2(p[0], p[1])))).collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    s.execute(
+        "path.freeTransform",
+        json!({"paths":[{"layer":a,"mask":ma},{"layer":b,"mask":mb}],"space":"comp","anchor":[0,0],"scale":[200,50],"rotation":30,"offset":[10,-5]}),
+    )
+    .unwrap();
+    {
+        let cid = s.active_comp_id().unwrap();
+        let comp = s.active_comp().unwrap();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, s.time());
+        for ((lid, uid, _), points) in originals.iter().zip(expected) {
+            let m = ctx.layer_to_comp(comp.layer(LayerId(*lid)).unwrap()).0;
+            for (v, expected) in mask_path(&s, *lid, *uid).vertices.iter().zip(points) {
+                let q = m.apply(vec2(v[0], v[1]));
+                assert!((q.x - expected.x).abs() < 1e-8 && (q.y - expected.y).abs() < 1e-8);
+            }
+        }
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.project, before);
+}
+
+#[test]
+fn free_transform_locked_path_is_atomic() {
+    let mut s = comp();
+    let (a, ma) = masked(&mut s);
+    let (b, mb) = masked(&mut s);
+    s.execute("layer.mask.lock", json!({"layer":b,"mask":mb,"value":true})).unwrap();
+    let before = s.project.clone();
+    assert!(s.execute("path.freeTransform", json!({"paths":[{"layer":a,"mask":ma},{"layer":b,"mask":mb}],"offset":[10,0]})).is_err());
+    assert_eq!(s.project, before, "a locked path must not leave an earlier path half-transformed");
+}
+
+#[test]
+fn absolute_free_transform_preserves_animation_metadata_and_restores_merge_origin() {
+    use effectcraft_keyframe::{Keyframe, ShapePath, Value as KV};
+    use effectcraft_project::LayerId;
+    for time in [0.0, 1.0] {
+        let mut s = comp();
+        let (lid, uid) = masked(&mut s);
+        let cid = s.active_comp_id().unwrap();
+        s.edit("Animation fixture", None, |p, _| {
+            let pr = p.comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+            pr.keys = vec![
+                Keyframe::new(Tick::ZERO, KV::Path(ShapePath::rect([50.0, 50.0], 40.0, 30.0))).eased(),
+                Keyframe::new(Tick::from_seconds_f64(2.0), KV::Path(ShapePath::rect([70.0, 60.0], 60.0, 50.0))).eased(),
+            ];
+            Ok(())
+        })
+        .unwrap();
+        s.execute("time.set", json!({"time":time})).unwrap();
+        s.mark_saved();
+        let before = s.project.clone();
+        let undo = s.history.undo.len();
+        let original = before.comp(cid).unwrap().layer(LayerId(lid)).unwrap().props.find_group(uid).unwrap().get("path").unwrap();
+        for factor in [0, 200, 150] {
+            s.execute("path.freeTransform", json!({"layer":lid,"mask":uid,"scale":factor,"anchor":[0,0],"fromStart":true,"merge":"absolute-key"})).unwrap();
+            let pr = s.project.comp(cid).unwrap().layer(LayerId(lid)).unwrap().props.find_group(uid).unwrap().get("path").unwrap();
+            let target = pr.value_at(Tick::from_seconds_f64(time));
+            let target = target.as_path().unwrap();
+            let source = original.value_at(Tick::from_seconds_f64(time));
+            let source = source.as_path().unwrap();
+            for (a, b) in target.vertices.iter().zip(&source.vertices) {
+                assert!((a[0] - b[0] * factor as f64 / 100.0).abs() < 1e-8);
+            }
+            for key in &original.keys {
+                let updated = pr.keys.iter().find(|k| k.time == key.time).unwrap();
+                assert_eq!(updated.in_ease, key.in_ease);
+                assert_eq!(updated.out_ease, key.out_ease);
+                assert_eq!(updated.in_interp, key.in_interp);
+            }
+        }
+        s.execute("path.freeTransform", json!({"layer":lid,"mask":uid,"scale":100,"fromStart":true,"merge":"absolute-key"})).unwrap();
+        assert_eq!(s.project, before);
+        assert_eq!(s.history.undo.len(), undo);
+        assert!(!s.is_dirty());
+    }
+}
+
+#[test]
+fn absolute_free_transform_rebuilds_selected_subsets_in_shared_rotated_space() {
+    use effectcraft_geom::{Mat3, vec2};
+    let mut s = comp();
+    let (a, ma) = masked(&mut s);
+    let (b, mb) = masked(&mut s);
+    s.execute("prop.set", json!({"layer":a,"path":"transform/rotation","value":25})).unwrap();
+    s.execute("prop.set", json!({"layer":b,"path":"transform/scale","value":[150,60,100]})).unwrap();
+    s.execute(
+        "mask.selectVertices",
+        json!({"vertices":[{"layer":a,"mask":ma,"index":0},{"layer":a,"mask":ma,"index":2},{"layer":b,"mask":mb,"index":0},{"layer":b,"mask":mb,"index":2}]}),
+    )
+    .unwrap();
+    let originals = [(a, ma, mask_path(&s, a, ma)), (b, mb, mask_path(&s, b, mb))];
+    let before = s.project.clone();
+    let undo = s.history.undo.len();
+    s.execute("path.freeTransform",json!({"paths":[{"layer":a,"mask":ma},{"layer":b,"mask":mb}],"space":"comp","scale":[0,100],"anchor":[100,150],"fromStart":true,"merge":"shared-origin"})).unwrap();
+    s.execute("path.freeTransform",json!({"paths":[{"layer":a,"mask":ma},{"layer":b,"mask":mb}],"space":"comp","scale":[150,75],"basisAngle":20,"rotation":35,"offset":[10,-5],"anchor":[100,150],"fromStart":true,"merge":"shared-origin"})).unwrap();
+    let transform = Mat3::translate(vec2(110.0, 145.0))
+        * Mat3::rotate_deg(55.0)
+        * Mat3::scale(vec2(1.5, 0.75))
+        * Mat3::rotate_deg(-20.0)
+        * Mat3::translate(vec2(-100.0, -150.0));
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.active_comp().unwrap();
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, s.time());
+    for (lid, uid, original) in &originals {
+        let m = ctx.layer_to_comp(comp.layer(LayerId(*lid)).unwrap()).0;
+        let actual = mask_path(&s, *lid, *uid);
+        for i in 0..4 {
+            if [0, 2].contains(&i) {
+                let want = transform.apply(m.apply(vec2(original.vertices[i][0], original.vertices[i][1])));
+                let got = m.apply(vec2(actual.vertices[i][0], actual.vertices[i][1]));
+                assert!((want.x - got.x).abs() < 1e-8 && (want.y - got.y).abs() < 1e-8);
+            } else {
+                assert_eq!(actual.vertices[i], original.vertices[i]);
+            }
+        }
+    }
+    s.execute(
+        "path.freeTransform",
+        json!({"paths":[{"layer":a,"mask":ma},{"layer":b,"mask":mb}],"space":"comp","scale":100,"fromStart":true,"merge":"shared-origin"}),
+    )
+    .unwrap();
+    assert_eq!(s.project, before);
+    assert_eq!(s.history.undo.len(), undo);
+}
+
 /// #1896: Convert To Bezier Path reads Per-Corner Roundness, not just the uniform Roundness, so
 /// the editable path is the shape that was on screen.
 #[test]

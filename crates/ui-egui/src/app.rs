@@ -36,6 +36,7 @@ impl EffectcraftApp {
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
         EffectcraftApp {
             session,
+            free_transform: Default::default(),
             ui,
             workspace_store,
             tokens: Tokens::for_kind(Default::default()),

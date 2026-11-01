@@ -12,7 +12,6 @@ use crate::widgets;
 use crate::{Dialog, EffectcraftApp};
 use effectcraft_color::BlendMode;
 use effectcraft_engine::commands::shape_tool::{PaintKind, ToolPaint};
-use effectcraft_engine::geom::vec2 as gv2;
 use effectcraft_engine::project::{LayerId, LayerSource, PropGroup};
 use effectcraft_engine::viewer as vw;
 
@@ -159,6 +158,18 @@ fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si:
         && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, params)
     {
         app.ui.status = e;
+    }
+    if resp.double_clicked() && cur.is_shape() && !modified && !prev_modified {
+        crate::panels::shape_draft::reset(
+            ui.ctx(),
+            match cur {
+                Tool::RoundedRect => "rounded",
+                Tool::Ellipse => "ellipse",
+                Tool::Polygon => "polygon",
+                Tool::Star => "star",
+                _ => "rect",
+            },
+        );
     }
     if slot_click {
         ui.data_mut(|d| d.insert_temp(prev_mod_id, modified));
@@ -463,19 +474,16 @@ fn create_on_double_click(app: &EffectcraftApp, tool: Tool) -> Option<(&'static 
             // itself), or a shape layer while Tool Creates Mask is on — as dragging does.
             let sel = app.session.state.selected_layers.first().copied().and_then(|id| comp.layer(id));
             if let Some(l) = sel.filter(|l| l.source.is_av() && (app.session.state.shape_tool.creates_mask || !matches!(l.source, LayerSource::Shape))) {
-                // The box in layer space, so a moved, scaled or rotated layer still gets a
-                // comp-filling mask: all four corners are mapped, and their bounds are the
-                // smallest axis-aligned box around the comp box.
-                let ctx = effectcraft_engine::render::EvalCtx::new(&app.session.project, app.session.active_comp_id()?, comp, app.session.time());
-                let inv = ctx.layer_to_comp(l).0.inverse().unwrap_or(effectcraft_engine::geom::Mat3::IDENTITY);
-                let (x0, y0, x1, y1) = (cw / 2.0 - w / 2.0, ch / 2.0 - h / 2.0, cw / 2.0 + w / 2.0, ch / 2.0 + h / 2.0);
-                let pts = [gv2(x0, y0), gv2(x1, y0), gv2(x1, y1), gv2(x0, y1)].map(|p| inv.apply(p));
-                let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-                for p in pts {
-                    lo = [lo[0].min(p.x), lo[1].min(p.y)];
-                    hi = [hi[0].max(p.x), hi[1].max(p.y)];
-                }
-                let rect = [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]];
+                // Mask geometry is local to the source, not the composition. Using content
+                // bounds also handles text/shapes without a fixed source size, and does not
+                // shrink the next mask to the selection bounds of an existing mask.
+                let ctx = effectcraft_engine::render::EvalCtx {
+                    expr: app.session.expr.as_deref(),
+                    footage: Some(app.session.footage.as_ref()),
+                    ..effectcraft_engine::render::EvalCtx::new(&app.session.project, app.session.active_comp_id()?, comp, app.session.time())
+                };
+                let [x0, y0, x1, y1] = effectcraft_render::content_bounds(&ctx, l).filter(|b| b.iter().all(|v| v.is_finite()) && b[2] > b[0] && b[3] > b[1])?;
+                let rect = [x0, y0, x1 - x0, y1 - y0];
                 return Some(("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})));
             }
             // Into the selected shape layer's Contents, else a new shape layer (the engine's own
@@ -1081,7 +1089,8 @@ mod tests {
             assert!(matches!(comp.layers[0].source, LayerSource::Text));
             assert!(app.session.state.text_edit.is_some(), "the text layer is being edited");
         }
-        // A non-shape layer is selected, so the Rectangle becomes a comp-filling mask on it.
+        app.session.execute("text.insert", json!({"text": "Mask bounds"})).unwrap();
+        // A non-shape layer is selected, so the Rectangle fits its local content bounds.
         app.ui.slot_tools[8] = Tool::Rectangle;
         frame(&mut app, &ctx, 3.05, vec![]);
         double_click(&mut app, &ctx, 4.0, "tools.Rectangle");
@@ -1091,9 +1100,10 @@ mod tests {
             let p = comp.layers[0].props.prop("masks/Mask 1/path").expect("Mask 1");
             let sh = p.value.as_path().expect("a mask path");
             let b = effectcraft_path::bounds(&[effectcraft_path::to_kurbo(sh)]).expect("bounds");
-            // The text layer is anchored top-left and centred in the comp: layer = comp - centre.
-            for (got, want) in [(b.x0, -320.0), (b.y0, -180.0), (b.x1, 320.0), (b.y1, 180.0)] {
-                assert!((got - want).abs() < 1.0, "the mask fills the comp: {got} vs {want}");
+            let ctx = effectcraft_render::EvalCtx::new(&app.session.project, app.session.active_comp_id().unwrap(), comp, app.session.time());
+            let expected = effectcraft_render::content_bounds(&ctx, &comp.layers[0]).expect("text bounds");
+            for (got, want) in [b.x0, b.y0, b.x1, b.y1].into_iter().zip(expected) {
+                assert!((got - want).abs() < 1e-6, "the mask fits the text: {got} vs {want}");
             }
         }
         // A tool that creates nothing: no layer, no error.
@@ -1134,6 +1144,31 @@ mod tests {
         let size = l.props.prop("contents/Ellipse 1/contents/Ellipse Path 1/size").expect("Ellipse Path 1");
         assert_eq!(size.value.as_vec2(), [640.0, 360.0], "the ellipse fills the comp");
         assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+    }
+
+    /// A toolbar-created mask fits the source, independently of the composition and transform.
+    #[test]
+    fn double_click_mask_fits_small_layer_source() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let lid = s.execute("layer.newSolid", json!({"width": 80, "height": 80})).unwrap()["layer"].as_u64().unwrap();
+        let mut app = EffectcraftApp::new(s);
+        for (rotation, scale) in [(0.0, [100.0, 100.0, 100.0]), (37.0, [125.0, 75.0, 100.0]), (0.0, [0.0, 100.0, 100.0])] {
+            app.session.execute("prop.set", json!({"layer": lid, "path": "transform/position", "value": [190.0, 110.0, 0.0]})).unwrap();
+            app.session.execute("prop.set", json!({"layer": lid, "path": "transform/rotation", "value": rotation})).unwrap();
+            app.session.execute("prop.set", json!({"layer": lid, "path": "transform/scale", "value": scale})).unwrap();
+            for tool in [Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Polygon, Tool::Star] {
+                let (command, params) = create_on_double_click(&app, tool).expect("mask creation");
+                assert_eq!(command, "layer.addMask");
+                assert_eq!(params["rect"], json!([0.0, 0.0, 80.0, 80.0]), "{tool:?}, rotation {rotation}");
+                app.session.execute(command, params).unwrap();
+                let layer = app.session.active_comp().unwrap().layer(LayerId(lid)).unwrap();
+                let path = layer.props.prop("masks/Mask 1/path").unwrap().value.as_path().unwrap();
+                let b = effectcraft_path::bounds(&[effectcraft_path::to_kurbo(path)]).unwrap();
+                assert!(b.x0 >= -1e-6 && b.y0 >= -1e-6 && b.x1 <= 80.0 + 1e-6 && b.y1 <= 80.0 + 1e-6, "{tool:?}: {b:?}");
+                app.session.execute("edit.undo", json!({})).unwrap();
+            }
+        }
     }
 
     /// Tool Creates Mask on (#1072): a double-click on a shape tool masks the selected shape

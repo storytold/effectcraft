@@ -357,6 +357,8 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.state.clipboard.len().hash(&mut h);
     s.state.key_clipboard.len().hash(&mut h);
     (s.history.undo.len(), s.history.redo.len()).hash(&mut h);
+    crate::panels::free_transform::transform_history_key(app).hash(&mut h);
+    s.time().hash(&mut h);
     s.journal.len().hash(&mut h);
     s.journal.last().map(|j| &j.0).hash(&mut h);
     s.prefs.recent_projects.hash(&mut h);

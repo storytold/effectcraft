@@ -411,6 +411,10 @@ mod preset_drop_tests {
     }
 }
 
+pub(crate) mod shape_draft;
+
+pub(crate) mod free_transform;
+
 #[cfg(test)]
 mod panel_menu_viewport_tests {
     use super::*;

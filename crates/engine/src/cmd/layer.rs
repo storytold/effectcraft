@@ -182,7 +182,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Mask",
             ["Layer", "Mask"],
             Some("Cmd+Shift+N"),
-            "{layer?, shape?: rect|ellipse|rounded|polygon|star, rect? [x,y,w,h] (layer space; a polygon or star fits its width), mode?}",
+            "{layer?, shape?: rect|ellipse|rounded|polygon|star, rect? [x,y,w,h] (layer space; a polygon or star fits its width), mode?, points? (polygon, star), rotation?: deg, roundness? % (rounded), innerRadius? %, outerRoundness? %, innerRoundness? %}",
             has_layers,
             add_mask
         ),
