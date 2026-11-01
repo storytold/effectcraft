@@ -1,0 +1,8 @@
+asset:        FX Console.jsx
+title:        EffectCraft bundled ScriptUI panel (FX Console)
+author:       EffectCraft contributors
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-11-01 by EffectCraft contributors
+notes:        Fast effect launcher ScriptUI extension recreating the quick effect launcher interface for EffectCraft.
+
