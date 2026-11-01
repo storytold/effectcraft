@@ -941,3 +941,52 @@ fn copied_effect_property_pastes_onto_the_same_effect() {
     assert_eq!(r["expressions"], 1, "{r}");
     assert_eq!(layer(&s, b).props.prop("effects/#1/blurriness").unwrap().expr.as_ref().unwrap().text, "time * 10");
 }
+
+#[test]
+fn select_all_and_deselect_all_effects() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let fx1 = apply(&mut s, a, "Gaussian Blur");
+    let fx2 = apply(&mut s, a, "Fast Box Blur");
+    let fx3 = apply(&mut s, a, "Color Control");
+    s.state.selected_layers = vec![LayerId(a)];
+    s.state.selected_props.clear();
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(a), prop: 1, time: Default::default() }];
+
+    let undo_len = s.history.undo.len();
+
+    // Select all effects on active layer a (also clears selected_keys)
+    let count = s.execute("effect.selectAll", json!({})).unwrap();
+    assert_eq!(count, 3);
+    assert_eq!(s.state.selected_props, vec![(LayerId(a), fx1), (LayerId(a), fx2), (LayerId(a), fx3)]);
+    assert_eq!(s.state.selected_layers, vec![LayerId(a)]);
+    assert!(s.state.selected_keys.is_empty(), "selected_keys is cleared on effect.selectAll");
+    assert_eq!(s.history.undo.len(), undo_len, "selection is not an undoable document change");
+
+    // Deselect all effects on layer a
+    s.execute("effect.deselectAll", json!({})).unwrap();
+    assert!(s.state.selected_props.is_empty());
+    assert_eq!(s.state.selected_layers, vec![LayerId(a)]);
+    assert_eq!(s.history.undo.len(), undo_len, "deselection is not an undoable document change");
+
+    // Select all effects on a layer with no effects
+    let (mut s2, empty_layer, _) = comp_with_two_solids();
+    s2.state.selected_layers = vec![LayerId(empty_layer)];
+    s2.state.selected_props.clear();
+    let count_empty = s2.execute("effect.selectAll", json!({})).unwrap();
+    assert_eq!(count_empty, 0, "layer with no effects returns 0 selected effects");
+    assert!(s2.state.selected_props.is_empty(), "selected_props remains empty");
+    assert_eq!(s2.state.selected_layers, vec![LayerId(empty_layer)]);
+
+    // Select all effects with explicit layer parameter
+    let fx_b = apply(&mut s, b, "Point Control");
+    let count_b = s.execute("effect.selectAll", json!({"layer": b})).unwrap();
+    assert_eq!(count_b, 1);
+    assert_eq!(s.state.selected_props, vec![(LayerId(b), fx_b)]);
+    assert_eq!(s.state.selected_layers, vec![LayerId(b)]);
+
+    // Clear after select all removes all selected effects
+    s.execute("effect.selectAll", json!({"layer": a})).unwrap();
+    assert_eq!(s.state.selected_props.len(), 3);
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(fx_names(&s, a), Vec::<String>::new());
+}

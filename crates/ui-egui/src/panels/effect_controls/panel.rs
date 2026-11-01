@@ -177,6 +177,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         media_overrides: &[],
     };
     let hdr = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
+    if ui.interact(hdr, egui::Id::unique("ec-hdr-click"), Sense::click()).clicked() {
+        app.ui.focused = crate::dock::PanelKind::EffectControls;
+    }
     p.text(pos2(hdr.min.x + 10.0, hdr.center().y), Align2::LEFT_CENTER, format!("{} • {}", comp_name, layer.name), Tokens::ui(11.5), t.text_dim);
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
     let body = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), rect.max);
@@ -200,6 +203,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Clicking empty space deselects the effects.
     let bg = ui.interact(body, egui::Id::unique("ec-bg"), Sense::click());
     if bg.clicked() {
+        app.ui.focused = crate::dock::PanelKind::EffectControls;
         app.session.state.selected_props.retain(|(l, u)| !(*l == layer.id && fx.iter().any(|g| effect_active(g, layer.id, &[(*l, *u)]))));
     }
     let has_clip = !app.session.state.effect_clipboard.is_empty();
@@ -268,6 +272,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         hresp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, &shown));
         app.auto.add(&format!("effectControls.effect.{}", g.uid), r, &g.name);
         if hresp.clicked() || hresp.drag_started() || hresp.secondary_clicked() {
+            app.ui.focused = crate::dock::PanelKind::EffectControls;
             let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
             if add && hresp.clicked() {
                 if selected {
