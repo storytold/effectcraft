@@ -1097,7 +1097,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13af
 [[package]]
 name = "craft-ecproj-format"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=246e8f837347ac642d6852df89e1425630111d21#246e8f837347ac642d6852df89e1425630111d21"
+source = "git+https://github.com/storytold/craft-libs?rev=d74959fb9caca1c5fd393b4351026885b5ba0cc8#d74959fb9caca1c5fd393b4351026885b5ba0cc8"
 dependencies = [
  "serde",
  "serde_json",

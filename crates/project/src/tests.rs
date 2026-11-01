@@ -162,6 +162,8 @@ fn project_files_name_their_version_and_always_read_back() {
     assert!(text.trim_start().starts_with("{\n  \"savedBy\""), "the version comes first");
     assert_eq!(Project::from_json(&text).unwrap(), p);
     assert_eq!(crate::saved_by(&p.to_json()), None, "plain JSON (worker hand-offs) has none");
+    assert_eq!(crate::saved_by(r#"{"savedBy": "999.0.0", "schema": 3}"#).as_deref(), Some("999.0.0"), "a newer schema still names its version");
+    assert_eq!(crate::saved_by(r#"[2, {}, {}, 1]"#), None, "the array form has none");
     // JSON can't hold NaN: saving refuses instead of writing a file that can't be opened.
     p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(f64::NAN);
     let e = p.to_file_json().unwrap_err().to_string();
