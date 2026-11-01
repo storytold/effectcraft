@@ -37,6 +37,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("keyframe", 1),
     ("path", 1),
     ("psd", 1),
+    ("aep", 3),
     ("segment", 1),
     ("project", 2),
     ("text", 2),
@@ -162,7 +163,7 @@ fn layers() -> Result<(), String> {
 const ASSET_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "bmp", "tif", "tiff", "heic", "avif", "exr", "ttf", "otf", "ttc", "woff", "woff2", "cube",
     "3dl", "lut", "look", "wav", "mp3", "aac", "flac", "ogg", "opus", "m4a", "aif", "aiff", "mp4", "mov", "m4v", "mkv", "webm", "avi", "mxf", "psd", "ai",
-    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep",
+    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep", "aepx",
 ];
 
 /// Sidecar fields that must be present and non-empty.

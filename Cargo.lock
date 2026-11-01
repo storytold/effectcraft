@@ -1427,6 +1427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-aep"
+version = "0.19.0"
+dependencies = [
+ "effectcraft-color",
+ "effectcraft-effects",
+ "effectcraft-keyframe",
+ "effectcraft-project",
+ "effectcraft-time",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "effectcraft-automation"
 version = "0.20.0"
 dependencies = [
@@ -1497,6 +1511,7 @@ version = "0.20.0"
 dependencies = [
  "chrono",
  "craft-docpath",
+ "effectcraft-aep",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-geom",
