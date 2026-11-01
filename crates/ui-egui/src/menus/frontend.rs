@@ -573,6 +573,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
+        "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
+        "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files")),
@@ -665,9 +667,32 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
-    if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        app.ui.status = e;
+    match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
+        Ok(result) => show_result_errors(app, &result),
+        Err(e) => app.ui.status = e,
     }
+}
+
+/// A successful command can still report per-item problems in an `errors` array (Effect ▸
+/// Install Effect Plug-in Bundle does): show a short, readable report in the status line,
+/// without turning the success into an error. The full structured array stays in the result
+/// for scripts; the status line is single-line and short-lived, so it lists the first few
+/// problems and counts the rest instead of printing raw JSON.
+pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
+    let Some(errors) = result.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) else { return };
+    let parts: Vec<String> = errors
+        .iter()
+        .map(|e| match (e.get("file").and_then(Value::as_str), e.get("error").and_then(Value::as_str)) {
+            (Some(file), Some(error)) => format!("{file}: {error}"),
+            (_, Some(error)) => error.to_string(),
+            _ => e.to_string(),
+        })
+        .collect();
+    let mut msg = parts.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    if parts.len() > 3 {
+        msg.push_str(&format!("; +{} more", parts.len() - 3));
+    }
+    app.ui.status = msg;
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.

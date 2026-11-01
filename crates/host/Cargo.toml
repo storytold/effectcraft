@@ -25,6 +25,7 @@ effectcraft-plugin = { workspace = true, features = ["wasm"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 effectcraft-psd = { workspace = true }
 effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }

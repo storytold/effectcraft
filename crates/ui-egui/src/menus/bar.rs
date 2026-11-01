@@ -115,10 +115,11 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
             egui::Popup::close_id(&ctx, top);
         }
     }
-    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params))
-        && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
-    {
-        app.ui.status = e;
+    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params)) {
+        match invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params }) {
+            Ok(result) => super::frontend::show_result_errors(app, &result),
+            Err(e) => app.ui.status = e,
+        }
     }
     // What the next frame starts from: the open title, and a title press still in progress.
     let open = nav.open_index(&ctx);

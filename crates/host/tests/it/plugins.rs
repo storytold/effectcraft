@@ -85,6 +85,114 @@ fn build_example() -> Option<std::path::PathBuf> {
 }
 
 #[test]
+fn plugin_bundle_install_copies_wasm_and_installs_panels() {
+    let config = tempfile::TempDir::new().unwrap();
+    let config = config.path();
+    let plug_dir = config.join("Plug-ins");
+    let bundle = tempfile::TempDir::new().unwrap();
+    let bundle = bundle.path();
+    std::fs::write(bundle.join("a-good.wasm"), wat_plugin("org.test.host.install", 1, "i32.const 0")).unwrap();
+    std::fs::write(bundle.join("My Panel.jsx"), "1".as_bytes()).unwrap();
+    std::fs::write(bundle.join("notes.txt"), b"not a plug-in".to_vec()).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    let r = s.execute("effect.plugins.install", json!({"folder": bundle.to_string_lossy()})).unwrap();
+    assert_eq!(r["installed"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["errors"].as_array().unwrap().len(), 0, "{r}");
+    assert_eq!(r["panels"].as_array().unwrap()[0], json!("My Panel.jsx"), "{r}");
+    // The plug-in is on disk where the start-up scan looks, and the panel is listable like an
+    // installed one.
+    assert!(plug_dir.join("a-good.wasm").is_file(), "{r}");
+    assert!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/My Panel.jsx").as_deref() == Some("1"), "{r}");
+    // The effect is usable in this session already.
+    s.execute("comp.new", json!({"name": "I", "width": 40, "height": 20, "duration": 1})).unwrap();
+    let l = s.execute("layer.newSolid", json!({"color": [1.0, 0.5, 0.0], "width": 40, "height": 20})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "Host org.test.host.install"})).unwrap();
+
+    // A load failure rolls the copy back: nothing left behind to fail every start.
+    let bad = tempfile::TempDir::new().unwrap();
+    let bad = bad.path();
+    std::fs::write(bad.join("b-garbage.wasm"), b"\0asm\x01\0\0\0garbage".to_vec()).unwrap();
+    let r2 = s.execute("effect.plugins.install", json!({"folder": bad.to_string_lossy()})).unwrap();
+    assert_eq!(r2["errors"].as_array().unwrap().len(), 1, "{r2}");
+    assert!(r2["installed"].as_array().unwrap().is_empty(), "{r2}");
+    assert!(!plug_dir.join("b-garbage.wasm").exists(), "{r2}");
+
+    // A single-file install: non-wasm paths are refused, and good files land on disk.
+    assert!(s.execute("effect.plugins.install", json!({"path": bundle.join("My Panel.jsx").to_string_lossy()})).is_err());
+    // A single-file success: the file lands in the Plug-ins folder and is reported installed.
+    let fresh = bundle.join("fresh.wasm");
+    std::fs::write(&fresh, wat_plugin("org.test.host.fresh", 1, "i32.const 0")).unwrap();
+    let r3 = s.execute("effect.plugins.install", json!({"path": fresh.to_string_lossy()})).unwrap();
+    assert_eq!(r3["installed"].as_array().unwrap()[0], json!("fresh.wasm"), "{r3}");
+    assert!(plug_dir.join("fresh.wasm").is_file(), "{r3}");
+    // Again from `config`: an already-registered (in-session) id fails as a duplicate.
+    let again = config.join("keep.wasm");
+    std::fs::copy(bundle.join("a-good.wasm"), &again).unwrap();
+    assert!(s.execute("effect.plugins.install", json!({"path": again.to_string_lossy()})).is_err());
+}
+
+#[test]
+fn plugin_install_never_replaces_an_installed_plugin() {
+    let config = tempfile::TempDir::new().unwrap();
+    let config = config.path();
+    let plug_dir = config.join("Plug-ins");
+    let src = tempfile::TempDir::new().unwrap();
+    let src = src.path();
+    std::fs::write(src.join("a-good.wasm"), wat_plugin("org.test.host.replace", 1, "i32.const 0")).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    s.execute("effect.plugins.install", json!({"path": src.join("a-good.wasm").to_string_lossy()})).unwrap();
+    let installed = std::fs::read(plug_dir.join("a-good.wasm")).unwrap();
+
+    // Same file name, a different plug-in: installing over the existing one must be refused,
+    // not quietly swap it — and the first plug-in's bytes on disk stay exactly what they were.
+    let attack = tempfile::TempDir::new().unwrap();
+    let attack = attack.path();
+    std::fs::write(attack.join("a-good.wasm"), wat_plugin("org.test.host.hack", 1, "i32.const 0")).unwrap();
+    let r = s.execute("effect.plugins.install", json!({"folder": attack.to_string_lossy()})).unwrap();
+    assert!(r["installed"].as_array().unwrap().is_empty(), "{r}");
+    let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["error"].as_str().unwrap().to_string()).collect();
+    assert!(errs.iter().any(|e| e.contains("already installed")), "{r}");
+    assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
+
+    // The same through a single-file install: a command error, disk untouched.
+    assert!(s.execute("effect.plugins.install", json!({"path": attack.join("a-good.wasm").to_string_lossy()})).is_err());
+    assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
+
+    // A ScriptUI panel is code too: a bundle must not replace an installed one silently either.
+    let p1 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p1.path().join("My Panel.jsx"), "1").unwrap();
+    s.execute("effect.plugins.install", json!({"folder": p1.path().to_string_lossy()})).unwrap();
+    let p2 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p2.path().join("My Panel.jsx"), "2").unwrap();
+    let r = s.execute("effect.plugins.install", json!({"folder": p2.path().to_string_lossy()})).unwrap();
+    assert!(r["panels"].as_array().unwrap().is_empty(), "{r}");
+    let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["error"].as_str().unwrap().to_string()).collect();
+    assert!(errs.iter().any(|e| e.contains("already installed as a ScriptUI panel")), "{r}");
+    assert_eq!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/My Panel.jsx").as_deref(), Some("1"));
+}
+
+/// A huge file is refused before it is read into memory and copied into the folder the app loads
+/// at every start.
+#[test]
+fn plugin_install_refuses_an_oversized_file() {
+    let config = tempfile::TempDir::new().unwrap();
+    let src = tempfile::TempDir::new().unwrap();
+    let big = src.path().join("big.wasm");
+    // Sparse on every platform we build for: no 64 MiB written, just the length.
+    std::fs::File::create(&big).unwrap().set_len((64 << 20) + 1).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(config.path())));
+    let Err(e) = s.execute("effect.plugins.install", json!({"path": big.to_string_lossy()})) else { panic!("an oversized plug-in was installed") };
+    assert!(e.to_string().contains("byte limit"), "{e}");
+    assert!(!config.path().join("Plug-ins/big.wasm").exists(), "{e}");
+}
+
+#[test]
 fn example_wasm_plugin_loads_and_renders() {
     let Some(wasm) = build_example() else { return };
     let (mut s, l) = setup();

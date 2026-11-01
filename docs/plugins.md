@@ -163,7 +163,7 @@ There are two ways to write one:
 | | WebAssembly plug-in | Rust plug-in |
 |---|---|---|
 | What | a `.wasm` (or `.wat`) module | a type implementing `effectcraft_effects::plugin::EffectPlugin` |
-| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
+| Loaded by | Effect ▸ Install Effect Plug-in… (copied into the `Plug-ins` folder next to the settings and loaded on every start-up), Effect ▸ Load Effect Plug-in… / `effect.plugins.load {path \| folder}` (loads in this session only), the `Plug-ins` folder next to the settings at start-up, or `effect.plugins.install {path \| folder}` | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
 | Sandbox | yes: no imports (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
 | Platforms | desktop and CLI (the wasmi interpreter, crate feature `effectcraft-plugin/wasm`); not the web build | everywhere |
 
@@ -241,10 +241,49 @@ plain Rust (no dependencies):
 ```sh
 cd examples/plugins/posterize-bands
 cargo build --release --target wasm32-unknown-unknown
-# then, in EffectCraft: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
+# then, in EffectCraft: Effect ▸ Install Effect Plug-in…
+#   → target/wasm32-unknown-unknown/release/posterize_bands.wasm  (copied into Plug-ins, loads on start-up)
+# or in-session only: Effect ▸ Load Effect Plug-in…
 # or headless:
 effectcraft-cli exec effect.plugins.load '{"path": "target/wasm32-unknown-unknown/release/posterize_bands.wasm"}'
 ```
+
+**Bundles.** `effect.plugins.install {"folder": ...}` installs a whole plug-in folder in one
+go: every `.wasm` at its top level is copied into the `Plug-ins` folder (and loads at once),
+and every `.jsx` at its top level is installed as a ScriptUI panel — so a third-party plug-in
+ships as one folder the user installs once. A `.wasm` that does not load is not copied (the
+install rolls it back), and per-file problems in a folder install come back in `errors`
+instead of failing the whole bundle.
+
+**What an install does and does not do.** It is a security boundary: it copies code into a
+folder the app runs at every start, so:
+
+* Only `.wasm` (`path` / a bundle's `.wasm`) and `.jsx` (a bundle's panel) are installed; other
+  files in a bundle (readmes, manifests, sources) are skipped. Files are named by their own
+  entry name, so a bundle cannot carry a path, a `..` component or a name that escapes the
+  destination folder.
+* Nothing is overwritten. An existing plug-in or panel with the same file name makes that file
+  fail with "already installed": delete it from `Plug-ins` / `Scripts/ScriptUI Panels` first to
+  update it (versioning the file name is the other option). A bundle is installed file by file,
+  so one collision does not undo the rest.
+* Files over 64 MiB are refused before they are read, rather than copied into a startup folder.
+* A `.wasm` is loaded once, in the same sandbox it runs in later (see below), so a module that
+  cannot load is reported instead of failing every start. That load runs the module's start-up
+  code and its metadata exports; `ec_render` is never called, and a panel's script is not run at
+  install time (it runs when the panel opens, as with any installed panel). The copy made before
+  the load is then removed again — best effort: if removing it fails, the command says so and
+  names the file, and you delete it from `Plug-ins` yourself.
+* A `.wasm` is uninstalled by deleting it from `Plug-ins` (the next start no longer loads it):
+  there is no `effect.plugins.uninstall`. A panel installed here is an installed script, so
+  `file.uninstallScript {name}` removes it. Replacing either means removing it first.
+
+**The sandbox.** A plug-in runs in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter
+with no imports (no file, network or clock access), deterministic floats, a fuel budget per
+frame and a 1 GiB memory cap, so a plug-in cannot escape the sandbox, hang the app or render
+differently on another machine. A ScriptUI panel is different: it is a script with the app's
+scripting object model, so it can read and write project data through commands; file and
+network access for scripts follow Settings ▸ Scripting & Expressions, exactly as for a script
+installed with File ▸ Scripts ▸ Install ScriptUI Panel….
 
 Any language that compiles to WebAssembly works (C, Zig, AssemblyScript…) as long as the module
 has no imports. `crates/plugin/src/tests.rs` has a plug-in written directly in WebAssembly text.

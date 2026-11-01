@@ -70,6 +70,135 @@ fn plugins_load(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"loaded": loaded, "errors": errors}))
 }
 
+/// The settings-folder name the desktop app scans for WebAssembly effect plug-ins on start.
+/// The scan uses this constant ([`apps/effectcraft/src/main.rs`]), so the two cannot drift.
+pub const PLUGINS_DIR: &str = "Plug-ins";
+
+/// The most one installed file may be: a plug-in is a compiled effect, a panel is script text.
+/// Above this the install refuses rather than reading an unbounded file into memory and copying
+/// it into a folder the app loads at every start.
+const MAX_INSTALL_BYTES: u64 = 64 << 20;
+
+/// `effect.plugins.install`: install WebAssembly effect plug-ins so they load on every start,
+/// not only in this session (Load Effect Plug-in keeps the file where it is and just loads it).
+/// `path` installs one `.wasm`; `folder` installs a bundle in one go: every `.wasm` at its top
+/// level is copied into the Plug-ins folder and every `.jsx` becomes a ScriptUI panel. What
+/// installs also loads in this session at once, so the effect menu has it immediately. A `.wasm`
+/// that fails to load is not copied: a broken plug-in must not fail every start.
+fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "effect.plugins.install";
+    let loader = s.plugin_loader.ok_or_else(|| EngineError::Other("WebAssembly effect plug-ins are not available in this build".into()))?;
+    let cfg = s.config.clone().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
+    let root = cfg.dir().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
+    let plug_dir = root.join(PLUGINS_DIR);
+    let single = str_p(p, "path").is_some();
+    let mut listing_errors: Vec<Value> = Vec::new();
+    let sources: Vec<std::path::PathBuf> = match (str_p(p, "path"), str_p(p, "folder")) {
+        (Some(path), _) => vec![std::path::PathBuf::from(path)],
+        (None, Some(dir)) => {
+            let read = std::fs::read_dir(dir).map_err(|e| bad(c, format!("cannot list {dir}: {e}")))?;
+            let mut v = Vec::new();
+            for entry in read {
+                match entry {
+                    Ok(e) => match e.path().metadata() {
+                        Ok(m) if m.is_file() => v.push(e.path()),
+                        // A vanished or unreadable entry is a bundle problem: report it rather
+                        // than installing a bundle that silently misses files. (`is_file()`
+                        // alone would treat unreadable metadata as "not a file" and skip it.)
+                        Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                        Ok(_) => {}
+                    },
+                    Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                }
+            }
+            v.sort();
+            v
+        }
+        _ => return Err(bad(c, "give `path` (a .wasm plug-in) or `folder` (a plug-in bundle)")),
+    };
+    let mut errors = listing_errors;
+    let mut installed = Vec::new();
+    let mut loaded = Vec::new();
+    let mut panels = Vec::new();
+    for src in &sources {
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let is_wasm = src.extension().is_some_and(|x| x.eq_ignore_ascii_case("wasm"));
+        let is_panel = src.extension().is_some_and(|x| x.eq_ignore_ascii_case("jsx"));
+        if single {
+            if !is_wasm {
+                return Err(bad(c, "an effect plug-in install is a `.wasm` file"));
+            }
+        } else if !is_wasm && !is_panel {
+            continue; // a bundle may carry readmes, manifests and source: skip them
+        }
+        let body: std::result::Result<(), String> = (|| {
+            // Never silently replace an installed file: a name collision is either a re-install
+            // the user did not ask to overwrite or a bundle that would shadow a working plug-in,
+            // and the update path is explicit (remove the old one first).
+            if is_panel {
+                let key = format!("{}/{name}", super::scripts::PANELS_DIR);
+                // Listed, not read: an existing panel whose text cannot be read is still a panel
+                // and must not be replaced (reading it would report it as absent).
+                if cfg.list(super::scripts::PANELS_DIR).iter().any(|n| n == &name) {
+                    return Err(format!("{name} is already installed as a ScriptUI panel; remove it from the Scripts/ScriptUI Panels folder first to update"));
+                }
+                let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
+                let code = String::from_utf8(bytes).map_err(|_| "panels are UTF-8 text (.jsx)".to_string())?;
+                cfg.write(&key, &code).map_err(|e| format!("cannot install panel: {e}"))?;
+                panels.push(json!(name));
+                return Ok(());
+            }
+            let target = plug_dir.join(&name);
+            if cfg.files().is_file(&target) {
+                return Err(format!("{name} is already installed; remove it from the Plug-ins folder first to update"));
+            }
+            let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
+            cfg.files().write(&target, &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
+            // Load in-session now: a plug-in that cannot load is rolled back, so a broken
+            // plug-in never makes every start fail.
+            match loader(&bytes, &src.to_string_lossy()) {
+                Ok(v) => {
+                    loaded.push(v);
+                    installed.push(json!(name));
+                    Ok(())
+                }
+                Err(e) => match cfg.files().remove(&target) {
+                    Ok(()) => Err(format!("it does not load, nothing was installed: {e}")),
+                    // Never say "nothing was installed" when the invalid copy is still there:
+                    // every start would report it and a re-install would say "already installed".
+                    Err(re) => Err(format!(
+                        "it does not load and its copy could not be removed from the Plug-ins folder ({re}): delete `{name}` there, or every start reports it; {e}"
+                    )),
+                },
+            }
+        })();
+        match body {
+            Ok(()) => {}
+            Err(e) => {
+                if single {
+                    return Err(bad(c, format!("{name}: {e}")));
+                }
+                errors.push(json!({"file": name, "error": e}));
+            }
+        }
+    }
+    if !panels.is_empty() {
+        s.scripts_changed();
+    }
+    if !installed.is_empty() || !panels.is_empty() {
+        let mut toast = format!("Installed {} effect plug-in(s)", installed.len());
+        if !panels.is_empty() {
+            toast.push_str(&format!(" and {} ScriptUI panel(s)", panels.len()));
+        }
+        toast.push_str(": they load on every start");
+        s.toast(toast);
+    }
+    Ok(json!({"installed": installed, "panels": panels, "loaded": loaded, "errors": errors}))
+}
+
 fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "effect").ok_or_else(|| bad("effect.apply", "missing `effect` (id or name)"))?;
     let spec = effectcraft_effects::lookup(name).ok_or_else(|| bad("effect.apply", format!("unknown effect `{name}`")))?;
@@ -1118,6 +1247,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
+        ),
+        cmd!(
+            "effect.plugins.install",
+            "Install Effect Plug-in...",
+            [],
+            None,
+            "{path (.wasm plug-in: copied into the Plug-ins folder and loaded on every start) | folder (a plug-in bundle: every .wasm goes into the Plug-ins folder and every .jsx becomes a ScriptUI panel)}",
+            super::always,
+            plugins_install
         ),
     ]
 }

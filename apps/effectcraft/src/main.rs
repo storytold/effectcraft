@@ -253,7 +253,7 @@ fn main() -> eframe::Result {
             // config directory. Agent-driven runs (`--control`) skip crash recovery.
             if let Some(dir) = effectcraft_host::config_dir() {
                 // WebAssembly effect plug-ins in <config>/Plug-ins load before the menus are built.
-                let plugins = dir.join("Plug-ins");
+                let plugins = dir.join(effectcraft_engine::commands::PLUGINS_DIR);
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
                 }
