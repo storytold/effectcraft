@@ -349,8 +349,17 @@ static NOTO_SYMBOLS2: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSymb
 /// system draws Chinese with the default setting. The CJK fallback that draws the interface's own
 /// script is registered first, so a Chinese interface is drawn by a Chinese face and a Japanese one
 /// by a Japanese face. `install` is called again when the language changes (see the `EffectcraftApp`
-/// frame loop), so the fonts do not need a restart.
+/// frame loop), so the fonts do not need a restart. Installed faces the language doesn't need are
+/// read the first time the interface paints text that needs them ([`crate::fallback_fonts`]).
 pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
+    install_fonts(ctx, language);
+    ctx.add_plugin(crate::fallback_fonts::Watch::new(language));
+    ctx.with_plugin(|w: &mut crate::fallback_fonts::Watch| w.set_language(language));
+    apply_visuals(ctx, t);
+}
+
+/// The fonts [`install`] sets for `language`, with the installed fallbacks read so far.
+pub(crate) fn install_fonts(ctx: &egui::Context, language: &str) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("inter".into(), Arc::new(FontData::from_static(INTER_REGULAR)));
     fonts.font_data.insert("inter-medium".into(), Arc::new(FontData::from_static(INTER_MEDIUM)));
@@ -373,7 +382,6 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
     }
     install_script_fallbacks(&mut fonts, language);
     ctx.set_fonts(fonts);
-    apply_visuals(ctx, t);
 }
 
 /// Scripts the bundled fonts lack beyond CJK, each probed with one of its letters: names typed in
@@ -451,6 +459,9 @@ fn baseline_tweak(row: &effectcraft_text::fonts::Face, face: &effectcraft_text::
 /// other one still render; then [`SCRIPT_PROBES`], then Hangul, since the Japanese and Chinese faces
 /// may lack it (Hiragino Sans on macOS has none). The web build has no system fonts
 /// and installs nothing.
+///
+/// Only the faces the interface language needs (its CJK faces and the catalog's extra faces) are
+/// read here; the others are registered once painted text needed them ([`LazyFallback`]).
 fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) -> Vec<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -460,17 +471,10 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
     #[cfg(not(target_arch = "wasm32"))]
     {
         use effectcraft_text::fonts;
-        // Kana is unambiguously Japanese; Han ideographs are shared, so the order decides which
-        // language's face draws them.
-        const KANA: (char, &str) = ('あ', "japanese-system");
-        // Hangul is probed last: with no Korean font installed the lookup can land on a catch-all
-        // face (Unifont) that also covers Arabic or Indic text but can't shape it, so the
-        // script-specific faces must be registered ahead of it. A face already seen is skipped.
-        const HANGUL: (char, &str) = ('한', "korean-system");
         // Han text follows the interface language, not the operating system's locale.
         fonts::set_cjk_locale(cjk_locale(language));
-        let base = fonts::resolve("Inter", "Regular").face;
-        let base_face = fonts::face(base);
+        // the row font the fallbacks' baseline tweak is measured against (#1309)
+        let base_face = fonts::face(fonts::resolve("Inter", "Regular").face);
         let han = (han_probe(language), "chinese-system");
         let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
         let mut names = Vec::new();
@@ -487,17 +491,11 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             if catalog && (uncovered_blocks.contains(&(probe as u32 >> 8)) || seen.iter().any(|&id| fonts::face(id).has_char(probe))) {
                 continue;
             }
-            // The interface asks for the platform's UI face first; the order a composed frame
-            // renders with is `fonts::fallback_for`'s and is not touched here. Another context may
-            // install a different language concurrently, so the shared fallback is asked with this
-            // context's own locale rather than the global request.
-            let id = interface_fallback_candidates(name, language)
-                .iter()
-                .find_map(|family| {
-                    let r = fonts::resolve(family, "Regular");
-                    (!r.missing && fonts::face(r.face).has_char(probe)).then_some(r.face)
-                })
-                .unwrap_or_else(|| fonts::fallback_for_locale(probe, base, cjk_locale(language)));
+            // installed faces the language doesn't need wait for painted text to need them
+            if !catalog && !needed(name, language) && !is_read(name) {
+                continue;
+            }
+            let id = interface_face(probe, name, language);
             let face = fonts::face(id);
             if !face.has_char(probe) {
                 if catalog {
@@ -508,13 +506,9 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             if seen.contains(&id) {
                 continue;
             }
-            let Some(font) = face.font() else { continue };
+            let Some(data) = fallback_data(&face, &base_face) else { continue };
             seen.push(id);
-            // Use the already-read, parsed bytes rather than reading a font file twice.
-            let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
-            data.index = face.info.index;
             let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
-            data.tweak = baseline_tweak(&base_face, &face);
             family_fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in family_fonts.families.values_mut() {
                 family.push(name.to_string());
@@ -523,6 +517,266 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         }
         names
     }
+}
+
+// Kana is unambiguously Japanese; Han ideographs are shared, so the order decides which language's
+// face draws them.
+#[cfg(not(target_arch = "wasm32"))]
+const KANA: (char, &str) = ('あ', "japanese-system");
+// Hangul is probed last: with no Korean font installed the lookup can land on a catch-all face
+// (Unifont) that also covers Arabic or Indic text but can't shape it, so the script-specific faces
+// must be registered ahead of it. A face already seen is skipped.
+#[cfg(not(target_arch = "wasm32"))]
+const HANGUL: (char, &str) = ('한', "korean-system");
+
+/// The installed face the interface draws `probe` (of fallback `name`) with for `language`. The
+/// interface asks for the platform's UI face first; the order a composed frame renders with is
+/// `fonts::fallback_for`'s and is not touched here. Another context may install a different
+/// language concurrently, so the shared fallback is asked with this context's own locale rather
+/// than the global request.
+#[cfg(not(target_arch = "wasm32"))]
+fn interface_face(probe: char, name: &str, language: &str) -> effectcraft_text::fonts::FaceId {
+    use effectcraft_text::fonts;
+    let base = fonts::resolve("Inter", "Regular").face;
+    interface_fallback_candidates(name, language)
+        .iter()
+        .find_map(|family| {
+            let r = fonts::resolve(family, "Regular");
+            (!r.missing && fonts::face(r.face).has_char(probe)).then_some(r.face)
+        })
+        .unwrap_or_else(|| fonts::fallback_for_locale(probe, base, cjk_locale(language)))
+}
+
+/// Whether the interface language needs fallback `name` whatever it paints: a Japanese or Chinese
+/// interface draws its own labels with the CJK faces, in the language's order.
+#[cfg(not(target_arch = "wasm32"))]
+fn needed(name: &str, language: &str) -> bool {
+    matches!(name, "japanese-system" | "chinese-system") && !cjk_locale(language).is_empty()
+}
+
+/// The installed fallbacks read for painted text so far ([`crate::fallback_fonts`]), by name.
+static READ: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
+
+fn is_read(name: &str) -> bool {
+    READ.read().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&name)
+}
+
+/// The code points of each installed fallback's script: the text its face is read for (Han, kana
+/// and bopomofo with the CJK symbols, punctuation and full-width forms; Hangul with its enclosed and
+/// half-width forms; each other script with its extensions and presentation forms), as inclusive
+/// `(first, last)` pairs.
+const SCRIPT_RANGES: &[(&str, &[(char, char)])] = &[
+    (
+        "japanese-system",
+        &[
+            ('\u{2e80}', '\u{2fdf}'),
+            ('\u{2ff0}', '\u{303f}'),
+            ('\u{3040}', '\u{30ff}'),
+            ('\u{3190}', '\u{319f}'),
+            ('\u{31c0}', '\u{33ff}'),
+            ('\u{3400}', '\u{4dbf}'),
+            ('\u{4e00}', '\u{9fff}'),
+            ('\u{f900}', '\u{faff}'),
+            ('\u{fe30}', '\u{fe4f}'),
+            ('\u{ff00}', '\u{ffef}'),
+            ('\u{1b000}', '\u{1b16f}'),
+            ('\u{20000}', '\u{3ffff}'),
+        ],
+    ),
+    (
+        "chinese-system",
+        &[
+            ('\u{2e80}', '\u{2fdf}'),
+            ('\u{2ff0}', '\u{303f}'),
+            ('\u{3100}', '\u{312f}'),
+            ('\u{3190}', '\u{33ff}'),
+            ('\u{3400}', '\u{4dbf}'),
+            ('\u{4e00}', '\u{9fff}'),
+            ('\u{f900}', '\u{faff}'),
+            ('\u{fe30}', '\u{fe4f}'),
+            ('\u{ff00}', '\u{ffef}'),
+            ('\u{20000}', '\u{3ffff}'),
+        ],
+    ),
+    (
+        "arabic-system",
+        &[
+            ('\u{600}', '\u{6ff}'),
+            ('\u{750}', '\u{77f}'),
+            ('\u{870}', '\u{8ff}'),
+            ('\u{fb50}', '\u{fdff}'),
+            ('\u{fe70}', '\u{fefc}'),
+            ('\u{1ee00}', '\u{1eeff}'),
+        ],
+    ),
+    ("hebrew-system", &[('\u{590}', '\u{5ff}'), ('\u{fb1d}', '\u{fb4f}')]),
+    ("devanagari-system", &[('\u{900}', '\u{97f}'), ('\u{a8e0}', '\u{a8ff}'), ('\u{1cd0}', '\u{1cff}')]),
+    ("bengali-system", &[('\u{980}', '\u{9ff}')]),
+    ("gurmukhi-system", &[('\u{a00}', '\u{a7f}')]),
+    ("gujarati-system", &[('\u{a80}', '\u{aff}')]),
+    ("tamil-system", &[('\u{b80}', '\u{bff}'), ('\u{11fc0}', '\u{11fff}')]),
+    ("telugu-system", &[('\u{c00}', '\u{c7f}')]),
+    ("kannada-system", &[('\u{c80}', '\u{cff}')]),
+    ("malayalam-system", &[('\u{d00}', '\u{d7f}')]),
+    ("thai-system", &[('\u{e00}', '\u{e7f}')]),
+    ("georgian-system", &[('\u{10a0}', '\u{10ff}'), ('\u{1c90}', '\u{1cbf}'), ('\u{2d00}', '\u{2d2f}')]),
+    (
+        "korean-system",
+        &[
+            ('\u{1100}', '\u{11ff}'),
+            ('\u{3130}', '\u{318f}'),
+            ('\u{3200}', '\u{321e}'),
+            ('\u{3260}', '\u{327e}'),
+            ('\u{a960}', '\u{a97f}'),
+            ('\u{ac00}', '\u{d7ff}'),
+            ('\u{ffa0}', '\u{ffdc}'),
+        ],
+    ),
+];
+
+/// An installed fallback [`crate::fallback_fonts::Watch`] reads when painted text needs it.
+pub(crate) struct LazyFallback {
+    probe: char,
+    name: &'static str,
+    language: String,
+}
+
+impl LazyFallback {
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The code points of the face this fallback would read, without reading it: the face the
+    /// interface asks for first (its UI family, else the first of the platform's usual families for
+    /// the script). Looked up once per fallback and language.
+    fn coverage(&self) -> Arc<Vec<(u32, u32)>> {
+        type Cache = Vec<((&'static str, String), Arc<Vec<(u32, u32)>>)>;
+        static CACHE: std::sync::Mutex<Cache> = std::sync::Mutex::new(Vec::new());
+        let key = (self.name, self.language.clone());
+        if let Some((_, ranges)) = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key) {
+            return ranges.clone();
+        }
+        #[cfg(target_arch = "wasm32")]
+        let ranges: Arc<Vec<(u32, u32)>> = Arc::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let ranges = {
+            use effectcraft_text::fonts;
+            let base = fonts::resolve("Inter", "Regular").face;
+            let ui = interface_fallback_candidates(self.name, &self.language).iter().map(|family| fonts::resolve(family, "Regular")).find(|r| !r.missing);
+            let id = ui.map(|r| r.face).or_else(|| fonts::usual_faces(self.probe, base, cjk_locale(&self.language)).first().copied());
+            Arc::new(id.map(|id| fonts::face(id).coverage()).unwrap_or_default())
+        };
+        CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((key, ranges.clone()));
+        ranges
+    }
+
+    /// The installed face for the interface language, when one covers the probe.
+    fn face(&self) -> Option<Arc<effectcraft_text::fonts::Face>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self.probe, &self.language);
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let face = effectcraft_text::fonts::face(interface_face(self.probe, self.name, &self.language));
+            face.has_char(self.probe).then_some(face)
+        }
+    }
+
+    /// The face read for this fallback, as `theme::install_fonts` registers it (the same name,
+    /// bytes and baseline tweak), for egui to add while it lays text out
+    /// ([`crate::fallback_fonts`]). `None` when the face isn't read or there is none.
+    pub(crate) fn insert(&self) -> Option<egui::FontInsert> {
+        if !is_read(self.name) {
+            return None;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let base = effectcraft_text::fonts::face(effectcraft_text::fonts::resolve("Inter", "Regular").face);
+            let face = self.face()?;
+            let data = fallback_data(&face, &base)?;
+            Some(egui::FontInsert { name: self.name.to_owned(), data, families: Vec::new() })
+        }
+    }
+}
+
+impl crate::fallback_fonts::Candidate for LazyFallback {
+    fn in_script(&self, c: char) -> bool {
+        SCRIPT_RANGES.iter().find(|(name, _)| *name == self.name).is_some_and(|(_, ranges)| ranges.iter().any(|&(first, last)| (first..=last).contains(&c)))
+    }
+    fn is_read(&self) -> bool {
+        is_read(self.name)
+    }
+    fn covers(&self, c: char) -> bool {
+        self.is_read() && self.face().is_some_and(|f| f.has_char(c))
+    }
+    fn might_cover(&self, c: char) -> bool {
+        if self.is_read() {
+            return self.covers(c);
+        }
+        let cp = u32::from(c);
+        let within = |&(a, b): &(u32, u32)| {
+            if b < cp {
+                std::cmp::Ordering::Less
+            } else if a > cp {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        };
+        self.coverage().binary_search_by(within).is_ok()
+    }
+    fn read(&self) -> bool {
+        if self.face().is_none() {
+            return false;
+        }
+        let mut read = READ.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !read.contains(&self.name) {
+            read.push(self.name);
+        }
+        true
+    }
+}
+
+/// The installed fallbacks for `language` that are read when painted text needs them, in the order
+/// [`install_script_fallbacks`] registers them.
+pub(crate) fn lazy_fallbacks(language: &str) -> Vec<LazyFallback> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = language;
+        Vec::new()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let han = (han_probe(language), "chinese-system");
+        let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
+        cjk.iter()
+            .chain(SCRIPT_PROBES)
+            .chain(std::iter::once(&HANGUL))
+            .filter(|(_, name)| !needed(name, language))
+            .map(|&(probe, name)| LazyFallback { probe, name, language: language.to_owned() })
+            .collect()
+    }
+}
+
+/// `face` for egui, sharing the bytes the font database keeps for it. A copy of the file
+/// (`font.data().as_bytes().to_vec()`) meant two copies of every fallback face for the life of the
+/// process: the database's and egui's. `None` when the face's file can't be read.
+#[cfg(not(target_arch = "wasm32"))]
+fn shared(face: &effectcraft_text::fonts::Face) -> Option<FontData> {
+    Some(FontData::from_blob(face.shared_bytes()?, face.info.index))
+}
+
+/// The font data a fallback face is registered with: its bytes, shared ([`shared`]), and the
+/// tweak that puts its glyphs on the baseline of `row`, the interface's row font (#1309).
+#[cfg(not(target_arch = "wasm32"))]
+fn fallback_data(face: &effectcraft_text::fonts::Face, row: &effectcraft_text::fonts::Face) -> Option<FontData> {
+    Some(shared(face)?.tweak(baseline_tweak(row, face)))
 }
 
 /// The faces the interface asks for before it settles on the one a composed frame renders with.
@@ -658,34 +912,45 @@ mod script_font_tests {
     }
 
     /// Every character of `text` draws a real glyph in every UI font family with the `language`
-    /// interface's fonts installed.
+    /// interface's fonts installed, on the first frame that paints it: installed faces are read
+    /// during that frame ([`crate::fallback_fonts`]).
     fn assert_drawn(language: &str, text: &str) {
         let ctx = egui::Context::default();
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), language);
-        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
-        // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
-        out.textures_delta.clear();
-        ctx.fonts_mut(|fonts| {
-            for family in [
-                egui::FontFamily::Proportional,
-                egui::FontFamily::Monospace,
-                egui::FontFamily::Name("medium".into()),
-                egui::FontFamily::Name("semibold".into()),
-            ] {
-                let font = egui::FontId::new(13.0, family);
-                // epaint 0.36's has_glyph compares face keys, so it reports a false
-                // negative when a real glyph shares the replacement face.
-                // Check the rendered atlas glyph instead of that face-level predicate.
-                let missing = fonts.layout_no_wrap("\u{10ffff}".into(), font.clone(), egui::Color32::WHITE);
-                let missing_uv = missing.rows[0].glyphs[0].uv_rect;
+        let families =
+            [egui::FontFamily::Proportional, egui::FontFamily::Monospace, egui::FontFamily::Name("medium".into()), egui::FontFamily::Name("semibold".into())];
+        // one label per character and family: each glyph is the first of its own galley
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for family in &families {
                 for ch in text.chars() {
-                    let rendered = fonts.layout_no_wrap(ch.to_string(), font.clone(), egui::Color32::WHITE);
-                    let uv = rendered.rows[0].glyphs[0].uv_rect;
-                    assert!(uv.size.x > 0.0 && uv.size.y > 0.0, "empty {ch} in {font:?}");
-                    assert_ne!((uv.min, uv.max), (missing_uv.min, missing_uv.max), "replacement glyph for {ch} in {font:?}");
+                    ui.label(egui::RichText::new(ch.to_string()).font(egui::FontId::new(13.0, family.clone())));
                 }
             }
         });
+        // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
+        out.textures_delta.clear();
+        let galleys: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.clone()),
+                _ => None,
+            })
+            .filter(|g| g.job.text.chars().count() == 1 && text.contains(g.job.text.as_str()))
+            .collect();
+        assert_eq!(galleys.len(), families.len() * text.chars().count(), "every label is painted");
+        for galley in galleys {
+            let font = galley.job.sections[0].format.font_id.clone();
+            let ch = galley.job.text.clone();
+            // epaint 0.36's has_glyph compares face keys, so it reports a false
+            // negative when a real glyph shares the replacement face.
+            // Check the rendered atlas glyph instead of that face-level predicate.
+            let missing_uv = ctx.fonts_mut(|f| f.layout_no_wrap("\u{10ffff}".into(), font.clone(), egui::Color32::WHITE).rows[0].glyphs[0].uv_rect);
+            let uv = galley.rows[0].glyphs[0].uv_rect;
+            assert!(uv.size.x > 0.0 && uv.size.y > 0.0, "empty {ch} in {font:?}");
+            assert_ne!((uv.min, uv.max), (missing_uv.min, missing_uv.max), "replacement glyph for {ch} in {font:?} on the first frame");
+        }
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
     }
 
     #[test]
@@ -740,9 +1005,76 @@ mod script_font_tests {
         assert_drawn("ka", "კომპოზიციაფენასაკვანძოკადრიეფექტიპარამეტრები");
     }
 
-    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. A Japanese face
-    /// can cover the Han probe while lacking other catalog characters. The context must keep its
-    /// own language policy even when another context installs Japanese fallbacks concurrently.
+    /// The pass that first lays out text in a script whose face isn't read yet draws it already:
+    /// egui asks the fallback provider for the face while it lays the text out, so a context that
+    /// treats a missing glyph as a bug sees none. The face then takes its place in the fallback
+    /// order, and a Han character after it is still drawn by the Japanese face's place ahead of it.
+    #[test]
+    fn a_face_read_during_layout_takes_its_place_in_the_fallback_order() {
+        if !installed('\u{d55c}') || !installed('\u{4e2d}') {
+            eprintln!("no Korean or Han system font installed; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
+        super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "en");
+        let frame = |text: &'static str| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label(text);
+            })
+            .textures_delta
+            .clear();
+        };
+        frame("\u{d55c}\u{ad6d}");
+        frame("\u{d55c}\u{ad6d}");
+        ctx.fonts_mut(|f| {
+            assert!(f.discovered_fonts().is_empty(), "the face egui added while laying out is installed in its place");
+            assert!(f.definitions().font_data.contains_key("korean-system"), "{:?}", f.definitions().font_data.keys());
+        });
+        frame("\u{4e2d}\u{6587}");
+        frame("\u{4e2d}\u{6587}");
+        // what this context installed, not the process-wide read flags: another test may have read
+        // the Japanese face first
+        ctx.fonts_mut(|f| {
+            let installed = f.definitions().font_data.contains_key("japanese-system");
+            assert!(installed, "Han in an English interface is drawn by the Japanese face, as before: {:?}", f.definitions().font_data.keys());
+        });
+    }
+
+    /// The faces read are process-wide. A context whose fonts were installed before another one read
+    /// a face installs it once its text needs the face, even when a face later in the order (here
+    /// the Korean one, which has Han too) already draws that text; and a context created after the
+    /// read installs it at once.
+    #[test]
+    fn a_face_read_by_another_context_is_installed_in_this_one() {
+        use crate::fallback_fonts::Candidate;
+        if !installed('\u{d55c}') || !installed('\u{4e2d}') {
+            eprintln!("no Korean or Han system font installed; skipping");
+            return;
+        }
+        let tokens = super::Tokens::for_kind(super::ThemeKind::Dark);
+        let earlier = egui::Context::default();
+        super::install(&earlier, &tokens, "en");
+        let pass = |ctx: &egui::Context, text: &'static str| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label(text);
+            })
+            .textures_delta
+            .clear();
+        };
+        pass(&earlier, "\u{d55c}\u{ad6d}");
+        pass(&earlier, "\u{d55c}\u{ad6d}");
+        let japanese = super::lazy_fallbacks("en").into_iter().find(|f| f.name() == "japanese-system");
+        assert!(japanese.is_some_and(|f| f.read()), "the Japanese face is read (as another context's text would)");
+        pass(&earlier, "\u{4e2d}\u{6587}");
+        pass(&earlier, "\u{4e2d}\u{6587}");
+        earlier.fonts_mut(|f| assert!(f.definitions().font_data.contains_key("japanese-system"), "{:?}", f.definitions().font_data.keys()));
+        let later = egui::Context::default();
+        super::install(&later, &tokens, "en");
+        pass(&later, "Composition");
+        later.fonts_mut(|f| assert!(f.definitions().font_data.contains_key("japanese-system"), "{:?}", f.definitions().font_data.keys()));
+    }
+
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
@@ -778,7 +1110,10 @@ mod script_font_tests {
         }
         let ctx = egui::Context::default();
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "en");
-        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // the frame that first paints Arabic reads the installed Arabic face
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label("مرحبا");
+        });
         out.textures_delta.clear();
         ctx.fonts_mut(|fonts| {
             let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
@@ -921,7 +1256,10 @@ mod tests {
 
     #[test]
     fn hangul_gets_a_face_when_one_is_installed() {
+        use crate::fallback_fonts::Candidate;
         use effectcraft_text::fonts;
+        // as the interface does the first time it paints Hangul
+        let _ = lazy_fallbacks("en").iter().find(|f| f.name() == "korean-system").map(|f| f.read());
         let mut fonts_def = FontDefinitions::default();
         install_script_fallbacks(&mut fonts_def, "en");
         let base = fonts::resolve("Inter", "Regular").face;
@@ -935,6 +1273,41 @@ mod tests {
         let bytes = font.data().as_bytes();
         let covered = fonts_def.font_data.values().any(|d| d.bytes() == bytes && d.index == face.info.index);
         assert!(covered, "a face covering Hangul must be registered with egui");
+    }
+
+    /// egui shares the font database's bytes for every installed fallback: installing the fonts
+    /// again (another language, another window) hands egui the same bytes, never a copy of the file.
+    #[test]
+    fn fallback_faces_are_shared_not_copied() {
+        let mut first = FontDefinitions::default();
+        let installed = install_script_fallbacks(&mut first, "ja");
+        let mut again = FontDefinitions::default();
+        install_script_fallbacks(&mut again, "ja");
+        if installed.is_empty() {
+            eprintln!("SKIPPED: no Japanese or Chinese system font installed");
+        }
+        for name in &installed {
+            let (Some(a), Some(b)) = (first.font_data.get(name), again.font_data.get(name)) else { panic!("{name} is missing") };
+            assert_eq!(a.bytes().as_ptr(), b.bytes().as_ptr(), "{name}: egui shares the same bytes each install, never a copy");
+        }
+        install_script_fallbacks(&mut first, "system");
+    }
+
+    /// The faces read when painted text needs them come in the order the fonts register them, and
+    /// a Japanese or Chinese interface reads its own CJK faces with the fonts instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lazy_fallbacks_follow_the_registration_order() {
+        let names = |language: &str| lazy_fallbacks(language).iter().map(LazyFallback::name).collect::<Vec<_>>();
+        let en = names("en");
+        assert_eq!(en.first(), Some(&"japanese-system"), "{en:?}");
+        assert_eq!(en.get(1), Some(&"chinese-system"), "{en:?}");
+        assert_eq!(en.last(), Some(&"korean-system"), "{en:?}");
+        for language in ["ja", "zh-hans", "zh-hant"] {
+            let list = names(language);
+            assert!(!list.contains(&"japanese-system") && !list.contains(&"chinese-system"), "{language}: {list:?}");
+            assert_eq!(list.first(), Some(&"arabic-system"), "{language}: {list:?}");
+        }
     }
 
     #[test]

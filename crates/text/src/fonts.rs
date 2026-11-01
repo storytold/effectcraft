@@ -158,6 +158,11 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
     }
 }
 
+/// Whether the font at `index` of `data` maps `c` to a glyph (false when it can't be parsed).
+pub fn maps_char(data: &[u8], index: u32, c: char) -> bool {
+    FontRef::from_index(data, index).ok().and_then(|f| f.charmap().map(c)).is_some_and(|g| g.to_u32() != 0)
+}
+
 /// A loaded (or loadable) face.
 pub struct Face {
     pub id: FaceId,
@@ -205,6 +210,15 @@ impl Face {
             .as_ref()
             .map(FaceBytes::get)
     }
+    /// The face's file, shared rather than copied: the bytes the database read (or the static
+    /// data), as one more reference to them. None if the file is missing or unreadable.
+    pub fn shared_bytes(&self) -> Option<Arc<dyn AsRef<[u8]> + Send + Sync>> {
+        self.bytes()?;
+        match self.bytes.get()?.as_ref()? {
+            FaceBytes::Static(b) => Some(Arc::new(*b)),
+            FaceBytes::Shared(b) => Some(b.clone()),
+        }
+    }
     /// The parsed font (None if the file is missing or unreadable).
     pub fn font(&self) -> Option<FontRef<'_>> {
         FontRef::from_index(self.bytes()?, self.info.index).ok()
@@ -219,6 +233,28 @@ impl Face {
     /// Glyph for a character (None when the face does not cover it).
     pub fn glyph(&self, c: char) -> Option<u32> {
         self.font()?.charmap().map(c).map(|g| g.to_u32()).filter(|g| *g != 0)
+    }
+    /// The code points the face maps to a glyph, as sorted, merged inclusive ranges. A face whose
+    /// file is not loaded yet is read into a temporary buffer that is dropped afterwards (as
+    /// [`file_covers`] does).
+    pub fn coverage(&self) -> Vec<(u32, u32)> {
+        fn ranges(font: &FontRef<'_>) -> Vec<(u32, u32)> {
+            let mut cps: Vec<u32> = font.charmap().mappings().filter(|(_, g)| g.to_u32() != 0).map(|(cp, _)| cp).collect();
+            cps.sort_unstable();
+            let mut out: Vec<(u32, u32)> = Vec::new();
+            for cp in cps {
+                match out.last_mut() {
+                    Some(last) if cp <= last.1.saturating_add(1) => last.1 = last.1.max(cp),
+                    _ => out.push((cp, cp)),
+                }
+            }
+            out
+        }
+        if let (FaceData::File(p), None) = (&self.info.data, self.bytes.get()) {
+            let Ok(data) = std::fs::read(p) else { return Vec::new() };
+            return FontRef::from_index(&data, self.info.index).map(|f| ranges(&f)).unwrap_or_default();
+        }
+        self.font().map(|f| ranges(&f)).unwrap_or_default()
     }
     /// Whether the face can draw `c`: it maps `c` to a glyph that has an outline, a colour glyph
     /// or a bitmap. Some fonts map whole scripts to empty glyphs (#285); those don't count, so
@@ -1018,6 +1054,27 @@ fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackSc
 /// last. `prefer` is returned when nothing covers it (the glyph renders as the missing-glyph box).
 pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
     fallback_with_locale(c, prefer, || CjkLocale::from_tag(&active_cjk_locale()))
+}
+
+/// The installed faces [`fallback_for_locale`] tries first for `c`: the platform's usual families
+/// for its script (CJK, Arabic, Hebrew, Indic, Thai, Georgian), in the style of `prefer`, for the
+/// language `tag`. Empty for a character of no such script. Nothing is read: a face's file is read
+/// when it is first asked for a glyph.
+pub fn usual_faces(c: char, prefer: FaceId, tag: &str) -> Vec<FaceId> {
+    let script = script_of(c);
+    if script == FallbackScript::Other {
+        return Vec::new();
+    }
+    if cfg!(not(target_arch = "wasm32")) && !system_scanned() {
+        scan_system();
+    }
+    let tag = tag.trim();
+    let locale = if tag.is_empty() || tag.eq_ignore_ascii_case("c") || tag.eq_ignore_ascii_case("posix") {
+        CjkLocale::from_tag(&environment_cjk_locale())
+    } else {
+        CjkLocale::from_tag(tag)
+    };
+    family_faces(script, &face(prefer), locale).to_vec()
 }
 
 /// Choose a fallback for an explicit interface language, independent of concurrent global

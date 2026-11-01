@@ -56,6 +56,10 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
 - **Fonts:** no bundled CJK font; the UI installs system fallbacks probed by script (Kana, Han,
   Arabic, Hebrew, Devanagari, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam,
   Thai and Hangul: `crates/ui-egui/src/theme.rs`; the Hangul probe was added for #599, closed). The web build has no system fonts.
+  A Japanese or Chinese interface reads its CJK faces when the fonts are installed; every other
+  fallback is read the first time the interface lays out text in its script, through an egui
+  font provider, so that frame already draws it (`crates/ui-egui/src/fallback_fonts.rs`). egui
+  shares the font database's bytes, so each face is in memory once.
 - **Script support in the interface:** egui draws text without complex shaping or right-to-left
   layout, so an Arabic or Hindi interface would render unshaped and left to right. **In text
   layers** (`crates/text`) shaping (harfrust), bidi (UAX #9), vertical text and Tate-Chu-Yoko
