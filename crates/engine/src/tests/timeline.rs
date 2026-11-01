@@ -1587,3 +1587,39 @@ fn multi_selection_pick_whip_links_every_selected_layer() {
     s.execute("prop.pickWhip", json!({"layer": a, "path": "transform/position", "target": {"layer": c, "prop": target}, "layers": [a, c]})).unwrap();
     assert!(prop(&s, c, "transform/position").expr.is_none(), "no self reference");
 }
+
+/// A pick whip over a selection links every selected layer even when the shared property is an
+/// effect parameter: a match name can carry periods (`ec.blur.gaussian`), which a plain path
+/// lookup splits, so each layer's path is resolved first. `byIndex` reaches those layers too, so
+/// an Alt whip keeps selecting the effect's property by index.
+#[test]
+fn multi_selection_pick_whip_resolves_effect_paths_and_by_index() {
+    let (mut s, a) = setup();
+    let mut ids = vec![a];
+    for name in ["B", "C"] {
+        ids.push(s.execute("layer.newSolid", json!({"name": name, "color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap());
+    }
+    for l in &ids {
+        s.execute("effect.apply", json!({"layer": l, "effect": "Gaussian Blur"})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": ids})).unwrap();
+    s.execute(
+        "prop.pickWhip",
+        json!({
+            "layer": a,
+            "path": "transform/rotation",
+            "target": {"layer": ids[1], "path": "effects/#1/blurriness"},
+            "layers": ids,
+            "byIndex": true,
+        }),
+    )
+    .unwrap();
+    for l in &ids {
+        let e = prop(&s, *l, "transform/rotation").expr.expect("every selected layer links");
+        assert!(e.text.contains("Gaussian Blur"), "the effect reference: {}", e.text);
+        assert!(e.text.contains("(1)"), "byIndex reaches every selected layer: {}", e.text);
+    }
+    // One undo step takes all three links away.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(ids.iter().all(|l| prop(&s, *l, "transform/rotation").expr.is_none()));
+}

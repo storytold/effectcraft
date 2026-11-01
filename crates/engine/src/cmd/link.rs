@@ -178,26 +178,6 @@ fn dims(l: &Layer, p: &Property) -> usize {
     }
 }
 
-/// The expression text linking `from`'s `uid` to the target property, with the source and target
-/// dimension handling (a scalar target repeats, a vector source onto a scalar takes `[0]`).
-fn linked_expression(comp: &Comp, from: &Layer, uid: Uid, target: &Layer, tu: Uid, dimension: Option<u64>, compact: bool) -> Option<String> {
-    let r = reference(comp, from, target, tu, compact)?;
-    let (me, them) = (from.props.find(uid)?, target.props.find(tu)?);
-    let (dm, dt) = (dims(from, me), dims(target, them));
-    let (r, dt) = match dimension {
-        Some(d) if d < dt as u64 => (format!("{r}[{d}]"), 1),
-        Some(_) => return None,
-        None => (r, dt),
-    };
-    Some(if dt == 1 && dm > 1 {
-        format!("temp = {r};\n[{}]", vec!["temp"; dm].join(", "))
-    } else if dt > 1 && dm == 1 {
-        format!("{r}[0]")
-    } else {
-        r
-    })
-}
-
 fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.pickWhip")?;
     let t = p.get("target").ok_or_else(|| bad("prop.pickWhip", "missing `target` {layer, path|prop}"))?;
@@ -205,27 +185,51 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
     if (tl, tu) == (lid, uid) {
         return Err(bad("prop.pickWhip", "a property can't reference itself"));
     }
-    // Several layers (a multi-selection pick whip): the same property on each, found by its
-    // match path, all in one undo step. Self-editing (`expression`) stays on its own layer.
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let from = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let target = comp.layer(tl).ok_or(EngineError::NoComp)?;
+    let by_index = b_p(p, "byIndex").unwrap_or(false);
+    let compact = s.prefs.general.expression_pick_whip_compact;
+    // The expression linking `from`'s `uid` to the drop target, with the dimension handling (a
+    // scalar target repeats, a vector source onto a scalar takes `[0]`). A closure over the
+    // target keeps the argument list short (strict clippy).
+    let expr_for = |from: &Layer, uid: Uid, dimension: Option<u64>| -> Option<String> {
+        let r = reference_with(comp, from, target, tu, compact, by_index)?;
+        let (me, them) = (from.props.find(uid)?, target.props.find(tu)?);
+        let (dm, dt) = (dims(from, me), dims(target, them));
+        let (r, dt) = match dimension {
+            Some(d) if d < dt as u64 => (format!("{r}[{d}]"), 1),
+            Some(_) => return None,
+            None => (r, dt),
+        };
+        Some(if dt == 1 && dm > 1 {
+            format!("temp = {r};\n[{}]", vec!["temp"; dm].join(", "))
+        } else if dt > 1 && dm == 1 {
+            format!("{r}[0]")
+        } else {
+            r
+        })
+    };
+    // Several layers (a multi-selection pick whip): the same property on each, found by its match
+    // path, all in one undo step. Self-editing (`expression`) stays on its own layer.
     if p.get("expression").is_none()
         && let Some(Value::Array(list)) = p.get("layers")
     {
-        let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
         let path = comp.layer(lid).and_then(|l| l.props.match_path_of(uid));
-        let target = comp.layer(tl).ok_or(EngineError::NoComp)?;
         let mut wanted: Vec<(LayerId, Uid)> = vec![(lid, uid)];
         for v in list {
             let Some(olid) = resolve_layer(comp, v) else { continue };
             if olid == lid {
-                // The source layer's own property is already in `wanted`.
                 continue;
             }
             let Some(ol) = comp.layer(olid) else { continue };
-            let Some(ouid) = path.as_deref().and_then(|path| ol.props.prop(path)).map(|pr| pr.uid) else { continue };
-            // Skipping the drop target before resolving its property dropped a selected target
-            // layer whose matching property is a different one: with A Position and B Position +
-            // Opacity selected, dragging A's Position whip onto B's Opacity links Position on
-            // both. Only the very property dropped on would reference itself.
+            // A match path can carry periods (an effect's match name), which `prop` would split:
+            // resolve it for this layer first, as `prop_ref` does.
+            let Some(ouid) = path.as_deref().map(|path| super::resolve_effect_path(ol, path)).and_then(|path| ol.props.prop(&path)).map(|pr| pr.uid) else {
+                continue;
+            };
+            // Only the very property dropped on would reference itself; a target layer whose
+            // matching property is a different one links like any other.
             if (olid, ouid) == (tl, tu) {
                 continue;
             }
@@ -233,12 +237,11 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
                 wanted.push((olid, ouid));
             }
         }
-        let compact = s.prefs.general.expression_pick_whip_compact;
         let texts: Vec<(LayerId, Uid, String)> = wanted
             .into_iter()
             .filter_map(|(olid, ouid)| {
                 let from = comp.layer(olid)?;
-                let text = linked_expression(comp, from, ouid, target, tu, t.get("dimension").and_then(Value::as_u64), compact)?;
+                let text = expr_for(from, ouid, t.get("dimension").and_then(Value::as_u64))?;
                 Some((olid, ouid, text))
             })
             .collect();
@@ -254,10 +257,6 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
         })?;
         return Ok(json!(first));
     }
-    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let from = comp.layer(lid).ok_or(EngineError::NoComp)?;
-    let target = comp.layer(tl).ok_or(EngineError::NoComp)?;
-    let by_index = b_p(p, "byIndex").unwrap_or(false);
     let r = reference_with(comp, from, target, tu, s.prefs.general.expression_pick_whip_compact, by_index)
         .ok_or_else(|| bad("prop.pickWhip", "no such target property"))?;
     let (me, them) = (from.props.find(uid).ok_or(EngineError::NoComp)?, target.props.find(tu).ok_or(EngineError::NoComp)?);
@@ -304,7 +303,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Whip (Link Property)",
             [],
             None,
-            "{layer?, path|prop, target: {layer, path|prop, dimension?}, layers?: [layer…], expression?, range?: [start, end], byIndex?: bool} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; `layers`: the same property on each selected layer, all in one undo step; with `expression`: inserts it there, replacing the characters in `range`, default the end; `byIndex`: an effect's properties by their index, `effect(\"Color Control\")(1)`, as an Alt pick whip does)",
+            "{layer?, path|prop, target: {layer, path|prop, dimension?}, layers?: [layer…], expression?, range?: [start, end], byIndex?: bool} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; with `expression`: inserts it there, replacing the characters in `range`, default the end; `byIndex`: an effect's properties by their index, `effect(\"Color Control\")(1)`, as an Alt pick whip does)",
             has_layers,
             pick_whip
         ),
