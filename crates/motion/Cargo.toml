@@ -1,0 +1,19 @@
+[package]
+name = "effectcraft-motion"
+description = "Apple Motion (OZML: .motn, .motr, .moti, .moef, .mogn) import and export: groups as precomps, image, color solid and text objects, keyframed transforms and opacity, and a few filters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-keyframe = { workspace = true }
+effectcraft-project = { workspace = true }
+effectcraft-effects = { workspace = true }
+roxmltree = "0.21"
+thiserror = { workspace = true }

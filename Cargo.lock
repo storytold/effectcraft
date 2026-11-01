@@ -1504,6 +1504,7 @@ dependencies = [
  "effectcraft-keyframe",
  "effectcraft-lottie",
  "effectcraft-model",
+ "effectcraft-motion",
  "effectcraft-path",
  "effectcraft-pdf",
  "effectcraft-project",
@@ -1729,6 +1730,19 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "effectcraft-motion"
+version = "0.17.0"
+dependencies = [
+ "effectcraft-color",
+ "effectcraft-effects",
+ "effectcraft-keyframe",
+ "effectcraft-project",
+ "effectcraft-time",
+ "roxmltree",
  "thiserror 2.0.21",
 ]
 

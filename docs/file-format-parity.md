@@ -89,6 +89,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 |---|---|---|---|---|
 | Premiere Pro `.prproj` | R (import) | none | none | Out of clean-room scope pending a decision; we interchange through FCP7 XML, FCPXML, OTIO, EDL, AAF and OMF instead (beyond After Effects) |
 | Lottie JSON / dotLottie | via third-party plug-ins | yes | yes | beyond After Effects; a warnings list names what Lottie can't express |
+| Apple Motion `.motn` / `.motr` / `.moti` / `.moef` / `.mogn` (OZML) | none | yes (groups as precomps, image objects, Color Solid generators, text with the first style's font and size, keyframed transform and opacity with Bezier tangents, group filters as adjustment layers; Gaussian/Directional Blur, Add Noise, Invert, Tint mapped, Bad TV approximated) | yes (`.motn`: groups, Color Solids, image objects with their clips, keyframed transform and opacity, Noise as Add Noise) | beyond After Effects; from Apple's public Motion XML Guide; behaviors, rigs, shapes, emitters, cameras, lights and most filters are listed as warnings. Export is checked by round trip only, not yet by opening it in Motion |
 | JSON / CSV / TSV data | R | yes (`footage()`, data layers) | — | good |
 | LUTs (`.cube`, `.3dl`, `.csp`, `.spi1d/3d`, CDL) | R | yes (Apply Color LUT, OCIO effects) | — | Apply Color LUT bug (#514) is closed |
 | OpenColorIO configs | R (OCIO 2.5.1, ACES 2.0 in 26.5) | yes (OCIO v2 subset, Blender configs) | — | partial: no ACES 2.0 output transforms |
