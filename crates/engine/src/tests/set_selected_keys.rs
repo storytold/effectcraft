@@ -51,3 +51,12 @@ fn value_edit_between_keys_only_adds_a_key() {
     s.execute_checked("prop.set", json!({"layer": layer, "path": "transform/opacity", "value": 40})).unwrap();
     assert_eq!(values(&s, layer, prop), vec![0.0, 40.0, 25.0, 50.0]);
 }
+
+#[test]
+fn explicit_time_off_the_playhead_only_edits_that_key() {
+    let (mut s, layer, prop) = setup();
+    select_all(&mut s, layer, prop);
+    s.execute_checked("time.set", json!({"time": 0.5})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": layer, "path": "transform/opacity", "time": 1.0, "value": 40})).unwrap();
+    assert_eq!(values(&s, layer, prop), vec![0.0, 40.0, 50.0]);
+}

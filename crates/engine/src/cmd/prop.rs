@@ -513,8 +513,8 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let target = at.unwrap_or(lt);
         // After Effects: editing the value with the CTI on one of several selected keys moves all
-        // the selected keys by the same change; between keys it only adds a key.
-        if selected.len() > 1 && selected.contains(&target) && key_at(&pr.keys, target).is_some() && nv.interpolates() {
+        // the selected keys by the same change; between keys, or at an explicit other time, it only edits that key.
+        if selected.len() > 1 && target == lt && selected.contains(&target) && key_at(&pr.keys, target).is_some() && nv.interpolates() {
             let delta: Vec<f64> = nv.components().iter().zip(pr.value_at(target).components()).map(|(n, o)| n - o).collect();
             let range = if let effectcraft_project::ParamUi::Slider { min, max, .. } = pr.ui { Some((min, max)) } else { None };
             for k in pr.keys.iter_mut().filter(|k| k.time != target && selected.contains(&k.time)) {
