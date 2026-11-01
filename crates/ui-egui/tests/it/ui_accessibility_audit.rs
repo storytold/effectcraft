@@ -4,10 +4,16 @@
 //! what it is, and the state that role needs (checked, selected, a value).
 //!
 //! * The panels that had their pass (`FIXED`: Effects & Presets, Settings, Render Queue with its
-//!   Templates dialog) must have **zero** findings.
+//!   Templates dialog, Project, Info, Flowchart, Script Console and the 3D Camera Tracker block
+//!   of Effect Controls) must have **zero** findings.
 //! * Every other panel is counted and printed (run with `--nocapture`), and checked against
 //!   [`BASELINE`], a ratchet that can only shrink: fixing a panel lowers its number, and a number
 //!   must never go up. When a panel's count falls, the test fails until its entry is lowered.
+//!
+//! A panel that only paints (Info) has no controls; there the audit counts what it *describes*: a
+//! graphic (`Role::Image`, which must have a name in a fixed panel), a read-out (`Role::Label`
+//! with a name) or a log. A fixed panel must show a minimum number of controls and described
+//! items, so zero findings cannot mean the panel was not looked at.
 //!
 //! What this does not measure: how a real screen reader speaks the tree (none was run), colour
 //! contrast, focus order or keyboard operation (the `ui_*_keyboard.rs` tests cover those), or
@@ -25,7 +31,12 @@ use egui_kittest::kittest::NodeT;
 use serde_json::json;
 
 /// Groups that must be clean. A group is the first part of a scenario name (before the `:`).
-const FIXED: &[&str] = &["EffectsPresets", "Settings", "RenderQueue", "Project"];
+const FIXED: &[&str] = &["EffectsPresets", "Settings", "RenderQueue", "Project", "Info", "Flowchart", "ScriptConsole", "CameraTracker"];
+
+/// Panels audited in a scenario of their own (a fresh window, the panel maximized, so it has its
+/// full size; in the shared loop below each panel opened squeezes the next one). The loop still
+/// opens them, so the layout the other panels are measured in does not change.
+const DEDICATED: &[PanelKind] = &[PanelKind::Info, PanelKind::Flowchart, PanelKind::ScriptConsole];
 
 /// Scenarios whose content is the machine's own folder listing (the Media Browser opens on the
 /// home folder), so a runner with fewer files finds fewer controls. They are held to the upper bound
@@ -53,10 +64,8 @@ const BASELINE: &[(&str, usize, usize)] = &[
     ("MotionSketch:default", 8, 4),
     ("Paint:default", 38, 18),
     ("Brushes:default", 34, 6),
-    ("Flowchart:default", 5, 1),
     ("History:default", 10, 5),
     ("MaskInterpolation:default", 16, 8),
-    ("ScriptConsole:default", 5, 3),
     ("EssentialGraphics:default", 1, 1),
     ("LumetriScopes:default", 2, 1),
     ("MediaBrowser:default", 20, 10),
@@ -64,7 +73,7 @@ const BASELINE: &[(&str, usize, usize)] = &[
     ("ContentAwareFill:default", 2, 1),
 ];
 
-/// How many controls the fixed scenarios must at least show, so that "zero findings" is never
+/// How many controls (and, in the panels that paint, described read-outs, graphics and logs) the fixed scenarios must at least show, so that "zero findings" is never
 /// the result of looking at nothing. Any scenario not listed needs 2.
 const MIN_CONTROLS: &[(&str, usize)] = &[
     ("EffectsPresets:default", 10),
@@ -79,6 +88,14 @@ const MIN_CONTROLS: &[(&str, usize)] = &[
     ("RenderQueue:menu", 20),
     ("RenderQueue:templates:renderSettings", 8),
     ("RenderQueue:templates:outputModule", 8),
+    // Info, Flowchart and Script Console count read-outs, graphics and logs as well as controls.
+    ("Info:default", 6),
+    ("Info:layer", 8),
+    ("Flowchart:default", 6),
+    ("Flowchart:layers", 8),
+    ("ScriptConsole:default", 4),
+    ("ScriptConsole:log", 4),
+    ("CameraTracker:editor", 3),
 ];
 
 /// The roles that are controls: anything with one of these (or with a click or focus action) is
@@ -164,9 +181,14 @@ fn node_ids(h: &Harness<'_, EffectcraftApp>) -> HashSet<String> {
 fn audit(h: &Harness<'_, EffectcraftApp>, scenario: &str, scope: Rect, since: Option<&HashSet<String>>) -> (Vec<Finding>, usize) {
     let mut out = Vec::new();
     let mut controls = 0;
+    // The rules for graphics apply where the panel has had its pass.
+    let strict = FIXED.contains(&group(scenario));
     for n in h.root().children_recursive() {
         let a = n.accesskit_node();
         if a.is_hidden() {
+            continue;
+        }
+        if since.is_some_and(|s| s.contains(&format!("{:?}", a.id()))) {
             continue;
         }
         let Some(b) = a.bounding_box() else {
@@ -180,10 +202,27 @@ fn audit(h: &Harness<'_, EffectcraftApp>, scenario: &str, scope: Rect, since: Op
         if !scope.contains(pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)) {
             continue;
         }
-        if since.is_some_and(|s| s.contains(&format!("{:?}", a.id()))) {
+        let role = a.role();
+        // What a panel describes without being operable: a graphic (a name is required in a fixed
+        // panel), a read-out with a name, a log.
+        let described = match role {
+            Role::Image | Role::Canvas | Role::Log => true,
+            Role::Label => a.label().is_some_and(|l| !l.trim().is_empty()),
+            _ => false,
+        };
+        if described {
+            if strict && matches!(role, Role::Image | Role::Canvas | Role::Log) && a.label().is_none_or(|l| l.trim().is_empty()) {
+                out.push(Finding {
+                    scenario: scenario.to_string(),
+                    problem: "graphic without a name",
+                    role,
+                    name: String::new(),
+                    rect: [b.x0 as i32, b.y0 as i32, b.x1 as i32, b.y1 as i32],
+                });
+            }
+            controls += 1;
             continue;
         }
-        let role = a.role();
         let actionable = a.data().supports_action(Action::Click) || a.data().supports_action(Action::Focus);
         let control = CONTROL_ROLES.contains(&role);
         if !(control || (actionable && matches!(role, Role::Unknown | Role::GenericContainer))) {
@@ -320,6 +359,9 @@ fn collect() -> Report {
         }
         h.state_mut().show_panel(p);
         h.run_steps(3);
+        if DEDICATED.contains(&p) {
+            continue;
+        }
         let name = format!("{}:default", p.id());
         let Some(rect) = panel_rect(&h, p) else {
             // A panel with a baseline entry must be looked at, or its allowance would pass unchecked.
@@ -333,6 +375,70 @@ fn collect() -> Report {
             h.state_mut().close_panel(PanelKind::Preview);
             h.run_steps(3);
         }
+    }
+
+    // ---- The panels with their own scenarios: alone in a window, maximized.
+    let alone = |p: PanelKind| {
+        let mut h = harness();
+        h.state_mut().show_panel(p);
+        h.state_mut().ui.maximized = Some(p);
+        h.run_steps(4);
+        h
+    };
+    // Info: nothing selected, then a layer selected (its Duration, In and Out), and a key.
+    let mut h = alone(PanelKind::Info);
+    h.state_mut().session.execute("layer.select", json!({"layers": []})).ok();
+    h.run_steps(4);
+    let rect = panel_rect(&h, PanelKind::Info).expect("Info is drawn");
+    r.add("Info:default", audit(&h, "Info:default", rect, None));
+    h.state_mut().session.execute("layer.select", json!({"layers": ["#1"]})).ok();
+    h.run_steps(4);
+    r.add("Info:layer", audit(&h, "Info:layer", rect, None));
+
+    // Flowchart: the comp and what it uses, then with layers and effects, then top to bottom.
+    let mut h = alone(PanelKind::Flowchart);
+    let rect = panel_rect(&h, PanelKind::Flowchart).expect("the Flowchart is drawn");
+    r.add("Flowchart:default", audit(&h, "Flowchart:default", rect, None));
+    {
+        let f = &mut h.state_mut().ui.flowchart;
+        f.layers = true;
+        f.effects = true;
+        f.vertical = true;
+    }
+    h.run_steps(4);
+    r.add("Flowchart:layers", audit(&h, "Flowchart:layers", rect, None));
+
+    // Script Console: empty, then with a run in its log.
+    let mut h = alone(PanelKind::ScriptConsole);
+    let rect = panel_rect(&h, PanelKind::ScriptConsole).expect("the Script Console is drawn");
+    r.add("ScriptConsole:default", audit(&h, "ScriptConsole:default", rect, None));
+    h.state_mut().ui.script_console.input = "app.project.numItems".into();
+    {
+        let app = h.state_mut();
+        let con = &mut app.ui.script_console;
+        con.record("app.project.numItems", &Ok(json!({"result": 3})));
+    }
+    h.run_steps(4);
+    r.add("ScriptConsole:log", audit(&h, "ScriptConsole:log", rect, None));
+
+    // 3D Camera Tracker block of Effect Controls (a separate scenario: the block, not the panel).
+    let mut h = harness();
+    h.state_mut().session.execute("effect.apply", json!({"effect": effectcraft_engine::effects::camera_tracker::ID})).ok();
+    h.state_mut().show_panel(PanelKind::EffectControls);
+    h.run_steps(4);
+    let block: Vec<Rect> = h
+        .state()
+        .auto
+        .query("effectControls.cameraTracker.")
+        .into_iter()
+        .map(|e| Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])))
+        .collect();
+    if let Some(first) = block.first() {
+        let area = block.iter().fold(*first, |a, b| a.union(*b));
+        let area = Rect::from_min_max(area.min - egui::vec2(8.0, 4.0), area.max + egui::vec2(8.0, 40.0));
+        r.add("CameraTracker:editor", audit(&h, "CameraTracker:editor", area, None));
+    } else {
+        r.rows.push(("CameraTracker:editor (not drawn)".to_string(), 0, 0, 0));
     }
     r
 }

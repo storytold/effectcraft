@@ -177,6 +177,49 @@ pub(crate) fn progress(r: &Response, label: &str, fraction: f32) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Things a panel paints that are not controls
+
+/// Make `rect` a node of the tree (egui paints text and shapes into the painter and leaves them
+/// out of it) and give it a role and a name. Not focusable: it is for assistive technology to
+/// read, not for the keyboard.
+fn static_node(ui: &egui::Ui, id: Id, rect: egui::Rect, role: Role, label: &str, value: Option<&str>) {
+    let r = ui.interact(rect, id, egui::Sense::hover());
+    node(&r, |n| {
+        n.set_role(role);
+        n.set_label(label);
+        if let Some(v) = value {
+            n.set_value(v);
+        }
+    });
+}
+
+/// A read-out painted at `rect` (a colour channel, the time, a status line): `label` is the whole
+/// sentence it shows, e.g. "Red: 128".
+pub(crate) fn readout(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str) {
+    static_node(ui, id, rect, Role::Label, label, None);
+}
+
+/// A picture with no text of its own (a colour swatch, a scope, a waveform): `label` says what it
+/// shows in a few words.
+pub(crate) fn graphic(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str) {
+    static_node(ui, id, rect, Role::Image, label, None);
+}
+
+/// A log or console output (newest line last): `label` says which, `text` is what it holds.
+pub(crate) fn log(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str, text: &str) {
+    static_node(ui, id, rect, Role::Log, label, Some(text));
+}
+
+/// A toggle button (it stays pressed while it is on).
+pub(crate) fn toggle_button(r: &Response, label: &str, on: bool) {
+    node(r, |n| {
+        n.set_role(Role::Button);
+        n.set_label(label);
+        n.set_toggled(if on { Toggled::True } else { Toggled::False });
+    });
+}
+
+// ------------------------------------------------------------------------------------------
 // List keyboard handling
 
 /// Ask for the keyboard focus on widget `id` once it is drawn (a list moves its focus to the row
