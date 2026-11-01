@@ -60,13 +60,16 @@ fn static_pattern_fill_and_stroke_repeat_with_tile_origin() {
 fn object_bounding_box_pattern_units_map_tile_and_content_coordinates() {
     let doc = parse(
         br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="8">
-            <defs><pattern id="p" width="0.5" height="1" patternContentUnits="objectBoundingBox">
+            <defs><pattern id="p" patternUnits="objectBoundingBox" width="0.5" height="1" patternContentUnits="objectBoundingBox">
                 <rect width="25%" height="100%" fill="green"/>
             </pattern></defs>
-            <rect x="10" y="2" width="8" height="4" fill="url(#p)"/>
+            <rect x="10" y="2" width="8" height="4" fill="url(#p)" stroke="url(#p)" stroke-width="1"/>
         </svg>"#,
     )
     .unwrap();
+    let shapes = doc.flatten();
+    assert!(matches!(shapes[0].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    assert!(matches!(shapes[0].2.stroke.as_ref().map(|stroke| &stroke.paint), Some(Paint::Pattern(_))));
     let img = rasterize(&doc, 20, 8, 1.0);
     assert!(near(px(&img, 10, 3), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
     assert_eq!(px(&img, 12, 3)[3], 0.0);
@@ -258,6 +261,24 @@ fn pattern_content_attribute_work_is_bounded_across_distinct_viewports() {
 }
 
 #[test]
+fn pattern_href_depth_limit_uses_paint_fallback() {
+    let patterns: String = (0..=16)
+        .map(|index| {
+            if index == 16 {
+                format!(r#"<pattern id="p{index}" patternUnits="userSpaceOnUse" width="1" height="1"/>"#)
+            } else {
+                format!(r#"<pattern id="p{index}" href="#p{}"/>"#, index + 1)
+            }
+        })
+        .collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><defs>{patterns}</defs><rect width="1" height="1" fill="url(#p0) blue"/></svg>"##
+    );
+    let doc = parse(svg.as_bytes()).unwrap();
+    assert_eq!(doc.flatten()[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+}
+
+#[test]
 fn pattern_ancestor_attribute_work_is_bounded_across_distinct_viewports() {
     let large_attribute = "x".repeat(2 * 1024 * 1024);
     let shapes: String = (0..12)
@@ -305,20 +326,22 @@ fn oversized_pattern_tile_falls_back_without_allocating() {
 }
 
 #[test]
-fn invalid_pattern_uses_paint_fallback_without_expanding_cycles() {
+fn invalid_or_cyclic_pattern_uses_paint_fallback_without_expanding() {
     let doc = parse(
-        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="2">
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="2">
             <defs>
                 <pattern id="bad" width="0" height="1"/>
                 <pattern id="viewbox" width="1" height="1" viewBox="0 0 1 1"/>
                 <pattern id="collapsed" patternUnits="userSpaceOnUse" width="1" height="1" patternTransform="scale(0)"/>
                 <pattern id="a" href="#b"/>
                 <pattern id="b" href="#a"/>
+                <pattern id="self" href="#self"/>
             </defs>
             <rect width="2" height="2" fill="url(#bad) blue"/>
             <rect x="2" width="2" height="2" fill="url(#viewbox) red"/>
             <rect x="4" width="2" height="2" fill="url(#collapsed) yellow"/>
             <rect x="6" width="2" height="2" fill="url(#a) green"/>
+            <rect x="8" width="2" height="2" fill="url(#self) cyan"/>
         </svg>"##,
     )
     .unwrap();
@@ -327,11 +350,31 @@ fn invalid_pattern_uses_paint_fallback_without_expanding_cycles() {
     assert_eq!(shapes[1].2.fill, Some(Paint::Color([1.0, 0.0, 0.0])));
     assert_eq!(shapes[2].2.fill, Some(Paint::Color([1.0, 1.0, 0.0])));
     assert_eq!(shapes[3].2.fill, Some(Paint::Color([0.0, 128.0 / 255.0, 0.0])));
-    let img = rasterize(&doc, 8, 2, 1.0);
+    assert_eq!(shapes[4].2.fill, Some(Paint::Color([0.0, 1.0, 1.0])));
+    let img = rasterize(&doc, 10, 2, 1.0);
     assert!(near(px(&img, 0, 0), [0.0, 0.0, 1.0, 1.0], 1e-3));
     assert!(near(px(&img, 3, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
     assert!(near(px(&img, 5, 0), [1.0, 1.0, 0.0, 1.0], 1e-3));
     assert!(near(px(&img, 7, 0), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 9, 0), [0.0, 1.0, 1.0, 1.0], 1e-3));
+}
+
+#[test]
+fn one_pixel_pattern_tiles_a_large_rectangle_from_one_surface() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>
+            <rect width="1024" height="1024" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 1024, 1024, 1.0);
+    assert_eq!((img.width, img.height), (1024, 1024));
+    for (x, y) in [(0, 0), (511, 511), (1023, 1023)] {
+        assert!(near(px(&img, x, y), [1.0, 0.0, 0.0, 1.0], 1e-3), "({x}, {y})");
+    }
 }
 
 #[test]

@@ -20,7 +20,7 @@ pub fn rasterize(doc: &Doc, w: u32, h: u32, scale: f64) -> Image {
 
 /// Rasterise `doc` with `m` mapping document pixels to image pixels.
 pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
-    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
+    let mut budget = SurfaceBudget { live_bytes: 0, pattern_tile_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
     let Some(mut img) = budget.image(w, h, None) else { return Image::default() };
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     img
@@ -28,9 +28,13 @@ pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
 
 /// Bound the simultaneously live offscreen image surfaces created by nested groups.
 const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
+/// Bound tile allocation and rasterisation work across one SVG render, even though each tile is
+/// released before the next pattern paint.
+const MAX_PATTERN_TILE_BYTES: usize = 512 * 1024 * 1024;
 
 struct SurfaceBudget {
     live_bytes: usize,
+    pattern_tile_bytes: usize,
     limit_bytes: usize,
 }
 
@@ -57,6 +61,20 @@ impl SurfaceBudget {
 
     fn release(&mut self, image: &Image) {
         self.live_bytes = self.live_bytes.saturating_sub(image.data.len().saturating_mul(std::mem::size_of::<[f32; 4]>()));
+    }
+
+    /// Allocate one pattern tile while charging its full storage cost against the render-wide
+    /// pattern budget. This prevents many shapes from repeatedly rasterising a near-limit tile.
+    fn pattern_tile(&mut self, width: u32, height: u32) -> Option<Image> {
+        let pixels = (width as usize).checked_mul(height as usize)?;
+        let bytes = pixels.checked_mul(std::mem::size_of::<[f32; 4]>())?;
+        let total = self.pattern_tile_bytes.checked_add(bytes)?;
+        if total > MAX_PATTERN_TILE_BYTES {
+            return None;
+        }
+        let image = self.image(width, height, None)?;
+        self.pattern_tile_bytes = total;
+        Some(image)
     }
 }
 
@@ -591,7 +609,7 @@ fn paint_pattern(dst: &mut Image, cov: &Mask, pattern: &Pattern, opacity: f32, m
         fallback_paint(dst);
         return;
     };
-    let Some(mut tile) = budget.image(tile_width, tile_height, None) else {
+    let Some(mut tile) = budget.pattern_tile(tile_width, tile_height) else {
         fallback_paint(dst);
         return;
     };
@@ -749,4 +767,21 @@ pub(crate) fn eval_stops(stops: &[(f64, [f64; 4])], t: f64) -> [f32; 4] {
     let Some(a) = stops.get(upper.saturating_sub(1)) else { return first.1.map(|v| v as f32) };
     let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 1.0 };
     [0, 1, 2, 3].map(|i| (a.1[i] + (b.1[i] - a.1[i]) * k) as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pattern_tile_budget_is_cumulative_after_tiles_are_released() {
+        let mut budget = SurfaceBudget {
+            live_bytes: 0,
+            pattern_tile_bytes: MAX_PATTERN_TILE_BYTES - std::mem::size_of::<[f32; 4]>(),
+            limit_bytes: MAX_LIVE_SURFACE_BYTES,
+        };
+        let tile = budget.pattern_tile(1, 1).expect("last tile within the budget");
+        budget.release(&tile);
+        assert!(budget.pattern_tile(1, 1).is_none(), "a released tile still counts toward cumulative pattern work");
+    }
 }

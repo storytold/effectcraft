@@ -634,7 +634,7 @@ struct Parser<'a, 'i> {
     /// Pattern contents may use only solid paints; nested paint servers invalidate that pattern.
     in_pattern_content: bool,
     invalid_pattern_content: bool,
-    /// Attribute bytes revisited while resolving patterns, bounded across all references.
+    /// Work revisited while resolving patterns, bounded across all references.
     pattern_work: usize,
     pattern_work_budget: usize,
     pattern_work_exceeded: bool,
@@ -672,15 +672,21 @@ impl<'a, 'i> Parser<'a, 'i> {
         w <= MAX_CSS_WORK
     }
 
-    /// Charge attribute bytes re-read while resolving a pattern reference.
-    fn charge_pattern_attributes(&mut self, n: roxmltree::Node) -> bool {
-        let bytes = n.attributes().map(|attribute| attribute.name().len().saturating_add(attribute.value().len())).fold(0usize, usize::saturating_add);
-        self.pattern_work = self.pattern_work.saturating_add(bytes);
+    /// Charge work while resolving pattern references. Attribute bytes and each traversed child
+    /// both count so a cache miss cannot repeatedly scan an enormous descriptive-only pattern.
+    fn charge_pattern_work(&mut self, work: usize) -> bool {
+        self.pattern_work = self.pattern_work.saturating_add(work);
         if self.pattern_work > self.pattern_work_budget {
             self.pattern_work_exceeded = true;
             return false;
         }
         true
+    }
+
+    /// Charge a pattern node's attributes and traversal while resolving a pattern reference.
+    fn charge_pattern_attributes(&mut self, n: roxmltree::Node) -> bool {
+        let bytes = n.attributes().map(|attribute| attribute.name().len().saturating_add(attribute.value().len())).fold(0usize, usize::saturating_add);
+        self.charge_pattern_work(bytes.saturating_add(1))
     }
 
     /// Apply the matching `<style>` rules to `out`, by specificity then source order.
@@ -1107,14 +1113,25 @@ impl<'a, 'i> Parser<'a, 'i> {
             self.vw = 1.0;
             self.vh = 1.0;
         }
-        let source = chain
-            .iter()
-            .copied()
-            .find(|node| node.children().any(|child| child.is_element() && !matches!(child.tag_name().name(), "title" | "desc" | "metadata")));
+        let source = chain.iter().copied().find(|node| {
+            node.children().any(|child| {
+                if !self.charge_pattern_work(1) {
+                    // Stop the scan immediately; the exceeded flag below rejects this pattern.
+                    return true;
+                }
+                child.is_element() && !matches!(child.tag_name().name(), "title" | "desc" | "metadata")
+            })
+        });
+        if self.pattern_work_exceeded {
+            return None;
+        }
         let mut children = Vec::new();
         if let Some(source) = source {
             for child in source.children() {
                 self.node(child, &content_style, &mut children, 1);
+                if self.pattern_work_exceeded {
+                    break;
+                }
             }
         }
         let invalid = self.invalid_pattern_content;
@@ -1122,7 +1139,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         self.invalid_pattern_content = old_invalid;
         self.vw = old_vw;
         self.vh = old_vh;
-        if invalid {
+        if invalid || self.pattern_work_exceeded {
             return None;
         }
         let content = Group {
@@ -1462,8 +1479,8 @@ const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
-/// Aggregate attribute bytes that pattern references may revisit, even when many shapes share one
-/// large pattern definition.
+/// Aggregate work that pattern references may revisit, including attributes and scanned children,
+/// even when many shapes share one large pattern definition.
 const MAX_PATTERN_WORK_BYTES: usize = 256 * 1024 * 1024;
 const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 /// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
@@ -1607,7 +1624,7 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         return Err(Error::Xml(format!("its <use> references expand to more than {} elements", p.budget)));
     }
     if p.pattern_work_exceeded {
-        return Err(Error::Xml(format!("resolving its <pattern> references scans more than {} attribute bytes", p.pattern_work_budget)));
+        return Err(Error::Xml(format!("resolving its <pattern> references scans more than {} work units", p.pattern_work_budget)));
     }
     if p.css_work.get() > MAX_CSS_WORK {
         // Never a silently unstyled drawing.
