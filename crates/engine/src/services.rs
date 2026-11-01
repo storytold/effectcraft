@@ -89,8 +89,8 @@ impl Services for FsServices {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
         // The size above came from this handle, and the read is capped too: a file that grows
-        // after the check still cannot read past `max`.
-        file.take(max + 1).read_to_end(&mut bytes)?;
+        // after the check still cannot read past `max`. Saturating, so `u64::MAX` cannot overflow.
+        file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > max {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
         }
@@ -128,6 +128,19 @@ mod tests {
         let f = dir.join(format!("ec-services-read-{}.txt", std::process::id()));
         std::fs::write(&f, b"data").unwrap();
         assert_eq!(FsServices.read_file(&f.to_string_lossy()).unwrap(), b"data");
+        let _ = std::fs::remove_file(f);
+    }
+
+    /// The limit is inclusive and cannot overflow: `u64::MAX` reads the file, one byte too many
+    /// is an error, and nothing past it is read.
+    #[test]
+    fn fs_services_bounded_read_stops_at_the_limit() {
+        let f = std::env::temp_dir().join(format!("ec-services-bounded-{}.txt", std::process::id()));
+        std::fs::write(&f, b"data").unwrap();
+        let p = f.to_string_lossy().to_string();
+        assert_eq!(FsServices.read_file_bounded(&p, u64::MAX).unwrap(), b"data");
+        assert_eq!(FsServices.read_file_bounded(&p, 4).unwrap(), b"data");
+        assert!(FsServices.read_file_bounded(&p, 3).is_err());
         let _ = std::fs::remove_file(f);
     }
 }
