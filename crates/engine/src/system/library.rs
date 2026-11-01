@@ -467,7 +467,10 @@ pub fn load_installed(s: &mut Session) -> Result<Value> {
                 v["packageVersion"] = json!(p.version);
                 loaded.push(v);
             }
-            Err(e) => errors.push(json!({"package": id, "error": e})),
+            Err(e) => {
+                log::warn!("plug-in library: {id} not loaded: {e}");
+                errors.push(json!({"package": id, "error": e}));
+            }
         }
     }
     Ok(json!({"loaded": loaded, "errors": errors}))

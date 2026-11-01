@@ -257,7 +257,10 @@ fn main() -> eframe::Result {
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
                     // Packages installed from the Plug-in Library (<config>/Plug-ins/Library).
-                    let _ = session.execute("library.loadInstalled", json!({}));
+                    // Each package that fails to load is logged by the library itself.
+                    if let Err(e) = session.execute("library.loadInstalled", json!({})) {
+                        log::warn!("plug-in library: {e}");
+                    }
                 }
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
