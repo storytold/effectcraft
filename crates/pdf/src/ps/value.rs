@@ -29,15 +29,49 @@ impl V {
             _ => None,
         }
     }
-    pub(super) fn key(&self) -> String {
+    /// Run `f` on the text this value names as a key: a name's text and a UTF-8 string's bytes in
+    /// place, so looking a key up copies nothing; a number, a boolean or a string that isn't UTF-8
+    /// as a short-lived conversion; anything else as the empty key.
+    pub(super) fn with_key<R>(&self, f: impl FnOnce(&str) -> R) -> R {
         match self {
-            V::Name(n) | V::Lit(n) | V::Op(n) => n.to_string(),
-            V::Str(s) => String::from_utf8_lossy(&s.borrow()).into_owned(),
-            V::Num(n) => format!("{n}"),
-            V::Bool(b) => format!("{b}"),
-            _ => String::new(),
+            V::Name(n) | V::Lit(n) | V::Op(n) => f(n),
+            V::Str(s) => {
+                let b = s.borrow();
+                match std::str::from_utf8(&b) {
+                    Ok(t) => f(t),
+                    Err(_) => f(&String::from_utf8_lossy(&b)),
+                }
+            }
+            V::Num(n) => f(&format!("{n}")),
+            V::Bool(b) => f(if *b { "true" } else { "false" }),
+            _ => f(""),
         }
     }
+    /// A copy of the text this value names as a key ([`V::with_key`]).
+    pub(super) fn key(&self) -> String {
+        self.with_key(str::to_owned)
+    }
+    /// The most bytes [`V::key`] allocates: a string's worst-case lossy UTF-8 copy (each invalid
+    /// byte becomes at most three), a name's length, at most 512 for a number (f64's
+    /// non-exponential decimal form stays under it), 5 for a boolean and none for an empty key.
+    pub(super) fn key_bytes(&self) -> usize {
+        match self {
+            V::Str(s) => s.borrow().len().saturating_mul(3),
+            V::Name(n) | V::Lit(n) | V::Op(n) => n.len(),
+            V::Num(_) => 512,
+            V::Bool(_) => 5,
+            _ => 0,
+        }
+    }
+    /// Return the array/procedure length without cloning its payload; other values have no items.
+    pub(super) fn item_count(&self) -> usize {
+        match self {
+            V::Array(a) => a.borrow().len(),
+            V::Proc(p) => p.len(),
+            _ => 0,
+        }
+    }
+
     pub(super) fn items(&self) -> Option<Vec<V>> {
         match self {
             V::Array(a) => Some(a.borrow().clone()),
@@ -78,9 +112,20 @@ pub(super) fn array(v: Vec<V>) -> V {
     V::Array(Rc::new(RefCell::new(v)))
 }
 
+/// Read a six-number array or procedure as a matrix. A PostScript matrix is exactly six numbers,
+/// so a different length is rejected without scanning the whole thing: the read is O(1), not O(len)
+/// for an operand a program controls the size of (`concat`, `setmatrix`, `makefont`, a font's
+/// stored matrix read on every text operation).
 pub(super) fn matrix_of(v: &V) -> Option<Affine> {
-    let a: Vec<f64> = v.items()?.iter().filter_map(V::num).collect();
-    (a.len() == 6).then(|| Affine::new([a[0], a[1], a[2], a[3], a[4], a[5]]))
+    let read = |items: &[V]| {
+        let [a, b, c, d, e, f] = items else { return None };
+        Some(Affine::new([a.num()?, b.num()?, c.num()?, d.num()?, e.num()?, f.num()?]))
+    };
+    match v {
+        V::Array(a) => read(&a.borrow()),
+        V::Proc(p) => read(p),
+        _ => None,
+    }
 }
 
 pub(super) fn matrix_val(m: Affine) -> V {

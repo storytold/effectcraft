@@ -123,6 +123,79 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   the file through constructs beyond this subset) and Level 3 `shfill` gradients in EPS draw
   only what the subset understands; save such artwork as PDF-compatible `.ai` or PDF instead.
   EPS images are skipped; Type 3 (procedure) fonts defined in EPS files draw nothing (reported).
+- The EPS operand stack holds at most 100,000 values. Numeric `copy` and `aload` check the
+  complete result before copying; exceeding it stops execution with an operand-stack-limit
+  note in `Doc::skipped`, keeping artwork already drawn; other operators drop a value pushed past
+  it. `astore` consumes its operands before returning its array, so it does not increase stack
+  depth.
+  The interpreter bounds what one operation can cost a hostile file: the memory an operator keeps
+  is charged to an allocation budget or capped by a fixed limit listed below, and its running time
+  is bounded by a fixed limit or paid for in proportion to the bytes or elements it touches:
+  elements through an operation budget of 8,000,000, bytes it scans or copies through the
+  allocation budget. Operators that reorder or search the operand stack
+  (`roll`, `counttomark`, `setcolor` counting its operands) are bounded only by its 100,000 values,
+  not yet paid per value.
+  The allocation budget is 256 MiB, cumulative and never refunded when an object is dropped or
+  overwritten. What an operator keeps is charged before it is allocated: array and procedure slots
+  at `size_of::<V>()`, string bytes, and kept text at its exact length (a number, a boolean or a
+  string that isn't UTF-8 is converted for the moment first, to measure it). That covers
+  constructors, intervals, conversions (`cvs`, `cvn`), bulk operand and snapshot copies (`aload`,
+  `copy`, `getinterval`, `dictstack`, `setdash`, and `forall`, which over a dictionary charges both the copies
+  of its keys and the key-value pairs of its snapshot), matrices (six slots each, a font's
+  included), encoding arrays (256 slots and every glyph name's text, including each `.notdef`),
+  the dash array `gsave` or `save` copies and the one each stroke keeps, executable strings
+  (charged conservatively before tokenization) and the copies `eq`
+  and `ne` compare. A dictionary charges a new entry once: its key text and a fixed slot for the
+  key's `String` and the value (`def`, `store`, `put`, `>>`, `defineresource`, `definefont`, a new
+  font for `findfont` or `selectfont`, and the per-key copies `scalefont`, `makefont` and
+  `selectfont` make); replacing an existing key's value reuses the entry. Hashing or comparing a
+  key reads every byte, so looking one up (`get`, `known`, `load`, `where`, `undef`, `store`,
+  `findfont`, `selectfont`, `findresource`, `findencoding`, `undefinefont`, a resource category),
+  replacing its value, or comparing it with `eq` or `ne` charges its scan: a string at its
+  worst-case lossy UTF-8 length, a name at its own length; a number key's text is formatted for the
+  moment and its scan is not charged. `load` of an undefined name charges the name its operator keeps.
+  A matrix is read only when its array is exactly six numbers, so `concat`, `setmatrix`,
+  `makefont` and a font's stored matrix do not scan an array a program can make any length. A
+  `SubFileDecode` end-of-data marker longer than 255 bytes is not searched for (the search costs
+  its length at each file position) and its data is not skipped; a real marker is short.
+  A font is built for drawing per base name and encoding (its first 256 glyph names, or the one
+  glyph `glyphshow` draws). Each new one charges the font, its glyph-name table and its cache key,
+  and, when its program is embedded in the file, the program's length for the parsed copy the font
+  keeps, so re-encoding one embedded program charges it again. Drawing with a font already built
+  charges only the string shown; the font is looked up by the identity of its name objects, and by
+  their text only when those objects are new. A string font or glyph name is copied, charged and length-capped (below)
+  each time it is used. A string's glyph outlines count against the operation budget and the path
+  limit (1,048,576 elements) element by element as they are built, so `show` and its variants
+  (`ashow`, `widthshow`, `awidthshow`, `kshow`, `cshow`, `xshow`, `yshow`, `xyshow`, `glyphshow`)
+  and `charpath` pay for the glyphs they draw; `stringwidth` builds no outlines and is paid by the
+  string's bytes.
+  `array` and `string` requests are clamped to 1,000,000 slots and 10,000,000 bytes. At most 1,024
+  graphics-state copies (`gsave`, `save`) are kept at once, `begin` keeps at most 64 dictionaries
+  on the stack, and procedures nest at most 256 deep.
+  A name or dictionary key made or kept at runtime is at most 255 bytes of text: converted by
+  `cvn`, kept by `load` as the operator it makes, made by `findfont`, `selectfont` or `definefont`
+  from a string, a string font or glyph name when it is drawn, or any new dictionary key, including
+  a name read from the file. One byte longer stops the program (`limitcheck` in a conforming
+  interpreter; PostScript's documented limit is 127, PostScript Language Reference, 3rd ed.,
+  Appendix B). A name read from the file is not capped when it is read, pushed or run, since the
+  file bounds how many there are: one too long to be any defined name or operator is not looked up
+  (that would hash it against every dictionary on the stack) but noted as an unknown operator, so
+  running it in a loop costs a constant however long the name. Inline image data an `image` cannot
+  step over (an indirect data source, an unknown image operator, a bare `readhexstring`) reaches
+  the scanner as names, so a cap there would reject it; the seventeen reference files this was
+  checked against create names of at most 85 bytes, and real generator output at most 28.
+  Reaching a limit stops execution with a note in `Doc::skipped` (operation limit, allocation
+  limit, operand stack limit, path limit, recursion limit, graphics state depth limit, name length
+  limit), keeping artwork already drawn, rather than continuing with partial results.
+  This is not a process-memory guarantee. Outside the allocation budget, each bounded another way:
+  the file's source tokens (the names, strings and procedures the scanner reads) and the one copy
+  of each embedded font program taken from the file before the program runs, both bounded by the
+  file's length; the operand stack (100,000 values); paths, including those in graphics-state
+  copies and clips, and the drawn output, whose elements the operation budget and path limit bound
+  (each stroke's dash copy aside, charged above); each font's outlines of the glyphs it has drawn
+  (at most 256 per font); the font cache's identity index (cleared at 1,024 entries); running a
+  name (a lookup of at most 255 bytes against at most 64 dictionaries); a hash table's spare
+  buckets, a vector's spare capacity, and allocator overhead.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip
