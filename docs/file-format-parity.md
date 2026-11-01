@@ -48,8 +48,8 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | GIF | R/W | yes | yes (animated) | good |
 | BMP | R | yes | — | good |
 | WebP | — | yes (still; animated WebP as footage with its frames, timing and alpha, #762) | — | beyond After Effects |
-| Targa `.tga` | R/W | yes (still and sequence; alpha interpreted on import) | none | good for import (#745); no Targa output |
-| DPX / Cineon `.dpx` `.cin` | R/W | yes (still and sequence; 8/10/12/16-bit luma, RGB, RGBA, both byte orders; log code values shown as stored) | none | partial: import (#756); no Interpret Footage ▸ Cineon Settings (log to linear), no DPX output; common in film VFX |
+| Targa `.tga` | R/W | yes (still and sequence; alpha interpreted on import) | yes (sequence; uncompressed 24-bit RGB or 32-bit RGB + Alpha, straight or premultiplied) | good: import (#745); output reads back through it unchanged; the alpha is not labelled in the file (no TGA 2.0 extension area), so it is interpreted on import |
+| DPX / Cineon `.dpx` `.cin` | R/W | yes (still and sequence; 8/10/12/16-bit luma, RGB, RGBA, both byte orders; log code values shown as stored, or converted by Interpret Footage ▸ Cineon Settings ▸ Logarithmic Conversion) | none | partial: import (#756) and Cineon Settings; no DPX output; common in film VFX |
 | Radiance `.hdr` | R/W | yes (still and sequence, 32-bit linear float like OpenEXR) | none | good for import (#745); no Radiance output |
 | SGI, PICT, ElectricImage, RLA/RPF images | R | none | none | Legacy; RPF camera data import exists (`keys.rpfCameraImport`) |
 | Camera Raw (DNG, CR3, NEF…) | R (Camera Raw) | none | none | LightCraft has decoders that could be shared |
@@ -65,7 +65,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Apple ProRes (422 family, 4444) | R/W | yes | yes | good; 4444 colour tag wrong (#340); no ProRes RAW |
 | WebM / Matroska (VP9, AV1, Opus) | R (limited) | yes, incl. VP9 alpha | yes | beyond After Effects |
 | MXF (OP1a / OP-Atom) | R/W | yes (FilmCraft's demuxer: AVC, MPEG-2 incl. XDCAM / D-10, VC-3 / DNxHD, ProRes; PCM audio) | none | partial: import (#767), checked against ffmpeg; no MXF output |
-| AVI | R | none | none | Media Browser lists it |
+| AVI | R | yes (FilmCraft's demuxer: AVI 1.0 / OpenDML; Motion JPEG, H.264, HEVC, uncompressed; PCM, MP3, MP2, AC-3 audio) | none | partial: import (#1701), checked against ffmpeg; H.264 needs its parameter sets in the chunks (global headers and copies with an `avcC` record don't decode until storytold/filmcraft#2303), and a damaged video index loses the video (storytold/filmcraft#2302); DV, MPEG-4 Part 2 (DivX / Xvid) and other legacy codecs import but show why they have no picture; no AVI output |
 | DNxHD / DNxHR | R/W | unverified (FilmCraft decodes it; reachable only inside `.mov`) | none | — |
 | BRAW, R3D, ARRIRAW | R (plug-ins / SDKs) | none | none | proprietary SDKs |
 | Variable-frame-rate phone video | R | unverified | — | needs a real-media corpus |
@@ -96,24 +96,56 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Mocha shapes | R (Mocha AE) | own documented JSON | — | Mocha's format is not public |
 | Vanishing Point `.vpe` | R | none | — | no public specification; the menu entry explains why |
 
-## Render queue outputs (`OutputFormat::ALL`, 13)
+## Render queue outputs (`OutputFormat::ALL`, 14)
 
 H.264 MP4, HEVC MP4, AV1 MP4, ProRes MOV, uncompressed 8-bit RGB / RGB + Alpha MOV (`raw `, + PCM;
-#372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR sequences, animated GIF, WAV, AIFF.
+#372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, WAV, AIFF.
 Missing against After Effects + Media Encoder: 16-bpc uncompressed, AVI and lossless-compressed
-single-file video (Animation / PNG codecs), DPX / Targa / Photoshop sequences, MXF, DNxHR, hardware
+single-file video (Animation / PNG codecs), DPX / Photoshop sequences, MXF, DNxHR, hardware
 encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over an existing file
 (#325).
+
+### Render source protection
+
+The render queue refuses an output that would replace footage, an attached proxy, or the
+project file. It checks every output module and segment before dispatching the item. A refused
+item is marked Failed with its reason; other valid queued items can still render. Render logs
+are checked too. No render parameter overrides this protection.
+
+Checks compare normalized paths and native file identities, so an existing symbolic link,
+hard link, junction or Windows short name cannot disguise a source as another output file.
+Source identities are indexed once per check and matching identities are verified. The index
+does not keep file handles open for the lifetime of a long sequence.
+
+Default output names move aside when they would replace a protected file. This also applies to
+Create Proxy: recreating a proxy chooses a new default name and attaches the new proxy, leaving
+the previous proxy file intact. An explicit output path is kept as entered and refused if it
+would replace a protected file.
+
+After Pre-render imports its result, that file is footage too. Re-queueing the same item
+with the same output is refused; run Pre-render again for a fresh default output, or choose
+another Output To. An item's `last_output` is not permission to replace imported footage.
+
+Image-sequence checks inspect existing frames in the requested range. Skip Existing Files leaves
+existing frames alone. If a frame number appears in a folder name, the checker probes each
+frame separately and refuses ranges over 100,000 frames instead of silently checking a prefix.
+Choose a fixed output folder or a shorter range for those exports.
+
+This guard does not introduce an overwrite flag, confirmation dialog, or changed replacement
+defaults for the CLI, scripts or MCP. Replacement consent and staging ordinary output files
+belong to the exporter. The source check runs before export; filesystem changes between that
+check and a write still require exporter-side revalidation.
 
 ## Estimate
 
 **≈ 130–230 h**: `.aep` / `.aepx` import 80–160 h (after the owner decision), wiring TGA / DPX /
-HDR / MXF / AVI / DNx import and DPX/TGA output 10–20 h, FBX animation and skinning, USD and Substance 20–40 h,
+HDR / MXF / AVI / DNx import and DPX output 10–20 h, FBX animation and skinning, USD and Substance 20–40 h,
 relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel with the rest).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Render-queue source-protection behavior and limits consolidated here from the standalone page |
 | 2026-10-12 | minor | #324 and #514 marked closed; open `.aep` PRs #251 and #860 noted |
 | 2026-10-10 | major | First file format parity document, from the After Effects 26.5 bundle and this repository's import/export registries |

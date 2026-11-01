@@ -2,8 +2,8 @@
 //! with the After Effects stacking semantics:
 //!
 //! - path operators (Trim Paths, Round Corners, Offset Paths, Pucker & Bloat, Twist, Zig Zag,
-//!   Wiggle Paths, Merge Paths, Repeater) act on all paths above them in the same group, including
-//!   the paths of nested groups;
+//!   Wiggle Paths, Wiggle Transform, Merge Paths, Repeater) act on all paths above them in the
+//!   same group, including the paths of nested groups;
 //! - paint items (fills, strokes, gradient fills/strokes) paint the paths above them, *as modified
 //!   by every operator in the stack* — a Trim Paths below a Stroke still trims it;
 //! - items higher in the list draw on top;
@@ -17,7 +17,9 @@ use effectcraft_keyframe::{Gradient, Value};
 use effectcraft_path::{BezPath, Cap, FillRule, Join, StrokeStyle, ops, varstroke};
 use effectcraft_project::{Layer, Node, PropGroup};
 use effectcraft_raster::{Image, Mask};
+use effectcraft_text::selectors::{self, Wiggly};
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 use crate::eval::EvalCtx;
 
@@ -185,9 +187,75 @@ fn used_slots(live: &[usize], draws: &[Draw]) -> Vec<usize> {
     v
 }
 
+/// Wiggle Transform: moves the live slots by a random offset of the Transform group's Anchor
+/// Point, Position, Scale and Rotation (the most each one wiggles), changing over time. Its
+/// Wiggles/Second, Correlation, Temporal Phase, Spatial Phase and Random Seed work as the Wiggly
+/// Selector's do, with each Repeater copy (`copy_of`) as one unit: the copies of a Repeater above
+/// the operation move on their own as far as Correlation allows, and the copies of a Repeater
+/// below it move as one. The four transformations of one operation move together.
+fn wiggle_transform(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, arena: &mut [BezPath], live: &[usize], copy_of: &HashMap<usize, usize>, draws: &mut [Draw]) {
+    let Some(tr) = g.sub("transform") else { return };
+    let w = Wiggly {
+        max: 1.0,
+        min: -1.0,
+        wiggles_per_second: ctx.f(layer, g, "speed", 2.0),
+        correlation: ctx.f(layer, g, "correlation", 50.0) / 100.0,
+        temporal_phase: ctx.f(layer, g, "phase", 0.0),
+        spatial_phase: ctx.f(layer, g, "spatialPhase", 0.0),
+        lock_dimensions: false,
+        seed: ctx.f(layer, g, "seed", 0.0).round() as i64 as u64,
+    };
+    let anchor = ctx.v2(layer, tr, "anchor", [0.0; 2]);
+    let pos = ctx.v2(layer, tr, "position", [0.0; 2]);
+    let scale = ctx.v2(layer, tr, "scale", [0.0; 2]);
+    let rot = ctx.f(layer, tr, "rotation", 0.0);
+    let t = layer.layer_time(ctx.time).seconds();
+    let matrix = |k: usize| {
+        let (x, y) = (selectors::wiggly_value(&w, t, k, 0), selectors::wiggly_value(&w, t, k, 1));
+        Mat3::translate(vec2(pos[0] * x, pos[1] * y))
+            * Mat3::rotate_deg(rot * x)
+            * Mat3::scale(vec2(1.0 + scale[0] * x / 100.0, 1.0 + scale[1] * y / 100.0))
+            * Mat3::translate(vec2(-anchor[0] * x, -anchor[1] * y))
+    };
+    let mut by_copy: HashMap<usize, Mat3> = HashMap::new();
+    let mut done: HashSet<usize> = HashSet::new();
+    for &s in live {
+        if !done.insert(s) {
+            continue;
+        }
+        let k = copy_of.get(&s).copied().unwrap_or(0);
+        let m = *by_copy.entry(k).or_insert_with(|| matrix(k));
+        arena[s] = mat_path(&arena[s], &m);
+    }
+    // A paint above the operation whose paths all moved by one matrix moves its gradient and
+    // stroke scale with them, as a group transform does. A paint over copies that moved by
+    // different matrices stays one paint (its fill rule and opacity apply to all of them at once)
+    // and keeps its gradient and stroke scale.
+    for d in draws {
+        let mut ms = d.slots.iter().map(|s| done.contains(s).then(|| by_copy.get(&copy_of.get(s).copied().unwrap_or(0)).copied()).flatten());
+        let Some(Some(m)) = ms.next() else { continue };
+        if ms.all(|x| x == Some(m)) {
+            d.xf = m * d.xf;
+        }
+    }
+}
+
 /// Collect the draws of a contents group and the path slots live at its end (in group space).
 /// `arena` holds every path slot; operators rewrite slots in place.
 fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<BezPath>) -> (Vec<Draw>, Vec<usize>) {
+    collect_in(ctx, layer, contents, arena, &mut Copies::default())
+}
+
+/// The Repeater copy each path slot belongs to, for Wiggle Transform: `of` maps a slot a Repeater
+/// made to its copy's id (slots no Repeater made are copy 0). Ids are unique across the layer's
+/// groups, so copies made in a nested group stay apart in the groups around it.
+#[derive(Default)]
+struct Copies {
+    of: HashMap<usize, usize>,
+    next: usize,
+}
+
+fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<BezPath>, copy_ids: &mut Copies) -> (Vec<Draw>, Vec<usize>) {
     let mut draws: Vec<Draw> = Vec::new();
     let mut live: Vec<usize> = Vec::new();
     let opacity = |g: &PropGroup| (ctx.f(layer, g, "opacity", 100.0) / 100.0) as f32;
@@ -201,7 +269,20 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             "rect" => {
                 let size = ctx.v2(layer, g, "size", [100.0; 2]);
                 let pos = ctx.v2(layer, g, "position", [0.0; 2]);
-                let p = effectcraft_path::rect(size, pos, ctx.f(layer, g, "roundness", 0.0));
+                let p = if ctx.b(layer, g, "perCorner") {
+                    effectcraft_path::rect_radii(
+                        size,
+                        pos,
+                        [
+                            ctx.f(layer, g, "topLeftRoundness", 0.0),
+                            ctx.f(layer, g, "topRightRoundness", 0.0),
+                            ctx.f(layer, g, "bottomRightRoundness", 0.0),
+                            ctx.f(layer, g, "bottomLeftRoundness", 0.0),
+                        ],
+                    )
+                } else {
+                    effectcraft_path::rect(size, pos, ctx.f(layer, g, "roundness", 0.0))
+                };
                 push_shape(ctx, layer, g, p, arena, &mut live);
             }
             "ellipse" => {
@@ -211,16 +292,16 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             }
             "star" => {
                 let star = ctx.e(layer, g, "type") == 0;
-                let p = effectcraft_path::polystar(
+                let p = effectcraft_path::polystar(effectcraft_path::Polystar {
                     star,
-                    ctx.f(layer, g, "points", 5.0),
-                    ctx.v2(layer, g, "position", [0.0; 2]),
-                    ctx.f(layer, g, "rotation", 0.0),
-                    ctx.f(layer, g, "innerRadius", 50.0),
-                    ctx.f(layer, g, "outerRadius", 100.0),
-                    ctx.f(layer, g, "innerRoundness", 0.0),
-                    ctx.f(layer, g, "outerRoundness", 0.0),
-                );
+                    points: ctx.f(layer, g, "points", 5.0),
+                    pos: ctx.v2(layer, g, "position", [0.0; 2]),
+                    rotation: ctx.f(layer, g, "rotation", 0.0),
+                    inner: ctx.f(layer, g, "innerRadius", 50.0),
+                    outer: ctx.f(layer, g, "outerRadius", 100.0),
+                    inner_round: ctx.f(layer, g, "innerRoundness", 0.0),
+                    outer_round: ctx.f(layer, g, "outerRoundness", 0.0),
+                });
                 push_shape(ctx, layer, g, p, arena, &mut live);
             }
             "path" => {
@@ -324,11 +405,13 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     speed: ctx.f(layer, g, "speed", 2.0),
                     correlation: ctx.f(layer, g, "correlation", 50.0),
                     phase_deg: ctx.f(layer, g, "phase", 0.0),
+                    spatial_phase_deg: ctx.f(layer, g, "spatialPhase", 0.0),
                     seed: ctx.f(layer, g, "seed", 0.0),
                 };
                 let t = layer.layer_time(ctx.time).seconds();
                 apply(arena, &live, |p| ops::wiggle(p, &w, t));
             }
+            "wiggler" => wiggle_transform(ctx, layer, g, arena, &live, &copy_ids.of, &mut draws),
             "merge" => {
                 let mode = ops::MergeMode::from_index(ctx.e(layer, g, "mode"));
                 let input: Vec<BezPath> = live.iter().map(|&i| arena[i].clone()).collect();
@@ -341,7 +424,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             }
             "group" => {
                 let Some(inner) = g.sub("contents") else { continue };
-                let (cd, cl) = collect(ctx, layer, inner, arena);
+                let (cd, cl) = collect_in(ctx, layer, inner, arena, copy_ids);
                 let (m, op) = g.sub("transform").map(|t| group_matrix(ctx, layer, t)).unwrap_or((Mat3::IDENTITY, 1.0));
                 for i in used_slots(&cl, &cd) {
                     arena[i] = mat_path(&arena[i], &m);
@@ -378,12 +461,20 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 // Each copy gets its own transformed slots, so operators below the repeater act on
                 // the repeated geometry (copy order: original first).
                 let mut copy_maps: Vec<std::collections::HashMap<usize, usize>> = Vec::with_capacity(n);
+                // Each copy of each earlier copy (a second Repeater) gets an id of its own.
+                let mut ids: HashMap<(usize, usize), usize> = HashMap::new();
                 for i in 0..n {
                     let m = step(i as f64 + offset);
                     let mut map = std::collections::HashMap::new();
                     for &s in &base_slots {
                         arena.push(mat_path(&arena[s], &m));
                         map.insert(s, arena.len() - 1);
+                        let base = copy_ids.of.get(&s).copied().unwrap_or(0);
+                        let id = *ids.entry((i, base)).or_insert_with(|| {
+                            copy_ids.next += 1;
+                            copy_ids.next
+                        });
+                        copy_ids.of.insert(arena.len() - 1, id);
                     }
                     live.extend(base_live.iter().map(|s| map[s]));
                     copy_maps.push(map);
@@ -395,7 +486,10 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 }
                 for i in order {
                     let m = step(i as f64 + offset);
-                    let t = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
+                    // Copy i's opacity moves 1 / Copies of the way from Start to End Opacity per
+                    // copy, so the last copy stops one step short of End Opacity (After Effects
+                    // 2026, case 709: 3 copies, End Opacity 40 give 100 %, 80 %, 60 %).
+                    let t = if copies > 0.0 { (i as f64 / copies) as f32 } else { 0.0 };
                     let opk = so + (eo - so) * t;
                     let partial = if i + 1 == n && copies.fract() > 0.0 { copies.fract() as f32 } else { 1.0 };
                     for d in &base_draws {

@@ -607,38 +607,44 @@ pub struct FillInput {
     pub references: Vec<(usize, Image)>,
 }
 
-/// Trace pixel (x, y) of frame `t` through `flows` (`step` = +1 forward with `fwd`, −1 backward
-/// with `bwd`) to the nearest frame where it is visible: (sampled colour, frames travelled).
-fn trace(
-    t: usize,
+/// Shared frame and flow data for tracing pixels through a sequence.
+struct TraceContext<'a> {
+    fwd: &'a [Flow],
+    bwd: &'a [Flow],
+    known: &'a (dyn Fn(usize, i64, i64) -> bool + Sync),
+    frames: &'a [&'a Image],
+    max: usize,
+}
+
+/// Starting frame, point, and direction for a flow trace.
+struct TraceStart {
+    frame: usize,
     x: f64,
     y: f64,
     step: i64,
-    fwd: &[Flow],
-    bwd: &[Flow],
-    known: &dyn Fn(usize, i64, i64) -> bool,
-    frames: &[&Image],
-    max: usize,
-) -> Option<([f32; 4], usize)> {
-    let n = frames.len();
-    let (w, h) = (frames[0].width as f64, frames[0].height as f64);
-    let (mut px, mut py) = (x, y);
-    let mut k = t as i64;
-    for d in 1..=max {
-        let v = if step > 0 {
+}
+
+/// Trace a point to the nearest visible frame: (sampled colour, frames travelled).
+fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usize)> {
+    let n = context.frames.len();
+    let (w, h) = (context.frames[0].width as f64, context.frames[0].height as f64);
+    let (mut px, mut py) = (start.x, start.y);
+    let mut k = start.frame as i64;
+    for d in 1..=context.max {
+        let v = if start.step > 0 {
             if k as usize + 1 >= n {
                 return None;
             }
-            fwd[k as usize].at(px, py)
+            context.fwd[k as usize].at(px, py)
         } else {
             if k == 0 {
                 return None;
             }
-            bwd[k as usize - 1].at(px, py)
+            context.bwd[k as usize - 1].at(px, py)
         };
         px += v[0] as f64;
         py += v[1] as f64;
-        k += step;
+        k += start.step;
         if px < 0.0 || py < 0.0 || px >= w || py >= h {
             return None;
         }
@@ -646,9 +652,9 @@ fn trace(
         let (x0, y0) = ((px - 0.5).floor() as i64, (py - 0.5).floor() as i64);
         let ok = [(x0, y0), (x0 + 1, y0), (x0, y0 + 1), (x0 + 1, y0 + 1)]
             .iter()
-            .all(|&(xx, yy)| known(k as usize, xx.clamp(0, w as i64 - 1), yy.clamp(0, h as i64 - 1)));
+            .all(|&(xx, yy)| (context.known)(k as usize, xx.clamp(0, w as i64 - 1), yy.clamp(0, h as i64 - 1)));
         if ok {
-            return Some((frames[k as usize].sample_bilinear_clamped(px, py), d));
+            return Some((context.frames[k as usize].sample_bilinear_clamped(px, py), d));
         }
     }
     None
@@ -697,6 +703,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
     // 2. Propagation (and the lighting-correction border ring).
     let refs: Vec<&Image> = frames.iter().collect();
     let known = |k: usize, x: i64, y: i64| !holes[k][y as usize * w + x as usize];
+    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &refs, max: n };
     let ring_r = 2usize;
     let propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
@@ -708,8 +715,8 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             }
             let sample = |i: usize| -> Option<[f32; 4]> {
                 let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
-                let f = trace(t, x, y, 1, &fwd, &bwd, &known, &refs, n);
-                let b = trace(t, x, y, -1, &fwd, &bwd, &known, &refs, n);
+                let f = trace(&trace_context, TraceStart { frame: t, x, y, step: 1 });
+                let b = trace(&trace_context, TraceStart { frame: t, x, y, step: -1 });
                 match (f, b) {
                     (Some((a, da)), Some((c, dc))) => {
                         let (wa, wc) = (1.0 / da as f32, 1.0 / dc as f32);

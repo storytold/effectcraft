@@ -6,6 +6,10 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use egui::FontTweak;
+#[cfg(not(target_arch = "wasm32"))]
+use egui::emath::GuiRounding as _;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +128,16 @@ impl Tokens {
     /// are off.
     pub fn grad_top(&self, c: Color32) -> Color32 {
         if self.gradients { c.lerp_to_gamma(Color32::WHITE, 0.06) } else { c }
+    }
+
+    /// The tokens a property's value fields use (#1306): with an expression driving the property
+    /// (`expression`, [`Property::has_expression`]) its values show in the expression colour, red
+    /// as in After Effects, hovered and dragged too; otherwise these tokens. For the values only:
+    /// the name, stopwatch and swatches keep the ordinary tokens.
+    ///
+    /// [`Property::has_expression`]: effectcraft_engine::project::Property::has_expression
+    pub fn for_value(self, expression: bool) -> Tokens {
+        if expression { Tokens { hot_text: self.expr_text, accent_hover: self.expr_text, ..self } } else { self }
     }
 }
 
@@ -311,6 +325,8 @@ impl Tokens {
     }
 }
 
+/// The default label colours, one RGB colour per [`effectcraft_color::Label`] in
+/// `Label::ALL` order.
 fn default_labels() -> [Color32; 17] {
     effectcraft_color::Label::ALL.map(|l| {
         let [r, g, b] = l.rgb();
@@ -322,9 +338,13 @@ static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regula
 static INTER_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Inter-Medium.ttf");
 static INTER_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
 static JETBRAINS_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+/// Chrome symbols (`✔` U+2714, `▣` U+25A3, …) that Inter, Inter Medium/SemiBold and
+/// JetBrains Mono do not cover. 0.37's default font set no longer includes the old emoji
+/// fonts, and named families (`medium`, `semibold`) never received egui's default fallbacks.
+static NOTO_SYMBOLS2: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSymbols2-Regular.ttf");
 
 /// Install fonts (Inter, Inter Medium/SemiBold, JetBrains Mono) and egui visuals. `language` is the
-/// resolved interface language from [`crate::i18n::language`] (`en`, `ja`, `zh-hans` or `zh-hant`),
+/// resolved interface language from `crate::i18n::language` (`en`, `ja`, `zh-hans` or `zh-hant`),
 /// not the stored `general.language` preference: `system` is already resolved there, so a Chinese
 /// system draws Chinese with the default setting. The CJK fallback that draws the interface's own
 /// script is registered first, so a Chinese interface is drawn by a Chinese face and a Japanese one
@@ -336,16 +356,20 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
     fonts.font_data.insert("inter-medium".into(), Arc::new(FontData::from_static(INTER_MEDIUM)));
     fonts.font_data.insert("inter-semibold".into(), Arc::new(FontData::from_static(INTER_SEMIBOLD)));
     fonts.font_data.insert("jbmono".into(), Arc::new(FontData::from_static(JETBRAINS_MONO)));
+    fonts.font_data.insert("noto-symbols2".into(), Arc::new(FontData::from_static(NOTO_SYMBOLS2)));
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".into());
     fonts.families.insert(FontFamily::Name("semibold".into()), vec!["inter-semibold".into(), "inter".into()]);
     fonts.families.insert(FontFamily::Name("medium".into()), vec!["inter-medium".into(), "inter".into()]);
     // Inter and egui's own fallbacks have no small triangles (the `▸` of "File ▸ Import"), which
     // would draw as missing-glyph boxes: JetBrains Mono fills in the symbols the others lack.
+    // Noto Sans Symbols 2 follows it for the check/box glyphs (`✔`, `▣`) that JetBrains Mono
+    // lacks; without it, named families such as `medium` fall straight through to tofu.
     for (family, stack) in &mut fonts.families {
         if *family != FontFamily::Monospace {
             stack.push("jbmono".into());
         }
+        stack.push("noto-symbols2".into());
     }
     install_script_fallbacks(&mut fonts, language);
     ctx.set_fonts(fonts);
@@ -370,7 +394,49 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
     ('ಕ', "kannada-system"),
     ('ക', "malayalam-system"),
     ('ก', "thai-system"),
+    ('ა', "georgian-system"),
 ];
+
+/// The size the fallback baseline correction is derived at. The correction is an em fraction, so the
+/// value holds at every interface size; any size in the interface's range gives the same answer.
+#[cfg(not(target_arch = "wasm32"))]
+const BASELINE_METRICS_PX: f32 = 12.0;
+
+/// A face's ascent and row height at `px`, rounded the way epaint rounds them: ascent, descent and
+/// line gap separately to 1/32, then `ascent + descent + line_gap` (epaint's descent is negative,
+/// this one is positive).
+#[cfg(not(target_arch = "wasm32"))]
+fn ascent_and_height(m: &effectcraft_text::fonts::VMetrics) -> (f32, f32) {
+    let ascent = m.ascent.round_ui();
+    let descent = m.descent.round_ui();
+    let line_gap = m.line_gap.round_ui();
+    (ascent, ascent + descent + line_gap)
+}
+
+/// The `FontTweak` that puts a fallback face's glyphs on the row font's baseline.
+///
+/// epaint draws a glyph at `A_face + 0.5·(H_row − H_face)` (`galley_from_rows` in epaint's
+/// `text_layout.rs`), where `A` and `H` are the ascent and the row height of the face that draws the
+/// glyph and of the row's own font, both from `styled_metrics` in epaint's `font.rs`. Shifting the
+/// face by `(A_row − A_face) − 0.5·(H_row − H_face)` cancels the offset; as an em fraction one
+/// number serves every size, because `FontTweak` applies `size · y_offset_factor`.
+///
+/// The same expression also carries `valign · (max_row_height − line_height)`, which cancels here:
+/// every glyph of a row takes the section font's row height, so it is the same term for the Latin
+/// and the fallback glyph. The remaining `snap_to_pixel` difference is likewise shared and cancels.
+/// (#1309)
+///
+/// The UI families do not share a row font — Proportional uses Inter, Monospace JetBrains Mono —
+/// and their factors differ by 0.0026 em, which is 0.03 px at 12 pt: inside the 1/32 that is already
+/// rounded away above, so one factor per face is enough. The test
+/// `fallback_glyphs_sit_on_the_row_baseline` pins the result.
+#[cfg(not(target_arch = "wasm32"))]
+fn baseline_tweak(row: &effectcraft_text::fonts::Face, face: &effectcraft_text::fonts::Face) -> FontTweak {
+    let px = BASELINE_METRICS_PX;
+    let (a_row, h_row) = ascent_and_height(&row.metrics(px));
+    let (a_face, h_face) = ascent_and_height(&face.metrics(px));
+    FontTweak { y_offset_factor: ((a_row - a_face) - 0.5 * (h_row - h_face)) / px, ..Default::default() }
+}
 
 /// Register the system fallbacks for scripts the bundled fonts lack in every font family, and
 /// return their names in registration order (empty when nothing installed covers a probe, so a
@@ -404,31 +470,83 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         // Han text follows the interface language, not the operating system's locale.
         fonts::set_cjk_locale(cjk_locale(language));
         let base = fonts::resolve("Inter", "Regular").face;
+        let base_face = fonts::face(base);
         let han = (han_probe(language), "chinese-system");
         let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
         let mut names = Vec::new();
         let mut seen = Vec::new();
-        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)) {
-            let id = fonts::fallback_for(probe, base);
-            if seen.contains(&id) {
+        // A font covering one Han probe may be a sparse subset. Register additional faces
+        // needed by the actual interface catalog instead of assuming whole-script coverage.
+        let extra = if is_chinese(language) { crate::i18n::catalog_characters(language) } else { Vec::new() };
+        let extra: Vec<_> = extra.into_iter().filter(|ch| *ch >= '\u{2e80}').map(|ch| (ch, "catalog-system")).collect();
+        // 256-character blocks where a catalog character found no face: with nothing installed
+        // covering them, each lookup would read every installed font file again.
+        let mut uncovered_blocks = std::collections::HashSet::new();
+        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)).chain(&extra) {
+            let catalog = name == "catalog-system";
+            if catalog && (uncovered_blocks.contains(&(probe as u32 >> 8)) || seen.iter().any(|&id| fonts::face(id).has_char(probe))) {
                 continue;
             }
+            // The interface asks for the platform's UI face first; the order a composed frame
+            // renders with is `fonts::fallback_for`'s and is not touched here. Another context may
+            // install a different language concurrently, so the shared fallback is asked with this
+            // context's own locale rather than the global request.
+            let id = interface_fallback_candidates(name, language)
+                .iter()
+                .find_map(|family| {
+                    let r = fonts::resolve(family, "Regular");
+                    (!r.missing && fonts::face(r.face).has_char(probe)).then_some(r.face)
+                })
+                .unwrap_or_else(|| fonts::fallback_for_locale(probe, base, cjk_locale(language)));
             let face = fonts::face(id);
             if !face.has_char(probe) {
+                if catalog {
+                    uncovered_blocks.insert(probe as u32 >> 8);
+                }
                 continue; // nothing installed covers this script
+            }
+            if seen.contains(&id) {
+                continue;
             }
             let Some(font) = face.font() else { continue };
             seen.push(id);
             // Use the already-read, parsed bytes rather than reading a font file twice.
             let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
             data.index = face.info.index;
-            family_fonts.font_data.insert(name.to_string(), Arc::new(data));
+            let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
+            data.tweak = baseline_tweak(&base_face, &face);
+            family_fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in family_fonts.families.values_mut() {
                 family.push(name.to_string());
             }
             names.push(name.to_string());
         }
         names
+    }
+}
+
+/// The faces the interface asks for before it settles on the one a composed frame renders with.
+///
+/// Windows ships a UI variant of its Japanese and Chinese families - `Meiryo`/`Meiryo UI`, `Yu
+/// Gothic`/`Yu Gothic UI`, `MS Gothic`/`MS UI Gothic`, `Microsoft YaHei`/`Microsoft YaHei UI`,
+/// `Microsoft JhengHei`/`Microsoft JhengHei UI` - and its own link table for `Segoe UI`
+/// (`FontLink\SystemLink`) picks the UI one for what it draws on screen. `PMingLiU` is the one face
+/// here that is not a sibling: it is `MingLiU`'s proportional relative, and proportional spacing is
+/// what makes the chrome read better in it.
+///
+/// Only the interface takes this order. `fonts::fallback_for` keeps the order a document renders
+/// with, so an existing project's output does not move when the chrome changes.
+#[cfg(not(target_arch = "wasm32"))]
+fn interface_fallback_candidates(name: &str, language: &str) -> &'static [&'static str] {
+    match (name, cjk_locale(language)) {
+        // Kana, and the Han ideographs of a Japanese interface: the language asks for the Japanese
+        // face, so its UI sibling is the one the platform would draw chrome with.
+        ("japanese-system", _) | ("chinese-system", "ja") => &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"],
+        ("chinese-system", "zh-hant") => &["Microsoft JhengHei UI", "PMingLiU"],
+        ("chinese-system", "zh-hans") => &["Microsoft YaHei UI"],
+        // The other scripts have no UI variant, and their shared order already picks the face made
+        // for the script - the one that draws it correctly at all.
+        _ => &[],
     }
 }
 
@@ -443,9 +561,9 @@ fn cjk_locale(language: &str) -> &str {
 }
 
 /// The Han character that picks the Chinese fallback face. A Simplified Chinese interface asks for
-/// a simplified-only hanzi: a Japanese face covers the shared ideographs (文) but not 页, 选 or 删,
-/// and the fallback takes a face already loaded first, so the Japanese face loaded for kana would
-/// draw the Chinese interface with boxes (#1141).
+/// a hanzi used by its catalog. Some Japanese faces also cover 页 while lacking 选 or 删, so
+/// coverage of this probe alone is not enough: the fallback must use the interface's own language
+/// policy, even while another context is installing Japanese fonts (#1141).
 #[cfg(not(target_arch = "wasm32"))]
 fn han_probe(language: &str) -> char {
     if language == "zh-hans" { '页' } else { '文' }
@@ -530,6 +648,7 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod script_font_tests {
+    use super::{SCRIPT_PROBES, interface_fallback_candidates};
     use effectcraft_text::fonts;
 
     /// Whether an installed face covers `probe` (else the glyph check is skipped).
@@ -595,9 +714,35 @@ mod script_font_tests {
         }
     }
 
-    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. The English
-    /// interface had already loaded a Japanese face for kana, and that face covers the Han probe,
-    /// so it became the Chinese fallback too, without the simplified-only hanzi.
+    #[test]
+    fn the_interface_asks_for_the_platforms_ui_faces() {
+        // The face a window draws its own chrome with, which is not the one a composed frame
+        // renders with: the two orders are deliberately separate.
+        let ja = &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"][..];
+        assert_eq!(interface_fallback_candidates("japanese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hans"), &["Microsoft YaHei UI"][..]);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hant"), &["Microsoft JhengHei UI", "PMingLiU"][..]);
+        // Every other script the install probes has no UI variant, so it keeps the shared order.
+        for &(_, name) in SCRIPT_PROBES.iter() {
+            assert!(interface_fallback_candidates(name, "en").is_empty(), "{name} asked for a UI face");
+        }
+    }
+
+    /// The Georgian interface draws its Mkhedruli text with an installed Georgian face (Sylfaen,
+    /// SF Georgian, Noto Sans Georgian…): Inter has no Georgian, so the labels showed as boxes.
+    #[test]
+    fn installed_georgian_fallback_draws_the_georgian_interface() {
+        if !installed('ა') {
+            eprintln!("no Georgian system font installed; skipping glyph coverage");
+            return;
+        }
+        assert_drawn("ka", "კომპოზიციაფენასაკვანძოკადრიეფექტიპარამეტრები");
+    }
+
+    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. A Japanese face
+    /// can cover the Han probe while lacking other catalog characters. The context must keep its
+    /// own language policy even when another context installs Japanese fallbacks concurrently.
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
@@ -609,7 +754,7 @@ mod script_font_tests {
         let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
         let missing: String = ctx.fonts_mut(|fonts| {
             let replacement = fonts.layout_no_wrap("\u{10ffff}".into(), font.clone(), egui::Color32::WHITE).rows[0].glyphs[0].uv_rect;
-            // Simplified-only hanzi of the zh-hans catalog (选择, 删除, 图层, 设置, 导入, 页面).
+            // Representative hanzi of the zh-hans catalog (选择, 删除, 图层, 设置, 导入, 页面).
             "选删层设导页"
                 .chars()
                 .filter(|ch| {
@@ -649,6 +794,64 @@ mod script_font_tests {
                 assert_ne!((uv.min, uv.max), (missing.min, missing.max), "a real glyph, not the replacement");
             }
             assert_ne!((meem.uv_rect.min, meem.uv_rect.max), (isolated.min, isolated.max), "the meem takes its initial form");
+        });
+    }
+
+    /// A fallback face's glyphs sit on the row font's baseline, in every UI family and at every
+    /// interface size. (#1309)
+    ///
+    /// `A` stands in for the row's baseline: epaint exposes none, but a capital without a descender
+    /// has its ink bottom on the baseline, so its ink bottom *is* the row's baseline. A glyph with a
+    /// descender (`g`) or a round one with an overshoot (`O`) would quietly stop holding, so keep `A`
+    /// as the Latin half of this pair.
+    ///
+    /// Both glyphs of `Aあ` end on the baseline, so their ink bottoms agree up to the difference
+    /// between the two outlines themselves - the kana reaches a little below the Latin letter in the
+    /// Japanese faces. Without the correction the kana sits 3 pt high at 12 pt (measured), so the
+    /// tolerance below separates "the correction is applied" from "it is missing"; it is not a claim
+    /// about the outlines. Two pixels per point, because epaint truncates a glyph's box height to
+    /// whole pixels, which would otherwise put up to a point of noise on the measurement.
+    #[test]
+    fn fallback_glyphs_sit_on_the_row_baseline() {
+        if !installed('\u{3042}') {
+            eprintln!("no Japanese system font installed; skipping the baseline check");
+            return;
+        }
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(2.0);
+        super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "ja");
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let bottom = |g: &egui::epaint::text::Glyph| g.pos.y + g.uv_rect.offset.y + g.uv_rect.size.y;
+        ctx.fonts_mut(|fonts| {
+            for family in [
+                egui::FontFamily::Proportional,
+                egui::FontFamily::Monospace,
+                egui::FontFamily::Name("medium".into()),
+                egui::FontFamily::Name("semibold".into()),
+            ] {
+                for size in [12.0_f32, 15.0, 18.0] {
+                    let font = egui::FontId::new(size, family.clone());
+                    let galley = fonts.layout_no_wrap("A\u{3042}".into(), font, egui::Color32::WHITE);
+                    let row = &galley.rows[0].glyphs;
+                    assert_eq!(row.len(), 2, "A\u{3042} should shape to two glyphs");
+                    let (latin, kana) = (bottom(&row[0]), bottom(&row[1]));
+                    let drift = kana - latin;
+                    // Without the correction the kana sits 3-5 pt *above* the Latin ink, so the sign is
+                    // what tells the two apart. With it, the kana reaches a little *below* the Latin
+                    // one, by however far the face's kana overshoot past the baseline - measured at
+                    // 1.94 pt for Noto Sans CJK JP against Yu Gothic's 0.4 - plus up to half a point of
+                    // whole-point rounding in `pos.y` for each glyph.
+                    assert!(
+                        drift > -0.5,
+                        "the kana sits {drift:.2} pt above the Latin baseline at {size} pt in {family:?} (latin {latin}, kana {kana}); the fallback tweak is missing or wrong"
+                    );
+                    assert!(
+                        drift < 2.5,
+                        "the kana sits {drift:.2} pt below the Latin baseline at {size} pt in {family:?} (latin {latin}, kana {kana}); the fallback tweak is too large"
+                    );
+                }
+            }
         });
     }
 }
@@ -708,7 +911,8 @@ mod tests {
             // another test has loaded a system face without `◻` (the fallback tries loaded faces first).
             let uv = |s: String| ctx.fonts_mut(|f| f.layout_no_wrap(s, id.clone(), egui::Color32::WHITE).rows[0].glyphs[0].uv_rect);
             let missing = uv("\u{10ffff}".into());
-            for c in "▸•›·▶◀●○⚠…×".chars() {
+            // Every chrome symbol the panels, menus, shortcut labels and buttons draw.
+            for c in "✔▣✓⚠▶◀▸●○…×›•·−←→↑↓⌘⇧⌥⌃".chars() {
                 let drawn = uv(c.to_string());
                 assert_ne!((drawn.min, drawn.max), (missing.min, missing.max), "{c} has no glyph in {id:?}");
             }
@@ -729,7 +933,7 @@ mod tests {
         }
         let Some(font) = face.font() else { return };
         let bytes = font.data().as_bytes();
-        let covered = fonts_def.font_data.values().any(|d| d.font.as_ref() == bytes && d.index == face.info.index);
+        let covered = fonts_def.font_data.values().any(|d| d.bytes() == bytes && d.index == face.info.index);
         assert!(covered, "a face covering Hangul must be registered with egui");
     }
 
@@ -745,7 +949,7 @@ mod tests {
             .iter()
             .map(|name| {
                 let data = fonts.font_data.get(name).unwrap_or_else(|| panic!("{name} is missing its font data"));
-                (data.font.as_ref(), data.index)
+                (data.bytes(), data.index)
             })
             .collect();
         for (i, a) in faces.iter().enumerate() {

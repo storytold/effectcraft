@@ -13,10 +13,15 @@ const W: u32 = 200;
 const H: u32 = 100;
 
 fn setup() -> (Project, ItemId, Comp) {
+    setup_sized(W, H)
+}
+
+/// [`setup`] with a `w`×`h` comp.
+fn setup_sized(w: u32, h: u32) -> (Project, ItemId, Comp) {
     let mut p = Project::default();
     // Exact float maths; 8/16 bpc quantisation has its own tests (tests_color).
     p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
-    let comp = Comp::new(W, H, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let comp = Comp::new(w, h, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
     (p, cid, comp)
 }
@@ -344,10 +349,37 @@ fn shadow_darkness_and_accepts_off() {
     assert!(close(v, 0.5, 1e-3), "no shadow accepted: {v}");
 }
 
+#[test]
+fn shadow_diffusion_is_a_soft_ramp_not_copies() {
+    // #2444: a wide Shadow Diffusion stamped 3 × 3 copies of the caster, so the penumbra stepped
+    // through three flat levels instead of ramping smoothly from lit to shadowed.
+    let (mut p, cid, comp) = setup();
+    let mut recv = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 400, 200, [100.0, 50.0, 100.0]);
+    no_specular(&mut recv);
+    let mut caster = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 100, 200, [40.0, 50.0, 0.0]);
+    set(&mut caster, "materialOptions/castsShadows", Value::Enum(2)); // Only: invisible caster
+    let mut l = light(&mut p, &comp, LightKind::Parallel, [100.0, 50.0, -500.0]);
+    set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
+    set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
+    // 100 px to the caster over the parallel light's 1000: a 15 px penumbra radius.
+    set(&mut l, "lightOptions/shadowDiffusion", Value::Scalar(150.0));
+    push(&mut p, cid, l);
+    push(&mut p, cid, caster);
+    push(&mut p, cid, recv);
+    let img = render(&p, cid);
+    let row: Vec<f32> = (0..i64::from(W)).map(|x| img.get(x, 50)[0]).collect();
+    // The row crosses both vertical edges of the caster's shadow: lit, ramp, shadowed, ramp, lit.
+    assert!(row.iter().any(|v| *v < 0.01) && close(row[W as usize - 1], 0.5, 1e-3), "shadow and light: {row:?}");
+    let ramp = row.iter().filter(|v| **v > 0.02 && **v < 0.48).count();
+    assert!(ramp >= 16, "two penumbras several pixels wide: {row:?}");
+    let step = row.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+    assert!(step < 0.08, "no jumps between copies of the caster (largest step {step}): {row:?}");
+}
+
 // ---------------------------------------------------------------- cameras
 
 fn camera(p: &mut Project, comp: &Comp) -> Layer {
-    build::layer(p, comp, "Camera", LayerSource::Camera, (W, H), None)
+    build::layer(p, comp, "Camera", LayerSource::Camera, (comp.width, comp.height), None)
 }
 
 #[test]
@@ -423,9 +455,155 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     assert!(b.get(66, 50)[3] > 0.01);
 }
 
+/// A non-finite Focus Distance doesn't reach the blur: the camera focuses on the property's
+/// default plane (`zoom`) instead.
+#[test]
+fn dof_falls_back_when_focus_distance_is_not_finite() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let (mut p, cid, comp) = setup();
+        let mut cam = camera(&mut p, &comp);
+        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(bad));
+        let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
+        push(&mut p, cid, cam);
+        push(&mut p, cid, s);
+        let cp = p.comp(cid).unwrap();
+        let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
+        let cs = crate::three_d::camera::layer_camera(&ctx, &cp.layers[0]);
+        let f = cs.dof.unwrap().focus;
+        assert!((f - zoom()).abs() < 1e-9, "{bad}: evaluated to {f}, expected the fallback to zoom {}", zoom());
+        // The z = 0 plane is in focus: hard edge, finite pixels.
+        let img = render(&p, cid);
+        assert!(img.get(71, 50)[3] > 0.99 && img.get(69, 50)[3] < 0.01, "{bad}: the edge should be hard");
+        assert!(img.data.iter().all(|px| px.iter().all(|c| c.is_finite())), "{bad}: non-finite pixels");
+    }
+}
+
+/// The Classic 3D blur stays bounded for degenerate inputs: a 0%-scaled 3D layer off the focal
+/// plane (e.g. the first frame of a scale-in) or a huge but finite Focus Distance asks for a
+/// radius of billions of buffer pixels, whose padded buffer can't be allocated.
+#[test]
+fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
+    let scene = |focus: f64, scale: f64| {
+        let (mut p, cid, comp) = setup();
+        let mut cam = camera(&mut p, &comp);
+        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
+        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
+        push(&mut p, cid, cam);
+        push(&mut p, cid, s);
+        render(&p, cid)
+    };
+    let finite = |img: &effectcraft_raster::Image| img.data.iter().all(|px| px.iter().all(|c| c.is_finite()));
+    // A 0%-scaled layer 10 px off the focal plane: an ordinary defocus times 1/sx (sx = 1e-9).
+    assert!(finite(&scene(zoom() + 10.0, 0.0)), "zero-scaled: non-finite pixels");
+    // Huge but finite Focus Distances (typed in, or a large expression result): the blur is as
+    // large as the buffer budget allows, never refused (which would render the layer sharp).
+    // 1e307 overflows the circle of confusion itself to infinity: still the largest blur.
+    for focus in [1.0e12, 1.0e307] {
+        let img = scene(focus, 100.0);
+        assert!(finite(&img), "focus {focus:e}: non-finite pixels");
+        assert!(img.get(100, 50)[3] < 0.5, "focus {focus:e}: the layer should be spread out, not sharp ({})", img.get(100, 50)[3]);
+    }
+}
+
+/// The blur radius map of a plane: a 0%-scaled plane is degenerate on screen and isn't blurred;
+/// any other radius stays within the buffer budget's cap.
+#[test]
+fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
+    let radii = |focus: f64, scale: f64| {
+        let (mut p, cid, comp) = setup();
+        let mut cam = camera(&mut p, &comp);
+        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
+        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
+        push(&mut p, cid, cam);
+        push(&mut p, cid, s);
+        let cp = p.comp(cid).unwrap();
+        let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
+        let cs = super::camera::layer_camera(&ctx, &cp.layers[0]);
+        let dof = cs.dof.unwrap();
+        let cap = super::compose::dof_radius_cap(&dof, 60, 60);
+        (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (60, 60), [0.0; 2], 1.0, cap), cap)
+    };
+    let (r, _) = radii(zoom() + 10.0, 0.0);
+    assert!(r.iter().all(|&r| r == 0.0), "a 0%-scaled plane is not blurred");
+    let (r, cap) = radii(1.0e12, 100.0);
+    assert!(cap > 1000.0, "a 60×60 buffer may blur by well over 1000 px: {cap}");
+    assert!(r.iter().all(|&r| r as f64 <= cap && r as f64 > cap - 1.0), "huge focus: every radius at the cap {cap}");
+}
+
+/// Two layers that look the same on screen (400×100 at 100%, 1600×400 at 25%) at the same depth
+/// blur by the same amount on screen: the radius bound must not depend on the layer's scale.
+#[test]
+fn dof_blur_is_independent_of_layer_scale() {
+    let ramp = |w: u32, h: u32, scale: f64| {
+        let (mut p, cid, comp) = setup_sized(800, 400);
+        let zoom = 800.0 * 50.0 / 36.0;
+        let mut cam = camera(&mut p, &comp);
+        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
+        // coc = aperture·|z − f| / z: a 40 px comp radius on the z = 0 plane (depth = zoom).
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(zoom + 2.0 * 40.0 * zoom / 200.0));
+        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], w, h, [400.0, 200.0, 0.0]);
+        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
+        push(&mut p, cid, cam);
+        push(&mut p, cid, s);
+        let img = render(&p, cid);
+        soft_count(&img, (0..400).map(|x| (x, 200)))
+    };
+    let (full, quarter) = (ramp(400, 100, 100.0), ramp(1600, 400, 25.0));
+    assert!(full > 60, "the out-of-focus edge should be soft: {full}");
+    assert!(full.abs_diff(quarter) <= 2, "same on-screen layer, same depth: {full} px at 100% vs {quarter} px at 25%");
+}
+
+/// The same frame at Full and Half resolution shows the same blur (in comp pixels). The radius
+/// (~100 px) is large so that any bound that depends on the resolution would show.
+#[test]
+fn dof_blur_matches_across_render_resolutions() {
+    let (mut p, cid, comp) = setup_sized(800, 400);
+    let zoom = 800.0 * 50.0 / 36.0;
+    let mut cam = camera(&mut p, &comp);
+    set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
+    set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(2.0 * zoom));
+    let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 400, 100, [400.0, 200.0, 0.0]);
+    push(&mut p, cid, cam);
+    push(&mut p, cid, s);
+    let ramp = |scale: f64| {
+        let img = render_frame(&p, cid, Tick::ZERO, scale);
+        let (w, h) = (img.width as i64, img.height as i64);
+        soft_count(&img, (0..w / 2).map(|x| (x, h / 2))) as f64 / scale
+    };
+    let (full, half) = (ramp(1.0), ramp(0.5));
+    assert!(full > 150.0, "a ~100 px radius must not be clamped: {full} comp px");
+    assert!((full - half).abs() <= 4.0, "Full {full} vs Half {half} comp px");
+}
+
+/// `Dof::coc` treats a non-finite focus or depth as in focus.
+#[test]
+fn dof_coc_is_zero_for_non_finite_inputs() {
+    let d = |focus: f64| super::camera::Dof { focus, aperture: 50.0, blur_level: 1.0, iris: Default::default(), highlight: Default::default() };
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(d(bad).coc(500.0), 0.0, "focus {bad}");
+        assert_eq!(d(400.0).coc(bad), 0.0, "depth {bad}");
+    }
+    assert!(d(400.0).coc(500.0) > 0.0);
+}
+
+/// Pixels among `pts` whose alpha is strictly between 0.05 and 0.95.
+fn soft_count(img: &effectcraft_raster::Image, pts: impl Iterator<Item = (i64, i64)>) -> usize {
+    pts.filter(|&(x, y)| (0.05..0.95).contains(&img.get(x, y)[3])).count()
+}
+
 /// Pixels in column `x` whose alpha is strictly between 0.05 and 0.95.
 fn soft_px(img: &effectcraft_raster::Image, x: i64) -> usize {
-    (0..img.height as i64).filter(|&y| (0.05..0.95).contains(&img.get(x, y)[3])).count()
+    soft_count(img, (0..img.height as i64).map(|y| (x, y)))
 }
 
 #[test]

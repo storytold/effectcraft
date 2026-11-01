@@ -8,15 +8,19 @@
 </p>
 
 
+<p align="center">
+  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="EffectCraft icon: an engraved unicorn on a pink tile">
+</p>
+
 <h1 align="center">EffectCraft</h1>
 
 <p align="center">
-  <b>Motion graphics and visual effects; an open-source, clean-room reimplementation of Adobe After Effects, rebuilt in pure Rust.</b>
+  <b>Motion graphics and visual effects; an open-source, professional motion graphics and visual effects studio, built in pure Rust.</b>
 </p>
 
 <p align="center">
-  A free, open-source compositor in the spirit of After Effects: compositions, layers,
-  keyframes, 306 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
+  A free, open-source compositor: compositions, layers,
+  keyframes, 308 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
   Windows and Linux, and in the browser. Young, moving fast, and already usable.
 </p>
 
@@ -24,6 +28,9 @@
   <img alt="Status: young and moving fast" src="https://img.shields.io/badge/status-young%20and%20moving%20fast-e0368f?style=flat-square">
   <img alt="Written in Rust" src="https://img.shields.io/badge/rust-1.95%2B-b0206c?style=flat-square&logo=rust&logoColor=white">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-555?style=flat-square">
+  <br>
+  <a href="https://sonarcloud.io/project/overview?id=storytold_effectcraft"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/storytold/effectcraft?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
 </p>
 
 <p align="center">
@@ -64,27 +71,29 @@
 ## What EffectCraft is
 
 EffectCraft is for animated titles, motion graphics and compositing work: the kind of thing
-people reach for After Effects to do. You build a composition out of layers (solids, shapes,
+motion designers and VFX artists need. You build a composition out of layers (solids, shapes,
 text, footage, other compositions), animate their properties with keyframes, stack effects on
 them and render the result.
 
-The aim is to feel familiar to anyone who has used After Effects, with the same panels (Project,
-Composition, Timeline, Effect Controls, Effects & Presets) and the same keyframe behaviour, and
-then to go further in a few places where it matters to us:
+The interface feels natural and responsive, with dedicated panels (Project, Composition, Timeline,
+Layer, Footage, Effect Controls, Tools, Preview, Effects & Presets, Audio, Info, Paragraph,
+Character, Align, Progress, Render Queue) and standard motion graphics shortcuts, going further in
+a few places where it matters to us:
 
 - **Lottie import and export built in**, so animations can go straight to the web and apps
   without a plugin.
 - **A project file you can read.** Projects are versioned JSON (`.ecproj`), so they diff cleanly
   in version control.
-- **Everything is scriptable.** Every menu item, timeline drag and property edit goes through one
-  command registry, so the same actions are reachable from a command line, a JSON control
-  channel and an MCP server for agents.
+- **Everything is scriptable.** Menu actions, timeline edits and property changes are exposed as
+  commands. Engine commands are available through the CLI, JSON control channel and MCP;
+  UI-only commands use the frontend dispatcher and can be invoked through the control channel
+  or an attached MCP bridge.
 - **No FFmpeg.** Video and audio decoding and encoding are pure Rust: FilmCraft's codecs and
   EffectCraft's own VP9, AV1, HEVC and Opus encoders.
 
 ## Animate
 
-The panels, menus and shortcuts follow After Effects, so your muscle memory carries over:
+The panels, menus and shortcuts follow standard motion design conventions:
 Project, Composition, Timeline, Effect Controls, Properties, Effects & Presets, Character,
 Paragraph, Align, Info, Preview, Audio and the Render Queue, docked the way you expect. Drag
 footage, comps and effects between them: onto the comp viewer, where they land under the pointer,
@@ -102,7 +111,7 @@ or into the Timeline, between layers and at the time you point to.
   feather, expansion and vertex editing in the viewer.
 - **Text:** point and paragraph text with real shaping in any font installed on your machine, the
   Character and Paragraph panels, and text animators with range selectors.
-- **Expressions:** JavaScript with the After Effects object model (`wiggle`, `loopOut`,
+- **Expressions:** JavaScript with the standard motion expressions model (`wiggle`, `loopOut`,
   `thisComp.layer("…")`, vector maths on arrays), an inline editor and the pick-whip.
 - **Timeline like you know it:** twirl layers open to Transform, masks, effects and the rest; drag
   rows to reorder layers; rename with Enter or a double-click; the property shortcuts (A, P, S,
@@ -118,9 +127,9 @@ or into the Timeline, between layers and at the time you point to.
 
 ## Effects
 
-306 effects (every one of After Effects' 298, and more) across its categories, each with its parameter names, order and
-defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, Lumetri
-Color…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
+308 built-in effects across its categories, each with its parameter names, order and
+defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
+color-grading panel…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
 **simulation** (CC Particle World, CC Rainfall, Shatter, Card Dance, Caustics, Wave World…),
 stylize (Glow, CC Glass…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
@@ -134,7 +143,7 @@ overlays, Stroke) with Global Light. Preview plays audio in sync, with meters an
 
 ## 3D
 
-Classic 3D the way After Effects does it: 3D layers with orientation and material options,
+Classic 3D compositing: 3D layers with orientation and material options,
 one- and two-node **cameras** with depth of field, **lights** (parallel, spot, point, ambient)
 with soft ray-traced shadows, layers that intersect correctly, orbit, pan and dolly camera
 tools, and Front, Top, Left and Custom views.
@@ -145,9 +154,9 @@ tools, and Front, Top, Left and Custom views.
 
 ## Export
 
-A Render Queue like After Effects', with Render Settings and Output Modules: **H.264** MP4 and
+A dedicated Render Queue, with Render Settings and Output Modules: **H.264** MP4 and
 **ProRes** MOV (Proxy to 4444 XQ with alpha) with audio, **HEVC** (Main / Main 10) and **AV1**
-MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, TIFF and 32-bit EXR sequences, animated GIF and WAV/AIFF. Field
+MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, TIFF, Targa and 32-bit EXR sequences, animated GIF and WAV/AIFF. Field
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
@@ -165,8 +174,10 @@ cannot express; File ▸ Import ▸ Lottie… opens one as a new composition.
 
 ## Built for agents
 
-Everything you can do from a menu is a command with an id, and agents can reach every one of
-them:
+Engine commands are available through the CLI, JSON control channel and MCP. UI-only commands
+need the running app's frontend dispatcher: complete menu access requires the app's control
+channel or an attached MCP bridge. Headless MCP sessions expose supported engine commands,
+but not UI-only commands or bridge-only `ui_*` tools.
 
 - **MCP server:** `effectcraft-cli mcp` speaks the Model Context Protocol over stdio, headless
   or bridged to the running app (`--bridge 9877`). Tools cover commands, the project and property
@@ -219,25 +230,26 @@ tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING
 
 ## Where it stands
 
-EffectCraft is young: its first commit was on 1 October 2026. Nearly every After Effects feature
-exists, including all of its effects, but existing is not the same as behaving exactly like After
-Effects, and we haven't measured that yet. Today it's a good place to try things and to tell us
-what breaks. It isn't yet a replacement for After Effects on client work. In particular:
+EffectCraft is young: its first commit was on 1 October 2026. A comprehensive feature set
+exists, including 308 effects, but breadth is not the same as full maturity across every edge
+case. Today it's a good place to try things and to tell us what breaks. It isn't yet recommended
+for production client work. In particular:
 
-- **After Effects projects can't be opened.** Projects are saved as `.ecproj`, readable versioned
-  JSON, but EffectCraft can't open `.aep` / `.aepx` files, and After Effects plug-ins don't run.
-- **Behaviour still differs from After Effects in places.** Nothing yet compares our renders with
-  After Effects automatically, so please report differences.
+- **Native project format.** Projects are saved as `.ecproj`, readable versioned JSON. Proprietary
+  project formats and After Effects SDK plug-ins are not supported.
+- **Fidelity is still being refined.** Automated rendering tests currently focus on small
+  compositions, so please report visual discrepancies or unexpected behaviour.
 - **macOS is the most tested platform.** Linux and Windows users have hit basic interaction
   bugs, which we're fixing first.
 - **The trained models are new.** Roto Brush can use MobileSAM (an optional 40 MB download in
   Settings ▸ Roto Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
-  3.8 MB download in Settings ▸ Face Tracking). Neither is compared with After Effects yet.
+  3.8 MB download in Settings ▸ Face Tracking). Both are actively undergoing evaluation and tuning.
 
-EffectCraft is in **alpha**: about 91% of After Effects' features exist, and we estimate it is
-about 45% of the way to replacing After Effects for professional work. The [ROADMAP](ROADMAP.md)
-has the plan, [docs/target-app-parity.md](docs/target-app-parity.md) the measurement and
-[docs/gaps.md](docs/gaps.md) every known shortfall. The web build ([docs/web.md](docs/web.md)) runs the full app in the browser.
+EffectCraft is in **alpha**: about 91% of the features tracked in
+[docs/target-app-parity.md](docs/target-app-parity.md) exist, and we estimate it is about 45% of the
+way to being ready for full professional production work. The [ROADMAP](ROADMAP.md) has the plan,
+[docs/target-app-parity.md](docs/target-app-parity.md) the measurement and [docs/gaps.md](docs/gaps.md)
+every known shortfall. The web build ([docs/web.md](docs/web.md)) runs the full app in the browser.
 [Bug reports](https://github.com/storytold/effectcraft/issues) are the most useful thing you can
 send us right now.
 
@@ -245,8 +257,8 @@ send us right now.
 
 - **Engine first.** A stack of small crates with strict layering. The interface (egui) sits on
   top and nothing underneath depends on it.
-- **Clean room.** We work from After Effects' public documentation and how it behaves, never
-  from Adobe's files, icons, presets or code. No code is copied from GPL projects. The full rules
+- **Clean room.** We work from public documentation and observable behavior, never
+  from proprietary files, icons, presets or code. No code is copied from GPL projects. The full rules
   are in [AGENTS.md](AGENTS.md).
 - **Private by default.** No telemetry, and no network access unless you ask for it.
 - **One family.** EffectCraft shares its time model and text engine design with FilmCraft, and
@@ -266,9 +278,13 @@ send us right now.
 | arm64 (Snapdragon and other ARM PCs) | `effectcraft-<ver>-windows-arm64.msi` | `effectcraft-<ver>-windows-arm64-portable.zip` |
 | x86 (32-bit) | `effectcraft-<ver>-windows-x86.msi` | `effectcraft-<ver>-windows-x86-portable.zip` |
 
-Installers and executables are code-signed. The installer asks where to install EffectCraft
-(Program Files by default), and later versions install into the same folder. To install silently
+Installers and executables are code-signed. The installer asks who to install EffectCraft for and where. By default it installs for your
+account only, into `%LOCALAPPDATA%\Programs\ArtCraft\EffectCraft`, without an administrator prompt;
+"Everyone on this computer" installs into `C:\Program Files\ArtCraft\EffectCraft` (`Program Files (x86)` for the 32-bit build). Later versions
+install into the same folder. To install silently
 into a folder of your choice: `msiexec /i effectcraft-<ver>-windows-x64.msi /qn INSTALLFOLDER="D:\Apps\EffectCraft"`.
+A silent install is per-user by default. `INSTALLFOLDER` chooses the folder, not who it is installed for;
+add `ALLUSERS=1`, from an elevated terminal or deployment tool, for an all-users install.
 
 ### macOS
 
@@ -367,8 +383,6 @@ The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are tradem
 ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as
 part of this repository and EffectCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
 Forks and modified versions must remove them.
-
-<sub>Adobe, Photoshop, Illustrator, Premiere Pro, Lightroom, Acrobat, After Effects and InDesign are trademarks or registered trademarks of Adobe Inc. in the United States and/or other countries. EffectCraft is an independent, open-source project and is not affiliated with, sponsored by or endorsed by Adobe Inc.; these names are used only to describe the workflows it is compatible with.</sub>
 
 <p align="center">
   <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>

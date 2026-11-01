@@ -5,9 +5,6 @@
 # .icns. The outputs are committed, so builds and packaging never need these tools.
 #
 #   packaging/icons.sh
-#
-# effectcraft.svg and effectcraft-small.svg (the lighter 1024 px trace) come from craftrules
-# (assets/app-icons/effectcraft/, which also keeps the source drawing) and are copied in by hand.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/assets/app-icon"
@@ -18,7 +15,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 command -v resvg >/dev/null || { echo "error: resvg not found (brew install resvg)" >&2; exit 1; }
 
-render() { resvg -w "$2" -h "$2" "$1" "$3" </dev/null; }
+render() {
+  local svg="$1" size="$2" out="$3"
+  resvg -w "$size" -h "$size" "$svg" "$out" </dev/null
+}
 
 # The tile fills its 512 viewBox edge to edge, which suits Windows and Linux. macOS icons keep
 # Apple's grid instead: an 824 px body centred on a 1024 canvas with a transparent margin.

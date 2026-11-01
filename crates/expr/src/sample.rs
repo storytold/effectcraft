@@ -99,8 +99,8 @@ pub fn sample_image(ctx: EvalCtx, comp: ItemId, layer: &Layer, point: [f64; 2], 
     };
     let mut acc = [0.0f64; 4];
     let mut n = 0.0;
-    for y in y0..=y1.min(y0 + 4096) {
-        for x in x0..=x1.min(x0 + 4096) {
+    for y in y0..=y1.min(y0.saturating_add(4096)) {
+        for x in x0..=x1.min(x0.saturating_add(4096)) {
             let p = b.img.get(x, y);
             for k in 0..4 {
                 acc[k] += p[k] as f64;

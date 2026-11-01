@@ -144,6 +144,16 @@ pub fn forward_matrices() -> &'static [[[f64; 16]; 16]; 4] {
     })
 }
 
+/// [`forward_matrices`] transposed: `[type][q][k]`.
+fn forward_matrices_t() -> &'static [[[f64; 16]; 16]; 4] {
+    use std::sync::OnceLock;
+    static M: OnceLock<[[[f64; 16]; 16]; 4]> = OnceLock::new();
+    M.get_or_init(|| {
+        let f = forward_matrices();
+        std::array::from_fn(|t| std::array::from_fn(|q| std::array::from_fn(|k| f[t][k][q])))
+    })
+}
+
 fn invert16(m: [[f64; 16]; 16]) -> [[f64; 16]; 16] {
     let mut a = m;
     let mut inv = [[0.0; 16]; 16];
@@ -191,12 +201,23 @@ impl Quant {
         if self.lossless {
             return forward_wht(res);
         }
-        let f = &forward_matrices()[tx_type as usize];
+        let ft = &forward_matrices_t()[tx_type as usize];
+        // Every output accumulates its 16 products in the same order (q ascending) as a
+        // per-output sum, but the 16 outputs advance together: 16 independent chains that
+        // vectorize instead of one serial chain per output.
+        let mut acc = [-0.0f64; 16];
+        for (q, col) in ft.iter().enumerate() {
+            let r = res[q] as f64;
+            for k in 0..16 {
+                acc[k] += col[k] * r;
+            }
+        }
         let mut lv = [0i32; 16];
         for k in 0..16 {
-            let coef: f64 = (0..16).map(|q| f[k][q] * res[q] as f64).sum();
+            let coef = acc[k];
             let (qs, rnd) = if k == 0 { (self.dcq, self.round_dc) } else { (self.acq, self.round_ac) };
-            let l = (coef.abs() / qs as f64 + rnd).floor() as i32;
+            // Non-negative: truncation is floor.
+            let l = (coef.abs() / qs as f64 + rnd) as i32;
             lv[k] = if coef < 0.0 { -l } else { l };
         }
         lv
