@@ -442,9 +442,18 @@ impl RenderSettings {
     pub fn frame_time(&self, comp: &Comp, i: u64) -> Tick {
         self.rate(comp).tick_of(self.first_frame(comp) + i as i64)
     }
-    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+    pub fn effective_scale(&self, comp: &Comp) -> f64 {
         let s = self.resolution.clamp(0.01, 4.0);
-        (((comp.width as f64 * s).round() as u32).max(1), ((comp.height as f64 * s).round() as u32).max(1))
+        let max = f64::from(crate::limits::MAX_SIZE);
+        s.min(max / f64::from(comp.width.max(1))).min(max / f64::from(comp.height.max(1)))
+    }
+    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+        let s = self.effective_scale(comp);
+        // The scale is clamped so neither side exceeds the comp limit, keeping the aspect
+        // ratio: a 30 000 px side at 4x renders at 1x instead of cropping to a corner.
+        let w = ((comp.width as f64 * s).round() as u32).max(1);
+        let h = ((comp.height as f64 * s).round() as u32).max(1);
+        (w, h)
     }
     pub fn resolution_label(&self) -> &'static str {
         match self.resolution {
@@ -509,6 +518,9 @@ pub enum OutputFormat {
     TiffSequence,
     /// OpenEXR sequence (32-bit float, linear light).
     ExrSequence,
+    /// Targa sequence: uncompressed 24-bit RGB or 32-bit RGB + Alpha (8 alpha bits), top-left
+    /// origin.
+    TargaSequence,
     /// Animated GIF.
     Gif,
     /// WebM: VP9 video (alpha with RGB + Alpha) + Opus audio.
@@ -528,7 +540,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 13] = [
+    pub const ALL: [OutputFormat; 14] = [
         OutputFormat::H264,
         OutputFormat::Hevc,
         OutputFormat::Av1,
@@ -539,6 +551,7 @@ impl OutputFormat {
         OutputFormat::JpegSequence,
         OutputFormat::TiffSequence,
         OutputFormat::ExrSequence,
+        OutputFormat::TargaSequence,
         OutputFormat::Gif,
         OutputFormat::Wav,
         OutputFormat::Aiff,
@@ -552,6 +565,7 @@ impl OutputFormat {
             OutputFormat::JpegSequence => "JPEG Sequence",
             OutputFormat::TiffSequence => "TIFF Sequence",
             OutputFormat::ExrSequence => "OpenEXR Sequence",
+            OutputFormat::TargaSequence => "Targa Sequence",
             OutputFormat::Gif => "Animated GIF",
             OutputFormat::WebM => "WebM (VP9 + Opus)",
             OutputFormat::Wav => "WAV",
@@ -569,6 +583,7 @@ impl OutputFormat {
             OutputFormat::JpegSequence => "jpg",
             OutputFormat::TiffSequence => "tif",
             OutputFormat::ExrSequence => "exr",
+            OutputFormat::TargaSequence => "tga",
             OutputFormat::Gif => "gif",
             OutputFormat::WebM => "webm",
             OutputFormat::Wav => "wav",
@@ -577,7 +592,10 @@ impl OutputFormat {
         }
     }
     pub fn is_sequence(self) -> bool {
-        matches!(self, OutputFormat::PngSequence | OutputFormat::JpegSequence | OutputFormat::TiffSequence | OutputFormat::ExrSequence)
+        matches!(
+            self,
+            OutputFormat::PngSequence | OutputFormat::JpegSequence | OutputFormat::TiffSequence | OutputFormat::ExrSequence | OutputFormat::TargaSequence
+        )
     }
     pub fn is_movie(self) -> bool {
         matches!(self, OutputFormat::H264 | OutputFormat::ProRes | OutputFormat::Uncompressed | OutputFormat::WebM | OutputFormat::Hevc | OutputFormat::Av1)
@@ -603,7 +621,7 @@ impl OutputFormat {
         if matches!(self, OutputFormat::H264 | OutputFormat::Hevc) { (even(w), even(h)) } else { (w, h) }
     }
     /// Parse a format name: `h264`, `mp4`, `prores`, `mov`, `uncompressed`, `png`, `jpeg`/`jpg`,
-    /// `tiff`/`tif`, `exr`, `gif`, or a label.
+    /// `tiff`/`tif`, `exr`, `tga`/`targa`, `gif`, or a label.
     pub fn from_name(s: &str) -> Option<OutputFormat> {
         let n = s.trim().to_ascii_lowercase().replace([' ', '.', '-', '_'], "");
         Some(match n.as_str() {
@@ -616,6 +634,7 @@ impl OutputFormat {
             "jpg" | "jpeg" | "jpegsequence" => OutputFormat::JpegSequence,
             "tif" | "tiff" | "tiffsequence" => OutputFormat::TiffSequence,
             "exr" | "openexr" | "openexrsequence" => OutputFormat::ExrSequence,
+            "tga" | "targa" | "targasequence" => OutputFormat::TargaSequence,
             "gif" | "animatedgif" => OutputFormat::Gif,
             "webm" | "vp9" | "webmvp9opus" => OutputFormat::WebM,
             "wav" | "wave" => OutputFormat::Wav,
@@ -769,15 +788,18 @@ impl Crop {
         if self.use_roi
             && let Some([x, y, rw, rh]) = self.roi
         {
-            // The quad arrives unvalidated (control channel or a hand-edited project):
-            // clamp like the sibling edge fields (plus/minus 20 000) and subtract
-            // without overflow.
-            let conv = |v: f64| v.round().clamp(-20_000.0, 20_000.0) as i32;
-            let l = conv(x * scale);
-            let t = conv(y * scale);
-            let r = (w as i32).saturating_sub(conv((x + rw) * scale));
-            let b = (h as i32).saturating_sub(conv((y + rh) * scale));
-            return (t, l, b, r);
+            // The quad arrives unvalidated (control channel or a hand-edited project). As in
+            // After Effects, the region of interest lies inside the frame: each converted edge
+            // is clamped to [0, w] / [0, h] (inf clamps to a side, NaN converts to 0), and the
+            // far edge never passes the near one. Every edge then lies inside the frame, so the
+            // crop can't be larger than the frame and no subtraction can overflow.
+            let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+            let conv = |v: f64, side: i32| v.round().clamp(0.0, f64::from(side)) as i32;
+            let l = conv(x * scale, wi);
+            let t = conv(y * scale, hi);
+            let r = conv((x + rw) * scale, wi).max(l);
+            let b = conv((y + rh) * scale, hi).max(t);
+            return (t, l, hi - b, wi - r);
         }
         (self.top, self.left, self.bottom, self.right)
     }
@@ -1116,7 +1138,7 @@ impl OutputModule {
     /// rounding).
     pub fn output_size(&self, comp: &Comp, settings: &RenderSettings) -> (u32, u32) {
         let (w, h) = settings.output_size(comp);
-        let (w, h) = self.frame_size(w, h, settings.resolution.clamp(0.01, 4.0));
+        let (w, h) = self.frame_size(w, h, settings.effective_scale(comp));
         self.format.coded_size(w, h)
     }
     /// Every setting as `(label, value)` lines (render logs).
@@ -1455,20 +1477,54 @@ pub fn expand_template(template: &str, format: OutputFormat, v: &TemplateVars) -
 /// Replace the first run of `#` (optionally in brackets, `[####]`) with the zero-padded frame
 /// number. Paths without a run get `_NNNNN` before the extension.
 pub fn sequence_path(path: &str, frame: i64) -> String {
+    let (before, width, after) = sequence_parts(path);
+    format!("{before}{frame:0width$}{after}")
+}
+
+/// A sequence output path around its frame number: what comes before it, how many digits it is
+/// padded to and what comes after (`out/a_[#####].png` → `out/a_`, 5, `.png`).
+pub fn sequence_parts(path: &str) -> (String, usize, String) {
     if let Some(start) = path.find('#') {
         let len = path[start..].chars().take_while(|c| *c == '#').count();
         let (mut a, mut b) = (start, start + len);
-        if a > 0 && path.as_bytes()[a - 1] == b'[' && path.as_bytes().get(b) == Some(&b']') {
+        if a > 0 && path.as_bytes().get(a - 1) == Some(&b'[') && path.as_bytes().get(b) == Some(&b']') {
             a -= 1;
             b += 1;
         }
-        return format!("{}{:0width$}{}", &path[..a], frame, &path[b..], width = len);
+        return (path[..a].to_string(), len, path[b..].to_string());
     }
     let p = std::path::Path::new(path);
     match p.extension() {
-        Some(ext) => format!("{}_{frame:05}.{}", p.with_extension("").to_string_lossy(), ext.to_string_lossy()),
-        None => format!("{path}_{frame:05}"),
+        Some(ext) => (format!("{}_", p.with_extension("").to_string_lossy()), 5, format!(".{}", ext.to_string_lossy())),
+        None => (format!("{path}_"), 5, String::new()),
     }
+}
+
+/// The frame number `candidate` is the file of, when `path` (a sequence output path) writes it:
+/// the inverse of [`sequence_path`].
+pub fn sequence_frame(path: &str, candidate: &str) -> Option<i64> {
+    let (before, width, after) = sequence_parts(path);
+    let digits = candidate.strip_prefix(before.as_str())?.strip_suffix(after.as_str())?;
+    let frame: i64 = digits.parse().ok()?;
+    (format!("{frame:0width$}") == digits).then_some(frame)
+}
+
+/// `template` with `_n` added to the name: before the frame-number run of a sequence, else before
+/// the extension (`[compName].[fileExtension]` → `[compName]_1.[fileExtension]`,
+/// `[compName]_[#####].[fileExtension]` → `[compName]_1_[#####].[fileExtension]`).
+pub fn numbered_template(template: &str, n: u32) -> String {
+    let at = match template.find('#') {
+        Some(hash) => {
+            // The run's `[`, then the separator that sets it off from the name.
+            let run = if template[..hash].ends_with('[') { hash - 1 } else { hash };
+            if template[..run].ends_with(['_', '-', '.', ' ']) { run - 1 } else { run }
+        }
+        None => {
+            let name = template.rfind(['/', '\\']).map_or(0, |i| i + 1);
+            template[name..].rfind('.').map_or(template.len(), |i| name + i)
+        }
+    };
+    format!("{}_{n}{}", &template[..at], &template[at..])
 }
 
 /// Make a name safe as a file name component.
@@ -1488,6 +1544,44 @@ mod tests {
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
         assert_eq!(sequence_path("a.png", 3), "a_00003.png");
+    }
+
+    /// `sequence_frame` reads back what `sequence_path` writes, and nothing else.
+    #[test]
+    fn sequence_frames_read_back() {
+        for path in ["out/a_[#####].png", "a###.tif", "a.png", "/x/[compName]/shot_[##].exr", "noext", "dir.v2/clip"] {
+            for frame in [0, 7, 42, 99_999, 123_456, -3] {
+                assert_eq!(sequence_frame(path, &sequence_path(path, frame)), Some(frame), "{path} {frame}");
+            }
+        }
+        let (before, width, after) = sequence_parts("out/a_[#####].png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("out/a_", 5, ".png"));
+        let (before, width, after) = sequence_parts("a.png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("a_", 5, ".png"));
+        // Other numbers, other widths, other names are not frames of the sequence.
+        assert_eq!(sequence_frame("a_[#####].png", "a_0042.png"), None, "padded to four");
+        assert_eq!(sequence_frame("a_[####].png", "a_+042.png"), None, "a sign is not padding");
+        assert_eq!(sequence_frame("a_[#####].png", "a_00042.jpg"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "b_00042.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_00x42.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_99999999999999999999.png"), None, "too big for a frame number");
+    }
+
+    #[test]
+    fn numbered_templates() {
+        assert_eq!(numbered_template(DEFAULT_TEMPLATE, 1), "[compName]_1.[fileExtension]");
+        assert_eq!(numbered_template(DEFAULT_SEQUENCE_TEMPLATE, 2), "[compName]_2_[#####].[fileExtension]");
+        assert_eq!(numbered_template("[compName]_frame.[fileExtension]", 3), "[compName]_frame_3.[fileExtension]");
+        assert_eq!(numbered_template("out/[compName]###.png", 1), "out/[compName]_1###.png");
+        assert_eq!(numbered_template("my.dir/clip", 4), "my.dir/clip_4", "a dot in a folder is not an extension");
+        assert_eq!(numbered_template("clip.v2.mov", 1), "clip.v2_1.mov");
+        assert_eq!(numbered_template("", 1), "_1");
+        assert_eq!(numbered_template("#", 1), "_1#");
+        assert_eq!(numbered_template("[#]", 1), "_1[#]");
+        // A numbered default is still a default: it expands to the numbered name.
+        let v = TemplateVars { comp_name: "footage", project_name: "P", width: 64, height: 36, frame_rate: 30.0, start_frame: 0, end_frame: 29 };
+        assert_eq!(expand_template(&numbered_template(DEFAULT_TEMPLATE, 1), OutputFormat::H264, &v), "footage_1.mp4");
     }
 
     #[test]
@@ -1649,8 +1743,8 @@ mod tests {
 
     #[test]
     fn hostile_roi_cannot_overflow_crop_math() {
-        // `-1e12` saturates to `i32::MIN` on conversion: `w as i32 - l` must saturate,
-        // not overflow, and still yield a usable (degenerate) frame size.
+        // `-1e12` is clamped into the frame on conversion: it must not overflow and must still
+        // yield a usable (degenerate) frame size.
         let c = Comp::new(1920, 1080, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
         let rs = RenderSettings::default();
         let mut m = OutputModule::for_format(OutputFormat::PngSequence);
@@ -1661,6 +1755,66 @@ mod tests {
         m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
         let half = RenderSettings { resolution: 0.5, ..Default::default() };
         assert_eq!(m.output_size(&c, &half), (400, 200));
+    }
+
+    #[test]
+    fn output_size_never_exceeds_the_comp_limit() {
+        // The effective scale is clamped so neither side exceeds the limit (exporter
+        // `w * h * 4` would overflow at 120 000 px sides); the pipeline renders at the
+        // same scale, so it never requests a frame larger than this reports.
+        let rs = RenderSettings { resolution: 4.0, ..Default::default() };
+        let m = OutputModule::for_format(OutputFormat::PngSequence);
+        let square = Comp::new(30_000, 30_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&square), 1.0);
+        assert_eq!(rs.output_size(&square), (30_000, 30_000));
+        assert_eq!(m.output_size(&square, &rs), (30_000, 30_000));
+        // Wide comps keep their aspect ratio instead of clamping each side on its own.
+        let wide = Comp::new(30_000, 15_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&wide), 1.0);
+        assert_eq!(rs.output_size(&wide), (30_000, 15_000));
+        assert_eq!(m.output_size(&wide, &rs), (30_000, 15_000));
+        // A mid-size comp renders at the largest scale that still fits.
+        let mid = Comp::new(20_000, 10_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(mid.width as f64 * rs.effective_scale(&mid), 30_000.0);
+        assert_eq!(rs.output_size(&mid), (30_000, 15_000));
+    }
+
+    #[test]
+    fn valid_wide_roi_endpoints_are_preserved() {
+        // A supported 30 000 x 100 frame at scale 1: ROI [10000, 0, 20000, 100] spans x 10 000..30 000
+        // and must give 20 000 x 100 (the absolute right edge 30 000 exceeds the old +/-20 000 clamp).
+        let c = Comp::new(30_000, 100, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        let rs = RenderSettings::default();
+        let mut m = OutputModule::for_format(OutputFormat::PngSequence);
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([10_000.0, 0.0, 20_000.0, 100.0]), ..Default::default() };
+        assert_eq!(m.output_size(&c, &rs), (20_000, 100));
+        assert_eq!(m.crop.edges(30_000, 100, 1.0), (0, 10_000, 0, 0));
+        // Scale 4.0 pushes a valid edge to 120 000 px (30 000 x 4); the left edge 40 000 and the
+        // right edge 120 000 are both beyond 20 000 and must survive.
+        assert_eq!(m.crop.edges(120_000, 400, 4.0), (0, 40_000, 0, 0));
+        assert_eq!(m.frame_size(120_000, 400, 4.0), (80_000, 400));
+        // Hostile quads stay inside the frame: never empty, never larger than the frame, so the
+        // export can't be asked for an unbounded crop (an ROI reaching far outside the comp
+        // used to pad the frame instead).
+        let (fw, fh) = (1920, 1080);
+        let hostile = [
+            [1e300, 1e300, 1e300, 1e300],
+            [-1e300, -1e300, 1e300, 1e300],
+            [-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0],
+            [-1e12, -1e12, -1e12, -1e12],
+            [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN],
+            [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY],
+        ];
+        for roi in hostile {
+            m.crop.roi = Some(roi);
+            let (t, l, b, r) = m.crop.edges(fw, fh, 1.0);
+            assert!([t, l, b, r].iter().all(|e| *e >= 0), "{roi:?}: an edge pads the frame: {:?}", (t, l, b, r));
+            let (w, h) = m.frame_size(fw, fh, 1.0);
+            assert!((1..=fw).contains(&w) && (1..=fh).contains(&h), "{roi:?}: {w}x{h} is outside 1x1..={fw}x{fh}");
+        }
+        // An ROI covering more than the frame is the whole frame.
+        m.crop.roi = Some([-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0]);
+        assert_eq!(m.frame_size(fw, fh, 1.0), (fw, fh));
     }
 
     #[test]
@@ -1678,6 +1832,28 @@ mod tests {
         m.channels = Channels::Rgba;
         m.set_format(f);
         assert_eq!((m.output.as_str(), m.channels), ("/out/Comp 1.mov", Channels::Rgba));
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap().format, f);
+    }
+
+    #[test]
+    fn targa_sequence_format() {
+        let f = OutputFormat::from_name("tga").unwrap();
+        assert_eq!(f, OutputFormat::TargaSequence);
+        assert_eq!(OutputFormat::from_name(&format!("{f:?}")), Some(f));
+        assert_eq!(OutputFormat::from_name("Targa"), Some(f));
+        assert_eq!(OutputFormat::from_name("Targa Sequence"), Some(f));
+        assert_eq!(OutputFormat::from_path("/out/shot_00001.TGA"), Some(f));
+        assert!(OutputFormat::ALL.contains(&f));
+        assert!(f.is_sequence() && f.supports_alpha() && !f.supports_audio() && !f.is_movie());
+        assert_eq!((f.label(), f.extension()), ("Targa Sequence", "tga"));
+        assert_eq!(f.coded_size(3, 5), (3, 5));
+        // A movie name becomes a numbered sequence; RGB + Alpha survives the switch.
+        let mut m = OutputModule::for_format(OutputFormat::ProRes);
+        m.output = "/out/Comp 1.mov".into();
+        m.channels = Channels::Rgba;
+        m.set_format(f);
+        assert_eq!((m.output.as_str(), m.channels), ("/out/Comp 1_[#####].tga", Channels::Rgba));
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap().format, f);
     }

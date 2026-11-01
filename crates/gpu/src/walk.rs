@@ -17,6 +17,12 @@ use effectcraft_time::Tick;
 use crate::context::{Enc, GpuImage};
 use crate::ops;
 
+/// The size [`render`] renders `comp_id` at, without rendering it.
+pub(crate) fn frame_size(r: &Renderer, comp_id: ItemId, t: Tick) -> Option<(u32, u32)> {
+    let ctx = r.eval_ctx(comp_id, t)?;
+    Some(effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale))
+}
+
 /// Render a comp frame into a GPU image (the canvas in the output space, as
 /// `Renderer::comp_frame_cpu` returns it). `None` when something cannot run here (the caller
 /// renders on the CPU instead).
@@ -26,9 +32,7 @@ pub(crate) fn render<'g>(e: &mut Enc<'g>, r: &Renderer, comp_id: ItemId, t: Tick
         return None;
     }
     let ctx = r.eval_ctx(comp_id, t)?;
-    let s = r.opts.scale;
-    let w = ((ctx.comp.width as f64 * s).round() as u32).max(1);
-    let h = ((ctx.comp.height as f64 * s).round() as u32).max(1);
+    let (w, h) = effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale);
     if r.depth() > 16 || !e.g.fits(w, h) {
         return None;
     }
@@ -85,7 +89,7 @@ fn draw_comp<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, canvas: &mut 
             i = j;
         } else {
             match r.collapsed(ctx, visible[i]) {
-                Some(item) => draw_collapsed(e, r, ctx, visible[i], item, canvas)?,
+                Some(collapsed) => draw_collapsed(e, r, ctx, visible[i], &collapsed, canvas)?,
                 None => draw_layer(e, r, ctx, visible[i], canvas)?,
             }
             i += 1;
@@ -183,19 +187,26 @@ fn draw_split(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, split: &effectcraft_rend
     Some(cv)
 }
 
-fn draw_collapsed<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut GpuImage) -> Option<()> {
+fn draw_collapsed<'a>(
+    e: &mut Enc,
+    r: &Renderer<'a>,
+    ctx: &EvalCtx<'a>,
+    layer: &'a Layer,
+    collapsed: &effectcraft_render::Collapsed,
+    canvas: &mut GpuImage,
+) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     if opacity <= 0.0 {
         return Some(());
     }
     let matte = r.track_matte(ctx, layer).is_some();
     if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
-        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, opacity) {
+        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, opacity) {
             draw_comp(e, &sub, &nctx, canvas)?;
         }
         return Some(());
     }
-    let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, 1.0) else { return Some(()) };
+    let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, 1.0) else { return Some(()) };
     let mut iso = e.zeros(canvas.width, canvas.height);
     draw_comp(e, &sub, &nctx, &mut iso)?;
     composite_iso(e, r, ctx, layer, iso, canvas, opacity)
@@ -341,8 +352,8 @@ fn draw_precomp(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas:
 
 /// Adjustment layer (`Renderer::draw_adjustment`): the effect stack runs on the comp below,
 /// resident on the GPU (non-GPU effects read back, run on the CPU and upload), and the result
-/// replaces the canvas inside the layer's footprint × track matte × opacity. `None` = draw it
-/// on the CPU.
+/// replaces the canvas inside the layer's footprint × track matte × opacity, or blends onto it in
+/// the layer's blend mode when that isn't Normal. `None` = draw it on the CPU.
 fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     let Some(foot) = r.adjustment_footprint(ctx, layer) else { return Some(()) };
@@ -357,14 +368,24 @@ fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canv
     };
     let mut fx = crate::effects::GpuFx::new(e, below, [0.0; 2], r.opts.scale, pipe.levels);
     r.run_effects_on(ctx, layer, true, &mut fx);
-    let (mut adjusted, _, _) = fx.finish()?;
+    let (mut adjusted, offset, _) = fx.finish()?;
+    // An effect that changed the frame (Motion Tile's Output size): back onto the canvas.
+    if let Some((dx, dy)) = effectcraft_effects::adjustment_crop(offset, [0.0; 2], (adjusted.width, adjusted.height), (w, h)) {
+        adjusted = e.crop(&adjusted, dx, dy, w, h);
+    }
     if adjusted.width != w || adjusted.height != h {
         return Some(());
     }
     if let Some(c) = pipe.to_blend() {
         adjusted = ops::convert(e, &adjusted, &c);
     }
-    *canvas = ops::adjust_mix(e, canvas, &adjusted, &matte, opacity);
+    *canvas = if layer.blend_mode == BlendMode::Normal {
+        ops::adjust_mix(e, canvas, &adjusted, &matte, opacity)
+    } else {
+        // The adjusted comp is a layer in that mode over the comp below (#2618).
+        let iso = ops::matte(e, &adjusted, &matte, effectcraft_project::MatteKind::Alpha);
+        ops::blend_full(e, canvas, &iso, layer.blend_mode, opacity, layer.id.0 as u32, None)
+    };
     Some(())
 }
 
@@ -464,12 +485,12 @@ fn place_src(
 ) -> Option<GpuImage> {
     let pl = r.placement(ctx, layer, buf);
     if let [m] = pl.matrices.as_slice() {
-        return Some(ops::warp_q(e, target, &src, m, pl.sampling, mode, opacity, pl.seed, None, levels));
+        return Some(ops::warp_q(e, target, &src, m, ops::WarpOptions { sampling: pl.sampling, mode, opacity, seed: pl.seed }, None, levels));
     }
     let mut acc = e.zeros(target.width, target.height);
     let k = 1.0 / pl.matrices.len() as f32;
     for m in &pl.matrices {
-        acc = ops::warp(e, &acc, &src, m, pl.sampling, BlendMode::Normal, 1.0, 0, Some(k));
+        acc = ops::warp(e, &acc, &src, m, ops::WarpOptions { sampling: pl.sampling, mode: BlendMode::Normal, opacity: 1.0, seed: 0 }, Some(k));
     }
     Some(ops::blend_full(e, target, &acc, mode, opacity, pl.seed, levels))
 }

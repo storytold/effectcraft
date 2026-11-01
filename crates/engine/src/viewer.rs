@@ -663,10 +663,10 @@ impl SimProfile {
     }
 
     pub fn parse(s: &str) -> Option<SimProfile> {
-        let k: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         SimProfile::ALL
             .into_iter()
-            .find(|p| p.id().to_ascii_lowercase() == k || p.label().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase() == k)
+            .find(|p| p.id().to_ascii_lowercase() == k || p.label().chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase() == k)
             .or(match k.as_str() {
                 "off" => Some(SimProfile::None),
                 "hdtv" | "bt709" => Some(SimProfile::Rec709),

@@ -150,6 +150,28 @@ fn operators_below_repeater_act_on_copies() {
     assert!((coverage(&img) - 3.0 * 24.0 * 24.0).abs() < 30.0, "{}", coverage(&img));
 }
 
+/// After Effects 2026 (case 709): a 400 × 200 rectangle with Fill, then a Repeater of 3 copies
+/// (Position 150, 60, Rotation 10, Scale 90 / 80, End Opacity 40) gives the copies 100 %, 80 %
+/// and 60 % opacity (EffectCraft gave 70 % and 40 %). The points are comp pixels where AE shows
+/// only the last copy, only the middle one, and both.
+#[test]
+fn repeater_copy_opacity_matches_after_effects() {
+    let (p, cid) = shape_comp_sized(1920, 1080, |ids| {
+        let mut rep = build::shape_repeater(ids, 3.0, [150.0, 60.0]);
+        set(&mut rep, "transform/rotation", Value::Scalar(10.0));
+        set(&mut rep, "transform/scale", Value::Vec2([90.0, 80.0]));
+        set(&mut rep, "transform/endOpacity", Value::Scalar(40.0));
+        let items = vec![build::shape_rect(ids, [400.0, 200.0], [0.0, 0.0], 0.0), build::shape_fill(ids, [0.0, 1.0, 0.0, 1.0]), rep];
+        vec![build::shape_group(ids, "Group 1", items)]
+    });
+    let img = frame(&p, cid);
+    // AE's green over its red layer, 153, 153, 204, 235 and 255 of 255.
+    for (x, y, want) in [(1360, 700, 0.6), (1300, 620, 0.6), (1220, 560, 0.8), (1180, 630, 0.92), (1100, 600, 1.0)] {
+        let a = alpha(&img, x, y);
+        assert!((a - want).abs() < 2.0 / 255.0, "({x}, {y}): {a} vs AE {want}");
+    }
+}
+
 #[test]
 fn repeater_then_merge_unites_copies() {
     let (p, cid) = shape_comp(|ids| {
@@ -258,6 +280,24 @@ fn round_corners_clip_corner_pixels() {
     assert!((coverage(&img) - std::f32::consts::PI * 400.0).abs() < 15.0, "{}", coverage(&img));
 }
 
+/// Wiggle Paths' Spatial Phase changes the drawn shape; a whole turn draws it as at 0°.
+#[test]
+fn wiggle_paths_spatial_phase_renders() {
+    let render = |phase: f64| {
+        let (p, cid) = shape_comp(|ids| {
+            vec![
+                build::shape_ellipse(ids, [60.0, 60.0], [0.0, 0.0]),
+                op(ids, "wiggle", &[("size", Value::Scalar(8.0)), ("correlation", Value::Scalar(0.0)), ("spatialPhase", Value::Scalar(phase))]),
+                build::shape_fill(ids, RED),
+            ]
+        });
+        render_frame(&p, cid, Tick::from_seconds_f64(0.5), 1.0).data
+    };
+    let zero = render(0.0);
+    assert!(render(90.0) != zero, "Spatial Phase 90° draws the shape of 0°");
+    assert!(render(360.0) == zero, "Spatial Phase 360° draws another shape than 0°");
+}
+
 #[test]
 fn wiggle_paths_vary_over_time_deterministically() {
     let (p, cid) = shape_comp(|ids| {
@@ -268,6 +308,202 @@ fn wiggle_paths_vary_over_time_deterministically() {
     let c = render_frame(&p, cid, Tick::from_seconds_f64(1.0), 1.0);
     assert_eq!(a.data, b.data);
     assert_ne!(a.data, c.data);
+}
+
+/// Alpha-weighted centroid of the pixels in columns `x0..x1`.
+fn centroid(img: &Image, x0: i64, x1: i64) -> [f32; 2] {
+    let (mut sx, mut sy, mut sa) = (0.0, 0.0, 0.0);
+    for x in x0..x1 {
+        for y in 0..img.height as i64 {
+            let a = alpha(img, x, y);
+            sx += a * x as f32;
+            sy += a * y as f32;
+            sa += a;
+        }
+    }
+    [sx / sa, sy / sa]
+}
+
+fn wiggle_transform(ids: &mut Ids, params: &[(&str, Value)]) -> PropGroup {
+    op(ids, "wiggler", params)
+}
+
+#[test]
+fn wiggle_transform_moves_paths_over_time() {
+    let run = |position: [f64; 2], t: f64| {
+        let (p, cid) = shape_comp(|ids| {
+            let w = wiggle_transform(ids, &[("transform/position", Value::Vec2(position))]);
+            vec![build::shape_rect(ids, [20.0, 20.0], [0.0, 0.0], 0.0), w, build::shape_fill(ids, RED)]
+        });
+        render_frame(&p, cid, Tick::from_seconds_f64(t), 1.0)
+    };
+    // The defaults wiggle nothing: the square stays centered on pixel 99.5, 49.5.
+    let rest = [99.5, 49.5];
+    assert_eq!(centroid(&run([0.0, 0.0], 0.37), 0, 200), rest);
+    let a = run([15.0, 15.0], 0.37);
+    assert_eq!(a.data, run([15.0, 15.0], 0.37).data, "the same time gives the same frame");
+    let b = run([15.0, 15.0], 1.21);
+    let (ca, cb) = (centroid(&a, 0, 200), centroid(&b, 0, 200));
+    assert!(ca != rest && ca != cb, "{ca:?} {cb:?}");
+    for c in [ca, cb] {
+        assert!((c[0] - rest[0]).abs() <= 15.01 && (c[1] - rest[1]).abs() <= 15.01, "{c:?}");
+    }
+    // A translation keeps the square's area.
+    assert!((coverage(&a) - 400.0).abs() < 1.0, "{}", coverage(&a));
+    // The layer cache keys a layer with a Wiggle Transform by time.
+    let (p, cid) = shape_comp(|ids| vec![build::shape_rect(ids, [20.0, 20.0], [0.0, 0.0], 0.0), wiggle_transform(ids, &[]), build::shape_fill(ids, RED)]);
+    let comp = p.comp(cid).unwrap();
+    let key = |t: f64| crate::cache::layer_key(&crate::eval::EvalCtx::new(&p, cid, comp, Tick::from_seconds_f64(t)), &comp.layers[0], 1.0, false, false);
+    assert_ne!(key(0.37), key(1.21));
+}
+
+#[test]
+fn wiggle_transform_scales_and_rotates() {
+    let run = |params: &[(&str, Value)]| {
+        let (p, cid) = shape_comp(|ids| {
+            let w = wiggle_transform(ids, params);
+            vec![build::shape_rect(ids, [40.0, 40.0], [0.0, 0.0], 0.0), w, build::shape_fill(ids, RED)]
+        });
+        render_frame(&p, cid, Tick::from_seconds_f64(0.37), 1.0)
+    };
+    let scaled = coverage(&run(&[("transform/scale", Value::Vec2([50.0, 50.0]))]));
+    assert!((scaled - 1600.0).abs() > 20.0, "{scaled}");
+    let rotated = run(&[("transform/rotation", Value::Scalar(45.0))]);
+    assert!((coverage(&rotated) - 1600.0).abs() < 2.0, "{}", coverage(&rotated));
+    assert!(alpha(&rotated, 81, 31) < 0.5 || alpha(&rotated, 119, 31) < 0.5, "a corner turned away");
+}
+
+/// A gradient above a Wiggle Transform moves with the paths it paints, as under a group transform.
+#[test]
+fn wiggle_transform_moves_the_gradient_with_the_path() {
+    let (p, cid) = shape_comp(|ids| {
+        let g = Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] };
+        vec![
+            build::shape_rect(ids, [40.0, 40.0], [0.0, 0.0], 0.0),
+            build::shape_gradient_fill(ids, false, [-20.0, 0.0], [20.0, 0.0], g),
+            wiggle_transform(ids, &[("transform/position", Value::Vec2([60.0, 0.0]))]),
+        ]
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.37), 1.0);
+    let cols: Vec<i64> = (0..200).filter(|&x| alpha(&img, x, 50) > 0.99).collect();
+    let (l, r) = (cols[0], cols[cols.len() - 1]);
+    assert!((l - 80).abs() > 3, "the square moved: {l}");
+    let (cl, cr) = (img.get(l, 50), img.get(r, 50));
+    assert!(cl[0] < 0.1 && cr[0] > 0.9, "the ramp runs edge to edge: {cl:?} {cr:?}");
+}
+
+/// A gradient that paints every copy of a Repeater moves with the copies when they wiggle alike
+/// (Correlation 100).
+#[test]
+fn wiggle_transform_moves_a_gradient_shared_by_repeater_copies() {
+    let (p, cid) = shape_comp(|ids| {
+        let g = Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] };
+        vec![
+            build::shape_rect(ids, [20.0, 20.0], [-60.0, 0.0], 0.0),
+            build::shape_repeater(ids, 3.0, [60.0, 0.0]),
+            build::shape_gradient_fill(ids, false, [0.0, -10.0], [0.0, 10.0], g),
+            wiggle_transform(ids, &[("correlation", Value::Scalar(100.0)), ("transform/position", Value::Vec2([0.0, 15.0]))]),
+        ]
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.9), 1.0);
+    for cx in [40, 100, 160] {
+        let rows: Vec<i64> = (0..100).filter(|&y| alpha(&img, cx, y) > 0.99).collect();
+        let (t, b) = (rows[0], rows[rows.len() - 1]);
+        assert!((t - 40).abs() > 3, "copy at {cx} moved: {t}");
+        let (ct, cb) = (img.get(cx, t), img.get(cx, b));
+        assert!(ct[0] < 0.1 && cb[0] > 0.9, "copy at {cx}: {ct:?} {cb:?}");
+    }
+}
+
+/// A gradient over copies that wiggle on their own keeps its place: every copy shows the ramp's
+/// middle at the group's origin row.
+#[test]
+fn wiggle_transform_keeps_a_gradient_over_copies_wiggling_apart() {
+    let (p, cid) = shape_comp(|ids| {
+        let g = Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] };
+        vec![
+            build::shape_rect(ids, [20.0, 40.0], [-60.0, 0.0], 0.0),
+            build::shape_repeater(ids, 3.0, [60.0, 0.0]),
+            build::shape_gradient_fill(ids, false, [0.0, -20.0], [0.0, 20.0], g),
+            wiggle_transform(ids, &[("correlation", Value::Scalar(0.0)), ("transform/position", Value::Vec2([0.0, 15.0]))]),
+        ]
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.9), 1.0);
+    for cx in [40, 100, 160] {
+        let c = img.get(cx, 50);
+        assert!(c[3] > 0.99 && (c[0] - 0.5).abs() < 0.05, "copy at {cx}: {c:?}");
+    }
+}
+
+/// Copies wiggling on their own under one 50 % fill stay one paint: where they overlap, the fill
+/// covers them once.
+#[test]
+fn wiggle_transform_keeps_one_fill_over_overlapping_copies() {
+    let (p, cid) = shape_comp(|ids| {
+        let mut fill = build::shape_fill(ids, RED);
+        set(&mut fill, "opacity", Value::Scalar(50.0));
+        vec![
+            build::shape_rect(ids, [40.0, 40.0], [-20.0, 0.0], 0.0),
+            build::shape_repeater(ids, 3.0, [20.0, 0.0]),
+            fill,
+            wiggle_transform(ids, &[("correlation", Value::Scalar(0.0)), ("transform/position", Value::Vec2([0.0, 15.0]))]),
+        ]
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.9), 1.0);
+    let top = img.data.iter().map(|px| px[3]).fold(0.0f32, f32::max);
+    assert!((top - 0.5).abs() < 0.01, "{top}");
+}
+
+/// A long stack of Repeaters, each cleared by a zero-copy Repeater, still renders the last Repeater's copies.
+#[test]
+fn long_repeater_stack_with_cleared_copies_renders() {
+    let (p, cid) = shape_comp(|ids| {
+        let mut items = vec![];
+        for _ in 0..70 {
+            items.push(build::shape_rect(ids, [20.0, 20.0], [0.0, 0.0], 0.0));
+            items.push(build::shape_repeater(ids, 3.0, [10.0, 0.0]));
+            items.push(build::shape_repeater(ids, 0.0, [10.0, 0.0]));
+        }
+        items.push(build::shape_rect(ids, [20.0, 20.0], [0.0, 0.0], 0.0));
+        items.push(build::shape_repeater(ids, 3.0, [30.0, 0.0]));
+        items.push(wiggle_transform(ids, &[("correlation", Value::Scalar(0.0)), ("transform/position", Value::Vec2([0.0, 15.0]))]));
+        items.push(build::shape_fill(ids, RED));
+        items
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.37), 1.0);
+    assert!((coverage(&img) - 1200.0).abs() < 2.0, "{}", coverage(&img));
+}
+
+/// Copies a Repeater makes above a Wiggle Transform wiggle on their own (Correlation 0) or as one
+/// (Correlation 100); with the Wiggle Transform above the Repeater every copy wiggles the same.
+#[test]
+fn wiggle_transform_and_repeater_order() {
+    let offsets = |wiggle_first: bool, correlation: f64| {
+        let (p, cid) = shape_comp(|ids| {
+            let rect = build::shape_rect(ids, [20.0, 20.0], [-60.0, 0.0], 0.0);
+            let rep = build::shape_repeater(ids, 3.0, [60.0, 0.0]);
+            let w = wiggle_transform(ids, &[("correlation", Value::Scalar(correlation)), ("transform/position", Value::Vec2([0.0, 15.0]))]);
+            let fill = build::shape_fill(ids, RED);
+            if wiggle_first { vec![rect, w, rep, fill] } else { vec![rect, rep, w, fill] }
+        });
+        let img = render_frame(&p, cid, Tick::from_seconds_f64(0.37), 1.0);
+        [(0, 70), (70, 130), (130, 200)].map(|(x0, x1)| centroid(&img, x0, x1)[1] - 50.0)
+    };
+    let own = offsets(false, 0.0);
+    assert!((own[0] - own[1]).abs() > 0.5 || (own[1] - own[2]).abs() > 0.5, "copies wiggle on their own: {own:?}");
+    // A Repeater inside a group above the Wiggle Transform: its copies still wiggle on their own.
+    let (p, cid) = shape_comp(|ids| {
+        let inner = vec![build::shape_rect(ids, [20.0, 20.0], [-60.0, 0.0], 0.0), build::shape_repeater(ids, 3.0, [60.0, 0.0]), build::shape_fill(ids, RED)];
+        let group = build::shape_group(ids, "Repeated", inner);
+        vec![group, wiggle_transform(ids, &[("correlation", Value::Scalar(0.0)), ("transform/position", Value::Vec2([0.0, 15.0]))])]
+    });
+    let img = render_frame(&p, cid, Tick::from_seconds_f64(0.37), 1.0);
+    let nested = [(0, 70), (70, 130), (130, 200)].map(|(x0, x1)| centroid(&img, x0, x1)[1] - 50.0);
+    assert!((nested[0] - nested[1]).abs() > 0.5 || (nested[1] - nested[2]).abs() > 0.5, "nested copies: {nested:?}");
+    for same in [offsets(false, 100.0), offsets(true, 0.0)] {
+        assert!(same[0].abs() > 0.5, "{same:?}");
+        assert!((same[0] - same[1]).abs() < 0.05 && (same[1] - same[2]).abs() < 0.05, "copies wiggle as one: {same:?}");
+    }
 }
 
 #[test]
@@ -478,4 +714,34 @@ fn miter_corner_still_fits_its_buffer() {
     assert!(alpha(&img, 100, 80) > 0.9, "{}", alpha(&img, 100, 80));
     let b = shape_buf(&p, cid);
     assert!(b.img.height as f64 >= 50.0 + 20.0 * 4.0 * 0.5, "{}", b.img.height);
+}
+
+#[test]
+fn rect_per_corner_roundness_rounds_the_named_corners() {
+    let render = |per_corner: bool, radii: [f64; 4], roundness: f64| {
+        let (p, cid) = shape_comp_sized(200, 100, move |ids| {
+            let mut g = build::shape_rect(ids, [100.0, 100.0], [0.0, 0.0], roundness);
+            g.prop_mut("perCorner").unwrap().value = Value::Bool(per_corner);
+            for (m, v) in
+                [("topLeftRoundness", radii[0]), ("topRightRoundness", radii[1]), ("bottomRightRoundness", radii[2]), ("bottomLeftRoundness", radii[3])]
+            {
+                g.prop_mut(m).unwrap().value = Value::Scalar(v);
+            }
+            vec![g, build::shape_fill(ids, RED)]
+        });
+        frame(&p, cid)
+    };
+    // Only the top-left corner rounds: its corner pixels fade, the other three stay filled.
+    let img = render(true, [30.0, 0.0, 0.0, 0.0], 0.0);
+    assert!(alpha(&img, 52, 2) < 0.1, "top-left rounds: {}", alpha(&img, 52, 2));
+    for (x, y) in [(148, 2), (148, 98), (52, 98)] {
+        assert!(alpha(&img, x, y) > 0.9, "({x},{y}) stays square: {}", alpha(&img, x, y));
+    }
+    // The checkbox off ignores the four values (the single Roundness still rules).
+    let off = render(false, [30.0; 4], 0.0);
+    assert!((coverage(&off) - 100.0 * 100.0).abs() < 20.0, "{}", coverage(&off));
+    // Four equal per-corner radii render like the same Roundness.
+    let per = render(true, [25.0; 4], 0.0);
+    let uni = render(false, [0.0; 4], 25.0);
+    assert!((coverage(&per) - coverage(&uni)).abs() < 5.0, "{} vs {}", coverage(&per), coverage(&uni));
 }

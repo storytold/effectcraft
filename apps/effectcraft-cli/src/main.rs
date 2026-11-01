@@ -6,11 +6,13 @@
 //! effectcraft-cli exec <command-id> [--params JSON]           run one command
 //! effectcraft-cli exec --list [--filter TEXT] [--schemas]     list engine commands (as `commands`)
 //! effectcraft-cli run <id> <json> [<id> <json> …]             run several commands in order
+//! effectcraft-cli run --args-file F                           the same, one argument per line of F
+//! effectcraft-cli run --commands FILE|-                         steps {"command", "params"} from FILE or stdin
 //! effectcraft-cli props <comp> <layer> [--flat] [--time S]    a layer's property tree (with paths)
 //! effectcraft-cli get <comp> <layer> <path> [--time S]        read a property
 //! effectcraft-cli set <comp> <layer> <path> <value> [--time S] [--expression E]
 //! effectcraft-cli render-frame [--comp C] [--time S|--frame N] [--max-side PX|--scale K] [--out F.png] [--transparent]
-//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff] [--start S] [--end S]
+//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff] [--start S] [--end S]
 //!     [--work-area] [--fps N] [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
 //!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
@@ -25,6 +27,8 @@
 //!     (--gpu: CPU vs GPU ms/frame for every comp at Full and Half)
 //! effectcraft-cli bench --ops [--small] [--layers N] [--comps N] [--footage N]   everyday-operation timings
 //!     on a large generated project (open, save, auto-save, undo/redo, timeline, Project panel)
+//! effectcraft-cli bench --roto [--frames N] [--sam2 model.safetensors] [--mobilesam mobile_sam.pt] [--fixes] [--clip FRAMES --truth MASKS] [--json]   Roto Brush trackers on synthetic clips with known mattes
+//!     (classical engine, MobileSAM and SAM 2.1 (any installed size) when installed; IoU, flicker, re-appearance, seconds per frame)
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
 //!
@@ -96,6 +100,11 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   commands [--filter TEXT] [--enabled]     list engine commands
   exec <command-id> [--params JSON]        run one engine command (exec --list: list them, as `commands`)
   run <id> <json> [<id> <json> ...]        run several commands in order
+  run --args-file F                        the same, one argument per line of F (no command-line length limit)
+  run --commands FILE|-                    steps from FILE, or standard input for -: a JSON array of
+                                           {\"command\": ID, \"params\": {...}} (or \"id\" for \"command\"), or one
+                                           such object per line (JSON Lines); at most 64 MiB and 100000 steps.
+                                           Repeatable; run after the <id> <json> pairs and --args-file
   props <comp> <layer> [--flat] [--time S] a layer's property tree with paths
   get <comp> <layer> <path> [--time S]     read a property
   set <comp> <layer> <path> <value> [--time S] [--expression E]
@@ -105,7 +114,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
          [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
          [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
-                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
+                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal
@@ -117,6 +126,9 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   bench --ops [--small] [--layers N] [--comps N] [--footage N]
                                            everyday operations on a large generated project: startup, open,
                                            save, auto-save, edits + undo/redo, timeline, Project panel
+  bench --roto [--frames N] [--sam2 FILE] [--mobilesam FILE] [--fixes] [--clip FRAMES_DIR --truth MASKS_DIR] [--json]
+                                           Roto Brush trackers on synthetic clips with known mattes: movement,
+                                           lighting change, occlusion, leaving and re-entering the frame
   script FILE.jsx [F.ecproj] | --eval CODE run JavaScript with the After Effects-style object model
                                            (app.project, comps, layers, properties…); prints writeLn
                                            output and the result; errors exit 1 with file:line:col
@@ -130,6 +142,11 @@ options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge
 /// Options that take a value.
 const VALUED: &[&str] = &[
     "--n",
+    "--clip",
+    "--truth",
+    "--frames",
+    "--sam2",
+    "--mobilesam",
     "--play",
     "--layers",
     "--comps",
@@ -148,6 +165,8 @@ const VALUED: &[&str] = &[
     "--expression",
     "--depth",
     "--eval",
+    "--args-file",
+    "--commands",
     // render
     "--template",
     "--values",
@@ -178,6 +197,7 @@ const VALUED: &[&str] = &[
 /// Options without a value. Any other `--option` is a usage error.
 const FLAGS: &[&str] = &[
     "--json",
+    "--fixes",
     "--save",
     "--demo",
     "--empty",
@@ -190,6 +210,7 @@ const FLAGS: &[&str] = &[
     "--work-area",
     "--queue",
     "--ops",
+    "--roto",
     "--small",
     "--adv3d",
     "--autosave",
@@ -276,6 +297,9 @@ fn utf8_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<St
 }
 
 fn main() {
+    // Warnings and errors to standard error (`RUST_LOG` overrides), so a GPU that declines
+    // frames or runs out of memory says so instead of silently rendering on the CPU.
+    effectcraft_engine::logging::install_with("warn");
     let raw = match utf8_args(std::env::args_os().skip(1)) {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
@@ -329,6 +353,87 @@ impl From<String> for Failure {
     fn from(e: String) -> Self {
         Failure::Error(e)
     }
+}
+
+/// Most bytes `run --commands` reads from a file or standard input: the steps are untrusted input.
+const MAX_COMMANDS_BYTES: u64 = 64 * 1024 * 1024;
+/// Most steps one `run --commands` takes.
+const MAX_COMMANDS_STEPS: usize = 100_000;
+
+/// The text of `--commands source`: the file `source`, or standard input for `-`, refused past
+/// [`MAX_COMMANDS_BYTES`]. This reader, [`parse_commands`] and [`command_step`] are ported from
+/// vectorcraft-cli's (storytold/vectorcraft#3630), with a tuple in place of its `Step` enum.
+fn read_commands(source: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = vec![];
+    let read = if source == "-" {
+        std::io::stdin().lock().take(MAX_COMMANDS_BYTES + 1).read_to_end(&mut bytes)
+    } else {
+        std::fs::File::open(source).and_then(|f| f.take(MAX_COMMANDS_BYTES + 1).read_to_end(&mut bytes))
+    };
+    read.map_err(|e| format!("--commands {source}: {e}"))?;
+    if bytes.len() as u64 > MAX_COMMANDS_BYTES {
+        return Err(format!("--commands {source}: more than {} MiB of steps", MAX_COMMANDS_BYTES / (1024 * 1024)));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("--commands {source}: not UTF-8 text"))
+}
+
+/// The steps of `--commands source` from its `text`: a JSON array of `{"command": ID, "params":
+/// {…}}` objects (`"id"` may stand for `"command"`), or one such object per line (JSON Lines, blank
+/// lines skipped). `first` is the run's index of the first of them, which an error names with the
+/// entry's place in the text.
+fn parse_commands(source: &str, text: &str, first: usize) -> Result<Vec<(String, Value)>, String> {
+    // Notepad on Windows starts UTF-8 files with a byte order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let too_many = || format!("--commands {source}: more than {MAX_COMMANDS_STEPS} steps");
+    // Each entry with where it is in the text: its line for JSON Lines.
+    let mut entries: Vec<(Option<usize>, Value)> = vec![];
+    if text.trim_start().starts_with('[') {
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("--commands {source}: {e}"))?;
+        let Value::Array(items) = v else { return Err(format!("--commands {source}: not a JSON array")) };
+        if items.len() > MAX_COMMANDS_STEPS {
+            return Err(too_many());
+        }
+        entries.extend(items.into_iter().map(|v| (None, v)));
+    } else {
+        for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+            if entries.len() == MAX_COMMANDS_STEPS {
+                return Err(too_many());
+            }
+            let v = serde_json::from_str(line).map_err(|e| format!("--commands {source}: step {} (line {}): {e}", first + entries.len(), n + 1))?;
+            entries.push((Some(n + 1), v));
+        }
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(k, (line, v))| {
+            command_step(v).map_err(|e| {
+                let place = line.map_or_else(|| format!("entry {}", k + 1), |l| format!("line {l}"));
+                format!("--commands {source}: step {} ({place}): {e}", first + k)
+            })
+        })
+        .collect()
+}
+
+/// The command id and params of one `--commands` entry, `{"command": ID, "params": {…}}`.
+fn command_step(v: Value) -> Result<(String, Value), String> {
+    let Value::Object(mut o) = v else { return Err("a step must be an object such as {\"command\": \"comp.new\", \"params\": {}}".into()) };
+    let id = match (o.remove("command"), o.remove("id")) {
+        (Some(Value::String(id)), None) | (None, Some(Value::String(id))) => id,
+        (Some(_), Some(_)) => return Err("give `command` or `id`, not both".into()),
+        (None, None) => return Err("no `command`".into()),
+        _ => return Err("`command` must be a string, a command id".into()),
+    };
+    let params = match o.remove("params") {
+        None | Some(Value::Null) => json!({}),
+        Some(p @ Value::Object(_)) => p,
+        Some(_) => return Err(format!("`params` of {id} must be a JSON object")),
+    };
+    if let Some(key) = o.keys().next() {
+        return Err(format!("unknown key `{key}`: a step has `command` (or `id`) and `params`"));
+    }
+    Ok((id, params))
 }
 
 fn usage_err<T>(m: &str) -> Result<T, Failure> {
@@ -515,15 +620,20 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             emit(&with_saved(r, saved), json_out);
         }
         "run" => {
-            if args.pos.is_empty() {
-                return usage_err("run needs <command-id> [<json>] pairs");
+            let mut pairs = args.pos.clone();
+            // Windows caps a command line at 32 767 characters: long batches come from a file.
+            if let Some(f) = args.opt("--args-file") {
+                let text = std::fs::read_to_string(f).map_err(|e| Failure::Usage(format!("--args-file {f}: {e}")))?;
+                pairs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from));
             }
-            let pairs = args.pos.clone();
-            let mut b = backend(args, true)?;
-            let mut results = vec![];
+            let sources = args.opts("--commands");
+            if pairs.is_empty() && sources.is_empty() {
+                return usage_err("run needs <command-id> [<json>] pairs or --commands FILE|-");
+            }
+            let mut steps = vec![];
             let mut i = 0;
             while i < pairs.len() {
-                let id = &pairs[i];
+                let id = pairs[i].clone();
                 let params = match pairs.get(i + 1).filter(|p| p.trim_start().starts_with('{')) {
                     Some(p) => {
                         i += 1;
@@ -532,9 +642,26 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                     None => json!({}),
                 };
                 i += 1;
-                let r = b.exec(id, params).map_err(|e| Failure::Error(format!("{id}: {e}")))?;
-                if let Some(e) = failed_render(id, &r) {
-                    return Err(Failure::Error(format!("{id}: {e}")));
+                steps.push((id, params));
+            }
+            if sources.iter().filter(|s| **s == "-").count() > 1 {
+                return usage_err("--commands - is given twice: standard input is read once");
+            }
+            for &source in &sources {
+                let text = read_commands(source).map_err(Failure::Usage)?;
+                steps.extend(parse_commands(source, &text, steps.len()).map_err(Failure::Usage)?);
+            }
+            if steps.is_empty() {
+                return Err(Failure::Usage(format!("--commands {}: no commands", sources.join(", "))));
+            }
+            let mut b = backend(args, true)?;
+            let mut results = vec![];
+            // The step's index closes the message: a generated list repeats ids, and callers match
+            // the leading `<id>: `.
+            for (n, (id, params)) in steps.into_iter().enumerate() {
+                let r = b.exec(&id, params).map_err(|e| Failure::Error(format!("{id}: {e} (step {n})")))?;
+                if let Some(e) = failed_render(&id, &r) {
+                    return Err(Failure::Error(format!("{id}: {e} (step {n})")));
                 }
                 if !json_out {
                     emit(&r, false);
@@ -612,9 +739,8 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             }
             let out = args.opt("--out").unwrap_or("frame.png").to_string();
             let t0 = std::time::Instant::now();
-            let f = b.render_with(comp.as_ref(), time, max_side, args.flag("--transparent"))?;
+            let f = b.render_to_file(comp.as_ref(), time, max_side, args.flag("--transparent"), &out)?;
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            std::fs::write(&out, &f.png).map_err(|e| format!("cannot write {out}: {e}"))?;
             let info = json!({"path": out, "comp": f.comp, "time": f.time, "width": f.width, "height": f.height, "ms": (ms * 10.0).round() / 10.0});
             if json_out {
                 emit(&info, true);
@@ -775,6 +901,7 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             r["outputModuleSummary"].as_str().unwrap_or("")
         );
     }
+    let attempted: std::collections::HashSet<u64> = s.project.render_queue.iter().filter(|i| i.is_queued()).map(|i| i.id).collect();
     s.execute("renderQueue.render", json!({"wait": false})).map_err(err)?;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     // `--progress`: one line per update for a program reading stderr (a terminal gets the live line).
@@ -813,7 +940,7 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     }
     let mut results = vec![];
     let mut failed = vec![];
-    for it in s.project.render_queue.iter().filter(|i| i.render && i.started.is_some()) {
+    for it in s.project.render_queue.iter().filter(|i| attempted.contains(&i.id)) {
         let name = s.project.item(it.comp).map(|i| i.name.clone()).unwrap_or_else(|| "?".into());
         match &it.status {
             RenderStatus::Done => {
@@ -860,6 +987,9 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
     if args.flag("--ops") {
         return bench_ops(args);
     }
+    if args.flag("--roto") {
+        return bench_roto(args);
+    }
     let mut s = effectcraft_host::session();
     match &args.project {
         Some(p) => s.execute("file.open", json!({"path": p})),
@@ -880,6 +1010,117 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
         bench_play(&s, cid, t, opts, n.max(1.0) as usize);
     }
     Ok(())
+}
+
+/// The model a bench option asks for: the file named on the command line, where failing to read or
+/// build it is an error saying why (not "not installed"); else the installed file, where a file that
+/// cannot be used just leaves the model out.
+fn bench_weights<T>(
+    flag: &str,
+    named: Option<&str>,
+    installed: Option<std::path::PathBuf>,
+    build: impl Fn(&[u8]) -> Result<T, String>,
+) -> Result<Option<T>, Failure> {
+    match named {
+        Some(path) => {
+            let bytes = std::fs::read(path).map_err(|e| Failure::Error(format!("{flag} {path}: {e}")))?;
+            build(&bytes).map(Some).map_err(|e| Failure::Error(format!("{flag} {path}: {e}")))
+        }
+        None => Ok(installed.and_then(|p| std::fs::read(p).ok()).and_then(|bytes| build(&bytes).ok())),
+    }
+}
+
+/// `bench --roto`: the Roto Brush's trackers on synthetic clips whose true mattes are known.
+fn bench_roto(args: &Args) -> Result<(), Failure> {
+    use effectcraft_segment::{Loaded, MOBILE_SAM, MaskModel};
+    use effectcraft_track::roto::bench;
+    let frames = args.num("--frames")?.unwrap_or(24.0).clamp(1.0, 240.0) as usize;
+    let session = effectcraft_host::session();
+    // `--mobilesam FILE` uses the weights at FILE (a file that cannot be used is an error);
+    // otherwise the installed ones.
+    let mobilesam: Option<std::sync::Arc<dyn MaskModel>> = bench_weights("--mobilesam", args.opt("--mobilesam"), session.model_path(&MOBILE_SAM), |bytes| {
+        match effectcraft_segment::load(MOBILE_SAM.id, bytes)? {
+            Loaded::Mask(m) => Ok(m),
+            _ => Err("not a mask model".to_string()),
+        }
+    })?;
+    if mobilesam.is_none() {
+        note!("bench --roto: MobileSAM is not installed; comparing the classical engine only");
+    }
+    // `--sam2 FILE` uses the weights at FILE (a file that cannot be used is an error); otherwise
+    // the installed ones.
+    let installed_sam2 = effectcraft_sam2::mask::SIZES.iter().find_map(|m| session.model_path(m));
+    let sam2: Option<std::sync::Arc<dyn MaskModel>> =
+        bench_weights("--sam2", args.opt("--sam2"), installed_sam2, |bytes| effectcraft_sam2::mask::load(bytes).map(|m| m as std::sync::Arc<dyn MaskModel>))?;
+    if sam2.is_none() {
+        note!("bench --roto: no SAM 2.1 size is installed; no SAM 2 column");
+    }
+    // `--fixes`: count correction rounds before every frame reaches IoU 0.9 (up to 6 rounds, each up to two strokes).
+    let fixes = args.flag("--fixes");
+    let measure = |sc: &bench::Scenario, run: &dyn Fn(&bench::Scenario) -> Option<bench::Run>| if fixes { bench::with_fixes(sc, 0.9, 6, run) } else { run(sc) };
+    let mut runs = vec![];
+    // User clips pair unique filename stems, allowing JPEG frames with PNG truth masks.
+    let scenarios = if let Some(dir) = args.opt("--clip") {
+        let truth = args.opt("--truth").ok_or_else(|| Failure::Error("--clip needs --truth MASKS_DIR".into()))?;
+        let name = std::path::Path::new(dir).file_name().map_or_else(|| "clip".to_string(), |n| n.to_string_lossy().chars().take(10).collect());
+        vec![load_bench_clip(&name, dir, truth, frames).map_err(Failure::Error)?]
+    } else {
+        bench::scenarios(frames)
+    };
+    for sc in scenarios {
+        runs.extend(measure(&sc, &|s| Some(bench::run_flow(s, "classical", None))));
+        if let Some(m) = &mobilesam {
+            runs.extend(measure(&sc, &|s| Some(bench::run_flow(s, "mobilesam", Some(m.as_ref())))));
+        }
+        if let Some(m) = &sam2 {
+            let label = m.info().id.replacen("sam2.1-hiera-", "sam2-", 1);
+            runs.extend(measure(&sc, &|s| bench::run_tracker(s, &label, m.as_ref())));
+        }
+    }
+    if args.flag("--json") {
+        say!("{}", serde_json::to_string_pretty(&runs).map_err(|e| Failure::Error(e.to_string()))?);
+    } else {
+        say!("{}", bench::table(&runs));
+    }
+    Ok(())
+}
+
+/// The image files of `dir` (png, jpg, jpeg), ordered by stem then full file name.
+fn image_files(dir: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {dir}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str())))
+        .collect();
+    files.sort_by(|a, b| a.file_stem().cmp(&b.file_stem()).then_with(|| a.file_name().cmp(&b.file_name())));
+    Ok(files)
+}
+
+/// A benchmark scenario from the user's frames and truth masks (at most `limit` frames, frames at most 480 px
+/// wide; a mask pixel above 127 is the object). Nothing is copied or kept.
+fn load_bench_clip(name: &str, frames_dir: &str, truth_dir: &str, limit: usize) -> Result<effectcraft_track::roto::bench::Scenario, String> {
+    let (frames, masks) = (image_files(frames_dir)?, image_files(truth_dir)?);
+    if frames.is_empty() || frames.len() != masks.len() {
+        return Err(format!("{} frames in {frames_dir} but {} masks in {truth_dir}: they must match one to one", frames.len(), masks.len()));
+    }
+    if frames.iter().map(|p| p.file_stem()).ne(masks.iter().map(|p| p.file_stem()))
+        || frames.windows(2).chain(masks.windows(2)).any(|pair| pair.first().and_then(|p| p.file_stem()) == pair.get(1).and_then(|p| p.file_stem()))
+    {
+        return Err("frame and truth file names must match one to one, with unique stems (extensions may differ)".into());
+    }
+    let n = frames.len().min(limit.clamp(1, 240));
+    let (mut imgs, mut truth) = (vec![], vec![]);
+    for (f, m) in frames.iter().zip(&masks).take(n) {
+        let rgba = image::open(f).map_err(|e| format!("{}: {e}", f.display()))?.to_rgba8();
+        let scale = (480.0 / f64::from(rgba.width().max(1))).min(1.0);
+        let (w, h) = (((f64::from(rgba.width()) * scale).round() as u32).max(1), ((f64::from(rgba.height()) * scale).round() as u32).max(1));
+        let rgba = if (w, h) == rgba.dimensions() { rgba } else { image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle) };
+        let mask = image::open(m).map_err(|e| format!("{}: {e}", m.display()))?.to_luma8();
+        let mask = image::imageops::resize(&mask, w, h, image::imageops::FilterType::Nearest);
+        imgs.push(effectcraft_render::Image::from_rgba8(w, h, rgba.as_raw()));
+        truth.push(mask.as_raw().iter().map(|v| u8::from(*v > 127)).collect());
+    }
+    effectcraft_track::roto::bench::scenario_from(name, imgs, truth)
 }
 
 /// `bench --ops`: everyday operations on a large generated project (200 comps, 5,000 layers in
@@ -1181,7 +1422,7 @@ fn adv3d_bench_comp(p: &mut effectcraft_engine::project::Project) -> Option<Item
         set(l, "cameraOptions/highlightGain", Value::Scalar(20.0));
         set(l, "cameraOptions/highlightThreshold", Value::Scalar(200.0));
     });
-    comp.layers = layers;
+    comp.layers = layers.into();
     Some(p.add_item("Advanced 3D (bench)", effectcraft_engine::color::Label::None, None, ItemKind::Comp(comp.into())))
 }
 

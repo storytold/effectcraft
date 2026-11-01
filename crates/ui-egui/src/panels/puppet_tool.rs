@@ -70,7 +70,7 @@ struct Cached {
 pub fn overlay(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId, layer: &Layer, t: Tick) -> Option<Overlay> {
     let fx = layer.effects()?.groups().find(|g| puppet::is_puppet(g))?;
     let key = (app.session.revision, cid.0, layer.id.0, t.0);
-    let id = egui::Id::new(("puppet-overlay", layer.id.0));
+    let id = egui::Id::unique(("puppet-overlay", layer.id.0));
     if let Some(c) = ctx.data(|d| d.get_temp::<Cached>(id))
         && c.key == key
     {

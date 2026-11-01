@@ -82,7 +82,18 @@ impl ShapePath {
             if i == 0 && f.segment == 0 && !self.closed {
                 return false;
             }
-            if i > 0 && f.segment == i - 1 {
+            if i == 0 && self.closed && segs > 0 {
+                // The old closing segment and segment 0 merge into the new closing one.
+                if f.segment == segs {
+                    f.segment = segs - 1;
+                    f.t *= 0.5;
+                } else if f.segment == 0 {
+                    f.segment = segs - 1;
+                    f.t = 0.5 + f.t * 0.5;
+                } else {
+                    f.segment -= 1;
+                }
+            } else if i > 0 && f.segment == i - 1 {
                 f.t *= 0.5;
             } else if f.segment == i && i > 0 {
                 f.segment = i - 1;
