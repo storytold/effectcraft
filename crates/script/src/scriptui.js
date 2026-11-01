@@ -839,6 +839,56 @@ function __uiMouseFire(target, type, v) {
   return e;
 }
 
+var __uiKeyKinds = ["keydown", "keyup"];
+
+function __uiKeyboardEvent(type, target, v) {
+  var keys = { alt: !!v.altKey, control: !!v.ctrlKey, ctrl: !!v.ctrlKey, meta: !!v.metaKey, shift: !!v.shiftKey };
+  return {
+    type: type,
+    target: target,
+    currentTarget: target,
+    eventPhase: "none",
+    bubbles: true,
+    cancelable: true,
+    captures: true,
+    view: target.window,
+    timeStamp: new Date(),
+    keyName: String(v.keyName || v.key || ""),
+    key: String(v.key || v.keyName || ""),
+    altKey: keys.alt,
+    ctrlKey: keys.ctrl,
+    metaKey: keys.meta,
+    shiftKey: keys.shift,
+    defaultPrevented: false,
+    __stopped: false,
+    stopPropagation: function () { this.__stopped = true; },
+    preventDefault: function () { this.defaultPrevented = true; },
+    getModifierState: function (k) { return !!keys[String(k).toLowerCase()]; },
+    toString: function () { return "[object KeyboardEvent]"; }
+  };
+}
+
+function __uiKeyFire(target, type, v) {
+  var path = [];
+  for (var p = target; p && path.length < 256; p = p.parent) path.unshift(p);
+  var e = __uiKeyboardEvent(type, target, v);
+  var run = function (c, phase, capture) {
+    var l = __uiMouseListeners(c, type, capture);
+    e.currentTarget = c;
+    e.eventPhase = phase;
+    for (const elem of l) if (typeof elem === "function") elem.call(c, e);
+  };
+  var n = path.length - 1;
+  for (var i = 0; i < n; i++) {
+    run(path[i], "capture", true);
+    if (e.__stopped) return e;
+  }
+  run(target, "target", true);
+  run(target, "target", false);
+  for (var j = n - 1; j >= 0 && !e.__stopped; j--) run(path[j], "bubble", false);
+  return e;
+}
+
 function __uiJson(c, inherited) {
   var mouse = __uiMouseWanted(c, inherited || []);
   var ps = __uiSize(c.preferredSize);
@@ -978,6 +1028,11 @@ function __uiDispatch(winId, id, kind, valueJson) {
   var mouse = v !== null && typeof v === "object" && !(v instanceof Array) ? v : null;
   if (kind !== "click" && __uiMouseKinds.indexOf(kind) >= 0) {
     __uiMouseFire(c, kind, mouse || {});
+    return;
+  }
+  if (__uiKeyKinds.indexOf(kind) >= 0) {
+    var keyObj = v !== null && typeof v === "object" ? v : {};
+    __uiKeyFire(c, kind, keyObj);
     return;
   }
   if (kind === "click") {

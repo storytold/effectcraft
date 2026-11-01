@@ -583,6 +583,15 @@ pub fn specs() -> Vec<CommandSpec> {
             scriptui::mouse
         ),
         cmd!(
+            "scriptui.key",
+            "Keyboard Event on Script Window Control",
+            [],
+            None,
+            "{window?, widget?, type: keydown | keyup, key?, keyName?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners receive a KeyboardEvent",
+            always,
+            scriptui::key
+        ),
+        cmd!(
             "scriptui.resize",
             "Resize Script Window",
             [],

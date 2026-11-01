@@ -323,3 +323,36 @@ f2.requestFocus();
     assert_eq!(win.root.children[0].text, "One");
     assert_eq!(win.root.children[1].text, "Two");
 }
+
+#[test]
+fn scriptui_keyboard_event_routing() {
+    let mut s = session();
+    let code = r#"
+var w = new Window("palette", "KeyTest");
+var f = w.add("edittext", undefined, "init");
+w.addEventListener("keydown", function(e) {
+    writeLn("key:" + e.keyName + " ctrl:" + e.ctrlKey);
+});
+w.show();
+f.active = true;
+"#;
+    let o = run_code(&mut s, code, "key_test.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+
+    let wid = s.script_ui.windows[0].id;
+    let r = s
+        .execute(
+            "scriptui.key",
+            json!({
+                "window": wid,
+                "widget": 1,
+                "type": "keydown",
+                "key": "ArrowDown",
+                "keyName": "Down",
+                "ctrlKey": true
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(r["output"].as_str().unwrap().trim(), "key:Down ctrl:true");
+}
