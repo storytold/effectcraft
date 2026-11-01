@@ -64,8 +64,9 @@ fn trace_frame(img: &Image, offset: [f64; 2], ch: Channel, invert: bool, blur: f
     let mut out = trace(&field, img.width as usize, img.height as usize, o);
     for t in &mut out {
         for v in &mut t.path.vertices {
-            v[0] += offset[0];
-            v[1] += offset[1];
+            // Source buffers are layer pixels + offset: subtract it to get back to layer space.
+            v[0] -= offset[0];
+            v[1] -= offset[1];
         }
     }
     out
