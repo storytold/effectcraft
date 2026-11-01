@@ -169,9 +169,9 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                     r.request_focus();
                     ui.ctx().memory_mut(|mem| mem.request_focus(id));
                     let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
-                    let char_count = buf.chars().count();
-                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(char_count))));
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
                     st.store(ui.ctx(), id);
+                    log::debug!("ScriptUI native focus applied to window {} widget {} ({:?})", win, w.id, id);
                 }
                 if seq > 0 && target_widget == Some(w.id) {
                     ui.data_mut(|d| d.insert_temp(focus_seq_id, seq));
@@ -183,6 +183,9 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             // Live updates already sent the text: the commit still runs onChange.
             let dirty_id = id.with("dirty");
             let dirty = ui.data(|d| d.get_temp::<bool>(dirty_id)).unwrap_or(false);
+            if r.lost_focus() {
+                log::debug!("ScriptUI focus lost on window {} widget {} ({:?})", win, w.id, id);
+            }
             if r.lost_focus() && (buf != w.text || dirty) {
                 acts.push(Act::Set(win, w.id, json!(buf)));
                 ui.data_mut(|d| d.remove::<bool>(dirty_id));
