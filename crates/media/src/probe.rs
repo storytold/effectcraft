@@ -275,17 +275,62 @@ pub(crate) fn swaps_sides(o: Orientation) -> bool {
     matches!(o, Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH)
 }
 
+/// The widest or tallest picture decoded: the largest footage frame a project holds
+/// ([`effectcraft_project::limits::MAX_SIZE`]); a wider picture could not be shown at its size.
+pub(crate) const MAX_SIDE: u32 = effectcraft_project::limits::MAX_SIZE;
+
+/// What one picture may cost to decode: no side over [`MAX_SIDE`], and no more memory than
+/// `image`'s default budget (512 MiB) or what a whole animation may hold, whichever is less.
+/// Decoders given these refuse a header claiming a huge picture before allocating it (#2130).
+/// Stills get their own, larger decode budget ([`still_limits`]); every picture must also pass
+/// [`fits_as_image`].
+pub(crate) fn decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    let held = u64::try_from(crate::gif_anim::MAX_BYTES).unwrap_or(u64::MAX);
+    limits.max_alloc = Some(limits.max_alloc.map_or(held, |m| m.min(held)));
+    limits
+}
+
+/// [`decode_limits`] for a still: one picture may use what a whole animation may hold
+/// ([`crate::gif_anim::MAX_BYTES`]) to decode.
+fn still_limits() -> image::Limits {
+    let mut limits = decode_limits();
+    limits.max_alloc = Some(u64::try_from(crate::gif_anim::MAX_BYTES).unwrap_or(u64::MAX));
+    limits
+}
+
+/// Whether a `w`×`h` picture fits the budget once it becomes what the compositor holds: an f32
+/// RGBA [`effectcraft_raster::Image`] of 16 bytes a pixel, up to [`crate::gif_anim::MAX_BYTES`]
+/// (about 67 MP on desktop, as many as a DPX may have). The decoded bytes alone are no measure:
+/// an 8-bit grey picture grows sixteenfold.
+pub(crate) fn fits_as_image(w: u32, h: u32) -> bool {
+    let px = std::mem::size_of::<effectcraft_raster::Px>() as u64;
+    u64::from(w) * u64::from(h) * px <= u64::try_from(crate::gif_anim::MAX_BYTES).unwrap_or(u64::MAX)
+}
+
 /// Decode a still the way it is meant to be seen: its Exif orientation (a camera held sideways, a
 /// mirrored scan) is applied to the pixels, as image viewers do. A file without
 /// the tag, or with a broken one, decodes as stored. `fmt`: the format when the file's extension
 /// decides it (Targa has no signature to guess from), else guessed from the bytes.
 pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> image::ImageResult<image::DynamicImage> {
     use image::ImageDecoder;
-    let reader = match fmt {
+    let mut reader = match fmt {
         Some(fmt) => image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt),
         None => image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?,
     };
+    let mut limits = still_limits();
+    reader.limits(limits.clone());
     let mut dec = reader.into_decoder()?;
+    let (w, h) = dec.dimensions();
+    if !fits_as_image(w, h) {
+        return Err(image::ImageError::Limits(image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory)));
+    }
+    // `from_decoder` allocates the whole picture without asking the limits (unlike
+    // `ImageReader::decode`), so reserve it here and leave the decoder the rest.
+    limits.reserve(dec.total_bytes())?;
+    dec.set_limits(limits)?;
     let orientation = dec.orientation().unwrap_or(Orientation::NoTransforms);
     let mut img = image::DynamicImage::from_decoder(dec)?;
     img.apply_orientation(orientation);
@@ -430,5 +475,78 @@ mod tests {
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
         assert_eq!(video_rate(b"not a movie"), None);
+    }
+
+    /// A PNG claiming `w`×`h` 8-bit pixels of PNG colour type `colour` (0 grey, 6 RGBA) with no
+    /// pixel data: a few dozen bytes.
+    fn png_header_only(w: u32, h: u32, colour: u8) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for &b in data {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let body = [kind.as_slice(), data].concat();
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+        }
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let ihdr = [w.to_be_bytes().as_slice(), h.to_be_bytes().as_slice(), &[8, colour, 0, 0, 0]].concat();
+        chunk(&mut out, b"IHDR", &ihdr);
+        // A zlib stream of nothing: the pixel data runs out at once.
+        chunk(&mut out, b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn a_still_too_big_for_memory_is_refused_before_allocating() {
+        // 20000×20000 RGBA (1.6 GB) declared in a 65-byte file (#2130): the decode budget refuses it
+        // up front instead of allocating the picture and failing on the missing pixel data.
+        let bytes = png_header_only(20_000, 20_000, 6);
+        let err = load_oriented(&bytes, Some(image::ImageFormat::Png)).err();
+        assert!(matches!(err, Some(image::ImageError::Limits(_))), "{err:?}");
+    }
+
+    #[test]
+    fn a_still_too_big_once_widened_to_float_is_refused() {
+        // 30000×30000 8-bit grey decodes to 900 MB, inside the budget, but every still becomes an
+        // f32 RGBA `Image` of 16 bytes a pixel: 14.4 GB asked of the allocator by a 1 MB file.
+        let bytes = png_header_only(MAX_SIDE, MAX_SIDE, 0);
+        let err = load_oriented(&bytes, Some(image::ImageFormat::Png)).err();
+        assert!(matches!(err, Some(image::ImageError::Limits(_))), "{err:?}");
+    }
+
+    #[test]
+    fn the_still_budget_is_the_float_image_it_becomes() {
+        // The largest grey still whose f32 RGBA `Image` fits the budget gets past the limits (and
+        // then fails on the missing pixel data); one more row is refused.
+        let w = 8192;
+        let h = u32::try_from(crate::gif_anim::MAX_BYTES / 16 / 8192).unwrap();
+        let err = load_oriented(&png_header_only(w, h, 0), Some(image::ImageFormat::Png)).err();
+        assert!(matches!(err, Some(image::ImageError::Decoding(_))), "{err:?}");
+        let err = load_oriented(&png_header_only(w, h + 1, 0), Some(image::ImageFormat::Png)).err();
+        assert!(matches!(err, Some(image::ImageError::Limits(_))), "{err:?}");
+    }
+
+    #[test]
+    fn a_still_wider_than_any_comp_is_refused() {
+        let bytes = png_header_only(MAX_SIDE + 1, 1, 6);
+        let err = load_oriented(&bytes, None).err();
+        assert!(matches!(err, Some(image::ImageError::Limits(_))), "{err:?}");
+    }
+
+    #[test]
+    fn a_small_still_still_decodes() {
+        let mut bytes = Vec::new();
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 4])).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        let img = load_oriented(&bytes, None).unwrap();
+        assert_eq!((img.width(), img.height()), (3, 2));
     }
 }

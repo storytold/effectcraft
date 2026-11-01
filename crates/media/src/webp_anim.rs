@@ -153,7 +153,7 @@ pub(crate) fn probe(path: &str, bytes: &[u8]) -> Option<Footage> {
 pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
     let h = header(bytes).ok_or_else(|| MediaError::Decode("WebP: not an animated WebP".into()))?;
     let frame_bytes = usize::try_from(u64::from(h.width) * u64::from(h.height) * 4).unwrap_or(usize::MAX);
-    if frame_bytes.saturating_mul(h.delays.len()) > MAX_BYTES {
+    if frame_bytes.saturating_mul(h.delays.len()) > MAX_BYTES || !crate::probe::fits_as_image(h.width, h.height) {
         return Err(MediaError::Unsupported(format!("animated WebP of {} frames of {}×{} is too large to hold in memory", h.delays.len(), h.width, h.height)));
     }
     let dec = WebPDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("WebP: {e}")))?;
@@ -323,6 +323,17 @@ mod tests {
         let mut bytes = webp(1, 1, &[(RED, 50); 10]);
         bytes[24..27].copy_from_slice(&u24(16383));
         bytes[27..30].copy_from_slice(&u24(16383));
+        let e = super::load(&bytes).err().unwrap();
+        assert!(e.to_string().contains("too large"), "{e}");
+    }
+
+    #[test]
+    fn a_canvas_too_big_once_widened_to_float_is_refused() {
+        // One frame on a 9000×9000 canvas: 324 MB of RGBA fits the animation budget, but the frame
+        // becomes an f32 RGBA `Image` of 1.3 GB.
+        let mut bytes = webp(1, 1, &[(RED, 50)]);
+        bytes[24..27].copy_from_slice(&u24(8999));
+        bytes[27..30].copy_from_slice(&u24(8999));
         let e = super::load(&bytes).err().unwrap();
         assert!(e.to_string().contains("too large"), "{e}");
     }
