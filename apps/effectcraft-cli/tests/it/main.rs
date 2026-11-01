@@ -1,7 +1,9 @@
 //! The crate's integration tests, one binary (each module is a former `tests/<name>.rs`).
 
 mod cli;
+mod man_and_completions;
 mod qa_template;
+mod usage;
 
 /// Nextest archives relocate binaries; plain Cargo keeps the compile-time path valid.
 fn binary() -> std::ffi::OsString {
