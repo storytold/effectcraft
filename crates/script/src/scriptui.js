@@ -458,10 +458,15 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
         var b = !!val;
         this.__active = b;
         if (b && this.window) {
+          if (this.window.__activeControl && this.window.__activeControl !== this) {
+            this.window.__activeControl.__active = false;
+          }
+          this.window.__activeControl = this;
           this.window.__focusTarget = this.__id;
           this.window.__focusSeq = (this.window.__focusSeq || 0) + 1;
         } else if (!b && this.window && this.window.__focusTarget === this.__id) {
           this.window.__focusTarget = null;
+          if (this.window.__activeControl === this) this.window.__activeControl = null;
         }
       },
       configurable: true,
@@ -543,6 +548,7 @@ function __uiProto() {
       if (t === "checkbox" || t === "radiobutton") c.value = false;
       if (t === "edittext" && c.properties.multiline) c.__multiline = true;
       if (t === "edittext" && c.properties.readonly) c.__readonly = true;
+      if (t === "edittext" && c.properties.placeholder) c.__placeholder = String(c.properties.placeholder);
       if (c.properties?.name) c.name = c.properties.name;
       this.children.push(c);
       if (t === "tab" && this.type === "tabbedpanel" && this.__sel.length === 0) this.__sel = [this.children.length - 1];
@@ -881,6 +887,7 @@ function __uiJson(c, inherited) {
     o.multiline = !!c.__multiline;
     o.readOnly = !!c.__readonly;
     o.active = !!c.__active;
+    if (c.__placeholder) o.placeholder = String(c.__placeholder);
   }
   return o;
 }

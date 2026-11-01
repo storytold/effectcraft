@@ -106,6 +106,7 @@ pub struct Widget {
     pub enabled: bool,
     pub visible: bool,
     pub help_tip: String,
+    pub placeholder: String,
     pub multiline: bool,
     pub read_only: bool,
     pub active: bool,

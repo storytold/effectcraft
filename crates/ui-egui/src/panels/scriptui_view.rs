@@ -149,23 +149,30 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             if !focused {
                 buf = w.text.clone();
             }
-            let te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
-            let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(12.0));
+            let mut te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
+            if !w.placeholder.is_empty() {
+                te = te.hint_text(&w.placeholder);
+            }
+            let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(14.0));
             let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(rect, te)).inner;
             let r = tip(r);
             // Handle ScriptUI keyboard focus request:
-            let (target_widget, seq) = app.session.script_ui.window(win)
-                .map(|sw| (sw.focus_widget, sw.focus_seq))
-                .unwrap_or((None, 0));
-            let focus_seq_id = egui::Id::unique(("sui-focus-seq", win));
+            let (target_widget, seq) = app.session.script_ui.window(win).map(|sw| (sw.focus_widget, sw.focus_seq)).unwrap_or((None, 0));
+            let focus_seq_id = egui::Id::unique(("sui-focus-seq", win, w.id));
             let last_seq: u64 = ui.data(|d| d.get_temp(focus_seq_id)).unwrap_or(0);
-            let wants_focus = (seq > 0 && seq > last_seq && target_widget == Some(w.id))
-                || (seq == 0 && last_seq == 0 && w.active);
+            let has_focus = ui.memory(|m| m.has_focus(id));
+            let wants_focus = (seq > 0 && seq > last_seq && target_widget == Some(w.id)) || (w.active && !has_focus && last_seq == 0);
             if wants_focus && w.enabled && !w.read_only {
-                if !ui.memory(|m| m.has_focus(id)) {
+                if !has_focus {
                     r.request_focus();
+                    ui.ctx().memory_mut(|mem| mem.request_focus(id));
                 }
-                ui.data_mut(|d| d.insert_temp(focus_seq_id, if seq > 0 { seq } else { 1 }));
+                if seq > 0 && target_widget == Some(w.id) {
+                    ui.data_mut(|d| d.insert_temp(focus_seq_id, seq));
+                }
+            }
+            if has_focus && last_seq == 0 {
+                ui.data_mut(|d| d.insert_temp(focus_seq_id, 1));
             }
             // Live updates already sent the text: the commit still runs onChange.
             let dirty_id = id.with("dirty");
@@ -560,7 +567,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
+        let order = if w.modal || w.kind == WindowKind::Palette { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
@@ -577,6 +584,9 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
             });
         if let Some(r) = resp {
             app.auto.add(&format!("scriptui.{}", w.id), r.response.rect, &w.title);
+            if w.modal || w.kind == WindowKind::Palette {
+                ctx.move_to_top(r.response.layer_id);
+            }
         }
         if !open {
             acts.push(Act::Close(w.id));

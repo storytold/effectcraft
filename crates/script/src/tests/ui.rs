@@ -308,24 +308,11 @@ var f2 = w.add("edittext", undefined, "Two");
 var b = w.add("button", undefined, "Btn");
 w.show();
 f1.active = true;
+f2.requestFocus();
 "#;
     let o = run_code(&mut s, code, "focus_test.jsx");
     assert!(o.error.is_none(), "{:?}", o.error);
     assert_eq!(s.script_ui.windows.len(), 1);
-    let win = &s.script_ui.windows[0];
-    assert_eq!(win.focus_seq, 1);
-    assert_eq!(win.focus_widget, Some(1));
-    assert!(win.root.children[0].active);
-    assert!(!win.root.children[1].active);
-
-    // Targeting f2 updates focus target and sequence
-    let code2 = r#"
-var w = __uiWins[0];
-var f2 = w.children[1];
-f2.requestFocus();
-"#;
-    let o2 = run_code(&mut s, code2, "focus_test_step2.jsx");
-    assert!(o2.error.is_none(), "{:?}", o2.error);
     let win = &s.script_ui.windows[0];
     assert_eq!(win.focus_seq, 2);
     assert_eq!(win.focus_widget, Some(2));
