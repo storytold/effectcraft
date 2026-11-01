@@ -775,11 +775,8 @@ mod tests {
 
     #[test]
     fn pattern_tile_budget_is_cumulative_after_tiles_are_released() {
-        let mut budget = SurfaceBudget {
-            live_bytes: 0,
-            pattern_tile_bytes: MAX_PATTERN_TILE_BYTES - std::mem::size_of::<[f32; 4]>(),
-            limit_bytes: MAX_LIVE_SURFACE_BYTES,
-        };
+        let mut budget =
+            SurfaceBudget { live_bytes: 0, pattern_tile_bytes: MAX_PATTERN_TILE_BYTES - std::mem::size_of::<[f32; 4]>(), limit_bytes: MAX_LIVE_SURFACE_BYTES };
         let tile = budget.pattern_tile(1, 1).expect("last tile within the budget");
         budget.release(&tile);
         assert!(budget.pattern_tile(1, 1).is_none(), "a released tile still counts toward cumulative pattern work");

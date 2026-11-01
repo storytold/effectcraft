@@ -267,7 +267,7 @@ fn pattern_href_depth_limit_uses_paint_fallback() {
             if index == 16 {
                 format!(r#"<pattern id="p{index}" patternUnits="userSpaceOnUse" width="1" height="1"/>"#)
             } else {
-                format!(r#"<pattern id="p{index}" href="#p{}"/>"#, index + 1)
+                format!(r##"<pattern id="p{index}" href="#p{}"/>"##, index + 1)
             }
         })
         .collect();
