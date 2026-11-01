@@ -116,16 +116,29 @@ pub fn bindings(session: &effectcraft_engine::Session) -> Vec<Binding> {
     // We collect (modifiers, key, scope) triples so that two bindings collide only when they
     // share both chord AND scope — a Timeline binding and a Composition one for different chords
     // are not a collision.
+    // Build cmd_bindings with BOTH the base key and its shifted alias (when Shift is set),
+    // so that a Ctrl+Shift+} (CloseCurlyBracket) correctly matches Cmd+Shift+]
+    // (CloseBracket), whose shifted alias is CloseCurlyBracket.
     let cmd_bindings: Vec<(egui::Modifiers, egui::Key, String)> = if cfg!(target_os = "macos") {
         vec![]
     } else {
-        all.iter()
-            .filter(|(sc, _)| !has_ctrl(sc) && !sc.starts_with("Physical+"))
-            .filter_map(|(sc, b)| parse_shortcut(sc).map(|(m, k)| (m, k, b.scope.clone())))
-            .collect()
+        let mut cb = Vec::new();
+        for (sc, b) in all.iter().filter(|(sc, _)| !has_ctrl(sc) && !sc.starts_with("Physical+")) {
+            if let Some((m, k)) = parse_shortcut(sc) {
+                cb.push((m, k, b.scope.clone()));
+                // Also register the shifted alias so Ctrl+Shift+} finds Cmd+Shift+].
+                if m.shift
+                    && let Some(alias) = shifted_alias(k)
+                {
+                    cb.push((m, alias, b.scope.clone()));
+                }
+            }
+        }
+        cb
     };
     // Check whether a Ctrl binding (modifiers `mk`, key `k`) collides with a Cmd binding
-    // in the same scope (including the shifted alias of the key).
+    // in the same scope. Both the base key and its shifted alias are checked against
+    // cmd_bindings (which already includes expanded aliases for Cmd bindings).
     let collides = |mk: egui::Modifiers, k: egui::Key, scope: &str| -> bool {
         if cfg!(target_os = "macos") {
             return false;
@@ -370,14 +383,13 @@ fn panel_owns_enter(kind: PanelKind) -> bool {
 }
 
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
+    // When the Effect Console is open, it owns keyboard input (Escape, Enter, arrows, Tab, text).
+    // Application shortcuts must not run behind it or consume keys before it does.
+    if app.dialog_state.fx_console.is_some() {
+        return;
+    }
     let start = modifiers_at_start(ctx);
-    // When the Effect Console is open, let fx_console::show consume Escape first (it is shown
-    // later this frame). Only fall through to escape_dialog when the console is not open.
-    if !tab_only
-        && app.dialog.is_some()
-        && app.dialog_state.fx_console.is_none()
-        && ctx.input(|i| i.key_pressed(egui::Key::Escape))
-    {
+    if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         escape_dialog(app, ctx);
         return;
     }

@@ -94,7 +94,7 @@ fn shift_enter_keeps_it_open_arrows_choose_and_escape_closes_without_applying() 
     let name = effectcraft_engine::effects::find(&fx[1]).map(|e| e.name).unwrap();
     assert_eq!(name, second);
 
-    // Escape closes and applies nothing.
+    // Escape closes and applies nothing, and does not leak to global shortcuts (like view.3d.last).
     h.key_press_modifiers(ctrl(), Key::Space);
     h.run_steps(2);
     type_text(&mut h, "glow");
@@ -102,6 +102,11 @@ fn shift_enter_keeps_it_open_arrows_choose_and_escape_closes_without_applying() 
     h.run_steps(2);
     assert!(!open(&h));
     assert_eq!(effects(&h, l).len(), 2);
+    assert!(
+        !h.state().ui.status.contains("view.3d.last"),
+        "Escape must not trigger view.3d.last shortcut behind FX Console: {}",
+        h.state().ui.status
+    );
 }
 
 #[test]

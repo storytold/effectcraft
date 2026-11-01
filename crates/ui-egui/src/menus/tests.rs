@@ -137,6 +137,27 @@ fn ctrl_shortcuts_never_take_over_cmd_ones() {
     }
 }
 
+/// Regression for the shifted-alias collision edge case reported in review on #1983:
+/// `Ctrl+Shift+}` (CloseCurlyBracket) must be treated as colliding with `Cmd+Shift+]`
+/// (CloseBracket, whose shifted alias IS CloseCurlyBracket), and therefore dropped on
+/// non-macOS. Before the fix, `cmd_bindings` only held CloseBracket so the Ctrl binding
+/// slipped through and could silently replace the layer-arrange shortcut.
+#[test]
+fn ctrl_shift_curly_collides_with_cmd_shift_bracket() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Shift+}"})).unwrap();
+    let bound = bindings(&app.session);
+    let (tm, tk) = parse_shortcut("Ctrl+Shift+}").unwrap();
+    let hand = bound.iter().any(|b| b.2 == "tool.hand" && (b.0, b.1) == (tm, tk));
+    let arrange = bound.iter().any(|b| b.2.starts_with("layer.arrange"));
+    if cfg!(target_os = "macos") {
+        assert!(hand, "Ctrl+Shift+}} binds on macOS (distinct from Cmd)");
+    } else {
+        assert!(!hand, "Ctrl+Shift+}} must not bind when Cmd+Shift+] exists");
+        assert!(arrange, "Cmd+Shift+] (layer.arrange) must survive");
+    }
+}
+
 /// The default keys of the keyboard-only commands parse and reach them.
 #[test]
 fn keyboard_only_commands_are_bound() {
