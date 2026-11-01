@@ -252,6 +252,16 @@ fn one_control_with_targets_of_different_timing_stays_in_step() {
     }
 }
 
+#[test]
+fn instance_keys_stay_out_of_a_nested_comp_that_preserves_its_frame_rate() {
+    let (mut s, scene, inner, [a, _], inst) = keyed_instance([(0.0, 100.0), (0.0, 100.0)]);
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().preserve_frame_rate = true;
+    // The nested time is floored to the nested comp's frames, so only the instance's value goes in.
+    let (v, pr) = rendered(&s, scene, inner, inst, a, 0.25);
+    assert!((v - 25.0).abs() < 1e-6, "rendered {v}");
+    assert!(pr.keys.is_empty());
+}
+
 /// #1747: through a collapsed precomp, a Text override and a Font override of the same Source
 /// Text both apply: the Font merges into the overridden text, as `essential::with_overrides`
 /// does on the flattened path, instead of one entry replacing the other.

@@ -184,7 +184,7 @@ fn effect_param<'a>(layer: &'a Layer, effect_index: usize, id: &str) -> Option<&
 
 /// Whether an instance's keys are in the nested comp's time, so they can go into the comp as they
 /// are: not with Time Remap, Responsive Design - Time (a stretched precomp with protected
-/// regions).
+/// regions) or a nested comp that preserves its frame rate (its time is floored to its own frames).
 fn keys_in_nested_time(ctx: &EvalCtx, layer: &Layer) -> bool {
     if layer.props.get("timeRemap").is_some() {
         return false;
@@ -192,7 +192,7 @@ fn keys_in_nested_time(ctx: &EvalCtx, layer: &Layer) -> bool {
     let LayerSource::Comp { item } = layer.source else { return true };
     let Some(nc) = ctx.project.comp(item) else { return true };
     let responsive = (layer.stretch - 100.0).abs() > 1e-9 && !super::eval::protected_regions(nc).is_empty();
-    !responsive
+    !responsive && !nc.preserve_frame_rate
 }
 
 /// The Essential Properties overrides of a precomp layer, evaluated at the context time.
