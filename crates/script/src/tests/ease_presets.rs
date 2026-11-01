@@ -90,7 +90,7 @@ fn per_key_methods_keep_the_key_selection_and_report_eases_as_they_play() {
     let r = ok(
         &mut s,
         r#"var comp = app.project.activeItem, p = comp.layer(1).transform.opacity;
-        // A linear side reports the speed it plays at (33.3 % influence).
+        // A linear side reports the speed it plays at (16.67 % influence, as After Effects).
         var lin = p.keyInTemporalEase(3)[0];
         p.setTemporalEaseAtKey(2, [new KeyframeEase(0, 50)], [new KeyframeEase(0, 75)]);
         p.setInterpolationTypeAtKey(3, KeyframeInterpolationType.HOLD, KeyframeInterpolationType.HOLD);
@@ -98,7 +98,7 @@ fn per_key_methods_keep_the_key_selection_and_report_eases_as_they_play() {
         var sel = comp.selectedProperties;
         [lin.speed, lin.influence, p.selectedKeys, sel.length, sel.length ? sel[0].name : ""]"#,
     );
-    assert!(close(r[0].as_f64().unwrap(), -100.0, 1e-9) && close(r[1].as_f64().unwrap(), 100.0 / 3.0, 1e-9), "{r}");
+    assert!(close(r[0].as_f64().unwrap(), -100.0, 1e-9) && close(r[1].as_f64().unwrap(), 100.0 / 6.0, 1e-9), "{r}");
     assert_eq!(r[2], json!([1, 3]), "the selection is the user's");
     assert_eq!((r[3].clone(), r[4].clone()), (json!(1), json!("Opacity")));
     assert_eq!(s.state.selected_keys, before);
