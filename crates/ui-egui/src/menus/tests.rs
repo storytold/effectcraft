@@ -299,6 +299,43 @@ fn save_dialogs_offer_the_file_extension() {
     assert_eq!(*asked.borrow(), ["project Frame.png"]);
 }
 
+/// #2788: Save As, Save a Copy and Save a Copy As XML start from the open project's name (in its
+/// folder), not Untitled Project.
+#[test]
+fn save_as_dialogs_start_from_the_open_project() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "A", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("ec-save-as-name-{}", std::process::id()));
+    let project = dir.join("Intro.ecproj");
+    app.session.path = Some(project.to_string_lossy().to_string());
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (a, b) = (asked.clone(), asked.clone());
+    app.hooks.pick_save = Some(Box::new(move |name: &str| {
+        a.borrow_mut().push(format!("project {name}"));
+        None
+    }));
+    app.hooks.pick_save_file = Some(Box::new(move |name: &str, ext: &str| {
+        b.borrow_mut().push(format!("file {name} [{ext}]"));
+        None
+    }));
+    for id in ["file.saveAs", "file.saveCopy", "file.saveCopyAsXml"] {
+        invoke(&mut app, &ctx, id, json!({})).unwrap();
+    }
+    let xml = dir.join("Intro.ecprojx").to_string_lossy().to_string();
+    assert_eq!(*asked.borrow(), ["project Intro.ecproj".to_string(), "project Intro.ecproj".into(), format!("file {xml} [ecprojx]")]);
+    // The non-blocking dialog gets the whole path, so it opens in the project's folder.
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
+    let dialog = pending.lock().unwrap().pop().expect("a dialog was shown");
+    assert_eq!(dialog, crate::FileDialog::Save { default: project.to_string_lossy().to_string(), ext: "ecproj".into(), project: true });
+}
+
 /// File ▸ Scripts ▸ Recent Script Files and its key run a script again without a file dialog.
 #[test]
 fn recent_script_files_run_without_a_dialog() {
