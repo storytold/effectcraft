@@ -189,7 +189,7 @@
   // 5. Layout Constants (Matching Reference Dimensions & Proportions)
   // ------------------------------------------------------------------
   var TARGET_WIDTH = 396;       // Exact reference console width
-  var INITIAL_HEIGHT = 40;      // State A compact height
+  var INITIAL_HEIGHT = 42;      // State A compact height (exact reference ~42px)
   var ICON_SIZE = 22;           // Toolbar button square dimension
   var SEARCH_ICON_W = 20;       // Magnifying glass width
   var ROW_SPACING = 3;          // Clean compact spacing
@@ -286,98 +286,125 @@
 
   // Icon 1: Camera (Take Snapshot)
   var cameraBtn = createIconButton("Take Snapshot (Shift+F5)", function (g) {
-    var pen = g.newPen(g.PenType.SOLID_COLOR, [0.82, 0.82, 0.82, 1.0], 1.4);
+    var brush = g.newBrush(g.BrushType.SOLID_COLOR, [0.72, 0.72, 0.72, 1.0]);
+    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.094, 0.094, 0.094, 1.0]);
+    // Top flash / prism bump
+    g.rectPath(7, 3, 7, 2.5);
+    g.fillPath(brush);
     // Camera body
-    g.rectPath(3, 6, 16, 11);
-    g.strokePath(pen);
-    // Center lens
-    g.ellipsePath(8, 8.5, 6, 6);
-    g.strokePath(pen);
-    // Top flash/shutter bump
-    g.rectPath(6, 4.5, 4, 1.5);
-    g.strokePath(pen);
+    g.rectPath(2, 5.5, 18, 12.5);
+    g.fillPath(brush);
+    // Outer lens cutout
+    g.ellipsePath(7, 7.5, 8, 8);
+    g.fillPath(bg);
+    // Center lens element
+    g.ellipsePath(9, 9.5, 4, 4);
+    g.fillPath(brush);
+    // Viewfinder dot at top right
+    g.ellipsePath(16.5, 7.5, 2, 2);
+    g.fillPath(bg);
   });
 
   // Icon 2: Gallery/Filmstrip (Show Snapshot)
   var galleryBtn = createIconButton("Show Snapshot", function (g) {
-    var pen = g.newPen(g.PenType.SOLID_COLOR, [0.82, 0.82, 0.82, 1.0], 1.4);
-    // Filmstrip outer frame
-    g.rectPath(3, 5, 16, 12);
-    g.strokePath(pen);
-    // Left subdivision column
-    g.moveTo(8, 5);
-    g.lineTo(8, 17);
-    g.strokePath(pen);
-    // Inner horizontal frames
-    g.moveTo(3, 9);
-    g.lineTo(8, 9);
-    g.moveTo(3, 13);
-    g.lineTo(8, 13);
-    g.strokePath(pen);
+    var brush = g.newBrush(g.BrushType.SOLID_COLOR, [0.72, 0.72, 0.72, 1.0]);
+    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.094, 0.094, 0.094, 1.0]);
+    // Left film perforations (3 blocks)
+    g.rectPath(2, 4, 4, 3);
+    g.fillPath(brush);
+    g.rectPath(2, 9, 4, 3);
+    g.fillPath(brush);
+    g.rectPath(2, 14, 4, 3);
+    g.fillPath(brush);
     // Right picture frame
-    g.ellipsePath(12, 8, 3, 3);
-    g.strokePath(pen);
+    g.rectPath(7.5, 4, 13, 13);
+    g.fillPath(brush);
+    // Mountain / landscape cutout
+    g.moveTo(9, 14);
+    g.lineTo(13, 9.5);
+    g.lineTo(16, 12.5);
+    g.lineTo(17.5, 11);
+    g.lineTo(19.5, 14);
+    g.lineTo(9, 14);
+    g.fillPath(bg);
+    // Sun dot cutout
+    g.ellipsePath(10.5, 6, 2.5, 2.5);
+    g.fillPath(bg);
   });
 
   // Icon 3: Download/Tray (Copy Frame to Clipboard)
   var copyBtn = createIconButton("Copy Frame to Clipboard", function (g) {
-    var pen = g.newPen(g.PenType.SOLID_COLOR, [0.82, 0.82, 0.82, 1.0], 1.4);
-    // Downward arrow stem
-    g.moveTo(11, 4);
-    g.lineTo(11, 12);
-    g.strokePath(pen);
-    // Arrowhead
-    g.moveTo(8, 9.5);
-    g.lineTo(11, 12.5);
-    g.lineTo(14, 9.5);
-    g.strokePath(pen);
-    // Bottom tray line
-    g.moveTo(5, 15);
-    g.lineTo(17, 15);
-    g.moveTo(5, 12.5);
-    g.lineTo(5, 15);
-    g.moveTo(17, 12.5);
-    g.lineTo(17, 15);
-    g.strokePath(pen);
-    // Small corner indicator at bottom right
-    var brush = g.newBrush(g.BrushType.SOLID_COLOR, [0.82, 0.82, 0.82, 1.0]);
-    g.moveTo(17, 15);
-    g.lineTo(19, 15);
-    g.lineTo(19, 13);
-    g.lineTo(17, 15);
+    var brush = g.newBrush(g.BrushType.SOLID_COLOR, [0.72, 0.72, 0.72, 1.0]);
+    // Vertical stem
+    g.rectPath(9.5, 3, 3, 8);
+    g.fillPath(brush);
+    // Downward arrowhead
+    g.moveTo(6.5, 10);
+    g.lineTo(15.5, 10);
+    g.lineTo(11, 14.5);
+    g.lineTo(6.5, 10);
+    g.fillPath(brush);
+    // Bottom tray
+    g.rectPath(3, 15, 16, 2.5);
+    g.fillPath(brush);
+    g.rectPath(3, 12, 2.5, 3);
+    g.fillPath(brush);
+    g.rectPath(16.5, 12, 2.5, 3);
+    g.fillPath(brush);
+    // Bottom right corner tick mark
+    g.moveTo(17, 18);
+    g.lineTo(19, 18);
+    g.lineTo(19, 16);
+    g.lineTo(17, 18);
     g.fillPath(brush);
   });
 
   // Icon 4: Settings/Gear (Keyboard Shortcuts)
   var settingsBtn = createIconButton("Keyboard Shortcuts / Settings", function (g) {
-    var pen = g.newPen(g.PenType.SOLID_COLOR, [0.82, 0.82, 0.82, 1.0], 1.4);
-    // Center ring
-    g.ellipsePath(8, 8, 6, 6);
-    g.strokePath(pen);
-    // Gear teeth (cross & diagonals)
-    g.moveTo(11, 3.5); g.lineTo(11, 6);
-    g.moveTo(11, 16); g.lineTo(11, 18.5);
-    g.moveTo(3.5, 11); g.lineTo(6, 11);
-    g.moveTo(16, 11); g.lineTo(18.5, 11);
-    g.moveTo(5.5, 5.5); g.lineTo(7.5, 7.5);
-    g.moveTo(14.5, 14.5); g.lineTo(16.5, 16.5);
-    g.moveTo(16.5, 5.5); g.lineTo(14.5, 7.5);
-    g.moveTo(5.5, 16.5); g.lineTo(7.5, 14.5);
-    g.strokePath(pen);
+    var brush = g.newBrush(g.BrushType.SOLID_COLOR, [0.72, 0.72, 0.72, 1.0]);
+    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.094, 0.094, 0.094, 1.0]);
+    // Outer gear circular disk
+    g.ellipsePath(3.5, 3.5, 15, 15);
+    g.fillPath(brush);
+    // 8 teeth (cardinals and diagonals)
+    g.rectPath(9.5, 1.5, 3, 3); g.fillPath(brush); // top
+    g.rectPath(9.5, 17.5, 3, 3); g.fillPath(brush); // bottom
+    g.rectPath(1.5, 9.5, 3, 3); g.fillPath(brush); // left
+    g.rectPath(17.5, 9.5, 3, 3); g.fillPath(brush); // right
+    g.rectPath(4, 4, 3, 3); g.fillPath(brush); // top-left
+    g.rectPath(15, 15, 3, 3); g.fillPath(brush); // bottom-right
+    g.rectPath(15, 4, 3, 3); g.fillPath(brush); // top-right
+    g.rectPath(4, 15, 3, 3); g.fillPath(brush); // bottom-left
+    // Center hole cutout
+    g.ellipsePath(8.5, 8.5, 5, 5);
+    g.fillPath(bg);
   });
 
-  // Icon 5: Action Logo (Cyan triangular faceted aperture mark - Apply Effect)
+  // Icon 5: Action Logo (Cyan Video Copilot aperture logo - Apply Effect)
   var applyBtn = createIconButton("Apply selected effect to selected layers (Enter)", function (g) {
-    var cyanBrush = g.newBrush(g.BrushType.SOLID_COLOR, [0.20, 0.69, 0.87, 1.0]);
-    // Triangular faceted polygon matching reference Image 1 & 2
-    g.moveTo(11, 3.5);
-    g.lineTo(19.5, 17.5);
-    g.lineTo(2.5, 17.5);
-    g.lineTo(11, 3.5);
+    var cyanBrush = g.newBrush(g.BrushType.SOLID_COLOR, [0.15, 0.72, 0.95, 1.0]); // Bright electric cyan #26b8f2
+    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.094, 0.094, 0.094, 1.0]);
+    // 3 curved aperture blades forming the Video Copilot logo
+    // Blade 1 (top-right)
+    g.moveTo(11, 2.5);
+    g.lineTo(19.5, 7.5);
+    g.lineTo(15.5, 16);
+    g.lineTo(11, 2.5);
     g.fillPath(cyanBrush);
-    // Inner aperture cutout
-    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.09, 0.09, 0.09, 1.0]);
-    g.ellipsePath(8, 10, 6, 6);
+    // Blade 2 (bottom)
+    g.moveTo(19.5, 8.5);
+    g.lineTo(11, 19.5);
+    g.lineTo(4.5, 14.5);
+    g.lineTo(19.5, 8.5);
+    g.fillPath(cyanBrush);
+    // Blade 3 (top-left)
+    g.moveTo(10, 19.5);
+    g.lineTo(2.5, 8.5);
+    g.lineTo(10.5, 4);
+    g.lineTo(10, 19.5);
+    g.fillPath(cyanBrush);
+    // Center aperture cutout opening
+    g.ellipsePath(8, 8, 6, 6);
     g.fillPath(bg);
   });
 
@@ -396,24 +423,24 @@
   catRow.orientation = "row";
   catRow.alignChildren = ["left", "center"];
   catRow.spacing = 6;
-  catRow.margins = [4, 1, 4, 1];
-  catRow.preferredSize = [TARGET_WIDTH - (WIN_MARGIN * 2), 18];
+  catRow.margins = [16, 2, 4, 2];
+  catRow.preferredSize = [TARGET_WIDTH - (WIN_MARGIN * 2), 22];
   catRow.onDraw = function () {
     var g = catRow.graphics;
     var rw = (catRow.size && catRow.size[0] > 0) ? catRow.size[0] : (TARGET_WIDTH - (WIN_MARGIN * 2));
-    var rh = (catRow.size && catRow.size[1] > 0) ? catRow.size[1] : 18;
-    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.157, 0.157, 0.157, 1.0]);
+    var rh = (catRow.size && catRow.size[1] > 0) ? catRow.size[1] : 22;
+    var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.165, 0.165, 0.165, 1.0]);
     g.rectPath(0, 0, rw, rh);
     g.fillPath(bg);
   };
 
   // Small blue circular indicator
   var catDot = catRow.add("group");
-  catDot.preferredSize = [8, 8];
+  catDot.preferredSize = [6, 6];
   catDot.onDraw = function () {
     var g = catDot.graphics;
-    var blue = g.newBrush(g.BrushType.SOLID_COLOR, [0.114, 0.447, 0.722, 1.0]); // #1d72b8
-    g.ellipsePath(1, 1, 6, 6);
+    var blue = g.newBrush(g.BrushType.SOLID_COLOR, [0.07, 0.45, 0.73, 1.0]); // #1272b8
+    g.ellipsePath(0, 0, 6, 6);
     g.fillPath(blue);
   };
 
@@ -428,10 +455,10 @@
 
   // Search Results List (Full Width, vibrant blue active selection)
   var resultsList = resultsContainer.add("listbox", undefined, []);
-  resultsList.preferredSize = [TARGET_WIDTH - (WIN_MARGIN * 2), 58];
+  resultsList.preferredSize = [TARGET_WIDTH - (WIN_MARGIN * 2), 62];
   resultsList.helpTip = "Matching effects. Click or use Up/Down keys to navigate.";
   try {
-    resultsList.graphics.font = ScriptUI.newFont("Segoe UI", ScriptUI.FontStyle.REGULAR, 13);
+    resultsList.graphics.font = ScriptUI.newFont("Segoe UI", ScriptUI.FontStyle.REGULAR, 14);
   } catch (e) { }
 
   // Navigation and Close buttons (retained for programmatic navigation & Esc)
@@ -480,11 +507,11 @@
       topRow.preferredSize = [innerW, 26];
       toolbar.preferredSize = [TOOLBAR_W, ICON_SIZE];
 
-      catRow.preferredSize = [innerW, 18];
+      catRow.preferredSize = [innerW, 22];
       resultsList.preferredSize = [innerW, currentListHeight];
 
-      // Reference State B height: ~125px with 2 results (40 + 20 + 58 + 7 = 125)
-      var totalH = resultsContainer.visible ? (INITIAL_HEIGHT + 20 + currentListHeight + 7) : INITIAL_HEIGHT;
+      // Reference State B height: ~126px with 2 results (42 + 22 + 62 = 126)
+      var totalH = resultsContainer.visible ? (INITIAL_HEIGHT + 22 + currentListHeight) : INITIAL_HEIGHT;
       win.preferredSize = [winW, totalH];
       win.layout.layout(true);
     } catch (e) {
@@ -521,7 +548,7 @@
       resultsList.selection = null;
       applyBtn.enabled = false;
 
-      var emptyH = 28;
+      var emptyH = 30;
       recalculateLayout(emptyH);
       return;
     }
@@ -536,7 +563,7 @@
 
     // Dynamically adjust height to exact row count (clamped between 1 and 8 rows)
     var visibleRows = Math.min(currentMatches.length, 8);
-    var rowHeight = 28;
+    var rowHeight = 30;
     var listH = (visibleRows * rowHeight) + 2;
     recalculateLayout(listH);
   }
