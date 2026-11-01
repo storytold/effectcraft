@@ -20,9 +20,9 @@
 //!
 //! A language decides for itself which names stay English: After Effects' Japanese interface
 //! leaves the `CC` series in English and gives the `VR` and `OCIO` sets a Japanese tail
-//! (`VR ブラー`, `OCIO CDL 変換`), while its Simplified Chinese one translates them (the `CC` names come from Adobe's Chinese *documentation*, which
-//! names 68 of the 69). Repeating the English name is therefore a language-level choice, not a
-//! missing row.
+//! (`VR ブラー`, `OCIO CDL 変換`), while its Simplified Chinese one translates them (the `CC`
+//! names come from Adobe's Chinese *documentation*, which names 68 of the 69). Repeating the
+//! English name is therefore a language-level choice, not a missing row.
 //!
 //! The Simplified Chinese names come from the installed After Effects 2026 (26.5.0.89)
 //! Simplified Chinese interface, its 21 category folder names included; `Cryptomatte`,
