@@ -1,7 +1,7 @@
 use super::geometry::{l2c, layer_quad, point_in_quad};
 use super::{
-    Color32, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, LayerSource, Mat3, PaintKind, Pos2, Rect, Stroke, Tick, Tokens, Tool, ViewerMap, gv2, json, ov,
-    pos2,
+    Color32, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, LayerSource, Mat3, PaintKind, Pos2, Rect, ShapeOptions, Stroke, Tick, Tokens, Tool, ViewerMap, gv2,
+    json, ov, pos2,
 };
 
 /// Visible layers eligible for viewer hit tests, locked or not, in front-to-back order.
@@ -86,6 +86,8 @@ pub(super) struct ShapeDrag {
     centre: [f64; 2],
     size: [f64; 2],
     target: ShapeTarget,
+    /// What the keys made of it while it was dragged out.
+    options: ShapeOptions,
     /// The selected layer's name and the index its next mask would take, for the ghost's caption
     /// and colour.
     layer_name: String,
@@ -93,7 +95,7 @@ pub(super) struct ShapeDrag {
 }
 
 /// The kind `tool` draws, as `shape.newShape` / `layer.addMask` name it.
-fn shape_kind(tool: Tool) -> &'static str {
+pub(super) fn shape_kind(tool: Tool) -> &'static str {
     match tool {
         Tool::Rectangle => "rect",
         Tool::RoundedRect => "rounded",
@@ -104,9 +106,16 @@ fn shape_kind(tool: Tool) -> &'static str {
 }
 
 /// What a shape tool drag from `start` to `end` makes, or `None` while it is too small to make
-/// anything. Alt (Option) draws from the press point and Shift squares the box; the live ghost and
+/// anything. Cmd (Ctrl) draws from the press point and Shift squares the box; the live ghost and
 /// [`create_shape`] both go through this, so the drag always shows what it will commit.
-pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<ShapeDrag> {
+pub(super) fn shape_drag(
+    app: &EffectcraftApp,
+    tool: Tool,
+    start: [f64; 2],
+    end: [f64; 2],
+    mods: egui::Modifiers,
+    mut options: ShapeOptions,
+) -> Option<ShapeDrag> {
     let comp = app.session.active_comp()?;
     let selected = app.session.state.selected_layers.first().copied();
     let sel = selected.and_then(|id| comp.layer(id));
@@ -122,9 +131,27 @@ pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end:
     };
     let (target, layer) = target;
     let mask_index = if target == ShapeTarget::Mask { layer.and_then(|l| l.masks()).map_or(0, |m| m.groups().count()) } else { 0 };
+    if matches!(tool, Tool::Polygon | Tool::Star) {
+        let radius = (end[0] - start[0]).hypot(end[1] - start[1]);
+        if radius < 1.0 {
+            return None;
+        }
+        options.rotation = if mods.shift { 0.0 } else { (end[1] - start[1]).atan2(end[0] - start[0]).to_degrees() + 90.0 };
+        return Some(ShapeDrag {
+            kind: shape_kind(tool),
+            centre: start,
+            size: [radius * 2.0; 2],
+            target,
+            options,
+            layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
+            mask_index,
+        });
+    }
     let (mut w, mut h) = ((end[0] - start[0]).abs(), (end[1] - start[1]).abs());
-    // Ctrl/Cmd draws from the press point as the centre, as in After Effects.
-    if mods.command {
+    // Ctrl/Cmd draws from the press point as the centre; on a star it changes the outer radius
+    // alone instead (`shape_draft`).
+    let centred = mods.command && tool != Tool::Star;
+    if centred {
         w *= 2.0;
         h *= 2.0;
     }
@@ -138,9 +165,10 @@ pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end:
     }
     Some(ShapeDrag {
         kind: shape_kind(tool),
-        centre: if mods.command { start } else { [start[0].min(end[0]) + w / 2.0, start[1].min(end[1]) + h / 2.0] },
+        centre: if centred { start } else { [start[0] + (end[0] - start[0]).signum() * w / 2.0, start[1] + (end[1] - start[1]).signum() * h / 2.0] },
         size: [w, h],
         target,
+        options,
         layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
         mask_index,
     })
@@ -156,7 +184,7 @@ fn paint_rgb(c: [f32; 3], opacity: f64, alpha: f32) -> Color32 {
 /// outlined in its Stroke (or the mask colour, for a mask), captioned with where it goes.
 pub(super) fn draw_shape_ghost(painter: &egui::Painter, map: &ViewerMap, app: &EffectcraftApp, d: &ShapeDrag, t: &Tokens) {
     // The engine's own geometry for the kind, so the ghost is the shape and not a stand-in for it.
-    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size) else { return };
+    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size, &d.options) else { return };
     let mut pts = ov::flatten(&sp, &Mat3::IDENTITY, map);
     if pts.first() == pts.last() {
         pts.pop();
@@ -200,39 +228,94 @@ fn bounds_of(pts: &[Pos2]) -> Option<Rect> {
     Some(r)
 }
 
-pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers) {
-    let Some(d) = shape_drag(app, tool, a, b, mods) else { return };
-    let (kind, (w, h), (cx, cy)) = (d.kind, (d.size[0], d.size[1]), (d.centre[0], d.centre[1]));
-    // A mask on the selected layer, as the ghost showed.
-    if d.target == ShapeTarget::Mask {
-        // In layer space: invert the layer transform.
-        let sel_layer = app.session.state.selected_layers.first().copied().and_then(|id| app.session.active_comp().and_then(|c| c.layer(id)).cloned());
-        if let Some(l) = sel_layer
-            && let Some(comp) = app.session.active_comp_arc()
-        {
-            let ectx = EvalCtx {
-                project: &app.session.project,
-                comp_id: app.session.active_comp_id().unwrap_or_default(),
-                comp: &comp,
-                time: app.session.time(),
-                expr: None,
-                footage: None,
-                property_overrides: &[],
-                media_overrides: &[],
-            };
-            let inv = l2c(&ectx, &l).0.inverse().unwrap_or(Mat3::IDENTITY);
-            let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));
-            let p1 = inv.apply(gv2(cx + w / 2.0, cy + h / 2.0));
-            let rect = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            if let Err(e) = app.session.execute("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})) {
-                app.ui.status = e.to_string();
-            }
+pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers, options: ShapeOptions) {
+    let Some(d) = shape_drag(app, tool, a, b, mods, options) else { return };
+    // The shape's own parameters join the command's.
+    let with_options = |mut q: serde_json::Value| {
+        if let (Some(q), serde_json::Value::Object(o)) = (q.as_object_mut(), d.options.to_params()) {
+            q.extend(o);
         }
+        q
+    };
+    let (kind, (w, h), (cx, cy)) = (d.kind, (d.size[0], d.size[1]), (d.centre[0], d.centre[1]));
+    if d.target == ShapeTarget::Mask {
+        create_mask(app, &d);
         return;
     }
     // Into the selected shape layer's Contents as a new group (as in After Effects), else a new
     // shape layer; painted with the Tools bar's Fill and Stroke.
-    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy]})) {
+    if let Err(e) = app.session.execute("shape.newShape", with_options(json!({"kind": kind, "size": [w, h], "position": [cx, cy]}))) {
         app.ui.status = e.to_string();
+    }
+}
+
+/// Commit the complete preview path, including Bezier handles, in the target layer's space.
+fn create_mask(app: &mut EffectcraftApp, draft: &ShapeDrag) {
+    let Some(comp) = app.session.active_comp_arc() else { return };
+    let Some(layer) = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) else { return };
+    let Some(cid) = app.session.active_comp_id() else { return };
+    let ctx = EvalCtx { expr: app.session.expr.as_deref(), ..EvalCtx::new(&app.session.project, cid, &comp, app.session.time()) };
+    let Some(inv) = l2c(&ctx, layer).0.inverse() else {
+        app.ui.status = "Cannot create a mask on a layer with a non-invertible transform".into();
+        return;
+    };
+    let Some(mut path) = effectcraft_engine::commands::shape_tool::mask_path(draft.kind, draft.centre, draft.size, &draft.options) else { return };
+    for point in &mut path.vertices {
+        let q = inv.apply(gv2(point[0], point[1]));
+        *point = [q.x, q.y];
+    }
+    for tangent in path.in_tangents.iter_mut().chain(&mut path.out_tangents) {
+        let q = inv.apply_vec(gv2(tangent[0], tangent[1]));
+        *tangent = [q.x, q.y];
+    }
+    if let Err(error) = app.session.execute(
+        "mask.new",
+        json!({
+            "layer":layer.id.0,"vertices":path.vertices,"inTangents":path.in_tangents,"outTangents":path.out_tangents,"closed":path.closed
+        }),
+    ) {
+        app.ui.status = error.to_string();
+    }
+}
+
+#[cfg(test)]
+mod mask_creation_tests {
+    use super::{EffectcraftApp, EvalCtx, ShapeOptions, Tool, create_shape, gv2, json, shape_drag};
+    use effectcraft_engine::Session;
+
+    #[test]
+    fn created_mask_matches_composition_preview_on_transformed_layer() {
+        for (tool, kind) in
+            [(Tool::Rectangle, "rect"), (Tool::RoundedRect, "rounded"), (Tool::Ellipse, "ellipse"), (Tool::Polygon, "polygon"), (Tool::Star, "star")]
+        {
+            let mut session = Session::default();
+            session.execute("comp.new", json!({"width":640,"height":360,"duration":2})).unwrap();
+            let lid = session.execute("layer.newSolid", json!({"width":320,"height":200})).unwrap()["layer"].as_u64().unwrap();
+            for (path, value) in [("position", json!([280, 180, 0])), ("rotation", json!(37)), ("scale", json!([125, 75, 100]))] {
+                session.execute("prop.set", json!({"layer":lid,"path":format!("transform/{path}"),"value":value})).unwrap();
+            }
+            let mut app = EffectcraftApp::new(session);
+            let options = ShapeOptions { points: Some(7.0), roundness: Some(35.0), outer_roundness: 15.0, inner_roundness: 10.0, ..Default::default() };
+            let draft = shape_drag(&app, tool, [100.0, 80.0], [300.0, 220.0], egui::Modifiers::NONE, options).unwrap();
+            let expected = effectcraft_engine::commands::shape_tool::mask_path(kind, draft.centre, draft.size, &draft.options).unwrap();
+            create_shape(&mut app, tool, [100.0, 80.0], [300.0, 220.0], egui::Modifiers::NONE, options);
+            assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+            let cid = app.session.active_comp_id().unwrap();
+            let comp = app.session.active_comp().unwrap();
+            let layer = comp.layer(effectcraft_engine::project::LayerId(lid)).unwrap();
+            let ctx = EvalCtx::new(&app.session.project, cid, comp, app.session.time());
+            let matrix = ctx.layer_to_comp(layer).0;
+            let mask = layer.masks().unwrap().groups().last().unwrap();
+            let actual = mask.get("path").unwrap().value.as_path().unwrap();
+            assert_eq!(actual.vertices.len(), expected.vertices.len(), "{kind}");
+            for (a, b) in actual.vertices.iter().zip(&expected.vertices) {
+                let p = matrix.apply(gv2(a[0], a[1]));
+                assert!((p.x - b[0]).abs() < 1e-7 && (p.y - b[1]).abs() < 1e-7, "{kind}: vertex {p:?} != {b:?}");
+            }
+            for (a, b) in actual.in_tangents.iter().chain(&actual.out_tangents).zip(expected.in_tangents.iter().chain(&expected.out_tangents)) {
+                let p = matrix.apply_vec(gv2(a[0], a[1]));
+                assert!((p.x - b[0]).abs() < 1e-7 && (p.y - b[1]).abs() < 1e-7, "{kind}: tangent {p:?} != {b:?}");
+            }
+        }
     }
 }

@@ -360,10 +360,14 @@ fn exact_merge(run: &[Seg], tidy: &Tidy) -> Option<CubicBez> {
 /// N-ary boolean: the region where `pred(inside_flags)` holds, `inside_flags[i]` telling whether a
 /// point is inside `paths[i]` under its fill rule. Returns one compound path.
 pub fn boolean_n(paths: &[(BezPath, FillRule)], pred: impl Fn(&[bool]) -> bool) -> BezPath {
-    match Arrangement::new(paths) {
-        Some(arr) => all_contours(&arr.contours(pred), &arr.tidy),
-        None => BezPath::new(),
-    }
+    try_boolean_n(paths, pred).unwrap_or_default()
+}
+
+/// The fallible N-ary boolean. `None` reports an invalid/unresolvable arrangement;
+/// `Some(empty)` is a successfully evaluated empty region.
+pub fn try_boolean_n(paths: &[(BezPath, FillRule)], pred: impl Fn(&[bool]) -> bool) -> Option<BezPath> {
+    let arr = Arrangement::new(paths)?;
+    Some(all_contours(&arr.contours(pred), &arr.tidy))
 }
 
 /// Resolve self-intersections / overlaps of one filled path into simple, consistently oriented

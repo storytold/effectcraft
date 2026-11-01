@@ -67,7 +67,7 @@ pub(crate) struct PathInfo {
     pub feather: Vec<(usize, Pos2)>,
 }
 
-fn cubic(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], t: f64) -> [f64; 2] {
+pub(super) fn cubic(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], t: f64) -> [f64; 2] {
     let u = 1.0 - t;
     let f = |k: usize| u * u * u * p0[k] + 3.0 * u * u * t * p1[k] + 3.0 * u * t * t * p2[k] + t * t * t * p3[k];
     [f(0), f(1)]
@@ -480,112 +480,7 @@ pub(crate) fn motion_path(
     }
 }
 
-// ---------------------------------------------------------------- free transform
-
-/// The `egui::Id` under which the free-transform target (layer and mask or path id) is stored.
-fn ft_id() -> egui::Id {
-    egui::Id::unique("viewer-free-transform")
-}
-
-/// Enter Free Transform on a path (double-click a path with the Selection tool).
-pub(crate) fn begin_free_transform(ctx: &egui::Context, layer: LayerId, uid: u64) {
-    ctx.data_mut(|d| d.insert_temp(ft_id(), (layer, uid)));
-}
-
-pub(crate) fn end_free_transform(ctx: &egui::Context) {
-    ctx.data_mut(|d| d.remove::<(LayerId, u64)>(ft_id()));
-}
-
-pub(crate) fn free_transform_target(ctx: &egui::Context) -> Option<(LayerId, u64)> {
-    ctx.data(|d| d.get_temp(ft_id()))
-}
-
-/// The free-transform box: path-space bounds of the transformed vertices, its handles on screen
-/// (corners 0–3, edge midpoints 4–7) and the path → comp matrix.
-pub(crate) struct FtBox {
-    pub layer: LayerId,
-    pub uid: u64,
-    pub b: [f64; 4],
-    pub m: Mat3,
-    pub handles: [Pos2; 8],
-    pub quad: [Pos2; 4],
-}
-
-impl FtBox {
-    /// Path-space position of handle `i`.
-    pub fn handle_local(&self, i: usize) -> [f64; 2] {
-        let [x0, y0, x1, y1] = self.b;
-        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-        [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [cx, y0], [x1, cy], [cx, y1], [x0, cy]][i]
-    }
-    pub fn center(&self) -> [f64; 2] {
-        [(self.b[0] + self.b[2]) / 2.0, (self.b[1] + self.b[3]) / 2.0]
-    }
-}
-
-/// Draw the free-transform box of the target path (if any) and return it for hit tests.
-pub(crate) fn draw_free_transform(
-    app: &mut EffectcraftApp,
-    ctx: &egui::Context,
-    painter: &egui::Painter,
-    map: &ViewerMap,
-    paths: &[PathInfo],
-) -> Option<FtBox> {
-    let (layer, uid) = free_transform_target(ctx)?;
-    let Some(p) = paths.iter().find(|p| p.layer == layer && p.uid == uid) else {
-        end_free_transform(ctx);
-        return None;
-    };
-    let sel: Vec<usize> = app.session.state.selected_vertices.iter().filter(|v| v.layer == layer && v.mask == uid).map(|v| v.index).collect();
-    let idx: Vec<usize> = if sel.len() >= 2 { sel } else { (0..p.sp.vertices.len()).collect() };
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for &i in &idx {
-        let Some(v) = p.sp.vertices.get(i) else { continue };
-        lo = [lo[0].min(v[0]), lo[1].min(v[1])];
-        hi = [hi[0].max(v[0]), hi[1].max(v[1])];
-    }
-    if lo[0] > hi[0] {
-        return None;
-    }
-    let b = [lo[0], lo[1], hi[0].max(lo[0] + 1e-3), hi[1].max(lo[1] + 1e-3)];
-    let mut f = FtBox { layer, uid, b, m: p.m, handles: [Pos2::ZERO; 8], quad: [Pos2::ZERO; 4] };
-    for i in 0..8 {
-        let q = f.handle_local(i);
-        let c = p.m.apply(gv2(q[0], q[1]));
-        f.handles[i] = map.to_screen([c.x, c.y]);
-    }
-    f.quad = [f.handles[0], f.handles[1], f.handles[2], f.handles[3]];
-    let col = app.tokens.accent;
-    painter.add(egui::Shape::closed_line(f.quad.to_vec(), Stroke::new(1.0, col)));
-    for (i, h) in f.handles.iter().enumerate() {
-        let r = Rect::from_center_size(*h, vec2(7.0, 7.0));
-        painter.rect_filled(r, 0.0, Color32::WHITE);
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, col), StrokeKind::Outside);
-        app.auto.add(&format!("viewer.freeTransform.handle.{i}"), r, "Free transform handle");
-    }
-    let c = f.center();
-    let cc = p.m.apply(gv2(c[0], c[1]));
-    let cs = map.to_screen([cc.x, cc.y]);
-    painter.circle_stroke(cs, 4.0, Stroke::new(1.0, col));
-    Some(f)
-}
-
-fn point_in_quad(p: Pos2, q: &[Pos2; 4]) -> bool {
-    let mut sign = 0.0f32;
-    for i in 0..4 {
-        let (a, b) = (q[i], q[(i + 1) % 4]);
-        let c = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
-        if c.abs() < 1e-6 {
-            continue;
-        }
-        if sign == 0.0 {
-            sign = c.signum();
-        } else if c.signum() != sign {
-            return false;
-        }
-    }
-    true
-}
+pub(crate) use super::free_transform::*;
 
 // ---------------------------------------------------------------- drags
 
@@ -597,7 +492,22 @@ pub(crate) enum Drag {
     /// A spatial tangent handle of a motion-path key.
     KeyTangent { layer: LayerId, prop: u64, time: Tick, out: bool, key: [f64; 3], inv: Mat3 },
     /// Free transform: 0 move, 1 scale (anchor, axes), 2 rotate about `anchor`.
-    Ft { layer: LayerId, path: u64, mode: u8, anchor: [f64; 2], last: [f64; 2], inv: Mat3, axes: [bool; 2] },
+    Ft {
+        paths: Vec<(LayerId, u64)>,
+        comp_space: bool,
+        angle: f64,
+        mode: u8,
+        anchor: [f64; 2],
+        opposite: [f64; 2],
+        previous: Mat3,
+        last: [f64; 2],
+        start: [f64; 2],
+        applied: [f64; 2],
+        inv: Mat3,
+        axes: [bool; 2],
+    },
+    /// Move only the Free Transform pivot; no document edit or undo entry.
+    FtPivot { inv: Mat3, targets: Vec<[f64; 2]> },
     /// Mask Feather tool: drag a feather point's radius handle (comp → layer matrix `inv`).
     Feather { layer: LayerId, mask: u64, index: usize, inv: Mat3 },
     /// A guide dragged in the viewer.
@@ -633,31 +543,6 @@ pub(crate) fn begin_key_drag(app: &mut EffectcraftApp, hits: &[KeyHit], press: P
     }
 }
 
-/// Start a free-transform drag on the box: a handle scales about the opposite one (corners both
-/// axes, edges one), inside moves, just outside a corner rotates about the centre.
-pub(crate) fn begin_ft_drag(f: &FtBox, press: Pos2, map: &ViewerMap) -> Option<Drag> {
-    let inv = f.m.inverse()?;
-    let c = map.to_comp(press);
-    let lp = inv.apply(gv2(c[0], c[1]));
-    let lp = [lp.x, lp.y];
-    if let Some(i) = (0..8).find(|i| f.handles[*i].distance(press) < 7.0) {
-        let opp = [2, 3, 0, 1, 6, 7, 4, 5][i];
-        let axes = match i {
-            4 | 6 => [false, true],
-            5 | 7 => [true, false],
-            _ => [true, true],
-        };
-        return Some(Drag::Ft { layer: f.layer, path: f.uid, mode: 1, anchor: f.handle_local(opp), last: lp, inv, axes });
-    }
-    if point_in_quad(press, &f.quad) {
-        return Some(Drag::Ft { layer: f.layer, path: f.uid, mode: 0, anchor: f.center(), last: lp, inv, axes: [true, true] });
-    }
-    if f.quad.iter().any(|q| q.distance(press) < 24.0) {
-        return Some(Drag::Ft { layer: f.layer, path: f.uid, mode: 2, anchor: f.center(), last: lp, inv, axes: [true, true] });
-    }
-    None
-}
-
 /// Mask Feather tool: press on a feather point's handle to drag it, or on a mask path to add a
 /// feather point there and drag its radius out.
 pub(crate) fn begin_feather(app: &mut EffectcraftApp, ectx: &EvalCtx, paths: &[PathInfo], map: &ViewerMap, press: Pos2) -> Option<Drag> {
@@ -682,17 +567,22 @@ pub(crate) fn begin_feather(app: &mut EffectcraftApp, ectx: &EvalCtx, paths: &[P
 
 /// Advance an overlay drag to the pointer (`cpt` comp, `pos` screen). `snap` corrects a comp
 /// point for snapping. Returns the replacement drag state.
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct OverlayFrame<'a> {
+    pub ctx: &'a egui::Context,
+    pub cpt: [f64; 2],
+    pub pos: Pos2,
+    pub mods: egui::Modifiers,
+    pub merge: &'a str,
+    pub zoom: f32,
+}
+
 pub(crate) fn update(
     app: &mut EffectcraftApp,
     d: &Drag,
-    cpt: [f64; 2],
-    pos: Pos2,
-    mods: egui::Modifiers,
-    merge: &str,
-    zoom: f32,
+    frame: OverlayFrame<'_>,
     snap: &mut dyn FnMut(&EffectcraftApp, [f64; 2], LayerId) -> [f64; 2],
 ) -> Option<Drag> {
+    let OverlayFrame { ctx, cpt, pos, mods, merge, zoom } = frame;
     match d.clone() {
         Drag::Key { layer, prop, time, start, press, inv, axes } => {
             // Snap the key's on-screen position like a layer drag.
@@ -721,38 +611,7 @@ pub(crate) fn update(
             let _ = app.session.execute("keys.setSpatialTangents", q);
             None
         }
-        Drag::Ft { layer, path, mode, anchor, last, inv, axes } => {
-            let p = inv.apply(gv2(cpt[0], cpt[1]));
-            let cur = [p.x, p.y];
-            let mut q = json!({"layer": layer.0, "mask": path, "anchor": anchor, "merge": merge});
-            match mode {
-                0 => q["offset"] = json!([cur[0] - last[0], cur[1] - last[1]]),
-                1 => {
-                    let f = |k: usize| {
-                        let a = last[k] - anchor[k];
-                        if axes[k] && a.abs() > 1e-6 { ((cur[k] - anchor[k]) / a).clamp(-50.0, 50.0) } else { 1.0 }
-                    };
-                    let (mut fx, mut fy) = (f(0), f(1));
-                    if mods.shift && axes[0] && axes[1] {
-                        let k = (fx + fy) / 2.0;
-                        (fx, fy) = (k, k);
-                    }
-                    if fx.abs() < 1e-3 || fy.abs() < 1e-3 {
-                        return None;
-                    }
-                    q["scale"] = json!([fx * 100.0, fy * 100.0]);
-                }
-                _ => {
-                    let a0 = (last[1] - anchor[1]).atan2(last[0] - anchor[0]);
-                    let a1 = (cur[1] - anchor[1]).atan2(cur[0] - anchor[0]);
-                    q["rotation"] = json!((a1 - a0).to_degrees());
-                }
-            }
-            if cur != last {
-                let _ = app.session.execute("path.freeTransform", q);
-            }
-            Some(Drag::Ft { layer, path, mode, anchor, last: cur, inv, axes })
-        }
+        Drag::FtPivot { .. } | Drag::Ft { .. } => update_transform(app, ctx, d, cpt, mods, merge, zoom),
         Drag::Feather { layer, mask, index, inv } => {
             let p = inv.apply(gv2(cpt[0], cpt[1]));
             let _ = (pos, zoom);
@@ -812,8 +671,14 @@ mod tests {
 
     fn info(vertices: Vec<[f64; 2]>, closed: bool) -> PathInfo {
         let n = vertices.len();
-        let sp = ShapePath { vertices, in_tangents: vec![[0.0; 2]; n], out_tangents: vec![[0.0; 2]; n], closed, feather: Vec::new() };
-        PathInfo { layer: LayerId(3), uid: 7, m: Mat3::IDENTITY, sp, is_mask: true, feather: Vec::new() }
+        PathInfo {
+            layer: LayerId(3),
+            uid: 7,
+            m: Mat3::IDENTITY,
+            sp: ShapePath { vertices, in_tangents: vec![[0.0; 2]; n], out_tangents: vec![[0.0; 2]; n], closed, feather: Vec::new() },
+            is_mask: true,
+            feather: Vec::new(),
+        }
     }
 
     fn circle() -> ShapePath {
@@ -920,7 +785,6 @@ mod tests {
         assert!(points.iter().all(|p| p.is_finite()));
         assert!(flatten(&sp, &Mat3::scale(gv2(1e300, 1e300)), &map).is_empty());
     }
-
     /// #912: clicking the last vertex of an open path with the Pen resumes that path.
     #[test]
     fn pen_resumes_an_open_path_at_its_last_vertex() {

@@ -353,6 +353,9 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
     let mut events = collect_key_events(ctx, start, clipboard, project);
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
+    if !tab_only {
+        events.retain(|(key, _, pressed, _)| !crate::panels::shape_draft::key(ctx, *key, *pressed));
+    }
     if !tab_only && clipboard && app.dialog.is_none() {
         numpad_star_marker(app, ctx);
     }
@@ -425,6 +428,16 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
         }) {
             let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
+            // Cmd/Ctrl+T transforms a selected path before falling back to the Type tool.
+            // Resolve the active keymap first so a custom binding on this chord still wins.
+            if id == "tool.type"
+                && key == egui::Key::T
+                && mods_match(egui::Modifiers::COMMAND, mods)
+                && matches!(app.ui.focused, PanelKind::Composition | PanelKind::Timeline | PanelKind::Viewer(_))
+                && crate::panels::viewer_overlays::begin_selected_free_transform(app, ctx)
+            {
+                continue;
+            }
             if id == "edit.paste"
                 && let Some(t) = &pasted
             {

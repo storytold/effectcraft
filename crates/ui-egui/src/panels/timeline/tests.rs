@@ -638,3 +638,109 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
         assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
     }
 }
+
+fn property_selection_fixture() -> (EffectcraftApp, LayerId, Vec<u64>) {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"width":400,"height":200,"duration":2})).unwrap();
+    let lid = LayerId(app.session.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap());
+    let mut masks = Vec::new();
+    for x in [30, 130, 230] {
+        masks.push(
+            app.session.execute("mask.new", json!({"layer":lid.0,"vertices":[[x,20],[x+40,20],[x+40,60],[x,60]],"closed":true})).unwrap()["mask"]
+                .as_u64()
+                .unwrap(),
+        );
+    }
+    let layer = app.session.active_comp().unwrap().layer(lid).unwrap();
+    let root = layer.masks().unwrap().uid;
+    app.ui.timeline.open_layers.insert(lid.0);
+    app.ui.timeline.open_groups.insert(root);
+    app.ui.timeline.open_groups.extend(masks.iter().copied());
+    app.session.execute("edit.deselectAll", json!({})).unwrap();
+    (app, lid, masks)
+}
+
+fn click_property(app: &mut EffectcraftApp, ctx: &egui::Context, target: (LayerId, u64), mods: egui::Modifiers) {
+    let comp = app.session.active_comp_arc().unwrap();
+    let rows = build_rows(app, &comp);
+    assert!(rows.iter().any(|r| row_target(r) == Some(target)), "test row must be visible");
+    for (cmd, params) in property_click_actions(app, ctx, &comp, &rows, target, mods) {
+        app.session.execute(&cmd, params).unwrap();
+    }
+}
+
+#[test]
+fn timeline_property_selection_shift_ranges_and_command_toggle() {
+    let (mut app, lid, masks) = property_selection_fixture();
+    let ctx = egui::Context::default();
+    click_property(&mut app, &ctx, (lid, masks[0]), egui::Modifiers::NONE);
+    click_property(&mut app, &ctx, (lid, masks[2]), egui::Modifiers::SHIFT);
+    assert_eq!(app.session.state.selected_props, masks.iter().map(|m| (lid, *m)).collect::<Vec<_>>());
+    assert_eq!(app.session.state.selected_vertices.len(), 12, "expanded mask children do not replace their sibling mask range");
+    click_property(&mut app, &ctx, (lid, masks[1]), egui::Modifiers::SHIFT);
+    assert_eq!(app.session.state.selected_props, vec![(lid, masks[0]), (lid, masks[1])], "range shrinks from the original anchor");
+    click_property(&mut app, &ctx, (lid, masks[2]), egui::Modifiers::COMMAND);
+    assert_eq!(app.session.state.selected_vertices.len(), 12);
+    click_property(&mut app, &ctx, (lid, masks[1]), egui::Modifiers::COMMAND);
+    assert_eq!(app.session.state.selected_props, vec![(lid, masks[0]), (lid, masks[2])]);
+    assert_eq!(app.session.state.selected_vertices.len(), 8);
+}
+
+#[test]
+fn timeline_property_selection_ranges_cover_mask_parameters() {
+    let (mut app, lid, masks) = property_selection_fixture();
+    let ctx = egui::Context::default();
+    let group = app.session.active_comp().unwrap().layer(lid).unwrap().props.find_group(masks[0]).unwrap();
+    let props: Vec<_> = group.props().map(|p| p.uid).collect();
+    let first = *props.first().unwrap();
+    let last = *props.last().unwrap();
+    click_property(&mut app, &ctx, (lid, first), egui::Modifiers::NONE);
+    click_property(&mut app, &ctx, (lid, last), egui::Modifiers::SHIFT);
+    assert_eq!(app.session.state.selected_props, props.iter().map(|p| (lid, *p)).collect::<Vec<_>>());
+    click_property(&mut app, &ctx, (lid, first), egui::Modifiers::COMMAND);
+    assert!(!app.session.state.selected_props.contains(&(lid, first)));
+    assert_eq!(app.session.state.selected_props.len(), props.len() - 1);
+}
+
+#[test]
+fn overlapping_reveal_filters_never_repeat_mask_rows() {
+    let mut app = app();
+    let lid = app.session.state.selected_layers[0];
+    let mut masks = vec![];
+    for _ in 0..3 {
+        masks.push(app.session.execute("layer.addMask", json!({"layer": lid.0})).unwrap()["mask"].as_u64().unwrap());
+    }
+    app.ui.timeline.open_layers.insert(lid.0);
+    for open in [true, false] {
+        app.ui.timeline.open_groups.clear();
+        if open {
+            app.ui.timeline.open_groups.extend(masks.iter().copied());
+        }
+        for kinds in [vec!["maskPath", "masks"], vec!["masks", "props", "maskPath"], vec!["effects", "paint", "selected", "masks", "maskPath"]] {
+            app.ui.timeline.layer_reveal.insert(lid.0, kinds.iter().map(|k| k.to_string()).collect());
+            app.ui.timeline.reveal_props.extend(masks.iter().copied());
+            let comp = app.session.active_comp().unwrap();
+            let layer = comp.layer(lid).unwrap();
+            let rows = build_rows(&app, comp);
+            let mut seen = std::collections::BTreeSet::new();
+            for row in rows.iter().filter(|r| r.layer == lid) {
+                let uid = match row.kind {
+                    RowKind::Prop { uid } | RowKind::Group { uid, .. } => uid,
+                    _ => continue,
+                };
+                assert!(seen.insert(uid), "duplicate row {uid} for {kinds:?}, open={open}");
+            }
+            for uid in &masks {
+                let path = layer.props.find_group(*uid).unwrap().get("path").unwrap().uid;
+                assert_eq!(
+                    rows.iter().filter(|r| matches!(r.kind, RowKind::Prop { uid } if uid == path)).count(),
+                    usize::from(open),
+                    "hidden group contents must stay hidden"
+                );
+            }
+        }
+    }
+    // A single M reveal still shows each Mask Path once without its group.
+    app.ui.timeline.layer_reveal.insert(lid.0, vec!["maskPath".into()]);
+    assert_eq!(labels(&app).iter().filter(|r| r.trim() == "Mask Path").count(), 3);
+}

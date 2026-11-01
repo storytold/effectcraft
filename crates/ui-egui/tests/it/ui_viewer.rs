@@ -481,6 +481,209 @@ fn tool_creates_mask_draws_a_mask_on_the_selected_shape_layer() {
     assert!(!h.state().session.state.shape_tool.creates_mask);
 }
 
+// ---- the keys of a shape being dragged out
+
+/// Press the mouse button at `from` and drag to `to` without releasing.
+fn drag_out(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: egui::Modifiers) {
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    for i in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+}
+
+/// The first shape item `id` (`star`, `rect`…) of the top layer's first group.
+fn drawn(h: &Harness<'_, EffectcraftApp>, id: &str) -> effectcraft_engine::project::PropGroup {
+    let comp = h.state().session.active_comp().unwrap();
+    let g = comp.layers[0].props.sub("contents").unwrap().groups().next().unwrap();
+    g.sub("contents").unwrap().groups().find(|i| i.match_id == id).unwrap_or_else(|| panic!("no {id}")).clone()
+}
+
+fn scalar(g: &effectcraft_engine::project::PropGroup, id: &str) -> f64 {
+    g.get(id).unwrap_or_else(|| panic!("no {id}")).value.components()[0]
+}
+
+/// While a star is dragged out, Up / Down change its points, Left / Right its Outer Roundness and
+/// Page Up / Page Down its Inner Roundness; the keys don't nudge layers or step the time
+/// meanwhile. On a rounded rectangle Up / Down change the corners and Left / Right make them
+/// sharp or fully round.
+#[test]
+fn keys_change_a_shape_while_it_is_dragged_out() {
+    let mut h = harness();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Star;
+    h.run_steps(2);
+    let (n0, t0) = (h.state().session.active_comp().unwrap().layers.len(), h.state().session.time());
+    let (a, b) = (screen(&h, [100.0, 100.0]), screen(&h, [300.0, 300.0]));
+    drag_out(&mut h, a, b, Default::default());
+    for key in [egui::Key::ArrowUp, egui::Key::ArrowUp, egui::Key::ArrowUp, egui::Key::ArrowDown, egui::Key::ArrowRight, egui::Key::ArrowRight] {
+        h.key_press(key);
+        h.step();
+    }
+    for key in [egui::Key::PageUp, egui::Key::PageUp, egui::Key::PageUp, egui::Key::PageDown] {
+        h.key_press(key);
+        h.step();
+    }
+    release(&mut h, b, Default::default());
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), n0 + 1);
+    assert_eq!(h.state().session.time(), t0, "Page Up / Page Down didn't step the time");
+    let star = drawn(&h, "star");
+    assert_eq!(scalar(&star, "points"), 7.0);
+    assert_eq!(scalar(&star, "outerRoundness"), 20.0);
+    assert_eq!(scalar(&star, "innerRoundness"), 20.0);
+    assert!((scalar(&star, "outerRadius") - 282.8427).abs() < 2.0 && (scalar(&star, "innerRadius") - 141.42135).abs() < 1.0);
+
+    // The next shape retains this tool's last settings.
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    drag(&mut h, a, b);
+    assert_eq!(scalar(&drawn(&h, "star"), "points"), 7.0);
+
+    // A rounded rectangle 200 × 100 starts at 20 px; one Up adds 10% of 50 px.
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.state_mut().ui.tool = Tool::RoundedRect;
+    h.run_steps(2);
+    let b = screen(&h, [300.0, 200.0]);
+    drag_out(&mut h, a, b, Default::default());
+    h.key_press(egui::Key::ArrowUp);
+    h.step();
+    release(&mut h, b, Default::default());
+    assert!((scalar(&drawn(&h, "rect"), "roundness") - 25.0).abs() < 0.5, "{}", scalar(&drawn(&h, "rect"), "roundness"));
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    drag_out(&mut h, a, b, Default::default());
+    h.key_press(egui::Key::ArrowLeft);
+    h.key_press(egui::Key::ArrowRight);
+    h.step();
+    release(&mut h, b, Default::default());
+    assert!((scalar(&drawn(&h, "rect"), "roundness") - 50.0).abs() < 0.5, "{}", scalar(&drawn(&h, "rect"), "roundness"));
+}
+
+#[test]
+fn wheel_during_shape_creation_changes_parameters_without_zooming() {
+    for tool in [Tool::Star, Tool::Polygon, Tool::RoundedRect] {
+        let mut h = harness();
+        h.state_mut().ui.tool = tool;
+        h.run_steps(2);
+        let a = screen(&h, [100.0, 100.0]);
+        let b = screen(&h, [280.0, 200.0]);
+        drag_out(&mut h, a, b, Default::default());
+        let view = (h.state().ui.viewer.zoom, h.state().ui.viewer.pan);
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(12);
+        assert_eq!((h.state().ui.viewer.zoom, h.state().ui.viewer.pan), view, "wheel must not zoom or pan while drawing");
+        release(&mut h, b, Default::default());
+        h.run_steps(12);
+        assert_eq!((h.state().ui.viewer.zoom, h.state().ui.viewer.pan), view, "smoothed wheel tail must not zoom after release");
+        if tool == Tool::RoundedRect {
+            let rect = drawn(&h, "rect");
+            let size = rect.get("size").unwrap().value.components();
+            assert!((scalar(&rect, "roundness") / (size[0].min(size[1]) / 2.0) - 0.5).abs() < 0.001);
+        } else {
+            assert_eq!(scalar(&drawn(&h, "star"), "points"), 6.0);
+        }
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(12);
+        assert_ne!(h.state().ui.viewer.zoom, view.0, "a new wheel gesture restores normal zoom after drawing");
+    }
+}
+
+/// Holding Spacebar while a shape is dragged out moves it with the pointer instead of resizing
+/// it, and doesn't start a preview.
+#[test]
+fn spacebar_repositions_a_shape_while_it_is_dragged_out() {
+    let mut h = harness();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Rectangle;
+    h.run_steps(2);
+    let (a, b, c) = (screen(&h, [100.0, 100.0]), screen(&h, [200.0, 160.0]), screen(&h, [240.0, 190.0]));
+    drag_out(&mut h, a, b, Default::default());
+    h.key_down(egui::Key::Space);
+    h.step();
+    for i in 1..=4 {
+        h.input_mut().events.push(Event::PointerMoved(b + (c - b) * (i as f32 / 4.0)));
+        h.step();
+    }
+    h.key_up(egui::Key::Space);
+    h.step();
+    release(&mut h, c, Default::default());
+    h.run_steps(2);
+    assert!(!h.state().playback.playing, "Spacebar didn't start a preview");
+    let comp = h.state().session.active_comp().unwrap();
+    let at = comp.layers[0].props.sub("transform").unwrap().get("position").unwrap().value.components();
+    let size = drawn(&h, "rect").get("size").unwrap().value.components();
+    assert!((size[0] - 100.0).abs() < 2.0 && (size[1] - 60.0).abs() < 2.0, "the size it had: {size:?}");
+    assert!((at[0] - 190.0).abs() < 2.0 && (at[1] - 160.0).abs() < 2.0, "moved by (40, 30): {at:?}");
+}
+
+/// Holding Cmd while a star is dragged out changes its outer radius alone: the inner radius
+/// stays where it was when Cmd went down.
+#[test]
+fn cmd_changes_a_stars_outer_radius_alone_while_it_is_dragged_out() {
+    let mut h = harness();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Star;
+    h.run_steps(2);
+    let (a, b, c) = (screen(&h, [100.0, 100.0]), screen(&h, [200.0, 200.0]), screen(&h, [300.0, 300.0]));
+    drag_out(&mut h, a, b, Default::default());
+    h.event(Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    h.step();
+    for i in 1..=4 {
+        h.input_mut().events.push(Event::PointerMoved(b + (c - b) * (i as f32 / 4.0)));
+        h.step();
+    }
+    release(&mut h, c, egui::Modifiers::COMMAND);
+    h.event(Event::ModifiersChanged(Default::default()));
+    h.run_steps(2);
+    let star = drawn(&h, "star");
+    assert!((scalar(&star, "outerRadius") - 282.8427).abs() < 2.0, "{}", scalar(&star, "outerRadius"));
+    assert!((scalar(&star, "innerRadius") - 70.71068).abs() < 1.0, "the inner radius of the 100 px star: {}", scalar(&star, "innerRadius"));
+}
+
+/// Cmd+T with a shape layer's Path selected in the Timeline (none of its points selected) puts
+/// the free-transform box around the path.
+#[test]
+fn cmd_t_puts_the_free_transform_box_around_the_selected_shape_path() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("shape.newPath", json!({"vertices": [[200, 100], [400, 120], [300, 260]], "closed": true})).unwrap();
+    let (layer, path) = {
+        let l = &s.active_comp().unwrap().layers[0];
+        let g = l.props.sub("contents").unwrap().groups().next().unwrap();
+        (l.id, g.sub("contents").unwrap().groups().find(|i| i.match_id == "path").unwrap().uid)
+    };
+    s.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    s.state.selected_props = vec![(layer, path)];
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().ui.tool, Tool::Selection);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 3);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
+    // Another property of the layer selected instead: the Type tool again.
+    h.key_press(egui::Key::Escape);
+    let s = &mut h.state_mut().session;
+    s.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    s.state.selected_props.clear();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().ui.tool, Tool::Type);
+}
+
 // ---- the shape tools' drag ghost
 
 /// Run frames until the viewer's background frame has landed, so the comp is painted (and not
@@ -554,6 +757,9 @@ fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
         let mid = mid_drag(&mut h, a, b, egui::Modifiers::default());
         let fill = fill_rgb(&h);
 
+        let radial = matches!(tool, Tool::Polygon | Tool::Star);
+        let centre = if radial { from } else { centre };
+        let corner = if radial { [600.0, 350.0] } else { corner };
         // Drawn while the button is down, and painted with the Fill rather than left to a hairline.
         let was = px_at(&before, &h, centre);
         let now = px_at(&mid, &h, centre);
@@ -997,6 +1203,10 @@ fn shape_pen_draws_a_closed_shape_layer() {
     assert_eq!(sp.vertices.len(), 3);
     assert!(sp.closed);
     assert!((sp.vertices[0][0] - (200.0 - 320.0)).abs() < 1.5, "{:?}", sp.vertices);
+    assert_eq!(h.state().session.state.selected_props, vec![(l.id, path.uid)]);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 3, "closing the new shape selects its whole path");
+    assert!(h.state().ui.timeline.open_layers.contains(&l.id.0));
+    assert!(h.state().ui.timeline.open_groups.contains(&path.uid));
     // G cycles the Pen slot: Add Vertex, Delete Vertex, Convert Vertex, Mask Feather, Pen.
     let ctx = h.ctx.clone();
     let mut seen = vec![];
@@ -1117,6 +1327,8 @@ fn pen_mask_undoes_step_by_step_and_double_click_moves_the_whole_mask() {
     h.run_steps(2);
     // Move one point: one undo step puts it back, the next reopens the path, the next removes the
     // last point.
+    let uid = h.state().session.state.selected_vertices[0].mask;
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices":[{"layer":plate,"mask":uid,"index":1}]})).unwrap();
     let (from, to) = (screen(&h, [500.0, 60.0]), screen(&h, [520.0, 80.0]));
     drag(&mut h, from, to);
     let moved = mask_path(&h, "Plate");
@@ -3069,4 +3281,334 @@ fn unselected_null_keeps_its_outline() {
     h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();
     h.run_steps(2);
     assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
+}
+
+#[test]
+fn free_transform_modifier_changes_without_pointer_movement_use_drag_start_geometry() {
+    for shape in [false, true] {
+        use egui::Modifiers;
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"width":640,"height":360,"duration":3})).unwrap();
+        let (layer, mask) = if shape {
+            let result = s.execute("shape.newPath", json!({"space":"path","vertices":[[200,100],[400,100],[400,200],[200,200]],"closed":true})).unwrap();
+            let layer = result["layer"].as_u64().unwrap();
+            let path = result["path"].as_u64().unwrap();
+            s.execute("prop.set", json!({"layer":layer,"path":"transform/position","value":[0,0]})).unwrap();
+            s.execute("prop.select", json!({"layer":layer,"prop":path})).unwrap();
+            (layer, path)
+        } else {
+            let layer = s.execute("layer.newSolid", json!({"width":640,"height":360})).unwrap()["layer"].as_u64().unwrap();
+            let mask = s.execute("mask.new", json!({"layer":layer,"vertices":[[200,100],[400,100],[400,200],[200,200]],"closed":true})).unwrap()["mask"]
+                .as_u64()
+                .unwrap();
+            (layer, mask)
+        };
+        let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+        h.run_steps(3);
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::T);
+        h.run_steps(3);
+        let from = rect(&h, "viewer.freeTransform.handle.2").center();
+        let to = screen(&h, [450.0, 220.0]);
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for i in 1..=8 {
+            h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+            h.step();
+        }
+        let vertices = |h: &Harness<'_, EffectcraftApp>| {
+            h.state()
+                .session
+                .active_comp()
+                .unwrap()
+                .layer(LayerId(layer))
+                .unwrap()
+                .props
+                .find_group(mask)
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .value
+                .as_path()
+                .unwrap()
+                .vertices
+                .clone()
+        };
+        for (mods, first, last) in [
+            (Modifiers::SHIFT, [200.0, 100.0], [445.0, 222.5]),
+            (Modifiers { command: true, shift: true, ..Default::default() }, [155.0, 77.5], [445.0, 222.5]),
+            (Modifiers::COMMAND, [150.0, 80.0], [450.0, 220.0]),
+            (Modifiers::NONE, [200.0, 100.0], [450.0, 220.0]),
+        ] {
+            h.event(Event::ModifiersChanged(mods));
+            h.run_steps(3);
+            let points = vertices(&h);
+            for (got, want) in [(points[0], first), (points[2], last)] {
+                assert!((got[0] - want[0]).abs() < 0.002 && (got[1] - want[1]).abs() < 0.002, "{mods:?}: {got:?} != {want:?}");
+            }
+        }
+        h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        let modified = vertices(&h);
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(vertices(&h), vec![[200.0, 100.0], [400.0, 100.0], [400.0, 200.0], [200.0, 200.0]]);
+        assert!(h.state().auto.find("viewer.freeTransform.handle.2").is_some());
+        h.key_press_modifiers(Modifiers { command: true, shift: true, ..Default::default() }, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(vertices(&h), modified);
+    }
+}
+
+#[test]
+fn path_marquee_combines_shape_and_mask_points_without_moving_the_layer() {
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width":640,"height":360,"duration":3})).unwrap();
+    let shape = session.execute("shape.newPath", json!({"space":"path","vertices":[[100,100],[300,100],[300,250],[100,250]],"closed":true})).unwrap();
+    let layer = shape["layer"].as_u64().unwrap();
+    let path = shape["path"].as_u64().unwrap();
+    session.execute("prop.set", json!({"layer":layer,"path":"transform/position","value":[0,0]})).unwrap();
+    let mask = session.execute("mask.new", json!({"layer":layer,"vertices":[[140,140],[350,140],[350,280]],"closed":true})).unwrap()["mask"].as_u64().unwrap();
+    session.execute("prop.select", json!({"layer":layer,"prop":path})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(session));
+    h.run_steps(3);
+    let before = h.state().session.project.clone();
+    let from = screen(&h, [75.0, 75.0]);
+    let to = screen(&h, [165.0, 165.0]);
+    drag(&mut h, from, to);
+    let vertices = &h.state().session.state.selected_vertices;
+    assert_eq!(vertices.len(), 2, "{vertices:?}");
+    assert!(vertices.iter().any(|v| v.mask == path && v.index == 0));
+    assert!(vertices.iter().any(|v| v.mask == mask && v.index == 0));
+    assert_eq!(h.state().session.project, before, "marquee only changes selection");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 2);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some());
+}
+
+#[test]
+fn review_failed_vertex_drag_finishes_and_keeps_the_next_undo_separate() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width":640,"height":360,"duration":3})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"width":640,"height":360})).unwrap()["layer"].as_u64().unwrap();
+    let first = s.execute("mask.new", json!({"layer":layer,"vertices":[[100,100],[300,100],[300,250]],"closed":true})).unwrap()["mask"].as_u64().unwrap();
+    let locked = s.execute("mask.new", json!({"layer":layer,"vertices":[[400,100],[500,100],[500,250]],"closed":true})).unwrap()["mask"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let group = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap().props.find_group_mut(locked).unwrap();
+    if let effectcraft_engine::project::GroupKind::Mask { locked, .. } = &mut group.kind {
+        *locked = true;
+    }
+    s.execute("mask.selectVertices", json!({"vertices":[{"layer":layer,"mask":first,"index":0}]})).unwrap();
+    s.execute("view.snapping", json!({"value":false})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let from = screen(&h, [100.0, 100.0]);
+    let to = screen(&h, [130.0, 120.0]);
+    drag_out(&mut h, from, to, Default::default());
+    let partial = h.state().session.project.clone();
+    h.state_mut().session.state.selected_vertices.push(effectcraft_engine::VertexRef { layer: LayerId(layer), mask: locked, index: 0 });
+    h.event(Event::PointerMoved(to + vec2(20.0, 10.0)));
+    h.run_steps(2);
+    let n = h.ctx.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0));
+    release(&mut h, to + vec2(20.0, 10.0), Default::default());
+    h.run_steps(2);
+    assert_eq!(h.ctx.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)), n + 1, "failed drag still cleans up on release");
+    assert_eq!(h.state().session.project, partial);
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices":[{"layer":layer,"mask":first,"index":0}]})).unwrap();
+    let from = screen(&h, [130.0, 120.0]);
+    let to = screen(&h, [150.0, 120.0]);
+    drag(&mut h, from, to);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(h.state().session.project, partial, "Undo preserves the successful part of the previous gesture");
+}
+
+/// A path point at (200,103), a nearer point off its constrained axis, and a reachable guide.
+/// Rotate the existing Box so its center/anchor remain point targets without axis-aligned edges.
+fn vertex_snap_competition_harness(mask: bool, horizontal: bool) -> (Harness<'static, EffectcraftApp>, u64, u64, String) {
+    let mut h = harness();
+    let vertices = [[200.0, 103.0], [400.0, 103.0], [400.0, 263.0], [200.0, 263.0]];
+    let (layer, uid, kind) = if mask {
+        let layer = layer_id(&h, "Plate");
+        h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+        let r = h.state_mut().session.execute("mask.new", json!({"layer": layer, "vertices": vertices, "closed": true})).unwrap();
+        (layer, r["mask"].as_u64().unwrap(), "mask")
+    } else {
+        let r = h
+            .state_mut()
+            .session
+            .execute("shape.newPath", json!({"vertices": vertices, "closed": true, "fill": false, "stroke": "#ffffff", "strokeWidth": 4}))
+            .unwrap();
+        (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap(), "shapePath")
+    };
+    let target = layer_id(&h, "Box");
+    let center = if horizontal { [238.0, 104.0, 0.0] } else { [201.0, 141.0, 0.0] };
+    h.state_mut().session.execute("prop.set", json!({"layer": target, "path": "transform/position", "value": center})).unwrap();
+    h.state_mut().session.execute("prop.set", json!({"layer": target, "path": "transform/rotation", "value": 45})).unwrap();
+    h.state_mut()
+        .session
+        .execute("view.addGuide", json!({"orientation": if horizontal { "vertical" } else { "horizontal" }, "position": if horizontal { 241 } else { 144 }}))
+        .unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": true})).unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices": [{"layer": layer, "mask": uid, "index": 0}]})).unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.state_mut().ui.viewer.zoom = Some(1.0);
+    h.state_mut().ui.viewer.guides = true;
+    h.state_mut().ui.viewer.snap_guides = true;
+    h.state_mut().ui.viewer.lock_guides = true;
+    h.state_mut().ui.viewer.snap_grid = false;
+    h.run_steps(3);
+    (h, layer, uid, format!("viewer.{kind}.{uid}.vertex.0"))
+}
+
+fn vertex_snap_path(h: &Harness<'_, EffectcraftApp>, layer: u64, uid: u64) -> effectcraft_engine::keyframe::ShapePath {
+    h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+fn assert_vertex_snap_delta(h: &Harness<'_, EffectcraftApp>, vertex: &str, from: Pos2, expected: [f32; 2], case: &str) {
+    let zoom = rect(h, "viewer.comp").width() / 640.0;
+    let actual = (rect(h, vertex).center() - from) / zoom;
+    assert!(
+        (actual.x - expected[0]).abs() < 0.02 && (actual.y - expected[1]).abs() < 0.02,
+        "{case}: vertex moved {actual:?} comp pixels, expected {expected:?}"
+    );
+}
+
+/// Leave the button down so the last frame still contains the snap feedback.
+fn begin_vertex_snap_drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: egui::Modifiers) {
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    for i in 1..=10 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i.min(8) as f32 / 8.0)));
+        h.step();
+    }
+}
+
+fn finish_vertex_snap_drag(h: &mut Harness<'_, EffectcraftApp>, to: Pos2, modifiers: egui::Modifiers) {
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(2);
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+}
+
+fn vertex_snap_cross_centers(h: &Harness<'_, EffectcraftApp>) -> Vec<Pos2> {
+    fn walk(shape: &egui::Shape, centers: &mut Vec<Pos2>) {
+        match shape {
+            egui::Shape::LineSegment { points, stroke } if stroke.color == egui::Color32::from_rgb(0xff, 0xd2, 0x3c) && (stroke.width - 1.5).abs() < 0.001 => {
+                let d = points[1] - points[0];
+                if ((d.x.abs() - 16.0).abs() < 0.01 && d.y.abs() < 0.01) || ((d.y.abs() - 16.0).abs() < 0.01 && d.x.abs() < 0.01) {
+                    centers.push(points[0] + d * 0.5);
+                }
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, centers)),
+            _ => {}
+        }
+    }
+    let mut centers = vec![];
+    for clipped in &h.output().shapes {
+        walk(&clipped.shape, &mut centers);
+    }
+    centers
+}
+
+/// A point sqrt(2) px away is unreachable with Shift, so the guide 4 px away must win.
+/// Without Shift the same actual point remains a valid target.
+#[test]
+fn shift_vertex_snapping_uses_reachable_line_over_nearer_point() {
+    for mask in [false, true] {
+        for horizontal in [true, false] {
+            for shift in [false, true] {
+                let (mut h, layer, uid, vertex) = vertex_snap_competition_harness(mask, horizontal);
+                let before = vertex_snap_path(&h, layer, uid);
+                let from = rect(&h, &vertex).center();
+                let zoom = rect(&h, "viewer.comp").width() / 640.0;
+                let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+                let expected = match (horizontal, shift) {
+                    (true, true) => [41.0, 0.0],
+                    (false, true) => [0.0, 41.0],
+                    (true, false) => [38.0, 1.0],
+                    (false, false) => [1.0, 38.0],
+                };
+                let modifiers = egui::Modifiers { shift, ..Default::default() };
+                hold_drag(&mut h, from, from + pointer * zoom, modifiers);
+                assert_vertex_snap_delta(&h, &vertex, from, expected, &format!("mask={mask}, horizontal={horizontal}, shift={shift}"));
+                assert_eq!(vertex_snap_path(&h, layer, uid).vertices[1..], before.vertices[1..]);
+                h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+                h.run_steps(2);
+                assert_eq!(vertex_snap_path(&h, layer, uid), before, "one Undo restores the entire path");
+            }
+        }
+    }
+}
+
+/// Check painted feedback independently of the expected target position: clamping a correction
+/// after snapping must not leave the cross at a point the vertex never actually reached.
+#[test]
+fn shift_vertex_snap_feedback_marks_the_actual_vertex() {
+    for mask in [false, true] {
+        for horizontal in [true, false] {
+            let (mut h, _, _, vertex) = vertex_snap_competition_harness(mask, horizontal);
+            let from = rect(&h, &vertex).center();
+            let zoom = rect(&h, "viewer.comp").width() / 640.0;
+            let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+            let to = from + pointer * zoom;
+            begin_vertex_snap_drag(&mut h, from, to, egui::Modifiers::SHIFT);
+            let actual = rect(&h, &vertex).center();
+            let centers = vertex_snap_cross_centers(&h);
+            assert_eq!(centers.len(), 2, "the active snap draws both arms of its cross");
+            assert!(
+                centers.iter().all(|c| c.distance(actual) < 0.1),
+                "mask={mask}, horizontal={horizontal}: feedback centers {centers:?} disagree with actual vertex {actual:?}"
+            );
+            finish_vertex_snap_drag(&mut h, to, egui::Modifiers::SHIFT);
+        }
+    }
+}
+
+/// Modifier-only updates must replace the prior snapped displacement, without a new pointer event.
+#[test]
+fn vertex_snapping_updates_when_shift_changes_without_pointer_motion() {
+    for horizontal in [true, false] {
+        let (mut h, layer, uid, vertex) = vertex_snap_competition_harness(true, horizontal);
+        let before = vertex_snap_path(&h, layer, uid);
+        let from = rect(&h, &vertex).center();
+        let zoom = rect(&h, "viewer.comp").width() / 640.0;
+        let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+        let to = from + pointer * zoom;
+        begin_vertex_snap_drag(&mut h, from, to, egui::Modifiers::NONE);
+        for shift in [false, true, false, true] {
+            let modifiers = egui::Modifiers { shift, ..Default::default() };
+            h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+            h.run_steps(3);
+            let expected = match (horizontal, shift) {
+                (true, true) => [41.0, 0.0],
+                (false, true) => [0.0, 41.0],
+                (true, false) => [38.0, 1.0],
+                (false, false) => [1.0, 38.0],
+            };
+            assert_vertex_snap_delta(&h, &vertex, from, expected, &format!("horizontal={horizontal}, shift={shift}"));
+        }
+        // Keep PR #1978's existing equal-axis rule: a tie chooses horizontal.
+        let tie = from + vec2(20.0, 20.0) * zoom;
+        h.input_mut().events.push(Event::PointerMoved(tie));
+        h.run_steps(3);
+        assert_vertex_snap_delta(&h, &vertex, from, [20.0, 0.0], "equal displacement remains horizontal");
+        h.input_mut().events.push(Event::PointerMoved(from));
+        h.run_steps(3);
+        assert_vertex_snap_delta(&h, &vertex, from, [0.0, 0.0], "return to the original point");
+        h.input_mut().events.push(Event::PointerMoved(to));
+        h.run_steps(3);
+        let expected = if horizontal { [41.0, 0.0] } else { [0.0, 41.0] };
+        assert_vertex_snap_delta(&h, &vertex, from, expected, "final snapped move before Undo");
+        finish_vertex_snap_drag(&mut h, to, egui::Modifiers::SHIFT);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(vertex_snap_path(&h, layer, uid), before, "modifier changes remain one Undo");
+    }
 }

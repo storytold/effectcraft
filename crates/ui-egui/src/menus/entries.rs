@@ -22,6 +22,12 @@ pub fn menus() -> Vec<&'static str> {
 
 pub(crate) fn entry_label(app: &EffectcraftApp, e: &MenuEntry) -> String {
     let shown = match e.command.as_str() {
+        "edit.undo" if crate::panels::viewer_overlays::transform_history_label(app, false).is_some() => {
+            format!("Undo {}", crate::panels::viewer_overlays::transform_history_label(app, false).unwrap_or("Free Transform"))
+        }
+        "edit.redo" if crate::panels::viewer_overlays::transform_history_label(app, true).is_some() => {
+            format!("Redo {}", crate::panels::viewer_overlays::transform_history_label(app, true).unwrap_or("Free Transform"))
+        }
         "edit.undo" => app.session.history.undo.last().map(|u| format!("Undo {}", u.0)).unwrap_or_else(|| "Can't Undo".into()),
         "edit.redo" => app.session.history.redo.last().map(|u| format!("Redo {}", u.0)).unwrap_or_else(|| "Can't Redo".into()),
         // Window ▸ Layer: the layer open in the Layer panel.
@@ -101,6 +107,12 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
 }
 
 pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
+    if matches!(e.command.as_str(), "edit.undo" | "edit.redo")
+        && crate::panels::viewer_overlays::transform_history_label(app, e.command == "edit.redo").is_some()
+    {
+        return true;
+    }
+
     // The Project-panel enabled rules mirror the invoke redirects, so they stand down for the
     // same reason (see the redirect block): while a text edit is open the menu items must be
     // enabled by what their routed command can do, or the menu grays out commands that work.

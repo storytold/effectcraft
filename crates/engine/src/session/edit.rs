@@ -161,6 +161,46 @@ impl Session {
         }
     }
 
+    /// Start an independent continuous edit without exposing the history's merge storage.
+    pub fn begin_edit_gesture(&mut self) {
+        self.history.merge_key = None;
+    }
+
+    /// Whether ordinary Undo/Redo would restore this snapshot. Frontends can interleave
+    /// temporary UI steps only while their document history still matches the engine's line.
+    pub fn adjacent_history_matches(&self, redo: bool, project: &Project) -> bool {
+        let next = if redo { self.history.redo.last() } else { self.history.undo.last() };
+        next.is_some_and(|(_, p)| p.same_content(project))
+    }
+
+    /// A UI-only edit after Undo starts a new future while preserving the old history branch.
+    pub fn abandon_redo_future(&mut self) {
+        self.history.abandon_redo(&self.project);
+    }
+
+    /// Immutable origin of the current merged gesture; before its first edit, the current project.
+    /// Commands use this to apply absolute transforms without accumulating pointer deltas.
+    pub(crate) fn project_at_merge_start(&self, merge: &str) -> Arc<Project> {
+        self.history
+            .undo
+            .last()
+            .filter(|_| self.history.merge_key.as_deref() == Some(merge))
+            .map(|(_, project)| project.clone())
+            .unwrap_or_else(|| self.project.clone())
+    }
+
+    /// Returning an absolute gesture to its origin must not leave an empty Undo step.
+    pub(crate) fn discard_empty_merge(&mut self, merge: &str) {
+        if self.history.merge_key.as_deref() != Some(merge) {
+            return;
+        }
+        let Some((_, start)) = self.history.undo.last().filter(|(_, start)| start.same_content(&self.project)) else { return };
+        self.project = start.clone();
+        self.history.undo.pop();
+        self.history.merge_key = None;
+        self.bump();
+    }
+
     /// Undoes one step: the current project goes onto the redo stack, per-comp Resolution is kept
     /// as it was, the merge key is cleared, selections are sanitized for the replaced state (the
     /// on-canvas editor gets a new IME epoch only when its own document changed) and the session is

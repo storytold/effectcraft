@@ -166,6 +166,15 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
 
+`ui.menu.invoke {id: "path.freeTransform"}` enters the interactive transform box for selected
+mask/shape paths (one shared box for several paths). The default Cmd/Ctrl+T chord does the same
+when a path is selected in Timeline or Composition. Explicit numeric `path.freeTransform`
+parameters still edit the project directly. For paths on different layers/groups, pass
+`{paths: [{layer, mask}], space: "comp", anchor: [x, y], scale: [xPercent, yPercent],
+rotation: degrees, offset: [dx, dy], merge?: string}`: the transform is in composition pixels
+and is converted back into each path's space. `space: "path"` is the numeric command's default.
+A shared `merge` key makes all ticks of a drag one undo step.
+
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
 
@@ -248,3 +257,51 @@ window's outer position to its content's, by the main window's title bar, before
 Panels that were closed stay closed and reopen at their default place. The first save writes version 2 and keeps
 the earlier file as `workspaces.old.json`. A damaged, unknown or newer file loads as the default
 layout and is left unchanged.
+
+### Mask creation and duplication
+
+`mask.new` (Pen) and `layer.addMask` (shape tools or menu) select the new mask, clear stale
+property/key selections, and ask the Timeline to reveal its row. The layer and Masks group open;
+the new mask is scrolled into view, including when a property reveal filter was active.
+A deferred reveal is ignored when its mask is no longer selected in the active comp.
+
+With mask groups or their Mask Path properties selected, `edit.duplicate {}` duplicates those
+masks in their existing layers, selects the copies and returns `{masks: [uid, ...]}`. Multiple
+masks duplicate in one undo step. Passing `layers` explicitly keeps layer duplication.
+
+`layer.centerAnchor` compensates Position at the current layer time: an animated Position gets
+a key there (or an existing key is updated), while other keys retain their values and timing.
+Separated X/Y Position works the same way. Unanimated properties remain unanimated.
+
+Free Transform keeps its box orientation between pointer gestures until the session ends or its
+selection changes. Its default pivot follows the center of the box during geometry edits. Once the user drags the
+pivot away from the center, it remains at that chosen point relative to the layer during later geometry edits,
+including ordinary scaling and translation. Moving the layer carries the pivot along. A shared box
+uses the first target layer as the pivot reference. Dragging the pivot itself changes only UI state. `path.freeTransform`
+accepts optional `basisAngle` (degrees, default 0) to scale along rotated axes in the requested
+`space`; `anchor` and `offset` remain coordinates/vectors in that space. Rotation is about `anchor`.
+Returning the pivot to the center restores automatic following. While drawing, the scroll wheel changes shape-draft parameters like Up/Down and does not zoom the viewer. Its smoothed tail remains captured after release; a new wheel gesture restores normal zoom.
+The viewer uses the same command for its oriented handles. A new tool session resets the temporary
+box orientation and pivot; interactive Undo/Redo restores them per gesture as described below.
+Neither is serialized into the project.
+
+During a pointer gesture, Shift and Command/Ctrl are evaluated against the geometry at pointer-down,
+including when only the modifier changes and the pointer stays still. Uniform scaling preserves those
+initial proportions; changing the center modifier switches between the original opposite handle and
+the original pivot. Scaling through zero or across an axis remains recoverable in the same gesture.
+The viewer sends `path.freeTransform {fromStart: true, merge: "<gesture key>", ...}` with the full
+transform from that origin. `fromStart` requires `merge`; it reads the original path properties from
+the current merged undo step, preserves existing keyframe interpolation metadata, and accepts an
+identity transform to restore the original properties (including removing a newly inserted key).
+Returning the project to its original content removes the empty undo step. Callers must use a fresh
+merge key for each gesture and keep targets, time and coordinate space fixed throughout it.
+Without `fromStart`, numeric commands retain their ordinary incremental behavior.
+
+While Free Transform is active, `ui.menu.invoke` with `edit.undo` / `edit.redo` (or the configured
+keyboard shortcuts) walks one completed pointer gesture per step. This interleaves pivot-only
+changes with the engine's geometry edits and restores the box orientation and automatic/pinned
+pivot together. The tool stays active. A new gesture after Undo abandons Redo; no-op gestures do
+not create steps. Session history is bounded by Undo Levels (at most 1024), is not serialized and
+is cleared when leaving/restarting the tool or after an unrelated document edit. Geometry still
+uses ordinary engine history outside the tool. `engine.execute edit.undo` remains document-only;
+use `ui.menu.invoke` to exercise interactive tool history. Pivot-only edits do not dirty the file.

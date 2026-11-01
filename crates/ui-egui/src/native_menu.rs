@@ -357,6 +357,10 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.state.clipboard.len().hash(&mut h);
     s.state.key_clipboard.len().hash(&mut h);
     (s.history.undo.len(), s.history.redo.len()).hash(&mut h);
+    crate::panels::free_transform::transform_history_key(app).hash(&mut h);
+    if crate::panels::free_transform::free_transform_target(app).is_some() {
+        (crate::panels::free_transform::transform_history_label(app, false), crate::panels::free_transform::transform_history_label(app, true)).hash(&mut h);
+    }
     s.journal.len().hash(&mut h);
     s.journal.last().map(|j| &j.0).hash(&mut h);
     s.prefs.recent_projects.hash(&mut h);
@@ -747,6 +751,16 @@ mod tests {
         assert_eq!((checked(&app, "renderQueue"), checked(&app, "timeline")), (Some(false), Some(true)));
         app.ui.maximized = Some(PanelKind::Timeline);
         assert_eq!((checked(&app, "timeline"), checked(&app, "project")), (Some(true), Some(false)));
+    }
+
+    #[test]
+    fn review_regression_playback_time_does_not_invalidate_idle_menu() {
+        let mut app = app();
+        let initial = state_key(&app);
+        for seconds in [0.5, 1.0, 1.5] {
+            app.session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(seconds));
+            assert_eq!(state_key(&app), initial);
+        }
     }
 
     #[test]

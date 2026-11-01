@@ -2,6 +2,7 @@
 //! First Vertex, Free Transform Points) and Layer ▸ Mask ▸ Motion Blur, Feather Falloff and Hide
 //! Locked Masks.
 
+use effectcraft_geom::{Mat3, vec2};
 use effectcraft_keyframe::{ShapePath, Value as KV};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{FeatherFalloff, GroupKind, ItemId, LayerId, LayerSource, MaskMotionBlur, Node, PropGroup, Uid};
@@ -57,6 +58,22 @@ fn map_path(g: &mut PropGroup, f: &dyn Fn(&mut ShapePath)) {
 
 /// Mask targets: masks of the selected vertices, else [`target_masks`].
 fn masks_for(s: &Session, p: &Value) -> Result<(ItemId, Vec<(LayerId, Uid)>)> {
+    if let Some(paths) = p.get("paths") {
+        let paths = paths.as_array().ok_or_else(|| bad("path.freeTransform", "paths must be [{layer, mask}]"))?;
+        if paths.len() > 10_000 {
+            return Err(bad("path.freeTransform", "too many paths"));
+        }
+        let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
+        let mut targets = Vec::new();
+        for path in paths {
+            let (_, lid) = layer_p(s, path, "path.freeTransform")?;
+            let uid = path.get("mask").and_then(Value::as_u64).ok_or_else(|| bad("path.freeTransform", "each path needs a mask uid"))?;
+            targets.push((lid, uid));
+        }
+        targets.sort();
+        targets.dedup();
+        return Ok((cid, targets));
+    }
     if p.get("mask").is_none() && p.get("layer").is_none() && !s.state.selected_vertices.is_empty() {
         let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
         let mut v: Vec<(LayerId, Uid)> = s.state.selected_vertices.iter().map(|v| (v.layer, v.mask)).collect();
@@ -314,32 +331,94 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
         _ => [1.0, 1.0],
     };
     let rot = f_p(p, "rotation").unwrap_or(0.0).to_radians();
+    let basis = f_p(p, "basisAngle").unwrap_or(0.0);
     let off =
         p.get("offset").and_then(Value::as_array).map(|a| [a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0)]);
     let off = off.unwrap_or([0.0; 2]);
     let anchor =
         p.get("anchor").and_then(Value::as_array).map(|a| [a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0)]);
-    if scale == [1.0, 1.0] && rot == 0.0 && off == [0.0, 0.0] {
+    let identity = scale == [1.0, 1.0] && rot == 0.0 && off == [0.0, 0.0];
+    let from_start = b_p(p, "fromStart").unwrap_or(false);
+    let merge = merge_p(p);
+    let origin =
+        if from_start { Some(s.project_at_merge_start(merge.ok_or_else(|| bad("path.freeTransform", "fromStart requires a merge key"))?)) } else { None };
+    if identity && !from_start {
         return Err(bad("path.freeTransform", "pass scale (% or [x%, y%]), rotation (deg) and/or offset [dx, dy]; anchor? [x, y]"));
     }
     let (cid, targets) = masks_for(s, p)?;
     let selected: Vec<VertexRef> = s.state.selected_vertices.clone();
     let t = s.time();
-    let (c, sn) = (rot.cos(), rot.sin());
+    if !scale.iter().chain(off.iter()).chain(anchor.iter().flatten()).all(|v| v.is_finite()) || !rot.is_finite() || !basis.is_finite() {
+        return Err(bad("path.freeTransform", "transform values must be finite"));
+    }
+    let comp_space = match str_p(p, "space").unwrap_or("path") {
+        "path" => false,
+        "comp" => true,
+        _ => return Err(bad("path.freeTransform", "space must be path or comp")),
+    };
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let ctx = effectcraft_render::EvalCtx { expr: s.expr.as_deref(), ..effectcraft_render::EvalCtx::new(&s.project, cid, comp, t) };
+    let mut placements = Vec::new();
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for (lid, uid) in &targets {
+        let l = comp.layer(*lid).ok_or_else(|| bad("path.freeTransform", "no such layer"))?;
+        let g = l.props.find_group(*uid).filter(|g| super::mask::is_path_group(g)).ok_or_else(|| bad("path.freeTransform", "no such path"))?;
+        if l.switches.locked || matches!(g.kind, GroupKind::Mask { locked: true, .. }) {
+            return Err(bad("path.freeTransform", "path is locked"));
+        }
+        let m = if comp_space {
+            let local = if g.match_id == "path" { effectcraft_render::shapes::item_matrix(&ctx, l, *uid).unwrap_or(Mat3::IDENTITY) } else { Mat3::IDENTITY };
+            ctx.layer_to_comp(l).0 * local
+        } else {
+            Mat3::IDENTITY
+        };
+        let inv = m.inverse().ok_or_else(|| bad("path.freeTransform", "path transform is not invertible"))?;
+        let source = if let Some(project) = &origin {
+            project.comp(cid).and_then(|c| c.layer(*lid)).and_then(|l| l.props.find_group(*uid)).and_then(|g| g.get("path"))
+        } else {
+            g.get("path")
+        };
+        if from_start && source.is_none() {
+            return Err(bad("path.freeTransform", "path was not present at gesture start"));
+        }
+        if let Some(KV::Path(sp)) = source.map(|pr| pr.value_at(l.layer_time(t))) {
+            let subset: Vec<_> = selected.iter().filter(|v| v.layer == *lid && v.mask == *uid).map(|v| v.index).collect();
+            for (_, v) in sp.vertices.iter().enumerate().filter(|(i, _)| subset.is_empty() || subset.contains(i)) {
+                let q = m.apply(vec2(v[0], v[1]));
+                if !q.x.is_finite() || !q.y.is_finite() {
+                    return Err(bad("path.freeTransform", "path has non-finite coordinates"));
+                }
+                lo = [lo[0].min(q.x), lo[1].min(q.y)];
+                hi = [hi[0].max(q.x), hi[1].max(q.y)];
+            }
+        }
+        placements.push((m, inv));
+    }
+    let anchor = if comp_space { Some(anchor.unwrap_or([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0])) } else { anchor };
+    let linear = Mat3::rotate_deg(basis + rot.to_degrees()) * Mat3::scale(vec2(scale[0], scale[1])) * Mat3::rotate_deg(-basis);
     let lin = |v: [f64; 2]| {
-        let x = v[0] * scale[0];
-        let y = v[1] * scale[1];
-        [x * c - y * sn, x * sn + y * c]
+        let q = linear.apply_vec(vec2(v[0], v[1]));
+        [q.x, q.y]
     };
     let n = s.edit("Free Transform Points", merge_p(p), |proj, _| {
         let mut n = 0;
-        for (lid, uid) in &targets {
+        for ((lid, uid), (m, inv)) in targets.iter().zip(&placements) {
             let l = layer_mut(proj, cid, *lid)?;
             let lt = l.layer_time(t);
             let Some(g) = l.props.find_group_mut(*uid).filter(|g| super::mask::is_path_group(g)) else { continue };
             let roto = is_roto(g);
             let Some(pr) = g.get_mut("path") else { continue };
-            let KV::Path(mut sp) = pr.value_at(lt) else { continue };
+            let source = origin
+                .as_ref()
+                .and_then(|project| project.comp(cid))
+                .and_then(|c| c.layer(*lid))
+                .and_then(|l| l.props.find_group(*uid))
+                .and_then(|g| g.get("path"));
+            if identity && let Some(source) = source {
+                *pr = source.clone();
+                continue;
+            }
+            let KV::Path(mut sp) = source.unwrap_or(pr).value_at(lt) else { continue };
             let idx: Vec<usize> = {
                 let sel: Vec<usize> =
                     selected.iter().filter(|v| v.layer == *lid && v.mask == *uid).map(|v| v.index).filter(|i| *i < sp.vertices.len()).collect();
@@ -359,23 +438,40 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
             });
             for &i in &idx {
                 let v = sp.vertices[i];
-                let q = lin([v[0] - a[0], v[1] - a[1]]);
-                sp.vertices[i] = [q[0] + a[0] + off[0], q[1] + a[1] + off[1]];
-                if let Some(tn) = sp.in_tangents.get_mut(i) {
-                    *tn = lin(*tn);
+                let transform = |point: [f64; 2]| {
+                    let q = m.apply(vec2(point[0], point[1]));
+                    let q = lin([q.x - a[0], q.y - a[1]]);
+                    let q = inv.apply(vec2(q[0] + a[0] + off[0], q[1] + a[1] + off[1]));
+                    [q.x, q.y]
+                };
+                let q = transform(v);
+                if !q.iter().all(|v| v.is_finite()) {
+                    return Err(bad("path.freeTransform", "transform produces non-finite coordinates"));
                 }
-                if let Some(tn) = sp.out_tangents.get_mut(i) {
-                    *tn = lin(*tn);
+                sp.vertices[i] = q;
+                for tangent in [sp.in_tangents.get_mut(i), sp.out_tangents.get_mut(i)].into_iter().flatten() {
+                    let control = transform([v[0] + tangent[0], v[1] + tangent[1]]);
+                    if !control.iter().all(|v| v.is_finite()) {
+                        return Err(bad("path.freeTransform", "transform produces non-finite tangents"));
+                    }
+                    *tangent = [control[0] - q[0], control[1] - q[1]];
                 }
                 n += 1;
             }
             if roto {
                 roto_smooth(&mut sp);
             }
-            pr.set_value_at(lt, KV::Path(sp));
+            if from_start && let Some(key) = pr.keys.iter_mut().find(|key| key.time == lt) {
+                key.value = KV::Path(sp);
+            } else {
+                pr.set_value_at(lt, KV::Path(sp));
+            }
         }
         Ok(n)
     })?;
+    if from_start && let Some(merge) = merge {
+        s.discard_empty_merge(merge);
+    }
     Ok(json!({"vertices": n}))
 }
 
@@ -565,7 +661,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Free Transform Points",
             ["Layer", "Mask and Shape Path"],
             None,
-            "{layer?, mask?, scale?: % | [x%, y%], rotation?: deg, offset?: [dx, dy], anchor?: [x, y], merge?: string}",
+            "{layer?, mask?, paths?: [{layer, mask}], space?: path|comp, scale?: % | [x%, y%], rotation?: deg, basisAngle?: deg, fromStart?: bool, offset?: [dx, dy], anchor?: [x, y], merge?: string}",
             has_layers,
             free_transform
         ),

@@ -798,9 +798,15 @@ fn select_prop(s: &mut Session, p: &Value) -> Result<Value> {
         s.state.selected_keys.clear();
     }
     if !s.state.selected_layers.contains(&lid) {
-        s.state.selected_layers = vec![lid];
+        if add {
+            s.state.selected_layers.push(lid);
+        } else {
+            s.state.selected_layers = vec![lid];
+        }
     }
-    s.state.selected_props.push((lid, uid));
+    if !s.state.selected_props.contains(&(lid, uid)) {
+        s.state.selected_props.push((lid, uid));
+    }
     // Selecting a mask (or its Mask Path, or a shape's Path) selects all its points, so the
     // viewer drags the whole mask (as in AE, #203).
     let t = s.time();
@@ -831,7 +837,13 @@ fn deselect_prop(s: &mut Session, params: &Value) -> Result<Value> {
     s.state.selected_props.retain(|(layer, prop)| *layer != lid || *prop != uid);
     s.state.selected_keys.retain(|key| key.layer != lid || key.prop != uid);
     if let Some(mask) = mask {
-        s.state.selected_vertices.retain(|v| v.layer != lid || v.mask != mask);
+        let still_selected = s.state.selected_props.iter().any(|(layer, uid)| {
+            *layer == lid
+                && s.active_comp().and_then(|c| c.layer(lid)).and_then(|l| path_points(l, *uid, l.layer_time(s.time()))).is_some_and(|(m, _)| m == mask)
+        });
+        if !still_selected {
+            s.state.selected_vertices.retain(|v| v.layer != lid || v.mask != mask);
+        }
     }
     Ok(Value::Null)
 }

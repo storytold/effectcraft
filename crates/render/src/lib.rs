@@ -16,6 +16,8 @@ pub mod disk_cache;
 use color::Region;
 pub mod eval;
 pub mod masks;
+mod selection;
+pub use selection::selection_bounds;
 pub mod passes;
 pub mod shapes;
 pub mod styles;

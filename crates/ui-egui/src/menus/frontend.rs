@@ -1,4 +1,5 @@
 use super::{EffectcraftApp, PanelKind, Resolution, Value, json};
+use crate::state::Tool;
 
 /// Run an engine command and perform the frontend events it emitted right away.
 /// Commands that fill the internal clipboard.
@@ -31,6 +32,11 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
 }
 
 pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if matches!(id, "edit.undo" | "edit.redo")
+        && let Some(result) = crate::panels::viewer_overlays::transform_undo(app, ctx, id == "edit.redo")
+    {
+        return result;
+    }
     // Events already queued belong to earlier invocations (`engine.execute` defers them).
     let queued = app.session.events.len();
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
@@ -56,6 +62,28 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
             other => app.session.events.push(other),
         }
     }
+    if r.is_ok() {
+        match id {
+            "layer.select" => {
+                app.session.state.selected_vertices.clear();
+                crate::panels::viewer_overlays::end_free_transform(app, ctx);
+            }
+            "prop.select"
+                if app.session.state.selected_props.iter().any(|(lid, uid)| {
+                    app.session.active_comp().and_then(|c| c.layer(*lid)).is_some_and(|l| {
+                        let group = l.props.find_group(*uid).or_else(|| l.props.parent_of(*uid));
+                        group.is_some_and(|g| g.get("path").is_some_and(|p| g.uid == *uid || p.uid == *uid))
+                    })
+                }) =>
+            {
+                app.ui.tool = Tool::Selection;
+                crate::panels::viewer_overlays::end_free_transform(app, ctx);
+            }
+            "edit.undo" | "edit.redo" => crate::panels::viewer_overlays::reset_free_transform_pivot(app, ctx),
+            _ => {}
+        }
+    }
+
     r
 }
 
@@ -69,6 +97,59 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
     let now = app.now();
     let v = &mut app.ui.viewer;
     Ok(match id {
+        "timeline.revealShape" => {
+            if let (Some(lid), Some(uid)) = (p.get("layer").and_then(Value::as_u64), p.get("shape").and_then(Value::as_u64)) {
+                let layer_id = effectcraft_engine::project::LayerId(lid);
+                if app.session.state.selected_props.contains(&(layer_id, uid))
+                    && let Some(layer) = app.session.active_comp().and_then(|c| c.layer(layer_id))
+                    && layer.props.sub("contents").is_some_and(|g| g.find_group(uid).is_some())
+                {
+                    let mut ancestors = vec![uid];
+                    let mut current = uid;
+                    for _ in 0..64 {
+                        let Some(parent) = layer.props.parent_of(current) else { break };
+                        ancestors.push(parent.uid);
+                        current = parent.uid;
+                    }
+                    let tl = &mut app.ui.timeline;
+                    tl.open_layers.insert(lid);
+                    tl.open_groups.extend(ancestors);
+                    if let Some(kinds) = tl.layer_reveal.get_mut(&lid)
+                        && !kinds.is_empty()
+                        && !kinds.iter().any(|kind| kind == "selected")
+                    {
+                        kinds.push("selected".into());
+                    }
+                    tl.search.clear();
+                    tl.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+                }
+            }
+            Value::Null
+        }
+        "timeline.revealMask" => {
+            if let (Some(lid), Some(uid)) = (p.get("layer").and_then(Value::as_u64), p.get("mask").and_then(Value::as_u64)) {
+                let layer_id = effectcraft_engine::project::LayerId(lid);
+                // Deferred events must not reopen masks after selection or composition changed.
+                if app.session.state.selected_props.contains(&(layer_id, uid))
+                    && let Some(masks) = app.session.active_comp().and_then(|c| c.layer(layer_id)).and_then(|l| l.masks())
+                    && masks.find_group(uid).is_some()
+                {
+                    let masks_uid = masks.uid;
+                    let tl = &mut app.ui.timeline;
+                    tl.open_layers.insert(lid);
+                    tl.open_groups.extend([masks_uid, uid]);
+                    if let Some(kinds) = tl.layer_reveal.get_mut(&lid)
+                        && !kinds.is_empty()
+                        && !kinds.iter().any(|kind| kind == "masks")
+                    {
+                        kinds.push("masks".into());
+                    }
+                    tl.search.clear();
+                    tl.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+                }
+            }
+            Value::Null
+        }
         "mediaBrowser.copySourcePath" => {
             let path = p.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or("A source path is required")?;
             ctx.copy_text(path.to_string());

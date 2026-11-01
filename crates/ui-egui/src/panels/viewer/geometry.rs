@@ -101,7 +101,7 @@ pub(super) fn box_corners(b: [f64; 4]) -> [[f64; 2]; 4] {
 /// Layer → comp matrix and its bounds quad (in comp pixels). None for a 3D layer reaching to or
 /// behind the camera (its quad would flip; [`layer_outline`] draws the part in front).
 pub(crate) fn layer_quad(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [[f64; 2]; 4], [f64; 4])> {
-    let b = effectcraft_engine::render::content_bounds(ctx, layer)?;
+    let b = effectcraft_engine::render::selection_bounds(ctx, layer)?;
     let (m, _) = l2c(ctx, layer);
     let corners = box_corners(b);
     if corners.iter().any(|p| homogeneous(&m, *p)[2] < NEAR_W) {
@@ -116,7 +116,7 @@ pub(crate) fn layer_quad(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [[f64; 2
 
 /// The outline of a layer's content box in comp pixels, clipped at the camera's near plane.
 pub(crate) fn layer_outline(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
-    let Some(b) = effectcraft_engine::render::content_bounds(ctx, layer) else { return vec![] };
+    let Some(b) = effectcraft_engine::render::selection_bounds(ctx, layer) else { return vec![] };
     project_clipped(&l2c(ctx, layer).0, &box_corners(b))
 }
 

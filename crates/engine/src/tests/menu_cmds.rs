@@ -218,6 +218,129 @@ fn transform_dialog_values_and_center_anchor() {
     assert_eq!(layer(&s, a).auto_orient, effectcraft_project::AutoOrient::AlongPath);
 }
 
+#[test]
+fn center_anchor_uses_mask_content_without_moving_the_layer() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("mask.new", json!({"layer": a, "vertices": [[20,20],[80,20],[80,60],[20,60]], "closed": true})).unwrap();
+    s.execute("layer.setTransform", json!({"prop": "scale", "value": [150,50]})).unwrap();
+    s.execute("layer.setTransform", json!({"prop": "rotation", "value": 90})).unwrap();
+    let before = layer(&s, a);
+    let pos_before = before.props.prop("transform/position").unwrap().value.as_vec3();
+    let result = s.execute("layer.centerAnchor", json!({"layers": [a]})).unwrap();
+    assert_eq!(result["layers"], 1);
+    let l = layer(&s, a);
+    let anchor = l.props.prop("transform/anchor").unwrap().value.as_vec3();
+    assert!((anchor[0] - 50.0).abs() < 1e-6 && (anchor[1] - 40.0).abs() < 1e-6, "{anchor:?}");
+    // Old anchor is [100,50]. Scaled delta [-75,-5], rotated 90° → [5,-75].
+    let pos_after = l.props.prop("transform/position").unwrap().value.as_vec3();
+    assert!((pos_after[0] - pos_before[0] - 5.0).abs() < 1e-6);
+    assert!((pos_after[1] - pos_before[1] + 75.0).abs() < 1e-6);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer(&s, a).props, before.props);
+}
+
+#[test]
+fn center_anchor_keys_only_the_current_position() {
+    for separated in [false, true] {
+        for at in [0.0, 1.0] {
+            let mut s = comp();
+            let a = solid(&mut s, "#ff0000");
+            s.execute("layer.addMask", json!({"layer": a, "rect": [20,20,60,40]})).unwrap();
+            s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [100,100]})).unwrap();
+            s.execute("prop.toggleAnimation", json!({"layer": a, "path": "transform/position"})).unwrap();
+            s.execute("time.set", json!({"time": 2.0})).unwrap();
+            s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [400,200]})).unwrap();
+            if separated {
+                s.execute("prop.separateDimensions", json!({"layer": a, "value": true})).unwrap();
+            }
+            s.execute("layer.setTransform", json!({"prop": "scale", "value": [150,50]})).unwrap();
+            s.execute("layer.setTransform", json!({"prop": "rotation", "value": 90})).unwrap();
+            // Animate Anchor too: this command must key it at the CTI as well.
+            s.execute("time.set", json!({"time": 0.0})).unwrap();
+            s.execute("prop.toggleAnimation", json!({"layer": a, "path": "transform/anchor"})).unwrap();
+            s.execute("time.set", json!({"time": at})).unwrap();
+            let before = layer(&s, a);
+            let image_before = opaque_bounds(&s, Tick::from_seconds_f64(at));
+            s.execute("layer.centerAnchor", json!({})).unwrap();
+            let after = layer(&s, a);
+            let count = if at == 0.0 { 2 } else { 3 };
+            let paths = if separated { vec!["transform/positionX", "transform/positionY"] } else { vec!["transform/position"] };
+            for path in paths {
+                let old = before.props.prop(path).unwrap();
+                let new = after.props.prop(path).unwrap();
+                assert_eq!(new.keys.len(), count, "{path}");
+                for key in old.keys.iter().filter(|k| k.time != Tick::from_seconds_f64(at)) {
+                    assert_eq!(new.keys.iter().find(|k| k.time == key.time), Some(key), "unrelated key changed: {path}");
+                }
+            }
+            assert_eq!(image_before, opaque_bounds(&s, Tick::from_seconds_f64(at)), "content must stay put at the CTI");
+            let anchor = after.props.prop("transform/anchor").unwrap();
+            assert_eq!(anchor.keys.len(), if at == 0.0 { 1 } else { 2 });
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(layer(&s, a).props, before.props);
+        }
+    }
+}
+
+#[test]
+fn duplicate_selected_masks_and_paths_in_place_with_one_undo() {
+    for select_path in [false, true] {
+        let mut s = comp();
+        let a = solid(&mut s, "#ff0000");
+        let m1 = s.execute("layer.addMask", json!({"layer": a, "rect": [10,10,40,40]})).unwrap()["mask"].as_u64().unwrap();
+        let m2 = s.execute("layer.addMask", json!({"layer": a, "shape": "ellipse", "rect": [100,20,30,50]})).unwrap()["mask"].as_u64().unwrap();
+        let before = layer(&s, a);
+        for (i, uid) in [m1, m2].into_iter().enumerate() {
+            let group = before.props.find_group(uid).unwrap();
+            let prop = if select_path { group.get("path").unwrap().uid } else { uid };
+            s.execute("prop.select", json!({"layer": a, "prop": prop, "add": i > 0})).unwrap();
+        }
+        let copies = s.execute("edit.duplicate", json!({})).unwrap();
+        let copies = copies["masks"].as_array().unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+        let after = layer(&s, a);
+        assert_eq!(after.masks().unwrap().groups().count(), 4);
+        let order: Vec<_> = after.masks().unwrap().groups().map(|m| m.uid).collect();
+        assert_eq!(order, vec![m1, copies[0].as_u64().unwrap(), m2, copies[1].as_u64().unwrap()], "copies belong immediately below their originals");
+        for (original, copy) in [m1, m2].into_iter().zip(copies) {
+            let original = before.props.find_group(original).unwrap();
+            let copy = after.props.find_group(copy.as_u64().unwrap()).unwrap();
+            assert_ne!(copy.uid, original.uid);
+            assert_ne!(copy.name, original.name);
+            assert_eq!(copy.get("path").unwrap().value, original.get("path").unwrap().value);
+            assert_ne!(copy.get("path").unwrap().uid, original.get("path").unwrap().uid);
+            assert!(s.state.selected_props.contains(&(effectcraft_project::LayerId(a), copy.uid)));
+            assert!(s.state.selected_vertices.iter().any(|v| v.mask == copy.uid));
+        }
+        assert!(!s.state.selected_vertices.iter().any(|v| v.mask == m1 || v.mask == m2));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(layer(&s, a).props, before.props);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(layer(&s, a).props, after.props);
+        // An explicit layer duplicate still duplicates the layer, even with a mask selected.
+        s.execute("edit.duplicate", json!({"layers": [a]})).unwrap();
+        assert_eq!(s.active_comp().unwrap().layers.len(), 2);
+    }
+}
+
+#[test]
+fn new_masks_replace_stale_property_and_vertex_selections() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let old = s.execute("layer.addMask", json!({"layer": a})).unwrap()["mask"].as_u64().unwrap();
+    for command in ["mask.new", "layer.addMask"] {
+        let b = solid(&mut s, "#00ff00");
+        s.execute("prop.select", json!({"layer": a, "prop": old})).unwrap();
+        let uid = s.execute(command, json!({"layer": b, "vertices": [[10,10],[40,10],[40,40]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+        assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(b)]);
+        assert_eq!(s.state.selected_props, vec![(effectcraft_project::LayerId(b), uid)]);
+        assert!(s.state.selected_vertices.iter().all(|v| v.layer.0 == b && v.mask == uid));
+        assert!(s.drain_events().iter().any(|e| matches!(e, Event::Frontend { command, params } if command == "timeline.revealMask" && params["mask"] == uid)));
+    }
+}
+
 /// Inclusive bounds of samples whose alpha is above one half, plus the frame size and the count.
 fn opaque_bounds(s: &Session, t: Tick) -> (u32, u32, i64, i64, i64, i64, u32) {
     let img = s.render(s.active_comp_id().unwrap(), t, Default::default());
@@ -371,6 +494,8 @@ fn mask_menu_on_existing_masks() {
     assert!(!s.is_enabled("layer.mask.reset"));
     s.execute("layer.addMask", json!({})).unwrap();
     s.execute("layer.addMask", json!({"shape": "ellipse"})).unwrap();
+    // New masks are selected now; select the layer for the all-masks command assertions.
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
     assert!(s.is_enabled("layer.mask.reset"));
     let masks = |s: &Session| layer(s, a).masks().unwrap().groups().cloned().collect::<Vec<_>>();
     s.execute("layer.mask.set", json!({"field": "feather", "value": 12, "mask": 1})).unwrap();
@@ -1942,6 +2067,41 @@ fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
     assert_eq!(back, g);
     // A zero-sized comp never divides by zero.
     assert!(g.px(0, 0).is_finite());
+}
+
+#[test]
+fn review_free_transform_uses_expression_driven_layer_and_shape_group_matrices() {
+    struct QuarterTurn;
+    impl effectcraft_render::ExprHost for QuarterTurn {
+        fn eval(&self, _: &effectcraft_render::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, _: &KV) -> Result<KV, String> {
+            Ok(KV::Scalar(90.0))
+        }
+    }
+    let mut s = comp();
+    let r = s.execute("shape.newPath", json!({"space":"path","vertices":[[10,10],[20,10],[20,20]],"closed":true})).unwrap();
+    let lid = r["layer"].as_u64().unwrap();
+    let group = r["group"].as_u64().unwrap();
+    let path = r["path"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer":lid,"path":"transform/position","value":[0,0]})).unwrap();
+    s.execute("prop.setExpression", json!({"layer":lid,"path":"transform/rotation","expression":"quarter_turn"})).unwrap();
+    let rotation = layer(&s, lid).props.find_group(group).unwrap().sub("transform").unwrap().get("rotation").unwrap().uid;
+    s.execute("prop.setExpression", json!({"layer":lid,"prop":rotation,"expression":"quarter_turn"})).unwrap();
+    s.expr = Some(std::sync::Arc::new(QuarterTurn));
+    let before = s.project.clone();
+    s.execute("path.freeTransform", json!({"layer":lid,"mask":path,"space":"comp","offset":[10,0]})).unwrap();
+    let value = layer(&s, lid).props.find_group(path).unwrap().get("path").unwrap().value.as_path().unwrap().vertices[0];
+    assert!(value[0].abs() < 1e-8 && (value[1] - 10.0).abs() < 1e-8, "{value:?}");
+    s.undo();
+    assert_eq!(s.project, before);
+}
+
+#[test]
+fn review_shape_and_mask_creation_options_pass_strict_parameter_validation() {
+    for command in ["shape.newShape", "layer.addMask"] {
+        let spec = crate::commands::find(command).unwrap();
+        let params = json!({"points":7,"rotation":30,"roundness":25,"innerRadius":40,"outerRoundness":15,"innerRoundness":10});
+        crate::commands::check_params(spec, &params).unwrap();
+    }
 }
 
 #[test]

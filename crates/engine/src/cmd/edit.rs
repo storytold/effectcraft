@@ -107,7 +107,7 @@ pub(crate) fn reid(layer: &mut Layer, next: &mut u64) {
 
 /// `edit.duplicate`: copies the targets in place. Without `layers` the targets are, in order:
 /// during a text edit the edited layer (the edit is committed first, as `text.endEdit` does),
-/// else the selected effects, shape items or text animators, else the selected layers. Layer
+/// else the selected effects, masks, shape items or text animators, else the selected layers. Layer
 /// copies are selected and their ids returned; the other paths return their delegated result.
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let editing = s.state.text_edit.is_some();
@@ -122,6 +122,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
                 out.push(s.execute("effect.duplicate", json!({"layer": lid.0, "effect": uid}))?);
             }
             return Ok(json!({"effects": out}));
+        }
+        // A selected mask or Mask Path duplicates inside its layer, before the layer fallback.
+        let masks = super::prop_groups::selected_masks(s);
+        if !masks.is_empty() {
+            return super::mask::duplicate_selected(s, &masks);
         }
         // Shape items selected → duplicate them inside their layers.
         let items = super::prop_groups::selected_contents(s);
@@ -1007,7 +1012,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Duplicate",
             ["Edit"],
             Some("Cmd+D"),
-            "{layers?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
+            "{layers?} (without layers: during a text edit the edited layer, else the selected effects, masks, shape items or text animators, else the selected layers)",
             layers_or_text_edit,
             duplicate
         ),

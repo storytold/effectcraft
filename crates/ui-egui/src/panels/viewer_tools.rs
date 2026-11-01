@@ -25,6 +25,13 @@ pub(crate) const SNAP_PX: f64 = 8.0;
 const SNAP_COLOR: Color32 = Color32::from_rgb(0xff, 0xd2, 0x3c);
 
 /// The `egui::Id` under which this frame's snap feedback is stored until `draw_snap` consumes it.
+/// The composition-space axis along which a constrained vertex may move.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SnapAxis {
+    Horizontal,
+    Vertical,
+}
+
 fn snap_id() -> egui::Id {
     egui::Id::unique("viewer-snap")
 }
@@ -48,7 +55,7 @@ pub(crate) fn snap(
     sources: &[[f64; 2]],
     mods: egui::Modifiers,
 ) -> [f64; 2] {
-    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[] })
+    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[], axis: None })
 }
 
 /// What [`snap_with`] snaps: the dragged features and the layers to ignore, plus `extra` layer
@@ -57,12 +64,13 @@ pub(crate) struct SnapQuery<'a> {
     pub exclude: &'a [LayerId],
     pub sources: &'a [[f64; 2]],
     pub mods: egui::Modifiers,
+    pub axis: Option<SnapAxis>,
     pub extra: &'a [vw::SnapTarget],
 }
 
 /// [`snap`] with extra layer targets.
 pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
-    let SnapQuery { exclude, sources, mods, extra } = *q;
+    let SnapQuery { exclude, sources, mods, extra, .. } = *q;
     let layers = snapping_on(app, mods);
     let v = &app.ui.viewer;
     let guides = v.snap_guides && v.guides;
@@ -75,6 +83,10 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
     if layers {
         targets.extend_from_slice(extra);
     }
+    if let Some(axis) = q.axis {
+        let Some(&source) = q.sources.first() else { return [0.0; 2] };
+        retain_axis_targets(&mut targets, source, axis);
+    }
     match vw::snap(sources, &targets, SNAP_PX / map.zoom.max(1e-3) as f64) {
         Some(s) => {
             let d = s.delta;
@@ -83,6 +95,33 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
         }
         None => [0.0; 2],
     }
+}
+
+/// Snap a constrained vertex without ranking unreachable targets.
+pub(crate) fn snap_along_axis(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
+    snap_with(app, ctx, ectx, map, q)
+}
+
+/// Filter before ranking: an unreachable point must not hide a reachable line, and the
+/// solver's target feedback must describe the position the vertex actually reaches.
+fn retain_axis_targets(targets: &mut Vec<vw::SnapTarget>, source: [f64; 2], axis: SnapAxis) {
+    targets.retain_mut(|target| match (axis, target.kind) {
+        (SnapAxis::Horizontal, SnapKind::VLine) | (SnapAxis::Vertical, SnapKind::HLine) => true,
+        (_, SnapKind::Point) => {
+            let (locked, value) = match axis {
+                SnapAxis::Horizontal => (&mut target.pos[1], source[1]),
+                SnapAxis::Vertical => (&mut target.pos[0], source[0]),
+            };
+            if (*locked - value).abs() <= 1e-9 {
+                // Remove roundoff without allowing a snap to move the locked coordinate.
+                *locked = value;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    });
 }
 
 /// The snap handle: the dragged layer's feature that snaps (the one nearest where it was
@@ -101,7 +140,7 @@ pub(crate) fn draw_snap(ctx: &egui::Context, painter: &egui::Painter, map: &View
     for h in &s.hits {
         if let SnapSource::Layer(l) | SnapSource::Vertex(l) = h.source
             && let Some(layer) = ectx.comp.layer(l)
-            && let Some(b) = effectcraft_engine::render::content_bounds(ectx, layer)
+            && let Some(b) = effectcraft_engine::render::selection_bounds(ectx, layer)
         {
             let (m, _) = ectx.layer_to_comp(layer);
             let q: Vec<Pos2> = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
@@ -932,6 +971,139 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         p.text(pos2(bar.max.x - 10.0, cy), Align2::RIGHT_CENTER, format!("{ms:.0} ms"), Tokens::ui(11.0), t.text_faint);
     }
     (tr.right() + 8.0 - bar.left()).max(bar.width())
+}
+
+#[cfg(test)]
+mod axis_snap_tests {
+    use super::{SnapAxis, retain_axis_targets};
+    use effectcraft_engine::project::LayerId;
+    use effectcraft_engine::viewer::{self as vw, Snap, SnapSource, SnapTarget};
+
+    // The same geometric fixture, transposed for a vertical drag.
+    fn point(axis: SnapAxis, along: f64, locked: f64) -> [f64; 2] {
+        match axis {
+            SnapAxis::Horizontal => [along, locked],
+            SnapAxis::Vertical => [locked, along],
+        }
+    }
+
+    fn crossing_line(axis: SnapAxis, coordinate: f64, priority: u8, source: SnapSource) -> SnapTarget {
+        match axis {
+            SnapAxis::Horizontal => SnapTarget::vline(coordinate, priority, source),
+            SnapAxis::Vertical => SnapTarget::hline(coordinate, priority, source),
+        }
+    }
+
+    fn parallel_line(axis: SnapAxis, coordinate: f64) -> SnapTarget {
+        match axis {
+            SnapAxis::Horizontal => SnapTarget::hline(coordinate, vw::PRI_GUIDE, SnapSource::Guide),
+            SnapAxis::Vertical => SnapTarget::vline(coordinate, vw::PRI_GUIDE, SnapSource::Guide),
+        }
+    }
+
+    fn solve(axis: SnapAxis, source: [f64; 2], targets: &[SnapTarget], tolerance: f64) -> Option<Snap> {
+        let mut targets = targets.to_vec();
+        retain_axis_targets(&mut targets, source, axis);
+        vw::snap(&[source], &targets, tolerance)
+    }
+
+    #[test]
+    fn constrained_snap_ignores_nearer_off_axis_point() {
+        for axis in [SnapAxis::Horizontal, SnapAxis::Vertical] {
+            let source = point(axis, 100.0, 80.0);
+            let off_axis = SnapTarget::point(point(axis, 101.0, 81.0), vw::PRI_VERTEX, SnapSource::Vertex(LayerId(7)));
+            let guide = crossing_line(axis, 104.0, vw::PRI_GUIDE, SnapSource::Guide);
+
+            // The unconstrained solver prefers the closer point. Removing a
+            // forbidden component afterward would miss the reachable guide.
+            assert_eq!(vw::snap(&[source], &[off_axis, guide], 8.0).unwrap().delta, point(axis, 1.0, 1.0));
+            assert_eq!(
+                solve(axis, source, &[off_axis, guide], 8.0),
+                Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, 80.0), hits: vec![guide] }),
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_point_snap_has_exact_position_and_feedback() {
+        for axis in [SnapAxis::Horizontal, SnapAxis::Vertical] {
+            let source = point(axis, 100.0, 80.0);
+            for roundoff in [0.0, 5e-10, -5e-10] {
+                let target = SnapTarget::point(point(axis, 104.0, 80.0 + roundoff), vw::PRI_VERTEX, SnapSource::Vertex(LayerId(7)));
+                let expected_target = SnapTarget::point(point(axis, 104.0, 80.0), vw::PRI_VERTEX, SnapSource::Vertex(LayerId(7)));
+
+                // A line along the locked coordinate is already distance zero.
+                // It must not prevent a reachable point from snapping.
+                let parallel = parallel_line(axis, 80.0);
+                assert_eq!(
+                    solve(axis, source, &[parallel, target], 8.0),
+                    Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, 80.0), hits: vec![expected_target] }),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constrained_snap_rejects_points_beyond_roundoff_tolerance() {
+        for axis in [SnapAxis::Horizontal, SnapAxis::Vertical] {
+            let source = point(axis, 100.0, 80.0);
+            let guide = crossing_line(axis, 104.0, vw::PRI_GUIDE, SnapSource::Guide);
+            for offset in [2e-9, -2e-9] {
+                let off_axis = SnapTarget::point(point(axis, 101.0, 80.0 + offset), vw::PRI_VERTEX, SnapSource::Vertex(LayerId(7)));
+                assert_eq!(solve(axis, source, &[off_axis], 8.0), None);
+                assert_eq!(
+                    solve(axis, source, &[off_axis, guide], 8.0),
+                    Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, 80.0), hits: vec![guide] }),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constrained_snap_preserves_line_spans_and_distance_tolerance() {
+        for axis in [SnapAxis::Horizontal, SnapAxis::Vertical] {
+            let guide = crossing_line(axis, 104.0, vw::PRI_GUIDE, SnapSource::Guide).within(Some([80.0, 100.0]));
+
+            // The span endpoints and snap-distance boundary remain inclusive.
+            for locked in [80.0, 100.0] {
+                let source = point(axis, 100.0, locked);
+                assert_eq!(solve(axis, source, &[guide], 4.0), Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, locked), hits: vec![guide] }),);
+                assert_eq!(solve(axis, source, &[guide], 3.999), None);
+            }
+            for locked in [79.999, 100.001] {
+                assert_eq!(solve(axis, point(axis, 100.0, locked), &[guide], 8.0), None);
+            }
+
+            // A nearer line whose finite extent is unreachable must not hide
+            // another line that really intersects the constrained drag.
+            let short_line = crossing_line(axis, 101.0, vw::PRI_LAYER, SnapSource::Layer(LayerId(7))).within(Some([81.0, 100.0]));
+            assert_eq!(
+                solve(axis, point(axis, 100.0, 80.0), &[short_line, guide], 8.0),
+                Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, 80.0), hits: vec![guide] }),
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_snap_preserves_distance_and_priority_ordering() {
+        for axis in [SnapAxis::Horizontal, SnapAxis::Vertical] {
+            let source = point(axis, 100.0, 80.0);
+            let grid = crossing_line(axis, 96.0, vw::PRI_GRID, SnapSource::Grid);
+            let guide = crossing_line(axis, 104.0, vw::PRI_GUIDE, SnapSource::Guide);
+            let farther = crossing_line(axis, 105.0, vw::PRI_LAYER, SnapSource::Layer(LayerId(7)));
+
+            // Distance wins first; priority breaks the equal-distance tie.
+            for targets in [vec![grid, guide, farther], vec![guide, farther, grid]] {
+                assert_eq!(solve(axis, source, &targets, 8.0), Some(Snap { delta: point(axis, 4.0, 0.0), at: point(axis, 104.0, 80.0), hits: vec![guide] }),);
+            }
+
+            let vertex = SnapTarget::point(point(axis, 96.0, 80.0), vw::PRI_VERTEX, SnapSource::Vertex(LayerId(7)));
+            let layer_point = SnapTarget::point(point(axis, 104.0, 80.0), vw::PRI_LAYER, SnapSource::Layer(LayerId(8)));
+            for targets in [vec![layer_point, vertex], vec![vertex, layer_point]] {
+                assert_eq!(solve(axis, source, &targets, 8.0), Some(Snap { delta: point(axis, -4.0, 0.0), at: point(axis, 96.0, 80.0), hits: vec![vertex] }),);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

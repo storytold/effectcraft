@@ -65,6 +65,8 @@ pub(super) enum Gesture {
     },
     Marquee {
         start: Pos2,
+        /// Active paths; empty means layer selection rather than point selection.
+        paths: Vec<(LayerId, u64)>,
     },
     /// Dragging selected mask / shape path vertices: press point, the grabbed vertex (comp px,
     /// it snaps), the comp-space move applied so far and comp → path space.
@@ -72,7 +74,6 @@ pub(super) enum Gesture {
         start: [f64; 2],
         src: [f64; 2],
         applied: [f64; 2],
-        inv: Mat3,
         layer: LayerId,
     },
     /// Dragging a vertex's Bezier tangent (both sides symmetric unless Alt breaks them).
@@ -194,4 +195,41 @@ pub(super) fn roi_drag(app: &EffectcraftApp, map: &ViewerMap, comp_rect: Rect, z
         6 => ov::Drag::Roi { start: [x0, y0], keep: [Some(x1), None] },
         _ => ov::Drag::Roi { start: [x1, y0], keep: [None, Some(y1)] },
     })
+}
+
+/// Pointer and gesture origin for one constrained path-vertex update.
+pub(super) struct VertexMove<'a> {
+    pub ctx: &'a egui::Context,
+    pub start: [f64; 2],
+    pub src: [f64; 2],
+    pub applied: [f64; 2],
+    pub layer: LayerId,
+    pub cpt: [f64; 2],
+    pub mods: egui::Modifiers,
+    pub merge: &'a str,
+}
+
+pub(super) fn move_vertices(app: &mut EffectcraftApp, ectx: &super::EvalCtx, map: &ViewerMap, frame: VertexMove<'_>) -> [f64; 2] {
+    let VertexMove { ctx, start, src, applied, layer, cpt, mods, merge } = frame;
+    let want = super::ov::constrain_move([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
+    let source = [src[0] + want[0], src[1] + want[1]];
+    let correction = if mods.shift {
+        let axis = if want[0].abs() >= want[1].abs() { super::vt::SnapAxis::Horizontal } else { super::vt::SnapAxis::Vertical };
+        super::vt::snap_along_axis(app, ctx, ectx, map, &super::vt::SnapQuery { exclude: &[layer], sources: &[source], mods, extra: &[], axis: Some(axis) })
+    } else {
+        super::vt::snap(app, ctx, ectx, map, &[layer], &[source], mods)
+    };
+    let total = [want[0] + correction[0], want[1] + correction[1]];
+    let delta = [total[0] - applied[0], total[1] - applied[1]];
+    let mut completed = applied;
+    if delta != [0.0; 2] {
+        let paths: std::collections::BTreeSet<_> = app.session.state.selected_vertices.iter().map(|v| (v.layer, v.mask)).collect();
+        let paths: Vec<_> = paths.into_iter().map(|(layer, mask)| serde_json::json!({"layer": layer.0, "mask": mask})).collect();
+        if let Err(e) = app.session.execute("path.freeTransform", serde_json::json!({"paths": paths, "space": "comp", "offset": delta, "merge": merge})) {
+            app.ui.status = e.to_string();
+        } else {
+            completed = total;
+        }
+    }
+    completed
 }

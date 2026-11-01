@@ -180,31 +180,95 @@ fn rgba(c: [f32; 3]) -> [f64; 4] {
     [c[0] as f64, c[1] as f64, c[2] as f64, 1.0]
 }
 
-/// The Rounded Rectangle tool's corner roundness: a fixed default, as in After Effects
-/// (it does not grow with the drawn size).
-fn roundness() -> f64 {
-    20.0
+/// What the keys change on a shape while a shape tool drags it out (and `shape.newShape` /
+/// `layer.addMask` take): unset, the tool's own shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShapeOptions {
+    /// Points of a polygon or star (5), 3–100.
+    pub points: Option<f64>,
+    pub rotation: f64,
+    /// A rounded rectangle's corners: 0 (sharp) – 100 (fully round) % of half its shorter side
+    /// (20 pixels when unset).
+    pub roundness: Option<f64>,
+    /// A star's inner radius, % of its outer radius (50).
+    pub inner_radius: Option<f64>,
+    /// Outer Roundness of a polygon or star, %.
+    pub outer_roundness: f64,
+    /// Inner Roundness of a star, %.
+    pub inner_roundness: f64,
 }
 
-/// The Polygon and Star tools' Polystar for `size`: (star, points, outer radius, inner radius).
-fn polystar_of(kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
-    match kind {
-        "star" => Some((true, 5.0, size[0] / 2.0, size[0] / 4.0)),
-        "polygon" => Some((false, 5.0, size[0] / 2.0, 0.0)),
-        _ => None,
+impl ShapeOptions {
+    pub const POINTS: (f64, f64) = (3.0, 100.0);
+    /// The range of Outer and Inner Roundness.
+    pub const ROUND: (f64, f64) = (-1000.0, 1000.0);
+
+    /// The `points`, `roundness`, `innerRadius`, `outerRoundness` and `innerRoundness` of `p`,
+    /// kept in range; a value that isn't a finite number is an error.
+    pub(crate) fn from_params(p: &Value, cmd: &str) -> Result<Self> {
+        let num = |k: &str, lo: f64, hi: f64| match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v.as_f64().filter(|v| v.is_finite()).map(|v| Some(v.clamp(lo, hi))).ok_or_else(|| bad(cmd, format!("{k}: a number"))),
+        };
+        Ok(Self {
+            points: num("points", Self::POINTS.0, Self::POINTS.1)?.map(f64::round),
+            rotation: num("rotation", -360000.0, 360000.0)?.unwrap_or(0.0),
+            roundness: num("roundness", 0.0, 100.0)?,
+            inner_radius: num("innerRadius", 0.0, 100.0)?,
+            outer_roundness: num("outerRoundness", Self::ROUND.0, Self::ROUND.1)?.unwrap_or(0.0),
+            inner_roundness: num("innerRoundness", Self::ROUND.0, Self::ROUND.1)?.unwrap_or(0.0),
+        })
+    }
+
+    /// As command parameters: the ones that differ from the tool's own shape.
+    pub fn to_params(&self) -> Value {
+        let set = |v: f64| Some(v).filter(|v| *v != 0.0);
+        let all = [
+            ("points", self.points),
+            ("rotation", set(self.rotation)),
+            ("roundness", self.roundness),
+            ("innerRadius", self.inner_radius),
+            ("outerRoundness", set(self.outer_roundness)),
+            ("innerRoundness", set(self.inner_roundness)),
+        ];
+        Value::Object(all.into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), json!(v)))).collect())
+    }
+
+    /// The Rounded Rectangle tool's corner roundness for `size`, pixels.
+    fn corner(&self, size: [f64; 2]) -> f64 {
+        self.roundness.map(|r| size[0].min(size[1]) / 2.0 * r.clamp(0.0, 100.0) / 100.0).unwrap_or(20.0)
+    }
+
+    /// The Polygon and Star tools' Polystar for `size`: (star, points, outer radius, inner
+    /// radius).
+    fn polystar(&self, kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
+        let outer = size[0] / 2.0;
+        let points = |tool: f64| self.points.unwrap_or(tool).clamp(Self::POINTS.0, Self::POINTS.1).round();
+        match kind {
+            "star" => Some((true, points(5.0), outer, outer * self.inner_radius.unwrap_or(50.0).clamp(0.0, 100.0) / 100.0)),
+            "polygon" => Some((false, points(5.0), outer, 0.0)),
+            _ => None,
+        }
     }
 }
 
 /// A new shape group for a shape tool `kind` of `size`, centred on the group's origin, painted
 /// with `paint` ("Rectangle 1", "Ellipse 1" or "Polystar 1"). None for another kind.
-pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &ShapeTool) -> Option<PropGroup> {
+pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &ShapeTool, o: &ShapeOptions) -> Option<PropGroup> {
     let (path, gname) = match kind {
         "rect" | "rectangle" => (build::shape_rect(ids, size, [0.0, 0.0], 0.0), "Rectangle 1"),
-        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], roundness()), "Rectangle 1"),
+        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], o.corner(size)), "Rectangle 1"),
         "ellipse" => (build::shape_ellipse(ids, size, [0.0, 0.0]), "Ellipse 1"),
         k => {
-            let (star, points, outer, inner) = polystar_of(k, size)?;
-            (build::shape_star(ids, star, points, [0.0, 0.0], outer, inner), "Polystar 1")
+            let (star, points, outer, inner) = o.polystar(k, size)?;
+            let mut g = build::shape_star(ids, star, points, [0.0, 0.0], outer, inner);
+            for (id, v) in [("outerRoundness", o.outer_roundness), ("innerRoundness", o.inner_roundness), ("rotation", o.rotation)] {
+                if let Some(pr) = g.get_mut(id) {
+                    pr.value = KV::Scalar(v);
+                }
+            }
+            (g, "Polystar 1")
         }
     };
     let mut items = vec![path];
@@ -215,22 +279,22 @@ pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &Sha
 /// The path a shape tool draws: `kind` of `size` centred at `centre` (layer space). The geometry
 /// of every one of the five kinds, so a caller that only wants to draw it (the viewer's
 /// drag ghost) cannot drift from what `shape.newShape` / `layer.addMask` commit.
-pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2]) -> Option<ShapePath> {
+pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2], o: &ShapeOptions) -> Option<ShapePath> {
     let bez = match kind {
         "rect" | "rectangle" => return Some(ShapePath::rect(centre, size[0], size[1])),
         "ellipse" => return Some(ShapePath::ellipse(centre, size[0], size[1])),
-        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness()),
+        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, o.corner(size)),
         k => {
-            let (star, points, outer, inner) = polystar_of(k, size)?;
+            let (star, points, outer, inner) = o.polystar(k, size)?;
             effectcraft_path::polystar(effectcraft_path::Polystar {
                 star,
                 points,
                 pos: centre,
-                rotation: 0.0,
+                rotation: o.rotation,
                 inner,
                 outer,
-                inner_round: 0.0,
-                outer_round: 0.0,
+                inner_round: o.inner_roundness,
+                outer_round: o.outer_roundness,
             })
         }
     };
@@ -319,6 +383,7 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let pos = position_p(p, c)?.unwrap_or([comp.width as f64 / 2.0, comp.height as f64 / 2.0]);
     let paint = paint_p(p, &s.state.shape_tool, c)?;
+    let options = ShapeOptions::from_params(p, c)?;
     let target = draw_target(s, &comp, p, c)?;
     // In the target layer's space: the centre maps through the layer's transform, the size by
     // its scale.
@@ -346,13 +411,22 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
             None => new_shape_layer(proj, st, &comp, cid, name, Some(pos))?,
         };
         let mut next = proj.next_id;
-        let g = shape_group(&mut Ids(&mut next), kind, size, &paint).ok_or_else(|| bad(c, "unknown kind"))?;
+        let g = shape_group(&mut Ids(&mut next), kind, size, &paint, &options).ok_or_else(|| bad(c, "unknown kind"))?;
         proj.next_id = next;
         let group = add_to_contents(proj, cid, lid, g, centre, c)?;
         st.selected_layers = vec![lid];
+        st.selected_props = vec![(lid, group)];
+        st.selected_keys.clear();
+        st.selected_vertices.clear();
         Ok((lid, group))
     })?;
+    reveal_created(s, lid, group);
     Ok(json!({"layer": lid.0, "group": group}))
+}
+
+/// Creation focuses the new shape item without changing its parametric representation.
+pub(crate) fn reveal_created(s: &mut Session, lid: LayerId, uid: effectcraft_project::Uid) {
+    s.events.push(crate::Event::Frontend { command: "timeline.revealShape".into(), params: json!({"layer":lid.0,"shape":uid}) });
 }
 
 /// The Tools bar's options for the shape tools and the Pen: Tool Creates Shape / Tool Creates
@@ -375,7 +449,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Tool",
             [],
             None,
-            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), space?: comp|layer, name? (a new layer's), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions)} → {layer, group}",
+            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), rotation?: deg, space?: comp|layer, name? (a new layer's), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions), points? (polygon, star), roundness? % (rounded), innerRadius? % of the outer (star), outerRoundness? %, innerRoundness? %} → {layer, group}",
             has_comp,
             new_shape
         ),
