@@ -72,8 +72,8 @@ wasmi = { version = "2", default-features = false, features = ["std", "validate"
 # geometry / fonts
 kurbo = { version = "0.13", features = ["serde"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
-skrifa = { version = "0.44", default-features = false, features = ["std"] }
-harfrust = { version = "0.12", default-features = false, features = ["std"] }
+skrifa = { version = "0.47", default-features = false, features = ["std"] }
+harfrust = { version = "0.13", default-features = false, features = ["std"] }
 exr = "1.74"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 same-file = "1.0"
@@ -120,7 +120,7 @@ egui = { version = "0.37", default-features = false, features = ["default_fonts"
 eframe = { version = "0.37", default-features = false }
 egui_kittest = "0.37"
 rfd = "0.17"
-cpal = "0.16"
+cpal = "0.18"
 # The operating system's interface language (MIT/Apache-2.0, no dependencies on desktop).
 sys-locale = "0.3"
 
