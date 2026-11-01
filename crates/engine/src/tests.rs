@@ -33,6 +33,7 @@ mod menu_cmds;
 mod model3d;
 mod models;
 mod motion_blur_depth;
+mod new_open_snapshot;
 mod paint;
 mod panels;
 mod project_items;

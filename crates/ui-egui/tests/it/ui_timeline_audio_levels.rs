@@ -155,7 +155,7 @@ fn a_new_project_starts_with_its_audio_levels_unlinked() {
     click(&mut h, &format!("timeline.prop.{uid}.link"));
     assert!(h.state().ui.timeline.is_linked(uid, false));
 
-    h.state_mut().session.execute("file.newProject", json!({})).unwrap();
+    h.state_mut().session.execute("file.newProject", json!({"discard": true})).unwrap();
     comps(&mut h.state_mut().session);
     let (l, again) = add_sound_layer(&mut h.state_mut().session, [0.0, 0.0]);
     assert_eq!(again, uid, "the new project reuses the property uid");

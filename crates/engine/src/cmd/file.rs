@@ -12,7 +12,8 @@ fn has_path(s: &Session) -> std::result::Result<(), String> {
     if s.path.is_some() { Ok(()) } else { Err("the project has not been saved yet".into()) }
 }
 
-fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
+fn new_project(s: &mut Session, p: &Value) -> Result<Value> {
+    let discard = b_p(p, "discard").unwrap_or(false);
     // Settings ▸ Project ▸ New Project Loads Template: open the template as an untitled project.
     let tpl = s.prefs.project.template_path.trim().to_string();
     if s.prefs.project.use_template && !tpl.is_empty() {
@@ -20,14 +21,16 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
+        let snapshot = s.snapshot_before_replace(discard)?;
         s.replace_project(proj, None);
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
-        return Ok(json!({"template": tpl}));
+        return Ok(json!({"template": tpl, "snapshot": snapshot}));
     }
+    let snapshot = s.snapshot_before_replace(discard)?;
     s.replace_project(Project::default(), None);
     s.update_sentinel();
-    Ok(Value::Null)
+    Ok(json!({"snapshot": snapshot}))
 }
 
 fn demo(s: &mut Session, _: &Value) -> Result<Value> {
@@ -52,6 +55,8 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
+    // After the target is read, so rotating the versions cannot remove what is being opened.
+    let snapshot = s.snapshot_before_replace(b_p(p, "discard").unwrap_or(false))?;
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
@@ -80,7 +85,12 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if s.check_footage_on_open {
         crate::footage_check::start(s, None, false)?;
     }
-    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    // The snapshot's rotation may have overwritten the very version that was opened: nothing then
+    // backs it, so it stays unsaved.
+    if snapshot.as_deref().is_some_and(|snap| std::path::Path::new(snap) == std::path::Path::new(path)) {
+        s.mark_unsaved();
+    }
+    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired, "snapshot": snapshot}))
 }
 
 /// The project file's text for `path`: `.ecproj` JSON, or XML for `.ecprojx` / `.xml` (a
@@ -773,9 +783,17 @@ fn cycle_depth(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("file.newProject", "New Project", ["File", "New"], Some("Cmd+Alt+N"), "{}", always, new_project),
+        cmd!(
+            "file.newProject",
+            "New Project",
+            ["File", "New"],
+            Some("Cmd+Alt+N"),
+            "{discard?: bool (drop unsaved changes that cannot be kept)}",
+            always,
+            new_project
+        ),
         cmd!("file.openDemoProject", "Open Demo Project", ["Help"], None, "{}", always, demo),
-        cmd!("file.open", "Open Project...", ["File"], Some("Cmd+O"), "{path}", always, open),
+        cmd!("file.open", "Open Project...", ["File"], Some("Cmd+O"), "{path, discard?: bool (drop unsaved changes that cannot be kept)}", always, open),
         cmd!("file.save", "Save", ["File"], Some("Cmd+S"), "{path?}", always, save),
         cmd!("file.saveAs", "Save As...", ["File", "Save As"], Some("Cmd+Shift+S"), "{path}", always, save_as),
         cmd!("file.incrementAndSave", "Increment and Save", ["File"], Some("Cmd+Alt+Shift+S"), "{}", has_path, increment_save),
