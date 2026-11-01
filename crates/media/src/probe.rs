@@ -16,6 +16,13 @@ pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;
 /// (`effectcraft_engine::sequence`) and probes their first frame here.
 pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     let path = path.as_ref();
+    // QuickTime Animation (`rle `, including 32-bit alpha) is not a FilmCraft codec.
+    if let Some(mut f) = crate::qt_anim::probe(path)? {
+        let header = crate::stream::movie_header(path);
+        let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
+        turn_footage(&mut f, turn);
+        return Ok(f);
+    }
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
         let mut f = footage_from_info(&path.to_string_lossy(), src?.info());
