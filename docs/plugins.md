@@ -255,6 +255,32 @@ ships as one folder the user installs once. A `.wasm` that does not load is not 
 install rolls it back), and per-file problems in a folder install come back in `errors`
 instead of failing the whole bundle.
 
+**What an install does and does not do.** It is a security boundary: it copies code into a
+folder the app runs at every start, so:
+
+* Only `.wasm` (`path` / a bundle's `.wasm`) and `.jsx` (a bundle's panel) are installed; other
+  files in a bundle (readmes, manifests, sources) are skipped. Files are named by their own
+  entry name, so a bundle cannot carry a path, a `..` component or a name that escapes the
+  destination folder.
+* Nothing is overwritten. An existing plug-in or panel with the same file name makes that file
+  fail with "already installed": delete it from `Plug-ins` / `Scripts/ScriptUI Panels` first to
+  update it (versioning the file name is the other option). A bundle is installed file by file,
+  so one collision does not undo the rest.
+* Files over 64 MiB are refused before they are read, rather than copied into a startup folder.
+* A `.wasm` is loaded once, in the same sandbox it runs in later (see below), so a module that
+  cannot load is reported and rolled back instead of failing every start. Nothing else runs at
+  install time; a panel's script runs when the panel opens, as with any installed panel.
+* There is no uninstall command: delete the file from the folder (the next start no longer
+  loads it). Replacing a plug-in means deleting the old file first.
+
+**The sandbox.** A plug-in runs in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter
+with no imports (no file, network or clock access), deterministic floats, a fuel budget per
+frame and a 1 GiB memory cap, so a plug-in cannot escape the sandbox, hang the app or render
+differently on another machine. A ScriptUI panel is different: it is a script with the app's
+scripting object model, so it can read and write project data through commands; file and
+network access for scripts follow Settings ▸ Scripting & Expressions, exactly as for a script
+installed with File ▸ Scripts ▸ Install ScriptUI Panel….
+
 Any language that compiles to WebAssembly works (C, Zig, AssemblyScript…) as long as the module
 has no imports. `crates/plugin/src/tests.rs` has a plug-in written directly in WebAssembly text.
 

@@ -634,4 +634,9 @@ fn effect_plugin_install_dialog_router() {
     let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"bundle": true, "path": "x.wasm"}));
     assert!(r.is_err(), "{r:?}");
     assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline path");
+    // A supplied `folder` is a bundle source too: asking for a file would let the install take
+    // the picked file and ignore the folder, so nothing is asked.
+    let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"folder": "some/where"}));
+    assert!(r.is_err(), "{r:?}");
+    assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline folder");
 }

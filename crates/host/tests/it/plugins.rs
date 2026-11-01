@@ -161,6 +161,35 @@ fn plugin_install_never_replaces_an_installed_plugin() {
     // The same through a single-file install: a command error, disk untouched.
     assert!(s.execute("effect.plugins.install", json!({"path": attack.join("a-good.wasm").to_string_lossy()})).is_err());
     assert_eq!(std::fs::read(plug_dir.join("a-good.wasm")).unwrap(), installed);
+
+    // A ScriptUI panel is code too: a bundle must not replace an installed one silently either.
+    let p1 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p1.path().join("My Panel.jsx"), "1").unwrap();
+    s.execute("effect.plugins.install", json!({"folder": p1.path().to_string_lossy()})).unwrap();
+    let p2 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p2.path().join("My Panel.jsx"), "2").unwrap();
+    let r = s.execute("effect.plugins.install", json!({"folder": p2.path().to_string_lossy()})).unwrap();
+    assert!(r["panels"].as_array().unwrap().is_empty(), "{r}");
+    let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["error"].as_str().unwrap().to_string()).collect();
+    assert!(errs.iter().any(|e| e.contains("already installed as a ScriptUI panel")), "{r}");
+    assert_eq!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/My Panel.jsx").as_deref(), Some("1"));
+}
+
+/// A huge file is refused before it is read into memory and copied into the folder the app loads
+/// at every start.
+#[test]
+fn plugin_install_refuses_an_oversized_file() {
+    let config = tempfile::TempDir::new().unwrap();
+    let src = tempfile::TempDir::new().unwrap();
+    let big = src.path().join("big.wasm");
+    // Sparse on every platform we build for: no 64 MiB written, just the length.
+    std::fs::File::create(&big).unwrap().set_len((64 << 20) + 1).unwrap();
+
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(config.path())));
+    let Err(e) = s.execute("effect.plugins.install", json!({"path": big.to_string_lossy()})) else { panic!("an oversized plug-in was installed") };
+    assert!(e.to_string().contains("install limit"), "{e}");
+    assert!(!config.path().join("Plug-ins/big.wasm").exists(), "{e}");
 }
 
 #[test]

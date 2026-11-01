@@ -70,9 +70,14 @@ fn plugins_load(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"loaded": loaded, "errors": errors}))
 }
 
-/// The settings-folder name the desktop app scans for WebAssembly effect plug-ins on start;
-/// keep in sync with the scan in the desktop app's `main.rs`.
+/// The settings-folder name the desktop app scans for WebAssembly effect plug-ins on start.
+/// The scan uses this constant ([`apps/effectcraft/src/main.rs`]), so the two cannot drift.
 pub const PLUGINS_DIR: &str = "Plug-ins";
+
+/// The most one installed file may be: a plug-in is a compiled effect, a panel is script text.
+/// Above this the install refuses rather than reading an unbounded file into memory and copying
+/// it into a folder the app loads at every start.
+const MAX_INSTALL_BYTES: u64 = 64 << 20;
 
 /// `effect.plugins.install`: install WebAssembly effect plug-ins so they load on every start,
 /// not only in this session (Load Effect Plug-in keeps the file where it is and just loads it).
@@ -130,20 +135,30 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             continue; // a bundle may carry readmes, manifests and source: skip them
         }
         let body: std::result::Result<(), String> = (|| {
+            // Never silently replace an installed file: a name collision is either a re-install
+            // the user did not ask to overwrite or a bundle that would shadow a working plug-in,
+            // and the update path is explicit (remove the old one first).
+            let size = src.metadata().map(|m| m.len()).map_err(|e| format!("cannot read its size: {e}"))?;
+            if size > MAX_INSTALL_BYTES {
+                return Err(format!("it is {} MiB, over the {} MiB install limit", size >> 20, MAX_INSTALL_BYTES >> 20));
+            }
             if is_panel {
+                let key = format!("{}/{name}", super::scripts::PANELS_DIR);
+                if cfg.read(&key).is_some() {
+                    return Err(format!("{name} is already installed as a ScriptUI panel; remove it from the Scripts/ScriptUI Panels folder first to update"));
+                }
                 let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
                 let code = String::from_utf8(bytes).map_err(|_| "panels are UTF-8 text (.jsx)".to_string())?;
-                cfg.write(&format!("{}/{name}", super::scripts::PANELS_DIR), &code).map_err(|e| format!("cannot install panel: {e}"))?;
+                cfg.write(&key, &code).map_err(|e| format!("cannot install panel: {e}"))?;
                 panels.push(json!(name));
                 return Ok(());
             }
-            let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
-            // Never silently replace an installed plug-in: a failed re-install of the same file
-            // name must not destroy (or roll back) the installation that already works.
-            if plug_dir.join(&name).is_file() {
+            let target = plug_dir.join(&name);
+            if cfg.files().is_file(&target) {
                 return Err(format!("{name} is already installed; remove it from the Plug-ins folder first to update"));
             }
-            cfg.files().write(&plug_dir.join(&name), &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
+            let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
+            cfg.files().write(&target, &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
             // Load in-session now: a plug-in that cannot load is rolled back, so a broken
             // plug-in never makes every start fail.
             match loader(&bytes, &src.to_string_lossy()) {
@@ -152,10 +167,14 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
                     installed.push(json!(name));
                     Ok(())
                 }
-                Err(e) => {
-                    let _ = cfg.files().remove(&plug_dir.join(&name));
-                    Err(format!("it does not load, nothing was installed: {e}"))
-                }
+                Err(e) => match cfg.files().remove(&target) {
+                    Ok(()) => Err(format!("it does not load, nothing was installed: {e}")),
+                    // Never say "nothing was installed" when the invalid copy is still there:
+                    // every start would report it and a re-install would say "already installed".
+                    Err(re) => Err(format!(
+                        "it does not load and its copy could not be removed from the Plug-ins folder ({re}): delete `{name}` there, or every start reports it; {e}"
+                    )),
+                },
             }
         })();
         match body {
