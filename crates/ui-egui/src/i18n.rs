@@ -2848,7 +2848,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("text.removeAllAnimators", "Remove All Text Animators", "すべてのテキストアニメーターを削除"),
     ("prop.setExpression", "Add Expression", "エクスプレッションを追加"),
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
-    ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
+    ("prop.separateDimensions", "Separate Dimensions", "次元に分割"),
     ("track.camera", "Track Camera", "カメラをトラッキング"),
     ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
     ("track.motion", "Track Motion", "モーションをトラッキング"),
@@ -2864,9 +2864,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.zoomOut", "Zoom Out", "ズームアウト"),
     ("", "Resolution", "解像度"),
     ("view.res.full", "Full", "フル画質"),
-    ("view.res.half", "Half", "1/2画質"),
-    ("view.res.third", "Third", "1/3画質"),
-    ("view.res.quarter", "Quarter", "1/4画質"),
+    ("view.res.half", "Half", "1/2 画質"),
+    ("view.res.third", "Third", "1/3 画質"),
+    ("view.res.quarter", "Quarter", "1/4 画質"),
     ("view.res.custom", "Custom...", "カスタム..."),
     ("view.displayColorManagement", "Use Display Color Management", "ディスプレイカラーマネジメントを使用"),
     ("", "Simulate Output", "出力をシミュレート"),
@@ -8761,6 +8761,18 @@ mod tests {
         ] {
             assert_eq!(command_label(id, en), ja, "{id}");
         }
+    }
+
+    /// The View menu's resolution rows hold the same spacing as the panel's: they live in this
+    /// catalog, which the panel test in `ui.rs` cannot see.
+    #[test]
+    fn the_view_menu_resolution_rows_match_the_panel() {
+        ui::set_current("ja");
+        for (id, en, ja) in [("view.res.half", "Half", "1/2 画質"), ("view.res.third", "Third", "1/3 画質"), ("view.res.quarter", "Quarter", "1/4 画質")]
+        {
+            assert_eq!(command_label(id, en), ja, "{id}");
+        }
+        ui::set_current("en");
     }
 
     /// Labels drawn outside the menu bar take the menu bar's row for their command (with `…` for
