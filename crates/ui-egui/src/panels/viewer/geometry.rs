@@ -32,7 +32,75 @@ pub(super) fn selected_others<'a>(app: &EffectcraftApp, comp: &'a Comp, layer: L
     if !sel.contains(&layer) {
         return vec![];
     }
-    sel.iter().filter(|id| **id != layer).filter_map(|id| comp.layer(*id)).filter(|l| !l.switches.locked && l.transform().is_some()).collect()
+    // The layers the gesture can edit: a locked layer or one without a Transform takes no part,
+    // so it must not stand in as an ancestor that already carries its children either.
+    let editable: Vec<LayerId> = sel.iter().copied().filter(|id| editable_layer(comp, *id)).collect();
+    editable
+        .iter()
+        .copied()
+        // A selected ancestor of the grabbed layer already carries it: editing that ancestor too
+        // would apply the change twice, once directly and once through the parent.
+        .filter(|id| *id != layer && !is_ancestor_of(comp, *id, layer))
+        // Descendants of a selected layer are carried by it.
+        .filter(|id| !has_ancestor_in(comp, *id, &editable))
+        .filter_map(|id| comp.layer(id))
+        .collect()
+}
+
+/// Whether a transform gesture can edit `id`: it exists, is unlocked and has a Transform.
+fn editable_layer(comp: &Comp, id: LayerId) -> bool {
+    comp.layer(id).is_some_and(|l| !l.switches.locked && l.transform().is_some())
+}
+
+/// Whether `id` has a parent that is in `ids` (through any number of parents): that ancestor
+/// already carries the child, so a multi-selection must not edit the child as well.
+pub(super) fn has_ancestor_in(comp: &Comp, id: LayerId, ids: &[LayerId]) -> bool {
+    let mut cur = comp.layer(id).and_then(|l| l.parent);
+    let mut guard = 0;
+    while let Some(p) = cur {
+        if ids.contains(&p) {
+            return true;
+        }
+        guard += 1;
+        if guard > 64 {
+            return false;
+        }
+        cur = comp.layer(p).and_then(|l| l.parent);
+    }
+    false
+}
+
+/// Whether `ancestor` is `id` or one of its parents (through any number of parents).
+fn is_ancestor_of(comp: &Comp, ancestor: LayerId, id: LayerId) -> bool {
+    ancestor == id || has_ancestor_in(comp, id, &[ancestor])
+}
+
+/// The selected layers that do not have a selected ancestor: the ones a transform gesture edits.
+pub(super) fn top_level_selected(comp: &Comp, ids: &[LayerId]) -> Vec<LayerId> {
+    // Only the layers the gesture can edit count as ancestors: a locked parent does not carry its
+    // children, so an unlocked child of it must still move on its own (AE).
+    let editable: Vec<LayerId> = ids.iter().copied().filter(|id| editable_layer(comp, *id)).collect();
+    editable.iter().copied().filter(|id| !has_ancestor_in(comp, *id, &editable)).collect()
+}
+
+/// `ids` plus every layer parented (directly or through others) to one of them. Descendants move
+/// with their ancestor, so they must not be snap targets of the drag.
+pub(super) fn with_descendants(comp: &Comp, ids: &[LayerId]) -> Vec<LayerId> {
+    let mut out = ids.to_vec();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for l in &comp.layers {
+            if let Some(p) = l.parent
+                && out.contains(&p)
+                && !out.contains(&l.id)
+            {
+                out.push(l.id);
+                changed = true;
+            }
+        }
+    }
+    out
 }
 
 /// The least homogeneous depth (`w`: the distance in front of a perspective camera in pixels, 1

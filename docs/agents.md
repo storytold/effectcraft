@@ -653,7 +653,9 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
 
 * `layer.arrange {"layers": [...], "above": "Layer Name"}` moves layers to just above another
   one (what dragging Timeline rows does: the selected layers move together, one undo step);
-  `to: front|forward|backward|back` and `index` still work.
+  `to: front|forward|backward|back` and `index` still work. Cmd+Option+Up / Down (Ctrl+Alt on
+  Windows and Linux) moves the selected layers one place in the stack, and with Shift to the top /
+  bottom, as in After Effects; those keys run the same command with `to: forward|backward|front|back`.
 * The reveal shortcuts are UI commands (`ui.menu.invoke` or the keys themselves): A Anchor Point,
   P Position, S Scale, R Rotation, T Opacity, M Mask Path, F Mask Feather, E Effects, L Audio
   Levels, U keyframed properties; pressed twice quickly AA Material Options, PP paint / Roto
