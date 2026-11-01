@@ -18,13 +18,13 @@ const MAX_VALUES: usize = 1_000_000;
 const MAX_DEPTH: usize = 64;
 const MAX_BYTES: usize = 512 * 1024 * 1024;
 /// How far after each `trailer` marker the encryption pre-scan lexes. A classic trailer
-/// dictionary is a few hundred bytes. If the lexer reaches the window's end, the dictionary
-/// may start or continue past it, so the file is refused when a name token that decodes to
-/// `Encrypt`, in any spelling (`/Encrypt`, `/Encr#79pt`), ends past the window. This fallback
-/// is conservative: it refuses on any such name there, which in practice only encrypted files
-/// contain. The pre-scan stays linear in file size, at most `MAX_OBJECTS` windows (about 400 MB)
-/// and one search for the name, even when a marker is followed by an unterminated string or
-/// dictionary the lexer would follow to the end.
+/// dictionary is a few hundred bytes. If the lexer reaches the window's end before any object
+/// or inside a dictionary, the dictionary may start or continue past it, so the file is refused
+/// when a name token that decodes to `Encrypt`, in any spelling (`/Encrypt`, `/Encr#79pt`), ends
+/// past the window. This fallback is conservative: it refuses on any such name there, which in
+/// practice only encrypted files contain. The pre-scan stays linear in file size, at most
+/// `MAX_OBJECTS` windows (about 400 MB) and one search for the name, even when a marker is
+/// followed by an unterminated string or dictionary the lexer would follow to the end.
 const TRAILER_WINDOW: usize = 4 * 1024;
 
 fn limit(what: &str) -> Error {
@@ -69,6 +69,12 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
             }
             let start = offset + 7;
             let mut end = bytes.len().min(start.saturating_add(TRAILER_WINDOW));
+            // If the first object after the marker starts in the window and does not open a dictionary
+            // (`<<`), such as a string running on through a stream, no trailer dictionary follows the
+            // marker, so the fallback below does not apply.
+            let mut first = Lexer::new(bytes.get(..end).unwrap_or_default(), start);
+            first.skip_ws();
+            let maybe_dict = first.pos >= end || bytes.get(first.pos..).is_some_and(|rest| rest.starts_with(b"<<"));
             // A window ending inside a token (a regular byte on each side of the cut) would read its
             // first part as all of it, such as `/Encrypt` of `/Encrypted`. It ends before that token
             // instead, so the fallback below reads the token whole.
@@ -81,7 +87,7 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
             // Whatever it returned, a lexer at the window's end (one past it after an unterminated
             // hex string) may have stopped before the dictionary started or partway through it, so
             // an `Encrypt` name in any spelling that ends past the window refuses the file.
-            let cut = lexer.pos >= window.len() && last_encrypt.is_some_and(|name_end| name_end > end);
+            let cut = maybe_dict && lexer.pos >= window.len() && last_encrypt.is_some_and(|name_end| name_end > end);
             if encrypt || cut {
                 return Err(Error::Encrypted);
             }

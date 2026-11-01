@@ -180,3 +180,16 @@ fn a_key_cut_by_the_trailer_window_is_read_whole() {
     assert_eq!(parse(trailer("/Encrypt", 7).as_bytes()), Err(Error::Encrypted));
     assert_eq!(parse(trailer("/Encrypt", 8).as_bytes()), Err(Error::Encrypted));
 }
+
+#[test]
+fn a_trailer_string_in_a_stream_does_not_refuse_a_later_encrypt_name() {
+    // A `trailer` marker in an unreferenced stream opens a string or array that runs on past the
+    // 4 KiB pre-scan window to an `Encrypt` name. The unbounded lexer read that object, not a
+    // trailer dictionary, so the past-the-window fallback does not refuse the file either.
+    let plain = parse(&document("", &[])).unwrap();
+    for (open, key) in [("(", "/Encrypt"), ("[", "/Encr#79pt")] {
+        let content = format!("trailer{open}{}{key} 9 0 R", "text ".repeat(1024));
+        let stream = (6, 0, format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+        assert_eq!(parse(&document("", &[stream])).as_ref(), Ok(&plain), "{open}");
+    }
+}
