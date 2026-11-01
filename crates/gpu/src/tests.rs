@@ -1319,6 +1319,57 @@ fn private_gpu(budget: usize) -> Option<Gpu> {
     Some(g)
 }
 
+/// Three effect calls while a frame encoder is open with recorded work reuse one set of
+/// textures: lent calls give them back at once, without waiting for that frame to submit.
+#[test]
+fn three_effect_calls_in_a_frame_reuse_one_set_of_textures() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let mut frame = crate::context::Enc::new(ctx);
+    // Open the frame encoder with real work so the pool has an open id (an empty Enc::new does not).
+    let src = frame.image(64, 64);
+    let dst = frame.image(64, 64);
+    frame.copy_into(&src, &dst, 0, 0);
+    let (hits0, misses0) = ctx.pool_stats();
+    for _ in 0..3 {
+        let mut e = crate::context::Enc::lent(ctx);
+        let a = e.image(256, 256);
+        let b = e.image(256, 256);
+        drop((a, b));
+        drop(e);
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert_eq!(misses, 2, "only the first effect call allocates: {hits} hits, {misses} misses");
+    assert_eq!(hits, 4, "calls 2 and 3 reuse both textures: {hits} hits, {misses} misses");
+    frame.submit();
+    drop((src, dst, frame));
+}
+
+/// Review of #1523: after the first frame fills the free list, later identical frames hit
+/// instead of allocating again.
+#[test]
+fn a_repeated_frame_reuses_after_the_first() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let frame = || {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256, 256), e.image(128, 64)));
+        drop(e);
+        ctx.pool_frame_end();
+    };
+    let (hits0, misses0) = ctx.pool_stats();
+    frame();
+    let (hits1, misses1) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert_eq!(misses1, 2, "first frame allocates both sizes: {hits1} hits, {misses1} misses");
+    let (hits_a, misses_a) = ctx.pool_stats();
+    for _ in 0..3 {
+        frame();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits_a, ctx.pool_stats().1 - misses_a);
+    assert_eq!(misses, 0, "frames 2..4 allocate nothing: {hits} hits, {misses} misses");
+    assert!(hits >= 6, "frames 2..4 reuse both sizes: {hits} hits");
+}
+
 /// Review of #1523: every idle effect-call owner kept up to the pool budget of its own,
 /// outside the shared accounting, and there are as many as calls ever ran at once (16 frame
 /// threads: ~12 GB after a 4K render). Finished calls share the free list's one budget, and

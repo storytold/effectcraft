@@ -420,6 +420,12 @@ impl Accelerator for Gpu {
     }
 
     fn render_end(&self) {
+        let (hits, misses) = self.ctx.pool_stats();
+        let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);
+        log::debug!(
+            target: "effectcraft_gpu",
+            "gpu pool: {hits} working textures reused, {misses} allocated ({pct}% reuse) so far"
+        );
         self.ctx.trim_pool();
     }
 
