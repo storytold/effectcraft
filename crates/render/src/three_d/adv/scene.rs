@@ -18,7 +18,8 @@ use std::sync::Arc;
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat4, Vec3, vec3};
 use effectcraft_model::{self as model, Primitive};
-use effectcraft_project::{ItemKind, Layer, LayerSource, LightKind, PrimitiveKind};
+use effectcraft_project::{ItemKind, Layer, LayerSource, LightKind, PrimitiveKind, Property};
+use effectcraft_time::Tick;
 
 use super::shade::srgb_to_linear;
 use crate::three_d::camera::{CameraState, NEAR};
@@ -457,6 +458,25 @@ pub fn model_to_layer(unit_scale: f64) -> Mat4 {
     Mat4::scale(vec3(unit_scale, -unit_scale, -unit_scale))
 }
 
+/// Layer time the selected clip started at: the last key that changed the selection, so a clip
+/// keyed on later plays from its first frame. Before any change, the layer clock; likewise under
+/// an expression or an Essential Property override, as the keys don't say when those switch.
+fn clip_start(ctx: &EvalCtx, layer: &Layer, prop: &Property, lt: Tick) -> Tick {
+    if prop.has_expression() || ctx.property_overrides.iter().any(|o| o.layer == layer.id && o.prop == prop.uid) {
+        return Tick::ZERO;
+    }
+    let mut keys = prop.keys.iter().filter(|k| !k.muted && k.time <= lt);
+    let Some(first) = keys.next() else { return Tick::ZERO };
+    let (mut clip, mut start) = (first.value.as_enum(), Tick::ZERO);
+    for k in keys {
+        let v = k.value.as_enum();
+        if v != clip {
+            (clip, start) = (v, k.time);
+        }
+    }
+    start
+}
+
 fn model_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
     let lin = b.s.linear_io;
     let (opts, prim_mat) = model_options(ctx, layer, lin);
@@ -472,7 +492,9 @@ fn model_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
             let clip = geo.map_or(0, |g| ctx.e(layer, g, "animation")) as usize;
             let clip = clip.checked_sub(1).filter(|c| *c < m.animations.len());
             let speed = geo.map_or(100.0, |g| ctx.f(layer, g, "animationSpeed", 100.0)) / 100.0;
-            let mut t = layer.layer_time(ctx.time).seconds() * speed;
+            let lt = layer.layer_time(ctx.time);
+            let start = geo.and_then(|g| g.get("animation")).map_or(Tick::ZERO, |p| clip_start(ctx, layer, p, lt));
+            let mut t = (lt - start).seconds() * speed;
             if let Some(c) = clip {
                 let d = m.animations[c].duration();
                 let looping = geo.is_none_or(|g| ctx.b(layer, g, "loopAnimation"));
