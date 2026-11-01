@@ -553,17 +553,18 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     }
     // Save As, Save a Copy and Save a Copy As XML start from the open project's file, in its
     // folder, as After Effects does (#2788); an untitled project starts from Untitled Project.
-    let project_as = |ext: &str| -> std::borrow::Cow<'static, str> {
-        match app.session.path.as_deref() {
-            Some(p) => std::path::Path::new(p).with_extension(ext).to_string_lossy().into_owned().into(),
-            None => format!("Untitled Project.{ext}").into(),
-        }
+    // Save a Copy adds ` copy` (`suffix`): it never writes over the open project's file.
+    let project_as = |suffix: &str, ext: &str| -> std::borrow::Cow<'static, str> {
+        let Some(path) = app.session.path.as_deref().map(std::path::Path::new) else { return format!("Untitled Project{suffix}.{ext}").into() };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled Project".into());
+        path.with_file_name(format!("{stem}{suffix}.{ext}")).to_string_lossy().into_owned().into()
     };
     let (key, ask) = match id {
         "file.import" | "file.importMultiple" => ("paths", Ask::Import),
         "file.open" => ("path", Ask::OpenProject),
-        "file.save" if app.session.path.is_none() => ("path", Ask::Save(project_as("ecproj"))),
-        "file.saveAs" | "file.saveCopy" => ("path", Ask::Save(project_as("ecproj"))),
+        "file.save" if app.session.path.is_none() => ("path", Ask::Save(project_as("", "ecproj"))),
+        "file.saveAs" => ("path", Ask::Save(project_as("", "ecproj"))),
+        "file.saveCopy" => ("path", Ask::Save(project_as(" copy", "ecproj"))),
         "comp.saveFrameAs" => ("path", Ask::Save("Frame.png".into())),
         "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd".into())),
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
@@ -584,7 +585,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
-        "file.saveCopyAsXml" => ("path", Ask::Save(project_as("ecprojx"))),
+        "file.saveCopyAsXml" => ("path", Ask::Save(project_as("", "ecprojx"))),
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate".into())),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),

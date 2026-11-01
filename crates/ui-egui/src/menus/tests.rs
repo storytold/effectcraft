@@ -299,8 +299,8 @@ fn save_dialogs_offer_the_file_extension() {
     assert_eq!(*asked.borrow(), ["project Frame.png"]);
 }
 
-/// #2788: Save As, Save a Copy and Save a Copy As XML start from the open project's name (in its
-/// folder), not Untitled Project.
+/// #2788: Save As, Save a Copy (`<name> copy`) and Save a Copy As XML start from the open
+/// project's name (in its folder), not Untitled Project.
 #[test]
 fn save_as_dialogs_start_from_the_open_project() {
     use std::cell::RefCell;
@@ -326,7 +326,8 @@ fn save_as_dialogs_start_from_the_open_project() {
         invoke(&mut app, &ctx, id, json!({})).unwrap();
     }
     let xml = dir.join("Intro.ecprojx").to_string_lossy().to_string();
-    assert_eq!(*asked.borrow(), ["project Intro.ecproj".to_string(), "project Intro.ecproj".into(), format!("file {xml} [ecprojx]")]);
+    // Save a Copy names another file: it would refuse to write over the open project.
+    assert_eq!(*asked.borrow(), ["project Intro.ecproj".to_string(), "project Intro copy.ecproj".into(), format!("file {xml} [ecprojx]")]);
     // The non-blocking dialog gets the whole path, so it opens in the project's folder.
     let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
     let queue = pending.clone();
