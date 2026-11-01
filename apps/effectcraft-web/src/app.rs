@@ -213,8 +213,17 @@ fn install_hooks(app: &mut EffectcraftApp) {
         }
         None
     }));
-    // Saving downloads the file: the chosen name is all a "save dialog" needs.
-    app.hooks.pick_save = Some(Box::new(|name: &str| Some(files::path_for(if name.is_empty() { "Untitled Project.ecproj" } else { name }))));
+    // Saving downloads the file: the chosen name is all a "save dialog" needs. A project (Save As,
+    // Save a Copy) asks for the name, starting from the open project's (#2788): without asking,
+    // Save As would replace the open project's file; Cancel cancels.
+    app.hooks.pick_save = Some(Box::new(|name: &str| {
+        let name = if name.is_empty() { "Untitled Project.ecproj" } else { name };
+        if !std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("ecproj") || e.eq_ignore_ascii_case("ecprojx")) {
+            return Some(files::path_for(name));
+        }
+        let typed = web_sys::window().and_then(|w| w.prompt_with_message_and_default("Save project as:", name).ok().flatten());
+        crate::store::typed_save_name(name, typed).map(|n| files::path_for(&n))
+    }));
     app.hooks.audio_device = Some(Box::new(audio::open));
     app.hooks.audio_devices = Some(Box::new(|| vec!["Browser default output".into()]));
 }

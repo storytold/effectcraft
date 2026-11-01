@@ -585,7 +585,11 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
-        "file.saveCopyAsXml" => ("path", Ask::Save(project_as("", "ecprojx"))),
+        // An open XML project gets ` copy` too: the copy never writes over the open file.
+        "file.saveCopyAsXml" => {
+            let xml = app.session.path.as_deref().and_then(|p| std::path::Path::new(p).extension()).is_some_and(|e| e.eq_ignore_ascii_case("ecprojx"));
+            ("path", Ask::Save(project_as(if xml { " copy" } else { "" }, "ecprojx")))
+        }
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate".into())),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),

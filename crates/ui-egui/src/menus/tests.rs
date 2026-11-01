@@ -328,6 +328,13 @@ fn save_as_dialogs_start_from_the_open_project() {
     let xml = dir.join("Intro.ecprojx").to_string_lossy().to_string();
     // Save a Copy names another file: it would refuse to write over the open project.
     assert_eq!(*asked.borrow(), ["project Intro.ecproj".to_string(), "project Intro copy.ecproj".into(), format!("file {xml} [ecprojx]")]);
+    // An open XML project's XML copy is another file too.
+    app.session.path = Some(dir.join("Intro.ecprojx").to_string_lossy().to_string());
+    asked.borrow_mut().clear();
+    invoke(&mut app, &ctx, "file.saveCopyAsXml", json!({})).unwrap();
+    let copy = dir.join("Intro copy.ecprojx").to_string_lossy().to_string();
+    assert_eq!(*asked.borrow(), [format!("file {copy} [ecprojx]")]);
+    app.session.path = Some(project.to_string_lossy().to_string());
     // The non-blocking dialog gets the whole path, so it opens in the project's folder.
     let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
     let queue = pending.clone();
