@@ -1461,8 +1461,8 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 mod tests {
     use super::*;
 
-    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
-    /// big layers may still grow to four times their area, and small pads are untouched.
+    /// #1938: Corner Pin's growth spans the pinned quad, and past the side cap or the pixel
+    /// budget it is cut by one factor instead of being dropped.
     #[test]
     fn grow_sides_spans_the_box_and_clamps_instead_of_giving_up() {
         let area = |w: u32, h: u32, s: [u32; 4]| (u64::from(w) + u64::from(s[0]) + u64::from(s[2])) * (u64::from(h) + u64::from(s[1]) + u64::from(s[3]));
@@ -1485,6 +1485,8 @@ mod tests {
         assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
     }
 
+    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
+    /// big layers may still grow to four times their area, and small pads are untouched.
     #[test]
     fn padded_buffers_stay_within_the_budget() {
         let area = |w: u32, h: u32, p: u32| (u64::from(w) + 2 * u64::from(p)) * (u64::from(h) + 2 * u64::from(p));
