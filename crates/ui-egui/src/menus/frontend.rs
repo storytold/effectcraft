@@ -614,9 +614,11 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         let tx = app.dialog_answers.0.clone();
         let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Vec::new() };
         app.file_dialogs.opened();
+        let open = OpenDialog::new(&app.native_dialogs);
         spawn(
             request,
             Box::new(move |paths| {
+                drop(open);
                 let _ = tx.send(crate::DialogAnswer { paths, ..answer });
             }),
         );
@@ -650,6 +652,23 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     };
     let Some(v) = picked else { return Some(Ok(Value::Null)) };
     Some(run_with_picked(app, id, key, params, v))
+}
+
+/// A native file dialog on screen, counted in [`EffectcraftApp::native_dialogs`] until it is
+/// dropped (answered, cancelled or discarded unanswered).
+struct OpenDialog(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl OpenDialog {
+    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        OpenDialog(count.clone())
+    }
+}
+
+impl Drop for OpenDialog {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The dialog's answer as the command's `key` parameter (`None`: cancelled).

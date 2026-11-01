@@ -101,6 +101,12 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
 }
 
 pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
+    // A disabled macOS menu item lets its key through, so a native file dialog gets Cmd+A, C, V
+    // (and Z) instead of the Edit menu acting on the window behind it (#1986). Only macOS: the
+    // native menu bar owns the keys there, and Linux's portal dialog is a separate window.
+    if cfg!(target_os = "macos") && e.command.starts_with("edit.") && app.native_dialogs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        return false;
+    }
     // The Project-panel enabled rules mirror the invoke redirects, so they stand down for the
     // same reason (see the redirect block): while a text edit is open the menu items must be
     // enabled by what their routed command can do, or the menu grays out commands that work.

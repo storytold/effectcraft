@@ -471,6 +471,10 @@ impl eframe::App for Desktop {
         if let Some(asked) = &self.file_dialogs {
             sheet_dialogs::show_asked(asked, frame, ctx);
         }
+        // A file dialog opened by this frame's commands is counted only now: sync the bar again so
+        // the Edit items step aside before the next key (#1986).
+        #[cfg(target_os = "macos")]
+        self.menu.update(&mut self.app, ctx);
         effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
 
