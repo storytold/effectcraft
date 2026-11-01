@@ -27,7 +27,13 @@ impl Exchange {
         let dir = if cfg!(target_os = "linux") && shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() };
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
         let path = dir.join(format!("effectcraft-helper-{}-{}-{nanos}.frames", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create_new(true);
+        // Frames are the user's pixels and /dev/shm is shared: only this user may read them
+        // (the helper runs as the same user).
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let file = opts.open(&path)?;
         Ok(Exchange { file, path, owned: true })
     }
 
@@ -96,6 +102,12 @@ mod tests {
     fn both_sides_see_the_same_pixels() {
         let mut a = Exchange::create().unwrap();
         let mut b = Exchange::open(a.path()).unwrap();
+        // Owner-only: frames are the user's pixels and /dev/shm is shared.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(a.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         let at = ImageRef { offset: 64, width: 2, height: 1, origin: [0.0; 2], scale: 1.0 };
         a.write(&at, &[[0.1, 0.2, 0.3, 0.4], [1.0, 2.0, 3.0, 4.0]]).unwrap();
         assert_eq!(b.read(&at).unwrap()[1], [1.0, 2.0, 3.0, 4.0]);

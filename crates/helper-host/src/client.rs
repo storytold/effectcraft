@@ -288,7 +288,7 @@ impl Helper {
     fn with_conn<T>(&self, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
         let mut g = lock(&self.conn);
         if g.is_none() {
-            *g = Some(self.spawn().map_err(Failure::Broken)?);
+            *g = Some(self.spawn().map_err(|e| self.not_started(e))?);
         }
         let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
         if c.last_used.elapsed() > HEARTBEAT_AFTER && !matches!(c.call(&Request::Ping, HEARTBEAT_TIMEOUT), Ok(Reply::Pong)) {
@@ -296,7 +296,7 @@ impl Helper {
                 dead.stop();
             }
             self.note_error("the helper stopped answering; restarting it");
-            *g = Some(self.spawn().map_err(Failure::Broken)?);
+            *g = Some(self.spawn().map_err(|e| self.not_started(e))?);
         }
         let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
         let r = f(c);
@@ -308,6 +308,14 @@ impl Helper {
             }
         }
         r
+    }
+
+    /// A helper that could not be started (not installed any more, restarting too often, no
+    /// frame exchange file): reported, but not charged to the effect that asked for it, since
+    /// nothing it did stopped the helper ([`Failure::Refused`], not [`Failure::Broken`]).
+    fn not_started(&self, e: String) -> Failure {
+        self.note_error(&e);
+        Failure::Refused(e)
     }
 
     fn note_error(&self, e: &str) {

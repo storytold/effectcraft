@@ -253,16 +253,39 @@ fn run_checks() -> bool {
         (&r, t0.elapsed()),
     );
 
+    // The restarts above use up the helper's restarts for this minute, so it can't start again.
+    // That is not the fault of the effect being rendered: it fails, but is not charged and never
+    // turned off (it would be after CRASH_LIMIT charged failures).
+    let starts: Vec<_> = (0..4).map(|_| render("org.test.helper.invert", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false)).collect();
+    all &= check(
+        "a helper that can't start doesn't block the effect",
+        starts.iter().all(|r| r.as_ref().is_err_and(|e| e.contains("keeps stopping")))
+            && !effectcraft_helper_host::blocklist::is_blocked("org.test.helper.invert"),
+        &starts,
+    );
+
     effectcraft_helper_host::stop_all();
     let _ = std::fs::remove_dir_all(&state);
     all
 }
 
+/// The one test this binary reports to test runners.
+const TEST_NAME: &str = "helper_protocol";
+
 fn main() {
-    if std::env::args().any(|a| a == HELPER_ARG) {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == HELPER_ARG) {
         if let Err(e) = serve(&mut FakeProvider) {
             eprintln!("fake helper: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+    // The libtest listing protocol cargo-nextest uses (`--list --format terse`, with and without
+    // `--ignored`): one `name: test` line, then nextest runs `<binary> helper_protocol --exact`.
+    if args.iter().any(|a| a == "--list") {
+        if !args.iter().any(|a| a == "--ignored") {
+            println!("{TEST_NAME}: test");
         }
         return;
     }
