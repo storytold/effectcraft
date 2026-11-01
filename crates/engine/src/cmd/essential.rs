@@ -915,6 +915,16 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     let (manifest, mut sub, entries) = read_template(&bytes).map_err(|e| bad(C, e))?;
     let name = manifest.get("name").and_then(Value::as_str).unwrap_or("Template").to_string();
     let tcomp = manifest.get("comp").and_then(Value::as_u64).map(ItemId).ok_or_else(|| bad(C, "manifest has no `comp`"))?;
+    // Remap the template's ids past the project's and check the result before anything is
+    // written to disk or to the project (#1229).
+    let base = s.project.next_id;
+    essential::offset_ids(&mut sub, base).map_err(|e| bad(C, format!("{path}: {e}")))?;
+    let new_comp = tcomp
+        .0
+        .checked_add(base)
+        .map(ItemId)
+        .filter(|c| sub.comp(*c).is_some())
+        .ok_or_else(|| bad(C, format!("{path}: the manifest's comp {} isn't a composition in the template", tcomp.0)))?;
     // Media next to the template: `<dir>/<stem> Media/<item>/<file>`.
     let pp = std::path::Path::new(&path);
     let dir = pp.parent().map(|d| d.to_path_buf()).unwrap_or_default();
@@ -944,9 +954,6 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let target = if b_p(p, "addToComp") == Some(false) { None } else { comp_id(s, p).ok() };
-    let base = s.project.next_id;
-    essential::offset_ids(&mut sub, base);
-    let new_comp = ItemId(tcomp.0 + base);
     let ids = s.edit("Import Template", None, |proj, st| {
         let folder = proj.add_item(&name, effectcraft_color::Label::Yellow, None, ItemKind::Folder);
         let mut ids = vec![];
