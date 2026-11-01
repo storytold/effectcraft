@@ -165,3 +165,21 @@ fn vr_comp_editor_turns_the_face_cameras_together() {
         assert!(e.iter().zip(o).all(|(a, b)| (a - b).abs() < 1e-6), "{o:?} → {e:?}");
     }
 }
+
+#[test]
+fn layer_create_null_path_menu_ops_run_the_paths_commands() {
+    let (mut s, l) = masked();
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    let r = s.execute("layer.create", json!({"op": "nullsFollowing"})).unwrap();
+    assert_eq!(r["nulls"].as_array().unwrap().len(), 4);
+    // The new nulls are selected now; `layers` names the layer whose path is used.
+    let r = s.execute("layer.create", json!({"op": "nullTracing", "layers": [l]})).unwrap();
+    let n = r["null"].as_u64().unwrap();
+    let r = s.execute("layer.create", json!({"op": "nullsPathPoints", "layers": [l]})).unwrap();
+    assert_eq!(r["nulls"].as_array().unwrap().len(), 4);
+    let comp = s.active_comp().unwrap().clone();
+    let plate = comp.layer(effectcraft_project::LayerId(l)).unwrap();
+    assert!(plate.props.prop("masks/#1/path").unwrap().expr.as_ref().unwrap().text.contains("createPath(pts"));
+    // A layer without a path is still an error.
+    assert!(s.execute("layer.create", json!({"op": "nullTracing", "layers": [n]})).is_err());
+}
