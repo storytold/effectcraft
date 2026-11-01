@@ -85,6 +85,17 @@ pub(crate) fn open_source(_path: &Path) -> Option<Result<SharedSource>> {
     None
 }
 
+/// `path` read in place (`None` when it can't be opened, or without a native file system).
+#[cfg(any(unix, windows))]
+pub(crate) fn file_reader(path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+    Some(Box::new(FileReader::open(path).ok()?))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+    None
+}
+
 /// The leading `ftyp` and the `moov` box of an ISO-BMFF movie on disk (all a track's display
 /// matrix needs), without reading the samples: top-level box headers are walked with positional
 /// reads. `None` when the file isn't ISO-BMFF or its `moov` is missing or implausibly large.

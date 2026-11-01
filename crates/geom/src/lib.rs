@@ -261,6 +261,9 @@ impl Mat3 {
             return Mat3([[x1 - x0, x3 - x0, x0], [y1 - y0, y3 - y0, y0], [0.0, 0.0, 1.0]]);
         }
         let den = dx1 * dy2 - dx2 * dy1;
+        if den == 0.0 || !den.is_finite() {
+            return Mat3::IDENTITY;
+        }
         let g = (sx * dy2 - dx2 * sy) / den;
         let h = (dx1 * sy - sx * dy1) / den;
         Mat3([[x1 - x0 + g * x1, x3 - x0 + h * x3, x0], [y1 - y0 + g * y1, y3 - y0 + h * y3, y0], [g, h, 1.0]])
@@ -360,6 +363,9 @@ impl Mat4 {
     }
     /// General inverse (Gauss-Jordan with partial pivoting).
     pub fn inverse(&self) -> Option<Mat4> {
+        if !self.0.iter().flatten().all(|v| v.is_finite()) {
+            return None;
+        }
         let mut a = self.0;
         let mut inv = Mat4::IDENTITY.0;
         for col in 0..4 {
@@ -446,8 +452,31 @@ pub fn look_at(pos: Vec3, poi: Vec3, extra: Mat4) -> Mat4 {
 mod tests {
     use super::*;
 
+    /// A quad with three collinear corners has no projective map: identity, not NaN.
+    #[test]
+    fn square_to_quad_degenerate_is_finite() {
+        let m = Mat3::square_to_quad([vec2(0.0, 5.0), vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(20.0, 0.0)]);
+        assert!(m.0.iter().flatten().all(|v| v.is_finite()), "non-finite: {m:?}");
+    }
+
+    #[test]
+    fn square_to_quad_regular_is_finite() {
+        let m = Mat3::square_to_quad([vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(8.0, 6.0), vec2(0.0, 5.0)]);
+        assert!(m.0.iter().flatten().all(|v| v.is_finite()));
+    }
+
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-9
+    }
+
+    #[test]
+    fn mat4_inverse_rejects_non_finite() {
+        for (r, c, v) in [(0, 0, f64::NAN), (2, 1, f64::NAN), (1, 3, f64::INFINITY)] {
+            let mut m = Mat4::IDENTITY;
+            m.0[r][c] = v;
+            assert!(m.inverse().is_none(), "{r},{c},{v}");
+        }
+        assert!(Mat4::IDENTITY.inverse().is_some());
     }
 
     #[test]

@@ -4,7 +4,7 @@ These checks use original compositions and public interaction behavior. No Adobe
 implementation code are included. Adobe's [selection documentation](https://helpx.adobe.com/after-effects/desktop/work-with-layers/select-and-arrange-layers/selecting-arranging-layers.html)
 describes Timeline range selection and Composition Shift-click/Shift-marquee selection.
 
-`crates/ui-egui/tests/ui_workflow_selection.rs` exercises actual pointer and keyboard events:
+`crates/ui-egui/tests/it/ui_workflow_selection.rs` exercises actual pointer and keyboard events:
 
 - Timeline Shift-click selects the visible range, skipping locked layers; Ctrl/Command-click toggles a layer.
 - A drag beginning in the empty Timeline outline selects the intersected layer rows without reordering them.
