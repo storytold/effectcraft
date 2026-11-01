@@ -906,8 +906,8 @@ fn an_edit_keeps_the_frames_outside_the_layers_it_changed() {
     s.execute("edit.splitLayer", json!({"layers": [a]})).unwrap();
     let after = f.content_of(&s.project, s.revision, comp);
     assert_ne!(after, before);
-    let kept: Vec<i64> = (fr.frame_at(out) + 2..frames.len() as i64).collect();
-    assert_eq!(cached(after), kept, "the cut layer's frames (and one either side) render again; the rest stay");
+    let kept: Vec<i64> = (0..fr.frame_at(Tick::from_seconds_f64(2.0)) - 1).chain(fr.frame_at(out) + 2..frames.len() as i64).collect();
+    assert_eq!(cached(after), kept, "the copy's half (and one frame either side) renders again; the rest stay");
 
     s.execute("layer.setParent", json!({"layers": [b], "parent": a})).unwrap();
     let parented = cache_all(&s);
@@ -1083,4 +1083,331 @@ fn timing_markers_and_expressions_still_change_the_frames() {
     let o2 = at(&s);
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
     assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
+}
+
+/// The oracle for [`Comp::changed_spans`]: every frame an edit keeps renders the same in the edited
+/// project. Moves, trims, splits, deletes and duplicates of moving clips, under adjustment
+/// layers, with seeded noise, motion blur, mattes, parents and effects that read other times.
+#[test]
+fn kept_frames_render_the_same() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::render::render_frame;
+    use serde_json::{Value as Json, json};
+    fn run(s: &mut Session, cmd: &str, p: Json) -> Json {
+        s.execute(cmd, p).unwrap_or_else(|e| panic!("{cmd}: {e}"))
+    }
+    /// Set a layer's start, in and out (frames).
+    fn timing(s: &mut Session, cid: ItemId, l: u64, start: i64, inp: i64, out: i64) {
+        let c = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+        let fr = c.frame_rate;
+        let l = c.layer_mut(effectcraft_engine::project::LayerId(l)).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (fr.tick_of(start), fr.tick_of(inp), fr.tick_of(out));
+    }
+    /// A 10×10 solid moving across the comp.
+    fn solid(s: &mut Session, color: &str) -> u64 {
+        let l = run(s, "layer.newSolid", json!({"color": color, "width": 10, "height": 10}))["layer"].as_u64().unwrap();
+        run(s, "prop.addKey", json!({"layer": l, "path": "transform/position", "time": 0.0, "value": [0.0, 4.0, 0.0]}));
+        run(s, "prop.addKey", json!({"layer": l, "path": "transform/position", "time": 1.5, "value": [16.0, 12.0, 0.0]}));
+        l
+    }
+    fn split(s: &mut Session, cid: ItemId, l: u64, at: i64) {
+        let fr = s.project.comp(cid).unwrap().frame_rate;
+        s.set_time(fr.tick_of(at));
+        run(s, "edit.splitLayer", json!({"layers": [l]}));
+    }
+    fn adjustment(s: &mut Session, cid: ItemId, effect: &str) -> u64 {
+        let l = run(s, "layer.newAdjustment", json!({}))["layer"].as_u64().unwrap();
+        run(s, "effect.apply", json!({"layers": [l], "effect": effect}));
+        timing(s, cid, l, 0, 10, 35);
+        l
+    }
+    /// Echo reaching 9 frames back, three times (past the shutter margin).
+    fn long_echo(s: &mut Session, l: u64) {
+        run(s, "effect.apply", json!({"layers": [l], "effect": "Echo"}));
+        run(s, "prop.set", json!({"layer": l, "path": "effects/#1/echoTime", "value": -0.3}));
+        run(s, "prop.set", json!({"layer": l, "path": "effects/#1/numberOfEchoes", "value": 3.0}));
+    }
+    // Clip a on frames 0–20, clip b on 20–40 of a 45-frame comp.
+    type Step = fn(&mut Session, ItemId, &mut Vec<u64>);
+    let none: Step = |_, _, _| {};
+    /// An audio-only file (music) and a layer of it over the whole comp.
+    fn music(s: &mut Session, cid: ItemId) -> u64 {
+        use effectcraft_engine::project::{Footage, FootageKind};
+        let song = Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() };
+        let song = Arc::make_mut(&mut s.project).add_item("song.wav", Default::default(), None, ItemKind::Footage(song));
+        let l = run(s, "layer.addItem", json!({"item": song.0}))["layer"].as_u64().unwrap();
+        timing(s, cid, l, 0, 0, 45);
+        l
+    }
+    /// What an edit keeps: every frame, some, or none.
+    #[derive(Debug, PartialEq)]
+    enum Keep {
+        All,
+        Part,
+        Nothing,
+    }
+    let scenarios: Vec<(&str, Step, Step, Keep)> = vec![
+        ("nudge", none, |s, c, l| timing(s, c, l[1], 21, 21, 41), Keep::Part),
+        ("trim out", none, |s, c, l| timing(s, c, l[1], 20, 20, 32), Keep::Part),
+        ("trim in", none, |s, c, l| timing(s, c, l[1], 20, 28, 40), Keep::Part),
+        ("split", none, |s, c, l| split(s, c, l[1], 30), Keep::Part),
+        ("delete", none, |s, _, l| _ = run(s, "edit.clear", json!({"layers": [l[1]]})), Keep::Part),
+        ("duplicate", none, |s, _, l| _ = run(s, "edit.duplicate", json!({"layers": [l[0]]})), Keep::Part),
+        ("adjustment trim", |s, c, l| l.push(adjustment(s, c, "Gaussian Blur")), |s, c, l| timing(s, c, l[2], 0, 10, 25), Keep::Part),
+        ("adjustment split", |s, c, l| l.push(adjustment(s, c, "Invert")), |s, c, l| split(s, c, l[2], 22), Keep::Part),
+        (
+            "adjustment fx off",
+            |s, c, l| l.push(adjustment(s, c, "Invert")),
+            |s, _, l| _ = run(s, "layer.setSwitch", json!({"layers": [l[2]], "switch": "fx", "value": false})),
+            Keep::Part,
+        ),
+        // Music changes no picture; neither does it when imported with the same action.
+        ("add music", none, |s, c, _| _ = music(s, c), Keep::All),
+        ("trim music", |s, c, l| l.push(music(s, c)), |s, c, l| timing(s, c, l[2], 0, 0, 20), Keep::All),
+        ("move music", |s, c, l| l.push(music(s, c)), |s, c, l| timing(s, c, l[2], 5, 5, 45), Keep::All),
+        ("delete music", |s, c, l| l.push(music(s, c)), |s, _, l| _ = run(s, "edit.clear", json!({"layers": [l[2]]})), Keep::All),
+        ("hide a clip", none, |s, _, l| _ = run(s, "layer.setSwitch", json!({"layers": [l[1]], "switch": "video", "value": false})), Keep::Part),
+        // Music another layer reads isn't silent: like any layer another one reads, editing
+        // it re-renders everything.
+        (
+            "trim music an audio spectrum reads",
+            |s, c, l| {
+                let m = music(s, c);
+                run(s, "effect.apply", json!({"layers": [l[0]], "effect": "Audio Spectrum"}));
+                run(s, "prop.set", json!({"layer": l[0], "path": "effects/#1/audioLayer", "value": m}));
+                l.push(m);
+            },
+            |s, c, l| timing(s, c, l[2], 0, 0, 20),
+            Keep::Nothing,
+        ),
+        (
+            "noise split",
+            |s, _, l| _ = run(s, "effect.apply", json!({"layers": [l[1]], "effect": "Fractal Noise"})),
+            |s, c, l| split(s, c, l[1], 30),
+            Keep::Part,
+        ),
+        (
+            "motion blur trim",
+            |s, c, l| {
+                Arc::make_mut(&mut s.project).comp_mut(c).unwrap().enable_motion_blur = true;
+                run(s, "layer.setSwitch", json!({"layers": [l[1]], "switch": "motionBlur", "value": true}));
+            },
+            |s, c, l| timing(s, c, l[1], 20, 20, 32),
+            Keep::Part,
+        ),
+        (
+            "matted clip trim",
+            |s, c, l| {
+                let m = solid(s, "#808080");
+                timing(s, c, m, 0, 0, 45);
+                run(s, "layer.setTrackMatte", json!({"layer": l[1], "matte": m}));
+            },
+            |s, c, l| timing(s, c, l[1], 20, 20, 32),
+            Keep::Part,
+        ),
+        (
+            "parent move",
+            |s, _, l| _ = run(s, "layer.setParent", json!({"layers": [l[0]], "parent": l[1]})),
+            |s, c, l| timing(s, c, l[1], 21, 21, 41),
+            Keep::Nothing,
+        ),
+        ("echo trim in", |s, _, l| long_echo(s, l[1]), |s, c, l| timing(s, c, l[1], 20, 28, 40), Keep::Part),
+        ("echo trim out", |s, _, l| long_echo(s, l[1]), |s, c, l| timing(s, c, l[1], 20, 20, 32), Keep::Part),
+        (
+            "posterize time trim in",
+            |s, _, l| {
+                run(s, "effect.apply", json!({"layers": [l[1]], "effect": "Posterize Time"}));
+                run(s, "prop.set", json!({"layer": l[1], "path": "effects/#1/frameRate", "value": 3.0}));
+            },
+            |s, c, l| timing(s, c, l[1], 20, 28, 40),
+            Keep::Part,
+        ),
+        (
+            "time displacement trim in",
+            |s, _, l| _ = run(s, "effect.apply", json!({"layers": [l[1]], "effect": "Time Displacement"})),
+            |s, c, l| timing(s, c, l[1], 20, 28, 40),
+            Keep::Part,
+        ),
+        // (Echo on an adjustment layer doesn't read other times yet, `FxHost::self_at`;
+        // when it does, an edit under it reaches frames after the edit.)
+        (
+            "echo adjustment nudge",
+            |s, _, l| {
+                let a = run(s, "layer.newAdjustment", json!({}))["layer"].as_u64().unwrap();
+                long_echo(s, a);
+                l.push(a);
+            },
+            |s, c, l| timing(s, c, l[1], 21, 21, 41),
+            Keep::Part,
+        ),
+    ];
+    for (name, setup, edit, expect) in scenarios {
+        let mut s = Session::default();
+        let cid = ItemId(run(&mut s, "comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 1.5}))["comp"].as_u64().unwrap());
+        let mut l = vec![solid(&mut s, "#ff0000"), solid(&mut s, "#00ff00")];
+        timing(&mut s, cid, l[0], 0, 0, 20);
+        timing(&mut s, cid, l[1], 20, 20, 40);
+        setup(&mut s, cid, &mut l);
+        let p0 = s.project.clone();
+        edit(&mut s, cid, &mut l);
+        let p1 = s.project.clone();
+        let fr = p1.comp(cid).unwrap().frame_rate;
+        let frames = fr.frame_at(p1.comp(cid).unwrap().duration);
+        let dirty = dirty_frames(&p0, &p1, cid);
+        let kept: Vec<i64> = match &dirty {
+            Some(d) => (0..frames).filter(|f| !d.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))).collect(),
+            None => vec![],
+        };
+        let got = match kept.len() as i64 {
+            0 => Keep::Nothing,
+            n if n == frames => Keep::All,
+            _ => Keep::Part,
+        };
+        assert_eq!(got, expect, "{name}: dirty {dirty:?}");
+        for f in kept {
+            let (a, b) = (render_frame(&p0, cid, fr.tick_of(f), 1.0), render_frame(&p1, cid, fr.tick_of(f), 1.0));
+            assert!(a.data == b.data, "{name}: kept frame {f} renders differently after the edit");
+        }
+    }
+}
+
+/// An edit keeps the cached frames it can't reach: nudging a clip re-renders only where it
+/// was and is, a trim only the part it cut, a split only the copy's half (its new ids seed
+/// randomness). Undo finds them all again; a clip another layer reads (its parent here) drops
+/// them all.
+#[test]
+fn an_edit_keeps_the_frames_it_cant_reach() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Layer, LayerId};
+    use serde_json::json;
+    type Edit = fn(&mut Comp, LayerId, &dyn Fn(i64) -> Tick);
+    let nudge: Edit = |c, b, t| {
+        let l = c.layer_mut(b).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (l.start_time + t(1), l.in_point + t(1), l.out_point + t(1));
+    };
+    let trim: Edit = |c, b, t| c.layer_mut(b).unwrap().out_point = t(75);
+    let split: Edit = |c, b, t| {
+        let i = c.layers.iter().position(|l| l.id == b).unwrap();
+        let mut copy: Layer = c.layers[i].clone();
+        copy.id = LayerId(1000);
+        copy.props.reassign_uids(&mut 1000);
+        copy.in_point = t(75);
+        c.layers[i].out_point = t(75);
+        c.layers.insert(i, copy);
+    };
+    let cut: Vec<i64> = (0..=72).chain(92..=95).collect();
+    for (edit, kept) in [(nudge, (0..=57).chain(93..=95).collect::<Vec<_>>()), (trim, cut.clone()), (split, cut)] {
+        for parented in [false, true] {
+            let mut s = Session::default();
+            let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4})).unwrap()["comp"].as_u64().unwrap());
+            s.execute("layer.newSolid", json!({})).unwrap();
+            s.execute("layer.newSolid", json!({})).unwrap();
+            let fr = s.project.comp(cid).unwrap().frame_rate;
+            let t = |f: i64| fr.tick_of(f);
+            let b = {
+                let c = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+                let (a, b): (LayerId, LayerId) = (c.layers[0].id, c.layers[1].id);
+                let l = c.layer_mut(a).unwrap();
+                (l.in_point, l.out_point) = (t(0), t(30));
+                l.parent = parented.then_some(b);
+                let l = c.layer_mut(b).unwrap();
+                (l.start_time, l.in_point, l.out_point) = (t(60), t(60), t(90));
+                b
+            };
+            let p0 = s.project.clone();
+            let f = Frames::default();
+            let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+            let id0 = f.content_of(&p0, 1, cid);
+            for fr in 0..=95 {
+                insert(&f, k(id0, fr));
+            }
+            let mut p1 = p0.clone();
+            edit(Arc::make_mut(&mut p1).comp_mut(cid).unwrap(), b, &t);
+            let id1 = f.content_of(&p1, 2, cid);
+            assert_ne!(id0, id1);
+            let got = f.cached_frames(&k(id1, 0));
+            assert_eq!(got, if parented { vec![] } else { kept.clone() });
+            assert_eq!(f.content_of(&p0, 3, cid), id0, "undo");
+            assert_eq!(f.cached_frames(&k(id0, 0)), (0..=95).collect::<Vec<_>>());
+        }
+    }
+}
+
+/// A saved and reopened project finds its frames on disk: the content key is the same.
+#[test]
+fn disk_keys_survive_save_and_reopen() {
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-disk-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("still.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255])).save(&png).unwrap();
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "Keys", "width": 16, "height": 16, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    let item = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].clone();
+    s.execute("layer.addItem", json!({"item": item})).unwrap();
+    s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 8, "height": 8})).unwrap();
+    let adj = s.execute("layer.newAdjustment", json!({})).unwrap()["layer"].clone();
+    s.execute("effect.apply", json!({"layers": [adj], "effect": "Gaussian Blur"})).unwrap();
+    let before = disk_cache::comp_content_key(&s.project, cid);
+    let path = dir.join("keys.ecproj");
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut again = effectcraft_host::session();
+    again.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!(disk_cache::comp_content_key(&again.project, cid), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Frames in RAM that the disk lacks (an edit kept them; a write was dropped) are written
+/// when idle, so the reopened project shows them all as the blue bar.
+#[test]
+fn ram_frames_missing_on_disk_are_written() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-persist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series = FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()), ..key(0, 0, 0) };
+    for fr in 0..10 {
+        insert(&f, FrameKey { frame: fr, ..series });
+    }
+    // The content key is computed on the frame pool first.
+    for _ in 0..1000 {
+        f.persist_missing(&src, &series);
+        disk.flush();
+        if (0..10).all(|fr| {
+            disk.contains(
+                disk_cache::Kind::Frame,
+                frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, series.opts, f.virtual_epoch.load(Ordering::Relaxed), None),
+            )
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Reopened: a new preview cache over the same disk shows every frame in blue.
+    let reopened = Frames::default();
+    let series = FrameKey { content: reopened.content_of(&src.project, 1, cid), ..series };
+    let mut blue = vec![];
+    for _ in 0..1000 {
+        blue = reopened.disk_frames(&src, &series, 0..10, &RenderOpts::default());
+        if blue.len() == 10 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(blue, (0..10).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
 }

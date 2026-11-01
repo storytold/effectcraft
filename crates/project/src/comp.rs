@@ -1,7 +1,7 @@
 use super::item::LayerId;
 use super::layer::{Layer, LayerSource};
 use super::settings::{Marker, yes};
-use super::{Deserialize, FrameRate, Node, PropGroup, Serialize, Tick, Value, essential, styles};
+use super::{Deserialize, FrameRate, Node, PropGroup, Serialize, Tick, essential, styles};
 
 /// 3D renderer of a composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,45 +358,51 @@ impl Comp {
             && *essential == o.essential
     }
 
-    /// The comp-time span (`in_point..out_point` of every layer changed, added or removed,
-    /// widened by the shutter) outside which `self` draws the same pixels as `o`, so cached
-    /// frames there stay valid (#1641). `None` when the edit can reach any frame: a comp setting,
-    /// a layer reorder, Solo turning on or off, an expression (it reads anything), or a changed
-    /// layer another layer parents to, mattes with or picks in an effect.
-    pub fn changed_span(&self, o: &Comp) -> Option<(Tick, Tick)> {
-        fn reads(g: &PropGroup, changed: &[LayerId]) -> bool {
+    /// The comp-time spans where `self` may draw other pixels than `o` after an edit of some of
+    /// its layers (moved, trimmed, split, edited, added, removed): where the active layers differ
+    /// or a changed one draws differently, widened by the shutter. A trim reaches only the part it
+    /// cut, a split only the copy's half (#1641). `None` when the edit can reach any frame: a comp
+    /// setting, a layer reorder, Solo turning on or off, an environment layer, an expression (it
+    /// reads anything), or a changed layer another layer parents to, mattes with or picks in an
+    /// effect or tracker.
+    pub fn changed_spans(&self, o: &Comp, with_markers: bool) -> Option<Vec<(Tick, Tick)>> {
+        fn has_expression(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
-                Node::Prop(p) => {
-                    p.expr.is_some()
-                        || std::iter::once(&p.value)
-                            .chain(p.keys.iter().map(|k| &k.value))
-                            .any(|v| matches!(v, Value::Layer(Some(id)) if changed.contains(&LayerId(*id))))
-                }
-                Node::Group(g) => reads(g, changed),
+                Node::Prop(p) => p.expr.is_some(),
+                Node::Group(g) => has_expression(g),
             })
         }
         // Solo hides every other layer at every frame.
-        if !self.same_settings(o, true) || self.any_solo() != o.any_solo() {
+        if !self.same_settings(o, with_markers) || self.any_solo() != o.any_solo() {
             return None;
         }
         let common = |a: &Comp, b: &Comp| a.layers.iter().map(|l| l.id).filter(|id| b.layer(*id).is_some()).collect::<Vec<_>>();
         if common(self, o) != common(o, self) {
             return None;
         }
+        // Changed, added or removed layers (each from both sides: its old and its new span), and
+        // those that draw the same apart from their span (a trim or split). Ids count: they seed
+        // randomness (noise, text randomisers), so a split's copy may draw differently.
         let mut changed = Vec::new();
-        let mut span: Option<(Tick, Tick)> = None;
-        // Each changed layer comes up from both sides: its old and its new span.
+        let mut respanned = Vec::new();
+        let mut cuts = Vec::new();
         for (l, other) in self.layers.iter().map(|l| (l, o.layer(l.id))).chain(o.layers.iter().map(|l| (l, self.layer(l.id)))) {
-            if other.is_some_and(|b| l.same_pixels(b)) {
+            if other.is_some_and(|b| l.same_pixels_with(b, with_markers)) {
                 continue;
             }
+            if l.environment || l.environment_background {
+                return None;
+            }
+            if let Some(b) = other
+                && (Layer { in_point: b.in_point, out_point: b.out_point, name: b.name.clone(), label: b.label, comment: b.comment.clone(), ..l.clone() })
+                    .same_pixels_with(b, with_markers)
+            {
+                respanned.push(l.id);
+            }
             changed.push(l.id);
-            let (s, e) = (l.in_point.min(l.out_point), l.in_point.max(l.out_point));
-            span = Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
+            cuts.extend([l.in_point, l.out_point]);
         }
-        let reaches = |l: &Layer| {
-            l.parent.is_some_and(|p| changed.contains(&p)) || l.track_matte.as_ref().is_some_and(|m| changed.contains(&m.layer)) || reads(&l.props, &changed)
-        };
+        let reaches = |l: &Layer| has_expression(&l.props) || l.referenced_layers().iter().any(|r| *r != l.id && changed.contains(r));
         if self.layers.iter().chain(&o.layers).any(reaches) {
             return None;
         }
@@ -405,7 +411,20 @@ impl Comp {
         let (a, p) = (self.shutter_angle / 360.0, self.shutter_phase / 360.0);
         let fd = self.frame_duration().seconds();
         let (before, after) = (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd));
-        span.map(|(s, e)| (s - before, e + after))
+        // Between two cuts the same layers are active; outside them no changed layer is.
+        cuts.sort_unstable();
+        cuts.dedup();
+        let draws_same = |l: &Layer| !changed.contains(&l.id) || respanned.contains(&l.id);
+        let spans = cuts
+            .windows(2)
+            .filter_map(|w| {
+                let (&s, &e) = (w.first()?, w.last()?);
+                let active = |c: &Comp| c.layers.iter().filter(|l| l.is_active_at(s)).map(|l| l.id).collect::<Vec<_>>();
+                let same = active(self) == active(o) && self.layers.iter().filter(|l| l.is_active_at(s)).all(draws_same);
+                (!same).then(|| (s - before, e + after))
+            })
+            .collect();
+        Some(spans)
     }
 
     /// Some layer is soloed: only the soloed layers draw.

@@ -365,3 +365,37 @@ fn upgrading_deeply_nested_shape_groups_fits_a_small_stack() {
     let ids: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
     assert_eq!(ids, ["size", "detail", "points", "speed", "correlation", "phase", "spatialPhase", "seed"]);
 }
+
+/// Layers that can't change the picture: music, hidden layers nothing reads. A hidden matte is
+/// read by the layer it mattes; nulls and cameras are never silent.
+#[test]
+fn silent_layers_are_music_and_unread_hidden_layers() {
+    use crate::{Footage, FootageKind, LayerId, MatteKind, TrackMatte};
+    let (mut p, cid) = project_with_layer();
+    let comp = p.comp(cid).unwrap().clone();
+    let song = p.add_item(
+        "song.wav",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+    );
+    let add = |p: &mut Project, name: &str, source: LayerSource| {
+        let l = build::layer(p, &comp, name, source, (1920, 1080), None);
+        let id = l.id;
+        p.comp_mut(cid).unwrap().layers.push(l);
+        id
+    };
+    let music = add(&mut p, "Music", LayerSource::Footage { item: song });
+    let solid = p.comp(cid).unwrap().layers[0].source.clone();
+    let hidden = add(&mut p, "Hidden", solid.clone());
+    let matte = add(&mut p, "Matte", solid);
+    let null = add(&mut p, "Null", LayerSource::Null);
+    let first = p.comp(cid).unwrap().layers[0].id;
+    let c = p.comp_mut(cid).unwrap();
+    for id in [hidden, matte, null] {
+        c.layer_mut(id).unwrap().switches.video = false;
+    }
+    c.layer_mut(first).unwrap().track_matte = Some(TrackMatte { layer: matte, kind: MatteKind::Alpha });
+    let c = p.comp(cid).unwrap();
+    assert_eq!(p.silent_layers(c).into_iter().collect::<Vec<LayerId>>(), vec![music, hidden]);
+}

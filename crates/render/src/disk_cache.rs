@@ -33,9 +33,14 @@ use effectcraft_raster::Image;
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
 const MAGIC: &[u8; 4] = b"ECDC";
-/// Pending writes before new ones are dropped.
+/// Pending layer and matte writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// Pending frame bytes before new frames are dropped. Frames have their own lane, written
+/// before layer buffers: a burst of large layer writes used to fill the shared queue and drop
+/// frames, so a fully cached comp came back with gaps in its blue bar.
+#[cfg(not(target_arch = "wasm32"))]
+const FRAME_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -225,8 +230,28 @@ enum Job {
 }
 
 struct Queue {
+    /// Frame writes (taken first) and their payload bytes.
+    frames: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    frame_bytes: usize,
+    /// Layer and matte writes.
     jobs: std::collections::VecDeque<Job>,
     busy: bool,
+}
+
+impl Queue {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pop(&mut self) -> Option<Job> {
+        if let Some(j) = self.frames.pop_front() {
+            let Job::Write(_, _, p) = &j;
+            self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+            return Some(j);
+        }
+        self.jobs.pop_front()
+    }
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty() && self.jobs.is_empty()
+    }
 }
 
 pub struct DiskCache {
@@ -320,7 +345,10 @@ impl DiskCache {
             dropped: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }), Condvar::new())),
+            queue: Arc::new((
+                Mutex::new(Queue { frames: Default::default(), frame_bytes: 0, jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }),
+                Condvar::new(),
+            )),
             min_layer_ms: AtomicU64::new(30),
         });
         dc.rescan();
@@ -467,8 +495,9 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.frames.clear();
         }
-        while !q.jobs.is_empty() || q.busy {
+        while !q.is_empty() || q.busy {
             q = match cv.wait(q) {
                 Ok(q) => q,
                 Err(_) => return,
@@ -524,11 +553,20 @@ impl DiskCache {
         {
             let (m, cv) = &*self.queue;
             let Ok(mut q) = m.lock() else { return };
-            if q.jobs.len() >= QUEUE_LIMIT {
+            let full = match kind {
+                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
+                _ => q.jobs.len() >= QUEUE_LIMIT,
+            };
+            if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            q.jobs.push_back(Job::Write(kind, key, payload));
+            if kind == Kind::Frame {
+                q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
+                q.frames.push_back(Job::Write(kind, key, payload));
+            } else {
+                q.jobs.push_back(Job::Write(kind, key, payload));
+            }
             cv.notify_all();
         }
     }
@@ -659,7 +697,7 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let job = {
             let Ok(mut g) = m.lock() else { return };
             loop {
-                if let Some(j) = g.jobs.pop_front() {
+                if let Some(j) = g.pop() {
                     g.busy = true;
                     break j;
                 }
@@ -841,7 +879,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-4";
+const RENDER_VERSION: &str = "effectcraft-render-5";
 
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
@@ -890,7 +928,10 @@ pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Opt
     let mut h = Hash128::default();
     h.write(RENDER_VERSION.as_bytes());
     for (id, it) in &project.items {
-        if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
+        // (files without video never make layer buffers: importing music keeps the keys)
+        if let effectcraft_project::ItemKind::Footage(f) = &it.kind
+            && f.has_video
+        {
             h.write_u64(id.0);
             hash_debug(&mut h, f);
             footage_stamp(&mut h, f, virtual_id);
@@ -924,34 +965,44 @@ fn comp_content_key_for_renderer(
     let mut h = Hash128::default();
     h.write(renderer.as_bytes());
     hash_debug(&mut h, &project.settings);
+    // Expressions can read anything (every item counts); without them, layers that can't
+    // change the picture (music, hidden layers nothing reads) and their files don't count.
+    let expressions = project.reads_markers();
+    let silent = |c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(c) };
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = vec![comp];
-    let mut expressions = false;
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
             continue;
         }
         let Some(it) = project.item(id) else { continue };
         if let ItemKind::Comp(c) = &it.kind {
-            for l in &c.layers {
+            let quiet = silent(c);
+            for l in c.layers.iter().filter(|l| !quiet.contains(&l.id)) {
                 if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                     stack.push(item);
-                }
-                if !expressions {
-                    l.props.walk("", &mut |_, p| expressions |= p.expr.is_some());
                 }
             }
         }
     }
     // Markers are pixels only to the expressions that read them (#1083).
-    let markers = project.reads_markers();
+    let markers = expressions;
     let ids: Vec<effectcraft_project::ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
     for id in ids {
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
         match &it.kind {
-            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form_with(markers)),
+            ItemKind::Comp(c) => {
+                let quiet = silent(c);
+                if quiet.is_empty() {
+                    hash_debug(&mut h, &c.pixel_form_with(markers));
+                } else {
+                    let mut pic = (**c).clone();
+                    pic.layers.retain(|l| !quiet.contains(&l.id));
+                    hash_debug(&mut h, &pic.pixel_form_with(markers));
+                }
+            }
             k => hash_debug(&mut h, k),
         }
         if let ItemKind::Footage(f) = &it.kind {
@@ -1080,6 +1131,51 @@ mod tests {
         assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
         // Wrong kind is a miss.
         assert!(dc.get_frame(42).is_none());
+    }
+
+    /// Music doesn't change a comp's disk keys (adding it to the timeline kept no blue frame);
+    /// hiding a clip does. Importing music keeps the layer-cache salt.
+    #[test]
+    fn music_keeps_the_disk_keys() {
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut p = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Main", Default::default(), None, ItemKind::Comp(comp.clone().into()));
+        let sid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+        let clip = build::layer(&mut p, &comp, "Clip", LayerSource::Solid { item: sid }, (64, 64), None);
+        let clip_id = clip.id;
+        p.comp_mut(cid).unwrap().layers.push(clip);
+        let (key, salt) = (comp_content_key(&p, cid), footage_salt(&p));
+        let song = p.add_item(
+            "song.wav",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+        );
+        assert_eq!(footage_salt(&p), salt, "importing music");
+        let music = build::layer(&mut p, &comp, "Music", LayerSource::Footage { item: song }, (64, 64), None);
+        p.comp_mut(cid).unwrap().layers.insert(0, music);
+        assert_eq!(comp_content_key(&p, cid), key, "music on the timeline");
+        p.comp_mut(cid).unwrap().layer_mut(clip_id).unwrap().switches.video = false;
+        assert_ne!(comp_content_key(&p, cid), key, "a hidden clip");
+    }
+
+    /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
+    /// on disk afterwards (the blue bar came back with gaps).
+    #[test]
+    fn frames_are_kept_when_layer_writes_fill_the_queue() {
+        let dir = tmpdir("burst");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..300 {
+            dc.put_layer(10_000 + k, &buf(1, 64, 64));
+        }
+        let rgba = vec![7u8; 32 * 32 * 4];
+        for k in 0..300 {
+            dc.put_frame(k, 32, 32, &rgba);
+        }
+        dc.flush();
+        assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
     }
 
     #[test]

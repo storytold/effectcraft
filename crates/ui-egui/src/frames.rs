@@ -318,6 +318,21 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
     comp_content_with(project, comp, project, |_, c| c)
 }
 
+/// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
+/// ([`Comp::changed_spans`]), a frame wider either side for rounding. Layers that can't change the
+/// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count.
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId) -> Option<Vec<(i64, i64)>> {
+    let picture = |p: &Project| {
+        let mut c = p.comp(comp)?.clone();
+        let quiet = p.silent_layers(&c);
+        c.layers.retain(|l| !quiet.contains(&l.id));
+        Some(c)
+    };
+    let (a, b) = (picture(old)?, picture(new)?);
+    let fr = b.frame_rate;
+    Some(b.changed_spans(&a, false)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
+}
+
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
 /// Sources removed by undo are read from `base`.
 fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
@@ -483,6 +498,9 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
+    /// Disk keys [`Frames::persist_missing`] queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    persisted: Mutex<HashSet<u128>>,
 }
 
 impl Default for Frames {
@@ -532,6 +550,8 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            persisted: Mutex::default(),
         }
     }
 }
@@ -776,20 +796,19 @@ impl Frames {
         {
             return (*base_id, Some(base.clone()));
         }
-        // Only layers of this comp changed: its frames outside their span (and a frame either
-        // side for rounding) keep drawing the same pixels, so a cut or trim recaches only the
-        // layers it touched (#1641).
-        if let Some((base_id, base)) = bases.get(&comp.0)
-            && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
+        // Only layers of this comp changed: its frames outside the spans they reach (and a frame
+        // either side for rounding) keep drawing the same pixels, so a nudge, cut or trim recaches
+        // only the frames it touched (#1641). An expression anywhere can read any layer at any time.
+        if !markers
+            && let Some((base_id, base)) = bases.get(&comp.0)
             && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
                 Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
                 _ => c,
             }) == *base_id
-            && let Some((s, e)) = new.changed_span(old)
+            && let Some(dirty) = dirty_frames(base, project, comp)
             && let Ok(mut cache) = self.cache.lock()
         {
-            let (first, last) = (new.frame_rate.frame_at(s).saturating_sub(1), new.frame_rate.frame_at(e).saturating_add(1));
-            cache.carry(*base_id, plain, |f| f < first || f > last);
+            cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
@@ -848,6 +867,48 @@ impl Frames {
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
         let oh = opts_hash(opts);
         (start..end).filter(|f| !ram.contains(f)).filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh))).collect()
+    }
+
+    /// Write the RAM frames of `base`'s series that the disk cache lacks: frames an edit kept
+    /// (written under the comp's previous content key) and writes the disk cache dropped. They
+    /// are converted on the frame pool, each queued once.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey) {
+        let Some(dc) = src.disk.clone() else { return };
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
+        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
+        let Some(content) = known else {
+            self.request_content_key(src.project.clone(), base.revision, base.comp);
+            return;
+        };
+        let missing: Vec<(u128, Arc<egui::ColorImage>)> = {
+            let (Ok(c), Ok(mut queued)) = (self.cache.lock(), self.persisted.lock()) else { return };
+            if queued.len() > 100_000 {
+                queued.clear();
+            }
+            c.map
+                .iter()
+                .filter(|(k, _)| k.same_series(base))
+                .filter_map(|(k, img)| {
+                    let FrameImage::Cpu(img) = img else { return None };
+                    let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ k.opts);
+                    (!dc.contains(disk_cache::Kind::Frame, dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                })
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let work = move || {
+            for (dk, img) in missing {
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba);
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
