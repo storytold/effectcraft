@@ -201,13 +201,21 @@ fn native_name(b: &[u8], id: u16) -> Option<String> {
     let count = be16(b, 2)? as usize;
     let storage = be16(b, 4)? as usize;
     for i in 0..count {
-        let r = 6 + i * 12;
-        let (plat, enc, lang, nid, len, off) =
-            (be16(b, r)?, be16(b, r + 2)?, be16(b, r + 4)?, be16(b, r + 6)?, be16(b, r + 8)? as usize, be16(b, r + 10)? as usize);
+        let r = 6usize.checked_add(i.checked_mul(12)?)?;
+        let (plat, enc, lang, nid, len, off) = (
+            be16(b, r)?,
+            be16(b, r.checked_add(2)?)?,
+            be16(b, r.checked_add(4)?)?,
+            be16(b, r.checked_add(6)?)?,
+            be16(b, r.checked_add(8)?)? as usize,
+            be16(b, r.checked_add(10)?)? as usize,
+        );
         if nid != id || plat != 3 || !(enc == 1 || enc == 10) || lang == 0x409 {
             continue;
         }
-        let raw = b.get(storage + off..storage + off + len)?;
+        let start = storage.checked_add(off)?;
+        let end = start.checked_add(len)?;
+        let raw = b.get(start..end)?;
         let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
         let s = String::from_utf16_lossy(&u);
         if !s.trim().is_empty() {
@@ -221,32 +229,45 @@ fn native_name(b: &[u8], id: u16) -> Option<String> {
 fn name_string(b: &[u8], id: u16) -> Option<String> {
     let count = be16(b, 2)? as usize;
     let storage = be16(b, 4)? as usize;
-    let mut best: Option<(u8, String)> = None;
+    let mut cands: Vec<(u8, u16, u16, &[u8])> = Vec::new();
     for i in 0..count {
-        let r = 6 + i * 12;
+        let r = 6usize.checked_add(i.checked_mul(12)?)?;
         let (plat, enc, lang, nid, len, off) =
             (be16(b, r)?, be16(b, r + 2)?, be16(b, r + 4)?, be16(b, r + 6)?, be16(b, r + 8)? as usize, be16(b, r + 10)? as usize);
         if nid != id {
             continue;
         }
-        let raw = b.get(storage + off..storage + off + len)?;
-        let (rank, s) = match plat {
+        let start = storage.checked_add(off)?;
+        let end = start.checked_add(len)?;
+        let raw = b.get(start..end)?;
+        let rank = match plat {
             3 if enc == 1 || enc == 10 => {
-                let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-                (if lang == 0x409 { 0 } else { 1 }, String::from_utf16_lossy(&u))
+                if lang == 0x409 {
+                    0
+                } else {
+                    1
+                }
             }
-            0 => {
-                let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-                (2, String::from_utf16_lossy(&u))
-            }
-            1 if enc == 0 => (3, raw.iter().map(|&c| if c < 128 { c as char } else { '?' }).collect()),
+            0 => 2,
+            1 if enc == 0 => 3,
             _ => continue,
         };
-        if best.as_ref().is_none_or(|(r0, _)| rank < *r0) {
-            best = Some((rank, s));
-        }
+        cands.push((rank, plat, enc, raw));
     }
-    best.map(|(_, s)| s).filter(|s| !s.trim().is_empty())
+    // Best rank first; a blank record falls through to the next. Decoding is lazy, so aliased
+    // records are not decoded once a usable one is found.
+    cands.sort_by_key(|c| c.0);
+    cands.into_iter().find_map(|(_, plat, enc, raw)| {
+        let s = match (plat, enc) {
+            (3, 1 | 10) | (0, _) => {
+                let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                String::from_utf16_lossy(&u)
+            }
+            (1, 0) => raw.iter().map(|&c| if c < 128 { c as char } else { '?' }).collect(),
+            _ => return None,
+        };
+        (!s.trim().is_empty()).then_some(s)
+    })
 }
 
 /// Synthetic font files for tests: just `name` and `fvar`, enough for the scan and the resolver.
@@ -367,6 +388,28 @@ mod tests {
     /// The scan marks a face with an `fvar` table that declares axes as variable, reading only
     /// the table directory and the fvar header; a static font, an fvar without axes and a
     /// truncated fvar are not.
+    #[test]
+    fn name_table_offsets_are_checked_and_duplicate_records_do_not_repeat_decode() {
+        let valid = names_font("Name Bounds", None);
+        let mut invalid = valid.clone();
+        // name record storage offset near u16::MAX must be rejected rather than overflowing
+        // when combined with its length (the name table starts at byte 28 in this fixture).
+        invalid[28 + 6 + 10] = 0xFF;
+        invalid[28 + 6 + 11] = 0xFF;
+        assert!(read_faces_bytes(&invalid).is_empty());
+
+        // Repeated aliases for one id retain the same selected name and do not change the face.
+        let mut duplicated = valid;
+        let count = u16::from_be_bytes([duplicated[28 + 2], duplicated[28 + 3]]);
+        let first = duplicated[28 + 6..28 + 18].to_vec();
+        for i in 1..count as usize {
+            duplicated[28 + 6 + i * 12..28 + 18 + i * 12].copy_from_slice(&first);
+        }
+        let faces = read_faces_bytes(&duplicated);
+        assert_eq!(faces.len(), 1);
+        assert_eq!((faces[0].family.as_str(), faces[0].style.as_str()), ("Name Bounds", "Regular"));
+    }
+
     #[test]
     fn detects_variable_faces_from_fvar() {
         let v = read_faces_bytes(&names_font("Var Test", Some(Some(1))));

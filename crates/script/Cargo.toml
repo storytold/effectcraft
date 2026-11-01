@@ -27,3 +27,6 @@ boa_engine = { workspace = true, features = ["js"] }
 [dev-dependencies]
 effectcraft-expr = { workspace = true }
 effectcraft-psd = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+socket2 = "0.6"

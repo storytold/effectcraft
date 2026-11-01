@@ -509,10 +509,23 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 // ---------------------------------------------------------------------------------------------
 // CC Radial Fast Blur
 
+/// Transparent pixels CC Radial Fast Blur adds on every side of a `w` × `h` buffer with Center
+/// at `c` (buffer pixels) and smear `s`: content `r` from Center streaks out to `r / (1 − s)`,
+/// so the farthest corner reaches `d · s / (1 − s)` past itself (at most 4096, as the other
+/// growing effects). Shared with the GPU path so both grow the same way.
+pub fn radial_fast_pad(c: (f64, f64), w: u32, h: u32, s: f64) -> u32 {
+    let (w, h) = (f64::from(w), f64::from(h));
+    let far = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].iter().map(|&(x, y)| (x - c.0).hypot(y - c.1)).fold(0.0, f64::max);
+    ((far * s / (1.0 - s)).ceil() + 1.0).min(4096.0) as u32
+}
+
 fn radial_fast_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = (ctx.params.f("amount") / 100.0).clamp(0.0, 1.0) * 0.5;
     if s <= 0.0 {
         return b;
+    }
+    if !ctx.adjustment {
+        b.pad(radial_fast_pad(b.to_px(ctx.params.v2("center")), b.img.width, b.img.height, s));
     }
     let c = b.to_px(ctx.params.v2("center"));
     let mode = ctx.params.e("zoom");
@@ -904,6 +917,23 @@ mod tests {
         assert_eq!(s0.1, -s0.2);
         let circle = iris_spans(10.0, 0, 0.0, 0.0);
         assert_eq!(circle.len(), 21);
+    }
+
+    #[test]
+    fn radial_fast_blur_streaks_past_the_layer_edge() {
+        // Center left of an opaque square: the streaks run right, beyond the layer rectangle (#2095).
+        let img = Image::filled(20, 20, [1.0, 1.0, 1.0, 1.0]);
+        let out = run("ec.blur.ccradialfast", &img, &[("center", Value::Vec2([-20.0, 10.0])), ("amount", num(80.0))]);
+        assert!(out.img.width > 20 && out.img.height > 20, "{}x{}", out.img.width, out.img.height);
+        let (o, d) = (out.offset[0] as i64, out.offset[1] as i64);
+        assert!(out.img.get(30 + o, 10 + d)[3] > 0.1, "{:?}", out.img.get(30 + o, 10 + d));
+        // Its streak samples only the square: still opaque, so the content keeps its place.
+        assert!((out.img.get(19 + o, 10 + d)[3] - 1.0).abs() < 1e-5, "{:?}", out.img.get(19 + o, 10 + d));
+        // An adjustment layer is comp-sized already; its buffer is not grown.
+        let s = find("ec.blur.ccradialfast").unwrap();
+        let params = Params { values: [("center".into(), Value::Vec2([-20.0, 10.0])), ("amount".into(), num(80.0))].into_iter().collect() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [20.0, 20.0], seed: 1, adjustment: true, env: Default::default() };
+        assert_eq!((s.render)(&ctx, Buf { img, offset: [0.0, 0.0], scale: 1.0 }).img.width, 20);
     }
 
     #[test]

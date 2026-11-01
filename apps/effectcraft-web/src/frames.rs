@@ -311,10 +311,11 @@ pub fn stats() -> Value {
     })
 }
 
+type PendingFrameCheck = (js_sys::Function, js_sys::Function, (u32, u32, Vec<u8>), f64);
+
 thread_local! {
     /// `workerFrameCheck` promises waiting for their frame: id → (resolve, reject, local frame).
-    #[allow(clippy::type_complexity)]
-    static CHECKS: RefCell<std::collections::HashMap<u64, (js_sys::Function, js_sys::Function, (u32, u32, Vec<u8>), f64)>> = RefCell::new(Default::default());
+    static CHECKS: RefCell<std::collections::HashMap<u64, PendingFrameCheck>> = RefCell::new(Default::default());
 }
 
 /// `effectcraft.workerFrameCheck({time?, scale?, backend?})`: render the active comp's frame in
@@ -416,6 +417,7 @@ fn post_reply(r: &FrameReply, px: Option<&[u8]>) {
 fn new_server() -> FrameServer {
     let mut s = FrameServer::new(crate::worker::pool(), Some(Arc::new(effectcraft_expr::Expressions)));
     s.set_layer_store(Some(Arc::new(effectcraft_engine::render::PrefetchStore::default())));
+    s.set_virtual_id(Some(Arc::new(|path| crate::files::STORE.file_identity(path))));
     s
 }
 
