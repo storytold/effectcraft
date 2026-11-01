@@ -8,12 +8,14 @@ use crate::EffectcraftApp;
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
-mod ui;
+pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 10] = ["ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
+const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -64,22 +66,74 @@ pub(crate) fn czech(app: &EffectcraftApp) -> bool {
     language(app) == "cs"
 }
 
+/// The UI is in Polish.
+pub(crate) fn polish(app: &EffectcraftApp) -> bool {
+    language(app) == "pl"
+}
+
+/// The UI is in Georgian.
+pub(crate) fn georgian(app: &EffectcraftApp) -> bool {
+    language(app) == "ka"
+}
+
+/// The UI is in Swedish.
+pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
+    language(app) == "sv"
+}
+
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
-/// language. The browser build stays in English because it has no system-locale probe.
+/// language. The browser build follows the locales its page passes in ([`set_system_locales`]).
 fn system_language() -> &'static str {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
         LANGUAGE.get_or_init(|| supported(sys_locale::get_locale().as_deref()))
     }
-    // No system locale in the browser build: English.
     #[cfg(target_arch = "wasm32")]
-    supported(None)
+    {
+        let (requested, browser) = SYSTEM_LOCALES.get().map(|(r, b)| (r.as_deref(), b.as_slice())).unwrap_or_default();
+        first_supported(requested, browser, web_draws)
+    }
+}
+
+/// The page's `?lang=`, then the browser's preferred languages, most preferred first
+/// (`navigator.languages`), for Match System in the web build.
+static SYSTEM_LOCALES: std::sync::OnceLock<(Option<String>, Vec<String>)> = std::sync::OnceLock::new();
+
+/// Tell Match System the language the page asks for (`?lang=`) and the browser's preferred
+/// languages (the web build has no locale probe of its own). Set before the first frame; only
+/// the first call counts.
+pub fn set_system_locales(requested: Option<String>, browser: Vec<String>) {
+    let _ = SYSTEM_LOCALES.set((requested, browser));
+}
+
+/// `requested` when EffectCraft has a catalog for it, else the first of `browser` it has a
+/// catalog for and `drawable` accepts (English counts), else English: someone who prefers Dutch,
+/// then Czech, gets Czech.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl Fn(&str) -> bool) -> &'static str {
+    let english = |t: &str| t.split(['-', '_']).next().is_some_and(|p| p.eq_ignore_ascii_case("en"));
+    requested
+        .map(|t| (t, true))
+        .into_iter()
+        .chain(browser.iter().map(|t| (t.as_str(), false)))
+        .map(|(t, asked)| (t, asked, supported(Some(t))))
+        .find(|(t, asked, code)| (*code != "en" && (*asked || drawable(code))) || english(t))
+        .map_or("en", |(_, _, code)| code)
+}
+
+/// Whether the web build can draw `language`'s interface. It installs no system fonts and its
+/// bundled faces have no CJK or Georgian glyphs, so Match System skips those browser languages
+/// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_draws(language: &str) -> bool {
+    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka")
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
-/// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`).
+/// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
+/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -90,6 +144,12 @@ fn supported(locale: Option<&str>) -> &'static str {
         "uk" => "uk",
         "es" => "es",
         "cs" => "cs",
+        "pl" => "pl",
+        "ka" => "ka",
+        "ru" => "ru",
+        "de" => "de",
+        "fr" => "fr",
+        "sv" => "sv",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -100,28 +160,45 @@ fn supported(locale: Option<&str>) -> &'static str {
     }
 }
 
+/// The Windows and Linux sources of *Reveal in Finder* in each catalog that has them, keyed by
+/// language code: the platform names the file manager before the catalog sees the label, so the
+/// macOS row alone leaves the other two in English (#1450).
+const REVEAL_FINDER: &[(&str, &str, &str)] = &[
+    ("uk", "Показати у Провіднику", "Показати у файловому менеджері"),
+    ("de", "Im Explorer anzeigen", "Im Dateimanager anzeigen"),
+    ("cs", "Zobrazit v Průzkumníku", "Zobrazit ve správci souborů"),
+    ("ja", "エクスプローラーで表示", "ファイルマネージャーで表示"),
+    ("pl", "Pokaż w Eksploratorze", "Pokaż w menedżerze plików"),
+    ("ka", "Explorer-ში ჩვენება", "ფაილების მენეჯერში ჩვენება"),
+    ("zh-hans", "在资源管理器中显示", "在文件管理器中显示"),
+    ("zh-hant", "在檔案總管中顯示", "在檔案管理員中顯示"),
+    ("es", "Mostrar en el Explorador", "Mostrar en el gestor de archivos"),
+    ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
+    ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
+    ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
+];
+
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {
     let language = language(app);
-    // The engine names the platform's file manager before the catalog sees the label. These
-    // two commands keep their ids, but on Windows/Linux their source is no longer "Finder".
-    if language == "uk" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+    // The engine names the platform's file manager before the catalog sees the label, so on
+    // Windows and Linux the source is no longer "Finder" and the catalog's row misses. Every
+    // language that names a file manager says so here (#1450); a language with no row keeps the
+    // English source rather than a guess.
+    if matches!(command, "file.revealInFinder" | "layer.revealInFinder")
+        && let Some((_, explorer, manager)) = REVEAL_FINDER.iter().find(|(code, ..)| *code == language)
+    {
+        // Only the Windows and Linux sources are overridden; "Reveal in Finder" keeps going to the
+        // catalog below, which holds the macOS wording.
         match source {
-            "Reveal in Explorer" => return "Показати у Провіднику",
-            "Reveal in File Manager" => return "Показати у файловому менеджері",
+            "Reveal in Explorer" => return explorer,
+            "Reveal in File Manager" => return manager,
             _ => {}
         }
     }
-    if language == "de" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+    if language == "sv" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
         match source {
-            "Reveal in Explorer" => return "Im Explorer anzeigen",
-            "Reveal in File Manager" => return "Im Dateimanager anzeigen",
-            _ => {}
-        }
-    }
-    if language == "cs" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
-        match source {
-            "Reveal in Explorer" => return "Zobrazit v Průzkumníku",
-            "Reveal in File Manager" => return "Zobrazit ve správci souborů",
+            "Reveal in Explorer" => return "Visa i Utforskaren",
+            "Reveal in File Manager" => return "Visa i filhanteraren",
             _ => {}
         }
     }
@@ -141,8 +218,28 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "fr" => FRENCH,
         "de" => GERMAN,
         "cs" => CZECH,
+        "pl" => POLISH,
+        "ka" => GEORGIAN,
+        "sv" => SWEDISH,
         _ => return None,
     })
+}
+
+/// A command's label drawn outside the menu bar (the dock's tab titles, the workspace bar), in the
+/// language the panels draw in: the menu bar's row for (`command`, `source`), else the panel
+/// catalog's row for `source`, else `source`. `…` also finds a menu bar row written `...`.
+pub(crate) fn command_label<'a>(command: &str, source: &'a str) -> &'a str {
+    let dotted = source.strip_suffix('…').map(|stem| format!("{stem}..."));
+    let row = |key: &str| menu_catalog(ui::current())?.iter().find(|(id, en, _)| *id == command && *en == key).map(|(_, _, translated)| *translated);
+    row(source).or_else(|| row(dotted.as_deref()?)).unwrap_or_else(|| tr(source))
+}
+
+/// A Settings page's title as the menu bar's Settings submenu draws it, without the ellipsis; the
+/// panel catalog's row for pages that have no menu row. The panel catalog's "Type" is the kind
+/// (Camera Settings, the Project panel's column), while the Type page is about text.
+pub(crate) fn settings_page_title(title: &str) -> &str {
+    let menu = menu_catalog(ui::current()).and_then(|c| c.iter().find(|(id, en, _)| *id == "app.settings" && en.strip_suffix("...") == Some(title)));
+    menu.and_then(|(_, _, translated)| translated.strip_suffix("...")).unwrap_or_else(|| tr(title))
 }
 
 /// `source` looked up in `catalog` by (command, English label); the source itself when the pair is
@@ -182,20 +279,36 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         return effects::name(id, &e.label);
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
-    // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
-    let (undo, no_undo, redo, no_redo) = match language(app) {
-        "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
-        "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
-        "zh-hant" => ("復原", "沒有可復原的操作", "重做", "沒有可重做的操作"),
-        "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
-        "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
-        "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
-        "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
-        _ => return shown,
+    // looked up in a catalog. A language without this wording keeps the shown undo/redo label, and
+    // the rest of its menu still goes through the catalog below (#1449).
+    let history = match language(app) {
+        "en" => return shown,
+        "ja" => Some(("取り消し", "取り消しできません", "やり直し", "やり直しできません")),
+        "zh-hans" => Some(("撤销", "无可撤销的操作", "重做", "无可重做的操作")),
+        "zh-hant" => Some(("復原", "沒有可復原的操作", "重做", "沒有可重做的操作")),
+        "uk" => Some(("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення")),
+        "es" => Some(("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer")),
+        "pt-br" => Some(("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer")),
+        "cs" => Some(("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat")),
+        "fr" => Some(("Annuler", "Impossible d'annuler", "Rétablir", "Impossible de rétablir")),
+        "de" => Some(("Rückgängig", "Rückgängig nicht möglich", "Wiederholen", "Wiederholen nicht möglich")),
+        "pl" => Some(("Cofnij", "Nie można cofnąć", "Ponów", "Nie można ponowić")),
+        // A colon before the history's (untranslated) action name: "დაბრუნება: Comp1".
+        "ka" => Some(("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია")),
+        // A colon before the history's (untranslated) action name: "Отменить: Comp1".
+        "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
+        "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
+        _ => None,
     };
     match e.command.as_str() {
-        "edit.undo" => app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
-        "edit.redo" => app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
+        "edit.undo" | "edit.redo" => {
+            let Some((undo, no_undo, redo, no_redo)) = history else { return shown };
+            if e.command == "edit.undo" {
+                app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into())
+            } else {
+                app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into())
+            }
+        }
         "window.panel" => {
             let prefix = format!("{}: ", e.label);
             if let Some(name) = shown.strip_prefix(&prefix) {
@@ -221,8 +334,23 @@ pub(crate) fn effect_category(children: &[MenuNode], source: &str) -> Option<Str
     (!children.is_empty() && children.iter().all(|c| matches!(c, MenuNode::Item(e) if e.command == "effect.apply"))).then(|| effects::category(source))
 }
 
+/// Polish names for the Assign Shortcut submenus that carry a workspace's or 3D view's name.
+fn polish_assign_shortcut(source: &str, shown: &str) -> Option<String> {
+    let named = shown.strip_prefix("Assign Shortcut to “")?;
+    match source {
+        "Assign Shortcut to Workspace" => named.strip_suffix("” Workspace").map(|name| format!("Przypisz skrót do obszaru roboczego „{name}”")),
+        "Assign Shortcut to 3D View" => named.strip_suffix('”').map(|name| format!("Przypisz skrót do widoku 3D „{name}”")),
+        _ => None,
+    }
+}
+
 pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> String {
     match language(app) {
+        "pl" => {
+            if let Some(label) = polish_assign_shortcut(source, &shown) {
+                return label;
+            }
+        }
         "cs" => {
             if source == "Assign Shortcut to Workspace" {
                 if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
@@ -298,6 +426,28 @@ pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> Stri
                 && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
             {
                 return format!("Atribuir atalho à visualização 3D “{name}”");
+            }
+        }
+        "ka" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    return format!("მალსახმობის მინიჭება სამუშაო სივრცისთვის „{name}“");
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                return format!("მალსახმობის მინიჭება 3D ხედისთვის „{name}“");
+            }
+        }
+        "sv" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    return format!("Tilldela kortkommando till arbetslayouten ”{name}”");
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                return format!("Tilldela kortkommando till 3D-vyn ”{name}”");
             }
         }
         _ => {}
@@ -386,6 +536,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安装脚本文件..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安装 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "运行脚本文件..."),
+    ("", "Recent Script Files", "最近的脚本文件"),
     ("", "Create Proxy", "创建代理"),
     ("file.createProxy", "Still...", "静止图像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -505,6 +656,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "形状图层"),
     ("layer.newAdjustment", "Adjustment Layer", "调整图层"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "内容识别填充图层..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D 基本体..."),
     ("layer.new3dPrimitive", "Cube", "立方体"),
     ("layer.new3dPrimitive", "Sphere", "球体"),
     ("layer.new3dPrimitive", "Plane", "平面"),
@@ -738,6 +890,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "行落下"),
     ("anim.addKeyframe", "Add Keyframe", "添加关键帧"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "切换定格关键帧"),
+    ("keys.setMuted", "Mute Keyframes", "静音关键帧"),
+    ("keys.setMuted", "Unmute Keyframes", "取消静音关键帧"),
     ("keys.interpolation", "Keyframe Interpolation...", "关键帧插值..."),
     ("keys.velocity", "Keyframe Velocity...", "关键帧速度..."),
     ("", "Keyframe Assistant", "关键帧辅助"),
@@ -940,6 +1094,642 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.openDemoProject", "Open Demo Project", "打开示例项目"),
 ];
 
+/// Swedish (`sv`), written from the English source.
+const SWEDISH: &[(&str, &str, &str)] = &[
+    ("", "EffectCraft", "EffectCraft"),
+    ("app.about", "About EffectCraft...", "Om EffectCraft..."),
+    ("", "Settings...", "Inställningar..."),
+    ("app.settings", "General...", "Allmänt..."),
+    ("app.settings", "Startup & Repair...", "Start och reparation..."),
+    ("app.settings", "Project...", "Projekt..."),
+    ("app.settings", "Composition...", "Komposition..."),
+    ("app.settings", "Previews...", "Förhandsgranskningar..."),
+    ("app.settings", "Appearance...", "Utseende..."),
+    ("app.settings", "Grids & Guides...", "Rutnät och stödlinjer..."),
+    ("app.settings", "Labels...", "Etiketter..."),
+    ("app.settings", "Type...", "Text..."),
+    ("app.settings", "Import...", "Importera..."),
+    ("app.settings", "Export...", "Exportera..."),
+    ("app.settings", "Audio...", "Ljud..."),
+    ("app.settings", "Disk...", "Disk..."),
+    ("app.settings", "Memory & CPU...", "Minne och CPU..."),
+    ("app.settings", "Video...", "Video..."),
+    ("app.settings", "3D...", "3D..."),
+    ("app.settings", "Scripting & Expressions...", "Skript och uttryck..."),
+    ("app.hide", "Hide EffectCraft", "Dölj EffectCraft"),
+    ("app.hideOthers", "Hide Others", "Göm övriga"),
+    ("app.showAll", "Show All", "Visa alla"),
+    ("app.quit", "Quit EffectCraft", "Avsluta EffectCraft"),
+    ("", "File", "Arkiv"),
+    ("", "New", "Nytt"),
+    ("file.newProject", "New Project", "Nytt projekt"),
+    ("file.newFromTemplate", "New Project from Template...", "Nytt projekt från mall..."),
+    ("project.newFolder", "New Folder", "Ny mapp"),
+    ("file.open", "Open Project...", "Öppna projekt..."),
+    ("", "Open Recent", "Öppna senaste"),
+    ("file.clearRecent", "Clear Recent Projects", "Rensa senaste projekt"),
+    ("file.close", "Close", "Stäng"),
+    ("file.closeProject", "Close Project", "Stäng projekt"),
+    ("file.save", "Save", "Spara"),
+    ("", "Save As", "Spara som"),
+    ("file.saveAs", "Save As...", "Spara som..."),
+    ("file.saveCopy", "Save a Copy...", "Spara en kopia..."),
+    ("file.saveCopyAsXml", "Save a Copy As XML...", "Spara en kopia som XML..."),
+    ("templates.saveAs", "Save as Template...", "Spara som mall..."),
+    ("file.incrementAndSave", "Increment and Save", "Räkna upp och spara"),
+    ("file.revert", "Revert", "Återgå"),
+    ("", "Import", "Importera"),
+    ("file.import", "File...", "Fil..."),
+    ("file.importMultiple", "Multiple Files...", "Flera filer..."),
+    ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
+    ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
+    ("file.importSolid", "Solid...", "Enfärgad..."),
+    ("file.importLottie", "Lottie...", "Lottie..."),
+    ("file.importVanishingPoint", "Vanishing Point (.vpe)...", "Fluktpunkt (.vpe)..."),
+    ("essential.importTemplate", "Essential Graphics Template...", "Mall för grundläggande grafik..."),
+    ("", "Import Recent Footage", "Importera senaste material"),
+    ("file.clearRecentFootage", "Clear Recent Footage", "Rensa senaste filmmaterial"),
+    ("", "Export", "Exportera"),
+    ("renderQueue.add", "Add to Render Queue", "Lägg till i renderingskön"),
+    ("file.exportTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
+    ("file.exportLottie", "Lottie JSON...", "Lottie JSON..."),
+    ("essential.exportTemplate", "Essential Graphics Template...", "Mall för grundläggande grafik..."),
+    ("app.find", "Find", "Sök"),
+    ("layer.addItem", "Add Footage to Comp", "Lägg till filmmaterial i komposition"),
+    ("file.newCompFromSelection", "New Comp from Selection...", "Ny komposition från markering..."),
+    ("", "Dependencies", "Beroenden"),
+    ("file.collectFiles", "Collect Files...", "Samla filer..."),
+    ("file.consolidateFootage", "Consolidate All Footage", "Konsolidera allt filmmaterial"),
+    ("file.removeUnusedFootage", "Remove Unused Footage", "Ta bort oanvänt filmmaterial"),
+    ("file.reduceProject", "Reduce Project", "Reducera projekt"),
+    ("file.findMissing", "Find Missing Effects", "Sök saknade effekter"),
+    ("file.findMissing", "Find Missing Fonts", "Sök saknade typsnitt"),
+    ("file.findMissing", "Find Missing Footage", "Sök saknat filmmaterial"),
+    ("file.relinkFootage", "Relink Missing Footage...", "Länka om saknat filmmaterial..."),
+    ("file.watchFolder", "Watch Folder...", "Bevakad mapp..."),
+    ("", "Scripts", "Skript"),
+    ("file.installScript", "Install Script File...", "Installera skriptfil..."),
+    ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Installera ScriptUI-panel..."),
+    ("file.runScript", "Run Script File...", "Kör skriptfil..."),
+    ("", "Create Proxy", "Skapa proxy"),
+    ("file.createProxy", "Still...", "Stillbild..."),
+    ("file.createProxy", "Movie...", "Film..."),
+    ("", "Set Proxy", "Ange proxy"),
+    ("file.setProxy", "File...", "Fil..."),
+    ("file.setProxyNone", "None", "Ingen"),
+    ("", "Interpret Footage", "Tolka material"),
+    ("file.interpretFootage", "Main...", "Huvud..."),
+    ("file.interpretProxy", "Proxy...", "Proxy..."),
+    ("file.rememberInterpretation", "Remember Interpretation", "Kom ihåg tolkning"),
+    ("file.applyInterpretation", "Apply Interpretation", "Använd tolkning"),
+    ("", "Replace Footage", "Ersätt material"),
+    ("file.replaceFootage", "File...", "Fil..."),
+    ("file.replaceWithPlaceholder", "Placeholder...", "Platshållare..."),
+    ("file.replaceWithSolid", "Solid...", "Enfärgad..."),
+    ("file.replaceWithLayeredComp", "With Layered Comp", "Med komposition i lager"),
+    ("file.reloadFootage", "Reload Footage", "Läs in filmmaterial igen"),
+    ("file.revealInFinder", "Reveal in Finder", "Visa i Finder"),
+    ("file.projectSettings", "Project Settings...", "Projektinställningar..."),
+    ("app.quit", "Exit", "Avsluta"),
+    ("", "Edit", "Redigera"),
+    ("edit.undo", "Undo", "Ångra"),
+    ("edit.redo", "Redo", "Gör om"),
+    ("", "History", "Historik"),
+    ("app.commandPalette", "Quick Apply...", "Använd snabbt..."),
+    ("edit.cut", "Cut", "Klipp ut"),
+    ("edit.copy", "Copy", "Kopiera"),
+    ("edit.copyWithPropertyLinks", "Copy with Property Links", "Kopiera med egenskapslänkar"),
+    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "Kopiera med relativa egenskapslänkar"),
+    ("edit.copyExpressionOnly", "Copy Expression Only", "Kopiera endast uttryck"),
+    ("edit.paste", "Paste", "Klistra in"),
+    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "Klistra in omvända nyckelbildrutor"),
+    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "Klistra in text och matcha formatering"),
+    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "Klistra in endast textformatering"),
+    ("edit.clear", "Clear", "Rensa"),
+    ("edit.duplicate", "Duplicate", "Duplicera"),
+    ("edit.splitLayer", "Split Layer", "Dela lager"),
+    ("edit.liftWorkArea", "Lift Work Area", "Lyft arbetsområde"),
+    ("edit.extractWorkArea", "Extract Work Area", "Extrahera arbetsområde"),
+    ("edit.selectAll", "Select All", "Markera alla"),
+    ("edit.deselectAll", "Deselect All", "Avmarkera alla"),
+    ("", "Label", "Etikett"),
+    ("edit.selectLabelGroup", "Select Label Group", "Markera etikettgrupp"),
+    ("edit.label", "None", "Ingen"),
+    ("edit.label", "Red", "Röd"),
+    ("edit.label", "Yellow", "Gul"),
+    ("edit.label", "Aqua", "Akvamarin"),
+    ("edit.label", "Pink", "Rosa"),
+    ("edit.label", "Lavender", "Lavendel"),
+    ("edit.label", "Peach", "Persika"),
+    ("edit.label", "Sea Foam", "Havsskum"),
+    ("edit.label", "Blue", "Blå"),
+    ("edit.label", "Green", "Grön"),
+    ("edit.label", "Purple", "Lila"),
+    ("edit.label", "Orange", "Orange"),
+    ("edit.label", "Brown", "Brun"),
+    ("edit.label", "Fuchsia", "Fuchsia"),
+    ("edit.label", "Cyan", "Cyan"),
+    ("edit.label", "Sandstone", "Sandsten"),
+    ("edit.label", "Dark Green", "Mörkgrön"),
+    ("app.settings", "Edit Label Colors...", "Redigera etikettfärger..."),
+    ("", "Select Keyframe Label Group", "Markera etikettgrupp för nyckelbildrutor"),
+    ("keys.selectLabelGroup", "On Selected Layers", "På markerade lager"),
+    ("keys.selectLabelGroup", "On All Layers", "På alla lager"),
+    ("keys.selectLabelGroup", "Visible Keyframes on Selected Layers", "Synliga nyckelbildrutor på markerade lager"),
+    ("keys.selectLabelGroup", "Visible Keyframes on All Layers", "Synliga nyckelbildrutor på alla lager"),
+    ("", "Purge", "Rensa"),
+    ("edit.purge", "All Cache...", "All cache..."),
+    ("edit.purge", "All Memory & Disk Cache...", "Allt minne och all diskcache..."),
+    ("edit.purge", "All Memory", "Allt minne"),
+    ("edit.purge", "All Disk Cache...", "All diskcache..."),
+    ("edit.purge", "All 3D Cache...", "All 3D-cache..."),
+    ("edit.purgeUndo", "Undo", "Ångra"),
+    ("edit.purge", "Image Cache Memory", "Bildcacheminne"),
+    ("edit.purge", "Snapshot", "Ögonblicksbild"),
+    ("edit.editOriginal", "Edit Original...", "Redigera original..."),
+    ("", "Templates", "Mallar"),
+    ("app.templates", "Render Settings...", "Renderingsinställningar..."),
+    ("app.templates", "Output Module...", "Utgångsmodul..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts", "Kortkommandon"),
+    ("", "Preferences", "Inställningar"),
+    ("", "Composition", "Komposition"),
+    ("comp.new", "New Composition...", "Ny komposition..."),
+    ("comp.settings", "Composition Settings...", "Kompositionsinställningar..."),
+    ("comp.setPosterTime", "Set Poster Time", "Ange affischtid"),
+    ("comp.trimToWorkArea", "Trim Comp to Work Area", "Trimma komp till arbetsområde"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "Beskär komp till intresseregion"),
+    ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "Beskär komp till markerade lager(s) gränser"),
+    ("render.addOutputModule", "Add Output Module", "Lägg till utgångsmodul"),
+    ("", "Preview", "Förhandsgranskning"),
+    ("playback.toggle", "Play Current Preview", "Spela upp aktuell förhandsgranskning"),
+    ("playback.cacheWhenIdle", "Cache Frames When Idle", "Cachelagra bildrutor vid inaktivitet"),
+    ("playback.audio", "Audio", "Ljud"),
+    ("", "Save Frame As", "Spara bildruta som"),
+    ("comp.saveFrameAs", "File...", "Fil..."),
+    ("comp.saveFrameAsPsd", "Photoshop Layers...", "Photoshop-lager..."),
+    ("comp.saveFrameAsExr", "ProEXR...", "ProEXR..."),
+    ("comp.copyFrame", "Copy Frame to Clipboard", "Kopiera bildruta till Urklipp"),
+    ("render.preRender", "Pre-render...", "Förrendera..."),
+    ("render.saveCurrentPreview", "Save Current Preview...", "Spara aktuell förhandsgranskning..."),
+    ("comp.openInEssentialGraphics", "Open in Essential Graphics", "Öppna i Grundläggande grafik"),
+    ("", "Responsive Design — Time", "Responsiv design — tid"),
+    ("comp.responsiveTime", "Create Intro", "Skapa intro"),
+    ("comp.responsiveTime", "Create Outro", "Skapa outro"),
+    ("comp.responsiveTime", "Create Protected Region from Work Area", "Skapa skyddad region från arbetsområde"),
+    ("comp.flowchart", "Composition Flowchart", "Kompositionsflödesschema"),
+    ("comp.miniFlowchart", "Composition Mini-Flowchart", "Kompositionens miniflödesschema"),
+    ("", "VR", "VR"),
+    ("comp.vr.createEnvironment", "Create VR Environment...", "Skapa VR-miljö..."),
+    ("comp.vr.extractCubemap", "Extract Cubemap...", "Extrahera kubkarta..."),
+    ("", "Layer", "Lager"),
+    ("layer.newText", "Text", "Text"),
+    ("layer.newSolid", "Solid...", "Enfärgad..."),
+    ("layer.newLight", "Light...", "Ljus..."),
+    ("layer.newCamera", "Camera...", "Kamera..."),
+    ("layer.newNull", "Null Object", "Nullobjekt"),
+    ("layer.newShape", "Shape Layer", "Formlager"),
+    ("layer.newAdjustment", "Adjustment Layer", "Justeringslager"),
+    ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Innehållsmedvetet fyllningslager..."),
+    ("layer.new3dPrimitive", "Cube", "Kub"),
+    ("layer.new3dPrimitive", "Sphere", "Sfär"),
+    ("layer.new3dPrimitive", "Plane", "Plan"),
+    ("layer.new3dPrimitive", "Torus", "Torus"),
+    ("layer.new3dPrimitive", "Cone", "Kon"),
+    ("layer.new3dPrimitive", "Cylinder", "Cylinder"),
+    ("layer.settings", "Layer Settings...", "Lagerinställningar..."),
+    ("layer.openLayer", "Open Layer", "Öppna lager"),
+    ("layer.openSource", "Open Layer Source", "Öppna lagerkälla"),
+    ("layer.revealInFinder", "Reveal in Finder", "Visa i Finder"),
+    ("", "Mask", "Mask"),
+    ("layer.addMask", "New Mask", "Ny mask"),
+    ("layer.mask.shape", "Mask Shape...", "Maskform..."),
+    ("layer.mask.set", "Mask Feather...", "Maskfjädring..."),
+    ("layer.mask.set", "Mask Opacity...", "Maskopacitet..."),
+    ("layer.mask.set", "Mask Expansion...", "Maskexpansion..."),
+    ("layer.mask.reset", "Reset Mask", "Återställ mask"),
+    ("layer.mask.remove", "Remove Mask", "Ta bort mask"),
+    ("layer.mask.removeAll", "Remove All Masks", "Ta bort alla masker"),
+    ("track.mask", "Track Mask", "Spåra mask"),
+    ("", "Mode", "Läge"),
+    ("layer.mask.mode", "None", "Ingen"),
+    ("layer.mask.mode", "Add", "Addera"),
+    ("layer.mask.mode", "Subtract", "Subtrahera"),
+    ("layer.mask.mode", "Intersect", "Skärning"),
+    ("layer.mask.mode", "Lighten", "Ljusare"),
+    ("layer.mask.mode", "Darken", "Mörkare"),
+    ("layer.mask.mode", "Difference", "Differens"),
+    ("layer.mask.invert", "Inverted", "Inverterad"),
+    ("layer.mask.lock", "Locked", "Låst"),
+    ("", "Motion Blur", "Rörelseoskärpa"),
+    ("layer.mask.motionBlur", "Same As Layer", "Samma som lagret"),
+    ("layer.mask.motionBlur", "On", "På"),
+    ("layer.mask.motionBlur", "Off", "Av"),
+    ("", "Feather Falloff", "Fjädringsavtagande"),
+    ("layer.mask.featherFalloff", "Smooth", "Mjuk"),
+    ("layer.mask.featherFalloff", "Linear", "Linjär"),
+    ("layer.mask.unlockAll", "Unlock All Masks", "Lås upp alla masker"),
+    ("layer.mask.lockOthers", "Lock Other Masks", "Lås andra masker"),
+    ("layer.mask.hideLocked", "Hide Locked Masks", "Dölj låsta masker"),
+    ("", "Mask and Shape Path", "Mask- och formbana"),
+    ("path.rotoBezier", "RotoBezier", "RotoBezier"),
+    ("mask.setClosed", "Closed", "Sluten"),
+    ("path.convertToBezier", "Convert To Bezier Path", "Konvertera till Bezierbana"),
+    ("path.setFirstVertex", "Set First Vertex", "Ange första hörnpunkt"),
+    ("path.freeTransform", "Free Transform Points", "Fri transformering av punkter"),
+    ("", "Quality", "Kvalitet"),
+    ("layer.quality", "Best", "Bästa"),
+    ("layer.quality", "Draft", "Utkast"),
+    ("layer.quality", "Wireframe", "Trådram"),
+    ("layer.sampling", "Bilinear", "Bilinjär"),
+    ("layer.sampling", "Bicubic", "Bikubisk"),
+    ("", "Switches", "Växlar"),
+    ("layer.hideOtherVideo", "Hide Other Video", "Dölj annan video"),
+    ("layer.showAllVideo", "Show All Video", "Visa all video"),
+    ("layer.unlockAll", "Unlock All Layers", "Lås upp alla lager"),
+    ("layer.expressions", "Enable Expressions", "Aktivera uttryck"),
+    ("layer.expressions", "Disable Expressions", "Inaktivera uttryck"),
+    ("layer.setSwitch", "Shy", "Blyg"),
+    ("layer.setSwitch", "Lock", "Lås"),
+    ("layer.setSwitch", "Audio", "Ljud"),
+    ("layer.setSwitch", "Video", "Video"),
+    ("layer.setSwitch", "Solo", "Solo"),
+    ("layer.setSwitch", "Effect", "Effekt"),
+    ("layer.setSwitch", "Collapse", "Komprimera"),
+    ("layer.setSwitch", "Motion Blur", "Rörelseoskärpa"),
+    ("layer.setSwitch", "Adjustment Layer", "Justeringslager"),
+    ("", "Transform", "Transformera"),
+    ("layer.transform", "Reset", "Återställ"),
+    ("layer.setTransform", "Anchor Point...", "Ankarpunkt..."),
+    ("layer.setTransform", "Position...", "Position..."),
+    ("layer.setTransform", "Scale...", "Skala..."),
+    ("layer.setTransform", "Orientation...", "Orientering..."),
+    ("layer.setTransform", "Rotation...", "Rotation..."),
+    ("layer.setTransform", "Opacity...", "Opacitet..."),
+    ("layer.transform", "Flip Horizontal", "Vänd vågrätt"),
+    ("layer.transform", "Flip Vertical", "Vänd lodrätt"),
+    ("layer.transform", "Center In View", "Centrera i vyn"),
+    ("layer.centerAnchor", "Center Anchor Point in Layer Content", "Centrera ankarpunkt i lagerinnehållet"),
+    ("layer.transform", "Fit to Comp", "Anpassa till kompositionen"),
+    ("layer.transform", "Fit to Comp Width", "Anpassa till kompositionens bredd"),
+    ("layer.transform", "Fit to Comp Height", "Anpassa till kompositionens höjd"),
+    ("layer.autoOrient", "Auto-Orient...", "Automatisk orientering..."),
+    ("", "Time", "Tid"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "Aktivera tidsomvandling"),
+    ("layer.timeReverse", "Time-Reverse Layer", "Tidsomvänd lager"),
+    ("layer.timeStretch", "Time Stretch...", "Tidssträckning..."),
+    ("layer.freezeFrame", "Freeze Frame", "Frys bildruta"),
+    ("layer.freezeOnLastFrame", "Freeze On Last Frame", "Frys på sista bildrutan"),
+    ("layer.alignVideoToData", "Align Video to Data", "Justera video efter data"),
+    ("", "Frame Blending", "Bildblandning"),
+    ("layer.frameBlending", "Off", "Av"),
+    ("layer.frameBlending", "Frame Mix", "Bildrutemix"),
+    ("layer.frameBlending", "Pixel Motion", "Pixelrörelse"),
+    ("layer.setSwitch", "3D Layer", "3D-lager"),
+    ("layer.setSwitch", "Guide Layer", "Hjälplager"),
+    ("layer.environment", "Environment Layer", "Miljölager"),
+    ("", "Markers", "Markörer"),
+    ("layer.addMarker", "Add Marker", "Lägg till markör"),
+    ("layer.updateMarkersFromSource", "Update Markers From Source", "Uppdatera markörer från källan"),
+    ("layer.markersLock", "Lock Markers", "Lås markörer"),
+    ("layer.deleteAllMarkers", "Delete All Markers", "Radera alla markörer"),
+    ("layer.setSwitch", "Preserve Transparency", "Bevara transparens"),
+    ("", "Blending Mode", "Blandningsläge"),
+    ("layer.setBlendMode", "Normal", "Normal"),
+    ("layer.setBlendMode", "Dissolve", "Övertoning"),
+    ("layer.setBlendMode", "Dancing Dissolve", "Dansande övertoning"),
+    ("layer.setBlendMode", "Darken", "Mörkare"),
+    ("layer.setBlendMode", "Multiply", "Multiplicera"),
+    ("layer.setBlendMode", "Color Burn", "Färgefterbelysning"),
+    ("layer.setBlendMode", "Classic Color Burn", "Klassisk färgefterbelysning"),
+    ("layer.setBlendMode", "Linear Burn", "Linjär efterbelysning"),
+    ("layer.setBlendMode", "Darker Color", "Mörkare färg"),
+    ("layer.setBlendMode", "Add", "Addera"),
+    ("layer.setBlendMode", "Lighten", "Ljusare"),
+    ("layer.setBlendMode", "Screen", "Skärm"),
+    ("layer.setBlendMode", "Color Dodge", "Färgskuggning"),
+    ("layer.setBlendMode", "Classic Color Dodge", "Klassisk färgskuggning"),
+    ("layer.setBlendMode", "Linear Dodge", "Linjär skuggning"),
+    ("layer.setBlendMode", "Lighter Color", "Ljusare färg"),
+    ("layer.setBlendMode", "Overlay", "Överlägg"),
+    ("layer.setBlendMode", "Soft Light", "Mjukt ljus"),
+    ("layer.setBlendMode", "Hard Light", "Hårt ljus"),
+    ("layer.setBlendMode", "Linear Light", "Linjärt ljus"),
+    ("layer.setBlendMode", "Vivid Light", "Intensivt ljus"),
+    ("layer.setBlendMode", "Pin Light", "Punktljus"),
+    ("layer.setBlendMode", "Hard Mix", "Hård blandning"),
+    ("layer.setBlendMode", "Difference", "Differens"),
+    ("layer.setBlendMode", "Classic Difference", "Klassisk differens"),
+    ("layer.setBlendMode", "Exclusion", "Uteslutning"),
+    ("layer.setBlendMode", "Subtract", "Subtrahera"),
+    ("layer.setBlendMode", "Divide", "Dividera"),
+    ("layer.setBlendMode", "Hue", "Nyans"),
+    ("layer.setBlendMode", "Saturation", "Mättnad"),
+    ("layer.setBlendMode", "Color", "Färg"),
+    ("layer.setBlendMode", "Luminosity", "Luminositet"),
+    ("layer.setBlendMode", "Stencil Alpha", "Schablon alfa"),
+    ("layer.setBlendMode", "Stencil Luma", "Schablon luma"),
+    ("layer.setBlendMode", "Silhouette Alpha", "Siluett alfa"),
+    ("layer.setBlendMode", "Silhouette Luma", "Siluett luma"),
+    ("layer.setBlendMode", "Alpha Add", "Alfa addera"),
+    ("layer.setBlendMode", "Luminescent Premul", "Luminiscent förmultiplicerad"),
+    ("layer.setBlendMode", "Next Blending Mode", "Nästa blandningsläge"),
+    ("layer.setBlendMode", "Previous Blending Mode", "Föregående blandningsläge"),
+    ("", "Track Matte", "Track matte"),
+    ("layer.trackMatte", "No Track Matte", "Ingen track matte"),
+    ("layer.trackMatte", "Alpha Matte", "Alfamatte"),
+    ("layer.trackMatte", "Alpha Inverted Matte", "Inverterad alfamatte"),
+    ("layer.trackMatte", "Luma Matte", "Lumamatte"),
+    ("layer.trackMatte", "Luma Inverted Matte", "Inverterad lumamatte"),
+    ("layer.trackMatte", "Matte with Layer Above", "Matte med lagret ovanför"),
+    ("layer.trackMatte", "Matte with Layer Below", "Matte med lagret nedanför"),
+    ("", "Layer Styles", "Lagerstilar"),
+    ("layer.style.options", "Layer Style Options...", "Lagerstilsalternativ..."),
+    ("layer.style.convertToEditable", "Convert to Editable Styles", "Konvertera till redigerbara stilar"),
+    ("layer.style.showAll", "Show All", "Visa alla"),
+    ("layer.style.removeAll", "Remove All", "Ta bort alla"),
+    ("layer.style.dropShadow", "Drop Shadow", "Slagskugga"),
+    ("layer.style.innerShadow", "Inner Shadow", "Inre skugga"),
+    ("layer.style.outerGlow", "Outer Glow", "Yttre glöd"),
+    ("layer.style.innerGlow", "Inner Glow", "Inre glöd"),
+    ("layer.style.bevelEmboss", "Bevel and Emboss", "Fasning och relief"),
+    ("layer.style.satin", "Satin", "Satin"),
+    ("layer.style.colorOverlay", "Color Overlay", "Färgöverlägg"),
+    ("layer.style.gradientOverlay", "Gradient Overlay", "Gradientöverlägg"),
+    ("layer.style.stroke", "Stroke", "Kontur"),
+    ("path.groupShapes", "Group Shapes", "Gruppera former"),
+    ("path.ungroupShapes", "Ungroup Shapes", "Avgruppera former"),
+    ("", "Arrange", "Ordna"),
+    ("layer.arrange", "Bring Layer to Front", "Lägg lager överst"),
+    ("layer.arrange", "Bring Layer Forward", "Flytta fram lager"),
+    ("layer.arrange", "Send Layer Backward", "Flytta bak lager"),
+    ("layer.arrange", "Send Layer to Back", "Lägg lager underst"),
+    ("", "Reveal", "Visa"),
+    ("layer.revealSource", "Reveal Layer Source in Project", "Visa lagerkälla i projektet"),
+    ("comp.flowchart", "Reveal Layer in Project Flowchart", "Visa lager i projektflödesschema"),
+    ("comp.revealInProject", "Reveal Composition in Project", "Visa komposition i projekt"),
+    ("layer.revealExpressionErrors", "Reveal Expression Errors", "Visa uttrycksfel"),
+    ("", "Create", "Skapa"),
+    ("layer.create", "Convert to Editable Text", "Konvertera till redigerbar text"),
+    ("layer.create", "Create Shapes from Text", "Skapa former från text"),
+    ("layer.create", "Create Masks from Text", "Skapa masker från text"),
+    ("layer.create", "Create Shapes from Vector Layer", "Skapa former från vektorlager"),
+    ("layer.create", "Create Keyframes from Data", "Skapa nyckelbildrutor från data"),
+    ("layer.create", "Null Controllers for Positional Points", "Null-kontroller för positionspunkter"),
+    ("layer.create", "Null Controllers for Path Points", "Null-kontroller för banpunkter"),
+    ("layer.create", "Nulls Following Path Points", "Nullobjekt som följer banpunkter"),
+    ("layer.create", "Null Tracing Along Path", "Null som spårar längs bana"),
+    ("layer.create", "Create 3D Layer Instance", "Skapa 3D-lagerinstans"),
+    ("", "Camera", "Kamera"),
+    ("camera.fromView", "Create Camera from 3D View", "Skapa kamera från 3D-vy"),
+    ("camera.stereoRig", "Create Stereo 3D Rig", "Skapa stereo-3D-rigg"),
+    ("camera.orbitNull", "Create Orbit Null", "Skapa null för kretsning"),
+    ("camera.fromModel", "Create Cameras from 3D Model", "Skapa kameror från 3D-modell"),
+    ("camera.linkFocusToPoi", "Link Focus Distance to Point of Interest", "Länka fokusavstånd till intressepunkt"),
+    ("camera.linkFocusToLayer", "Link Focus Distance to Layer", "Länka fokusavstånd till lager"),
+    ("camera.setFocusToLayer", "Set Focus Distance to Layer", "Ange fokusavstånd till lager"),
+    ("layer.cameraSettings", "Camera Settings...", "Kamerainställningar..."),
+    ("view.reset3DView", "Reset 3D View", "Återställ 3D-vy"),
+    ("", "Light", "Ljus"),
+    ("light.fromModel", "Create Lights from 3D Model", "Skapa ljus från 3D-modell"),
+    ("light.controlWithCamera", "Control Light with Camera", "Styr ljuset med kameran"),
+    ("light.environmentBackground", "Create Environment Light Background Layer", "Skapa bakgrundslager för miljöljus"),
+    ("", "Material", "Material"),
+    ("material.revealSource", "Reveal Material Source in Project", "Visa materialkällan i projektet"),
+    ("material.reset", "Reset Material", "Återställ material"),
+    ("material.duplicateAssign", "Duplicate and Assign Material", "Duplicera och tilldela material"),
+    ("layer.autoTrace", "Auto-trace...", "Automatisk konturspårning..."),
+    ("layer.precompose", "Pre-compose...", "Förkomponera..."),
+    ("layer.sceneEditDetection", "Scene Edit Detection...", "Identifiering av scensnitt..."),
+    ("", "Effect", "Effekt"),
+    ("window.panel", "Effect Controls", "Effektkontroller"),
+    ("effect.applyLast", "Last Effect", "Senaste effekten"),
+    ("effect.removeAll", "Remove All", "Ta bort alla"),
+    ("effect.manage", "Manage Effects...", "Hantera effekter..."),
+    ("effect.plugins.load", "Load Effect Plug-in...", "Läs in effektplugin..."),
+    ("", "Animation", "Animering"),
+    ("anim.savePreset", "Save Animation Preset...", "Spara animeringsförinställning..."),
+    ("anim.applyPreset", "Apply Animation Preset...", "Använd animeringsförinställning..."),
+    ("", "Recent Animation Presets", "Senaste animeringsförinställningar"),
+    ("anim.clearRecentPresets", "Clear Recent Presets", "Rensa senaste förinställningar"),
+    ("anim.browsePresets", "Browse Presets...", "Bläddra bland förinställningar..."),
+    ("", "Text Animation Presets", "Förinställningar för textanimering"),
+    ("layer.applyTextPreset", "Typewriter", "Skrivmaskin"),
+    ("layer.applyTextPreset", "Fade Up Characters", "Tona upp tecken"),
+    ("layer.applyTextPreset", "Bounce In Words", "Studsa in ord"),
+    ("layer.applyTextPreset", "Tracking In", "Spärrning in"),
+    ("layer.applyTextPreset", "Scramble", "Kasta om"),
+    ("layer.applyTextPreset", "Blur In", "Oskärpa in"),
+    ("layer.applyTextPreset", "Jitter", "Darr"),
+    ("layer.applyTextPreset", "Drop In Lines", "Släpp in rader"),
+    ("anim.addKeyframe", "Add Keyframe", "Lägg till nyckelbildruta"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "Växla hållen nyckelbildruta"),
+    ("keys.interpolation", "Keyframe Interpolation...", "Interpolering för nyckelbildrutor..."),
+    ("keys.velocity", "Keyframe Velocity...", "Ändringshastighet för nyckelbildrutor..."),
+    ("", "Keyframe Assistant", "Nyckelbildrutsassistent"),
+    ("keys.audioToKeyframes", "Convert Audio to Keyframes", "Konvertera ljud till nyckelbildrutor"),
+    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "Konvertera uttryck till nyckelbildrutor"),
+    ("keys.easyEase", "Easy Ease", "Mjukt in och ut"),
+    ("keys.easyEaseIn", "Easy Ease In", "Mjukt in"),
+    ("keys.easyEaseOut", "Easy Ease Out", "Mjukt ut"),
+    ("keys.exponentialScale", "Exponential Scale", "Exponentiell skala"),
+    ("keys.rpfCameraImport", "RPF Camera Import", "RPF-kameraimport"),
+    ("layer.sequence", "Sequence Layers...", "Sekvensera lager..."),
+    ("keys.timeReverse", "Time-Reverse Keyframes", "Vänd nyckelbildrutor i tid"),
+    ("", "Animate Text", "Animera text"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "Aktivera 3D per tecken"),
+    ("layer.addTextAnimator", "Anchor Point", "Ankarpunkt"),
+    ("layer.addTextAnimator", "Position", "Position"),
+    ("layer.addTextAnimator", "Scale", "Skala"),
+    ("layer.addTextAnimator", "Skew", "Skevning"),
+    ("layer.addTextAnimator", "Rotation", "Rotation"),
+    ("layer.addTextAnimator", "Opacity", "Opacitet"),
+    ("layer.addTextAnimator", "All Transform Properties", "Alla transformeringsegenskaper"),
+    ("", "Fill Color", "Fyllnadsfärg"),
+    ("layer.addTextAnimator", "RGB", "RGB"),
+    ("layer.addTextAnimator", "Hue", "Nyans"),
+    ("layer.addTextAnimator", "Saturation", "Mättnad"),
+    ("layer.addTextAnimator", "Brightness", "Ljusstyrka"),
+    ("", "Stroke Color", "Konturfärg"),
+    ("layer.addTextAnimator", "Stroke Width", "Konturbredd"),
+    ("", "Front", "Fram"),
+    ("", "Bevel", "Fasning"),
+    ("", "Side", "Sida"),
+    ("", "Back", "Tillbaka"),
+    ("layer.addTextAnimator", "Color", "Färg"),
+    ("layer.addTextAnimator", "Tracking", "Spärrning"),
+    ("layer.addTextAnimator", "Line Anchor", "Radankare"),
+    ("layer.addTextAnimator", "Line Spacing", "Radavstånd"),
+    ("layer.addTextAnimator", "Character Offset", "Teckenförskjutning"),
+    ("layer.addTextAnimator", "Character Value", "Teckenvärde"),
+    ("layer.addTextAnimator", "Blur", "Oskärpa"),
+    ("text.animatorFontAxes", "Variable Font Axes", "Axlar för variabla typsnitt"),
+    ("", "Add Text Selector", "Lägg till textväljare"),
+    ("text.addSelector", "Range", "Omfång"),
+    ("text.addSelector", "Wiggly", "Vickande"),
+    ("text.addSelector", "Expression", "Uttryck"),
+    ("text.removeAllAnimators", "Remove All Text Animators", "Ta bort alla textanimatörer"),
+    ("prop.setExpression", "Add Expression", "Lägg till uttryck"),
+    ("essential.addProperty", "Add Property to Essential Graphics", "Lägg till egenskap i Grundläggande grafik"),
+    ("prop.separateDimensions", "Separate Dimensions", "Separera dimensioner"),
+    ("track.camera", "Track Camera", "Spåra kamera"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
+    ("track.motion", "Track Motion", "Spåra rörelse"),
+    ("track.stabilize", "Stabilize Motion", "Stabilisera rörelse"),
+    ("track.property", "Track this Property", "Spåra den här egenskapen"),
+    ("anim.reveal", "Reveal Properties with Keyframes", "Visa egenskaper med nyckelbildrutor"),
+    ("anim.reveal", "Reveal Properties with Animation", "Visa egenskaper med animering"),
+    ("anim.reveal", "Reveal All Modified Properties", "Visa alla ändrade egenskaper"),
+    ("", "View", "Visa"),
+    ("view.newViewer", "New Viewer", "Ny visare"),
+    ("view.splitLockedViewer", "Split with New Locked Viewer", "Dela med ny låst visare"),
+    ("view.zoomIn", "Zoom In", "Zooma in"),
+    ("view.zoomOut", "Zoom Out", "Zooma ut"),
+    ("", "Resolution", "Upplösning"),
+    ("view.res.full", "Full", "Full"),
+    ("view.res.half", "Half", "Halv"),
+    ("view.res.third", "Third", "En tredjedel"),
+    ("view.res.quarter", "Quarter", "En fjärdedel"),
+    ("view.res.custom", "Custom...", "Anpassad..."),
+    ("view.displayColorManagement", "Use Display Color Management", "Använd färghantering för bildskärm"),
+    ("", "Simulate Output", "Simulera utgång"),
+    ("view.simulateOutput", "No Output Simulation", "Ingen utdatasimulering"),
+    ("view.simulateOutput", "HDTV (Rec. 709)", "HDTV (Rec. 709)"),
+    ("view.simulateOutput", "SDTV NTSC", "SDTV NTSC"),
+    ("view.simulateOutput", "SDTV PAL", "SDTV PAL"),
+    ("view.simulateOutput", "Legacy Macintosh RGB (Gamma 1.8)", "Äldre Macintosh RGB (gamma 1,8)"),
+    ("view.simulateOutput", "Internet Standard RGB (sRGB)", "Internetstandard-RGB (sRGB)"),
+    ("view.simulateOutput", "UHDTV (Rec. 2020)", "UHDTV (Rec. 2020)"),
+    ("view.simulateOutput", "Display P3", "Display P3"),
+    ("view.simulateOutput", "Linear (1.0 Gamma)", "Linjär (gamma 1,0)"),
+    ("view.customRgb", "My Custom RGB...", "Min anpassade RGB..."),
+    ("view.simulateOutput", "Custom...", "Anpassad..."),
+    ("view.rulers", "Show Rulers", "Visa linjaler"),
+    ("", "Panel Background Color", "Panelens bakgrundsfärg"),
+    ("view.panelBackground", "Black", "Svart"),
+    ("view.panelBackground", "Dark Gray", "Mörkgrå"),
+    ("view.panelBackground", "Medium Gray (Default)", "Mellangrå (standard)"),
+    ("view.panelBackground", "Light Gray", "Ljusgrå"),
+    ("view.panelBackground", "White", "Vit"),
+    ("view.panelBackground", "Custom", "Anpassad"),
+    ("view.panelBackground", "Select Custom Background Color...", "Välj anpassad bakgrundsfärg..."),
+    ("view.guides", "Show Guides", "Visa stödlinjer"),
+    ("view.snapToGuides", "Snap to Guides", "Fäst mot stödlinjer"),
+    ("view.lockGuides", "Lock Guides", "Lås stödlinjer"),
+    ("view.addGuide", "Add Guide...", "Lägg till stödlinje..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Lägg till procentstödlinje..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Konvertera stödlinjer till procent"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Konvertera stödlinjer till pixlar"),
+    ("view.clearGuides", "Clear Guides", "Rensa stödlinjer"),
+    ("view.importGuides", "Import Guides...", "Importera stödlinjer..."),
+    ("view.exportGuides", "Export Guides...", "Exportera stödlinjer..."),
+    ("view.grid", "Show Grid", "Visa rutnät"),
+    ("view.snapToGrid", "Snap to Grid", "Fäst mot rutnät"),
+    ("view.snapping", "Snapping", "Fäst"),
+    ("view.options", "View Options...", "Visningsalternativ..."),
+    ("view.layerControls", "Show Layer Controls", "Visa lagerkontroller"),
+    ("", "Switch View Layout", "Växla vylayout"),
+    ("view.layout", "1 View", "1 vy"),
+    ("view.layout", "2 Views", "2 vyer"),
+    ("view.layout", "4 Views", "4 vyer"),
+    ("view.shareViewOptions", "Share View Options", "Dela visningsalternativ"),
+    ("", "Switch 3D View", "Växla 3D-vy"),
+    ("view.3d.activeCamera", "Active Camera", "Aktiv kamera"),
+    ("view.3d.default", "Default", "Standard"),
+    ("view.3d.front", "Front", "Framifrån"),
+    ("view.3d.left", "Left", "Vänster"),
+    ("view.3d.top", "Top", "Ovanifrån"),
+    ("view.3d.back", "Back", "Bakifrån"),
+    ("view.3d.right", "Right", "Höger"),
+    ("view.3d.bottom", "Bottom", "Underifrån"),
+    ("view.3d.custom1", "Custom View 1", "Anpassad vy 1"),
+    ("view.3d.custom2", "Custom View 2", "Anpassad vy 2"),
+    ("view.3d.custom3", "Custom View 3", "Anpassad vy 3"),
+    ("", "Assign Shortcut to 3D View", "Tilldela kortkommando till 3D-vy"),
+    ("view.3d.last", "Switch to Last 3D View", "Växla till senaste 3D-vy"),
+    ("view.lookAtSelected", "Look at Selected Layers", "Titta på markerade lager"),
+    ("view.lookAtAll", "Look at All Layers", "Titta på alla lager"),
+    ("time.set", "Go to Time...", "Gå till tid..."),
+    ("view.fullScreen", "Enter Full Screen", "Visa i helskärm"),
+    ("", "Window", "Fönster"),
+    ("", "Workspace", "Arbetslayout"),
+    ("window.workspace", "Default", "Standard"),
+    ("window.workspace", "Review", "Granskning"),
+    ("window.workspace", "Learn", "Lär dig"),
+    ("window.workspace", "Small Screen", "Liten skärm"),
+    ("window.workspace", "Standard", "Standard"),
+    ("window.workspace", "All Panels", "Alla paneler"),
+    ("window.workspace", "Animation", "Animering"),
+    ("window.workspace", "Color", "Färg"),
+    ("window.workspace", "Effects", "Effekter"),
+    ("window.workspace", "Essential Graphics", "Grundläggande grafik"),
+    ("window.workspace", "Minimal", "Minimal"),
+    ("window.workspace", "Motion Tracking", "Rörelsespårning"),
+    ("window.workspace", "Paint", "Måla"),
+    ("window.workspace", "Text", "Text"),
+    ("window.workspace", "Undocked Panels", "Odockade paneler"),
+    ("window.resetWorkspace", "Reset to Saved Layout", "Återställ till sparad layout"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "Spara ändringar i den här arbetslayouten"),
+    ("window.saveWorkspaceAs", "Save as New Workspace...", "Spara som ny arbetslayout..."),
+    ("window.editWorkspaces", "Edit Workspaces...", "Redigera arbetslayouter..."),
+    ("", "Assign Shortcut to Workspace", "Tilldela kortkommando till arbetslayout"),
+    ("window.panel", "Align", "Justera"),
+    ("window.panel", "Audio", "Ljud"),
+    ("window.panel", "Brushes", "Penslar"),
+    ("window.panel", "Character", "Tecken"),
+    ("window.panel", "Content-Aware Fill", "Innehållsmedveten fyllning"),
+    ("window.panel", "Effects & Presets", "Effekter och förinställningar"),
+    ("window.panel", "Essential Graphics", "Grundläggande grafik"),
+    ("window.panel", "Info", "Info"),
+    ("help.inAppTutorials", "Learn", "Lär dig"),
+    ("window.panel", "Lumetri Scopes", "Lumetri-scope"),
+    ("window.panel", "Mask Interpolation", "Maskinterpolering"),
+    ("window.panel", "Media Browser", "Mediebläddrare"),
+    ("window.panel", "Metadata", "Metadata"),
+    ("window.panel", "Motion Sketch", "Rörelseskiss"),
+    ("window.panel", "Paint", "Måla"),
+    ("window.panel", "Paragraph", "Stycke"),
+    ("window.panel", "Preview", "Förhandsgranskning"),
+    ("window.panel", "Progress", "Förlopp"),
+    ("window.panel", "Properties", "Egenskaper"),
+    ("window.panel", "Script Console", "Skriptkonsol"),
+    ("window.panel", "Smoother", "Utjämnare"),
+    ("window.panel", "Tools", "Verktyg"),
+    ("window.panel", "Tracker", "Spårare"),
+    ("window.panel", "Wiggler", "Vickare"),
+    ("window.panel", "Composition", "Komposition"),
+    ("window.panel", "Flowchart", "Flödesschema"),
+    ("window.panel", "Footage", "Filmmaterial"),
+    ("window.panel", "Layer", "Lager"),
+    ("window.panel", "Project", "Projekt"),
+    ("window.panel", "Render Queue", "Renderingskö"),
+    ("window.panel", "Timeline", "Tidslinje"),
+    ("window.panel", "Create Nulls From Paths", "Skapa nullobjekt från banor"),
+    ("window.panel", "VR Comp Editor", "VR-kompositionsredigerare"),
+    ("", "Help", "Hjälp"),
+    ("help.docs", "EffectCraft Help...", "EffectCraft-hjälp..."),
+    ("help.docs", "Scripting Help...", "Hjälp för skript..."),
+    ("help.docs", "Expression Reference...", "Uttrycksreferens..."),
+    ("help.docs", "Effect Reference...", "Effektreferens..."),
+    ("anim.browsePresets", "Animation Presets...", "Animeringsförinställningar..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts...", "Kortkommandon..."),
+    ("help.inAppTutorials", "In-App Tutorials...", "Självstudier i appen..."),
+    ("help.onlineTutorials", "Online Tutorials...", "Självstudier online..."),
+    ("help.systemReport", "System Compatibility Report...", "Systemkompatibilitetsrapport..."),
+    ("help.enableLogging", "Enable Logging", "Aktivera loggning"),
+    ("help.revealLogFile", "Reveal Logging File", "Visa loggfil"),
+    ("help.discord", "Join the ArtCraft Discord...", "Gå med i ArtCraft på Discord..."),
+    ("help.reportIssue", "Provide Feedback...", "Ge återkoppling..."),
+    ("help.website", "ArtCraft Website", "ArtCrafts webbplats"),
+    ("help.appPage", "EffectCraft Home Page", "EffectCrafts startsida"),
+    ("help.github", "EffectCraft on GitHub", "EffectCraft på GitHub"),
+    ("file.openDemoProject", "Open Demo Project", "Öppna demoprojekt"),
+    ("", "Recent Script Files", "Senaste skriptfiler"),
+    ("layer.newPrimitive", "3D Primitive...", "3D-primitiv..."),
+    ("keys.setMuted", "Mute Keyframes", "Stäng av nyckelbildrutor"),
+    ("keys.setMuted", "Unmute Keyframes", "Slå på nyckelbildrutor"),
+];
+
 /// Traditional Chinese (zh-hant): the same (command, English label) keys as `JAPANESE`, one
 /// entry per fixed menu row of the engine's menu tree, mirroring `SIMPLIFIED_CHINESE` in the
 /// vocabulary the sibling Craft apps' zh-hant catalogs use.
@@ -1020,6 +1810,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安裝指令碼檔案..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安裝 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "執行指令碼檔案..."),
+    ("", "Recent Script Files", "最近使用的指令碼檔案"),
     ("", "Create Proxy", "建立代理"),
     ("file.createProxy", "Still...", "靜態影像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -1139,6 +1930,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "形狀圖層"),
     ("layer.newAdjustment", "Adjustment Layer", "調整圖層"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "內容感知填滿圖層..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D 基本體..."),
     ("layer.new3dPrimitive", "Cube", "立方體"),
     ("layer.new3dPrimitive", "Sphere", "球體"),
     ("layer.new3dPrimitive", "Plane", "平面"),
@@ -1372,6 +2164,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "行落下"),
     ("anim.addKeyframe", "Add Keyframe", "新增關鍵影格"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "切換定格關鍵影格"),
+    ("keys.setMuted", "Mute Keyframes", "靜音關鍵影格"),
+    ("keys.setMuted", "Unmute Keyframes", "取消靜音關鍵影格"),
     ("keys.interpolation", "Keyframe Interpolation...", "關鍵影格插補..."),
     ("keys.velocity", "Keyframe Velocity...", "關鍵影格速度..."),
     ("", "Keyframe Assistant", "關鍵影格輔助"),
@@ -1651,6 +2445,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "スクリプトファイルをインストール..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUIパネルをインストール..."),
     ("file.runScript", "Run Script File...", "スクリプトファイルを実行..."),
+    ("", "Recent Script Files", "最近使用したスクリプトファイル"),
     ("", "Create Proxy", "プロキシを作成"),
     ("file.createProxy", "Still...", "静止画..."),
     ("file.createProxy", "Movie...", "ムービー..."),
@@ -1675,23 +2470,23 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("edit.undo", "Undo", "取り消し"),
     ("edit.redo", "Redo", "やり直し"),
     ("", "History", "履歴"),
-    ("app.commandPalette", "Quick Apply...", "クイック適用..."),
+    ("app.commandPalette", "Quick Apply...", "今すぐ適用..."),
     ("edit.cut", "Cut", "カット"),
     ("edit.copy", "Copy", "コピー"),
-    ("edit.copyWithPropertyLinks", "Copy with Property Links", "プロパティリンク付きでコピー"),
-    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "相対プロパティリンク付きでコピー"),
+    ("edit.copyWithPropertyLinks", "Copy with Property Links", "プロパティリンクと一緒にコピー"),
+    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "相対的なプロパティリンクと一緒にコピー"),
     ("edit.copyExpressionOnly", "Copy Expression Only", "エクスプレッションのみをコピー"),
     ("edit.paste", "Paste", "ペースト"),
-    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "逆順にキーフレームをペースト"),
-    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "書式を合わせてテキストをペースト"),
-    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "テキストの書式のみをペースト"),
+    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "反転したキーフレームをペースト"),
+    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "テキストをペーストし書式設定を一致させる"),
+    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "テキスト書式設定のみをペースト"),
     ("edit.clear", "Clear", "消去"),
     ("edit.duplicate", "Duplicate", "複製"),
     ("edit.splitLayer", "Split Layer", "レイヤーを分割"),
-    ("edit.liftWorkArea", "Lift Work Area", "ワークエリアをリフト"),
-    ("edit.extractWorkArea", "Extract Work Area", "ワークエリアを抽出"),
-    ("edit.selectAll", "Select All", "すべてを選択"),
-    ("edit.deselectAll", "Deselect All", "すべての選択を解除"),
+    ("edit.liftWorkArea", "Lift Work Area", "ワークエリアのリフト"),
+    ("edit.extractWorkArea", "Extract Work Area", "ワークエリアの抽出"),
+    ("edit.selectAll", "Select All", "すべて選択"),
+    ("edit.deselectAll", "Deselect All", "すべてを選択解除"),
     ("", "Label", "ラベル"),
     ("edit.selectLabelGroup", "Select Label Group", "ラベルグループを選択"),
     ("edit.label", "None", "なし"),
@@ -1717,7 +2512,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("keys.selectLabelGroup", "On All Layers", "すべてのレイヤー上"),
     ("keys.selectLabelGroup", "Visible Keyframes on Selected Layers", "選択したレイヤー上の表示キーフレーム"),
     ("keys.selectLabelGroup", "Visible Keyframes on All Layers", "すべてのレイヤー上の表示キーフレーム"),
-    ("", "Purge", "キャッシュを消去"),
+    ("", "Purge", "キャッシュの消去"),
     ("edit.purge", "All Cache...", "すべてのキャッシュ..."),
     ("edit.purge", "All Memory & Disk Cache...", "すべてのメモリおよびディスクキャッシュ..."),
     ("edit.purge", "All Memory", "すべてのメモリ"),
@@ -1737,7 +2532,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("comp.settings", "Composition Settings...", "コンポジション設定..."),
     ("comp.setPosterTime", "Set Poster Time", "ポスター時間を設定"),
     ("comp.trimToWorkArea", "Trim Comp to Work Area", "コンポジションをワークエリアにトリミング"),
-    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "コンポジションを目標範囲にクロップ"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "コンポジションを関心領域にクロップ"),
     ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "コンポジションを選択レイヤーの境界にクロップ"),
     ("render.addOutputModule", "Add Output Module", "出力モジュールを追加"),
     ("", "Preview", "プレビュー"),
@@ -1770,6 +2565,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "シェイプレイヤー"),
     ("layer.newAdjustment", "Adjustment Layer", "調整レイヤー"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "コンテンツに応じた塗りつぶしレイヤー..."),
+    ("layer.newPrimitive", "3D Primitive...", "3Dプリミティブ..."),
     ("layer.new3dPrimitive", "Cube", "立方体"),
     ("layer.new3dPrimitive", "Sphere", "球体"),
     ("layer.new3dPrimitive", "Plane", "平面"),
@@ -1789,7 +2585,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.reset", "Reset Mask", "マスクをリセット"),
     ("layer.mask.remove", "Remove Mask", "マスクを削除"),
     ("layer.mask.removeAll", "Remove All Masks", "すべてのマスクを削除"),
-    ("track.mask", "Track Mask", "マスクをトラック"),
+    ("track.mask", "Track Mask", "マスクをトラッキング"),
     ("", "Mode", "モード"),
     ("layer.mask.mode", "None", "なし"),
     ("layer.mask.mode", "Add", "加算"),
@@ -1854,8 +2650,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.transform", "Fit to Comp Height", "コンポジションの高さに合わせる"),
     ("layer.autoOrient", "Auto-Orient...", "自動方向..."),
     ("", "Time", "時間"),
-    ("layer.enableTimeRemap", "Enable Time Remapping", "タイムリマップ使用可能"),
-    ("layer.timeReverse", "Time-Reverse Layer", "時間反転レイヤー"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "時間リマップを有効化"),
+    ("layer.timeReverse", "Time-Reverse Layer", "レイヤーを時間反転"),
     ("layer.timeStretch", "Time Stretch...", "時間伸縮..."),
     ("layer.freezeFrame", "Freeze Frame", "フレームを固定"),
     ("layer.freezeOnLastFrame", "Freeze On Last Frame", "最後のフレームで固定"),
@@ -1923,7 +2719,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.trackMatte", "Matte with Layer Above", "上のレイヤーをマットにする"),
     ("layer.trackMatte", "Matte with Layer Below", "下のレイヤーをマットにする"),
     ("", "Layer Styles", "レイヤースタイル"),
-    ("layer.style.options", "Layer Style Options...", "レイヤースタイルオプション..."),
+    ("layer.style.options", "Layer Style Options...", "レイヤースタイルのオプション..."),
     ("layer.style.convertToEditable", "Convert to Editable Styles", "編集可能なスタイルに変換"),
     ("layer.style.showAll", "Show All", "すべてを表示"),
     ("layer.style.removeAll", "Remove All", "すべてを削除"),
@@ -1952,7 +2748,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.create", "Convert to Editable Text", "編集可能なテキストに変換"),
     ("layer.create", "Create Shapes from Text", "テキストからシェイプを作成"),
     ("layer.create", "Create Masks from Text", "テキストからマスクを作成"),
-    ("layer.create", "Create Shapes from Vector Layer", "ベクトルレイヤーからシェイプを作成"),
+    ("layer.create", "Create Shapes from Vector Layer", "ベクターレイヤーからシェイプを作成"),
     ("layer.create", "Create Keyframes from Data", "データからキーフレームを作成"),
     ("layer.create", "Null Controllers for Positional Points", "位置のポイント用ヌルコントローラー"),
     ("layer.create", "Null Controllers for Path Points", "パスのポイント用ヌルコントローラー"),
@@ -2002,7 +2798,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Jitter", "ジッター"),
     ("layer.applyTextPreset", "Drop In Lines", "行をドロップイン"),
     ("anim.addKeyframe", "Add Keyframe", "キーフレームを追加"),
-    ("keys.toggleHold", "Toggle Hold Keyframe", "停止したキーフレームの切り替え"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "ホールドキーフレームの切り替え"),
+    ("keys.setMuted", "Mute Keyframes", "キーフレームをミュート"),
+    ("keys.setMuted", "Unmute Keyframes", "キーフレームのミュートを解除"),
     ("keys.interpolation", "Keyframe Interpolation...", "キーフレーム補間法..."),
     ("keys.velocity", "Keyframe Velocity...", "キーフレーム速度..."),
     ("", "Keyframe Assistant", "キーフレーム補助"),
@@ -2016,7 +2814,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.sequence", "Sequence Layers...", "シーケンスレイヤー..."),
     ("keys.timeReverse", "Time-Reverse Keyframes", "時間反転キーフレーム"),
     ("", "Animate Text", "テキストをアニメート"),
-    ("layer.enablePerChar3D", "Enable Per-character 3D", "文字ごとの3Dを使用可能にする"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "文字ごとの3Dを有効化"),
     ("layer.addTextAnimator", "Anchor Point", "アンカーポイント"),
     ("layer.addTextAnimator", "Position", "位置"),
     ("layer.addTextAnimator", "Scale", "スケール"),
@@ -2028,7 +2826,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.addTextAnimator", "RGB", "RGB"),
     ("layer.addTextAnimator", "Hue", "色相"),
     ("layer.addTextAnimator", "Saturation", "彩度"),
-    ("layer.addTextAnimator", "Brightness", "明度"),
+    ("layer.addTextAnimator", "Brightness", "明るさ"),
     ("", "Stroke Color", "線のカラー"),
     ("layer.addTextAnimator", "Stroke Width", "線幅"),
     ("", "Front", "前面"),
@@ -2050,12 +2848,12 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("text.removeAllAnimators", "Remove All Text Animators", "すべてのテキストアニメーターを削除"),
     ("prop.setExpression", "Add Expression", "エクスプレッションを追加"),
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
-    ("prop.separateDimensions", "Separate Dimensions", "次元に分割"),
-    ("track.camera", "Track Camera", "カメラをトラック"),
+    ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
+    ("track.camera", "Track Camera", "カメラをトラッキング"),
     ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
-    ("track.motion", "Track Motion", "モーションをトラック"),
-    ("track.stabilize", "Stabilize Motion", "モーションをスタビライズ"),
-    ("track.property", "Track this Property", "このプロパティをトラック"),
+    ("track.motion", "Track Motion", "モーションをトラッキング"),
+    ("track.stabilize", "Stabilize Motion", "モーションを安定化"),
+    ("track.property", "Track this Property", "このプロパティをトラッキング"),
     ("anim.reveal", "Reveal Properties with Keyframes", "キーフレームのあるプロパティを表示"),
     ("anim.reveal", "Reveal Properties with Animation", "アニメーションのあるプロパティを表示"),
     ("anim.reveal", "Reveal All Modified Properties", "変更されたすべてのプロパティを表示"),
@@ -2066,9 +2864,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.zoomOut", "Zoom Out", "ズームアウト"),
     ("", "Resolution", "解像度"),
     ("view.res.full", "Full", "フル画質"),
-    ("view.res.half", "Half", "1/2 画質"),
-    ("view.res.third", "Third", "1/3 画質"),
-    ("view.res.quarter", "Quarter", "1/4 画質"),
+    ("view.res.half", "Half", "1/2画質"),
+    ("view.res.third", "Third", "1/3画質"),
+    ("view.res.quarter", "Quarter", "1/4画質"),
     ("view.res.custom", "Custom...", "カスタム..."),
     ("view.displayColorManagement", "Use Display Color Management", "ディスプレイカラーマネジメントを使用"),
     ("", "Simulate Output", "出力をシミュレート"),
@@ -2114,16 +2912,16 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.shareViewOptions", "Share View Options", "表示オプションを共有"),
     ("", "Switch 3D View", "3Dビューを切り替え"),
     ("view.3d.activeCamera", "Active Camera", "アクティブカメラ"),
-    ("view.3d.default", "Default", "初期設定"),
-    ("view.3d.front", "Front", "フロント"),
-    ("view.3d.left", "Left", "レフト"),
-    ("view.3d.top", "Top", "トップ"),
-    ("view.3d.back", "Back", "バック"),
-    ("view.3d.right", "Right", "ライト"),
-    ("view.3d.bottom", "Bottom", "ボトム"),
-    ("view.3d.custom1", "Custom View 1", "カスタムビュー1"),
-    ("view.3d.custom2", "Custom View 2", "カスタムビュー2"),
-    ("view.3d.custom3", "Custom View 3", "カスタムビュー3"),
+    ("view.3d.default", "Default", "デフォルト"),
+    ("view.3d.front", "Front", "フロントビュー"),
+    ("view.3d.left", "Left", "レフトビュー"),
+    ("view.3d.top", "Top", "トップビュー"),
+    ("view.3d.back", "Back", "バックビュー"),
+    ("view.3d.right", "Right", "ライトビュー"),
+    ("view.3d.bottom", "Bottom", "ボトムビュー"),
+    ("view.3d.custom1", "Custom View 1", "カスタムビュー 1"),
+    ("view.3d.custom2", "Custom View 2", "カスタムビュー 2"),
+    ("view.3d.custom3", "Custom View 3", "カスタムビュー 3"),
     ("", "Assign Shortcut to 3D View", "3Dビューにショートカットを割り当て"),
     ("view.3d.last", "Switch to Last 3D View", "最後の3Dビューに切り替え"),
     ("view.lookAtSelected", "Look at Selected Layers", "選択したレイヤーを見る"),
@@ -2135,7 +2933,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.workspace", "Default", "初期設定"),
     ("window.workspace", "Review", "レビュー"),
     ("window.workspace", "Learn", "学習"),
-    ("window.workspace", "Small Screen", "小画面"),
+    ("window.workspace", "Small Screen", "小さい画面"),
     ("window.workspace", "Standard", "標準"),
     ("window.workspace", "All Panels", "すべてのパネル"),
     ("window.workspace", "Animation", "アニメーション"),
@@ -2148,7 +2946,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.workspace", "Text", "テキスト"),
     ("window.workspace", "Undocked Panels", "ドッキング解除したパネル"),
     ("window.resetWorkspace", "Reset to Saved Layout", "保存したレイアウトにリセット"),
-    ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースの変更を保存"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースへの変更を保存"),
     ("window.saveWorkspaceAs", "Save as New Workspace...", "新規ワークスペースとして保存..."),
     ("window.editWorkspaces", "Edit Workspaces...", "ワークスペースを編集..."),
     ("", "Assign Shortcut to Workspace", "ワークスペースにショートカットを割り当て"),
@@ -2285,6 +3083,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Встановити файл скрипту..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Встановити панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Виконати файл скрипту..."),
+    ("", "Recent Script Files", "Нещодавні файли скриптів"),
     ("", "Create Proxy", "Створити проксі"),
     ("file.createProxy", "Still...", "Зображення..."),
     ("file.createProxy", "Movie...", "Відео..."),
@@ -2404,6 +3203,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Шар фігури"),
     ("layer.newAdjustment", "Adjustment Layer", "Коригувальний шар"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Шар заливки з урахуванням вмісту..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D-примітив..."),
     ("layer.new3dPrimitive", "Cube", "Куб"),
     ("layer.new3dPrimitive", "Sphere", "Сфера"),
     ("layer.new3dPrimitive", "Plane", "Площина"),
@@ -2637,6 +3437,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Поява рядків згори"),
     ("anim.addKeyframe", "Add Keyframe", "Додати ключовий кадр"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Перемкнути утримання ключового кадру"),
+    ("keys.setMuted", "Mute Keyframes", "Заглушити ключові кадри"),
+    ("keys.setMuted", "Unmute Keyframes", "Зняти заглушення ключових кадрів"),
     ("keys.interpolation", "Keyframe Interpolation...", "Інтерполяція ключових кадрів..."),
     ("keys.velocity", "Keyframe Velocity...", "Швидкість ключових кадрів..."),
     ("", "Keyframe Assistant", "Помічник ключових кадрів"),
@@ -2920,6 +3722,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar archivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar panel de ScriptUI..."),
     ("file.runScript", "Run Script File...", "Ejecutar archivo de script..."),
+    ("", "Recent Script Files", "Archivos de script recientes"),
     ("", "Create Proxy", "Crear proxy"),
     ("file.createProxy", "Still...", "Imagen fija..."),
     ("file.createProxy", "Movie...", "Película..."),
@@ -3039,6 +3842,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Capa de forma"),
     ("layer.newAdjustment", "Adjustment Layer", "Capa de ajuste"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Capa de relleno según el contenido..."),
+    ("layer.newPrimitive", "3D Primitive...", "Primitiva 3D..."),
     ("layer.new3dPrimitive", "Cube", "Cubo"),
     ("layer.new3dPrimitive", "Sphere", "Esfera"),
     ("layer.new3dPrimitive", "Plane", "Plano"),
@@ -3272,6 +4076,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Entrada de líneas cayendo"),
     ("anim.addKeyframe", "Add Keyframe", "Añadir fotograma clave"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Conmutar mantener fotograma clave"),
+    ("keys.setMuted", "Mute Keyframes", "Silenciar fotogramas clave"),
+    ("keys.setMuted", "Unmute Keyframes", "Reactivar fotogramas clave"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolación de fotogramas clave..."),
     ("keys.velocity", "Keyframe Velocity...", "Velocidad de fotogramas clave..."),
     ("", "Keyframe Assistant", "Asistente de fotogramas clave"),
@@ -3553,6 +4359,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar arquivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar painel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Executar arquivo de script..."),
+    ("", "Recent Script Files", "Arquivos de script recentes"),
     ("", "Create Proxy", "Criar proxy"),
     ("file.createProxy", "Still...", "Imagem fixa..."),
     ("file.createProxy", "Movie...", "Filme..."),
@@ -3672,6 +4479,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Camada de forma"),
     ("layer.newAdjustment", "Adjustment Layer", "Camada de ajuste"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Camada de preenchimento sensível ao conteúdo..."),
+    ("layer.newPrimitive", "3D Primitive...", "Primitiva 3D..."),
     ("layer.new3dPrimitive", "Cube", "Cubo"),
     ("layer.new3dPrimitive", "Sphere", "Esfera"),
     ("layer.new3dPrimitive", "Plane", "Plano"),
@@ -3905,6 +4713,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Entrar com queda de linhas"),
     ("anim.addKeyframe", "Add Keyframe", "Adicionar quadro-chave"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Alternar quadro-chave de retenção"),
+    ("keys.setMuted", "Mute Keyframes", "Silenciar quadros-chave"),
+    ("keys.setMuted", "Unmute Keyframes", "Reativar quadros-chave"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolação de quadro-chave..."),
     ("keys.velocity", "Keyframe Velocity...", "Velocidade do quadro-chave..."),
     ("", "Keyframe Assistant", "Assistente de quadro-chave"),
@@ -4194,6 +5004,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Установить файл скрипта..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Установить панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Выполнить файл скрипта..."),
+    ("", "Recent Script Files", "Недавние файлы скриптов"),
     ("", "Create Proxy", "Создать суррогат"),
     ("file.createProxy", "Still...", "Стоп-кадр..."),
     ("file.createProxy", "Movie...", "Видео..."),
@@ -4312,6 +5123,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Слой-фигура"),
     ("layer.newAdjustment", "Adjustment Layer", "Корректирующий слой"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Слой заливки с учетом содержимого..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D-примитив..."),
     ("layer.new3dPrimitive", "Cube", "Куб"),
     ("layer.new3dPrimitive", "Sphere", "Сфера"),
     ("layer.new3dPrimitive", "Plane", "Плоскость"),
@@ -4545,6 +5357,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Появление строк сверху"),
     ("anim.addKeyframe", "Add Keyframe", "Добавить ключевой кадр"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Переключить фиксацию ключевого кадра"),
+    ("keys.setMuted", "Mute Keyframes", "Отключить ключевые кадры"),
+    ("keys.setMuted", "Unmute Keyframes", "Включить ключевые кадры"),
     ("keys.interpolation", "Keyframe Interpolation...", "Интерполяция ключевых кадров..."),
     ("keys.velocity", "Keyframe Velocity...", "Скорость ключевых кадров..."),
     ("", "Keyframe Assistant", "Помощник по ключевым кадрам"),
@@ -4827,6 +5641,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Installer un fichier de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Installer un panneau ScriptUI..."),
     ("file.runScript", "Run Script File...", "Exécuter un fichier de script..."),
+    ("", "Recent Script Files", "Fichiers de script récents"),
     ("", "Create Proxy", "Créer un proxy"),
     ("file.createProxy", "Still...", "Image fixe..."),
     ("file.createProxy", "Movie...", "Vidéo..."),
@@ -4945,6 +5760,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Calque de forme"),
     ("layer.newAdjustment", "Adjustment Layer", "Calque de réglage"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Calque de remplissage d’après le contenu..."),
+    ("layer.newPrimitive", "3D Primitive...", "Primitive 3D..."),
     ("layer.new3dPrimitive", "Cube", "Cube"),
     ("layer.new3dPrimitive", "Sphere", "Sphère"),
     ("layer.new3dPrimitive", "Plane", "Plan"),
@@ -5178,6 +5994,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Chute des lignes depuis le haut"),
     ("anim.addKeyframe", "Add Keyframe", "Ajouter une image clé"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Activer/Désactiver l'image clé figée"),
+    ("keys.setMuted", "Mute Keyframes", "Désactiver les images clés"),
+    ("keys.setMuted", "Unmute Keyframes", "Réactiver les images clés"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolation des images clés..."),
     ("keys.velocity", "Keyframe Velocity...", "Vitesse des images clés..."),
     ("", "Keyframe Assistant", "Assistant d'images clés"),
@@ -5460,6 +6278,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Skriptdatei installieren..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI-Bedienfeld installieren..."),
     ("file.runScript", "Run Script File...", "Skriptdatei ausführen..."),
+    ("", "Recent Script Files", "Zuletzt verwendete Skriptdateien"),
     ("", "Create Proxy", "Proxy erstellen"),
     ("file.createProxy", "Still...", "Standbild..."),
     ("file.createProxy", "Movie...", "Film..."),
@@ -5578,6 +6397,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Formebene"),
     ("layer.newAdjustment", "Adjustment Layer", "Einstellungsebene"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Ebene für inhaltsbasierte Füllung..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D-Grundkörper..."),
     ("layer.new3dPrimitive", "Cube", "Würfel"),
     ("layer.new3dPrimitive", "Sphere", "Kugel"),
     ("layer.new3dPrimitive", "Plane", "Fläche"),
@@ -5811,6 +6631,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Zeilen fallen ein"),
     ("anim.addKeyframe", "Add Keyframe", "Keyframe hinzufügen"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Halte-Keyframe umschalten"),
+    ("keys.setMuted", "Mute Keyframes", "Keyframes stummschalten"),
+    ("keys.setMuted", "Unmute Keyframes", "Keyframes wieder aktivieren"),
     ("keys.interpolation", "Keyframe Interpolation...", "Keyframe-Interpolation..."),
     ("keys.velocity", "Keyframe Velocity...", "Keyframe-Geschwindigkeit..."),
     ("", "Keyframe Assistant", "Keyframe-Assistent"),
@@ -6010,6 +6832,640 @@ const GERMAN: &[(&str, &str, &str)] = &[
 
 // <<< generated i18n catalogs
 
+/// Polish (pl): original phrase translations of every fixed menu entry.
+const POLISH: &[(&str, &str, &str)] = &[
+    ("", "Front", "Przód"),
+    ("", "Bevel", "Fazowanie"),
+    ("", "Side", "Bok"),
+    ("", "Back", "Tył"),
+    ("layer.addTextAnimator", "Color", "Kolor"),
+    ("", "EffectCraft", "EffectCraft"),
+    ("app.about", "About EffectCraft...", "O programie EffectCraft..."),
+    ("", "Settings...", "Ustawienia..."),
+    ("app.settings", "General...", "Ogólne..."),
+    ("app.settings", "Startup & Repair...", "Uruchamianie i naprawa..."),
+    ("app.settings", "Project...", "Projekt..."),
+    ("app.settings", "Composition...", "Kompozycja..."),
+    ("app.settings", "Previews...", "Podglądy..."),
+    ("app.settings", "Appearance...", "Wygląd..."),
+    ("app.settings", "Grids & Guides...", "Siatki i linie pomocnicze..."),
+    ("app.settings", "Labels...", "Etykiety..."),
+    ("app.settings", "Type...", "Tekst..."),
+    ("app.settings", "Import...", "Import..."),
+    ("app.settings", "Export...", "Eksport..."),
+    ("app.settings", "Audio...", "Audio..."),
+    ("app.settings", "Disk...", "Dysk..."),
+    ("app.settings", "Memory & CPU...", "Pamięć i procesor..."),
+    ("app.settings", "Video...", "Wideo..."),
+    ("app.settings", "3D...", "3D..."),
+    ("app.settings", "Scripting & Expressions...", "Skrypty i wyrażenia..."),
+    ("app.hide", "Hide EffectCraft", "Ukryj EffectCraft"),
+    ("app.hideOthers", "Hide Others", "Ukryj pozostałe"),
+    ("app.showAll", "Show All", "Pokaż wszystko"),
+    ("app.quit", "Quit EffectCraft", "Zakończ EffectCraft"),
+    ("", "File", "Plik"),
+    ("", "New", "Nowy"),
+    ("file.newProject", "New Project", "Nowy projekt"),
+    ("file.newFromTemplate", "New Project from Template...", "Nowy projekt z szablonu..."),
+    ("project.newFolder", "New Folder", "Nowy folder"),
+    ("file.open", "Open Project...", "Otwórz projekt..."),
+    ("", "Open Recent", "Otwórz ostatnie"),
+    ("file.clearRecent", "Clear Recent Projects", "Wyczyść ostatnie projekty"),
+    ("file.close", "Close", "Zamknij"),
+    ("file.closeProject", "Close Project", "Zamknij projekt"),
+    ("file.save", "Save", "Zapisz"),
+    ("", "Save As", "Zapisz jako"),
+    ("file.saveAs", "Save As...", "Zapisz jako..."),
+    ("file.saveCopy", "Save a Copy...", "Zapisz kopię..."),
+    ("file.saveCopyAsXml", "Save a Copy As XML...", "Zapisz kopię jako XML..."),
+    ("templates.saveAs", "Save as Template...", "Zapisz jako szablon..."),
+    ("file.incrementAndSave", "Increment and Save", "Zapisz z kolejnym numerem"),
+    ("file.revert", "Revert", "Przywróć"),
+    ("", "Import", "Importuj"),
+    ("file.import", "File...", "Plik..."),
+    ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
+    ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
+    ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
+    ("file.importSolid", "Solid...", "Plansza..."),
+    ("file.importLottie", "Lottie...", "Lottie..."),
+    ("file.importVanishingPoint", "Vanishing Point (.vpe)...", "Punkt zbiegu (.vpe)..."),
+    ("essential.importTemplate", "Essential Graphics Template...", "Szablon Essential Graphics..."),
+    ("", "Import Recent Footage", "Importuj ostatnie materiały"),
+    ("file.clearRecentFootage", "Clear Recent Footage", "Wyczyść ostatnie materiały"),
+    ("", "Export", "Eksportuj"),
+    ("renderQueue.add", "Add to Render Queue", "Dodaj do kolejki renderowania"),
+    ("file.exportTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.exportLottie", "Lottie JSON...", "Lottie JSON..."),
+    ("essential.exportTemplate", "Essential Graphics Template...", "Szablon Essential Graphics..."),
+    ("app.find", "Find", "Znajdź"),
+    ("layer.addItem", "Add Footage to Comp", "Dodaj materiał do kompozycji"),
+    ("file.newCompFromSelection", "New Comp from Selection...", "Nowa kompozycja z zaznaczenia..."),
+    ("", "Dependencies", "Zależności"),
+    ("file.collectFiles", "Collect Files...", "Zbierz pliki..."),
+    ("file.consolidateFootage", "Consolidate All Footage", "Scal wszystkie materiały"),
+    ("file.removeUnusedFootage", "Remove Unused Footage", "Usuń nieużywane materiały"),
+    ("file.reduceProject", "Reduce Project", "Zredukuj projekt"),
+    ("file.findMissing", "Find Missing Effects", "Znajdź brakujące efekty"),
+    ("file.findMissing", "Find Missing Fonts", "Znajdź brakujące czcionki"),
+    ("file.findMissing", "Find Missing Footage", "Znajdź brakujące materiały"),
+    ("file.relinkFootage", "Relink Missing Footage...", "Połącz ponownie brakujące materiały..."),
+    ("file.watchFolder", "Watch Folder...", "Folder obserwowany..."),
+    ("", "Scripts", "Skrypty"),
+    ("file.installScript", "Install Script File...", "Zainstaluj plik skryptu..."),
+    ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Zainstaluj panel ScriptUI..."),
+    ("file.runScript", "Run Script File...", "Uruchom plik skryptu..."),
+    ("", "Create Proxy", "Utwórz proxy"),
+    ("file.createProxy", "Still...", "Klatka..."),
+    ("file.createProxy", "Movie...", "Film..."),
+    ("", "Set Proxy", "Ustaw proxy"),
+    ("file.setProxy", "File...", "Plik..."),
+    ("file.setProxyNone", "None", "Brak"),
+    ("", "Interpret Footage", "Interpretuj materiał"),
+    ("file.interpretFootage", "Main...", "Główny..."),
+    ("file.interpretProxy", "Proxy...", "Proxy..."),
+    ("file.rememberInterpretation", "Remember Interpretation", "Zapamiętaj interpretację"),
+    ("file.applyInterpretation", "Apply Interpretation", "Zastosuj interpretację"),
+    ("", "Replace Footage", "Zastąp materiał"),
+    ("file.replaceFootage", "File...", "Plik..."),
+    ("file.replaceWithPlaceholder", "Placeholder...", "Element zastępczy..."),
+    ("file.replaceWithSolid", "Solid...", "Plansza..."),
+    ("file.replaceWithLayeredComp", "With Layered Comp", "Z warstwową kompozycją"),
+    ("file.reloadFootage", "Reload Footage", "Wczytaj ponownie materiał"),
+    ("file.revealInFinder", "Reveal in Finder", "Pokaż w Finderze"),
+    ("file.projectSettings", "Project Settings...", "Ustawienia projektu..."),
+    ("app.quit", "Exit", "Zakończ"),
+    ("", "Edit", "Edycja"),
+    ("edit.undo", "Undo", "Cofnij"),
+    ("edit.redo", "Redo", "Ponów"),
+    ("", "History", "Historia"),
+    ("app.commandPalette", "Quick Apply...", "Szybkie stosowanie..."),
+    ("edit.cut", "Cut", "Wytnij"),
+    ("edit.copy", "Copy", "Kopiuj"),
+    ("edit.copyWithPropertyLinks", "Copy with Property Links", "Kopiuj z łączami właściwości"),
+    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "Kopiuj ze względnymi łączami właściwości"),
+    ("edit.copyExpressionOnly", "Copy Expression Only", "Kopiuj tylko wyrażenie"),
+    ("edit.paste", "Paste", "Wklej"),
+    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "Wklej odwrócone klatki kluczowe"),
+    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "Wklej tekst i dopasuj formatowanie"),
+    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "Wklej tylko formatowanie tekstu"),
+    ("edit.clear", "Clear", "Wyczyść"),
+    ("edit.duplicate", "Duplicate", "Powiel"),
+    ("edit.splitLayer", "Split Layer", "Podziel warstwę"),
+    ("edit.liftWorkArea", "Lift Work Area", "Wytnij obszar roboczy"),
+    ("edit.extractWorkArea", "Extract Work Area", "Wyodrębnij obszar roboczy"),
+    ("edit.selectAll", "Select All", "Zaznacz wszystko"),
+    ("edit.deselectAll", "Deselect All", "Usuń zaznaczenie"),
+    ("", "Label", "Etykieta"),
+    ("edit.selectLabelGroup", "Select Label Group", "Zaznacz grupę etykiet"),
+    ("edit.label", "None", "Brak"),
+    ("edit.label", "Red", "Czerwony"),
+    ("edit.label", "Yellow", "Żółty"),
+    ("edit.label", "Aqua", "Akwamaryna"),
+    ("edit.label", "Pink", "Różowy"),
+    ("edit.label", "Lavender", "Lawendowy"),
+    ("edit.label", "Peach", "Brzoskwiniowy"),
+    ("edit.label", "Sea Foam", "Morska piana"),
+    ("edit.label", "Blue", "Niebieski"),
+    ("edit.label", "Green", "Zielony"),
+    ("edit.label", "Purple", "Fioletowy"),
+    ("edit.label", "Orange", "Pomarańczowy"),
+    ("edit.label", "Brown", "Brązowy"),
+    ("edit.label", "Fuchsia", "Fuksja"),
+    ("edit.label", "Cyan", "Cyjan"),
+    ("edit.label", "Sandstone", "Piaskowiec"),
+    ("edit.label", "Dark Green", "Ciemnozielony"),
+    ("app.settings", "Edit Label Colors...", "Edytuj kolory etykiet..."),
+    ("", "Select Keyframe Label Group", "Zaznacz grupę etykiet klatek kluczowych"),
+    ("keys.selectLabelGroup", "On Selected Layers", "Na zaznaczonych warstwach"),
+    ("keys.selectLabelGroup", "On All Layers", "Na wszystkich warstwach"),
+    ("keys.selectLabelGroup", "Visible Keyframes on Selected Layers", "Widoczne klatki kluczowe na zaznaczonych warstwach"),
+    ("keys.selectLabelGroup", "Visible Keyframes on All Layers", "Widoczne klatki kluczowe na wszystkich warstwach"),
+    ("", "Purge", "Wyczyść pamięć"),
+    ("edit.purge", "All Cache...", "Całą pamięć podręczną..."),
+    ("edit.purge", "All Memory & Disk Cache...", "Całą pamięć i pamięć dyskową..."),
+    ("edit.purge", "All Memory", "Całą pamięć"),
+    ("edit.purge", "All Disk Cache...", "Całą pamięć dyskową..."),
+    ("edit.purge", "All 3D Cache...", "Całą pamięć 3D..."),
+    ("edit.purgeUndo", "Undo", "Cofanie"),
+    ("edit.purge", "Image Cache Memory", "Pamięć podręczna obrazów"),
+    ("edit.purge", "Snapshot", "Migawka"),
+    ("edit.editOriginal", "Edit Original...", "Edytuj oryginał..."),
+    ("", "Templates", "Szablony"),
+    ("app.templates", "Render Settings...", "Ustawienia renderowania..."),
+    ("app.templates", "Output Module...", "Moduł wyjściowy..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts", "Skróty klawiaturowe"),
+    ("", "Preferences", "Preferencje"),
+    ("", "Composition", "Kompozycja"),
+    ("comp.new", "New Composition...", "Nowa kompozycja..."),
+    ("comp.settings", "Composition Settings...", "Ustawienia kompozycji..."),
+    ("comp.setPosterTime", "Set Poster Time", "Ustaw czas plakatu"),
+    ("comp.trimToWorkArea", "Trim Comp to Work Area", "Przytnij kompozycję do obszaru roboczego"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "Kadruj kompozycję do obszaru zainteresowania"),
+    ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "Kadruj kompozycję do granic zaznaczonych warstw (warstwy)"),
+    ("render.addOutputModule", "Add Output Module", "Dodaj moduł wyjściowy"),
+    ("", "Preview", "Podgląd"),
+    ("playback.toggle", "Play Current Preview", "Odtwórz bieżący podgląd"),
+    ("playback.cacheWhenIdle", "Cache Frames When Idle", "Buforuj klatki w bezczynności"),
+    ("playback.audio", "Audio", "Audio"),
+    ("", "Save Frame As", "Zapisz klatkę jako"),
+    ("comp.saveFrameAs", "File...", "Plik..."),
+    ("comp.saveFrameAsPsd", "Photoshop Layers...", "Warstwy Photoshopa..."),
+    ("comp.saveFrameAsExr", "ProEXR...", "ProEXR..."),
+    ("comp.copyFrame", "Copy Frame to Clipboard", "Kopiuj klatkę do schowka"),
+    ("render.preRender", "Pre-render...", "Wstępne renderowanie..."),
+    ("render.saveCurrentPreview", "Save Current Preview...", "Zapisz bieżący podgląd..."),
+    ("comp.openInEssentialGraphics", "Open in Essential Graphics", "Otwórz w Essential Graphics"),
+    ("", "Responsive Design — Time", "Projekt responsywny — czas"),
+    ("comp.responsiveTime", "Create Intro", "Utwórz intro"),
+    ("comp.responsiveTime", "Create Outro", "Utwórz outro"),
+    ("comp.responsiveTime", "Create Protected Region from Work Area", "Utwórz chroniony obszar z obszaru roboczego"),
+    ("comp.flowchart", "Composition Flowchart", "Schemat kompozycji"),
+    ("comp.miniFlowchart", "Composition Mini-Flowchart", "Miniaturowy schemat kompozycji"),
+    ("", "VR", "VR"),
+    ("comp.vr.createEnvironment", "Create VR Environment...", "Utwórz środowisko VR..."),
+    ("comp.vr.extractCubemap", "Extract Cubemap...", "Wyodrębnij cubemapę..."),
+    ("", "Layer", "Warstwa"),
+    ("layer.newText", "Text", "Tekst"),
+    ("layer.newSolid", "Solid...", "Plansza..."),
+    ("layer.newLight", "Light...", "Światło..."),
+    ("layer.newCamera", "Camera...", "Kamera..."),
+    ("layer.newNull", "Null Object", "Obiekt zerowy"),
+    ("layer.newShape", "Shape Layer", "Warstwa kształtu"),
+    ("layer.newAdjustment", "Adjustment Layer", "Warstwa korekcyjna"),
+    ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Warstwa wypełnienia z uwzględnieniem zawartości..."),
+    ("layer.new3dPrimitive", "Cube", "Sześcian"),
+    ("layer.new3dPrimitive", "Sphere", "Kula"),
+    ("layer.new3dPrimitive", "Plane", "Płaszczyzna"),
+    ("layer.new3dPrimitive", "Torus", "Torus"),
+    ("layer.new3dPrimitive", "Cone", "Stożek"),
+    ("layer.new3dPrimitive", "Cylinder", "Walec"),
+    ("layer.settings", "Layer Settings...", "Ustawienia warstwy..."),
+    ("layer.openLayer", "Open Layer", "Otwórz warstwę"),
+    ("layer.openSource", "Open Layer Source", "Otwórz źródło warstwy"),
+    ("layer.revealInFinder", "Reveal in Finder", "Pokaż w Finderze"),
+    ("", "Mask", "Maska"),
+    ("layer.addMask", "New Mask", "Nowa maska"),
+    ("layer.mask.shape", "Mask Shape...", "Kształt maski..."),
+    ("layer.mask.set", "Mask Feather...", "Wtapianie maski..."),
+    ("layer.mask.set", "Mask Opacity...", "Krycie maski..."),
+    ("layer.mask.set", "Mask Expansion...", "Rozszerzenie maski..."),
+    ("layer.mask.reset", "Reset Mask", "Resetuj maskę"),
+    ("layer.mask.remove", "Remove Mask", "Usuń maskę"),
+    ("layer.mask.removeAll", "Remove All Masks", "Usuń wszystkie maski"),
+    ("track.mask", "Track Mask", "Śledź maskę"),
+    ("", "Mode", "Tryb"),
+    ("layer.mask.mode", "None", "Brak"),
+    ("layer.mask.mode", "Add", "Dodaj"),
+    ("layer.mask.mode", "Subtract", "Odejmij"),
+    ("layer.mask.mode", "Intersect", "Część wspólna"),
+    ("layer.mask.mode", "Lighten", "Rozjaśnij"),
+    ("layer.mask.mode", "Darken", "Przyciemnij"),
+    ("layer.mask.mode", "Difference", "Różnica"),
+    ("layer.mask.invert", "Inverted", "Odwrócona"),
+    ("layer.mask.lock", "Locked", "Zablokowana"),
+    ("", "Motion Blur", "Rozmycie ruchu"),
+    ("layer.mask.motionBlur", "Same As Layer", "Jak warstwa"),
+    ("layer.mask.motionBlur", "On", "Wł."),
+    ("layer.mask.motionBlur", "Off", "Wył."),
+    ("", "Feather Falloff", "Zanikanie wtapiania"),
+    ("layer.mask.featherFalloff", "Smooth", "Gładkie"),
+    ("layer.mask.featherFalloff", "Linear", "Liniowe"),
+    ("layer.mask.unlockAll", "Unlock All Masks", "Odblokuj wszystkie maski"),
+    ("layer.mask.lockOthers", "Lock Other Masks", "Zablokuj pozostałe maski"),
+    ("layer.mask.hideLocked", "Hide Locked Masks", "Ukryj zablokowane maski"),
+    ("", "Mask and Shape Path", "Ścieżka maski i kształtu"),
+    ("path.rotoBezier", "RotoBezier", "RotoBezier"),
+    ("mask.setClosed", "Closed", "Zamknięta"),
+    ("path.convertToBezier", "Convert To Bezier Path", "Konwertuj na ścieżkę Béziera"),
+    ("path.setFirstVertex", "Set First Vertex", "Ustaw pierwszy wierzchołek"),
+    ("path.freeTransform", "Free Transform Points", "Swobodne przekształcanie punktów"),
+    ("", "Quality", "Jakość"),
+    ("layer.quality", "Best", "Najlepsza"),
+    ("layer.quality", "Draft", "Robocza"),
+    ("layer.quality", "Wireframe", "Szkielet"),
+    ("layer.sampling", "Bilinear", "Dwuliniowa"),
+    ("layer.sampling", "Bicubic", "Dwusześcienna"),
+    ("", "Switches", "Przełączniki"),
+    ("layer.hideOtherVideo", "Hide Other Video", "Ukryj pozostałe wideo"),
+    ("layer.showAllVideo", "Show All Video", "Pokaż całe wideo"),
+    ("layer.unlockAll", "Unlock All Layers", "Odblokuj wszystkie warstwy"),
+    ("layer.expressions", "Enable Expressions", "Włącz wyrażenia"),
+    ("layer.expressions", "Disable Expressions", "Wyłącz wyrażenia"),
+    ("layer.setSwitch", "Shy", "Nieśmiała"),
+    ("layer.setSwitch", "Lock", "Zablokuj"),
+    ("layer.setSwitch", "Audio", "Audio"),
+    ("layer.setSwitch", "Video", "Wideo"),
+    ("layer.setSwitch", "Solo", "Solo"),
+    ("layer.setSwitch", "Effect", "Efekt"),
+    ("layer.setSwitch", "Collapse", "Zwiń"),
+    ("layer.setSwitch", "Motion Blur", "Rozmycie ruchu"),
+    ("layer.setSwitch", "Adjustment Layer", "Warstwa korekcyjna"),
+    ("", "Transform", "Przekształć"),
+    ("layer.transform", "Reset", "Resetuj"),
+    ("layer.setTransform", "Anchor Point...", "Punkt zakotwiczenia..."),
+    ("layer.setTransform", "Position...", "Położenie..."),
+    ("layer.setTransform", "Scale...", "Skala..."),
+    ("layer.setTransform", "Orientation...", "Orientacja..."),
+    ("layer.setTransform", "Rotation...", "Obrót..."),
+    ("layer.setTransform", "Opacity...", "Krycie..."),
+    ("layer.transform", "Flip Horizontal", "Odbij w poziomie"),
+    ("layer.transform", "Flip Vertical", "Odbij w pionie"),
+    ("layer.transform", "Center In View", "Wyśrodkuj w widoku"),
+    ("layer.centerAnchor", "Center Anchor Point in Layer Content", "Wyśrodkuj punkt zakotwiczenia w zawartości warstwy"),
+    ("layer.transform", "Fit to Comp", "Dopasuj do kompozycji"),
+    ("layer.transform", "Fit to Comp Width", "Dopasuj do szerokości kompozycji"),
+    ("layer.transform", "Fit to Comp Height", "Dopasuj do wysokości kompozycji"),
+    ("layer.autoOrient", "Auto-Orient...", "Automatyczna orientacja..."),
+    ("", "Time", "Czas"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "Włącz przemapowanie czasu"),
+    ("layer.timeReverse", "Time-Reverse Layer", "Odwróć czas warstwy"),
+    ("layer.timeStretch", "Time Stretch...", "Rozciągnięcie czasu..."),
+    ("layer.freezeFrame", "Freeze Frame", "Zamrożenie klatki"),
+    ("layer.freezeOnLastFrame", "Freeze On Last Frame", "Zamroź na ostatniej klatce"),
+    ("layer.alignVideoToData", "Align Video to Data", "Wyrównaj wideo do danych"),
+    ("", "Frame Blending", "Mieszanie klatek"),
+    ("layer.frameBlending", "Off", "Wył."),
+    ("layer.frameBlending", "Frame Mix", "Miks klatek"),
+    ("layer.frameBlending", "Pixel Motion", "Ruch pikseli"),
+    ("layer.setSwitch", "3D Layer", "Warstwa 3D"),
+    ("layer.setSwitch", "Guide Layer", "Warstwa pomocnicza"),
+    ("layer.environment", "Environment Layer", "Warstwa środowiska"),
+    ("", "Markers", "Znaczniki"),
+    ("layer.addMarker", "Add Marker", "Dodaj znacznik"),
+    ("layer.updateMarkersFromSource", "Update Markers From Source", "Aktualizuj znaczniki ze źródła"),
+    ("layer.markersLock", "Lock Markers", "Zablokuj znaczniki"),
+    ("layer.deleteAllMarkers", "Delete All Markers", "Usuń wszystkie znaczniki"),
+    ("layer.setSwitch", "Preserve Transparency", "Zachowaj przezroczystość"),
+    ("", "Blending Mode", "Tryb mieszania"),
+    ("layer.setBlendMode", "Normal", "Normalny"),
+    ("layer.setBlendMode", "Dissolve", "Rozpuszczenie"),
+    ("layer.setBlendMode", "Dancing Dissolve", "Tańczące rozpuszczenie"),
+    ("layer.setBlendMode", "Darken", "Ciemniej"),
+    ("layer.setBlendMode", "Multiply", "Mnożenie"),
+    ("layer.setBlendMode", "Color Burn", "Ściemnianie koloru"),
+    ("layer.setBlendMode", "Classic Color Burn", "Klasyczne ściemnianie koloru"),
+    ("layer.setBlendMode", "Linear Burn", "Ściemnianie liniowe"),
+    ("layer.setBlendMode", "Darker Color", "Ciemniejszy kolor"),
+    ("layer.setBlendMode", "Add", "Dodaj"),
+    ("layer.setBlendMode", "Lighten", "Jaśniej"),
+    ("layer.setBlendMode", "Screen", "Mnożenie odwrotne"),
+    ("layer.setBlendMode", "Color Dodge", "Rozjaśnianie koloru"),
+    ("layer.setBlendMode", "Classic Color Dodge", "Klasyczne rozjaśnianie koloru"),
+    ("layer.setBlendMode", "Linear Dodge", "Rozjaśnianie liniowe"),
+    ("layer.setBlendMode", "Lighter Color", "Jaśniejszy kolor"),
+    ("layer.setBlendMode", "Overlay", "Nakładka"),
+    ("layer.setBlendMode", "Soft Light", "Łagodne światło"),
+    ("layer.setBlendMode", "Hard Light", "Ostre światło"),
+    ("layer.setBlendMode", "Linear Light", "Światło liniowe"),
+    ("layer.setBlendMode", "Vivid Light", "Jaskrawe światło"),
+    ("layer.setBlendMode", "Pin Light", "Światło punktowe"),
+    ("layer.setBlendMode", "Hard Mix", "Twarde mieszanie"),
+    ("layer.setBlendMode", "Difference", "Różnica"),
+    ("layer.setBlendMode", "Classic Difference", "Klasyczna różnica"),
+    ("layer.setBlendMode", "Exclusion", "Wykluczenie"),
+    ("layer.setBlendMode", "Subtract", "Odejmowanie"),
+    ("layer.setBlendMode", "Divide", "Dzielenie"),
+    ("layer.setBlendMode", "Hue", "Barwa"),
+    ("layer.setBlendMode", "Saturation", "Nasycenie"),
+    ("layer.setBlendMode", "Color", "Kolor"),
+    ("layer.setBlendMode", "Luminosity", "Jasność"),
+    ("layer.setBlendMode", "Stencil Alpha", "Szablon alfa"),
+    ("layer.setBlendMode", "Stencil Luma", "Szablon luma"),
+    ("layer.setBlendMode", "Silhouette Alpha", "Sylweta alfa"),
+    ("layer.setBlendMode", "Silhouette Luma", "Sylweta luma"),
+    ("layer.setBlendMode", "Alpha Add", "Dodawanie alfa"),
+    ("layer.setBlendMode", "Luminescent Premul", "Luminescencja premul"),
+    ("layer.setBlendMode", "Next Blending Mode", "Następny tryb mieszania"),
+    ("layer.setBlendMode", "Previous Blending Mode", "Poprzedni tryb mieszania"),
+    ("", "Track Matte", "Matowa ścieżka"),
+    ("layer.trackMatte", "No Track Matte", "Bez matowej ścieżki"),
+    ("layer.trackMatte", "Alpha Matte", "Matowa alfa"),
+    ("layer.trackMatte", "Alpha Inverted Matte", "Odwrócona matowa alfa"),
+    ("layer.trackMatte", "Luma Matte", "Matowa luma"),
+    ("layer.trackMatte", "Luma Inverted Matte", "Odwrócona matowa luma"),
+    ("layer.trackMatte", "Matte with Layer Above", "Matowa z warstwą powyżej"),
+    ("layer.trackMatte", "Matte with Layer Below", "Matowa z warstwą poniżej"),
+    ("", "Layer Styles", "Style warstwy"),
+    ("layer.style.options", "Layer Style Options...", "Opcje stylu warstwy..."),
+    ("layer.style.convertToEditable", "Convert to Editable Styles", "Konwertuj na edytowalne style"),
+    ("layer.style.showAll", "Show All", "Pokaż wszystkie"),
+    ("layer.style.removeAll", "Remove All", "Usuń wszystkie"),
+    ("layer.style.dropShadow", "Drop Shadow", "Cień"),
+    ("layer.style.innerShadow", "Inner Shadow", "Cień wewnętrzny"),
+    ("layer.style.outerGlow", "Outer Glow", "Blask zewnętrzny"),
+    ("layer.style.innerGlow", "Inner Glow", "Blask wewnętrzny"),
+    ("layer.style.bevelEmboss", "Bevel and Emboss", "Faza i płaskorzeźba"),
+    ("layer.style.satin", "Satin", "Satyna"),
+    ("layer.style.colorOverlay", "Color Overlay", "Nakładka koloru"),
+    ("layer.style.gradientOverlay", "Gradient Overlay", "Nakładka gradientu"),
+    ("layer.style.stroke", "Stroke", "Obrys"),
+    ("path.groupShapes", "Group Shapes", "Grupuj kształty"),
+    ("path.ungroupShapes", "Ungroup Shapes", "Rozgrupuj kształty"),
+    ("", "Arrange", "Kolejność"),
+    ("layer.arrange", "Bring Layer to Front", "Przesuń warstwę na wierzch"),
+    ("layer.arrange", "Bring Layer Forward", "Przesuń warstwę do przodu"),
+    ("layer.arrange", "Send Layer Backward", "Przesuń warstwę do tyłu"),
+    ("layer.arrange", "Send Layer to Back", "Przesuń warstwę na spód"),
+    ("", "Reveal", "Pokaż"),
+    ("layer.revealSource", "Reveal Layer Source in Project", "Pokaż źródło warstwy w projekcie"),
+    ("comp.flowchart", "Reveal Layer in Project Flowchart", "Pokaż warstwę w schemacie projektu"),
+    ("comp.revealInProject", "Reveal Composition in Project", "Pokaż kompozycję w projekcie"),
+    ("layer.revealExpressionErrors", "Reveal Expression Errors", "Pokaż błędy wyrażeń"),
+    ("", "Create", "Utwórz"),
+    ("layer.create", "Convert to Editable Text", "Konwertuj na edytowalny tekst"),
+    ("layer.create", "Create Shapes from Text", "Utwórz kształty z tekstu"),
+    ("layer.create", "Create Masks from Text", "Utwórz maski z tekstu"),
+    ("layer.create", "Create Shapes from Vector Layer", "Utwórz kształty z warstwy wektorowej"),
+    ("layer.create", "Create Keyframes from Data", "Utwórz klatki kluczowe z danych"),
+    ("layer.create", "Null Controllers for Positional Points", "Kontrolery zerowe dla punktów położenia"),
+    ("layer.create", "Null Controllers for Path Points", "Kontrolery zerowe dla punktów ścieżki"),
+    ("layer.create", "Nulls Following Path Points", "Obiekty zerowe podążające za punktami ścieżki"),
+    ("layer.create", "Null Tracing Along Path", "Obiekt zerowy wzdłuż ścieżki"),
+    ("layer.create", "Create 3D Layer Instance", "Utwórz instancję warstwy 3D"),
+    ("", "Camera", "Kamera"),
+    ("camera.fromView", "Create Camera from 3D View", "Utwórz kamerę z widoku 3D"),
+    ("camera.stereoRig", "Create Stereo 3D Rig", "Utwórz zestaw stereo 3D"),
+    ("camera.orbitNull", "Create Orbit Null", "Utwórz obiekt zerowy orbity"),
+    ("camera.fromModel", "Create Cameras from 3D Model", "Utwórz kamery z modelu 3D"),
+    ("camera.linkFocusToPoi", "Link Focus Distance to Point of Interest", "Powiąż odległość ostrości z punktem zainteresowania"),
+    ("camera.linkFocusToLayer", "Link Focus Distance to Layer", "Powiąż odległość ostrości z warstwą"),
+    ("camera.setFocusToLayer", "Set Focus Distance to Layer", "Ustaw odległość ostrości na warstwę"),
+    ("layer.cameraSettings", "Camera Settings...", "Ustawienia kamery..."),
+    ("view.reset3DView", "Reset 3D View", "Resetuj widok 3D"),
+    ("", "Light", "Światło"),
+    ("light.fromModel", "Create Lights from 3D Model", "Utwórz światła z modelu 3D"),
+    ("light.controlWithCamera", "Control Light with Camera", "Steruj światłem za pomocą kamery"),
+    ("light.environmentBackground", "Create Environment Light Background Layer", "Utwórz warstwę tła światła otoczenia"),
+    ("", "Material", "Materiał"),
+    ("material.revealSource", "Reveal Material Source in Project", "Pokaż źródło materiału w projekcie"),
+    ("material.reset", "Reset Material", "Resetuj materiał"),
+    ("material.duplicateAssign", "Duplicate and Assign Material", "Powiel i przypisz materiał"),
+    ("layer.autoTrace", "Auto-trace...", "Automatyczne obrysowanie..."),
+    ("layer.precompose", "Pre-compose...", "Utwórz kompozycję wstępną..."),
+    ("layer.sceneEditDetection", "Scene Edit Detection...", "Wykrywanie zmian scen..."),
+    ("", "Effect", "Efekt"),
+    ("window.panel", "Effect Controls", "Ustawienia efektów"),
+    ("effect.applyLast", "Last Effect", "Ostatni efekt"),
+    ("effect.removeAll", "Remove All", "Usuń wszystkie"),
+    ("effect.manage", "Manage Effects...", "Zarządzaj efektami..."),
+    ("effect.plugins.load", "Load Effect Plug-in...", "Wczytaj wtyczkę efektu..."),
+    ("", "Animation", "Animacja"),
+    ("anim.savePreset", "Save Animation Preset...", "Zapisz ustawienie animacji..."),
+    ("anim.applyPreset", "Apply Animation Preset...", "Zastosuj ustawienie animacji..."),
+    ("", "Recent Animation Presets", "Ostatnie ustawienia animacji"),
+    ("anim.clearRecentPresets", "Clear Recent Presets", "Wyczyść ostatnie ustawienia"),
+    ("anim.browsePresets", "Browse Presets...", "Przeglądaj ustawienia..."),
+    ("", "Text Animation Presets", "Ustawienia animacji tekstu"),
+    ("layer.applyTextPreset", "Typewriter", "Maszyna do pisania"),
+    ("layer.applyTextPreset", "Fade Up Characters", "Pojawianie się znaków"),
+    ("layer.applyTextPreset", "Bounce In Words", "Odbijające się słowa"),
+    ("layer.applyTextPreset", "Tracking In", "Zbliżanie liter"),
+    ("layer.applyTextPreset", "Scramble", "Mieszanie znaków"),
+    ("layer.applyTextPreset", "Blur In", "Wyostrzanie z rozmycia"),
+    ("layer.applyTextPreset", "Jitter", "Drganie"),
+    ("layer.applyTextPreset", "Drop In Lines", "Wpadające wiersze"),
+    ("anim.addKeyframe", "Add Keyframe", "Dodaj klatkę kluczową"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "Przełącz klatkę zatrzymania"),
+    ("keys.interpolation", "Keyframe Interpolation...", "Interpolacja klatek kluczowych..."),
+    ("keys.velocity", "Keyframe Velocity...", "Prędkość klatek kluczowych..."),
+    ("", "Keyframe Assistant", "Asystent klatek kluczowych"),
+    ("keys.audioToKeyframes", "Convert Audio to Keyframes", "Konwertuj audio na klatki kluczowe"),
+    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "Konwertuj wyrażenie na klatki kluczowe"),
+    ("keys.easyEase", "Easy Ease", "Łagodne przejście"),
+    ("keys.easyEaseIn", "Easy Ease In", "Łagodne wejście"),
+    ("keys.easyEaseOut", "Easy Ease Out", "Łagodne wyjście"),
+    ("keys.exponentialScale", "Exponential Scale", "Skalowanie wykładnicze"),
+    ("keys.rpfCameraImport", "RPF Camera Import", "Import kamery RPF"),
+    ("layer.sequence", "Sequence Layers...", "Ułóż warstwy w sekwencję..."),
+    ("keys.timeReverse", "Time-Reverse Keyframes", "Odwróć czas klatek kluczowych"),
+    ("", "Animate Text", "Animuj tekst"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "Włącz 3D dla każdego znaku"),
+    ("layer.addTextAnimator", "Anchor Point", "Punkt zakotwiczenia"),
+    ("layer.addTextAnimator", "Position", "Położenie"),
+    ("layer.addTextAnimator", "Scale", "Skala"),
+    ("layer.addTextAnimator", "Skew", "Pochylenie"),
+    ("layer.addTextAnimator", "Rotation", "Obrót"),
+    ("layer.addTextAnimator", "Opacity", "Krycie"),
+    ("layer.addTextAnimator", "All Transform Properties", "Wszystkie właściwości przekształcenia"),
+    ("", "Fill Color", "Kolor wypełnienia"),
+    ("layer.addTextAnimator", "RGB", "RGB"),
+    ("layer.addTextAnimator", "Hue", "Barwa"),
+    ("layer.addTextAnimator", "Saturation", "Nasycenie"),
+    ("layer.addTextAnimator", "Brightness", "Jasność"),
+    ("", "Stroke Color", "Kolor obrysu"),
+    ("layer.addTextAnimator", "Stroke Width", "Szerokość obrysu"),
+    ("layer.addTextAnimator", "Tracking", "Światło"),
+    ("layer.addTextAnimator", "Line Anchor", "Zakotwiczenie wiersza"),
+    ("layer.addTextAnimator", "Line Spacing", "Odstęp między wierszami"),
+    ("layer.addTextAnimator", "Character Offset", "Przesunięcie znaku"),
+    ("layer.addTextAnimator", "Character Value", "Wartość znaku"),
+    ("layer.addTextAnimator", "Blur", "Rozmycie"),
+    ("text.animatorFontAxes", "Variable Font Axes", "Osie czcionki zmiennej"),
+    ("", "Add Text Selector", "Dodaj selektor tekstu"),
+    ("text.addSelector", "Range", "Zakres"),
+    ("text.addSelector", "Wiggly", "Falowanie"),
+    ("text.addSelector", "Expression", "Wyrażenie"),
+    ("text.removeAllAnimators", "Remove All Text Animators", "Usuń wszystkie animatory tekstu"),
+    ("prop.setExpression", "Add Expression", "Dodaj wyrażenie"),
+    ("essential.addProperty", "Add Property to Essential Graphics", "Dodaj właściwość do Essential Graphics"),
+    ("prop.separateDimensions", "Separate Dimensions", "Rozdziel wymiary"),
+    ("track.camera", "Track Camera", "Śledź kamerę"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
+    ("track.motion", "Track Motion", "Śledź ruch"),
+    ("track.stabilize", "Stabilize Motion", "Stabilizuj ruch"),
+    ("track.property", "Track this Property", "Śledź tę właściwość"),
+    ("anim.reveal", "Reveal Properties with Keyframes", "Pokaż właściwości z klatkami kluczowymi"),
+    ("anim.reveal", "Reveal Properties with Animation", "Pokaż właściwości z animacją"),
+    ("anim.reveal", "Reveal All Modified Properties", "Pokaż wszystkie zmienione właściwości"),
+    ("", "View", "Widok"),
+    ("view.newViewer", "New Viewer", "Nowa przeglądarka"),
+    ("view.splitLockedViewer", "Split with New Locked Viewer", "Podziel z nową zablokowaną przeglądarką"),
+    ("view.zoomIn", "Zoom In", "Powiększ"),
+    ("view.zoomOut", "Zoom Out", "Pomniejsz"),
+    ("", "Resolution", "Rozdzielczość"),
+    ("view.res.full", "Full", "Pełna"),
+    ("view.res.half", "Half", "Połowa"),
+    ("view.res.third", "Third", "Jedna trzecia"),
+    ("view.res.quarter", "Quarter", "Jedna czwarta"),
+    ("view.res.custom", "Custom...", "Niestandardowa..."),
+    ("view.displayColorManagement", "Use Display Color Management", "Używaj zarządzania kolorem wyświetlacza"),
+    ("", "Simulate Output", "Symuluj wyjście"),
+    ("view.simulateOutput", "No Output Simulation", "Bez symulacji wyjścia"),
+    ("view.simulateOutput", "HDTV (Rec. 709)", "HDTV (Rec. 709)"),
+    ("view.simulateOutput", "SDTV NTSC", "SDTV NTSC"),
+    ("view.simulateOutput", "SDTV PAL", "SDTV PAL"),
+    ("view.simulateOutput", "Legacy Macintosh RGB (Gamma 1.8)", "Starsze RGB komputerów Macintosh (gamma 1,8)"),
+    ("view.simulateOutput", "Internet Standard RGB (sRGB)", "Standardowe internetowe RGB (sRGB)"),
+    ("view.simulateOutput", "UHDTV (Rec. 2020)", "UHDTV (Rec. 2020)"),
+    ("view.simulateOutput", "Display P3", "Display P3"),
+    ("view.simulateOutput", "Linear (1.0 Gamma)", "Liniowe (gamma 1,0)"),
+    ("view.customRgb", "My Custom RGB...", "Moje niestandardowe RGB..."),
+    ("view.simulateOutput", "Custom...", "Niestandardowe..."),
+    ("view.rulers", "Show Rulers", "Pokaż linijki"),
+    ("", "Panel Background Color", "Kolor tła panelu"),
+    ("view.panelBackground", "Black", "Czarny"),
+    ("view.panelBackground", "Dark Gray", "Ciemnoszary"),
+    ("view.panelBackground", "Medium Gray (Default)", "Średnioszary (domyślny)"),
+    ("view.panelBackground", "Light Gray", "Jasnoszary"),
+    ("view.panelBackground", "White", "Biały"),
+    ("view.panelBackground", "Custom", "Niestandardowy"),
+    ("view.panelBackground", "Select Custom Background Color...", "Wybierz niestandardowy kolor tła..."),
+    ("view.guides", "Show Guides", "Pokaż linie pomocnicze"),
+    ("view.snapToGuides", "Snap to Guides", "Przyciągaj do linii pomocniczych"),
+    ("view.lockGuides", "Lock Guides", "Zablokuj linie pomocnicze"),
+    ("view.addGuide", "Add Guide...", "Dodaj linię pomocniczą..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Dodaj procentową linię pomocniczą..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Konwertuj linie pomocnicze na procenty"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Konwertuj linie pomocnicze na piksele"),
+    ("view.clearGuides", "Clear Guides", "Wyczyść linie pomocnicze"),
+    ("view.importGuides", "Import Guides...", "Importuj linie pomocnicze..."),
+    ("view.exportGuides", "Export Guides...", "Eksportuj linie pomocnicze..."),
+    ("view.grid", "Show Grid", "Pokaż siatkę"),
+    ("view.snapToGrid", "Snap to Grid", "Przyciągaj do siatki"),
+    ("view.snapping", "Snapping", "Przyciąganie"),
+    ("view.options", "View Options...", "Opcje widoku..."),
+    ("view.layerControls", "Show Layer Controls", "Pokaż elementy sterujące warstwy"),
+    ("", "Switch View Layout", "Przełącz układ widoków"),
+    ("view.layout", "1 View", "1 widok"),
+    ("view.layout", "2 Views", "2 widoki"),
+    ("view.layout", "4 Views", "4 widoki"),
+    ("view.shareViewOptions", "Share View Options", "Wspólne opcje widoku"),
+    ("", "Switch 3D View", "Przełącz widok 3D"),
+    ("view.3d.activeCamera", "Active Camera", "Aktywna kamera"),
+    ("view.3d.default", "Default", "Domyślny"),
+    ("view.3d.front", "Front", "Przód"),
+    ("view.3d.left", "Left", "Lewo"),
+    ("view.3d.top", "Top", "Góra"),
+    ("view.3d.back", "Back", "Tył"),
+    ("view.3d.right", "Right", "Prawo"),
+    ("view.3d.bottom", "Bottom", "Dół"),
+    ("view.3d.custom1", "Custom View 1", "Widok niestandardowy 1"),
+    ("view.3d.custom2", "Custom View 2", "Widok niestandardowy 2"),
+    ("view.3d.custom3", "Custom View 3", "Widok niestandardowy 3"),
+    ("", "Assign Shortcut to 3D View", "Przypisz skrót do widoku 3D"),
+    ("view.3d.last", "Switch to Last 3D View", "Przełącz na ostatni widok 3D"),
+    ("view.lookAtSelected", "Look at Selected Layers", "Patrz na zaznaczone warstwy"),
+    ("view.lookAtAll", "Look at All Layers", "Patrz na wszystkie warstwy"),
+    ("time.set", "Go to Time...", "Przejdź do czasu..."),
+    ("view.fullScreen", "Enter Full Screen", "Pełny ekran"),
+    ("", "Window", "Okno"),
+    ("", "Workspace", "Obszar roboczy"),
+    ("window.workspace", "Default", "Domyślny"),
+    ("window.workspace", "Review", "Przegląd"),
+    ("window.workspace", "Learn", "Nauka"),
+    ("window.workspace", "Small Screen", "Mały ekran"),
+    ("window.workspace", "Standard", "Standardowy"),
+    ("window.workspace", "All Panels", "Wszystkie panele"),
+    ("window.workspace", "Animation", "Animacja"),
+    ("window.workspace", "Color", "Kolor"),
+    ("window.workspace", "Effects", "Efekty"),
+    ("window.workspace", "Essential Graphics", "Essential Graphics"),
+    ("window.workspace", "Minimal", "Minimalny"),
+    ("window.workspace", "Motion Tracking", "Śledzenie ruchu"),
+    ("window.workspace", "Paint", "Malowanie"),
+    ("window.workspace", "Text", "Tekst"),
+    ("window.workspace", "Undocked Panels", "Panele odpięte"),
+    ("window.resetWorkspace", "Reset to Saved Layout", "Przywróć zapisany układ"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "Zapisz zmiany w tym obszarze roboczym"),
+    ("window.saveWorkspaceAs", "Save as New Workspace...", "Zapisz jako nowy obszar roboczy..."),
+    ("window.editWorkspaces", "Edit Workspaces...", "Edytuj obszary robocze..."),
+    ("", "Assign Shortcut to Workspace", "Przypisz skrót do obszaru roboczego"),
+    ("window.panel", "Align", "Wyrównanie"),
+    ("window.panel", "Audio", "Audio"),
+    ("window.panel", "Brushes", "Pędzle"),
+    ("window.panel", "Character", "Znak"),
+    ("window.panel", "Content-Aware Fill", "Wypełnienie z uwzględnieniem zawartości"),
+    ("window.panel", "Effects & Presets", "Efekty i ustawienia"),
+    ("window.panel", "Essential Graphics", "Essential Graphics"),
+    ("window.panel", "Info", "Informacje"),
+    ("help.inAppTutorials", "Learn", "Nauka"),
+    ("window.panel", "Lumetri Scopes", "Zakresy Lumetri"),
+    ("window.panel", "Mask Interpolation", "Interpolacja maski"),
+    ("window.panel", "Media Browser", "Przeglądarka multimediów"),
+    ("window.panel", "Metadata", "Metadane"),
+    ("window.panel", "Motion Sketch", "Szkic ruchu"),
+    ("window.panel", "Paint", "Malowanie"),
+    ("window.panel", "Paragraph", "Akapit"),
+    ("window.panel", "Preview", "Podgląd"),
+    ("window.panel", "Progress", "Postęp"),
+    ("window.panel", "Properties", "Właściwości"),
+    ("window.panel", "Script Console", "Konsola skryptów"),
+    ("window.panel", "Smoother", "Wygładzanie"),
+    ("window.panel", "Tools", "Narzędzia"),
+    ("window.panel", "Tracker", "Śledzenie"),
+    ("window.panel", "Wiggler", "Wahanie"),
+    ("window.panel", "Composition", "Kompozycja"),
+    ("window.panel", "Flowchart", "Schemat"),
+    ("window.panel", "Footage", "Materiał"),
+    ("window.panel", "Layer", "Warstwa"),
+    ("window.panel", "Project", "Projekt"),
+    ("window.panel", "Render Queue", "Kolejka renderowania"),
+    ("window.panel", "Timeline", "Oś czasu"),
+    ("window.panel", "Create Nulls From Paths", "Utwórz obiekty zerowe ze ścieżek"),
+    ("window.panel", "VR Comp Editor", "Edytor kompozycji VR"),
+    ("", "Help", "Pomoc"),
+    ("help.docs", "EffectCraft Help...", "Pomoc EffectCraft..."),
+    ("help.docs", "Scripting Help...", "Pomoc dotycząca skryptów..."),
+    ("help.docs", "Expression Reference...", "Dokumentacja wyrażeń..."),
+    ("help.docs", "Effect Reference...", "Dokumentacja efektów..."),
+    ("anim.browsePresets", "Animation Presets...", "Ustawienia animacji..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts...", "Skróty klawiaturowe..."),
+    ("help.inAppTutorials", "In-App Tutorials...", "Samouczki w aplikacji..."),
+    ("help.onlineTutorials", "Online Tutorials...", "Samouczki online..."),
+    ("help.systemReport", "System Compatibility Report...", "Raport zgodności systemu..."),
+    ("help.enableLogging", "Enable Logging", "Włącz rejestrowanie"),
+    ("help.revealLogFile", "Reveal Logging File", "Pokaż plik dziennika"),
+    ("help.discord", "Join the ArtCraft Discord...", "Dołącz do Discorda ArtCraft..."),
+    ("help.reportIssue", "Provide Feedback...", "Prześlij opinię..."),
+    ("help.website", "ArtCraft Website", "Witryna ArtCraft"),
+    ("help.appPage", "EffectCraft Home Page", "Strona główna EffectCraft"),
+    ("help.github", "EffectCraft on GitHub", "EffectCraft w serwisie GitHub"),
+    ("file.openDemoProject", "Open Demo Project", "Otwórz projekt demonstracyjny"),
+    ("", "Recent Script Files", "Ostatnie pliki skryptów"),
+    ("layer.newPrimitive", "3D Primitive...", "Bryła podstawowa 3D..."),
+];
+
 /// Czech (cs): original phrase translations of every fixed menu entry.
 const CZECH: &[(&str, &str, &str)] = &[
     ("", "Front", "Přední strana"),
@@ -6093,6 +7549,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Nainstalovat soubor skriptu..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Nainstalovat panel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Spustit soubor skriptu..."),
+    ("", "Recent Script Files", "Nedávné soubory skriptů"),
     ("", "Create Proxy", "Vytvořit zástupný soubor"),
     ("file.createProxy", "Still...", "Statický snímek..."),
     ("file.createProxy", "Movie...", "Video..."),
@@ -6212,6 +7669,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.newShape", "Shape Layer", "Vrstva tvaru"),
     ("layer.newAdjustment", "Adjustment Layer", "Vrstva úprav"),
     ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "Vrstva výplně podle obsahu..."),
+    ("layer.newPrimitive", "3D Primitive...", "3D primitivum..."),
     ("layer.new3dPrimitive", "Cube", "Krychle"),
     ("layer.new3dPrimitive", "Sphere", "Koule"),
     ("layer.new3dPrimitive", "Plane", "Rovina"),
@@ -6445,6 +7903,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.applyTextPreset", "Drop In Lines", "Spustit řádky shora"),
     ("anim.addKeyframe", "Add Keyframe", "Přidat klíčový snímek"),
     ("keys.toggleHold", "Toggle Hold Keyframe", "Přepnout podržení klíčového snímku"),
+    ("keys.setMuted", "Mute Keyframes", "Ztlumit klíčové snímky"),
+    ("keys.setMuted", "Unmute Keyframes", "Obnovit klíčové snímky"),
     ("keys.interpolation", "Keyframe Interpolation...", "Interpolace klíčových snímků..."),
     ("keys.velocity", "Keyframe Velocity...", "Rychlost klíčového snímku..."),
     ("", "Keyframe Assistant", "Pomocník klíčových snímků"),
@@ -6642,6 +8102,644 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.openDemoProject", "Open Demo Project", "Otevřít ukázkový projekt"),
 ];
 
+/// Georgian (ka): the same (command, English label) keys as `JAPANESE`, one entry per fixed menu row.
+/// Original translations written from the meaning of the English labels, sharing the terminology of
+/// the other Craft apps' Georgian catalogs (შრე, საკვანძო კადრი, კომპოზიცია, ნიღაბი); commands are
+/// verbal nouns (შენახვა, გახსნა) and Georgian has no capital letters.
+const GEORGIAN: &[(&str, &str, &str)] = &[
+    ("", "EffectCraft", "EffectCraft"),
+    ("app.about", "About EffectCraft...", "EffectCraft-ის შესახებ..."),
+    ("", "Settings...", "პარამეტრები..."),
+    ("app.settings", "General...", "ზოგადი..."),
+    ("app.settings", "Startup & Repair...", "გაშვება და აღდგენა..."),
+    ("app.settings", "Project...", "პროექტი..."),
+    ("app.settings", "Composition...", "კომპოზიცია..."),
+    ("app.settings", "Previews...", "წინასწარი ნახვა..."),
+    ("app.settings", "Appearance...", "იერსახე..."),
+    ("app.settings", "Grids & Guides...", "ბადე და დამხმარე ხაზები..."),
+    ("app.settings", "Labels...", "იარლიყები..."),
+    ("app.settings", "Type...", "ტექსტი..."),
+    ("app.settings", "Import...", "იმპორტი..."),
+    ("app.settings", "Export...", "ექსპორტი..."),
+    ("app.settings", "Audio...", "აუდიო..."),
+    ("app.settings", "Disk...", "დისკი..."),
+    ("app.settings", "Memory & CPU...", "მეხსიერება და CPU..."),
+    ("app.settings", "Video...", "ვიდეო..."),
+    ("app.settings", "3D...", "3D..."),
+    ("app.settings", "Scripting & Expressions...", "სკრიპტები და ექსპრესიები..."),
+    ("app.hide", "Hide EffectCraft", "EffectCraft-ის დამალვა"),
+    ("app.hideOthers", "Hide Others", "სხვების დამალვა"),
+    ("app.showAll", "Show All", "ყველას ჩვენება"),
+    ("app.quit", "Quit EffectCraft", "EffectCraft-იდან გასვლა"),
+    ("", "File", "ფაილი"),
+    ("", "New", "ახალი"),
+    ("file.newProject", "New Project", "ახალი პროექტი"),
+    ("file.newFromTemplate", "New Project from Template...", "ახალი პროექტი შაბლონიდან..."),
+    ("project.newFolder", "New Folder", "ახალი საქაღალდე"),
+    ("file.open", "Open Project...", "პროექტის გახსნა..."),
+    ("", "Open Recent", "ბოლოს გახსნილი ფაილების გახსნა"),
+    ("file.clearRecent", "Clear Recent Projects", "ბოლო პროექტების სიის გასუფთავება"),
+    ("file.close", "Close", "დახურვა"),
+    ("file.closeProject", "Close Project", "პროექტის დახურვა"),
+    ("file.save", "Save", "შენახვა"),
+    ("", "Save As", "შენახვა როგორც"),
+    ("file.saveAs", "Save As...", "შენახვა როგორც..."),
+    ("file.saveCopy", "Save a Copy...", "ასლის შენახვა..."),
+    ("file.saveCopyAsXml", "Save a Copy As XML...", "ასლის შენახვა XML-ად..."),
+    ("templates.saveAs", "Save as Template...", "შაბლონად შენახვა..."),
+    ("file.incrementAndSave", "Increment and Save", "ვერსიის გაზრდით შენახვა"),
+    ("file.revert", "Revert", "წინა ვერსიაზე დაბრუნება"),
+    ("", "Import", "იმპორტი"),
+    ("file.import", "File...", "ფაილი..."),
+    ("file.importMultiple", "Multiple Files...", "რამდენიმე ფაილი..."),
+    ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraft-ის პროექტი..."),
+    ("file.importPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
+    ("file.importSolid", "Solid...", "სოლიდი..."),
+    ("file.importLottie", "Lottie...", "Lottie..."),
+    ("file.importVanishingPoint", "Vanishing Point (.vpe)...", "Vanishing Point (.vpe)..."),
+    ("essential.importTemplate", "Essential Graphics Template...", "ძირითადი გრაფიკის შაბლონი..."),
+    ("", "Import Recent Footage", "ბოლო ვიდეომასალის იმპორტი"),
+    ("file.clearRecentFootage", "Clear Recent Footage", "ბოლო ვიდეომასალის სიის გასუფთავება"),
+    ("", "Export", "ექსპორტი"),
+    ("renderQueue.add", "Add to Render Queue", "რენდერის რიგში დამატება"),
+    ("file.exportTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
+    ("file.exportLottie", "Lottie JSON...", "Lottie JSON..."),
+    ("essential.exportTemplate", "Essential Graphics Template...", "ძირითადი გრაფიკის შაბლონი..."),
+    ("app.find", "Find", "ძებნა"),
+    ("layer.addItem", "Add Footage to Comp", "ვიდეომასალის კომპოზიციაში დამატება"),
+    ("file.newCompFromSelection", "New Comp from Selection...", "ახალი კომპოზიცია მონიშნულიდან..."),
+    ("", "Dependencies", "დამოკიდებულებები"),
+    ("file.collectFiles", "Collect Files...", "ფაილების შეგროვება..."),
+    ("file.consolidateFootage", "Consolidate All Footage", "მთელი ვიდეომასალის კონსოლიდაცია"),
+    ("file.removeUnusedFootage", "Remove Unused Footage", "გამოუყენებელი ვიდეომასალის წაშლა"),
+    ("file.reduceProject", "Reduce Project", "პროექტის შემცირება"),
+    ("file.findMissing", "Find Missing Effects", "დაკარგული ეფექტების ძებნა"),
+    ("file.findMissing", "Find Missing Fonts", "დაკარგული შრიფტების ძებნა"),
+    ("file.findMissing", "Find Missing Footage", "დაკარგული ვიდეომასალის ძებნა"),
+    ("file.relinkFootage", "Relink Missing Footage...", "დაკარგული ვიდეომასალის ხელახლა დაკავშირება..."),
+    ("file.watchFolder", "Watch Folder...", "საქაღალდეზე თვალყურის დევნება..."),
+    ("", "Scripts", "სკრიპტები"),
+    ("file.installScript", "Install Script File...", "სკრიპტის ფაილის დაყენება..."),
+    ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI პანელის დაყენება..."),
+    ("file.runScript", "Run Script File...", "სკრიპტის ფაილის გაშვება..."),
+    ("", "Recent Script Files", "ბოლო სკრიპტის ფაილები"),
+    ("", "Create Proxy", "პროქსის შექმნა"),
+    ("file.createProxy", "Still...", "სტატიკური კადრი..."),
+    ("file.createProxy", "Movie...", "ვიდეო..."),
+    ("", "Set Proxy", "პროქსის მინიჭება"),
+    ("file.setProxy", "File...", "ფაილი..."),
+    ("file.setProxyNone", "None", "არცერთი"),
+    ("", "Interpret Footage", "ვიდეომასალის ინტერპრეტაცია"),
+    ("file.interpretFootage", "Main...", "ძირითადი..."),
+    ("file.interpretProxy", "Proxy...", "პროქსი..."),
+    ("file.rememberInterpretation", "Remember Interpretation", "ინტერპრეტაციის დამახსოვრება"),
+    ("file.applyInterpretation", "Apply Interpretation", "ინტერპრეტაციის გამოყენება"),
+    ("", "Replace Footage", "ვიდეომასალის ჩანაცვლება"),
+    ("file.replaceFootage", "File...", "ფაილი..."),
+    ("file.replaceWithPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
+    ("file.replaceWithSolid", "Solid...", "სოლიდი..."),
+    ("file.replaceWithLayeredComp", "With Layered Comp", "შრეებიანი კომპოზიციით"),
+    ("file.reloadFootage", "Reload Footage", "ვიდეომასალის ხელახლა ჩატვირთვა"),
+    ("file.revealInFinder", "Reveal in Finder", "Finder-ში ჩვენება"),
+    ("file.projectSettings", "Project Settings...", "პროექტის პარამეტრები..."),
+    ("app.quit", "Exit", "გასვლა"),
+    ("", "Edit", "რედაქტირება"),
+    ("edit.undo", "Undo", "დაბრუნება"),
+    ("edit.redo", "Redo", "ხელახლა შესრულება"),
+    ("", "History", "ისტორია"),
+    ("app.commandPalette", "Quick Apply...", "სწრაფი გამოყენება..."),
+    ("edit.cut", "Cut", "ამოჭრა"),
+    ("edit.copy", "Copy", "კოპირება"),
+    ("edit.copyWithPropertyLinks", "Copy with Property Links", "კოპირება თვისებების ბმულებით"),
+    ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "კოპირება თვისებების ფარდობითი ბმულებით"),
+    ("edit.copyExpressionOnly", "Copy Expression Only", "მხოლოდ ექსპრესიის კოპირება"),
+    ("edit.paste", "Paste", "ჩასმა"),
+    ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "საკვანძო კადრების შებრუნებული ჩასმა"),
+    ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "ტექსტის ჩასმა ფორმატის შეთანხმებით"),
+    ("edit.pasteTextFormattingOnly", "Paste Text Formatting Only", "მხოლოდ ტექსტის ფორმატის ჩასმა"),
+    ("edit.clear", "Clear", "გასუფთავება"),
+    ("edit.duplicate", "Duplicate", "დუბლირება"),
+    ("edit.splitLayer", "Split Layer", "შრის დაყოფა"),
+    ("edit.liftWorkArea", "Lift Work Area", "სამუშაო არის აწევა"),
+    ("edit.extractWorkArea", "Extract Work Area", "სამუშაო არის ამოღება"),
+    ("edit.selectAll", "Select All", "ყველაფრის მონიშვნა"),
+    ("edit.deselectAll", "Deselect All", "ყველა მონიშვნის მოხსნა"),
+    ("", "Label", "იარლიყი"),
+    ("edit.selectLabelGroup", "Select Label Group", "იარლიყის ჯგუფის მონიშვნა"),
+    ("edit.label", "None", "არცერთი"),
+    ("edit.label", "Red", "წითელი"),
+    ("edit.label", "Yellow", "ყვითელი"),
+    ("edit.label", "Aqua", "ზღვისფერი"),
+    ("edit.label", "Pink", "ვარდისფერი"),
+    ("edit.label", "Lavender", "ლავანდისფერი"),
+    ("edit.label", "Peach", "ატმისფერი"),
+    ("edit.label", "Sea Foam", "ზღვის ქაფი"),
+    ("edit.label", "Blue", "ლურჯი"),
+    ("edit.label", "Green", "მწვანე"),
+    ("edit.label", "Purple", "იისფერი"),
+    ("edit.label", "Orange", "ნარინჯისფერი"),
+    ("edit.label", "Brown", "ყავისფერი"),
+    ("edit.label", "Fuchsia", "ფუქსია"),
+    ("edit.label", "Cyan", "ცისფერი"),
+    ("edit.label", "Sandstone", "ქვიშაქვა"),
+    ("edit.label", "Dark Green", "მუქი მწვანე"),
+    ("app.settings", "Edit Label Colors...", "იარლიყის ფერების რედაქტირება..."),
+    ("", "Select Keyframe Label Group", "საკვანძო კადრების იარლიყის ჯგუფის მონიშვნა"),
+    ("keys.selectLabelGroup", "On Selected Layers", "მონიშნულ შრეებზე"),
+    ("keys.selectLabelGroup", "On All Layers", "ყველა შრეზე"),
+    ("keys.selectLabelGroup", "Visible Keyframes on Selected Layers", "ხილული საკვანძო კადრები მონიშნულ შრეებზე"),
+    ("keys.selectLabelGroup", "Visible Keyframes on All Layers", "ხილული საკვანძო კადრები ყველა შრეზე"),
+    ("", "Purge", "გაწმენდა"),
+    ("edit.purge", "All Cache...", "მთელი ქეში..."),
+    ("edit.purge", "All Memory & Disk Cache...", "მთელი მეხსიერება და დისკის ქეში..."),
+    ("edit.purge", "All Memory", "მთელი მეხსიერება"),
+    ("edit.purge", "All Disk Cache...", "მთელი დისკის ქეში..."),
+    ("edit.purge", "All 3D Cache...", "მთელი 3D ქეში..."),
+    ("edit.purgeUndo", "Undo", "დაბრუნების ისტორია"),
+    ("edit.purge", "Image Cache Memory", "გამოსახულების ქეშის მეხსიერება"),
+    ("edit.purge", "Snapshot", "მომენტალური ასლი"),
+    ("edit.editOriginal", "Edit Original...", "ორიგინალის რედაქტირება..."),
+    ("", "Templates", "შაბლონები"),
+    ("app.templates", "Render Settings...", "რენდერის პარამეტრები..."),
+    ("app.templates", "Output Module...", "გამოტანის მოდული..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts", "კლავიატურის მალსახმობები"),
+    ("", "Preferences", "პარამეტრები"),
+    ("", "Composition", "კომპოზიცია"),
+    ("comp.new", "New Composition...", "ახალი კომპოზიცია..."),
+    ("comp.settings", "Composition Settings...", "კომპოზიციის პარამეტრები..."),
+    ("comp.setPosterTime", "Set Poster Time", "პოსტერის დროის დაყენება"),
+    ("comp.trimToWorkArea", "Trim Comp to Work Area", "კომპოზიციის მოკვეთა სამუშაო არემდე"),
+    ("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", "კომპოზიციის ჩამოჭრა ინტერესის არემდე"),
+    ("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", "კომპოზიციის ჩამოჭრა მონიშნული შრ(ეებ)ის საზღვრებამდე"),
+    ("render.addOutputModule", "Add Output Module", "გამოტანის მოდულის დამატება"),
+    ("", "Preview", "წინასწარი ნახვა"),
+    ("playback.toggle", "Play Current Preview", "მიმდინარე წინასწარი ნახვის დაკვრა"),
+    ("playback.cacheWhenIdle", "Cache Frames When Idle", "კადრების ქეშირება უქმობისას"),
+    ("playback.audio", "Audio", "აუდიო"),
+    ("", "Save Frame As", "კადრის შენახვა როგორც"),
+    ("comp.saveFrameAs", "File...", "ფაილი..."),
+    ("comp.saveFrameAsPsd", "Photoshop Layers...", "Photoshop-ის შრეები..."),
+    ("comp.saveFrameAsExr", "ProEXR...", "ProEXR..."),
+    ("comp.copyFrame", "Copy Frame to Clipboard", "კადრის კოპირება გაცვლის ბუფერში"),
+    ("render.preRender", "Pre-render...", "წინასწარი რენდერი..."),
+    ("render.saveCurrentPreview", "Save Current Preview...", "მიმდინარე წინასწარი ნახვის შენახვა..."),
+    ("comp.openInEssentialGraphics", "Open in Essential Graphics", "ძირითად გრაფიკაში გახსნა"),
+    ("", "Responsive Design — Time", "რესპონსიული დიზაინი — დრო"),
+    ("comp.responsiveTime", "Create Intro", "შესავლის შექმნა"),
+    ("comp.responsiveTime", "Create Outro", "დასასრულის შექმნა"),
+    ("comp.responsiveTime", "Create Protected Region from Work Area", "დაცული არის შექმნა სამუშაო არიდან"),
+    ("comp.flowchart", "Composition Flowchart", "კომპოზიციის ბლოკ-სქემა"),
+    ("comp.miniFlowchart", "Composition Mini-Flowchart", "კომპოზიციის მინი-ბლოკ-სქემა"),
+    ("", "VR", "VR"),
+    ("comp.vr.createEnvironment", "Create VR Environment...", "VR გარემოს შექმნა..."),
+    ("comp.vr.extractCubemap", "Extract Cubemap...", "კუბური რუკის ამოღება..."),
+    ("", "Layer", "შრე"),
+    ("layer.newText", "Text", "ტექსტი"),
+    ("layer.newSolid", "Solid...", "სოლიდი..."),
+    ("layer.newLight", "Light...", "სინათლე..."),
+    ("layer.newCamera", "Camera...", "კამერა..."),
+    ("layer.newNull", "Null Object", "ნულოვანი ობიექტი"),
+    ("layer.newShape", "Shape Layer", "ფიგურის შრე"),
+    ("layer.newAdjustment", "Adjustment Layer", "კორექციის შრე"),
+    ("layer.newContentAwareFill", "Content-Aware Fill Layer...", "შიგთავსის გათვალისწინებით შევსების შრე..."),
+    ("layer.new3dPrimitive", "Cube", "კუბი"),
+    ("layer.new3dPrimitive", "Sphere", "სფერო"),
+    ("layer.new3dPrimitive", "Plane", "სიბრტყე"),
+    ("layer.new3dPrimitive", "Torus", "ტორი"),
+    ("layer.new3dPrimitive", "Cone", "კონუსი"),
+    ("layer.new3dPrimitive", "Cylinder", "ცილინდრი"),
+    ("layer.settings", "Layer Settings...", "შრის პარამეტრები..."),
+    ("layer.openLayer", "Open Layer", "შრის გახსნა"),
+    ("layer.openSource", "Open Layer Source", "შრის წყაროს გახსნა"),
+    ("layer.revealInFinder", "Reveal in Finder", "Finder-ში ჩვენება"),
+    ("", "Mask", "ნიღაბი"),
+    ("layer.addMask", "New Mask", "ახალი ნიღაბი"),
+    ("layer.mask.shape", "Mask Shape...", "ნიღბის ფორმა..."),
+    ("layer.mask.set", "Mask Feather...", "ნიღბის კიდეების შერბილება..."),
+    ("layer.mask.set", "Mask Opacity...", "ნიღბის გაუმჭვირვალობა..."),
+    ("layer.mask.set", "Mask Expansion...", "ნიღბის გაფართოება..."),
+    ("layer.mask.reset", "Reset Mask", "ნიღბის ჩამოყრა"),
+    ("layer.mask.remove", "Remove Mask", "ნიღბის წაშლა"),
+    ("layer.mask.removeAll", "Remove All Masks", "ყველა ნიღბის წაშლა"),
+    ("track.mask", "Track Mask", "ნიღბის ტრეკინგი"),
+    ("", "Mode", "რეჟიმი"),
+    ("layer.mask.mode", "None", "არცერთი"),
+    ("layer.mask.mode", "Add", "დამატება"),
+    ("layer.mask.mode", "Subtract", "გამოკლება"),
+    ("layer.mask.mode", "Intersect", "გადაკვეთა"),
+    ("layer.mask.mode", "Lighten", "გაღიავება"),
+    ("layer.mask.mode", "Darken", "ჩამუქება"),
+    ("layer.mask.mode", "Difference", "სხვაობა"),
+    ("layer.mask.invert", "Inverted", "შებრუნებული"),
+    ("layer.mask.lock", "Locked", "ჩაკეტილი"),
+    ("", "Motion Blur", "მოძრაობის გაბუნდოვნება"),
+    ("layer.mask.motionBlur", "Same As Layer", "შრის მსგავსად"),
+    ("layer.mask.motionBlur", "On", "ჩართული"),
+    ("layer.mask.motionBlur", "Off", "გამორთული"),
+    ("", "Feather Falloff", "კიდეების შერბილების მილევა"),
+    ("layer.mask.featherFalloff", "Smooth", "გლუვი"),
+    ("layer.mask.featherFalloff", "Linear", "წრფივი"),
+    ("layer.mask.unlockAll", "Unlock All Masks", "ყველა ნიღბის განბლოკვა"),
+    ("layer.mask.lockOthers", "Lock Other Masks", "სხვა ნიღბების ჩაკეტვა"),
+    ("layer.mask.hideLocked", "Hide Locked Masks", "ჩაკეტილი ნიღბების დამალვა"),
+    ("", "Mask and Shape Path", "ნიღაბი და ფიგურის ტრაექტორია"),
+    ("path.rotoBezier", "RotoBezier", "RotoBezier"),
+    ("mask.setClosed", "Closed", "შეკრული"),
+    ("path.convertToBezier", "Convert To Bezier Path", "ბეზიეს ტრაექტორიად გარდაქმნა"),
+    ("path.setFirstVertex", "Set First Vertex", "პირველი წვეროს დაყენება"),
+    ("path.freeTransform", "Free Transform Points", "წერტილების თავისუფალი გარდაქმნა"),
+    ("", "Quality", "ხარისხი"),
+    ("layer.quality", "Best", "საუკეთესო"),
+    ("layer.quality", "Draft", "მონახაზი"),
+    ("layer.quality", "Wireframe", "კარკასი"),
+    ("layer.sampling", "Bilinear", "ბიწრფივი"),
+    ("layer.sampling", "Bicubic", "ბიკუბური"),
+    ("", "Switches", "გადამრთველები"),
+    ("layer.hideOtherVideo", "Hide Other Video", "სხვა ვიდეოს დამალვა"),
+    ("layer.showAllVideo", "Show All Video", "მთელი ვიდეოს ჩვენება"),
+    ("layer.unlockAll", "Unlock All Layers", "ყველა შრის განბლოკვა"),
+    ("layer.expressions", "Enable Expressions", "ექსპრესიების ჩართვა"),
+    ("layer.expressions", "Disable Expressions", "ექსპრესიების გამორთვა"),
+    ("layer.setSwitch", "Shy", "მორცხვი"),
+    ("layer.setSwitch", "Lock", "ჩაკეტვა"),
+    ("layer.setSwitch", "Audio", "აუდიო"),
+    ("layer.setSwitch", "Video", "ვიდეო"),
+    ("layer.setSwitch", "Solo", "სოლო"),
+    ("layer.setSwitch", "Effect", "ეფექტი"),
+    ("layer.setSwitch", "Collapse", "ჩაკეცვა"),
+    ("layer.setSwitch", "Motion Blur", "მოძრაობის გაბუნდოვნება"),
+    ("layer.setSwitch", "Adjustment Layer", "კორექციის შრე"),
+    ("", "Transform", "გარდაქმნა"),
+    ("layer.transform", "Reset", "ჩამოყრა"),
+    ("layer.setTransform", "Anchor Point...", "საყრდენი წერტილი..."),
+    ("layer.setTransform", "Position...", "პოზიცია..."),
+    ("layer.setTransform", "Scale...", "მასშტაბი..."),
+    ("layer.setTransform", "Orientation...", "ორიენტაცია..."),
+    ("layer.setTransform", "Rotation...", "შემობრუნება..."),
+    ("layer.setTransform", "Opacity...", "გაუმჭვირვალობა..."),
+    ("layer.transform", "Flip Horizontal", "ჰორიზონტალურად არეკვლა"),
+    ("layer.transform", "Flip Vertical", "ვერტიკალურად არეკვლა"),
+    ("layer.transform", "Center In View", "ხედის ცენტრში მოთავსება"),
+    ("layer.centerAnchor", "Center Anchor Point in Layer Content", "საყრდენი წერტილის შრის შიგთავსის ცენტრში მოთავსება"),
+    ("layer.transform", "Fit to Comp", "კომპოზიციაში ჩატევა"),
+    ("layer.transform", "Fit to Comp Width", "კომპოზიციის სიგანეში ჩატევა"),
+    ("layer.transform", "Fit to Comp Height", "კომპოზიციის სიმაღლეში ჩატევა"),
+    ("layer.autoOrient", "Auto-Orient...", "ავტოორიენტაცია..."),
+    ("", "Time", "დრო"),
+    ("layer.enableTimeRemap", "Enable Time Remapping", "დროის გადანაწილების ჩართვა"),
+    ("layer.timeReverse", "Time-Reverse Layer", "შრის დროში შებრუნება"),
+    ("layer.timeStretch", "Time Stretch...", "დროში გაწელვა..."),
+    ("layer.freezeFrame", "Freeze Frame", "კადრის გაყინვა"),
+    ("layer.freezeOnLastFrame", "Freeze On Last Frame", "ბოლო კადრზე გაყინვა"),
+    ("layer.alignVideoToData", "Align Video to Data", "ვიდეოს მონაცემებთან სწორება"),
+    ("", "Frame Blending", "კადრების შერევა"),
+    ("layer.frameBlending", "Off", "გამორთული"),
+    ("layer.frameBlending", "Frame Mix", "კადრების ნაზავი"),
+    ("layer.frameBlending", "Pixel Motion", "პიქსელების მოძრაობა"),
+    ("layer.setSwitch", "3D Layer", "3D შრე"),
+    ("layer.setSwitch", "Guide Layer", "დამხმარე შრე"),
+    ("layer.environment", "Environment Layer", "გარემოს შრე"),
+    ("", "Markers", "მარკერები"),
+    ("layer.addMarker", "Add Marker", "მარკერის დამატება"),
+    ("layer.updateMarkersFromSource", "Update Markers From Source", "მარკერების განახლება წყაროდან"),
+    ("layer.markersLock", "Lock Markers", "მარკერების ჩაკეტვა"),
+    ("layer.deleteAllMarkers", "Delete All Markers", "ყველა მარკერის წაშლა"),
+    ("layer.setSwitch", "Preserve Transparency", "გამჭვირვალობის შენარჩუნება"),
+    ("", "Blending Mode", "შერევის რეჟიმი"),
+    ("layer.setBlendMode", "Normal", "ჩვეულებრივი"),
+    ("layer.setBlendMode", "Dissolve", "გაფანტვა"),
+    ("layer.setBlendMode", "Dancing Dissolve", "მოცეკვავე გაფანტვა"),
+    ("layer.setBlendMode", "Darken", "ჩამუქება"),
+    ("layer.setBlendMode", "Multiply", "გამრავლება"),
+    ("layer.setBlendMode", "Color Burn", "ფერით ჩამუქება"),
+    ("layer.setBlendMode", "Classic Color Burn", "კლასიკური ფერით ჩამუქება"),
+    ("layer.setBlendMode", "Linear Burn", "წრფივი ჩამუქება"),
+    ("layer.setBlendMode", "Darker Color", "უფრო მუქი ფერი"),
+    ("layer.setBlendMode", "Add", "დამატება"),
+    ("layer.setBlendMode", "Lighten", "გაღიავება"),
+    ("layer.setBlendMode", "Screen", "ეკრანი"),
+    ("layer.setBlendMode", "Color Dodge", "ფერით გაღიავება"),
+    ("layer.setBlendMode", "Classic Color Dodge", "კლასიკური ფერით გაღიავება"),
+    ("layer.setBlendMode", "Linear Dodge", "წრფივი გაღიავება"),
+    ("layer.setBlendMode", "Lighter Color", "უფრო ღია ფერი"),
+    ("layer.setBlendMode", "Overlay", "გადაფარვა"),
+    ("layer.setBlendMode", "Soft Light", "რბილი სინათლე"),
+    ("layer.setBlendMode", "Hard Light", "მკვეთრი სინათლე"),
+    ("layer.setBlendMode", "Linear Light", "წრფივი სინათლე"),
+    ("layer.setBlendMode", "Vivid Light", "კაშკაშა სინათლე"),
+    ("layer.setBlendMode", "Pin Light", "წერტილოვანი სინათლე"),
+    ("layer.setBlendMode", "Hard Mix", "მკვეთრი შერევა"),
+    ("layer.setBlendMode", "Difference", "სხვაობა"),
+    ("layer.setBlendMode", "Classic Difference", "კლასიკური სხვაობა"),
+    ("layer.setBlendMode", "Exclusion", "გამორიცხვა"),
+    ("layer.setBlendMode", "Subtract", "გამოკლება"),
+    ("layer.setBlendMode", "Divide", "გაყოფა"),
+    ("layer.setBlendMode", "Hue", "ფერის ტონი"),
+    ("layer.setBlendMode", "Saturation", "გაჯერება"),
+    ("layer.setBlendMode", "Color", "ფერი"),
+    ("layer.setBlendMode", "Luminosity", "ნათება"),
+    ("layer.setBlendMode", "Stencil Alpha", "ალფა-ტრაფარეტი"),
+    ("layer.setBlendMode", "Stencil Luma", "ლუმა-ტრაფარეტი"),
+    ("layer.setBlendMode", "Silhouette Alpha", "ალფა-სილუეტი"),
+    ("layer.setBlendMode", "Silhouette Luma", "ლუმა-სილუეტი"),
+    ("layer.setBlendMode", "Alpha Add", "ალფას დამატება"),
+    ("layer.setBlendMode", "Luminescent Premul", "მანათობელი წინასწარ გამრავლებული"),
+    ("layer.setBlendMode", "Next Blending Mode", "შემდეგი შერევის რეჟიმი"),
+    ("layer.setBlendMode", "Previous Blending Mode", "წინა შერევის რეჟიმი"),
+    ("", "Track Matte", "ტრეკ-მატი"),
+    ("layer.trackMatte", "No Track Matte", "ტრეკ-მატის გარეშე"),
+    ("layer.trackMatte", "Alpha Matte", "ალფა-მატი"),
+    ("layer.trackMatte", "Alpha Inverted Matte", "შებრუნებული ალფა-მატი"),
+    ("layer.trackMatte", "Luma Matte", "ლუმა-მატი"),
+    ("layer.trackMatte", "Luma Inverted Matte", "შებრუნებული ლუმა-მატი"),
+    ("layer.trackMatte", "Matte with Layer Above", "მატი ზედა შრით"),
+    ("layer.trackMatte", "Matte with Layer Below", "მატი ქვედა შრით"),
+    ("", "Layer Styles", "შრის სტილები"),
+    ("layer.style.options", "Layer Style Options...", "შრის სტილის პარამეტრები..."),
+    ("layer.style.convertToEditable", "Convert to Editable Styles", "რედაქტირებად სტილებად გარდაქმნა"),
+    ("layer.style.showAll", "Show All", "ყველას ჩვენება"),
+    ("layer.style.removeAll", "Remove All", "ყველას წაშლა"),
+    ("layer.style.dropShadow", "Drop Shadow", "ჩრდილი"),
+    ("layer.style.innerShadow", "Inner Shadow", "შიდა ჩრდილი"),
+    ("layer.style.outerGlow", "Outer Glow", "გარე ნათება"),
+    ("layer.style.innerGlow", "Inner Glow", "შიდა ნათება"),
+    ("layer.style.bevelEmboss", "Bevel and Emboss", "ფასკა და რელიეფი"),
+    ("layer.style.satin", "Satin", "ატლასი"),
+    ("layer.style.colorOverlay", "Color Overlay", "ფერის გადაფარვა"),
+    ("layer.style.gradientOverlay", "Gradient Overlay", "გრადიენტის გადაფარვა"),
+    ("layer.style.stroke", "Stroke", "კონტური"),
+    ("path.groupShapes", "Group Shapes", "ფიგურების დაჯგუფება"),
+    ("path.ungroupShapes", "Ungroup Shapes", "ფიგურების დაჯგუფების მოხსნა"),
+    ("", "Arrange", "დალაგება"),
+    ("layer.arrange", "Bring Layer to Front", "შრის წინა პლანზე გადმოტანა"),
+    ("layer.arrange", "Bring Layer Forward", "შრის წინ გადმოტანა"),
+    ("layer.arrange", "Send Layer Backward", "შრის უკან გადატანა"),
+    ("layer.arrange", "Send Layer to Back", "შრის უკანა პლანზე გადატანა"),
+    ("", "Reveal", "ჩვენება"),
+    ("layer.revealSource", "Reveal Layer Source in Project", "შრის წყაროს ჩვენება პროექტში"),
+    ("comp.flowchart", "Reveal Layer in Project Flowchart", "შრის ჩვენება პროექტის ბლოკ-სქემაში"),
+    ("comp.revealInProject", "Reveal Composition in Project", "კომპოზიციის ჩვენება პროექტში"),
+    ("layer.revealExpressionErrors", "Reveal Expression Errors", "ექსპრესიის შეცდომების ჩვენება"),
+    ("", "Create", "შექმნა"),
+    ("layer.create", "Convert to Editable Text", "რედაქტირებად ტექსტად გარდაქმნა"),
+    ("layer.create", "Create Shapes from Text", "ფიგურების შექმნა ტექსტიდან"),
+    ("layer.create", "Create Masks from Text", "ნიღბების შექმნა ტექსტიდან"),
+    ("layer.create", "Create Shapes from Vector Layer", "ფიგურების შექმნა ვექტორული შრიდან"),
+    ("layer.create", "Create Keyframes from Data", "საკვანძო კადრების შექმნა მონაცემებიდან"),
+    ("layer.create", "Null Controllers for Positional Points", "ნულოვანი მართვის ობიექტები პოზიციის წერტილებისთვის"),
+    ("layer.create", "Null Controllers for Path Points", "ნულოვანი მართვის ობიექტები ტრაექტორიის წერტილებისთვის"),
+    ("layer.create", "Nulls Following Path Points", "ტრაექტორიის წერტილებს მიმყოლი ნულოვანი ობიექტები"),
+    ("layer.create", "Null Tracing Along Path", "ტრაექტორიის გასწვრივ მოძრავი ნულოვანი ობიექტი"),
+    ("layer.create", "Create 3D Layer Instance", "3D შრის ეგზემპლარის შექმნა"),
+    ("", "Camera", "კამერა"),
+    ("camera.fromView", "Create Camera from 3D View", "კამერის შექმნა 3D ხედიდან"),
+    ("camera.stereoRig", "Create Stereo 3D Rig", "სტერეო 3D სისტემის შექმნა"),
+    ("camera.orbitNull", "Create Orbit Null", "ორბიტის ნულოვანი ობიექტის შექმნა"),
+    ("camera.fromModel", "Create Cameras from 3D Model", "კამერების შექმნა 3D მოდელიდან"),
+    ("camera.linkFocusToPoi", "Link Focus Distance to Point of Interest", "ფოკუსური მანძილის მიბმა ინტერესის წერტილზე"),
+    ("camera.linkFocusToLayer", "Link Focus Distance to Layer", "ფოკუსური მანძილის მიბმა შრეზე"),
+    ("camera.setFocusToLayer", "Set Focus Distance to Layer", "ფოკუსური მანძილის დაყენება შრეზე"),
+    ("layer.cameraSettings", "Camera Settings...", "კამერის პარამეტრები..."),
+    ("view.reset3DView", "Reset 3D View", "3D ხედის ჩამოყრა"),
+    ("", "Light", "სინათლე"),
+    ("light.fromModel", "Create Lights from 3D Model", "სინათლის წყაროების შექმნა 3D მოდელიდან"),
+    ("light.controlWithCamera", "Control Light with Camera", "სინათლის მართვა კამერით"),
+    ("light.environmentBackground", "Create Environment Light Background Layer", "გარემოს სინათლის ფონური შრის შექმნა"),
+    ("", "Material", "მასალა"),
+    ("material.revealSource", "Reveal Material Source in Project", "მასალის წყაროს ჩვენება პროექტში"),
+    ("material.reset", "Reset Material", "მასალის ჩამოყრა"),
+    ("material.duplicateAssign", "Duplicate and Assign Material", "მასალის დუბლირება და მინიჭება"),
+    ("layer.autoTrace", "Auto-trace...", "ავტომატური ვექტორიზაცია..."),
+    ("layer.precompose", "Pre-compose...", "კომპოზიციაში მოთავსება..."),
+    ("layer.sceneEditDetection", "Scene Edit Detection...", "სცენების ჭრილების ამოცნობა..."),
+    ("", "Effect", "ეფექტი"),
+    ("window.panel", "Effect Controls", "ეფექტის მართვა"),
+    ("effect.applyLast", "Last Effect", "ბოლო ეფექტი"),
+    ("effect.removeAll", "Remove All", "ყველას წაშლა"),
+    ("effect.manage", "Manage Effects...", "ეფექტების მართვა..."),
+    ("effect.plugins.load", "Load Effect Plug-in...", "ეფექტის პლაგინის ჩატვირთვა..."),
+    ("", "Animation", "ანიმაცია"),
+    ("anim.savePreset", "Save Animation Preset...", "ანიმაციის პრესეტის შენახვა..."),
+    ("anim.applyPreset", "Apply Animation Preset...", "ანიმაციის პრესეტის გამოყენება..."),
+    ("", "Recent Animation Presets", "ბოლო ანიმაციის პრესეტები"),
+    ("anim.clearRecentPresets", "Clear Recent Presets", "ბოლო პრესეტების სიის გასუფთავება"),
+    ("anim.browsePresets", "Browse Presets...", "პრესეტების დათვალიერება..."),
+    ("", "Text Animation Presets", "ტექსტის ანიმაციის პრესეტები"),
+    ("layer.applyTextPreset", "Typewriter", "საბეჭდი მანქანა"),
+    ("layer.applyTextPreset", "Fade Up Characters", "ასოების ამოსვლა გამოჩენით"),
+    ("layer.applyTextPreset", "Bounce In Words", "სიტყვების ხტუნვით შემოსვლა"),
+    ("layer.applyTextPreset", "Tracking In", "ასოების შეკუმშვით შემოსვლა"),
+    ("layer.applyTextPreset", "Scramble", "არევა"),
+    ("layer.applyTextPreset", "Blur In", "გამოჩენა გაბუნდოვნებიდან"),
+    ("layer.applyTextPreset", "Jitter", "კანკალი"),
+    ("layer.applyTextPreset", "Drop In Lines", "სტრიქონების ჩამოვარდნა"),
+    ("anim.addKeyframe", "Add Keyframe", "საკვანძო კადრის დამატება"),
+    ("keys.toggleHold", "Toggle Hold Keyframe", "ფიქსირებული საკვანძო კადრის გადართვა"),
+    ("keys.setMuted", "Mute Keyframes", "საკვანძო კადრების დადუმება"),
+    ("keys.setMuted", "Unmute Keyframes", "საკვანძო კადრების დადუმების მოხსნა"),
+    ("keys.interpolation", "Keyframe Interpolation...", "საკვანძო კადრის ინტერპოლაცია..."),
+    ("keys.velocity", "Keyframe Velocity...", "საკვანძო კადრის სიჩქარე..."),
+    ("", "Keyframe Assistant", "საკვანძო კადრების ასისტენტი"),
+    ("keys.audioToKeyframes", "Convert Audio to Keyframes", "აუდიოს საკვანძო კადრებად გარდაქმნა"),
+    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "ექსპრესიის საკვანძო კადრებად გარდაქმნა"),
+    ("keys.easyEase", "Easy Ease", "რბილი შენელება"),
+    ("keys.easyEaseIn", "Easy Ease In", "რბილი შენელება შესვლისას"),
+    ("keys.easyEaseOut", "Easy Ease Out", "რბილი შენელება გამოსვლისას"),
+    ("keys.exponentialScale", "Exponential Scale", "ექსპონენციალური მასშტაბი"),
+    ("keys.rpfCameraImport", "RPF Camera Import", "RPF კამერის იმპორტი"),
+    ("layer.sequence", "Sequence Layers...", "შრეების თანმიმდევრობით განლაგება..."),
+    ("keys.timeReverse", "Time-Reverse Keyframes", "საკვანძო კადრების დროში შებრუნება"),
+    ("", "Animate Text", "ტექსტის ანიმირება"),
+    ("layer.enablePerChar3D", "Enable Per-character 3D", "თითოეული ასოს 3D-ს ჩართვა"),
+    ("layer.addTextAnimator", "Anchor Point", "საყრდენი წერტილი"),
+    ("layer.addTextAnimator", "Position", "პოზიცია"),
+    ("layer.addTextAnimator", "Scale", "მასშტაბი"),
+    ("layer.addTextAnimator", "Skew", "დახრა"),
+    ("layer.addTextAnimator", "Rotation", "შემობრუნება"),
+    ("layer.addTextAnimator", "Opacity", "გაუმჭვირვალობა"),
+    ("layer.addTextAnimator", "All Transform Properties", "გარდაქმნის ყველა თვისება"),
+    ("", "Fill Color", "შევსების ფერი"),
+    ("layer.addTextAnimator", "RGB", "RGB"),
+    ("layer.addTextAnimator", "Hue", "ფერის ტონი"),
+    ("layer.addTextAnimator", "Saturation", "გაჯერება"),
+    ("layer.addTextAnimator", "Brightness", "სიკაშკაშე"),
+    ("", "Stroke Color", "კონტურის ფერი"),
+    ("layer.addTextAnimator", "Stroke Width", "კონტურის სისქე"),
+    ("", "Front", "წინა მხარე"),
+    ("", "Bevel", "წაკვეთა"),
+    ("", "Side", "გვერდითი მხარე"),
+    ("", "Back", "უკანა მხარე"),
+    ("layer.addTextAnimator", "Color", "ფერი"),
+    ("layer.addTextAnimator", "Tracking", "ასოთაშორისი ინტერვალი"),
+    ("layer.addTextAnimator", "Line Anchor", "სტრიქონის საყრდენი"),
+    ("layer.addTextAnimator", "Line Spacing", "სტრიქონთა დაშორება"),
+    ("layer.addTextAnimator", "Character Offset", "ასოს წანაცვლება"),
+    ("layer.addTextAnimator", "Character Value", "ასოს მნიშვნელობა"),
+    ("layer.addTextAnimator", "Blur", "გაბუნდოვნება"),
+    ("text.animatorFontAxes", "Variable Font Axes", "ცვლადი შრიფტის ღერძები"),
+    ("", "Add Text Selector", "ტექსტის სელექტორის დამატება"),
+    ("text.addSelector", "Range", "დიაპაზონი"),
+    ("text.addSelector", "Wiggly", "რხევითი"),
+    ("text.addSelector", "Expression", "ექსპრესია"),
+    ("text.removeAllAnimators", "Remove All Text Animators", "ტექსტის ყველა ანიმატორის წაშლა"),
+    ("prop.setExpression", "Add Expression", "ექსპრესიის დამატება"),
+    ("essential.addProperty", "Add Property to Essential Graphics", "თვისების დამატება ძირითად გრაფიკაში"),
+    ("prop.separateDimensions", "Separate Dimensions", "განზომილებების გაყოფა"),
+    ("track.camera", "Track Camera", "კამერის ტრეკინგი"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
+    ("track.motion", "Track Motion", "მოძრაობის ტრეკინგი"),
+    ("track.stabilize", "Stabilize Motion", "მოძრაობის სტაბილიზაცია"),
+    ("track.property", "Track this Property", "ამ თვისების ტრეკინგი"),
+    ("anim.reveal", "Reveal Properties with Keyframes", "საკვანძო კადრების მქონე თვისებების ჩვენება"),
+    ("anim.reveal", "Reveal Properties with Animation", "ანიმაციის მქონე თვისებების ჩვენება"),
+    ("anim.reveal", "Reveal All Modified Properties", "ყველა შეცვლილი თვისების ჩვენება"),
+    ("", "View", "ხედი"),
+    ("view.newViewer", "New Viewer", "ახალი დამთვალიერებელი"),
+    ("view.splitLockedViewer", "Split with New Locked Viewer", "დაყოფა ახალი ჩაკეტილი დამთვალიერებელით"),
+    ("view.zoomIn", "Zoom In", "გადიდება"),
+    ("view.zoomOut", "Zoom Out", "დაპატარავება"),
+    ("", "Resolution", "გარჩევადობა"),
+    ("view.res.full", "Full", "სრული"),
+    ("view.res.half", "Half", "ნახევარი"),
+    ("view.res.third", "Third", "მესამედი"),
+    ("view.res.quarter", "Quarter", "მეოთხედი"),
+    ("view.res.custom", "Custom...", "მორგებული..."),
+    ("view.displayColorManagement", "Use Display Color Management", "ეკრანის ფერთა მართვის გამოყენება"),
+    ("", "Simulate Output", "გამოტანის იმიტაცია"),
+    ("view.simulateOutput", "No Output Simulation", "გამოტანის იმიტაციის გარეშე"),
+    ("view.simulateOutput", "HDTV (Rec. 709)", "HDTV (Rec. 709)"),
+    ("view.simulateOutput", "SDTV NTSC", "SDTV NTSC"),
+    ("view.simulateOutput", "SDTV PAL", "SDTV PAL"),
+    ("view.simulateOutput", "Legacy Macintosh RGB (Gamma 1.8)", "ძველი Macintosh RGB (გამა 1.8)"),
+    ("view.simulateOutput", "Internet Standard RGB (sRGB)", "ინტერნეტის სტანდარტული RGB (sRGB)"),
+    ("view.simulateOutput", "UHDTV (Rec. 2020)", "UHDTV (Rec. 2020)"),
+    ("view.simulateOutput", "Display P3", "Display P3"),
+    ("view.simulateOutput", "Linear (1.0 Gamma)", "წრფივი (გამა 1.0)"),
+    ("view.customRgb", "My Custom RGB...", "ჩემი მორგებული RGB..."),
+    ("view.simulateOutput", "Custom...", "მორგებული..."),
+    ("view.rulers", "Show Rulers", "სახაზავების ჩვენება"),
+    ("", "Panel Background Color", "პანელის ფონის ფერი"),
+    ("view.panelBackground", "Black", "შავი"),
+    ("view.panelBackground", "Dark Gray", "მუქი ნაცრისფერი"),
+    ("view.panelBackground", "Medium Gray (Default)", "საშუალო ნაცრისფერი (ნაგულისხმევი)"),
+    ("view.panelBackground", "Light Gray", "ღია ნაცრისფერი"),
+    ("view.panelBackground", "White", "თეთრი"),
+    ("view.panelBackground", "Custom", "მორგებული"),
+    ("view.panelBackground", "Select Custom Background Color...", "მორგებული ფონის ფერის არჩევა..."),
+    ("view.guides", "Show Guides", "დამხმარე ხაზების ჩვენება"),
+    ("view.snapToGuides", "Snap to Guides", "დამხმარე ხაზებზე მიბმა"),
+    ("view.lockGuides", "Lock Guides", "დამხმარე ხაზების ჩაკეტვა"),
+    ("view.addGuide", "Add Guide...", "დამხმარე ხაზის დამატება..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "პროცენტული დამხმარე ხაზის დამატება..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "დამხმარე ხაზების პროცენტულად გარდაქმნა"),
+    ("view.convertGuides", "Convert Guides to Pixels", "დამხმარე ხაზების პიქსელებად გარდაქმნა"),
+    ("view.clearGuides", "Clear Guides", "დამხმარე ხაზების გასუფთავება"),
+    ("view.importGuides", "Import Guides...", "დამხმარე ხაზების იმპორტი..."),
+    ("view.exportGuides", "Export Guides...", "დამხმარე ხაზების ექსპორტი..."),
+    ("view.grid", "Show Grid", "ბადის ჩვენება"),
+    ("view.snapToGrid", "Snap to Grid", "ბადეზე მიბმა"),
+    ("view.snapping", "Snapping", "მიბმა"),
+    ("view.options", "View Options...", "ხედის პარამეტრები..."),
+    ("view.layerControls", "Show Layer Controls", "შრის მართვის ელემენტების ჩვენება"),
+    ("", "Switch View Layout", "ხედების განლაგების გადართვა"),
+    ("view.layout", "1 View", "1 ხედი"),
+    ("view.layout", "2 Views", "2 ხედი"),
+    ("view.layout", "4 Views", "4 ხედი"),
+    ("view.shareViewOptions", "Share View Options", "ხედის პარამეტრების გაზიარება"),
+    ("", "Switch 3D View", "3D ხედის გადართვა"),
+    ("view.3d.activeCamera", "Active Camera", "აქტიური კამერა"),
+    ("view.3d.default", "Default", "ნაგულისხმევი"),
+    ("view.3d.front", "Front", "წინიდან"),
+    ("view.3d.left", "Left", "მარცხნიდან"),
+    ("view.3d.top", "Top", "ზემოდან"),
+    ("view.3d.back", "Back", "უკნიდან"),
+    ("view.3d.right", "Right", "მარჯვნიდან"),
+    ("view.3d.bottom", "Bottom", "ქვემოდან"),
+    ("view.3d.custom1", "Custom View 1", "მორგებული ხედი 1"),
+    ("view.3d.custom2", "Custom View 2", "მორგებული ხედი 2"),
+    ("view.3d.custom3", "Custom View 3", "მორგებული ხედი 3"),
+    ("", "Assign Shortcut to 3D View", "მალსახმობის მინიჭება 3D ხედისთვის"),
+    ("view.3d.last", "Switch to Last 3D View", "ბოლო 3D ხედზე გადართვა"),
+    ("view.lookAtSelected", "Look at Selected Layers", "მონიშნული შრეების დათვალიერება"),
+    ("view.lookAtAll", "Look at All Layers", "ყველა შრის დათვალიერება"),
+    ("time.set", "Go to Time...", "დროზე გადასვლა..."),
+    ("view.fullScreen", "Enter Full Screen", "სრულეკრანიან რეჟიმში გადასვლა"),
+    ("", "Window", "ფანჯარა"),
+    ("", "Workspace", "სამუშაო სივრცე"),
+    ("window.workspace", "Default", "ნაგულისხმევი"),
+    ("window.workspace", "Review", "განხილვა"),
+    ("window.workspace", "Learn", "სწავლა"),
+    ("window.workspace", "Small Screen", "პატარა ეკრანი"),
+    ("window.workspace", "Standard", "სტანდარტული"),
+    ("window.workspace", "All Panels", "ყველა პანელი"),
+    ("window.workspace", "Animation", "ანიმაცია"),
+    ("window.workspace", "Color", "ფერი"),
+    ("window.workspace", "Effects", "ეფექტები"),
+    ("window.workspace", "Essential Graphics", "ძირითადი გრაფიკა"),
+    ("window.workspace", "Minimal", "მინიმალური"),
+    ("window.workspace", "Motion Tracking", "მოძრაობის ტრეკინგი"),
+    ("window.workspace", "Paint", "ხატვა"),
+    ("window.workspace", "Text", "ტექსტი"),
+    ("window.workspace", "Undocked Panels", "მოხსნილი პანელები"),
+    ("window.resetWorkspace", "Reset to Saved Layout", "შენახულ განლაგებაზე დაბრუნება"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "ამ სამუშაო სივრცეში ცვლილებების შენახვა"),
+    ("window.saveWorkspaceAs", "Save as New Workspace...", "ახალ სამუშაო სივრცედ შენახვა..."),
+    ("window.editWorkspaces", "Edit Workspaces...", "სამუშაო სივრცეების რედაქტირება..."),
+    ("", "Assign Shortcut to Workspace", "მალსახმობის მინიჭება სამუშაო სივრცისთვის"),
+    ("window.panel", "Align", "სწორება"),
+    ("window.panel", "Audio", "აუდიო"),
+    ("window.panel", "Brushes", "ფუნჯები"),
+    ("window.panel", "Character", "სიმბოლო"),
+    ("window.panel", "Content-Aware Fill", "შიგთავსის გათვალისწინებით შევსება"),
+    ("window.panel", "Effects & Presets", "ეფექტები და პრესეტები"),
+    ("window.panel", "Essential Graphics", "ძირითადი გრაფიკა"),
+    ("window.panel", "Info", "ინფორმაცია"),
+    ("help.inAppTutorials", "Learn", "სწავლა"),
+    ("window.panel", "Lumetri Scopes", "Lumetri Scopes"),
+    ("window.panel", "Mask Interpolation", "ნიღბის ინტერპოლაცია"),
+    ("window.panel", "Media Browser", "მედიის ბრაუზერი"),
+    ("window.panel", "Metadata", "მეტამონაცემები"),
+    ("window.panel", "Motion Sketch", "მოძრაობის ესკიზი"),
+    ("window.panel", "Paint", "ხატვა"),
+    ("window.panel", "Paragraph", "აბზაცი"),
+    ("window.panel", "Preview", "წინასწარი ნახვა"),
+    ("window.panel", "Progress", "პროგრესი"),
+    ("window.panel", "Properties", "თვისებები"),
+    ("window.panel", "Script Console", "სკრიპტის კონსოლი"),
+    ("window.panel", "Smoother", "დამგლუვებელი"),
+    ("window.panel", "Tools", "ხელსაწყოები"),
+    ("window.panel", "Tracker", "ტრეკერი"),
+    ("window.panel", "Wiggler", "რხევის გენერატორი"),
+    ("window.panel", "Composition", "კომპოზიცია"),
+    ("window.panel", "Flowchart", "ბლოკ-სქემა"),
+    ("window.panel", "Footage", "ვიდეომასალა"),
+    ("window.panel", "Layer", "შრე"),
+    ("window.panel", "Project", "პროექტი"),
+    ("window.panel", "Render Queue", "რენდერის რიგი"),
+    ("window.panel", "Timeline", "დროის ხაზი"),
+    ("window.panel", "Create Nulls From Paths", "ნულოვანი ობიექტების შექმნა ტრაექტორიებიდან"),
+    ("window.panel", "VR Comp Editor", "VR კომპოზიციის რედაქტორი"),
+    ("", "Help", "დახმარება"),
+    ("help.docs", "EffectCraft Help...", "EffectCraft-ის დახმარება..."),
+    ("help.docs", "Scripting Help...", "სკრიპტების დახმარება..."),
+    ("help.docs", "Expression Reference...", "ექსპრესიების ცნობარი..."),
+    ("help.docs", "Effect Reference...", "ეფექტების ცნობარი..."),
+    ("anim.browsePresets", "Animation Presets...", "ანიმაციის პრესეტები..."),
+    ("app.keyboardShortcuts", "Keyboard Shortcuts...", "კლავიატურის მალსახმობები..."),
+    ("help.inAppTutorials", "In-App Tutorials...", "აპის შიგნით გაკვეთილები..."),
+    ("help.onlineTutorials", "Online Tutorials...", "ონლაინ გაკვეთილები..."),
+    ("help.systemReport", "System Compatibility Report...", "სისტემის თავსებადობის ანგარიში..."),
+    ("help.enableLogging", "Enable Logging", "ჟურნალის ჩართვა"),
+    ("help.revealLogFile", "Reveal Logging File", "ჟურნალის ფაილის ჩვენება"),
+    ("help.discord", "Join the ArtCraft Discord...", "შემოუერთდით ArtCraft-ის Discord-ს..."),
+    ("help.reportIssue", "Provide Feedback...", "გამოხმაურების გაგზავნა..."),
+    ("help.website", "ArtCraft Website", "ArtCraft-ის ვებსაიტი"),
+    ("help.appPage", "EffectCraft Home Page", "EffectCraft-ის საწყისი გვერდი"),
+    ("help.github", "EffectCraft on GitHub", "EffectCraft GitHub-ზე"),
+    ("file.openDemoProject", "Open Demo Project", "სადემონსტრაციო პროექტის გახსნა"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6649,138 +8747,122 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeSet;
 
+    /// The four options at the foot of the header's workspace menu say what After Effects says,
+    /// read from its workspace button on 2026-10-31: reset, save over this one, save a copy, then
+    /// edit the list.
     #[test]
-    fn czech_translates_menus_without_changing_bindings_or_user_names() {
+    fn the_workspace_menu_options_use_after_effects_words() {
+        set_current("ja");
+        for (id, en, ja) in [
+            ("window.resetWorkspace", "Reset to Saved Layout", "保存したレイアウトにリセット"),
+            ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースへの変更を保存"),
+            ("window.saveWorkspaceAs", "Save as New Workspace...", "新規ワークスペースとして保存..."),
+            ("window.editWorkspaces", "Edit Workspaces...", "ワークスペースを編集..."),
+        ] {
+            assert_eq!(command_label(id, en), ja, "{id}");
+        }
+    }
+
+    /// Labels drawn outside the menu bar take the menu bar's row for their command (with `…` for
+    /// `...`), else the panel catalog's row, else stay as they are.
+    #[test]
+    fn command_label_reads_the_menu_row_then_the_panel_row() {
+        set_current("zh-hans");
+        assert_eq!(command_label("window.panel", "Project"), lookup(SIMPLIFIED_CHINESE, "window.panel", "Project"));
+        let (command, en, translated) = SIMPLIFIED_CHINESE.iter().find(|(c, en, _)| !c.is_empty() && en.ends_with("...")).expect("a menu row ending in ...");
+        assert_eq!(command_label(command, &format!("{}…", en.trim_end_matches("..."))), *translated);
+        assert_eq!(command_label("no.such.command", "Cancel"), tr("Cancel"));
+        assert_eq!(command_label("window.panel", "Comp 1"), "Comp 1");
+        set_current("en");
+        assert_eq!(command_label("window.panel", "Project"), "Project");
+    }
+
+    #[test]
+    fn settings_page_titles_read_the_menu_row() {
+        set_current("zh-hans");
+        let menu_row = lookup(SIMPLIFIED_CHINESE, "app.settings", "Type...");
+        assert_eq!(settings_page_title("Type"), menu_row.trim_end_matches("..."));
+        assert_ne!(settings_page_title("Type"), tr("Type"), "the page is about text, the panel row is the kind");
+        assert_eq!(settings_page_title("Roto Brush"), tr("Roto Brush"));
+        set_current("en");
+        assert_eq!(settings_page_title("Type"), "Type");
+    }
+
+    #[test]
+    fn match_system_takes_the_first_browser_language_with_a_catalog() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let any = |_: &str| true;
+        assert_eq!(super::first_supported(None, &tags(&["cs-CZ", "cs", "en"]), any), "cs");
+        assert_eq!(super::first_supported(None, &tags(&["nl-NL", "cs"]), any), "cs");
+        assert_eq!(super::first_supported(None, &tags(&["en-US", "cs"]), any), "en");
+        assert_eq!(super::first_supported(None, &tags(&["nl-NL"]), any), "en");
+        assert_eq!(super::first_supported(None, &tags(&[]), any), "en");
+        assert_eq!(super::first_supported(Some("uk"), &tags(&["cs"]), any), "uk");
+        assert_eq!(super::first_supported(Some("nl"), &tags(&["cs"]), any), "cs");
+    }
+
+    /// The web build installs no CJK or Georgian font: Match System passes over those browser
+    /// languages, while `?lang=` still selects them.
+    #[test]
+    fn web_match_system_skips_languages_without_a_font() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::first_supported(None, &tags(&["ja-JP", "zh-CN", "zh-TW", "ka-GE", "cs"]), super::web_draws), "cs");
+        assert_eq!(super::first_supported(None, &tags(&["ka"]), super::web_draws), "en");
+        assert_eq!(super::first_supported(Some("ka"), &tags(&["cs"]), super::web_draws), "ka");
+        assert_eq!(super::first_supported(Some("ja"), &tags(&[]), super::web_draws), "ja");
+    }
+
+    #[test]
+    fn swedish_translates_menus_without_changing_bindings_or_user_names() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.execute("prefs.set", json!({"key": "general.language", "value": "en"})).unwrap();
         app.session.prefs.push_recent("File.ecproj");
         let en = crate::native_menu::build(&app);
         let state = crate::native_menu::state_key(&app);
-        app.session.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
-        let cs = crate::native_menu::build(&app);
-        assert_eq!(language(&app), "cs");
-        assert!(czech(&app));
-        assert_eq!(code("cs"), "cs");
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "sv"})).unwrap();
+        let sv = crate::native_menu::build(&app);
+        assert_eq!(language(&app), "sv");
+        assert!(swedish(&app));
+        assert!(!czech(&app));
+        assert_eq!(code("sv"), "sv");
         assert_ne!(state, crate::native_menu::state_key(&app));
         let bindings = |menu: &crate::native_menu::NativeMenu| {
             menu.items().into_iter().map(|i| (i.id.clone(), i.command.clone(), i.params.clone(), i.shortcut.clone(), i.enabled, i.checked)).collect::<Vec<_>>()
         };
-        assert_eq!(bindings(&en), bindings(&cs));
-        assert!(cs.items().iter().any(|i| i.command == "comp.new" && i.label == "Nová kompozice..."));
-        assert!(cs.items().iter().any(|i| i.command == "layer.newText" && i.label == "Text"));
-        assert!(cs.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "Snadné zpomalení"));
-        assert!(cs.items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
-        for (source, translated) in [
-            ("File", "Soubor"),
-            ("Edit", "Úpravy"),
-            ("Composition", "Kompozice"),
-            ("Layer", "Vrstva"),
-            ("Effect", "Efekt"),
-            ("Animation", "Animace"),
-            ("View", "Zobrazení"),
-            ("Window", "Okno"),
-            ("Help", "Nápověda"),
-        ] {
+        assert_eq!(bindings(&en), bindings(&sv));
+        assert!(sv.items().iter().any(|i| i.command == "comp.new" && i.label == "Ny komposition..."));
+        assert!(sv.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "Mjukt in och ut"));
+        assert!(sv.items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
+        for (source, translated) in
+            [("File", "Arkiv"), ("Edit", "Redigera"), ("Composition", "Komposition"), ("Layer", "Lager"), ("Window", "Fönster"), ("Help", "Hjälp")]
+        {
             assert_eq!(label(&app, "", source), translated);
         }
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
         let panel =
             MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel": "layer"}), shortcut: None, alt_shortcuts: vec![] };
-        assert_eq!(entry(&app, &panel, "Layer: File Čeština".into()), "Vrstva: File Čeština");
+        assert_eq!(entry(&app, &panel, "Layer: File Åsa".into()), "Lager: File Åsa");
         assert_eq!(
-            submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “File Čeština” Workspace".into()),
-            "Přiřadit zkratku pracovnímu prostoru „File Čeština“"
+            submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “File Åsa” Workspace".into()),
+            "Tilldela kortkommando till arbetslayouten ”File Åsa”"
         );
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "Přiřadit zkratku 3D zobrazení „Top“");
-        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to Workspace".into()), "Přiřadit zkratku pracovnímu prostoru");
+        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "Tilldela kortkommando till 3D-vyn ”Top”");
+        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to Workspace".into()), "Tilldela kortkommando till arbetslayout");
+        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Det går inte att ångra");
+        app.session.history.undo.push(("File Åsa".into(), app.session.project.clone()));
+        assert_eq!(entry(&app, &undo, "Undo File Åsa".into()), "Ångra File Åsa");
+        for command in ["file.revealInFinder", "layer.revealInFinder"] {
+            for (source, translated) in
+                [("Reveal in Finder", "Visa i Finder"), ("Reveal in Explorer", "Visa i Utforskaren"), ("Reveal in File Manager", "Visa i filhanteraren")]
+            {
+                assert_eq!(label(&app, command, source), translated);
+                assert_eq!(label(&app, "file.openRecent", source), source);
+            }
+        }
+        app.session.history.undo.clear();
         app.session.execute("prefs.set", json!({"key": "general.language", "value": "en"})).unwrap();
         assert_eq!(crate::native_menu::build(&app), en);
-    }
-
-    #[test]
-    fn czech_undo_redo_keeps_history_labels_verbatim() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
-        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
-        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
-        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Není co vrátit");
-        assert_eq!(entry(&app, &redo, "Can't Redo".into()), "Není co zopakovat");
-        app.session.history.undo.push(("File Čeština".into(), app.session.project.clone()));
-        app.session.history.redo.push(("Text Čeština".into(), app.session.project.clone()));
-        assert_eq!(entry(&app, &undo, "Undo File Čeština".into()), "Zpět File Čeština");
-        assert_eq!(entry(&app, &redo, "Redo Text Čeština".into()), "Znovu Text Čeština");
-    }
-
-    #[test]
-    fn german_reveal_labels_follow_the_platform_file_manager() {
-        // As `czech_…` and `ukrainian_…` do. Asserted through `label`, not `entry`: `entry`
-        // returns the English for German, Russian and French, which have catalogues but are
-        // not wired into the menus (see the undo/redo match in `entry` and `supported`).
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
-        for command in ["file.revealInFinder", "layer.revealInFinder"] {
-            for (source, translated) in [
-                ("Reveal in Finder", "Im Finder anzeigen"),
-                ("Reveal in Explorer", "Im Explorer anzeigen"),
-                ("Reveal in File Manager", "Im Dateimanager anzeigen"),
-            ] {
-                assert_eq!(label(&app, command, source), translated, "{command} / {source}");
-                // Another command keeps a label that merely looks like one of these.
-                assert_eq!(label(&app, "file.openRecent", source), source);
-            }
-            assert_eq!(label(&app, command, "My file.mp4"), "My file.mp4", "a user's filename is never looked up");
-        }
-    }
-
-    #[test]
-    fn german_menu_labels_name_what_their_command_does() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
-        // "Ebenenreihenfolge umkehren" reads as reversing the stacking order, not time, and
-        // "Formate" are formats, not layer styles (#1443).
-        assert_eq!(label(&app, "layer.timeReverse", "Time-Reverse Layer"), "Ebene zeitlich umkehren");
-        assert_eq!(label(&app, "keys.timeReverse", "Time-Reverse Keyframes"), "Keyframes zeitlich umkehren");
-        assert_eq!(label(&app, "layer.style.convertToEditable", "Convert to Editable Styles"), "In bearbeitbare Stile umwandeln");
-    }
-
-    #[test]
-    fn german_uses_one_word_per_term() {
-        let german: Vec<&str> = GERMAN.iter().map(|(_, _, de)| *de).collect();
-        let with = |needle: &str| german.iter().filter(|de| de.contains(needle)).copied().collect::<Vec<_>>();
-        // "Expression" is "Ausdruck", not the English word.
-        assert!(with("Expression").is_empty(), "{:?}", with("Expression"));
-        // "Track" as a verb is "verfolgen", not "tracken".
-        assert!(with("tracken").is_empty(), "{:?}", with("tracken"));
-        // "Reveal <somewhere>" is "anzeigen". ("einblenden" stays right for "Show All",
-        // "Fade from Blur" and the like, so only the Reveal entries are checked.)
-        let reveal: Vec<&str> =
-            GERMAN.iter().filter(|(_, en, _)| en.starts_with("Reveal")).map(|(_, _, de)| *de).filter(|de| !de.to_lowercase().contains("anzeigen")).collect();
-        assert!(reveal.is_empty(), "{reveal:?}");
-        // One spelling of "to the front".
-        let vorn: Vec<&str> = german.iter().filter(|de| de.ends_with("nach vorn")).copied().collect();
-        assert!(vorn.is_empty(), "{vorn:?}");
-        // The terms those entries joined are still the majority ones.
-        assert!(with("verfolgen").len() >= 4, "{:?}", with("verfolgen"));
-        assert!(with("anzeigen").len() >= 12, "{}", with("anzeigen").len());
-    }
-
-    #[test]
-    fn czech_reveal_labels_follow_the_platform_file_manager() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
-        for command in ["file.revealInFinder", "layer.revealInFinder"] {
-            for (source, translated) in [
-                ("Reveal in Finder", "Zobrazit ve Finderu"),
-                ("Reveal in Explorer", "Zobrazit v Průzkumníku"),
-                ("Reveal in File Manager", "Zobrazit ve správci souborů"),
-            ] {
-                let e = MenuEntry { label: source.into(), command: command.into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
-                assert_eq!(label(&app, command, source), translated);
-                assert_eq!(entry(&app, &e, source.into()), translated);
-                assert_eq!(label(&app, "file.openRecent", source), source);
-            }
-            assert_eq!(label(&app, command, "My file.mp4"), "My file.mp4");
-        }
     }
 
     fn keys(nodes: &[MenuNode], out: &mut BTreeSet<(String, String)>) {
@@ -6798,63 +8880,82 @@ mod tests {
         }
     }
 
+    /// The fixed menu entries `code` has no row for. `@effects` is the generated plug-in catalog,
+    /// whose effect names come from the effect catalog instead.
+    fn missing_menu_entries(code: &str) -> Vec<String> {
+        let catalog = menu_catalog(code).unwrap_or_default();
+        // A label the tree repeats (one command in two menus) counts once.
+        let mut missing = Vec::new();
+        let mut seen = BTreeSet::new();
+        for line in TREE.lines() {
+            let line = line.trim().trim_start_matches("[mac] ").trim_start_matches("[!mac] ");
+            if line.is_empty() || line == "---" || line.starts_with('@') {
+                continue;
+            }
+            let mut parts = line.split(" | ");
+            let Some(en) = parts.next() else { continue };
+            let command = parts.next().and_then(|p| p.split_whitespace().next()).unwrap_or("");
+            if !catalog.iter().any(|(id, source, _)| *id == command && *source == en) && seen.insert((command, en)) {
+                missing.push(en.to_string());
+            }
+        }
+        missing
+    }
+
+    /// Lists, per language, the interface strings with no translation, which show in English. It
+    /// always passes: a missing translation never blocks a change. `cargo xtask ci` runs it.
     #[test]
-    fn every_translation_key_exists_in_the_actual_menu_tree() {
+    fn missing_translations_report() {
+        const SHOWN: usize = 12;
+        println!("Missing translations (shown in English):");
+        let mut total = 0;
+        for code in CATALOG_CODES {
+            let catalogs = [("menus", missing_menu_entries(code)), ("panels", ui::missing(code)), ("effects", effects::missing(code))];
+            let count: usize = catalogs.iter().map(|(_, missing)| missing.len()).sum();
+            total += count;
+            println!("{code}: {count}");
+            for (catalog, missing) in &catalogs {
+                if missing.is_empty() {
+                    continue;
+                }
+                let shown: Vec<&String> = missing.iter().take(SHOWN).collect();
+                let more = missing.len().saturating_sub(SHOWN);
+                let more = if more > 0 { format!(" … and {more} more") } else { String::new() };
+                println!("  {catalog} ({}): {shown:?}{more}", missing.len());
+            }
+        }
+        println!("total: {total}");
+    }
+
+    /// Prints the translated-row counts per language, the numbers `docs/localization-parity.md`
+    /// quotes. `cargo xtask i18n-report` runs it with `--nocapture`.
+    #[test]
+    fn catalog_row_counts_report() {
+        println!("Localization catalog rows:");
+        for code in CATALOG_CODES {
+            let menus = menu_catalog(code).map_or(0, |catalog| catalog.len());
+            let panels = ui::translated_rows(code);
+            let effect_names = effects::translated_rows(code);
+            println!("{code}: menus {menus}, panels {panels}, effect names {effect_names}, total {}", menus + panels + effect_names);
+        }
+    }
+
+    #[test]
+    fn menu_catalogs_have_no_stale_or_duplicate_rows() {
         let mut actual = BTreeSet::new();
         for mac in [false, true] {
             keys(&parse(TREE, mac).unwrap(), &mut actual);
         }
-        let mut japanese_keys = BTreeSet::new();
-        let mut chinese_keys = BTreeSet::new();
-        let mut traditional_keys = BTreeSet::new();
-        let mut ukrainian_keys = BTreeSet::new();
-        let mut spanish_keys = BTreeSet::new();
-        let mut portuguese_keys = BTreeSet::new();
-        let mut russian_keys = BTreeSet::new();
-        let mut french_keys = BTreeSet::new();
-        let mut german_keys = BTreeSet::new();
-        let mut czech_keys = BTreeSet::new();
-        for (catalog, unique) in [
-            (JAPANESE, &mut japanese_keys),
-            (SIMPLIFIED_CHINESE, &mut chinese_keys),
-            (TRADITIONAL_CHINESE, &mut traditional_keys),
-            (UKRAINIAN, &mut ukrainian_keys),
-            (SPANISH, &mut spanish_keys),
-            (PORTUGUESE, &mut portuguese_keys),
-            (RUSSIAN, &mut russian_keys),
-            (FRENCH, &mut french_keys),
-            (GERMAN, &mut german_keys),
-            (CZECH, &mut czech_keys),
-        ] {
+        for code in CATALOG_CODES {
+            let catalog = menu_catalog(code).unwrap();
+            let mut unique = BTreeSet::new();
             for (command, en, translated) in catalog {
                 let key = (command.to_string(), en.to_string());
-                assert!(actual.contains(&key), "stale translation: {key:?}");
-                assert!(unique.insert(key), "duplicate translation: {command} / {en}");
-                assert!(!translated.is_empty());
-            }
-            // All fixed TREE entries are covered; @effects is a generated plug-in catalog,
-            // whose product/effect names are intentionally left as registered.
-            for line in TREE.lines() {
-                let line = line.trim().trim_start_matches("[mac] ").trim_start_matches("[!mac] ");
-                if line.is_empty() || line == "---" || line.starts_with('@') {
-                    continue;
-                }
-                let mut parts = line.split(" | ");
-                let en = parts.next().unwrap();
-                let command = parts.next().and_then(|p| p.split_whitespace().next()).unwrap_or("");
-                assert!(unique.contains(&(command.into(), en.into())), "untranslated fixed entry: {line}");
+                assert!(actual.contains(&key), "{code}: stale translation: {key:?}");
+                assert!(unique.insert(key), "{code}: duplicate translation: {command} / {en}");
+                assert!(!translated.is_empty(), "{code}: empty translation: {command} / {en}");
             }
         }
-        // Every translated language covers exactly the same entries.
-        assert_eq!(japanese_keys, chinese_keys, "the languages must translate the same entries");
-        assert_eq!(chinese_keys, traditional_keys, "the languages must translate the same entries");
-        assert_eq!(traditional_keys, spanish_keys, "the languages must translate the same entries");
-        assert_eq!(spanish_keys, portuguese_keys, "the languages must translate the same entries");
-        assert_eq!(japanese_keys, ukrainian_keys, "the languages must translate the same entries");
-        assert_eq!(ukrainian_keys, russian_keys, "the languages must translate the same entries");
-        assert_eq!(russian_keys, french_keys, "the languages must translate the same entries");
-        assert_eq!(french_keys, german_keys, "the languages must translate the same entries");
-        assert_eq!(japanese_keys, czech_keys, "the languages must translate the same entries");
     }
 
     /// Exercise each engine spelling on every host: a macOS-only run must still catch a
@@ -6895,23 +8996,68 @@ mod tests {
             menu.items().into_iter().map(|i| (i.id.clone(), i.command.clone(), i.params.clone(), i.shortcut.clone(), i.enabled, i.checked)).collect::<Vec<_>>()
         };
         assert_eq!(bindings(&en), bindings(&ja));
+        assert!(ja.items().iter().any(|i| i.command == "comp.new" && i.label == label(&app, "comp.new", "New Composition...")));
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
-                "Layer: File".into()
-            ),
-            "レイヤー: File"
-        );
-        assert!(ja.items().iter().any(|i| i.command == "comp.new" && i.label == "新規コンポジション..."));
-        assert!(ja.items().iter().any(|i| i.command == "layer.newText" && i.label == "テキスト"));
-        assert!(ja.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "イージーイーズ"));
         app.session.prefs.push_recent("/tmp/File.ecproj");
         assert!(crate::native_menu::build(&app).items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
         assert_eq!(label(&app, "", "Composition"), "Composition");
     }
+    /// Every catalog names the platform's file manager: the engine substitutes it for "Finder"
+    /// before the label reaches the catalog, so the macOS row alone leaves Windows and Linux in
+    /// English (#1450).
+    #[test]
+    fn the_reveal_command_names_the_file_manager_in_every_catalog() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        for (code, explorer, manager) in REVEAL_FINDER {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value": code})).unwrap();
+            assert_eq!(label(&app, "file.revealInFinder", "Reveal in Explorer"), *explorer, "{code}");
+            assert_eq!(label(&app, "layer.revealInFinder", "Reveal in File Manager"), *manager, "{code}");
+        }
+        // English keeps the source, and the macOS wording still comes from the catalog.
+        app.session.execute("prefs.set", json!({"key":"general.language", "value": "en"})).unwrap();
+        assert_eq!(label(&app, "file.revealInFinder", "Reveal in Explorer"), "Reveal in Explorer");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value": "ja"})).unwrap();
+        assert_eq!(label(&app, "file.revealInFinder", "Reveal in Finder"), "Finderで表示");
+    }
+
+    /// Match System in the browser also picks the Russian, French and German catalogs, in the
+    /// order of the browser's preferences (#1700).
+    #[test]
+    fn browser_preferences_choose_russian_french_and_german() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (locales, expected) in
+            [(vec!["de-DE", "es-ES"], "de"), (vec!["xx-XX", "fr-CA"], "fr"), (vec!["ru-RU", "cs"], "ru"), (vec!["en-US", "de-DE"], "en"), (vec!["xx-XX"], "en")]
+        {
+            assert_eq!(super::first_supported(None, &tags(&locales), super::web_draws), expected, "{locales:?}");
+        }
+    }
+
+    /// The Edit menu's Undo and Redo name the history's action in the interface language, also in
+    /// the languages added with #1700.
+    #[test]
+    fn undo_and_redo_are_localized_for_russian_french_and_german() {
+        for (language, undo, no_undo, redo, no_redo) in [
+            ("ru", "Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять"),
+            ("fr", "Annuler", "Impossible d'annuler", "Rétablir", "Impossible de rétablir"),
+            ("de", "Rückgängig", "Rückgängig nicht möglich", "Wiederholen", "Wiederholen nicht möglich"),
+        ] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.session.execute("prefs.set", json!({"key": "general.language", "value": language})).unwrap();
+            let entry_of = |app: &EffectcraftApp, command: &str| {
+                let (_, e) = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == command).unwrap();
+                entry(app, e, e.label.clone())
+            };
+            assert_eq!(entry_of(&app, "edit.undo"), no_undo, "{language}");
+            assert_eq!(entry_of(&app, "edit.redo"), no_redo, "{language}");
+            app.session.execute("comp.new", json!({"name": "A", "duration": 1})).unwrap();
+            let action = app.session.history.undo.last().map(|u| u.0.clone()).unwrap();
+            assert_eq!(entry_of(&app, "edit.undo"), format!("{undo} {action}"), "{language}");
+            app.session.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(entry_of(&app, "edit.redo"), format!("{redo} {action}"), "{language}");
+        }
+    }
+
     #[test]
     fn match_system_uses_the_system_language_where_there_is_a_catalog() {
         for (locale, language) in [
@@ -6941,9 +9087,30 @@ mod tests {
             (Some("cs-CZ"), "cs"),
             (Some("cs_CZ.UTF-8"), "cs"),
             (Some("CS_cz.UTF-8"), "cs"),
+            (Some("pl"), "pl"),
+            (Some("pl-PL"), "pl"),
+            (Some("pl_PL.UTF-8"), "pl"),
+            (Some("PL_pl.UTF-8"), "pl"),
+            (Some("ka"), "ka"),
+            (Some("ka-GE"), "ka"),
+            (Some("ka_GE.UTF-8"), "ka"),
+            (Some("ru"), "ru"),
+            (Some("ru-RU"), "ru"),
+            (Some("ru-SK"), "ru"),
+            (Some("ru_RU.UTF-8"), "ru"),
+            (Some("de"), "de"),
+            (Some("de-DE"), "de"),
+            (Some("de_AT.UTF-8"), "de"),
+            (Some("fr"), "fr"),
+            (Some("fr-FR"), "fr"),
+            (Some("fr_CA.UTF-8"), "fr"),
+            (Some("sv"), "sv"),
+            (Some("sv-SE"), "sv"),
+            (Some("sv-FI"), "sv"),
+            (Some("sv_SE.UTF-8"), "sv"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
-            (Some("de-DE"), "en"),
+            (Some("nl-NL"), "en"),
             (None, "en"),
         ] {
             assert_eq!(supported(locale), language, "{locale:?}");
@@ -6955,6 +9122,8 @@ mod tests {
         assert_eq!(traditional(&app), system_language() == "zh-hant");
         assert_eq!(spanish(&app), system_language() == "es");
         assert_eq!(czech(&app), system_language() == "cs");
+        assert_eq!(polish(&app), system_language() == "pl");
+        assert_eq!(swedish(&app), system_language() == "sv");
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ja"})).unwrap();
         assert!(japanese(&app));
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hans"})).unwrap();
@@ -6974,9 +9143,17 @@ mod tests {
 
     #[test]
     fn every_translated_entry_keeps_the_english_shape() {
-        for (code, catalog) in
-            [("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE), ("uk", UKRAINIAN), ("es", SPANISH), ("pt-br", PORTUGUESE), ("cs", CZECH)]
-        {
+        for (code, catalog) in [
+            ("zh-hans", SIMPLIFIED_CHINESE),
+            ("zh-hant", TRADITIONAL_CHINESE),
+            ("uk", UKRAINIAN),
+            ("es", SPANISH),
+            ("pt-br", PORTUGUESE),
+            ("cs", CZECH),
+            ("pl", POLISH),
+            ("ka", GEORGIAN),
+            ("sv", SWEDISH),
+        ] {
             for (command, en, translated) in catalog {
                 assert_eq!(en.contains("..."), translated.contains("..."), "{code} {command} / {en}: {translated}");
                 let brackets = |s: &str| s.chars().filter(|c| *c == '(' || *c == ')').count();
@@ -6986,143 +9163,33 @@ mod tests {
         }
     }
 
+    /// The dock's tab titles are `PanelKind::title()`; the panels the Window menu lists are drawn in
+    /// the interface language through their `(window.panel, title)` rows. `History` and `ScriptUI
+    /// Panel` are in no menu and keep their English names, which is what this pins.
     #[test]
-    fn zh_hans_translates_labels_computed_titles_and_keeps_names_verbatim() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hans"})).unwrap();
-        assert_eq!(language(&app), "zh-hans");
-        assert!(simplified(&app));
-        assert!(!traditional(&app));
-        assert!(!japanese(&app));
-        // Fixed menu rows come from the catalog.
-        assert_eq!(label(&app, "", "Composition"), "合成");
-        assert_eq!(label(&app, "", "Effect"), "效果");
-        assert_eq!(label(&app, "comp.new", "New Composition..."), "新建合成...");
-        assert_eq!(label(&app, "layer.newText", "Text"), "文本");
-        // Untranslated keys and dynamic labels stay verbatim.
-        assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
-                "Undo Comp1".into()
-            ),
-            "无可撤销的操作"
-        );
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
-                "Layer: File".into()
-            ),
-            "图层: File"
-        );
-        // The submenu titles that name the current workspace / view.
-        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()), "为工作区“Default”指定快捷键");
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "为 3D 视图“Top”指定快捷键");
-        // The menu tree carries the same commands and shortcuts with the Chinese labels.
-        let zh = crate::native_menu::build(&app);
-        assert!(zh.items().iter().any(|i| i.command == "comp.new" && i.label == "新建合成..."));
-        assert!(zh.items().iter().any(|i| i.command == "layer.newText" && i.label == "文本"));
-        assert!(zh.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "缓动"));
-        // A dynamic filename is never translated.
-        app.session.prefs.push_recent("/tmp/File.ecproj");
-        assert!(crate::native_menu::build(&app).items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
-    }
-
-    #[test]
-    fn zh_hant_translates_labels_computed_titles_and_keeps_names_verbatim() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hant"})).unwrap();
-        assert_eq!(language(&app), "zh-hant");
-        assert!(traditional(&app));
-        assert!(!simplified(&app));
-        assert!(!japanese(&app));
-        // Fixed menu rows come from the catalog.
-        assert_eq!(label(&app, "", "Composition"), "合成");
-        assert_eq!(label(&app, "", "Effect"), "效果");
-        assert_eq!(label(&app, "comp.new", "New Composition..."), "新增合成...");
-        assert_eq!(label(&app, "layer.newText", "Text"), "文字");
-        // Untranslated keys and dynamic labels stay verbatim.
-        assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
-                "Undo Comp1".into()
-            ),
-            "沒有可復原的操作"
-        );
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
-                "Layer: File".into()
-            ),
-            "圖層: File"
-        );
-        // The submenu titles that name the current workspace / view.
-        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()), "為工作區“Default”指定快速鍵");
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "為 3D 檢視“Top”指定快速鍵");
-        // The menu tree carries the same commands and shortcuts with the Traditional labels.
-        let zh = crate::native_menu::build(&app);
-        assert!(zh.items().iter().any(|i| i.command == "comp.new" && i.label == "新增合成..."));
-        assert!(zh.items().iter().any(|i| i.command == "layer.newText" && i.label == "文字"));
-        assert!(zh.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "緩動"));
-        // A dynamic filename is never translated.
-        app.session.prefs.push_recent("/tmp/File.ecproj");
-        assert!(crate::native_menu::build(&app).items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
-    }
-
-    #[test]
-    fn ukrainian_translates_menus_without_changing_bindings_or_user_names() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
-        app.session.prefs.push_recent("/tmp/File.ecproj");
-        let en = crate::native_menu::build(&app);
-        let state = crate::native_menu::state_key(&app);
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"uk"})).unwrap();
-        let uk = crate::native_menu::build(&app);
-        assert_eq!(language(&app), "uk");
-        assert!(ukrainian(&app));
-        assert_ne!(state, crate::native_menu::state_key(&app));
-        let bindings = |menu: &crate::native_menu::NativeMenu| {
-            menu.items().into_iter().map(|i| (i.id.clone(), i.command.clone(), i.params.clone(), i.shortcut.clone(), i.enabled, i.checked)).collect::<Vec<_>>()
-        };
-        assert_eq!(bindings(&en), bindings(&uk));
-        assert!(uk.items().iter().any(|i| i.command == "comp.new" && i.label == "Нова композиція..."));
-        assert!(uk.items().iter().any(|i| i.command == "layer.newText" && i.label == "Текст"));
-        assert!(uk.items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
-        assert_eq!(label(&app, "", "File"), "Файл");
-        assert_eq!(label(&app, "", "Light"), "Світло");
-        assert_eq!(label(&app, "view.panelBackground", "Black"), "Чорний");
-        assert_eq!(label(&app, "layer.addTextAnimator", "Tracking"), "Міжлітерний інтервал");
-        assert_eq!(label(&app, "edit.purgeUndo", "Undo"), "Історія скасувань");
-        assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        let panel =
-            MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] };
-        assert_eq!(entry(&app, &panel, "Layer: File".into()), "Шар: File");
-        assert_eq!(
-            submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “File Україна” Workspace".into()),
-            "Призначити скорочення для робочого простору «File Україна»"
-        );
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "Призначити скорочення для вигляду 3D «Top»");
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
-        assert_eq!(crate::native_menu::build(&app), en);
-    }
-
-    #[test]
-    fn ukrainian_undo_redo_keeps_history_labels_verbatim() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"uk"})).unwrap();
-        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
-        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
-        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Немає дій для скасування");
-        assert_eq!(entry(&app, &redo, "Can't Redo".into()), "Немає дій для повторення");
-        app.session.history.undo.push(("File Україна".into(), app.session.project.clone()));
-        app.session.history.redo.push(("Text Україна".into(), app.session.project.clone()));
-        assert_eq!(entry(&app, &undo, "Undo File Україна".into()), "Скасувати File Україна");
-        assert_eq!(entry(&app, &redo, "Redo Text Україна".into()), "Повторити Text Україна");
+    fn the_dock_draws_every_panel_it_can_in_the_interface_language() {
+        use crate::dock::PanelKind;
+        const WITHOUT_A_ROW: &[&str] = &["History", "ScriptUI Panel"];
+        for (name, catalog, code) in [("ja", JAPANESE, "ja"), ("zh-hans", SIMPLIFIED_CHINESE, "zh-hans"), ("zh-hant", TRADITIONAL_CHINESE, "zh-hant")] {
+            // The dock asks both catalogs, so a title may be named by either.
+            ui::set_current(code);
+            for p in PanelKind::ALL {
+                let title = p.title();
+                let in_menu = catalog.iter().any(|(c, en, _)| *c == "window.panel" && *en == title);
+                let in_panel = ui::tr(title) != title;
+                assert_eq!(
+                    in_menu || in_panel,
+                    !WITHOUT_A_ROW.contains(&title),
+                    "{name}: {title} is {}named by a catalog and {}in the exception list",
+                    if in_menu || in_panel { "" } else { "not " },
+                    if WITHOUT_A_ROW.contains(&title) { "" } else { "not " }
+                );
+            }
+        }
+        ui::set_current("en");
+        // The dock asks the catalog rather than drawing the English name.
+        let dock_ui = include_str!("dock_ui.rs");
+        assert!(dock_ui.contains(r#"crate::i18n::command_label("window.panel", title)"#), "dock_ui.rs no longer asks the catalog for the panel titles");
     }
 
     #[test]
@@ -7134,90 +9201,33 @@ mod tests {
         assert_eq!(code("unknown"), "en");
     }
 
+    /// Every catalog language draws its menu entries from the catalog, including those with no
+    /// undo/redo wording of their own: choosing Deutsch, Русский or Français left the menus in
+    /// English (#1449).
     #[test]
-    fn es_translates_labels_computed_titles_and_keeps_names_verbatim() {
+    fn every_catalog_language_translates_menu_entries() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"es"})).unwrap();
-        assert_eq!(language(&app), "es");
-        assert!(spanish(&app));
-        assert!(!traditional(&app));
-        assert!(!simplified(&app));
-        assert!(!japanese(&app));
-        // Fixed menu rows come from the catalog.
-        assert_eq!(label(&app, "", "Composition"), "Composición");
-        assert_eq!(label(&app, "", "Effect"), "Efecto");
-        assert_eq!(label(&app, "comp.new", "New Composition..."), "Nueva composición...");
-        assert_eq!(label(&app, "layer.newText", "Text"), "Texto");
-        assert_eq!(label(&app, "layer.setBlendMode", "Color Burn"), "Subexposición de color");
-        // Untranslated keys and dynamic labels stay verbatim.
-        assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
-                "Undo Comp1".into()
-            ),
-            "No se puede deshacer"
-        );
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
-                "Layer: File".into()
-            ),
-            "Capa: File"
-        );
-        // The submenu titles that name the current workspace / view.
-        assert_eq!(
-            submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()),
-            "Asignar método abreviado al espacio de trabajo “Default”"
-        );
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "Asignar método abreviado a la vista 3D “Top”");
-        // The menu tree carries the same commands and shortcuts with the Spanish labels.
-        let es = crate::native_menu::build(&app);
-        assert!(es.items().iter().any(|i| i.command == "comp.new" && i.label == "Nueva composición..."));
-        assert!(es.items().iter().any(|i| i.command == "layer.newText" && i.label == "Texto"));
-        assert!(es.items().iter().any(|i| i.command == "keys.easyEase" && i.label == "Suavizado"));
-        // A dynamic filename is never translated.
-        app.session.prefs.push_recent("/tmp/File.ecproj");
-        assert!(crate::native_menu::build(&app).items().iter().any(|i| i.command == "file.openRecent" && i.label == "File.ecproj"));
-    }
-
-    #[test]
-    fn pt_br_translates_labels_computed_titles_and_keeps_names_verbatim() {
-        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.execute("prefs.set", json!({"key":"general.language", "value":"pt-br"})).unwrap();
-        assert_eq!(language(&app), "pt-br");
-        assert!(!japanese(&app));
-        // Fixed menu rows come from the catalog.
-        assert_eq!(label(&app, "", "Composition"), "Composição");
-        assert_eq!(label(&app, "", "Effect"), "Efeito");
-        assert_eq!(label(&app, "comp.new", "New Composition..."), "Nova composição...");
-        assert_eq!(label(&app, "layer.newText", "Text"), "Texto");
-        // Untranslated keys and dynamic labels stay verbatim.
-        assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
-                "Undo Comp1".into()
-            ),
-            "Não há nada para desfazer"
-        );
-        assert_eq!(
-            entry(
-                &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
-                "Layer: File".into()
-            ),
-            "Camada: File"
-        );
-        // The submenu titles that name the current workspace / view.
-        assert_eq!(
-            submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()),
-            "Atribuir atalho à área de trabalho “Default”"
-        );
-        assert_eq!(submenu(&app, "Assign Shortcut to 3D View", "Assign Shortcut to “Top”".into()), "Atribuir atalho à visualização 3D “Top”");
+        let menu_entry = |command: &str, label: &str| MenuEntry {
+            label: label.into(),
+            command: command.into(),
+            params: serde_json::Value::Null,
+            shortcut: None,
+            alt_shortcuts: Vec::new(),
+        };
+        let new_comp = menu_entry("comp.new", "New Composition...");
+        let undo = menu_entry("edit.undo", "Undo");
+        for code in CATALOG_CODES {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
+            let drawn = entry(&app, &new_comp, new_comp.label.clone());
+            assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
+            assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+        }
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"de"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Rückgängig nicht möglich");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+        assert_eq!(entry(&app, &new_comp, new_comp.label.clone()), "New Composition...");
     }
 
     #[test]

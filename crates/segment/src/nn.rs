@@ -334,9 +334,19 @@ pub fn softmax_rows(x: &mut [f32], n: usize) {
     }
 }
 
-/// Multi-head scaled dot-product attention of `nq` queries over `nk` keys/values, each `heads ×
-/// hd` wide (token-major, heads side by side), plus an optional per-head bias `[heads × nq × nk]`.
-pub fn attention(q: &[f32], k: &[f32], v: &[f32], nq: usize, nk: usize, heads: usize, hd: usize, bias: Option<&[f32]>) -> Vec<f32> {
+/// Token counts and channel layout shared by the query, key and value tensors.
+#[derive(Clone, Copy, Debug)]
+pub struct AttentionShape {
+    pub query_tokens: usize,
+    pub key_tokens: usize,
+    pub heads: usize,
+    pub head_dim: usize,
+}
+
+/// Multi-head scaled dot-product attention with token-major tensors, heads side by side,
+/// and an optional per-head bias `[heads × query_tokens × key_tokens]`.
+pub fn attention(q: &[f32], k: &[f32], v: &[f32], shape: AttentionShape, bias: Option<&[f32]>) -> Vec<f32> {
+    let AttentionShape { query_tokens: nq, key_tokens: nk, heads, head_dim: hd } = shape;
     let dim = heads * hd;
     let mut out = vec![0.0f32; nq * dim];
     if q.len() < nq * dim || k.len() < nk * dim || v.len() < nk * dim {
@@ -371,6 +381,37 @@ pub fn attention(q: &[f32], k: &[f32], v: &[f32], nq: usize, nk: usize, heads: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_head_cross_attention_matches_direct_sums() {
+        let shape = AttentionShape { query_tokens: 2, key_tokens: 3, heads: 2, head_dim: 2 };
+        let q = [1.0, -0.5, 0.25, 2.0, -1.0, 0.75, 1.5, -0.25];
+        let k = [0.5, 1.0, -0.5, 0.25, 1.5, -0.25, 0.75, 1.0, -1.0, 0.5, 2.0, -1.5];
+        let v = [1.0, 2.0, 3.0, 4.0, -1.0, 0.5, 1.5, -2.0, 0.25, 0.75, -0.5, 2.5];
+        let bias = [0.0, 0.5, -0.5, 1.0, 0.0, -1.0, -0.25, 0.25, 0.5, 0.0, -0.5, 1.0];
+        for bias in [None, Some(bias.as_slice())] {
+            let actual = attention(&q, &k, &v, shape, bias);
+            for query in 0..shape.query_tokens {
+                for head in 0..shape.heads {
+                    let mut scores: Vec<f32> = (0..shape.key_tokens)
+                        .map(|key| {
+                            let dot: f32 = (0..shape.head_dim).map(|channel| q[query * 4 + head * 2 + channel] * k[key * 4 + head * 2 + channel]).sum();
+                            dot / (shape.head_dim as f32).sqrt() + bias.map_or(0.0, |b| b[(head * 2 + query) * 3 + key])
+                        })
+                        .collect();
+                    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    for score in &mut scores {
+                        *score = (*score - max).exp();
+                    }
+                    let total: f32 = scores.iter().sum();
+                    for channel in 0..shape.head_dim {
+                        let expected: f32 = scores.iter().enumerate().map(|(key, score)| score / total * v[key * 4 + head * 2 + channel]).sum();
+                        assert!((actual[query * 4 + head * 2 + channel] - expected).abs() < 1e-6);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn gemm_matches_naive() {

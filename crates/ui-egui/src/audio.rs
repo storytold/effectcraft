@@ -532,7 +532,7 @@ mod tests {
         let item = p.add_item("long.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
         let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
         let layer = build::layer(&mut p, &comp, "long.flac", LayerSource::Footage { item }, (0, 0), None);
-        comp.layers = vec![layer];
+        comp.layers = vec![layer].into();
         let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let src = RenderSource {
             project: Arc::new(p),

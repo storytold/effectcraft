@@ -165,7 +165,8 @@ fn fxm_sprite(at: u32, x: f32, y: f32) -> FxmShade {
     return FxmShade(true, vec4<f32>(rgb * a, a));
 }
 
-// CC Bubbles' bubble (sim::bubbles). u[1].y = metal, u[1].z = shading type.
+// CC Bubbles' bubble (sim::bubbles). u[1].y = metal, u[1].z = shading type, f[0] = the layer
+// rectangle's first and last pixel centres (x0, y0, x1, y1), which refraction samples stay within.
 fn fxm_bubble(at: u32, x: f32, y: f32) -> FxmShade {
     let qx = data[at + 1u];
     let qy = data[at + 2u];
@@ -180,7 +181,9 @@ fn fxm_bubble(at: u32, x: f32, y: f32) -> FxmShade {
     }
     let k = select(-0.7, 1.6, P.u[1].y != 0u);
     let nz = sqrt(max(1.0 - d2, 0.0));
-    let s = fxm_unpremul(sample_bilinear(src, data[at + 4u] + dx * qr * k, data[at + 5u] + dy * qr * k));
+    let sx = min(max(data[at + 4u] + dx * qr * k, P.f[0].x), P.f[0].z);
+    let sy = min(max(data[at + 5u] + dy * qr * k, P.f[0].y), P.f[0].w);
+    let s = fxm_unpremul(sample_bilinear_clamped(src, sx, sy));
     var c = s.xyz;
     if (s.w <= 0.0) {
         c = vec3<f32>(0.6, 0.7, 0.8);

@@ -30,11 +30,12 @@ Commands (CLI, MCP, control channel):
 
 ### Settings that change behaviour
 
-- `general.language`: interface language (`system` / `en` / `ja` / `zh-hans` / `zh-hant` / `uk` / `es` / `pt-br`), Settings ▸ General ▸ Language; menu labels change immediately. `system` (Match System, the default) follows the operating system's interface language where EffectCraft has a translation and is English otherwise: a Simplified Chinese locale (`zh`, `zh-CN`, `zh_CN.UTF-8`, `zh-Hans-CN`, `zh-SG`) selects `zh-hans`, a Traditional one (`zh-TW`, `zh-HK`, `zh-Hant`, `zh_MO`) selects `zh-hant`, a Ukrainian one (`uk`, `uk-UA`, `uk_UA.UTF-8`) selects `uk`, a Spanish one (`es`, `es-ES`, `es_MX.UTF-8`) selects `es`, a Portuguese one (`pt`, `pt-BR`, `pt_PT.UTF-8`) selects `pt-br`; the browser build stays in English with it. Choose **Español** or **Português (Brasil)** for Spanish or Brazilian Portuguese menus (panels stay in English for now); choose **Українська** for Ukrainian menus and cataloged panel, dialog, button and tooltip text; Ukrainian uses the bundled UI fonts. Native Japanese, Simplified and Traditional Chinese UI uses installed system fonts; the web host must supply a Japanese font. The same setting picks the CJK fallback for the interface *and* the Han preference of the text engine, so the composition's own text is drawn with the same language's glyph forms (the text engine's preference is process-global); swapping the language reinstalls the fonts, so it applies without a restart. Two catalogs back the text: the menus are keyed by `(command, English label)` (`crates/ui-egui/src/i18n.rs`), and the rest of the interface - panels, dialogs, buttons, tooltips - is keyed by its English source string (`crates/ui-egui/src/i18n/ui.rs`, with rows for Japanese, Simplified and Traditional Chinese and Ukrainian), where a panel writes `tr("Rename")`, or `tr_args("Proxy Use: {}", &[&quality])` when the row carries a value. A row that is missing falls back to English, so a new string shows up untranslated rather than empty; the tests in that module fail on an unused row and on a hard-coded string in a converted panel.
+- `general.language`: interface language (`system` / `en` / `ja` / `zh-hans` / `zh-hant` / `uk` / `es` / `pt-br` / `ka` / `sv`), Settings ▸ General ▸ Language; menu labels change immediately. `system` (Match System, the default) follows the operating system's interface language where EffectCraft has a translation and is English otherwise: a Simplified Chinese locale (`zh`, `zh-CN`, `zh_CN.UTF-8`, `zh-Hans-CN`, `zh-SG`) selects `zh-hans`, a Traditional one (`zh-TW`, `zh-HK`, `zh-Hant`, `zh_MO`) selects `zh-hant`, a Ukrainian one (`uk`, `uk-UA`, `uk_UA.UTF-8`) selects `uk`, a Spanish one (`es`, `es-ES`, `es_MX.UTF-8`) selects `es`, a Portuguese one (`pt`, `pt-BR`, `pt_PT.UTF-8`) selects `pt-br`, a Georgian one (`ka`, `ka-GE`, `ka_GE.UTF-8`) selects `ka`, a Swedish one (`sv`, `sv-SE`, `sv_SE.UTF-8`) selects `sv`; the browser build follows `?lang=` in the address, then the browser's languages (`navigator.languages`). Choose **Español** or **Português (Brasil)** for Spanish or Brazilian Portuguese menus (panels stay in English for now); choose **Українська** for Ukrainian menus and cataloged panel, dialog, button and tooltip text; Ukrainian uses the bundled UI fonts. Choose **Svenska** for Swedish menus, panels and effect names. Native Japanese, Simplified and Traditional Chinese UI uses installed system fonts; the web host must supply a Japanese font. The same setting picks the CJK fallback for the interface *and* the Han preference of the text engine, so the composition's own text is drawn with the same language's glyph forms (the text engine's preference is process-global); swapping the language reinstalls the fonts, so it applies without a restart. Two catalogs back the text: the menus are keyed by `(command, English label)` (`crates/ui-egui/src/i18n.rs`), and the rest of the interface - panels, dialogs, buttons, tooltips - is keyed by its English source string (`crates/ui-egui/src/i18n/ui.rs`, with rows for Japanese, Simplified and Traditional Chinese and Ukrainian), where a panel writes `tr("Rename")`, or `tr_args("Proxy Use: {}", &[&quality])` when the row carries a value. A row that is missing falls back to English, so a new string shows up untranslated rather than empty; the `missing_translations_report` test lists what each language lacks, and the tests in `ui.rs` fail on an unused row.
 - `general.undoLevels`: Levels of Undo
 - `general.pathPointSize`: Path Point and Handle Size
 - `general.recentItems`: Recent Projects Shown
 - `general.showToolTips`: Show Tool Tips
+- `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
@@ -42,6 +43,7 @@ Commands (CLI, MCP, control channel):
 - `startup.windowGraphics`: Window Graphics (`auto` / `gl`), what the desktop window draws with from the next launch. `auto` lets the platform pick (DirectX 12, Vulkan or Metal); `gl` uses OpenGL, with CPU compositing, for graphics drivers that crash with the others. A launch leaves a `launch-pending` marker in the settings folder until its window has been drawing for a few seconds (or the app quits normally before that); a launch that stops earlier (a graphics driver crashing as the window opens or as its surface is re-created) leaves the marker behind, and the next launch switches to `gl` and says so (not on macOS, which has no OpenGL backend). `WGPU_BACKEND` overrides both.
 - `project.useTemplate`: New Project Loads Template
 - `project.templatePath`: Template Project
+- `project.compactProjectFiles`: Save Compact Project Files (default off). Off: File ▸ Save writes `.ecproj` files as indented JSON, one value per line, easy to read and diff in version control. On: compact JSON on one line, smaller and faster to save and open. Either opens the same; auto-saves, XML copies and template packages are not affected.
 - `autoSave.enabled`: Automatically Save Projects
 - `autoSave.intervalMinutes`: Save Every
 - `autoSave.maxVersions`: Maximum Project Versions
@@ -91,7 +93,8 @@ Commands (CLI, MCP, control channel):
   one and in the comps that nest it (through the precomp layers' timing)
 - `general.expressionPickWhipCompact`: off, the pick whip writes match names
   (`thisComp.layer("A")("transform")("opacity")`)
-- `general.createSplitLayersAbove`: where Edit ▸ Split Layer puts the new layer
+- `general.createSplitLayersAbove`: where Edit ▸ Split Layer puts the new layer (on by default,
+  as in After Effects)
 - `startup.showHomeOnOpenProject`: the Home screen comes up after File ▸ Open / Open Recent
 - `composition.motionPath`, `composition.motionPathSeconds`, `composition.motionPathKeyframes`:
   how much of a position motion path the viewer draws (all, none, N seconds or N keyframes
@@ -118,9 +121,11 @@ Commands (CLI, MCP, control channel):
 - `import.reportMissingFrames`: gaps in an image sequence's numbering are reported on import
   (they show as colour-bar placeholders, as in After Effects; see [footage.md](footage.md))
 - `import.autoReloadFootage`: Automatically Reload Footage, `off`, `nonSequence` (the default, as
-  in After Effects) or `all` (image sequences too). Every two seconds,
-  and as soon as the window comes back to the front, the desktop app compares each footage file's
-  size and modification time with what they were, and reloads what another app saved: a
+  in After Effects) or `all` (image sequences too). Every two seconds while its window is in
+  front (every ten seconds while another app has the front), and as soon as the window comes back
+  to the front, the desktop app compares each footage file's size and modification time with what
+  they were, on a worker thread that only wakes the interface when something changed, and reloads
+  what another app saved: a
   Photoshop file edited in PhotoCraft or Photoshop shows its new pixels without File ▸ Reload
   Footage. It is not an undo step and doesn't modify the project; a layer item stays on its layer
   (found again by name), and a file that can't be read yet (still being written) is tried again once it changes again.
@@ -188,7 +193,8 @@ Effect Controls uses compact, fixed 20 pt parameter rows, as After Effects does:
 Edit ▸ Keyboard Shortcuts (`Cmd+Alt+'`) opens the shortcut editor: an on-screen keyboard showing
 which keys are assigned for the held modifiers (purple: application-wide, green: panel-specific,
 both: split), modifier toggles, a searchable list of every command (all engine commands, menu
-entries with bound parameters and the frontend's tool / panel commands), and a preset menu.
+entries with bound parameters, the scripts File ▸ Scripts lists and the frontend's tool / panel
+commands), and a preset menu.
 
 - **Presets.** "EffectCraft Default" is After Effects' default layout and is read-only; editing
   it creates a "Custom" copy. Custom presets store only their differences from the default and

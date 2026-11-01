@@ -8,7 +8,10 @@
 
 use crate::mc::{Mv, PhasePlanes, RefPlane, clamp_for_plane, predict};
 use crate::probs::{self, P, Writer, cost, tree_cost};
-use crate::tables::*;
+use crate::tables::{
+    COEFBAND_4X4, COL_SCAN_4X4, COUNTER_TO_CONTEXT, DEFAULT_SCAN_4X4, ENERGY_CLASS, KF_PARTITION_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, MODE_2_COUNTER,
+    MV_REF_8X8, MV_REF_16X16, ROW_SCAN_4X4,
+};
 use crate::transform::{ADST_ADST, ADST_DCT, DCT_ADST, DCT_DCT, Quant};
 use crate::{BLOCK_8X8, BLOCK_16X16, Mi, Plane};
 
@@ -21,6 +24,13 @@ pub const NEARESTMV: u8 = 10;
 pub const NEARMV: u8 = 11;
 pub const ZEROMV: u8 = 12;
 pub const NEWMV: u8 = 13;
+
+/// Which reconstructed neighbours are available for intra prediction.
+#[derive(Clone, Copy)]
+struct IntraEdges {
+    left: bool,
+    above: bool,
+}
 
 const PARTITION_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
 const INTRA_MODE_TREE: [i8; 18] = [0, 2, -9, 4, -1, 6, 8, 12, -2, 10, -4, -5, -3, 14, -8, 16, -6, -7];
@@ -104,7 +114,8 @@ fn levels_cost(levels: &[i32; 16], eob: usize) -> u32 {
 }
 
 /// Intra prediction (8.5.1) of a square block for DC / V / H / TM.
-fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> [i32; 64] {
+fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, edges: IntraEdges) -> [i32; 64] {
+    let IntraEdges { left: have_left, above: have_above } = edges;
     let size = 1usize << log2;
     let base = 128i32;
     let buf = &p.rec;
@@ -209,6 +220,21 @@ fn probs_defaults() -> &'static probs::Probs {
     use std::sync::OnceLock;
     static D: OnceLock<probs::Probs> = OnceLock::new();
     D.get_or_init(probs::Probs::defaults)
+}
+
+/// SAD of two N×N blocks: per-column 16-bit sums (at most 16 · 255), summed once.
+#[inline(always)]
+fn sad_n<const N: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize) -> u32 {
+    let mut acc = [0u16; N];
+    for i in 0..N {
+        let (Some(ra), Some(rb)) = (a.get(i * sa..).and_then(|r| r.first_chunk::<N>()), b.get(i * sb..).and_then(|r| r.first_chunk::<N>())) else {
+            return u32::MAX / 4;
+        };
+        for j in 0..N {
+            acc[j] += ra[j].abs_diff(rb[j]) as u16;
+        }
+    }
+    acc.iter().map(|&v| v as u32).sum()
 }
 
 // ---------------------------------------------------------------- the tile
@@ -356,11 +382,11 @@ impl<'a> Tile<'a> {
     fn intra_block(&mut self, r: usize, c: usize) {
         let avail_u = r > 0;
         let avail_l = c > self.col_start;
-        let y_mode = self.choose_intra(0, c * 8, r * 8, 3, avail_l, avail_u);
+        let y_mode = self.choose_intra(0, c * 8, r * 8, 3, IntraEdges { left: avail_l, above: avail_u });
         let uv_mode = {
             let mut best = (i64::MAX, DC_PRED);
             for m in MODES {
-                let cost: i64 = (1..3).map(|p| self.intra_cost(p, c * 4, r * 4, 2, m, avail_l, avail_u)).sum();
+                let cost: i64 = (1..3).map(|p| self.intra_cost(p, c * 4, r * 4, 2, m, IntraEdges { left: avail_l, above: avail_u })).sum();
                 if cost < best.0 {
                     best = (cost, m);
                 }
@@ -379,17 +405,16 @@ impl<'a> Tile<'a> {
         // Residual: luma 2×2 transform blocks, then one 4×4 block per chroma plane.
         for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             let tx = if self.f.quant.lossless { DCT_DCT } else { mode_tx_type(y_mode) };
-            self.intra_tx(0, c * 8 + dx * 4, r * 8 + dy * 4, y_mode, tx, avail_l || dx > 0, avail_u || dy > 0);
+            self.intra_tx(0, c * 8 + dx * 4, r * 8 + dy * 4, y_mode, tx, IntraEdges { left: avail_l || dx > 0, above: avail_u || dy > 0 });
         }
         for p in 1..3 {
-            self.intra_tx(p, c * 4, r * 4, uv_mode, DCT_DCT, avail_l, avail_u);
+            self.intra_tx(p, c * 4, r * 4, uv_mode, DCT_DCT, IntraEdges { left: avail_l, above: avail_u });
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn intra_cost(&self, plane: usize, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> i64 {
+    fn intra_cost(&self, plane: usize, x: usize, y: usize, log2: usize, mode: u8, edges: IntraEdges) -> i64 {
         let p = &self.planes[plane];
-        let pred = predict_intra(p, x, y, log2, mode, have_left, have_above);
+        let pred = predict_intra(p, x, y, log2, mode, edges);
         let size = 1 << log2;
         let mut s = 0i64;
         for i in 0..size {
@@ -400,10 +425,10 @@ impl<'a> Tile<'a> {
         s
     }
 
-    fn choose_intra(&self, plane: usize, x: usize, y: usize, log2: usize, have_left: bool, have_above: bool) -> u8 {
+    fn choose_intra(&self, plane: usize, x: usize, y: usize, log2: usize, edges: IntraEdges) -> u8 {
         let mut best = (i64::MAX, DC_PRED);
         for m in MODES {
-            let cost = self.intra_cost(plane, x, y, log2, m, have_left, have_above);
+            let cost = self.intra_cost(plane, x, y, log2, m, edges);
             if cost < best.0 {
                 best = (cost, m);
             }
@@ -411,8 +436,7 @@ impl<'a> Tile<'a> {
         best.1
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn intra_tx(&mut self, plane: usize, x: usize, y: usize, mode: u8, tx_type: u8, have_left: bool, have_above: bool) {
+    fn intra_tx(&mut self, plane: usize, x: usize, y: usize, mode: u8, tx_type: u8, edges: IntraEdges) {
         let ss = (plane > 0) as usize;
         let max_x = (self.f.mi_cols * 8) >> ss;
         let max_y = (self.f.mi_rows * 8) >> ss;
@@ -424,7 +448,7 @@ impl<'a> Tile<'a> {
             return;
         }
         let p = &self.planes[plane];
-        let pred = predict_intra(p, x, y, 2, mode, have_left, have_above);
+        let pred = predict_intra(p, x, y, 2, mode, edges);
         let mut res = [0i32; 16];
         for i in 0..4 {
             for j in 0..4 {
@@ -592,12 +616,18 @@ impl<'a> Tile<'a> {
         let (x16, y16) = (((c * 8) << 4) as i32 + 2 * mv.col, ((r * 8) << 4) as i32 + 2 * mv.row);
         let mut s = 0u32;
         if let Some((pl, o, st)) = self.f.phases.as_ref().and_then(|ph| ph.block(x16, y16, n)) {
-            for i in 0..n {
-                let a = &p.src[(r * 8 + i) * p.w + c * 8..][..n];
-                let b = &pl[o + i * st..o + i * st + n];
-                s += a.iter().zip(b).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs()).sum::<u32>();
-            }
-            return s;
+            let a = &p.src[(r * 8) * p.w + c * 8..];
+            let b = &pl[o..];
+            return match n {
+                8 => sad_n::<8>(a, p.w, b, st),
+                16 => sad_n::<16>(a, p.w, b, st),
+                _ => {
+                    for i in 0..n {
+                        s += a[i * p.w..][..n].iter().zip(&b[i * st..][..n]).map(|(a, b)| a.abs_diff(*b) as u32).sum::<u32>();
+                    }
+                    s
+                }
+            };
         }
         // Inter search only runs on frames with a reference.
         let Some(refs) = self.f.refs.as_ref() else { return u32::MAX / 4 };
@@ -621,7 +651,7 @@ impl<'a> Tile<'a> {
         let d = &probs_defaults().0;
         let mb: [u32; 4] = std::array::from_fn(|m| tree_cost(&INTER_MODE_TREE, &d[probs::INTER_MODE + mctx * 3..], m as u8));
         let mode_bits = |m: u8| mb[(m - NEARESTMV) as usize];
-        let cost = |mv: Mv| -> f64 {
+        let cost_raw = |mv: Mv| -> f64 {
             let bits = if mv == nearest {
                 mode_bits(NEARESTMV)
             } else if mv == Mv::ZERO {
@@ -632,6 +662,21 @@ impl<'a> Tile<'a> {
                 mode_bits(NEWMV) + mv_cost(mv.minus(nearest))
             };
             self.sad(r, c, n, mv) as f64 + lambda * bits as f64
+        };
+        // The cost is a pure function of the vector: points the search revisits (the centre it
+        // came from, candidates on the diamond) are looked up instead of predicted again.
+        let mut seen = [(Mv::ZERO, 0.0f64); 64];
+        let mut nseen = 0usize;
+        let mut cost = |mv: Mv| -> f64 {
+            if let Some(&(_, j)) = seen[..nseen].iter().find(|e| e.0 == mv) {
+                return j;
+            }
+            let j = cost_raw(mv);
+            if nseen < seen.len() {
+                seen[nseen] = (mv, j);
+                nseen += 1;
+            }
+            j
         };
         let mut best = (Mv::ZERO, cost(Mv::ZERO));
         let prev = self.f.prev_mvs.map(|p| p[r * self.f.mi_cols + c]);
