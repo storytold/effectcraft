@@ -649,6 +649,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         return;
     }
     let t = app.tokens;
+    let services = app.session.services.clone();
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
@@ -674,12 +675,19 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
             .open(&mut open)
             .default_pos(screen.center() - size / 2.0);
         if is_palette {
-            win_widget = win_widget.frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(0.0).corner_radius(0.0).shadow(egui::Shadow::NONE));
+            win_widget = win_widget.frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(Color32::from_rgb(24, 24, 24))
+                    .inner_margin(0.0)
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60))),
+            );
         } else {
             win_widget = win_widget.frame(egui::Frame::window(&ctx.global_style()).fill(t.panel_bg));
         }
         let resp = win_widget.show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            paint_draw(ui, rect, &w.root.draw, &t, &*services);
             draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
             mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
             key_events(ui, w.id, &w.root, w.modal || !blocked, &mut acts);
