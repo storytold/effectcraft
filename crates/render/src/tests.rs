@@ -812,6 +812,50 @@ impl crate::Accelerator for ProbeAccel {
     }
 }
 
+/// Counts [`Accelerator::frame_end`] and optionally panics inside [`Accelerator::comp_frame`].
+struct EndAccel {
+    ends: std::sync::atomic::AtomicUsize,
+    panic: std::sync::atomic::AtomicBool,
+}
+impl crate::Accelerator for EndAccel {
+    fn name(&self) -> String {
+        "end".into()
+    }
+    fn comp_frame(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
+        if self.panic.load(std::sync::atomic::Ordering::SeqCst) {
+            panic!("comp_frame");
+        }
+        Some(crate::Image::new(1, 1))
+    }
+    fn supports_effect(&self, _id: &str) -> bool {
+        false
+    }
+    fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
+        None
+    }
+    fn frame_end(&self) {
+        self.ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn comp_frame_ends_the_frame_when_the_render_panics() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::Ordering;
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 50, 50);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let a = EndAccel { ends: Default::default(), panic: true.into() };
+    let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { backend: crate::Backend::Gpu, ..Default::default() });
+    r.accel = Some(&a);
+    assert!(catch_unwind(AssertUnwindSafe(|| crate::passes::block_on(crate::passes::comp_frame(&r, cid, Tick::ZERO)))).is_err());
+    assert_eq!(a.ends.load(Ordering::SeqCst), 1);
+    a.panic.store(false, Ordering::SeqCst);
+    a.ends.store(0, Ordering::SeqCst);
+    let _ = crate::passes::block_on(crate::passes::comp_frame(&r, cid, Tick::ZERO));
+    assert_eq!(a.ends.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn auto_backend_sends_2d_and_3d_comps_to_the_gpu() {
     let (mut p, cid, comp) = setup();

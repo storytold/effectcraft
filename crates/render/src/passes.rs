@@ -59,15 +59,24 @@ pub async fn in_passes<'a, T>(accel: Option<&'a dyn Accelerator>, mut render: im
     Passed { value: render(None), passes: MAX_PASSES + 1, accelerated: false }
 }
 
+/// Ends the frame for the accelerator ([`Accelerator::frame_end`]) when dropped: also when the
+/// render panics or the future is dropped between passes.
+struct FrameEnd<'a>(&'a dyn Accelerator);
+impl Drop for FrameEnd<'_> {
+    fn drop(&mut self) {
+        self.0.frame_end();
+    }
+}
+
 /// A top-level comp frame through [`in_passes`] ([`Renderer::comp_frame`] in passes). Backend
 /// Auto picks CPU or GPU for the whole frame (all its passes) and is timed as a whole, as the
-/// frame workers do. Ends the frame for the accelerator ([`Accelerator::frame_end`]).
+/// frame workers do. Ends the frame for the accelerator ([`Accelerator::frame_end`]) on every
+/// exit, including a panic.
 pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     let Some(a) = r.accel else { return r.comp_frame(comp, t) };
+    let _end = FrameEnd(a);
     if a.miss_gate().is_none() {
-        let img = r.comp_frame(comp, t);
-        a.frame_end();
-        return img;
+        return r.comp_frame(comp, t);
     }
     let mut opts = r.opts;
     let mut auto = None;
@@ -89,7 +98,6 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     } else {
         in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
     };
-    a.frame_end();
     if let (Some((key, chose)), Some(pick)) = (auto, a.auto_pick()) {
         pick.record(key, chose, t0.elapsed().as_secs_f64() * 1e3);
     }
