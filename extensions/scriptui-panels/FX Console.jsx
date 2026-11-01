@@ -194,8 +194,8 @@
   var SEARCH_ICON_W = 20;       // Magnifying glass width
   var ROW_SPACING = 3;          // Clean compact spacing
   var WIN_MARGIN = 2;           // Tight outer border padding
-  var TOOLBAR_COUNT = 5;
-  var TOOLBAR_W = (TOOLBAR_COUNT * ICON_SIZE) + ((TOOLBAR_COUNT - 1) * ROW_SPACING); // 5*22 + 4*3 = 122
+  var TOOLBAR_COUNT = 6;
+  var TOOLBAR_W = (TOOLBAR_COUNT * ICON_SIZE) + ((TOOLBAR_COUNT - 1) * ROW_SPACING); // 6*22 + 5*3 = 147
 
   // ------------------------------------------------------------------
   // 6. Build ScriptUI Window
@@ -406,6 +406,18 @@
     // Center aperture cutout opening
     g.ellipsePath(8, 8, 6, 6);
     g.fillPath(bg);
+  });
+
+  // Icon 6: Close Console (X button)
+  var closeIconBtn = createIconButton("Close Console (Esc)", function (g) {
+    var pen = g.newPen(g.PenType.SOLID_COLOR, [0.72, 0.72, 0.72, 1.0], 1.8);
+    // Draw an 'X'
+    g.moveTo(6.5, 6.5);
+    g.lineTo(15.5, 15.5);
+    g.strokePath(pen);
+    g.moveTo(15.5, 6.5);
+    g.lineTo(6.5, 15.5);
+    g.strokePath(pen);
   });
 
   // ==================================================================
@@ -732,6 +744,10 @@
   };
 
   closeBtn.onClick = function () {
+    win.close();
+  };
+
+  closeIconBtn.onClick = function () {
     win.close();
   };
 
