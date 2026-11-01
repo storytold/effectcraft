@@ -6,14 +6,15 @@
 //! retires it, and freed-but-not-destroyed memory runs the device out of memory (#879). Once the
 //! allocator holds more than the cap and enough of that total is reclaimable (not held by the
 //! upload cache, the texture pool, or live images), a frame submits its encoder and waits for its
-//! own submission so wgpu frees what was dropped.
+//! own submission so wgpu frees what was dropped. Frames are not held back for memory that cannot
+//! be reclaimed; a warning is logged once.
 //!
 //! wgpu has no safe query for the adapter's memory size (`max_buffer_size` is capped at `i32::MAX`
 //! on Direct3D 12 and Linux/Mesa Vulkan), so the default cap is conservative per device type;
 //! `EFFECTCRAFT_GPU_MEMCAP_MB` overrides it (0 = off). Backends without an allocator report
 //! (Metal, WebGPU, GL) are never gated.
 
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 /// Check the allocator only every this many gate calls (effect calls and layers): the report
@@ -34,6 +35,8 @@ pub(crate) struct MemCap {
     /// Reclaimable bytes remaining after the last wait: another wait fires only once reclaimable
     /// memory grows by `hysteresis` above this floor (or drops below it first).
     floor: AtomicU64,
+    /// Set after the first over-cap sample where non-reclaimable memory alone exceeds the cap.
+    warned: AtomicBool,
     #[cfg(test)]
     timeout_ns: AtomicU64,
 }
@@ -52,6 +55,7 @@ impl MemCap {
             calls: AtomicU64::new(0),
             waits: AtomicU64::new(0),
             floor: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
             #[cfg(test)]
             timeout_ns: AtomicU64::new(crate::readback::TIMEOUT.as_nanos() as u64),
         }
@@ -66,6 +70,7 @@ impl MemCap {
             calls: AtomicU64::new(0),
             waits: AtomicU64::new(0),
             floor: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
             timeout_ns: AtomicU64::new(self.timeout_ns.load(Relaxed)),
         }
     }
@@ -85,6 +90,14 @@ impl MemCap {
         if self.cap == 0 || allocated <= self.cap {
             self.floor.store(0, Relaxed);
             return false;
+        }
+        if kept > self.cap && !self.warned.swap(true, Relaxed) {
+            log::warn!(
+                target: "effectcraft_gpu",
+                "gpu: {} MiB held by live frames, the upload cache and the texture pool is over the {} MiB memory cap: waiting cannot free it, so frames are not held back for it ({MEMCAP_ENV} sets the cap)",
+                kept >> 20,
+                self.cap >> 20,
+            );
         }
         let reclaimable = allocated.saturating_sub(kept);
         let floor = self.floor.load(Relaxed);
@@ -117,6 +130,11 @@ impl MemCap {
     #[cfg(test)]
     pub(crate) fn waits(&self) -> u64 {
         self.waits.load(Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn warned(&self) -> bool {
+        self.warned.load(Relaxed)
     }
 
     #[cfg(test)]
@@ -203,5 +221,16 @@ mod tests {
         // Once the other thread finishes and reclaimable memory drops, the floor drops with it.
         assert!(!m.should_wait(kept + 16 * MIB, kept));
         assert!(m.should_wait(kept + (16 + 256) * MIB, kept));
+    }
+
+    #[test]
+    fn kept_memory_over_the_cap_warns_once_and_never_waits() {
+        let m = MemCap::from_env(Some("8"), wgpu::DeviceType::IntegratedGpu);
+        // Cap 8 MiB: kept alone over the cap with reclaimable under the hysteresis → no wait, warn once.
+        assert!(!m.should_wait(20 * MIB, 20 * MIB));
+        assert!(m.warned());
+        assert!(!m.should_wait(20 * MIB, 20 * MIB));
+        assert!(!m.should_wait(20 * MIB, 19 * MIB + MIB / 2));
+        assert!(m.should_wait(20 * MIB, 4 * MIB), "16 MiB reclaimable is over the hysteresis");
     }
 }

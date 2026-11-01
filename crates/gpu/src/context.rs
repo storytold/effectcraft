@@ -1122,6 +1122,11 @@ impl GpuContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn memcap_warned(&self) -> bool {
+        self.memcap.warned()
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_memcap_wait_timeout(&self, timeout: std::time::Duration) {
         self.memcap.set_wait_timeout(timeout);
     }
