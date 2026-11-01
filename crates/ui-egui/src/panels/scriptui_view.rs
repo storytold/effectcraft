@@ -534,9 +534,9 @@ fn key_events(ui: &egui::Ui, win: u32, root: &Widget, active: bool, acts: &mut V
             text_editing_focused = target.kind == WidgetKind::EditText;
         }
     }
-    let (events, mods) = ui.input(|i| (i.events.clone(), i.modifiers));
+    let (events, _mods) = ui.input(|i| (i.events.clone(), i.modifiers));
     for e in &events {
-        let egui::Event::Key { key, pressed: true, repeat: _, modifiers } = e else { continue };
+        let egui::Event::Key { key, pressed: true, modifiers, .. } = e else { continue };
         let (key_str, key_name, is_nav) = match key {
             egui::Key::ArrowUp => ("ArrowUp", "Up", true),
             egui::Key::ArrowDown => ("ArrowDown", "Down", true),
