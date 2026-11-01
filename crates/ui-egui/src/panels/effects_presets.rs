@@ -510,7 +510,7 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
 }
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
-fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<PresetFile>) -> Arc<Vec<PresetFile>> {
+pub(crate) fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<PresetFile>) -> Arc<Vec<PresetFile>> {
     let id = egui::Id::unique("fx-user-presets");
     let now = ctx.input(|i| i.time);
     if !force

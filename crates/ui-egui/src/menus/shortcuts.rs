@@ -58,7 +58,14 @@ pub fn parse_shortcut(s: &str) -> Option<(egui::Modifiers, egui::Key)> {
             "Physical" => {}
             "Shift" => m.shift = true,
             "Alt" => m.alt = true,
-            "Ctrl" => m.ctrl = true,
+            // Off macOS Ctrl is the command key: egui reports both, so a Ctrl shortcut (the
+            // Effect Console's Ctrl+Space) must expect both to match.
+            "Ctrl" => {
+                m.ctrl = true;
+                if !cfg!(target_os = "macos") {
+                    m.command = true;
+                }
+            }
             k => {
                 key = match k {
                     ";" => Some(egui::Key::Semicolon),
@@ -102,8 +109,14 @@ pub type Binding = (egui::Modifiers, egui::Key, String, Value);
 /// All bindings of the active keyboard shortcut preset, most modifiers first.
 pub fn bindings(session: &effectcraft_engine::Session) -> Vec<Binding> {
     let mut v: Vec<Binding> = Vec::new();
-    for (sc, b) in session.shortcuts().bindings() {
-        if sc.starts_with("Physical+") {
+    let all = session.shortcuts().bindings();
+    let has_ctrl = |sc: &str| sc.split('+').any(|p| p == "Ctrl");
+    // Off macOS a Ctrl shortcut parses to the same modifiers as the Cmd one with the same keys:
+    // the Cmd binding (the standard one) keeps them and the Ctrl one is not bound.
+    let cmd_keys: Vec<(egui::Modifiers, egui::Key)> =
+        if cfg!(target_os = "macos") { vec![] } else { all.iter().filter(|(sc, _)| !has_ctrl(sc)).filter_map(|(sc, _)| parse_shortcut(sc)).collect() };
+    for (sc, b) in all {
+        if sc.starts_with("Physical+") || has_ctrl(sc) && parse_shortcut(sc).is_some_and(|mk| cmd_keys.contains(&mk)) {
             continue;
         }
         // Off macOS `Cmd` is Ctrl, so a custom Ctrl+Cmd shortcut would
