@@ -248,14 +248,29 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
         if texts.is_empty() {
             return Err(bad("prop.pickWhip", "no selected layer has this property"));
         }
-        let first = texts[0].2.clone();
+        // A property that cannot take an expression (a static one) is skipped rather than
+        // failing the whole selection, and the caller is told how many were linked.
+        let mut linked = 0usize;
+        let mut first: Option<String> = None;
+        let mut why: Option<String> = None;
         super::app_more::grouped(s, "Pick Whip", |s| {
             for (olid, ouid, text) in &texts {
-                s.execute("prop.setExpression", json!({"layer": olid.0, "prop": ouid, "expression": text}))?;
+                match s.execute("prop.setExpression", json!({"layer": olid.0, "prop": ouid, "expression": text})) {
+                    Ok(_) => {
+                        linked += 1;
+                        if first.is_none() {
+                            first = Some(text.clone());
+                        }
+                    }
+                    Err(e) => why = Some(e.to_string()),
+                }
             }
             Ok(())
         })?;
-        return Ok(json!(first));
+        if linked == 0 {
+            return Err(bad("prop.pickWhip", why.unwrap_or_else(|| "no selected layer has this property".to_string())));
+        }
+        return Ok(json!({"linked": linked, "expression": first.unwrap_or_default()}));
     }
     let r = reference_with(comp, from, target, tu, s.prefs.general.expression_pick_whip_compact, by_index)
         .ok_or_else(|| bad("prop.pickWhip", "no such target property"))?;
