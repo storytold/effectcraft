@@ -152,6 +152,24 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
 /// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
 /// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
 /// reports startup failure through `startup_failed`. Returns the event loop's result.
+/// External effect helpers are native programs, so they start at launch only when the user opts
+/// in with `EFFECTCRAFT_HELPERS=1`: an environment variable, outside the settings folder, so
+/// writing there alone can't run code at launch. Otherwise Effect ▸ Scan for Effect Helpers
+/// starts them.
+fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
+    if session.helpers.is_none() || std::env::var_os("EFFECTCRAFT_HELPERS").is_none_or(|v| v != "1") {
+        return;
+    }
+    match session.execute("effect.helpers.scan", json!({})) {
+        Ok(r) => {
+            for e in r["errors"].as_array().into_iter().flatten() {
+                log::warn!("effect helpers: {}", e.as_str().unwrap_or("error"));
+            }
+        }
+        Err(e) => log::warn!("effect helpers: {e}"),
+    }
+}
+
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
@@ -257,6 +275,7 @@ fn main() -> eframe::Result {
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
                 }
+                start_helpers_if_opted_in(&mut session);
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
@@ -498,6 +517,7 @@ impl eframe::App for Desktop {
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
+        effectcraft_host::stop_helpers();
         // Scripts in Scripts/Shutdown run with the project closed.
         let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
     }

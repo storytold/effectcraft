@@ -50,6 +50,7 @@ effectcraft-script = { path = "crates/script" }
 effectcraft-hevcenc = { path = "crates/hevcenc" }
 effectcraft-av1enc = { path = "crates/av1enc" }
 effectcraft-plugin = { path = "crates/plugin" }
+effectcraft-helper-host = { path = "crates/helper-host" }
 
 # foundation
 thiserror = "2"

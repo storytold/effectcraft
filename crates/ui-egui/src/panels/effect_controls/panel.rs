@@ -127,6 +127,17 @@ fn drop_payload(ui: &egui::Ui, rect: Rect, p: &egui::Painter, t: &Tokens, layer_
     }
 }
 
+/// A plug-in effect whose last render failed (an effect helper that stopped, ...): a warning sign
+/// at `at`, after the effect's name, with the message on hover. The frame shows the input as is.
+fn render_error_mark(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, effect: &str, g: &PropGroup, at: egui::Pos2) {
+    let Some(err) = effectcraft_engine::effects::plugin::plugin_error(effect) else { return };
+    let wr = bp.text(at, Align2::LEFT_CENTER, "⚠", Tokens::semibold(12.0), app.tokens.warning);
+    let resp = ui.interact(wr.expand(2.0), egui::Id::unique(("ec-fx-error", g.uid)), Sense::hover());
+    app.auto.add(&format!("effectControls.effect.{}.error", g.uid), wr, &err);
+    resp.on_hover_text(err);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+}
+
 fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, t: &Tokens, effect: &str, g: &PropGroup, r: Rect) {
     // About…: the effect's name and category (AE's About dialog).
     let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.center().y - 9.0), vec2(44.0, 18.0));
@@ -248,6 +259,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         } else {
             let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::semibold(12.0), t.text);
             app.auto.add(&format!("effectControls.effect.{}.name", g.uid), name, &g.name);
+            render_error_mark(app, ui, &bp, effect, g, pos2(name.max.x + 8.0, r.center().y));
         }
         let rresp = ui.interact(reset, egui::Id::unique(("ec-reset", g.uid)), Sense::click());
         bp.text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), Tokens::ui(11.5), if rresp.hovered() { t.hot_text } else { t.text_dim });

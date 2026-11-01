@@ -24,11 +24,12 @@ fn plugins_list(s: &mut Session, _: &Value) -> Result<Value> {
                 "author": m.as_ref().map(|m| m.author.clone()),
                 "description": m.as_ref().map(|m| m.description.clone()),
                 "source": p.map(|p| p.source()),
+                "error": plugin::plugin_error(spec.id),
                 "params": spec.params.iter().map(|p| p.id).collect::<Vec<_>>(),
             })
         })
         .collect();
-    Ok(json!({"api": plugin::PLUGIN_API_VERSION, "wasm": s.plugin_loader.is_some(), "plugins": list}))
+    Ok(json!({"api": plugin::PLUGIN_API_VERSION, "wasm": s.plugin_loader.is_some(), "helpers": s.helpers.is_some(), "plugins": list}))
 }
 
 /// `effect.plugins.load`: load WebAssembly effect plug-ins (a file, or every `.wasm` in a
@@ -68,6 +69,49 @@ fn plugins_load(s: &mut Session, p: &Value) -> Result<Value> {
         s.toast(format!("Loaded {} effect plug-in(s)", loaded.len()));
     }
     Ok(json!({"loaded": loaded, "errors": errors}))
+}
+
+/// External effect helpers need a host that runs them.
+fn has_helpers(s: &Session) -> std::result::Result<(), String> {
+    if s.helpers.is_some() { Ok(()) } else { Err("effect helpers are not available in this build".into()) }
+}
+
+fn helper_hooks(s: &Session) -> Result<crate::HelperHooks> {
+    s.helpers.ok_or_else(|| EngineError::Other("effect helpers are not available in this build".into()))
+}
+
+/// `effect.helpers.list`: the external effect helpers and their state.
+fn helpers_list(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(match s.helpers {
+        Some(h) => (h.list)(),
+        None => json!({"helpers": [], "blocked": [], "available": false}),
+    })
+}
+
+/// `effect.helpers.scan`: start the installed helpers that aren't running and register their
+/// effects. One bad helper doesn't stop the rest; `retry: true` turns blocked effects back on.
+fn helpers_scan(s: &mut Session, p: &Value) -> Result<Value> {
+    let h = helper_hooks(s)?;
+    let r = (h.scan)(b_p(p, "retry").unwrap_or(false));
+    let n = r["loaded"].as_array().map_or(0, Vec::len);
+    if n > 0 {
+        s.toast(format!("{n} effect(s) from effect helpers"));
+    }
+    Ok(r)
+}
+
+/// `effect.helpers.load`: load a file or folder through the helpers that accept it (an OpenFX
+/// helper takes `.ofx` plug-ins, for example).
+fn helpers_load(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "effect.helpers.load";
+    let h = helper_hooks(s)?;
+    let path = str_p(p, "path").ok_or_else(|| bad(c, "missing `path`"))?;
+    let r = (h.load)(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let n = r["loaded"].as_array().map_or(0, Vec::len);
+    if n > 0 {
+        s.toast(format!("Loaded {n} effect(s) through a helper"));
+    }
+    Ok(r)
 }
 
 fn apply(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1107,7 +1151,7 @@ pub fn specs() -> Vec<CommandSpec> {
         crate::query!(
             "effect.plugins.list",
             "List Effect Plug-ins",
-            "{} → {api, wasm, plugins: [{id, name, category, version, author, source, params}]}",
+            "{} → {api, wasm, helpers, plugins: [{id, name, category, version, author, source, params, error}]}",
             plugins_list
         ),
         cmd!(
@@ -1118,6 +1162,30 @@ pub fn specs() -> Vec<CommandSpec> {
             "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
+        ),
+        crate::query!(
+            "effect.helpers.list",
+            "List Effect Helpers",
+            "{} → {helpers: [{program, name, version, loads, running, effects, restarts, error}], blocked: [effect ids]}",
+            helpers_list
+        ),
+        cmd!(
+            "effect.helpers.scan",
+            "Scan for Effect Helpers",
+            [],
+            None,
+            "{retry?} → {paths, helpers, loaded, errors}: starts the effect helpers installed in helpers/ next to the app, helpers/ in the settings folder and EFFECTCRAFT_HELPER_PATH, and adds their effects; retry turns effects that kept stopping their helper back on",
+            has_helpers,
+            helpers_scan
+        ),
+        cmd!(
+            "effect.helpers.load",
+            "Load Plug-ins Through Helper...",
+            [],
+            None,
+            "{path (a file or folder an installed helper accepts, e.g. a folder of .ofx plug-ins for an OpenFX helper; the menu asks for a folder)} → {loaded: [{id, name, category, helper}], errors}",
+            has_helpers,
+            helpers_load
         ),
     ]
 }

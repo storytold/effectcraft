@@ -306,6 +306,11 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 - After Effects SDK plug-ins cannot run in EffectCraft. Our own WebAssembly plug-in API exists
   ([plugins.md](plugins.md)). Grow it: documentation, examples, and original effects that cover
   what the most common third-party plug-ins are used for (particles, glows, 3D objects, sabers).
+- Native plug-in formats (OpenFX first) run only in **external effect helpers**, separate
+  processes behind a safe, versioned protocol ([external-helpers.md](external-helpers.md),
+  [ADR 0001](adr/0001-external-effect-helpers.md)): the core gains no native code and no
+  `unsafe`, and a crashing plug-in is an error on the effect. The helpers themselves ship
+  separately.
 - Features that come from third parties in After Effects are extensions in EffectCraft too, built
   on the same extension points as After Effects: scripts, ScriptUI panels and effect plug-ins
   ([plugins.md](plugins.md#extension-points-compared-with-after-effects) compares them). ScriptUI

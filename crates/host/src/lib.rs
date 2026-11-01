@@ -95,10 +95,36 @@ pub fn session() -> Session {
         expr: Some(Arc::new(effectcraft_expr::Expressions)),
         expr_check: Some(effectcraft_expr::check_syntax),
         plugin_loader: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::loader as effectcraft_engine::PluginLoader),
+        helpers: helper_hooks(),
         ..Default::default()
     };
     effectcraft_script::install(&mut s);
     s
+}
+
+/// External effect helpers run as child processes: native builds only.
+#[cfg(not(target_arch = "wasm32"))]
+fn helper_hooks() -> Option<effectcraft_engine::HelperHooks> {
+    use effectcraft_helper_host as hh;
+    // Effects that keep stopping their helper are remembered in the settings folder.
+    if let Some(dir) = config_dir() {
+        hh::blocklist::set_state_dir(dir);
+    }
+    fn scan(retry: bool) -> serde_json::Value {
+        hh::scan_paths(&hh::default_search_paths(config_dir().as_deref()), retry)
+    }
+    Some(effectcraft_engine::HelperHooks { scan, load: hh::load_path, list: hh::list })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn helper_hooks() -> Option<effectcraft_engine::HelperHooks> {
+    None
+}
+
+/// Stop the external effect helpers (when the app quits).
+pub fn stop_helpers() {
+    #[cfg(not(target_arch = "wasm32"))]
+    effectcraft_helper_host::stop_all();
 }
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):
