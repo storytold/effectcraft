@@ -1,5 +1,5 @@
-//! Warp Stabilizer commands (Effect ▸ Distort ▸ Warp Stabilizer's Analyze / Cancel, Animation ▸
-//! Warp Stabilizer VFX, the Tracker panel button) and its status query.
+//! Warp Stabilizer commands (Effect ▸ Distort ▸ Warp Stabilizer's Analyze / Cancel / Apply to
+//! Transform, Animation ▸ Warp Stabilizer VFX, the Tracker panel button) and its status query.
 
 use effectcraft_project::{GroupKind, ItemId, Layer, LayerId, PropGroup, Uid};
 use serde_json::{Value, json};
@@ -13,6 +13,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("track.warpStabilizer", "Warp Stabilizer VFX", ["Animation"], None, "{layer?, wait?}", can_stabilize, warp_apply),
         cmd!("warp.analyze", "Analyze", [], None, "{layer?, effect?: uid|name|index, wait?: block until done}", has_comp, warp_analyze),
         cmd!("warp.cancel", "Cancel", [], None, "{}", is_analyzing, |s, _| Ok(json!({"stopped": s.stop_warp()}))),
+        cmd!("warp.applyToTransform", "Apply to Transform", [], None, "{layer?, effect?: uid|name|index}", has_comp, warp_apply_to_transform),
         query!("warp.status", "Warp Stabilizer Status", "{layer?, effect?}", warp_status),
     ]
 }
@@ -85,6 +86,36 @@ fn warp_analyze(s: &mut Session, p: &Value) -> Result<Value> {
         out["status"] = warp_status(s, &json!({"layer": lid.0, "effect": uid, "comp": cid.0}))?;
     }
     Ok(out)
+}
+
+/// Bake the stabilization into the layer's Transform (or a Corner Pin), see
+/// [`crate::warp::apply_to_transform`].
+fn warp_apply_to_transform(s: &mut Session, p: &Value) -> Result<Value> {
+    let (cid, lid, uid) = warp_p(s, p, "warp.applyToTransform")?;
+    if s.warp_target() == Some((cid, lid, uid)) && s.is_warp_analyzing() {
+        return Err(bad("warp.applyToTransform", "wait for the analysis to finish"));
+    }
+    let r = s.edit("Apply Warp Stabilizer to Transform", None, |proj, _| {
+        crate::warp::apply_to_transform(proj, cid, lid, uid).map_err(|e| bad("warp.applyToTransform", e))
+    })?;
+    let mut msg = match (r.target, &r.reason) {
+        (crate::warp::BakeTarget::CornerPin, Some(why)) => format!("Warp Stabilizer applied to a Corner Pin ({why}): {} keyframes", r.frames),
+        _ => format!("Warp Stabilizer applied to Transform: {} keyframes", r.frames),
+    };
+    if r.effects_after > 0 {
+        msg.push_str(&format!("; {} effect(s) below it now render before the stabilization", r.effects_after));
+    }
+    s.events.push(crate::Event::Toast { message: msg, error: false });
+    Ok(json!({
+        "layer": lid.0,
+        "effect": uid,
+        "target": r.target,
+        "frames": r.frames,
+        "reason": r.reason,
+        "mask": r.mask,
+        "cornerPin": r.corner_pin,
+        "effectsAfter": r.effects_after,
+    }))
 }
 
 /// Animation ▸ Warp Stabilizer VFX / the Tracker panel button: apply the effect to the selected
