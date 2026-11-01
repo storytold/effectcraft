@@ -1762,10 +1762,10 @@ OutputModule.prototype = {
     return p ? new File(p) : null;
   },
   set file(f) { __call("renderQueue.setOutput", { item: this.__rq.__id, module: this.__n, path: __str(f) }); },
-  get templates() { return ["H.264", "ProRes", "PNG Sequence", "JPEG Sequence", "TIFF Sequence", "OpenEXR Sequence", "GIF"]; },
+  get templates() { return ["H.264", "ProRes", "PNG Sequence", "JPEG Sequence", "TIFF Sequence", "OpenEXR Sequence", "GIF", "WebP"]; },
   applyTemplate: function (name) {
     var n = String(name).toLowerCase();
-    var f = n.indexOf("prores") >= 0 ? "prores" : n.indexOf("png") >= 0 || n.indexOf("lossless") >= 0 ? "png" : n.indexOf("jpeg") >= 0 || n.indexOf("jpg") >= 0 ? "jpeg"
+    var f = n.indexOf("prores") >= 0 ? "prores" : n.indexOf("webp") >= 0 ? "webp" : n.indexOf("png") >= 0 || n.indexOf("lossless") >= 0 ? "png" : n.indexOf("jpeg") >= 0 || n.indexOf("jpg") >= 0 ? "jpeg"
       : n.indexOf("tiff") >= 0 ? "tiff" : n.indexOf("exr") >= 0 ? "exr" : n.indexOf("gif") >= 0 ? "gif" : n.indexOf("264") >= 0 ? "h264" : null;
     if (!f) throw __err("Unknown output module template \"" + name + "\"");
     __call("renderQueue.setOutputModule", { item: this.__rq.__id, module: this.__n, format: f });
