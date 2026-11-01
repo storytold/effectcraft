@@ -179,7 +179,14 @@ fn composites_and_colour() {
     env_case("ec.color.colorlink", &[("sourceLayer", Value::Layer(Some(9))), ("sampleSource", e(4)), ("clip", n(5.0))]);
     effect_case("ec.utility.cineon", &[]);
     effect_case("ec.utility.cineon", &[("conversionType", e(0)), ("gamma", n(2.2))]);
+    effect_case("ec.utility.cineon", &[("version", n(1.0)), ("gamma", n(2.2))]);
+    effect_case("ec.utility.cineon", &[("version", n(1.0)), ("gamma", n(0.0)), ("conversionType", e(0))]);
     effect_case("ec.utility.cineon", &[("conversionType", e(2)), ("highlightRolloff", n(60.0)), ("tenBitWhitePoint", n(800.0))]);
+    effect_case("ec.utility.cineon", &[("conversionType", e(1)), ("gamma", n(1.7)), ("highlightRolloff", n(0.0))]);
+    effect_case("ec.utility.cineon", &[("conversionType", e(1)), ("gamma", n(2.2)), ("highlightRolloff", n(0.0))]);
+    effect_case("ec.utility.cineon", &[("conversionType", e(2)), ("gamma", n(1.0)), ("highlightRolloff", n(0.0))]);
+    effect_case("ec.utility.cineon", &[("conversionType", e(2)), ("gamma", n(1.7))]);
+    env_case_allow("ec.utility.cineon", &[("version", n(1.0)), ("conversionType", e(2)), ("gamma", n(2.2))], 0.005);
     effect_case("ec.utility.hdrcompander", &[("gain", n(4.0)), ("gamma", n(2.0))]);
     effect_case("ec.utility.hdrcompander", &[("mode", e(1)), ("gain", n(3.0)), ("gamma", n(1.5))]);
     effect_case("ec.utility.hdrcompression", &[]);
@@ -189,6 +196,31 @@ fn composites_and_colour() {
     for ch in 1..=5 {
         effect_case("ec.utility.ccoverbrights", &[("channel", e(ch)), ("highlightColor", c(0.2, 0.9, 0.4))]);
     }
+}
+
+#[test]
+fn cineon_version_2_paths_match_cpu() {
+    for vals in [
+        &[("conversionType", e(2)), ("gamma", n(1.0)), ("highlightRolloff", n(0.0))][..],
+        &[("conversionType", e(2)), ("gamma", n(1.0)), ("highlightRolloff", n(20.0))][..],
+        &[("conversionType", e(2)), ("gamma", n(1.7)), ("highlightRolloff", n(20.0))][..],
+        &[("conversionType", e(1)), ("gamma", n(2.2)), ("highlightRolloff", n(0.0))][..],
+    ] {
+        env_case_allow("ec.utility.cineon", vals, 0.005);
+    }
+    let Some(g) = gpu() else { return };
+    let spec = effectcraft_effects::find("ec.utility.cineon").unwrap();
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, [1.0, 1.0]))).collect() };
+    params.values.insert("gamma".into(), n(1.7));
+    params.values.insert("highlightRolloff".into(), n(0.0));
+    let mut img = effectcraft_raster::Image::new(1, 1);
+    img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+    let buf = Buf { img, offset: [0.0; 2], scale: 1.0 };
+    let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [1.0, 1.0], seed: 0, adjustment: false, env: EffectEnv::default() };
+    let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx }], &buf, None).expect("the GPU runs the effect");
+    let got = (out.img.get(0, 0)[0].clamp(0.0, 1.0) * 255.0).round() as i32;
+    assert!((got - 57).abs() <= 1, "code 400: {got} vs 57");
 }
 
 #[test]
