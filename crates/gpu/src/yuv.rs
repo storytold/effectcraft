@@ -130,7 +130,7 @@ pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) ->
         ],
     });
     {
-        let enc = e.encoder();
+        let enc = e.record(&[img]);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("yuv420"), timestamp_writes: None });
             pass.set_pipeline(&yp.pipe);
