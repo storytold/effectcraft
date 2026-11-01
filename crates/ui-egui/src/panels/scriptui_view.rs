@@ -26,6 +26,8 @@ enum Act {
     Close(u32),
     /// A mouse event (`scriptui.mouse` parameters without window and widget).
     Mouse(u32, u32, Value),
+    /// A keyboard event (scriptui.key parameters without window).
+    Key(u32, u32, Value),
     /// A docked panel's new size (`scriptui.resize`).
     Resize(u32, [f32; 2]),
 }
@@ -149,13 +151,41 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             if !focused {
                 buf = w.text.clone();
             }
-            let te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
-            let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(12.0));
+            let mut te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
+            if !w.placeholder.is_empty() {
+                te = te.hint_text(&w.placeholder);
+            }
+            let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(14.0));
             let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(rect, te)).inner;
             let r = tip(r);
+            // Handle ScriptUI keyboard focus request:
+            let (target_widget, seq) = app.session.script_ui.window(win).map(|sw| (sw.focus_widget, sw.focus_seq)).unwrap_or((None, 0));
+            let focus_seq_id = egui::Id::unique(("sui-focus-seq", win, w.id));
+            let last_seq: u64 = ui.data(|d| d.get_temp(focus_seq_id)).unwrap_or(0);
+            let has_focus = ui.memory(|m| m.has_focus(id));
+            let wants_focus = (seq > 0 && seq > last_seq && target_widget == Some(w.id)) || (w.active && !has_focus && last_seq == 0);
+            if wants_focus && w.enabled && !w.read_only {
+                if !has_focus {
+                    r.request_focus();
+                    ui.ctx().memory_mut(|mem| mem.request_focus(id));
+                    let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+                    st.store(ui.ctx(), id);
+                    log::debug!("ScriptUI native focus applied to window {} widget {} ({:?})", win, w.id, id);
+                }
+                if seq > 0 && target_widget == Some(w.id) {
+                    ui.data_mut(|d| d.insert_temp(focus_seq_id, seq));
+                }
+            }
+            if has_focus && last_seq == 0 {
+                ui.data_mut(|d| d.insert_temp(focus_seq_id, 1));
+            }
             // Live updates already sent the text: the commit still runs onChange.
             let dirty_id = id.with("dirty");
             let dirty = ui.data(|d| d.get_temp::<bool>(dirty_id)).unwrap_or(false);
+            if r.lost_focus() {
+                log::debug!("ScriptUI focus lost on window {} widget {} ({:?})", win, w.id, id);
+            }
             if r.lost_focus() && (buf != w.text || dirty) {
                 acts.push(Act::Set(win, w.id, json!(buf)));
                 ui.data_mut(|d| d.remove::<bool>(dirty_id));
@@ -235,13 +265,29 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         }
         WidgetKind::ListBox => {
             let mut pick: Option<usize> = None;
-            ui.painter().rect_filled(rect, 2.0, t.field_bg);
+            ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(31, 30, 30));
             ui.add_enabled_ui(w.enabled, |ui| {
-                ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(2.0)), |ui| {
-                    egui::ScrollArea::vertical().id_salt(id).max_height(rect.height() - 4.0).show(ui, |ui| {
-                        ui.set_width(rect.width() - 8.0);
+                ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                    egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(ui, |ui| {
+                        ui.set_width(rect.width());
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                         for (i, it) in w.items.iter().enumerate() {
-                            if ui.selectable_label(w.selection.contains(&i), it).clicked() {
+                            let selected = w.selection.contains(&i);
+                            let item_h = 30.0;
+                            let (row_rect, resp) = ui.allocate_exact_size(vec2(rect.width(), item_h), Sense::click());
+                            if selected {
+                                ui.painter().rect_filled(row_rect, 0.0, Color32::from_rgb(16, 114, 187));
+                            } else if resp.hovered() {
+                                ui.painter().rect_filled(row_rect, 0.0, Color32::from_rgb(45, 45, 45));
+                            } else {
+                                ui.painter().rect_filled(row_rect, 0.0, Color32::from_rgb(31, 30, 30));
+                            }
+                            let text_color = if selected { Color32::WHITE } else { Color32::from_rgb(220, 220, 220) };
+                            let font = egui::FontId::new(14.0, egui::FontFamily::Proportional);
+                            let pad_x = if it.starts_with("   ") { 35.0 } else { 8.0 };
+                            let text_pos = pos2(row_rect.min.x + pad_x, row_rect.center().y);
+                            ui.painter().text(text_pos, Align2::LEFT_CENTER, it.trim_start(), font, text_color);
+                            if resp.clicked() {
                                 pick = Some(i);
                             }
                         }
@@ -486,6 +532,68 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
+fn find_focused_widget<'a>(w: &'a Widget, win: u32, fid: egui::Id) -> Option<&'a Widget> {
+    if egui::Id::unique(("sui", win, w.id)) == fid {
+        return Some(w);
+    }
+    for c in &w.children {
+        if let Some(found) = find_focused_widget(c, win, fid) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn key_events(ui: &egui::Ui, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
+    if !active {
+        return;
+    }
+    let focused_id = ui.memory(|m| m.focused());
+    let mut target_widget = 0;
+    let mut text_editing_focused = false;
+    if let Some(fid) = focused_id {
+        if let Some(target) = find_focused_widget(root, win, fid) {
+            target_widget = target.id;
+            text_editing_focused = target.kind == WidgetKind::EditText;
+        } else {
+            // The focused widget does not belong to this window; do not route key events here.
+            return;
+        }
+    }
+    let (events, _mods) = ui.input(|i| (i.events.clone(), i.modifiers));
+    for e in &events {
+        let egui::Event::Key { key, pressed: true, modifiers, .. } = e else { continue };
+        let (key_str, key_name, is_nav) = match key {
+            egui::Key::ArrowUp => ("ArrowUp", "Up", true),
+            egui::Key::ArrowDown => ("ArrowDown", "Down", true),
+            egui::Key::ArrowLeft => ("ArrowLeft", "Left", false),
+            egui::Key::ArrowRight => ("ArrowRight", "Right", false),
+            egui::Key::Enter => ("Enter", "Enter", true),
+            egui::Key::Escape => ("Escape", "Escape", true),
+            egui::Key::Tab => ("Tab", "Tab", true),
+            _ => continue,
+        };
+        // Gate routing: if a textedit is actively editing, only route navigation/command keys
+        // (ArrowUp, ArrowDown, Enter, Escape, Tab) so normal typing is preserved and not consumed.
+        if text_editing_focused && !is_nav {
+            continue;
+        }
+        acts.push(Act::Key(
+            win,
+            target_widget,
+            json!({
+                "type": "keydown",
+                "key": key_str,
+                "keyName": key_name,
+                "altKey": modifiers.alt,
+                "ctrlKey": modifiers.ctrl,
+                "shiftKey": modifiers.shift,
+                "metaKey": modifiers.mac_cmd,
+            }),
+        ));
+    }
+}
+
 /// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
 fn snug(r: Rect, text: &str) -> Rect {
     let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
@@ -510,6 +618,15 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
                 }
                 ("scriptui.mouse", v)
             }
+            Act::Key(w, id, mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("window".into(), json!(w));
+                    if id > 0 {
+                        o.insert("widget".into(), json!(id));
+                    }
+                }
+                ("scriptui.key", v)
+            }
         };
         match crate::menus::invoke(app, ctx, cmd, p) {
             Ok(r) => {
@@ -532,6 +649,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         return;
     }
     let t = app.tokens;
+    let services = app.session.services.clone();
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
@@ -546,23 +664,40 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
-        let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
+        let is_palette = w.kind == WindowKind::Palette;
+        let order = if w.modal || is_palette { egui::Order::Foreground } else { egui::Order::Middle };
+        let mut win_widget = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
             .collapsible(false)
             .resizable(false)
+            .title_bar(!is_palette)
             .open(&mut open)
-            .default_pos(screen.center() - size / 2.0)
-            .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel_bg))
-            .show(ctx, |ui| {
-                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-                draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
-                mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
-                rect
-            });
+            .default_pos(screen.center() - size / 2.0);
+        if is_palette {
+            win_widget = win_widget.frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(Color32::from_rgb(24, 24, 24))
+                    .inner_margin(0.0)
+                    .corner_radius(4.0)
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60))),
+            );
+        } else {
+            win_widget = win_widget.frame(egui::Frame::window(&ctx.global_style()).fill(t.panel_bg));
+        }
+        let resp = win_widget.show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            paint_draw(ui, rect, &w.root.draw, &t, &*services);
+            draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
+            mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
+            key_events(ui, w.id, &w.root, w.modal || !blocked, &mut acts);
+            rect
+        });
         if let Some(r) = resp {
             app.auto.add(&format!("scriptui.{}", w.id), r.response.rect, &w.title);
+            if w.modal || w.kind == WindowKind::Palette {
+                ctx.move_to_top(r.response.layer_id);
+            }
         }
         if !open {
             acts.push(Act::Close(w.id));
@@ -598,6 +733,7 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
+        key_events(ui, id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();

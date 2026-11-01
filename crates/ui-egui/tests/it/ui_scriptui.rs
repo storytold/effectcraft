@@ -398,3 +398,120 @@ fn scheduled_import_reveals_its_composition_without_manual_clicks() {
     assert!(!h.state().ui.start_screen, "Home must not hide a composition opened by the scheduled import");
     h.state_mut().session.execute("scriptui.close", json!({"window":"Automatic import"})).unwrap();
 }
+
+#[test]
+fn fx_console_focus_and_typing_test() {
+    let mut h = harness();
+    let r = h.state_mut().session.execute("file.runScript", json!({"name": "FX Console.jsx"})).unwrap();
+    assert_eq!(r["result"]["ok"], true, "FX Console opened: {r}");
+    h.step();
+    h.step();
+
+    let win =
+        h.state().session.script_ui.windows.iter().find(|w| w.title == "FX Console" || w.script == "FX Console.jsx").cloned().expect("FX Console window open");
+    let target_wid = win.focus_widget.expect("focus_widget set");
+    let field_id = egui::Id::unique(("sui", win.id, target_wid));
+
+    // Focus must be on the search field immediately
+    assert!(h.ctx.memory(|m| m.has_focus(field_id)), "searchField must have focus without mouse interaction");
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(field_id));
+
+    // Verify cursor is at the beginning (index 0)
+    let state = egui::text_edit::TextEditState::load(&h.ctx, field_id).expect("TextEditState exists");
+    assert_eq!(state.cursor.char_range(), Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+
+    // Send typing event "blur" directly without touching the mouse
+    for ch in ['b', 'l', 'u', 'r'] {
+        h.event(Event::Key {
+            key: match ch {
+                'b' => egui::Key::B,
+                'l' => egui::Key::L,
+                'u' => egui::Key::U,
+                'r' => egui::Key::R,
+                _ => egui::Key::A,
+            },
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.event(Event::Text(ch.to_string()));
+        h.step();
+    }
+    h.run_steps(2);
+
+    let updated_win = h.state().session.script_ui.window(win.id).cloned().expect("window exists");
+    let search_field = updated_win.root.lookup(&json!("searchField")).expect("searchField exists");
+    assert_eq!(search_field.text, "blur", "typed characters must appear inside searchField");
+
+    // Close and reopen
+    h.state_mut().session.execute("scriptui.close", json!({"window": win.id})).unwrap();
+    h.step();
+    let r2 = h.state_mut().session.execute("file.runScript", json!({"name": "FX Console.jsx"})).unwrap();
+    assert_eq!(r2["result"]["ok"], true);
+    h.step();
+    h.step();
+
+    let win2 = h
+        .state()
+        .session
+        .script_ui
+        .windows
+        .iter()
+        .find(|w| (w.title == "FX Console" || w.script == "FX Console.jsx") && w.visible)
+        .cloned()
+        .expect("FX Console reopened");
+    let field_id2 = egui::Id::unique(("sui", win2.id, win2.focus_widget.unwrap()));
+    assert!(h.ctx.memory(|m| m.has_focus(field_id2)), "focus must be restored upon reopening");
+}
+
+#[test]
+fn fx_console_apply_on_enter_test() {
+    let mut h = harness();
+    // Create comp and solid layer
+    h.state_mut().session.execute("comp.new", json!({"name": "Comp 1", "width": 1920, "height": 1080})).unwrap();
+    let l = h.state_mut().session.execute("layer.newSolid", json!({"name": "Solid 1", "color": "#ff0000"})).unwrap();
+    let lid = l["layer"].as_u64().unwrap();
+    h.step();
+
+    // Open FX Console
+    let r = h.state_mut().session.execute("file.runScript", json!({"name": "FX Console.jsx"})).unwrap();
+    assert_eq!(r["result"]["ok"], true);
+    h.step();
+    h.step();
+
+    // Type "blur"
+    for ch in ['b', 'l', 'u', 'r'] {
+        h.event(Event::Key {
+            key: match ch {
+                'b' => egui::Key::B,
+                'l' => egui::Key::L,
+                'u' => egui::Key::U,
+                'r' => egui::Key::R,
+                _ => egui::Key::A,
+            },
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.event(Event::Text(ch.to_string()));
+        h.step();
+    }
+    h.run_steps(2);
+
+    // Press Enter
+    h.event(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.step();
+    h.step();
+
+    // Check if effect was applied to the layer
+    let comp = h.state().session.active_comp().unwrap();
+    let layer = comp.layer(effectcraft_project::LayerId(lid)).unwrap();
+    let fx = layer.props.group("effects").unwrap();
+    println!("Effects count: {}", fx.children.len());
+    for child in &fx.children {
+        println!("Effect: {:?}", child.name());
+    }
+    assert!(!fx.children.is_empty(), "An effect must be applied to the layer on Enter!");
+}

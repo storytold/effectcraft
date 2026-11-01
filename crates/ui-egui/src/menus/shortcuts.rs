@@ -433,6 +433,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             if let Err(e) = invoke(app, ctx, &id, params) {
                 app.ui.status = e;
             }
+            ctx.input_mut(|i| i.consume_key(mods, key));
             ctx.data_mut(|d| d.remove_temp::<String>(system_paste_id()));
         }
     }

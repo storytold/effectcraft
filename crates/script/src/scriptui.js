@@ -426,6 +426,8 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   if (!win) {
     o.__next = 1;
     o.__wid = __uiNewId();
+    o.__focusTarget = null;
+    o.__focusSeq = 0;
   }
   o.properties = props || {};
   // Image controls and icon buttons take an image where other controls take their text.
@@ -446,6 +448,31 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   o.alignment = null;
   o.graphics = __uiGraphics();
   o.__listeners = {};
+  o.__active = false;
+  if (type !== "window") {
+    Object.defineProperty(o, "active", {
+      get: function () {
+        return !!this.__active;
+      },
+      set: function (val) {
+        var b = !!val;
+        this.__active = b;
+        if (b && this.window) {
+          if (this.window.__activeControl && this.window.__activeControl !== this) {
+            this.window.__activeControl.__active = false;
+          }
+          this.window.__activeControl = this;
+          this.window.__focusTarget = this.__id;
+          this.window.__focusSeq = (this.window.__focusSeq || 0) + 1;
+        } else if (!b && this.window && this.window.__focusTarget === this.__id) {
+          this.window.__focusTarget = null;
+          if (this.window.__activeControl === this) this.window.__activeControl = null;
+        }
+      },
+      configurable: true,
+      enumerable: true
+    });
+  }
   if (o.properties.name) o.name = o.properties.name;
   if (__uiContainers[type]) {
     o.orientation = type === "group" ? "row" : type === "tabbedpanel" ? "stack" : "column";
@@ -469,7 +496,7 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   if (type === "edittext") {
     o.characters = 0;
     o.textselection = "";
-    o.active = false;
+
   }
   if (type === "dropdownlist" || type === "listbox") {
     o.items = [];
@@ -521,6 +548,7 @@ function __uiProto() {
       if (t === "checkbox" || t === "radiobutton") c.value = false;
       if (t === "edittext" && c.properties.multiline) c.__multiline = true;
       if (t === "edittext" && c.properties.readonly) c.__readonly = true;
+      if (t === "edittext" && c.properties.placeholder) c.__placeholder = String(c.properties.placeholder);
       if (c.properties?.name) c.name = c.properties.name;
       this.children.push(c);
       if (t === "tab" && this.type === "tabbedpanel" && this.__sel.length === 0) this.__sel = [this.children.length - 1];
@@ -589,6 +617,9 @@ function __uiProto() {
       if (this.__modal) __uiResults[this.__wid] = this.__result;
     },
     center: function () {},
+    requestFocus: function () {
+      this.active = true;
+    },
     notify: function (ev) {
       var e = ev || (this.type === "edittext" || this.type === "slider" || this.type === "dropdownlist" || this.type === "listbox" ? "onChange" : "onClick");
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
@@ -808,6 +839,56 @@ function __uiMouseFire(target, type, v) {
   return e;
 }
 
+var __uiKeyKinds = ["keydown", "keyup"];
+
+function __uiKeyboardEvent(type, target, v) {
+  var keys = { alt: !!v.altKey, control: !!v.ctrlKey, ctrl: !!v.ctrlKey, meta: !!v.metaKey, shift: !!v.shiftKey };
+  return {
+    type: type,
+    target: target,
+    currentTarget: target,
+    eventPhase: "none",
+    bubbles: true,
+    cancelable: true,
+    captures: true,
+    view: target.window,
+    timeStamp: new Date(),
+    keyName: String(v.keyName || v.key || ""),
+    key: String(v.key || v.keyName || ""),
+    altKey: keys.alt,
+    ctrlKey: keys.ctrl,
+    metaKey: keys.meta,
+    shiftKey: keys.shift,
+    defaultPrevented: false,
+    __stopped: false,
+    stopPropagation: function () { this.__stopped = true; },
+    preventDefault: function () { this.defaultPrevented = true; },
+    getModifierState: function (k) { return !!keys[String(k).toLowerCase()]; },
+    toString: function () { return "[object KeyboardEvent]"; }
+  };
+}
+
+function __uiKeyFire(target, type, v) {
+  var path = [];
+  for (var p = target; p && path.length < 256; p = p.parent) path.unshift(p);
+  var e = __uiKeyboardEvent(type, target, v);
+  var run = function (c, phase, capture) {
+    var l = __uiMouseListeners(c, type, capture);
+    e.currentTarget = c;
+    e.eventPhase = phase;
+    for (const elem of l) if (typeof elem === "function") elem.call(c, e);
+  };
+  var n = path.length - 1;
+  for (var i = 0; i < n; i++) {
+    run(path[i], "capture", true);
+    if (e.__stopped) return e;
+  }
+  run(target, "target", true);
+  run(target, "target", false);
+  for (var j = n - 1; j >= 0 && !e.__stopped; j--) run(path[j], "bubble", false);
+  return e;
+}
+
 function __uiJson(c, inherited) {
   var mouse = __uiMouseWanted(c, inherited || []);
   var ps = __uiSize(c.preferredSize);
@@ -819,6 +900,7 @@ function __uiJson(c, inherited) {
     text: String(c.text === undefined || c.text === null ? "" : c.text),
     enabled: c.enabled !== false,
     visible: c.visible !== false,
+    active: !!c.__active,
     helpTip: String(c.helpTip || ""),
     handlers: c.__handlers(),
     children: []
@@ -854,6 +936,8 @@ function __uiJson(c, inherited) {
   if (c.type === "edittext") {
     o.multiline = !!c.__multiline;
     o.readOnly = !!c.__readonly;
+    o.active = !!c.__active;
+    if (c.__placeholder) o.placeholder = String(c.__placeholder);
   }
   return o;
 }
@@ -864,7 +948,16 @@ function __uiSnapshot() {
   for (const elem of __uiWins) {
     var w = elem;
     if (w.__shown && !w.__closed) __uiRunDraws(w);
-    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: !!w.__shown && !w.__closed, modal: !!w.__modal, root: __uiJson(w) });
+    out.push({
+      id: w.__wid,
+      kind: w.__kind,
+      title: String(w.text || ""),
+      visible: !!w.__shown && !w.__closed,
+      modal: !!w.__modal,
+      root: __uiJson(w),
+      focusWidget: typeof w.__focusTarget === "number" ? w.__focusTarget : null,
+      focusSeq: typeof w.__focusSeq === "number" ? w.__focusSeq : 0
+    });
   }
   // Closed windows are forgotten.
   __uiWins = __uiWins.filter(function (w) { return !w.__closed; });
@@ -935,6 +1028,11 @@ function __uiDispatch(winId, id, kind, valueJson) {
   var mouse = v !== null && typeof v === "object" && !(v instanceof Array) ? v : null;
   if (kind !== "click" && __uiMouseKinds.indexOf(kind) >= 0) {
     __uiMouseFire(c, kind, mouse || {});
+    return;
+  }
+  if (__uiKeyKinds.indexOf(kind) >= 0) {
+    var keyObj = v !== null && typeof v === "object" ? v : {};
+    __uiKeyFire(c, kind, keyObj);
     return;
   }
   if (kind === "click") {

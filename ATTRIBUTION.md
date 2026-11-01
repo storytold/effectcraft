@@ -95,8 +95,9 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   `crates/engine/scripts/Sort Layers by In Point.jsx`, `crates/engine/scripts/Create Null at Selected Layers.jsx`,
   `crates/engine/scripts/Render Queue Batch.jsx`, `crates/engine/scripts/ScriptUI Panels/Layer Tools.jsx`
   (sidecars `.attribution`).
-- Bundled extension (ScriptUI panel) with its twelve built-in ease presets:
-  `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`).
+- Bundled extensions (ScriptUI panels):
+  `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`),
+  `extensions/scriptui-panels/FX Console.jsx` (sidecar `.attribution`).
 - Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
 
 ## Trained models (optional downloads, not bundled)
