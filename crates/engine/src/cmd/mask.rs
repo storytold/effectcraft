@@ -314,6 +314,7 @@ fn select_vertices(s: &mut Session, p: &Value) -> Result<Value> {
     let g = vertex_groups(s, &json!({"vertices": p.get("vertices").cloned().unwrap_or(json!([]))}))?;
     let sel: Vec<VertexRef> =
         g.into_iter().flat_map(|((l, m), is)| is.into_iter().map(move |i| VertexRef { layer: effectcraft_project::LayerId(l), mask: m, index: i })).collect();
+    // Explicit point selection leaves whole-mask selection, so Delete edits vertices.
     s.state.selected_props.clear();
     s.state.selected_keys.clear();
     if b_p(p, "add").unwrap_or(false) {
@@ -327,9 +328,6 @@ fn select_vertices(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     } else {
-        // Explicit point selection leaves whole-mask selection, so Delete edits vertices.
-        s.state.selected_props.clear();
-        s.state.selected_keys.clear();
         s.state.selected_vertices = sel;
     }
     Ok(json!(s.state.selected_vertices.len()))

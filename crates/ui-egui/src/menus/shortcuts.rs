@@ -352,9 +352,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     let pasted =
         if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
     let mut events = collect_key_events(ctx, start, clipboard, project);
-    events.retain(|(key, _, pressed, _)| !crate::panels::shape_draft::key(ctx, *key, *pressed));
-
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
+    if !tab_only {
+        events.retain(|(key, _, pressed, _)| !crate::panels::shape_draft::key(ctx, *key, *pressed));
+    }
     if !tab_only && clipboard && app.dialog.is_none() {
         numpad_star_marker(app, ctx);
     }

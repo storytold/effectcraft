@@ -35,6 +35,30 @@ fn shortcut_passes_share_frame_start_modifiers() {
 }
 
 #[test]
+fn review_regression_draft_keys_apply_once_across_both_shortcut_passes() {
+    for key in [egui::Key::ArrowUp, egui::Key::PageUp] {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::panels::shape_draft::begin(&ctx, "star");
+        let events = [egui::Key::Tab, key]
+            .into_iter()
+            .map(|key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE })
+            .collect();
+        let mut output = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+            handle_shortcuts(&mut app, ui.ctx());
+            handle_tab_shortcut(&mut app, ui.ctx());
+        });
+        output.textures_delta.clear();
+        let options = crate::panels::shape_draft::end(&ctx);
+        if key == egui::Key::ArrowUp {
+            assert_eq!(options.points, Some(6.0), "one press adds one point");
+        } else {
+            assert_eq!(options.inner_roundness, 10.0, "one press adds one roundness step");
+        }
+    }
+}
+
+#[test]
 fn every_ui_shortcut_parses() {
     for c in UI_COMMANDS {
         if let Some(sc) = c.shortcut {

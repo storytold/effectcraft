@@ -768,6 +768,14 @@ mod tests {
             assert_ne!(initial, moved);
             let spec = crate::native_menu::build(&app);
             assert!(spec.items().iter().any(|item| item.command == "edit.undo" && item.enabled && item.label.contains("Move Free Transform Pivot")));
+            app.session.set_time(Tick::from_seconds_f64(0.5));
+            let away = crate::native_menu::state_key(&app);
+            assert_ne!(away, moved, "moving away hides the interactive Undo label");
+            assert_eq!(transform_history_label(&app, false), None);
+            app.session.set_time(Tick::from_seconds_f64(1.0));
+            assert_eq!(crate::native_menu::state_key(&app), away, "the hidden label does not change again during playback");
+            app.session.set_time(Tick::ZERO);
+            assert_eq!(crate::native_menu::state_key(&app), moved, "returning restores the interactive Undo label");
             transform_undo(&mut app, &ctx, false).unwrap().unwrap();
             let undone = crate::native_menu::state_key(&app);
             assert_ne!(moved, undone);
