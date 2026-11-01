@@ -1,6 +1,7 @@
 //! Layer ▸ Create: Convert to Editable Text (Photoshop type layers), Create Shapes from Text,
 //! Create Masks from Text, Create Shapes from Vector Layer (SVG footage) and Create 3D Layer
-//! Instance (a 2D copy of a 3D model layer that 2D effects can be applied to).
+//! Instance (a 2D copy of a 3D model layer that 2D effects can be applied to). Null Controllers for
+//! Path Points, Nulls Following Path Points and Null Tracing Along Path run the `paths.*` commands.
 
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value as KV;
@@ -11,10 +12,25 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, has_layers, layers_p, str_p};
 use crate::{EngineError, Result, Session, cmd};
 
-const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d";
+const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|nullsPathPoints|nullsFollowing|nullTracing";
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let op = str_p(p, "op").ok_or_else(|| bad("layer.create", format!("missing `op` ({OPS})")))?;
+    // The Layer ▸ Create null entries are the Create Nulls From Paths commands (they pick the
+    // selected path); a `layers` param names the layer whose path they use.
+    let paths_cmd = match op {
+        "nullsPathPoints" => Some("paths.pointsFollowNulls"),
+        "nullsFollowing" => Some("paths.nullsFollowPoints"),
+        "nullTracing" => Some("paths.tracePath"),
+        _ => None,
+    };
+    if let Some(c) = paths_cmd {
+        let mut q = p.clone();
+        if let (Some(first), Some(o)) = (p.get("layers").and_then(|v| v.get(0)).cloned(), q.as_object_mut()) {
+            o.entry("layer").or_insert(first);
+        }
+        return s.execute(c, q);
+    }
     let (cid, lids) = layers_p(s, p)?;
     if lids.is_empty() {
         return Err(bad("layer.create", "select a layer first"));
@@ -264,5 +280,13 @@ fn insert_above(
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![cmd!("layer.create", "Create", [], None, "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d, layers?}", has_layers, create)]
+    vec![cmd!(
+        "layer.create",
+        "Create",
+        [],
+        None,
+        "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|nullsPathPoints|nullsFollowing|nullTracing, layers?}",
+        has_layers,
+        create
+    )]
 }
