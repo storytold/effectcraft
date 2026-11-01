@@ -49,7 +49,7 @@ fn rust_plugins_apply_by_id() {
         version: "1".into(),
         author: String::new(),
         description: String::new(),
-        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true } }],
+        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true }, group: String::new() }],
     };
     register_plugin(Arc::new(Swap { m })).unwrap();
     let (mut s, l) = setup();
@@ -62,7 +62,7 @@ fn rust_plugins_apply_by_id() {
     assert!(p[0] > 0.99 && p[2] < 0.01, "{p:?}");
     let list = s.execute("effect.plugins.list", json!({})).unwrap();
     assert!(list["plugins"].as_array().unwrap().iter().any(|p| p["id"] == "org.test.swap" && p["category"] == "Channel"));
-    assert_eq!(list["api"], 1);
+    assert_eq!(list["api"], 2);
     assert!(s.execute("effect.list", json!({"filter": "swap red"})).unwrap().as_array().unwrap().len() == 1);
 }
 

@@ -54,6 +54,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("lottie", 3),
     ("format", 3),
     ("plugin", 3),
+    ("helper-host", 3),
     ("interchange", 3),
     ("engine", 4),
     ("script", 4),
