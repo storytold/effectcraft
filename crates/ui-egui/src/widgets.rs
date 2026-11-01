@@ -377,7 +377,10 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
         _ => crate::i18n::tr("Options").to_string(),
     };
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), &name));
-    ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
+    // A drop-down pressed and browsed keeps its hover look: with the button down egui reports
+    // nothing as hovered, so the control under the pointer takes it by hand (#2686).
+    let hot = resp.hovered() || (browsing(ui.ctx()) && resp.contains_pointer());
+    ui.painter().rect_filled(rect, 3.0, if hot { t.hover } else { t.field_bg });
     ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     // Text that doesn't fit before the arrow is elided (narrow panels).
     let room = rect.width() - 7.0 - 18.0;
@@ -760,7 +763,9 @@ pub fn label_popup(
         ui.set_min_width(160.0);
         let mut chosen = None;
         for l in labels {
-            if label_entry(ui, l, &name(l), l == current, t).clicked() {
+            let r = label_entry(ui, l, &name(l), l == current, t);
+            let r = browse_hover(ui, r);
+            if r.clicked() || browse_pick(ui, &r) {
                 chosen = Some(l);
             }
         }
@@ -807,12 +812,13 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
                 ui.separator();
             } else {
                 let r = ui.selectable_label(current == Some(i), o);
+                let r = browse_hover(ui, r);
                 // The keyboard starts on the current entry (the first one, with none current).
                 if current == Some(i) || (current.is_none() && first) {
                     focus_when_opened(ui, id, &r);
                 }
                 first = false;
-                if r.clicked() {
+                if r.clicked() || browse_pick(ui, &r) {
                     chosen = Some(i);
                 }
             }
@@ -866,22 +872,41 @@ pub fn layer_picker(
 /// returns a choice, on Escape, or on a press outside it and outside `anchor` (a control that
 /// toggles the list itself). Returns the choice.
 pub fn popup_list<R>(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, anchor: Rect, rows: usize, seps: usize, body: impl FnOnce(&mut Ui) -> Option<R>) -> Option<R> {
+    // A drop-down opened on the press ([`open_on_press`]) remembers its trigger, which is the
+    // control that toggles the list: the press that opens the list is outside the list itself and
+    // must not close it in the same pass (#2686).
+    let anchor = ui.data(|d| d.get_temp::<Rect>(id.with("anchor"))).unwrap_or(anchor);
+    let held = browsing(ui.ctx());
     let screen = ui.ctx().content_rect();
     let max_h = (screen.height() - 24.0).max(120.0);
     let sp = ui.spacing();
     let est = (rows as f32 * (sp.interact_size.y + sp.item_spacing.y + 4.0) + seps as f32 * (2.0 * sp.item_spacing.y + 2.0) + 16.0).min(max_h + 12.0);
     let pos = egui::pos2(pos.x, pos.y.min(screen.bottom() - est).max(screen.top()));
     let mut chosen = None;
+    let mut crawl = None;
+    let pending = id.with("edge-scroll-offset");
+    let mut scroll = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height((est - 16.0).min(max_h));
+    if let Some(target) = ui.ctx().data_mut(|d| d.remove_temp::<f32>(pending)) {
+        scroll = scroll.vertical_scroll_offset(target);
+    }
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             // (An area's content is laid out in last frame's size: ask for the estimate.)
-            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height((est - 16.0).min(max_h)).show(ui, |ui| chosen = body(ui));
+            let out = scroll.show(ui, |ui| chosen = body(ui));
+            // Resting the pointer against the top or bottom edge walks a long list while the
+            // button stays down, as it does in the menus (blend modes, fonts).
+            crawl = edge_scroll(ui, &out, held);
         });
     });
     note_open_popup_list(ui.ctx());
+    if let Some(target) = crawl {
+        ui.ctx().data_mut(|d| d.insert_temp(pending, target));
+    }
     let outside = pressed_outside(ui.ctx(), &area.response) && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| anchor.contains(p));
     if chosen.is_some() || outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.data_mut(|d| d.insert_temp(id.with("open"), false));
+        // A closed list cannot browse: the flag must not outlive the press that opened it.
+        stop_browsing(ui.ctx());
     }
     chosen
 }
@@ -1027,6 +1052,89 @@ pub fn popup_is_open(ui: &Ui, id: egui::Id) -> bool {
 
 pub fn open_popup(ui: &Ui, id: egui::Id) {
     ui.data_mut(|d| d.insert_temp(id.with("open"), true));
+}
+
+/// The temp-data id of the "a control was pressed and its list is being browsed" flag.
+fn browse_id() -> egui::Id {
+    egui::Id::unique("popup-browse")
+}
+
+/// The temp-data id of the trigger whose press opened the browsed list (its rect).
+fn browse_trigger_id() -> egui::Id {
+    egui::Id::unique("popup-browse-trigger")
+}
+
+/// `resp` opens (or closes) the [`popup_menu`] `id` on the press, not on the release, as After
+/// Effects' drop-downs do: the list is up while the button is still down, the entries take the
+/// highlight as the pointer moves over them ([`browse_hover`]) and the one the button comes up
+/// over is chosen ([`browse_pick`]). A press on it while the list is open closes the list, so it
+/// is its own toggle; keyboard and accessibility activation (a `clicked` without the primary
+/// button) toggles it too.
+///
+/// The trigger's rect is remembered for the list, so the press that opens it is not mistaken for
+/// a press outside it ([`popup_list`]) and closes it in the same pass, and for [`browse_pick`],
+/// which must not choose when the button comes up back over the trigger.
+pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
+    let open = popup_is_open(ui, id);
+    let pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && resp.hovered();
+    // The trigger stays under the pointer for the whole hold: the list opens below it. Its rect is
+    // the list's anchor, so a press on it is never a press outside the list.
+    ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
+    if pressed {
+        ui.data_mut(|d| {
+            d.insert_temp(browse_id(), !open);
+            d.insert_temp(browse_trigger_id(), resp.rect);
+            d.insert_temp(id.with("open"), !open);
+        });
+    } else if resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary) {
+        ui.data_mut(|d| d.insert_temp(id.with("open"), !open));
+    }
+}
+
+/// Whether a control was pressed and its list is still being browsed: the press that opened it
+/// has not come up yet (or is coming up in this pass, so the entry under the pointer can be
+/// chosen). Nothing browses otherwise, so a release that belongs to some other gesture — a
+/// viewer drag, a timeline drag — never picks an entry.
+pub fn browsing(ctx: &egui::Context) -> bool {
+    if !ctx.data(|d| d.get_temp::<bool>(browse_id())).unwrap_or(false) {
+        return false;
+    }
+    let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.button_released(egui::PointerButton::Primary)));
+    if down || released {
+        return true;
+    }
+    // The press is over and its release pass has gone: nothing may browse any more.
+    stop_browsing(ctx);
+    false
+}
+
+/// Ends an [`open_on_press`] browse: the list closed, or the press ended.
+fn stop_browsing(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.insert_temp(browse_id(), false);
+        d.remove::<Rect>(browse_trigger_id());
+    });
+}
+
+/// The row `r` highlighted while its list is browsed with the button held: egui reports nothing
+/// as hovered while a button is down — which would leave browsing with no hover feedback at all
+/// — so the row under the pointer takes the highlight by hand.
+pub fn browse_hover(ui: &Ui, r: Response) -> Response {
+    if browsing(ui.ctx()) && r.contains_pointer() { r.highlight() } else { r }
+}
+
+/// Whether a [`open_on_press`] press that is still down comes up over row `r`, which then chooses
+/// it as a click would. egui reports no click for that release (it is far from the press), and
+/// nothing but the pressed widget is hovered while a button is down, so the row tests the pointer
+/// itself. Rows that are disabled are skipped, as in native menus, and so is a release back over
+/// the trigger: a long list is moved up to fit the window and can cover the control that opened
+/// it, and the click that opened it must not choose the entry that happens to lie under it then.
+pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
+    if !(browsing(ui.ctx()) && r.enabled() && r.contains_pointer()) {
+        return false;
+    }
+    let trigger = ui.data(|d| d.get_temp::<Rect>(browse_trigger_id()));
+    ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) && !i.pointer.interact_pos().is_some_and(|p| trigger.is_some_and(|t| t.contains(p))))
 }
 
 /// Linked values after component `d` of `c` became `v`: the others scale by the same ratio
@@ -1318,5 +1426,218 @@ mod tests {
             let r = got.expect("the field was drawn");
             assert!((r.center().y - field.center().y).abs() < 0.5 && r.height() >= h - 2.5, "{h}: {r:?} in {field:?}");
         }
+    }
+
+    /// A drop-down drawn the way the panels draw one ([`dropdown`] + [`open_on_press`] plus either
+    /// [`popup_menu`] or a panel's own [`popup_list`] body), with the trigger's rect, the rows it
+    /// drew and the list's open state read back after every pass.
+    struct Browsing {
+        current: Option<usize>,
+        open: bool,
+        trigger: Rect,
+        rows: Vec<Rect>,
+    }
+
+    const SIZES: [&str; 3] = ["Small", "Medium", "Large"];
+
+    const EMPTY: Browsing = Browsing { current: None, open: false, trigger: Rect::NOTHING, rows: Vec::new() };
+
+    fn list() -> egui_kittest::Harness<'static, Browsing> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
+            |ui, s: &mut Browsing| {
+                let t = Tokens::for_kind(Default::default());
+                let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 20.0));
+                let resp = dropdown(ui, rect, "Pick", &t, egui::Id::unique("browse-trigger"));
+                s.trigger = resp.rect;
+                let pop = egui::Id::unique("browse-list");
+                open_on_press(ui, &resp, pop);
+                if popup_is_open(ui, pop) {
+                    let options: Vec<String> = SIZES.iter().map(|s| (*s).to_string()).collect();
+                    if let Some(i) = popup_menu(ui, pop, rect.left_bottom(), &options, s.current) {
+                        s.current = Some(i);
+                    }
+                }
+                s.open = popup_is_open(ui, pop);
+            },
+            EMPTY,
+        )
+    }
+
+    /// The same drop-down, but with the panel's own [`popup_list`] body (the raw sites).
+    fn raw_list() -> egui_kittest::Harness<'static, Browsing> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
+            |ui, s: &mut Browsing| {
+                let t = Tokens::for_kind(Default::default());
+                let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 20.0));
+                let resp = dropdown(ui, rect, "Pick", &t, egui::Id::unique("raw-trigger"));
+                s.trigger = resp.rect;
+                let pop = egui::Id::unique("raw-list");
+                open_on_press(ui, &resp, pop);
+                s.rows.clear();
+                if popup_is_open(ui, pop) {
+                    let chosen = popup_list(ui, pop, rect.left_bottom(), Rect::NOTHING, SIZES.len(), 0, |ui| {
+                        let mut chosen = None;
+                        for (i, name) in SIZES.iter().enumerate() {
+                            let r = ui.selectable_label(s.current == Some(i), *name);
+                            let r = browse_hover(ui, r);
+                            s.rows.push(r.rect);
+                            if r.clicked() || browse_pick(ui, &r) {
+                                chosen = Some(i);
+                            }
+                        }
+                        chosen
+                    });
+                    if let Some(i) = chosen {
+                        s.current = Some(i);
+                    }
+                }
+                s.open = popup_is_open(ui, pop);
+            },
+            EMPTY,
+        )
+    }
+
+    /// The same drop-down with more entries than a short window holds: the list is moved up to fit
+    /// the window and so covers its own trigger.
+    fn clamped_list() -> egui_kittest::Harness<'static, Browsing> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 240.0)).build_ui_state(
+            |ui, s: &mut Browsing| {
+                let t = Tokens::for_kind(Default::default());
+                let rect = Rect::from_min_size(pos2(20.0, 100.0), vec2(120.0, 20.0));
+                let resp = dropdown(ui, rect, "Pick", &t, egui::Id::unique("clamped-trigger"));
+                s.trigger = resp.rect;
+                let pop = egui::Id::unique("clamped-list");
+                open_on_press(ui, &resp, pop);
+                s.rows.clear();
+                if popup_is_open(ui, pop) {
+                    let chosen = popup_list(ui, pop, rect.left_bottom(), Rect::NOTHING, 20, 0, |ui| {
+                        let mut chosen = None;
+                        for i in 0..20 {
+                            let r = ui.selectable_label(s.current == Some(i), format!("Entry {i}"));
+                            let r = browse_hover(ui, r);
+                            s.rows.push(r.rect);
+                            if r.clicked() || browse_pick(ui, &r) {
+                                chosen = Some(i);
+                            }
+                        }
+                        chosen
+                    });
+                    if let Some(i) = chosen {
+                        s.current = Some(i);
+                    }
+                }
+                s.open = popup_is_open(ui, pop);
+            },
+            EMPTY,
+        )
+    }
+
+    fn pointer_button(h: &mut egui_kittest::Harness<'_, Browsing>, at: egui::Pos2, pressed: bool) {
+        if pressed {
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+        }
+        let event = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        h.event(event);
+        h.step();
+    }
+
+    /// #2686: After Effects' drop-downs open on the press and the entries are browsed while the
+    /// button stays down; the one it comes up over is chosen. Without the trigger remembered as
+    /// the list's anchor, the press that opens it is a press outside it and it closes at once.
+    #[test]
+    fn a_press_opens_the_list_and_the_release_over_an_entry_chooses_it() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        assert!(h.state().open, "the press opens the list");
+        // (The accessibility tree is one pass behind the drawing: let the list settle first.)
+        h.run();
+        assert!(h.query_by_label("Large").is_some(), "and its entries are up while the button is down");
+        let entry = h.query_by_label("Large").expect("the list is open").rect().center();
+        h.event(egui::Event::PointerMoved(entry));
+        h.step();
+        assert!(h.state().open, "moving onto an entry keeps the list open");
+        pointer_button(&mut h, entry, false);
+        assert_eq!(h.state().current, Some(2), "the release over the third entry chooses it");
+        assert!(!h.state().open, "and closes the list");
+        assert!(!browsing(&h.ctx), "and nothing browses any more");
+    }
+
+    #[test]
+    fn a_press_released_back_over_the_trigger_leaves_the_list_open() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        pointer_button(&mut h, trigger, false);
+        assert!(h.state().open, "released over the trigger, the list stays up");
+        assert_eq!(h.state().current, None, "and nothing was chosen");
+        pointer_button(&mut h, trigger, true);
+        assert!(!h.state().open, "pressing the trigger again closes it");
+    }
+
+    #[test]
+    fn a_press_outside_an_open_list_closes_it() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        pointer_button(&mut h, trigger, false);
+        assert!(h.state().open);
+        pointer_button(&mut h, pos2(300.0, 300.0), true);
+        assert!(!h.state().open, "a press elsewhere closes it");
+        assert_eq!(h.state().current, None, "without choosing anything");
+    }
+
+    /// The panels' own list bodies browse the same way: highlight by pointer while the button is
+    /// down, choose on the release over the row.
+    #[test]
+    fn a_custom_popup_list_body_browses_its_rows() {
+        let mut h = raw_list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        assert_eq!(h.state().rows.len(), SIZES.len(), "the press opens the list");
+        h.run();
+        let entry = h.state().rows[1].center();
+        h.event(egui::Event::PointerMoved(entry));
+        h.step();
+        pointer_button(&mut h, entry, false);
+        assert_eq!(h.state().current, Some(1), "the release over the second row chooses it");
+        assert!(!h.state().open, "and closes the list");
+    }
+
+    /// A list with more entries than the window holds is moved up and covers its trigger. The click
+    /// that opened it (a press and a release in the same place) must not choose the entry that now
+    /// lies under the pointer, or a plain click would change the value; moving onto another entry
+    /// and letting the button up there still chooses it.
+    #[test]
+    fn a_release_back_over_the_trigger_chooses_nothing_under_a_list_that_covers_it() {
+        let mut h = clamped_list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        h.run();
+        assert!(h.state().rows.iter().any(|r| r.contains(trigger)), "the clamped list covers the trigger");
+        pointer_button(&mut h, trigger, false);
+        assert_eq!(h.state().current, None, "the click that opened the list chose nothing");
+        assert!(h.state().open, "and left the list up");
+        // A press away from it closes the list without choosing.
+        let elsewhere = pos2(350.0, 200.0);
+        pointer_button(&mut h, elsewhere, true);
+        assert!(!h.state().open, "a press elsewhere closes it");
+        pointer_button(&mut h, elsewhere, false);
+        // Opened again, a move onto an entry away from the trigger and the release there chooses it.
+        pointer_button(&mut h, trigger, true);
+        h.run();
+        let away = h.state().rows.iter().copied().find(|r| !r.contains(trigger)).expect("an entry away from the trigger");
+        h.event(egui::Event::PointerMoved(away.center()));
+        h.step();
+        pointer_button(&mut h, away.center(), false);
+        assert_eq!(h.state().current, Some(0), "the release over an entry away from the trigger chooses it");
+        assert!(!h.state().open, "and closes the list");
     }
 }
