@@ -321,6 +321,41 @@ fn paste_svg_markup_as_a_shape_layer() {
 }
 
 #[test]
+fn pasted_svg_pattern_keeps_geometry_and_editable_fallback_paint() {
+    let (mut s, _) = text_session();
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+        <defs><pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4">
+            <circle cx="2" cy="2" r="1" fill="red"/>
+        </pattern></defs>
+        <rect id="patterned" width="16" height="6" fill="url(#p) rgba(255, 0, 0, 0.5)"/>
+        <path id="patterned-stroke" d="M0 8 H16" fill="none" stroke="url(#p) rgba(0, 0, 255, 0.25)" stroke-width="2"/>
+        <rect id="patterned-no-fallback" y="10" width="16" height="6" fill="url(#p)"/>
+        <path id="patterned-stroke-no-fallback" d="M0 15 H16" fill="none" stroke="url(#p)" stroke-width="2"/>
+    </svg>"##;
+    let result = s.execute_checked("edit.pasteSvg", json!({"svg": svg})).unwrap();
+    let layer_id = effectcraft_project::LayerId(result["layer"].as_u64().unwrap());
+    let layer = s.active_comp().unwrap().layer(layer_id).unwrap();
+    let shape = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned").unwrap();
+    let items: Vec<_> = shape.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "rect"), "the editable geometry remains");
+    let fill = items.iter().find(|item| item.match_id == "fill").expect("fallback fill remains editable");
+    assert_eq!(fill.get("color").unwrap().value, KV::Color([1.0, 0.0, 0.0, 0.5]));
+    let stroke = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned-stroke").unwrap();
+    let items: Vec<_> = stroke.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "path"), "the editable stroke path remains");
+    let stroke = items.iter().find(|item| item.match_id == "stroke").expect("fallback stroke remains editable");
+    assert_eq!(stroke.get("color").unwrap().value, KV::Color([0.0, 0.0, 1.0, 0.25]));
+    let no_fallback = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned-no-fallback").unwrap();
+    let items: Vec<_> = no_fallback.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "rect"), "the editable geometry remains without a fallback");
+    assert!(!items.iter().any(|item| item.match_id == "fill"), "pattern paint without a fallback is omitted");
+    let no_fallback_stroke = layer.props.sub("contents").unwrap().groups().find(|g| g.name == "patterned-stroke-no-fallback").unwrap();
+    let items: Vec<_> = no_fallback_stroke.sub("contents").unwrap().groups().collect();
+    assert!(items.iter().any(|item| item.match_id == "path"), "the editable stroke geometry remains without a fallback");
+    assert!(!items.iter().any(|item| item.match_id == "stroke"), "pattern stroke without a fallback is omitted");
+}
+
+#[test]
 fn paste_svg_rejects_text_that_is_not_usable_svg() {
     let (mut s, _) = text_session();
     for bad in ["hello", "<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"></svg>", "<html><svg></html>"] {
