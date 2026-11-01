@@ -97,6 +97,19 @@ fn a_classic_trailer_with_an_encrypt_entry_is_refused() {
 }
 
 #[test]
+fn a_trailer_with_a_long_id_fits_the_window() {
+    // Two 128-byte file identifiers leave the trailer dictionary under 600 bytes, well inside the
+    // 4 KiB pre-scan window, so /Encrypt after them is read there.
+    let plain = String::from_utf8(document("", &[])).unwrap();
+    let id = format!("<{}>", "0123456789ABCDEF".repeat(16));
+    let with_id = plain.replace("/Root 1 0 R >>", &format!("/Root 1 0 R /ID [{id} {id}] >>"));
+    let encrypted = plain.replace("/Root 1 0 R >>", &format!("/Root 1 0 R /ID [{id} {id}] /Encrypt 9 0 R >>"));
+    let doc = parse(plain.as_bytes()).unwrap();
+    assert_eq!(parse(with_id.as_bytes()), Ok(doc));
+    assert_eq!(parse(encrypted.as_bytes()), Err(Error::Encrypted));
+}
+
+#[test]
 fn an_encrypt_entry_past_the_trailer_window_is_refused() {
     // The filler pushes /Encrypt past the pre-scan's 4 KiB window. Object 9 does not exist, and the
     // shared parser reads /Encrypt only as a dictionary, so it alone would open the file.
@@ -126,6 +139,16 @@ fn an_escaped_encrypt_entry_past_the_trailer_window_is_refused() {
 }
 
 #[test]
+fn a_hash_without_two_hex_digits_stays_in_a_name() {
+    // `#` escapes a byte only before two hex digits. Otherwise it and what follows stay as written,
+    // so none of these reads as `Encrypt`.
+    let name = |token: &str| String::from_utf8(crate::object::name_bytes(token.as_bytes()).collect()).unwrap();
+    assert_eq!(name("Encry#pt"), "Encry#pt");
+    assert_eq!(name("Encrypt#"), "Encrypt#");
+    assert_eq!(name("Encrypt#7"), "Encrypt#7");
+}
+
+#[test]
 fn an_encrypt_entry_after_a_window_cut_before_the_trailer_dictionary_is_refused() {
     // The 4 KiB pre-scan window ends in the whitespace before the trailer dictionary (the lexer
     // returns nothing) or between the two `<` of its `<<` (the lexer reads a hex string).
@@ -137,4 +160,23 @@ fn an_encrypt_entry_after_a_window_cut_before_the_trailer_dictionary_is_refused(
         assert_eq!(parse(spaced.as_bytes()).as_ref(), Ok(&doc));
         assert_eq!(parse(encrypted.as_bytes()), Err(Error::Encrypted));
     }
+}
+
+#[test]
+fn a_key_cut_by_the_trailer_window_is_read_whole() {
+    // Spaces put the 4 KiB pre-scan window's end inside a trailer key, `inside` bytes into it. The
+    // `/Encrypt` of the decoy `/Encrypted` is not taken for the key, a real `/Encrypt` cut after
+    // `/Encryp` is still refused, and one ending exactly at the window's end is read there.
+    let plain = String::from_utf8(document("", &[])).unwrap();
+    let doc = parse(plain.as_bytes()).unwrap();
+    let window_end = plain.find("trailer").unwrap() + "trailer".len() + 4 * 1024;
+    let key_at = plain.find("/Root 1 0 R >>").unwrap() + "/Root 1 0 R ".len();
+    let trailer = |key: &str, inside: usize| {
+        let file = plain.replace("/Root 1 0 R >>", &format!("/Root 1 0 R {}{key} 9 0 R >>", " ".repeat(window_end - inside - key_at)));
+        assert!(file[window_end - inside..].starts_with(key), "{key}");
+        file
+    };
+    assert_eq!(parse(trailer("/Encrypted", 8).as_bytes()).as_ref(), Ok(&doc));
+    assert_eq!(parse(trailer("/Encrypt", 7).as_bytes()), Err(Error::Encrypted));
+    assert_eq!(parse(trailer("/Encrypt", 8).as_bytes()), Err(Error::Encrypted));
 }

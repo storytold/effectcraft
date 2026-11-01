@@ -51,11 +51,12 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
     // Preserve the app's refusal of encrypted PDFs, including empty-user-password files.
     // Classic trailer dictionaries use the existing lexer; xref-stream dictionaries below
     // are read by the shared parser. This does not parse document objects a second time.
+    let regular = |c: u8| !is_white(c) && !is_delim(c);
     // Where the last name token decoding to `Encrypt` (escaped or not) ends, searched at most once.
     // Each token scan stops at the next `/`, so the search is linear.
     let last_encrypt = LazyCell::new(|| {
         bytes.iter().enumerate().rev().filter(|&(_, &c)| c == b'/').find_map(|(at, _)| {
-            let token = bytes.get(at + 1..).unwrap_or_default().split(|&c| is_white(c) || is_delim(c)).next().unwrap_or_default();
+            let token = bytes.get(at + 1..).unwrap_or_default().split(|&c| !regular(c)).next().unwrap_or_default();
             name_bytes(token).eq(*b"Encrypt").then_some(at + 1 + token.len())
         })
     });
@@ -67,7 +68,13 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
                 return Err(limit("trailer count"));
             }
             let start = offset + 7;
-            let end = bytes.len().min(start.saturating_add(TRAILER_WINDOW));
+            let mut end = bytes.len().min(start.saturating_add(TRAILER_WINDOW));
+            // A window ending inside a token (a regular byte on each side of the cut) would read its
+            // first part as all of it, such as `/Encrypt` of `/Encrypted`. It ends before that token
+            // instead, so the fallback below reads the token whole.
+            if bytes.get(end).is_some_and(|&c| regular(c)) {
+                end = end.saturating_sub(bytes.get(start..end).unwrap_or_default().iter().rev().take_while(|&&c| regular(c)).count());
+            }
             let window = bytes.get(start..end).unwrap_or_default();
             let mut lexer = Lexer::new(window, 0);
             let encrypt = matches!(lexer.next(), Some(Obj::Dict(dict)) if dict.contains_key("Encrypt"));
