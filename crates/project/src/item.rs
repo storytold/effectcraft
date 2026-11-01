@@ -10,6 +10,11 @@ pub struct ItemId(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LayerId(pub u64);
 
+/// An explicit "None" in a layer parameter whose unset value means the owning layer (Compound
+/// Blur's Blur Layer, Displacement Map's map, Set Matte's matte): `Value::Layer(Some(NO_LAYER))`.
+/// Ids start at 1, so it never names a layer; it resolves to no layer and shows as "None".
+pub const NO_LAYER: u64 = 0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
