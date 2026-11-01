@@ -63,6 +63,7 @@ mod ui_panel_windows;
 mod ui_panels;
 mod ui_parameter_spacing;
 mod ui_presets_folder;
+mod ui_press_and_browse;
 mod ui_preview_align;
 mod ui_project_delete;
 mod ui_project_duplicate;

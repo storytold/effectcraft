@@ -2845,7 +2845,8 @@ fn layer_label_swatch(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, r
         app.auto.add(&format!("timeline.layer.{}.label", layer.id.0), lr, layer.label.name());
         // Click (or right-click) the swatch for the label menu (After Effects).
         let pop = egui::Id::unique(("label-pop", layer.id.0));
-        if lresp.clicked() || lresp.secondary_clicked() {
+        widgets::open_on_press(ui, &lresp, pop);
+        if lresp.secondary_clicked() {
             widgets::open_popup(ui, pop);
         }
         if let Some(lab) = widgets::label_popup(ui, pop, lr.left_bottom(), layer.label, |l| app.session.prefs.label_name(l), &t) {
@@ -3048,9 +3049,7 @@ fn layer_mode_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
     let mresp = widgets::dropdown(ui, mr, layer.blend_mode.label(), &t, egui::Id::unique(("mode", layer.id.0)));
     app.auto.add(&format!("timeline.layer.{}.mode", layer.id.0), mr, "Mode");
     let pop = egui::Id::unique(("mode-pop", layer.id.0));
-    if mresp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &mresp, pop);
     let opts: Vec<String> =
         BlendMode::ALL.iter().flat_map(|m| if m.ends_group() { vec![m.label().to_string(), "-".to_string()] } else { vec![m.label().to_string()] }).collect();
     if let Some(i) = widgets::popup_menu(ui, pop, mr.left_bottom(), &opts, opts.iter().position(|o| o == layer.blend_mode.label())) {
@@ -3106,9 +3105,7 @@ fn layer_matte_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc:
     let tresp = widgets::dropdown_tip(ui, mr, &label, tip.as_deref(), &t, egui::Id::unique(("trkmat", layer.id.0)));
     app.auto.add(&format!("timeline.layer.{}.trackMatte", layer.id.0), mr, "Track Matte");
     let pop = egui::Id::unique(("trk-pop", layer.id.0));
-    if tresp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &tresp, pop);
     // The menu lists every layer: built only while it is open (per visible row
     // it made a big comp's timeline quadratic).
     let mut opts = vec!["No Track Matte".to_string(), "-".to_string()];
@@ -3163,9 +3160,7 @@ fn layer_parent_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc
     let presp = widgets::dropdown(ui, pr_rect, &plabel, &t, egui::Id::unique(("parent", layer.id.0)));
     app.auto.add(&format!("timeline.layer.{}.parent", layer.id.0), pr_rect, "Parent");
     let pop = egui::Id::unique(("par-pop", layer.id.0));
-    if presp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &presp, pop);
     let mut cands: Vec<&Layer> = vec![];
     let mut popts = vec!["None".to_string(), "-".to_string()];
     if widgets::popup_is_open(ui, pop) {
@@ -3557,9 +3552,8 @@ fn group_mask_mode(ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>) {
     {
         let mr = Rect::from_min_size(pos2(cw.switches + 4.0, cy - 9.0), vec2(80.0, 18.0));
         let pop = egui::Id::unique(("maskmode", uid));
-        if widgets::dropdown(ui, mr, mode.label(), &t, egui::Id::unique(("mm", uid))).clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        let mresp = widgets::dropdown(ui, mr, mode.label(), &t, egui::Id::unique(("mm", uid)));
+        widgets::open_on_press(ui, &mresp, pop);
         let opts: Vec<String> = effectcraft_engine::project::MaskMode::ALL.iter().map(|m| m.label().to_string()).collect();
         if let Some(i) = widgets::popup_menu(ui, pop, mr.left_bottom(), &opts, None) {
             actions.push(("layer.setMask".into(), json!({"layer": layer.id.0, "mask": uid, "mode": opts[i]})));
@@ -5185,9 +5179,7 @@ fn shape_add_popup(
     icons::paint(p, br.shrink(3.0), Icon::ChevronRight, if resp.hovered() { t.text } else { t.text_dim });
     app.auto.add(&format!("timeline.group.{uid}.add"), br, "Add:");
     let pop = egui::Id::unique(("tl-shapeadd-pop", uid));
-    if resp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &resp, pop);
     let opts: Vec<String> = SHAPE_ADD_ITEMS.iter().map(|(k, l)| if *k == "-" { "-".to_string() } else { l.to_string() }).collect();
     if let Some(i) = widgets::popup_menu(ui, pop, br.left_bottom(), &opts, None)
         && let Some((kind, _)) = SHAPE_ADD_ITEMS.get(i).filter(|(k, _)| *k != "-")
@@ -5237,9 +5229,7 @@ fn text_anim_popups(
     icons::paint(p, br.shrink(3.0), Icon::ChevronRight, if resp.hovered() { t.text } else { t.text_dim });
     app.auto.add(&format!("timeline.group.{uid}.{key}"), br, label);
     let pop = egui::Id::unique(("tl-textanim-pop", uid));
-    if resp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &resp, pop);
     let per_char = layer.props.prop("text/perChar3d").is_some_and(|q| q.value.as_bool());
     let mut opts: Vec<String> = Vec::new();
     let mut acts: Vec<(String, serde_json::Value)> = Vec::new();
@@ -5767,9 +5757,7 @@ fn color_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>,
     let resp = widgets::swatch(ui, r, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0], egui::Id::unique(("sw", uid)), &t);
     app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
     let pop = egui::Id::unique(("cpop", uid));
-    if resp.clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    widgets::open_on_press(ui, &resp, pop);
     // The eyedropper after the swatch samples the Composition panel (shape Fill and
     // Stroke colours, text and effect colours), as in After Effects' Timeline (#633).
     let er = Rect::from_center_size(pos2(r.max.x + 12.0, at.y), vec2(16.0, 16.0));
@@ -5810,9 +5798,8 @@ fn enum_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
         let r = Rect::from_min_size(pos2(x, at.y - 9.0), vec2(150.0, 18.0));
         let label = options.get(*i as usize).cloned().unwrap_or_default();
         let pop = egui::Id::unique(("epop", uid));
-        if widgets::dropdown(ui, r, &label, &t, egui::Id::unique(("en", uid))).clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        let eresp = widgets::dropdown(ui, r, &label, &t, egui::Id::unique(("en", uid)));
+        widgets::open_on_press(ui, &eresp, pop);
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, Some(*i as usize)) {
             ve.set_step(actions, json!(ni));
