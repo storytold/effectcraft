@@ -153,6 +153,20 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(12.0));
             let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(rect, te)).inner;
             let r = tip(r);
+            // Handle ScriptUI keyboard focus request:
+            let (target_widget, seq) = app.session.script_ui.window(win)
+                .map(|sw| (sw.focus_widget, sw.focus_seq))
+                .unwrap_or((None, 0));
+            let focus_seq_id = egui::Id::unique(("sui-focus-seq", win));
+            let last_seq: u64 = ui.data(|d| d.get_temp(focus_seq_id)).unwrap_or(0);
+            let wants_focus = (seq > 0 && seq > last_seq && target_widget == Some(w.id))
+                || (seq == 0 && last_seq == 0 && w.active);
+            if wants_focus && w.enabled && !w.read_only {
+                if !ui.memory(|m| m.has_focus(id)) {
+                    r.request_focus();
+                }
+                ui.data_mut(|d| d.insert_temp(focus_seq_id, if seq > 0 { seq } else { 1 }));
+            }
             // Live updates already sent the text: the commit still runs onChange.
             let dirty_id = id.with("dirty");
             let dirty = ui.data(|d| d.get_temp::<bool>(dirty_id)).unwrap_or(false);

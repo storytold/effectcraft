@@ -108,6 +108,7 @@ pub struct Widget {
     pub help_tip: String,
     pub multiline: bool,
     pub read_only: bool,
+    pub active: bool,
     /// Event handlers the script attached (`onClick`, `onChange`, `onChanging`…).
     pub handlers: Vec<String>,
     /// The mouse events ([`MOUSE_EVENTS`]) a script listener receives when they happen on this
@@ -360,6 +361,10 @@ pub struct ScriptWindow {
     pub modal: bool,
     /// The window and its controls (`root.bounds` is the content size).
     pub root: Widget,
+    /// The control requested to have keyboard focus (widget id within this window).
+    pub focus_widget: Option<u32>,
+    /// Focus request revision token (monotonically increments on each focus request).
+    pub focus_seq: u64,
 }
 
 /// A user (or agent) action on a script window control.

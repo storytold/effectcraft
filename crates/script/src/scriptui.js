@@ -426,6 +426,8 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   if (!win) {
     o.__next = 1;
     o.__wid = __uiNewId();
+    o.__focusTarget = null;
+    o.__focusSeq = 0;
   }
   o.properties = props || {};
   // Image controls and icon buttons take an image where other controls take their text.
@@ -446,6 +448,26 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   o.alignment = null;
   o.graphics = __uiGraphics();
   o.__listeners = {};
+  o.__active = false;
+  if (type !== "window") {
+    Object.defineProperty(o, "active", {
+      get: function () {
+        return !!this.__active;
+      },
+      set: function (val) {
+        var b = !!val;
+        this.__active = b;
+        if (b && this.window) {
+          this.window.__focusTarget = this.__id;
+          this.window.__focusSeq = (this.window.__focusSeq || 0) + 1;
+        } else if (!b && this.window && this.window.__focusTarget === this.__id) {
+          this.window.__focusTarget = null;
+        }
+      },
+      configurable: true,
+      enumerable: true
+    });
+  }
   if (o.properties.name) o.name = o.properties.name;
   if (__uiContainers[type]) {
     o.orientation = type === "group" ? "row" : type === "tabbedpanel" ? "stack" : "column";
@@ -469,7 +491,7 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   if (type === "edittext") {
     o.characters = 0;
     o.textselection = "";
-    o.active = false;
+
   }
   if (type === "dropdownlist" || type === "listbox") {
     o.items = [];
@@ -589,6 +611,9 @@ function __uiProto() {
       if (this.__modal) __uiResults[this.__wid] = this.__result;
     },
     center: function () {},
+    requestFocus: function () {
+      this.active = true;
+    },
     notify: function (ev) {
       var e = ev || (this.type === "edittext" || this.type === "slider" || this.type === "dropdownlist" || this.type === "listbox" ? "onChange" : "onClick");
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
@@ -819,6 +844,7 @@ function __uiJson(c, inherited) {
     text: String(c.text === undefined || c.text === null ? "" : c.text),
     enabled: c.enabled !== false,
     visible: c.visible !== false,
+    active: !!c.__active,
     helpTip: String(c.helpTip || ""),
     handlers: c.__handlers(),
     children: []
@@ -854,6 +880,7 @@ function __uiJson(c, inherited) {
   if (c.type === "edittext") {
     o.multiline = !!c.__multiline;
     o.readOnly = !!c.__readonly;
+    o.active = !!c.__active;
   }
   return o;
 }
@@ -864,7 +891,16 @@ function __uiSnapshot() {
   for (const elem of __uiWins) {
     var w = elem;
     if (w.__shown && !w.__closed) __uiRunDraws(w);
-    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: !!w.__shown && !w.__closed, modal: !!w.__modal, root: __uiJson(w) });
+    out.push({
+      id: w.__wid,
+      kind: w.__kind,
+      title: String(w.text || ""),
+      visible: !!w.__shown && !w.__closed,
+      modal: !!w.__modal,
+      root: __uiJson(w),
+      focusWidget: typeof w.__focusTarget === "number" ? w.__focusTarget : null,
+      focusSeq: typeof w.__focusSeq === "number" ? w.__focusSeq : 0
+    });
   }
   // Closed windows are forgotten.
   __uiWins = __uiWins.filter(function (w) { return !w.__closed; });
