@@ -120,6 +120,7 @@ fn protocol_round_trips() {
                 expand: 1,
                 reference: Some((LayerId(1), Tick::ZERO)),
                 dir: "/Fill/Clip_Fill_1".into(),
+                memory: 0,
             }),
         },
     ];
@@ -162,6 +163,7 @@ fn protocol_round_trips() {
                 expand: 1,
                 reference: Some((LayerId(1), Tick::ZERO)),
                 dir: "/Fill/Clip_Fill_1".into(),
+                memory: 0,
             }),
             files: vec!["/Fill/Clip_Fill_1/fill_00000.png".into()],
         },

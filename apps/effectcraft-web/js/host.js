@@ -350,7 +350,8 @@ function spawn(base) {
 /// Run a job in a worker. `files`: [[path, Uint8Array, version]] the job reads (`version`
 /// changes with every write of the file); `onMessage(type, json,
 /// path, bytes)` receives "reply" (json), "file" (path, bytes: a rendered file to download),
-/// "store" (path, bytes: a file to keep in browser storage) and "error" (json = message).
+/// "store" (path, bytes: a file to keep in browser storage), "unstore" (path: a stored file to
+/// remove) and "error" (json = message).
 export function workerRun(id, json, files, base, onMessage) {
   let w;
   try {
@@ -375,6 +376,8 @@ export function workerRun(id, json, files, base, onMessage) {
         onMessage("file", null, m.path, new Uint8Array(m.bytes));
       } else if (m.type === "store") {
         onMessage("store", null, m.path, new Uint8Array(m.bytes));
+      } else if (m.type === "unstore") {
+        onMessage("unstore", null, m.path, null);
       } else if (m.type === "stats") {
         jobStats.push({ kind: m.kind, gpu: m.gpu, passes: m.passes, readbacks: m.readbacks, ms: m.ms });
         if (jobStats.length > 16) jobStats.shift();

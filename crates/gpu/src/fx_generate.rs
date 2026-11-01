@@ -137,10 +137,12 @@ fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     if r < 0.5 {
         return Some(b);
     }
-    let (spans, reach) = effectcraft_effects::camera_lens_spans(ctx, r);
+    let (spans, _) = effectcraft_effects::camera_lens_spans(ctx, r);
     let repeat = ctx.params.b("repeatEdge") || ctx.adjustment;
     if !repeat {
-        b.pad(e, reach.ceil() as u32 + 1)?;
+        // As on the CPU: each direction's own reach, capped.
+        let (rx, ry) = effectcraft_effects::lens_reach(r, ctx.params.f("irisProperties/irisAspectRatio"));
+        b.pad_xy(e, rx, ry)?;
     }
     let linear = ctx.params.b("useLinear");
     let thr = ctx.params.f("highlight/specularThreshold") as f32 / 255.0;

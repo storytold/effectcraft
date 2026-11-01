@@ -210,7 +210,12 @@ layer's frames in passes on its device, fills them and writes the PNG sequence t
 services, which send each file to the page's browser storage (`{type: "store"}` messages, under
 `/Fill/<layer>_Fill_<n>/`); then the plan comes back (`WorkerReply::Fill`) and the page adds
 the fill layer as one undo step. (Before, the fill ran on the page's thread and could not
-write its folder.)
+write its folder.) A fill that fails or is cancelled removes the frames it already wrote
+(`Services::remove_file`; from a worker an `{type: "unstore"}` message, which the page applies
+to its storage), so it leaves its whole sequence or none of it. Nothing else removes stored
+files on its own: closing a project or replacing a render keeps them, and the user removes
+them in Settings ▸ Disk ▸ Browser Storage (`storage.*`). Removing a path that isn't stored
+does nothing.
 
 **Threading design: one engine instance per worker (decided, M13.24).** Shared-memory threads
 inside one instance (SharedArrayBuffer + atomics, a `wasm-bindgen-rayon`-style pool) need the

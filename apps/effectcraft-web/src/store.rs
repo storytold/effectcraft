@@ -442,6 +442,26 @@ mod tests {
         s
     }
 
+    /// Removing a stored file (a failed fill's frame, `Services::remove_file` / the worker's
+    /// `unstore`) drops it and queues its deletion from browser storage; removing a path that
+    /// isn't stored is a no-op: nothing else changes and nothing is queued.
+    #[test]
+    fn removing_a_file_that_is_not_stored_is_a_no_op() {
+        let s = store();
+        s.put_file("/Fill/Clip_Fill_1/fill_00000.png", Arc::from(&b"png"[..]), true);
+        s.put_file("/clip.mp4", Arc::from(&b"0123"[..]), true);
+        s.lock().take_pending();
+        assert!(s.remove_file("/Fill/Clip_Fill_1/fill_00000.png"));
+        assert!(s.file("/Fill/Clip_Fill_1/fill_00000.png").is_none());
+        let pending = s.lock().take_pending();
+        assert_eq!(pending.len(), 1, "the removal is written to browser storage");
+        assert!(pending[0].data.is_none(), "as a deletion");
+        assert!(!s.remove_file("/Fill/Clip_Fill_1/fill_00000.png"), "already gone");
+        assert!(!s.remove_file("/never/stored.png"));
+        assert!(!s.lock().has_pending(), "nothing to write");
+        assert_eq!(s.file("/clip.mp4").as_deref(), Some(&b"0123"[..]), "other files stay");
+    }
+
     #[test]
     fn usage_by_kind_and_clearing() {
         let s = store();
