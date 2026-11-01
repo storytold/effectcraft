@@ -192,6 +192,8 @@ struct Deferred {
     asked: std::sync::Mutex<std::collections::HashSet<u64>>,
     gate: Arc<std::sync::atomic::AtomicBool>,
     chains: std::sync::atomic::AtomicUsize,
+    begins: std::sync::atomic::AtomicUsize,
+    ends: std::sync::atomic::AtomicUsize,
     auto: effectcraft_render::AutoPick,
 }
 
@@ -245,7 +247,11 @@ impl Accelerator for Deferred {
         Some(&self.auto)
     }
     fn frame_begin(&self) {
+        self.begins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.ready.lock().unwrap().clear();
+    }
+    fn frame_end(&self) {
+        self.ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     fn pass_begin(&self) {
         self.gate.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -315,4 +321,57 @@ fn deferred_readbacks_render_in_passes() {
     }
     let st = acc.auto.stats(effectcraft_render::AutoKey::new(comp, opts.scale, false)).unwrap();
     assert!(st.cpu_frames > 0 && st.gpu_frames > 0, "{st:?}");
+}
+
+/// `frame_begin` and `frame_end` stay paired: early fails (before `frame_begin`), a pending frame replaced by a new render, a finished multi-pass frame, and a CPU frame.
+#[test]
+fn every_frame_begin_has_a_frame_end() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut s = Session::default();
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#3388ff", "name": "Blue", "width": 200, "height": 120})).unwrap();
+    s.execute("effect.apply", json!({"effect": "ec.blur.gaussian"})).unwrap();
+    s.execute("effect.apply", json!({"effect": "ec.stylize.glow"})).unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ffcc00", "name": "Yellow", "width": 80, "height": 80})).unwrap();
+    s.execute("effect.apply", json!({"effect": "ec.color.levels"})).unwrap();
+    let opts = RenderOpts { scale: 0.25, backend: Backend::Gpu, ..Default::default() };
+    let t = Tick::from_seconds_f64(1.0);
+    let mut w = server(&s);
+    let acc = Arc::new(Deferred::default());
+    w.set_accel(Some(acc.clone()));
+    let mut m = Mirror::default();
+    w.handle(round(&m.sync(s.revision, &s.project).unwrap()));
+    let req = |id, revision, comp, opts: RenderOpts| {
+        round(&FrameMsg::Render { id, revision, comp, time: t, opts: Box::new(opts), disk: None, layers: false, prefetch: vec![] })
+    };
+    let load = || (acc.begins.load(Relaxed), acc.ends.load(Relaxed));
+    // Early fails never touch the frame clock.
+    assert!(matches!(w.handle(req(1, s.revision + 1, comp, opts))[0].0, FrameReply::Failed { .. }));
+    assert!(matches!(w.handle(req(2, s.revision, ItemId(999_999), opts))[0].0, FrameReply::Failed { .. }));
+    assert_eq!(load(), (0, 0));
+    // First GPU pass misses and leaves the frame pending.
+    assert!(w.handle(req(3, s.revision, comp, opts)).is_empty() && w.waiting());
+    assert_eq!(load(), (1, 0));
+    // A fail while pending leaves the frame and the counters alone.
+    assert!(matches!(w.handle(req(4, s.revision + 1, comp, opts))[0].0, FrameReply::Failed { .. }));
+    assert!(w.waiting());
+    assert_eq!(load(), (1, 0));
+    // A new valid render replaces the pending frame (ends the old one).
+    assert!(w.handle(req(5, s.revision, comp, opts)).is_empty() && w.waiting());
+    assert_eq!(load(), (2, 1));
+    let mut out = vec![];
+    for _ in 0..10 {
+        acc.settle();
+        out = w.resume();
+        if !w.waiting() {
+            break;
+        }
+    }
+    assert!(matches!(out[0].0, FrameReply::Frame { id: 5, .. }));
+    assert_eq!(load(), (2, 2));
+    // CPU still pairs begin/end on the accelerator.
+    let cpu = RenderOpts { backend: Backend::Cpu, ..opts };
+    assert!(matches!(w.handle(req(6, s.revision, comp, cpu))[0].0, FrameReply::Frame { id: 6, .. }));
+    assert_eq!(load(), (3, 3));
 }

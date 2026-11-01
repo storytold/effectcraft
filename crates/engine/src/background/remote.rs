@@ -417,6 +417,10 @@ impl FrameServer {
                             auto = Some((key, gpu));
                         }
                     }
+                    // A frame still waiting for readbacks is replaced: end it, so every `frame_begin` has its `frame_end`.
+                    if self.pending.take().is_some() {
+                        a.frame_end();
+                    }
                     a.frame_begin();
                 }
                 self.pending = Some(Pending { id, project: p, comp, time, opts, t0: web_time::Instant::now(), passes: 0, auto });
