@@ -270,7 +270,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let w = 18.0 + label.len() as f32 * 6.6;
         let r = Rect::from_min_size(pos2(x - w, bar.min.y + 5.0), vec2(w, 20.0));
         x -= w + 6.0;
-        if widgets::text_button(ui, r, label, on, &t, egui::Id::new(("flow-opt", key))).clicked() {
+        if widgets::text_button(ui, r, label, on, &t, egui::Id::unique(("flow-opt", key))).clicked() {
             let v = if key == "direction" { json!({"direction": if o.vertical { "lr" } else { "tb" }}) } else { json!({key: !on}) };
             cmds.push(("flowchart.options".into(), v));
         }
@@ -282,7 +282,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let g = build(&app.session.project, rid, &o);
     let pos = layout(&g, o.vertical);
     let origin = body.min + vec2(24.0 + o.pan[0], 24.0 + o.pan[1]);
-    let bg = ui.interact(body, egui::Id::new("flow-bg"), Sense::click_and_drag());
+    let bg = ui.interact(body, egui::Id::unique("flow-bg"), Sense::click_and_drag());
     if bg.dragged() {
         let d = bg.drag_delta();
         app.ui.flowchart.pan[0] += d.x;
@@ -322,7 +322,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let (icon, fill) = kind_style(n.kind);
         let selected = o.selected.as_deref() == Some(n.id.as_str());
-        let resp = ui.interact(r.intersect(body), egui::Id::new(("flow-node", &n.id)), Sense::click());
+        let resp = ui.interact(r.intersect(body), egui::Id::unique(("flow-node", &n.id)), Sense::click());
         let fill = if resp.hovered() { fill.gamma_multiply(1.25) } else { fill };
         gp.rect_filled(r, 5.0, fill);
         gp.rect_stroke(

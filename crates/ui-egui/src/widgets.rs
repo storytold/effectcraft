@@ -2,6 +2,8 @@
 
 use egui::{Align2, Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
+use effectcraft_project::ParamUi;
+
 use crate::automation::Registry;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
@@ -20,9 +22,11 @@ struct TabOrder {
     pending: Option<(egui::Id, bool, u64)>,
 }
 
+/// The temp-data id of the [`TabOrder`] for the panel containing `ui` (unique per panel scope;
+/// `Id::NULL` outside a tagged panel).
 fn tab_order_id(ui: &Ui) -> egui::Id {
-    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.id);
-    egui::Id::new(("hot-tab-order", panel))
+    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.scope_id);
+    egui::Id::unique(("hot-tab-order", panel))
 }
 
 /// Puts hot-text field `id` in its panel's Tab order. True when a Tab in the field before it
@@ -47,20 +51,21 @@ fn tab_stop(ui: &Ui, id: egui::Id) -> bool {
     })
 }
 
+/// How a hot-text field scrubs and prints: `speed` value units per pointer pixel, clamped to
+/// `range`, shown with `decimals` places followed by `suffix`.
+#[derive(Clone, Copy)]
+pub struct HotSpec<'a> {
+    pub speed: f64,
+    pub range: (f64, f64),
+    pub decimals: usize,
+    pub suffix: &'a str,
+}
+
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
 /// Returns (response, Some(new value) when changed, drag finished).
-pub fn hot_number_at(
-    ui: &mut Ui,
-    rect_min: egui::Pos2,
-    id: egui::Id,
-    value: f64,
-    speed: f64,
-    range: (f64, f64),
-    decimals: usize,
-    suffix: &str,
-    t: &Tokens,
-) -> (Rect, Option<f64>, bool) {
+pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64, spec: &HotSpec, t: &Tokens) -> (Rect, Option<f64>, bool) {
+    let HotSpec { speed, range, decimals, suffix } = *spec;
     let editing_id = id.with("editing");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     if tab_stop(ui, id) && editing.is_none() {
@@ -145,11 +150,21 @@ pub fn proportional_scrub(m: egui::Modifiers) -> bool {
     m.command && m.alt
 }
 
+/// How far one pointer pixel scrubs a hot-text field: the property's slider (soft) range over
+/// 300 px. The Timeline and Effect Controls share this so they cannot drift; a large hard range
+/// only allows typing big values, it must not make dragging coarse (#2097).
+pub fn slider_scrub_speed(ui: &ParamUi) -> f64 {
+    match ui {
+        ParamUi::Slider { slider_min, slider_max, .. } => ((slider_max - slider_min) / 300.0).clamp(0.001, 50.0),
+        _ => 0.5,
+    }
+}
+
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
 /// `1 / speed` pixels however slowly the pointer moves (the fractions add up between frames),
 /// and a typed value is truncated. Returns (rect, Some(new value) when changed, drag finished).
 pub fn hot_int_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: i64, speed: f64, suffix: &str, t: &Tokens) -> (Rect, Option<i64>, bool) {
-    let (rect, nv, done) = hot_number_at(ui, rect_min, id, value as f64, speed, (-1e6, 1e6), 0, suffix, t);
+    let (rect, nv, done) = hot_number_at(ui, rect_min, id, value as f64, &HotSpec { speed, range: (-1e6, 1e6), decimals: 0, suffix }, t);
     let acc_id = id.with("acc");
     let acc = ui.data(|d| d.get_temp::<f64>(acc_id)).unwrap_or(0.0) + nv.map_or(0.0, |n| n - value as f64);
     // (Ten 0.1 steps add up to just under 1.)
@@ -245,6 +260,7 @@ pub fn twirl(ui: &mut Ui, rect: Rect, open: bool, id: egui::Id, t: &Tokens) -> R
         vec![c + vec2(-0.8 * k, -1.6 * k), c + vec2(0.8 * k, 0.0), c + vec2(-0.8 * k, 1.6 * k)]
     };
     ui.painter().add(egui::Shape::line(pts, Stroke::new(1.4, col)));
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -258,12 +274,18 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
     if on || resp.hovered() {
         icons::paint(ui.painter(), rect.shrink(rect.width() * 0.18), icon, if on { t.icon } else { t.text_faint });
     }
+    focus_outline(ui, &resp, t);
     resp
 }
 
 /// Icon button (toolbar style) with optional active state.
+///
+/// The icon alone carries no text, so the button's accessible name is its tooltip: callers chain
+/// `.on_hover_text(…)`, which names the node this reports (an icon button with neither is unnamed
+/// and kittest's accessibility check flags it).
 pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, ""));
     if active {
         ui.painter().rect_filled(rect, 4.0, t.accent);
     } else if resp.hovered() {
@@ -277,6 +299,8 @@ pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens
         t.icon
     };
     icons::paint(ui.painter(), rect.shrink(rect.width() * 0.22), icon, col);
+    // An icon has no text: the caller names the button.
+    crate::a11y::role(&resp, egui::accesskit::Role::Button);
     focus_outline(ui, &resp, t);
     resp
 }
@@ -309,6 +333,9 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
     field(ui, rect, text, hint, t, false)
 }
 
+/// The shared body of [`text_field`] and [`search_field`]: paints the rounded field (and, for
+/// `search`, a magnifier), places a single-line `TextEdit` on `text` filling the inner rect,
+/// and returns its response.
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
@@ -318,7 +345,7 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
     }
     let inner = Rect::from_min_max(pos2(rect.min.x + if search { 22.0 } else { 9.0 }, rect.min.y + 1.0), pos2(rect.max.x - 8.0, rect.max.y - 1.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    child.add(
+    let resp = child.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
@@ -326,8 +353,11 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
             // As tall as the field, so the text and the hint sit on its middle (they sat high, #581).
             .min_size(inner.size())
             .font(Tokens::ui(12.0))
-            .vertical_align(egui::Align::Center),
-    )
+            .align(egui::Align2::LEFT_CENTER),
+    );
+    // The hint is the field's visible name (the caller can give it a better one).
+    crate::a11y::name(&resp, hint);
+    resp
 }
 
 /// Dropdown-looking control ("Full ▾").
@@ -338,6 +368,15 @@ pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -
 /// [`dropdown`] with a tooltip `tip` (shown always; it replaces the elided text's tooltip).
 pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    // A combo box shows its current value; with no separate label widget that value is also the
+    // name a screen reader announces. An empty value falls back to the tooltip (or a generic name)
+    // so the control is still reachable.
+    let name = match (text.is_empty(), tip) {
+        (false, _) => text.to_string(),
+        (true, Some(tip)) if !tip.is_empty() => tip.to_string(),
+        _ => crate::i18n::tr("Options").to_string(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), &name));
     ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
     ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     // Text that doesn't fit before the arrow is elided (narrow panels).
@@ -358,6 +397,10 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
     };
     ui.painter().text(pos2(rect.min.x + 7.0, rect.center().y), Align2::LEFT_CENTER, shown, Tokens::ui(11.5), t.text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.max.x - 9.0, rect.center().y), vec2(8.0, 8.0)), Icon::ChevronDown, t.text_dim);
+    // A drop-down showing `text`; the caller names what it sets.
+    crate::a11y::role(&resp, egui::accesskit::Role::ComboBox);
+    crate::a11y::value(&resp, text);
+    focus_outline(ui, &resp, t);
     if let Some(tip) = tip {
         return resp.on_hover_text(tip.to_string());
     }
@@ -370,6 +413,7 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
 /// Text button with a subtle fill.
 pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), text));
     let bg = if primary {
         if resp.hovered() { t.accent_hover } else { t.accent }
     } else if resp.hovered() {
@@ -379,12 +423,178 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     };
     ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, Tokens::medium(12.0), if primary { Color32::WHITE } else { t.text });
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, text);
+    focus_outline(ui, &resp, t);
     resp
 }
 
-/// Checkbox in the AE look (small square).
+/// A primary-button gesture shared by custom and labelled checkboxes in this context.
+#[derive(Clone, Default)]
+struct CheckboxDrag {
+    press_frame: u64,
+    target: Option<bool>,
+    visited: std::collections::HashSet<egui::Id>,
+    /// Checkboxes the pointer crossed in the frame of the press, before the checkbox it pressed on
+    /// had been drawn (so the value to set was not known): they take it in the next frame.
+    pending: std::collections::HashSet<egui::Id>,
+}
+
+/// A primary-button event of the frame, in the order it happened.
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    Press,
+    Move,
+    Release,
+}
+
+/// The frame's primary-button events in order, each with its position. egui hit-tests the whole
+/// frame at the last pointer position, so a press followed by a move in one frame would otherwise
+/// be taken for a press where the pointer ended.
+fn pointer_steps(ui: &Ui) -> Vec<(Step, egui::Pos2)> {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::PointerMoved(pos) => Some((Step::Move, *pos)),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } => {
+                    Some((if *pressed { Step::Press } else { Step::Release }, *pos))
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Returns the requested value. Mixed checkboxes (`None`) and disabled controls are
+/// skipped. Each checkbox is visited once, so crossing it again cannot toggle it back. The
+/// checkbox a press lands on, and the ones the pointer passes over after it, are found from the
+/// frame's ordered pointer events, not from where the pointer ended.
+fn drag_toggle(ui: &Ui, response: &Response, value: Option<bool>) -> Option<bool> {
+    let (pressed, down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
+    let frame = ui.ctx().cumulative_frame_nr();
+    // clicked() reads Context input; do not call it while Context data is locked.
+    let clicked = response.clicked();
+    // Whether the pointer at `pos` is over this checkbox itself (not a window above it).
+    let over = |pos: egui::Pos2| response.rect.contains(pos) && ui.clip_rect().contains(pos) && ui.ctx().layer_id_at(pos) == Some(response.layer_id);
+    // Resolved before the data lock below: layer_id_at reads the Context.
+    let steps: Vec<(Step, bool)> = pointer_steps(ui).into_iter().map(|(step, pos)| (step, over(pos))).collect();
+    ui.data_mut(|data| {
+        let drag = data.get_temp_mut_or_default::<CheckboxDrag>(egui::Id::unique("checkbox-drag"));
+        // A release in the press frame leaves crossings pending: keep them for the next frame.
+        let flushing = !drag.pending.is_empty() && drag.target.is_some() && frame <= drag.press_frame.saturating_add(1);
+        if (!down && !released && !flushing) || (pressed && drag.press_frame != frame) {
+            *drag = CheckboxDrag { press_frame: frame, ..Default::default() };
+        }
+        let on = value?;
+        if !response.enabled() {
+            return None;
+        }
+        // Crossed in the frame of the press before the value was known: take it now.
+        if drag.pending.remove(&response.id)
+            && let Some(target) = drag.target
+            && drag.visited.insert(response.id)
+            && on != target
+        {
+            return Some(target);
+        }
+        // Whether the button is held, tracked in event order: a move after a release in the same frame is no drag.
+        // Before the first button event it is held exactly when that event is a release (or, with none, when it is down).
+        let mut held = match steps.iter().find(|(step, _)| *step != Step::Move) {
+            Some((step, _)) => *step == Step::Release,
+            None => down,
+        };
+        let mut press_seen = false;
+        for (step, over) in steps {
+            match step {
+                Step::Press => {
+                    press_seen = true;
+                    held = true;
+                    if drag.target.is_none() && over {
+                        drag.target = Some(!on);
+                        drag.visited.insert(response.id);
+                        return Some(!on);
+                    }
+                }
+                Step::Release => held = false,
+                Step::Move if held => match drag.target {
+                    Some(target) if over => {
+                        if drag.visited.insert(response.id) && on != target {
+                            return Some(target);
+                        }
+                    }
+                    None if press_seen && over => {
+                        drag.pending.insert(response.id);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        // The pointer held still over this checkbox in a later frame of the gesture.
+        if down
+            && !pressed
+            && response.contains_pointer()
+            && let Some(target) = drag.target
+        {
+            if drag.visited.insert(response.id) && on != target {
+                return Some(target);
+            }
+            return None;
+        }
+        // The source already changed on press. Suppress its ordinary release click.
+        if released && drag.target.is_some() {
+            return None;
+        }
+        clicked.then_some(!on)
+    })
+}
+
+/// A labelled checkbox with the same drag behavior as the custom panel checkbox.
+/// Use through `ui.add`, `ui.put`, or `ui.add_enabled` like `egui::Checkbox`.
+pub struct DragCheckbox<'a> {
+    value: &'a mut bool,
+    text: egui::WidgetText,
+}
+
+impl<'a> DragCheckbox<'a> {
+    pub fn new(value: &'a mut bool, text: impl Into<egui::WidgetText>) -> Self {
+        Self { value, text: text.into() }
+    }
+}
+
+impl egui::Widget for DragCheckbox<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let before = *self.value;
+        let mut response = ui.add(egui::Checkbox::new(self.value, self.text));
+        // egui changes on release; our shared gesture changes on press and entry.
+        *self.value = before;
+        response.flags.remove(egui::response::Flags::CHANGED);
+        if response.clicked() {
+            ui.ctx().request_repaint();
+        }
+        if let Some(value) = drag_toggle(ui, &response, Some(before)) {
+            *self.value = value;
+            response.mark_changed();
+            ui.ctx().request_repaint();
+        }
+        response
+    }
+}
+
+/// A labelled checkbox that allocates its own rectangle.
+pub fn labelled_checkbox(ui: &mut Ui, value: &mut bool, text: impl Into<egui::WidgetText>) -> Response {
+    ui.add(DragCheckbox::new(value, text))
+}
+
+/// Checkbox in the AE look (small square). `changed()` requests a toggle, including
+/// keyboard activation and entry during a drag begun on another checkbox.
 pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> Response {
-    let resp = ui.interact(rect, id, Sense::click());
+    let mut resp = ui.interact(rect, id, Sense::click());
+    let next = drag_toggle(ui, &resp, Some(on));
+    if next.is_some() {
+        resp.mark_changed();
+    }
+    let on = next.unwrap_or(on);
     let b = Rect::from_center_size(rect.center(), vec2(12.0, 12.0));
     ui.painter().rect_filled(b, 2.0, if on { t.accent } else { t.field_bg });
     ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, if on { t.accent } else { t.field_border }), StrokeKind::Inside);
@@ -392,6 +602,7 @@ pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> 
         let p = |x: f32, y: f32| pos2(b.min.x + x * b.width(), b.min.y + y * b.height());
         ui.painter().line(vec![p(0.2, 0.52), p(0.42, 0.74), p(0.8, 0.28)], Stroke::new(1.6, Color32::WHITE));
     }
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -411,7 +622,9 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::drag());
+    // Dragged with the mouse only: a Tab stop that no key could move would be a trap. The panels
+    // scroll with their own keys (the arrows, Page Up / Page Down) and the wheel.
+    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::unique(key), Sense::DRAG);
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -455,6 +668,22 @@ impl PanelScroll {
         Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
     }
 
+    /// Scroll the panel `id` (a [`PanelScroll`] kept under that id) so the content from `top` to
+    /// `bottom` is in view of a `view` tall list, from the next pass.
+    pub fn reveal(ctx: &egui::Context, id: egui::Id, top: f32, bottom: f32, view: f32) {
+        let (offset, max): (f32, f32) = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+        let wanted = if top < offset {
+            top
+        } else if bottom > offset + view {
+            bottom - view
+        } else {
+            offset
+        }
+        .max(0.0);
+        // (`max` is last frame's overflow; the next `end` measures it again.)
+        ctx.data_mut(|d| d.insert_temp(id, (wanted, max.max(wanted))));
+    }
+
     /// The rows were `content` points tall: keep the offset, with the scroll bar registered for
     /// automation as `key`.
     pub fn end(self, ui: &mut Ui, auto: &mut Registry, key: &str, content: f32, t: &Tokens) {
@@ -482,8 +711,10 @@ pub fn check_label(on: bool, label: &str) -> String {
     if on { format!("✓ {label}") } else { format!("   {label}") }
 }
 
-fn label_swatch_id() -> egui::Id {
-    egui::Id::new("label-swatch")
+/// The atom id of [`label_swatch`]'s slot inside a button, which [`paint_label_swatch`] looks
+/// up on the laid-out button.
+fn label_swatch_id() -> egui::IdSalt {
+    egui::IdSalt::new("label-swatch")
 }
 
 /// The colour swatch of a Label menu row, as an atom for its button: Label menus show each
@@ -494,7 +725,7 @@ pub fn label_swatch() -> egui::Atom<'static> {
 }
 
 /// Paint the [`label_swatch`] of a laid-out button: label `l`'s colour, an empty box for None.
-pub fn paint_label_swatch(ui: &Ui, out: &egui::AtomLayoutResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
+pub fn paint_label_swatch(ui: &Ui, out: &egui::WidgetAtomResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
     let Some(r) = out.rect(label_swatch_id()) else { return };
     let r = Rect::from_center_size(r.center(), vec2(11.0, 11.0));
     if l == effectcraft_engine::color::Label::None {
@@ -537,6 +768,30 @@ pub fn label_popup(
     })
 }
 
+/// This pass's input has no mouse press or release: whatever just happened (a control activated,
+/// a list opened, an entry chosen) came from the keyboard or an assistive technology.
+pub fn by_keyboard(ui: &Ui) -> bool {
+    !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released())
+}
+
+/// Put the keyboard on `entry` of the popup list `id` the pass the list opens, so Up / Down and
+/// Enter work it and Escape closes it. (The pass count tells a fresh opening from a list that has
+/// been open for some passes.)
+pub fn focus_when_opened(ui: &Ui, id: egui::Id, entry: &Response) {
+    let key = id.with("focus-pass");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let previous = ui.data_mut(|d| {
+        let previous = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        previous
+    });
+    // A list opened with the mouse keeps the keyboard where it was: a widget with the focus
+    // pauses the application's shortcuts (Space, Ctrl+Z) until the focus is lost.
+    if previous.is_none_or(|p| p.saturating_add(1) < pass) && by_keyboard(ui) {
+        entry.request_focus();
+    }
+}
+
 /// Show a popup menu anchored at `pos` with string options; returns the chosen index.
 pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String], current: Option<usize>) -> Option<usize> {
     if !popup_is_open(ui, id) {
@@ -546,15 +801,62 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     popup_list(ui, id, pos, Rect::NOTHING, options.len().saturating_sub(seps), seps, |ui| {
         ui.set_min_width(160.0);
         let mut chosen = None;
+        let mut first = true;
         for (i, o) in options.iter().enumerate() {
             if o == "-" {
                 ui.separator();
-            } else if ui.selectable_label(current == Some(i), o).clicked() {
-                chosen = Some(i);
+            } else {
+                let r = ui.selectable_label(current == Some(i), o);
+                // The keyboard starts on the current entry (the first one, with none current).
+                if current == Some(i) || (current.is_none() && first) {
+                    focus_when_opened(ui, id, &r);
+                }
+                first = false;
+                if r.clicked() {
+                    chosen = Some(i);
+                }
             }
         }
         chosen
     })
+}
+
+/// The drop-down for a layer-valued property (`ParamUi::Layer`): the current layer shown as
+/// "N. name" (or "None"), and a popup of "None" plus every layer of the comp. Effect Controls
+/// and the Timeline share it so a layer reference (an Environment light's Source, a Displacement
+/// Map's layer) is picked the same way in every panel, and the reference is shown as its layer's
+/// index and name rather than its internal id. Returns `Some(chosen)` when the user picked —
+/// the layer's id, or `None` for "None" — and `None` while nothing is chosen; the caller writes
+/// it as an undoable `prop.set` (id, or null for "None").
+pub fn layer_picker(
+    ui: &mut Ui,
+    rect: Rect,
+    layers: &effectcraft_engine::project::Layers,
+    current: Option<u64>,
+    t: &Tokens,
+    id: egui::Id,
+) -> Option<Option<u64>> {
+    let index_of = |wanted: u64| layers.iter().position(|l| l.id.0 == wanted);
+    let entry = |i: usize| layers.get(i).map(|l| format!("{}. {}", i + 1, l.name));
+    let current_index = current.and_then(index_of);
+    let label = current_index.and_then(entry).unwrap_or_else(|| crate::i18n::tr("None").to_string());
+    let pop = id.with("pop");
+    if dropdown(ui, rect, &label, t, id).clicked() {
+        open_popup(ui, pop);
+    }
+    if !popup_is_open(ui, pop) {
+        return None;
+    }
+    // Built only while open: a comp can hold hundreds of layers.
+    let mut options: Vec<String> = Vec::with_capacity(layers.len() + 1);
+    options.push(crate::i18n::tr("None").to_string());
+    options.extend((0..layers.len()).filter_map(entry));
+    // The current entry is highlighted (the first option is "None").
+    match popup_menu(ui, pop, rect.left_bottom(), &options, Some(current_index.map_or(0, |i| i + 1))) {
+        Some(0) => Some(None),
+        Some(picked) => layers.get(picked - 1).map(|l| Some(l.id.0)),
+        None => None,
+    }
 }
 
 /// The open popup list `id` at `pos`, drawn by `body` (`rows` entries and `seps` separators,
@@ -592,7 +894,7 @@ pub(crate) fn note_open_popup_list(ctx: &egui::Context) {
 
 /// The pass a [`popup_list`] was last drawn in.
 fn popup_list_pass_id() -> egui::Id {
-    egui::Id::new("popup-list-pass")
+    egui::Id::unique("popup-list-pass")
 }
 
 /// Whether a menu, context menu or popup list is open, or the menu bar has the keyboard (as of
@@ -607,9 +909,94 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// whole: egui sizes a new menu from a default 400 pt area, so without a minimum a longer one
 /// (Window ▸ Workspace) got stuck at that height with its last entries scrolled out of view
 /// (#191).
-pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+///
+/// While the bar is mid press-and-browse (`browsing`), resting the pointer against the menu's
+/// bottom or top edge scrolls it from there — a crawl at first, then a run, as native menus do —
+/// so a long list can be walked with no wheel. Without the hold the edges do nothing: the wheel
+/// and the scroll bar are how a normally opened menu scrolls.
+pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
-    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+    let pending = ui.scope_id().with("menu-edge-scroll-offset");
+    let target = ui.ctx().data_mut(|d| d.remove_temp::<f32>(pending));
+    let mut area = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h);
+    if let Some(target) = target {
+        area = area.vertical_scroll_offset(target);
+    }
+    let out = area.show(ui, add);
+    if let Some(target) = edge_scroll(ui, &out, browsing) {
+        ui.ctx().data_mut(|d| d.insert_temp(pending, target));
+    }
+    out.inner
+}
+
+/// The edge scroll [`menu_scroll`] adds while browsing: with the pointer resting in the bottom
+/// (top) band of an overflowing menu, its content crawls up (down) after a short pause, ramps to
+/// a run and stops at the end — and stops at once when the pointer leaves the band or the hold.
+///
+/// This runs after `ScrollArea::show`, which laid the menu out for the offset it had, so the new
+/// offset is supplied once to the next draw's builder: a frame of lag, invisible at these speeds.
+/// That explicit vertical offset cancels prior momentum on that draw; later wheel and scroll-bar
+/// input still applies normally. A replay can consume the target but cannot queue another step
+/// at the same input time.
+fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) -> Option<f32> {
+    /// How far from the top / bottom edge the pointer starts the crawl (points).
+    const BAND: f32 = 18.0;
+    /// The pause before the crawl starts: a pointer merely grazing the edge must not jump.
+    const DELAY: f32 = 0.12;
+    /// Points per second: a crawl at first, reaching the run about three quarters of a second in.
+    const CRAWL: f32 = 45.0;
+    const RAMP: f32 = 700.0;
+    const RUN: f32 = 560.0;
+
+    let ctx = ui.ctx();
+    let over = out.content_size.y - out.inner_rect.height();
+    let dir = match (browsing, over > 0.0, ctx.input(|i| i.pointer.latest_pos())) {
+        (true, true, Some(p)) if out.inner_rect.contains(p) => {
+            if p.y >= out.inner_rect.max.y - BAND {
+                1
+            } else if p.y <= out.inner_rect.min.y + BAND {
+                -1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    // The clock the pause counts from, kept per menu: entering or leaving an edge band restarts
+    // it, so a later stay there crawls off again instead of jumping straight to the run.
+    let now = ctx.input(|i| i.time);
+    let key = out.id.with("menu-edge-scroll");
+    let (since, prev) = ctx.data(|d| d.get_temp::<(f64, i32)>(key)).unwrap_or((now, 0));
+    let since = if dir == prev {
+        since
+    } else {
+        ctx.data_mut(|d| d.insert_temp(key, (now, dir)));
+        now
+    };
+    if dir == 0 {
+        return None;
+    }
+    if now - since < f64::from(DELAY) {
+        // A pointer resting still fires no events: keep the frames coming until the crawl runs.
+        ctx.request_repaint();
+        return None;
+    }
+    let speed = (CRAWL + RAMP * ((now - since) as f32 - DELAY)).min(RUN);
+    let crawl = ctx.input(|i| i.unstable_dt).min(0.05) * speed * dir as f32;
+    let old = out.state.unclamped_offset().y;
+    let new = (old + crawl).clamp(0.0, over);
+    if new == old {
+        // At the end of the list the crawl stands still and asks for no more frames.
+        return None;
+    }
+    ctx.request_repaint();
+    let stepped = out.id.with("menu-edge-scroll-step");
+    if ctx.data(|d| d.get_temp::<f64>(stepped)) == Some(now) {
+        return None;
+    }
+    // Stamp the queue operation, not consumption: a later real frame must still take a step.
+    ctx.data_mut(|d| d.insert_temp(stepped, now));
+    Some(new)
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
@@ -662,9 +1049,216 @@ pub(crate) fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Linked values after component `d` of `c` became `v`: the others move by the same amount, so
+/// linked Audio Levels keep their stereo balance in dB (#2485).
+pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
+    let Some(&old) = c.get(d) else { return c.to_vec() };
+    c.iter().enumerate().map(|(e, &x)| if e == d { v } else { x + (v - old) }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checkbox_frame(ctx: &egui::Context, values: &mut [Option<bool>; 5], events: Vec<egui::Event>) {
+        let t = Tokens::for_kind(Default::default());
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| {
+            for (index, value) in values.iter_mut().enumerate() {
+                let rect = Rect::from_min_size(pos2(20.0, 20.0 + index as f32 * 30.0), vec2(120.0, 20.0));
+                ui.add_enabled_ui(index != 3, |ui| {
+                    if index == 4 {
+                        if let Some(on) = value {
+                            ui.put(rect, DragCheckbox::new(on, crate::i18n::tr("Grid")));
+                        }
+                    } else if let Some(on) = value {
+                        if checkbox(ui, rect, *on, &t, egui::Id::unique(index)).changed() {
+                            *on = !*on;
+                        }
+                    } else {
+                        let response = ui.interact(rect, egui::Id::unique(index), Sense::click());
+                        assert_eq!(drag_toggle(ui, &response, None), None);
+                    }
+                });
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    fn checkbox_pointer(y: f32, pressed: Option<bool>) -> Vec<egui::Event> {
+        let pos = pos2(28.0, y);
+        let mut events = vec![egui::Event::PointerMoved(pos)];
+        if let Some(pressed) = pressed {
+            events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        events
+    }
+
+    #[test]
+    fn checkbox_drag_sets_one_state_skips_mixed_and_disabled_and_ends_on_release() {
+        let ctx = egui::Context::default();
+        let mut values = [Some(false), Some(true), None, Some(false), Some(false)];
+        checkbox_frame(&ctx, &mut values, vec![]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(true)));
+        assert_eq!(values[0], Some(true));
+        // An already-matching neighbour must not invert, even after revisiting.
+        for y in [58.0, 88.0, 118.0, 148.0, 58.0, 28.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, None));
+        }
+        assert_eq!(values, [Some(true), Some(true), None, Some(false), Some(true)]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values[0], Some(true), "release must not toggle the source again");
+        // Begin on the labelled wrapper and drag back into custom checkboxes.
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(148.0, Some(true)));
+        assert_eq!(values[4], Some(false));
+        for y in [58.0, 28.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, None));
+        }
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values, [Some(false), Some(false), None, Some(false), Some(false)]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(58.0, None));
+        assert_eq!(values[1], Some(false), "hover after release must not paint");
+    }
+
+    fn button(y: f32, pressed: bool) -> Vec<egui::Event> {
+        let pos = pos2(28.0, y);
+        vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }]
+    }
+
+    fn moved(y: f32) -> egui::Event {
+        egui::Event::PointerMoved(pos2(28.0, y))
+    }
+
+    /// A press and the moves after it can arrive in one frame (a quick flick): the press belongs to
+    /// the checkbox it landed on, not to the one the pointer ended over, and the ones passed over
+    /// follow the pressed one's new state, whether they are drawn before it or after it.
+    #[test]
+    fn a_press_and_a_move_in_one_frame_start_on_the_checkbox_pressed() {
+        // Rows are 30 apart, from y = 28; index 3 is disabled.
+        let (a, b) = (28.0, 58.0);
+        // Pressed on the first, moved to the second (drawn after it).
+        let ctx = egui::Context::default();
+        let mut values = [Some(false); 5];
+        values[2] = None;
+        checkbox_frame(&ctx, &mut values, vec![]);
+        let mut events = vec![moved(a)];
+        events.extend(button(a, true));
+        events.push(moved(b));
+        checkbox_frame(&ctx, &mut values, events);
+        assert_eq!((values[0], values[1]), (Some(true), Some(true)), "the pressed one is the source, the one passed over follows");
+        let mut events = vec![moved(b)];
+        events.extend(button(b, false));
+        checkbox_frame(&ctx, &mut values, events);
+        assert_eq!((values[0], values[1]), (Some(true), Some(true)), "release changes nothing");
+        // Pressed on the second, moved to the first (drawn before it): the first takes the state in
+        // the next frame, while the button is still down.
+        let ctx = egui::Context::default();
+        let mut values = [Some(false); 5];
+        values[2] = None;
+        checkbox_frame(&ctx, &mut values, vec![]);
+        let mut events = vec![moved(b)];
+        events.extend(button(b, true));
+        events.push(moved(a));
+        checkbox_frame(&ctx, &mut values, events);
+        assert_eq!(values[1], Some(true), "the pressed one is the source");
+        checkbox_frame(&ctx, &mut values, vec![]);
+        assert_eq!(values[0], Some(true), "the one passed over takes the state");
+        let mut events = vec![moved(a)];
+        events.extend(button(a, false));
+        checkbox_frame(&ctx, &mut values, events);
+        assert_eq!((values[0], values[1]), (Some(true), Some(true)));
+        // Pressed outside every checkbox, then moved onto one in the same frame: nothing starts.
+        let ctx = egui::Context::default();
+        let mut values = [Some(false); 5];
+        values[2] = None;
+        checkbox_frame(&ctx, &mut values, vec![]);
+        let mut events = vec![moved(200.0)];
+        events.extend(button(200.0, true));
+        events.push(moved(a));
+        checkbox_frame(&ctx, &mut values, events);
+        checkbox_frame(&ctx, &mut values, vec![]);
+        assert_eq!(values, [Some(false), Some(false), None, Some(false), Some(false)], "a press outside starts no gesture");
+        // Pressed on the second, moved to the first (drawn before it) and released, all in one
+        // frame: the first still takes the state in the next frame.
+        let ctx = egui::Context::default();
+        let mut values = [Some(false); 5];
+        values[2] = None;
+        checkbox_frame(&ctx, &mut values, vec![]);
+        let mut events = vec![moved(b)];
+        events.extend(button(b, true));
+        events.push(moved(a));
+        events.extend(button(a, false));
+        checkbox_frame(&ctx, &mut values, events);
+        checkbox_frame(&ctx, &mut values, vec![]);
+        assert_eq!((values[0], values[1]), (Some(true), Some(true)), "a crossing before the release still takes the state");
+    }
+
+    /// A move that arrives after the release, in the frame of the click, is the pointer travelling without the button:
+    /// it must not carry the gesture onto the checkbox it ends over.
+    #[test]
+    fn a_move_after_the_release_in_the_same_frame_paints_nothing() {
+        let (a, b) = (28.0, 58.0);
+        let ctx = egui::Context::default();
+        let mut values = [Some(false); 5];
+        values[2] = None;
+        checkbox_frame(&ctx, &mut values, vec![]);
+        let mut events = vec![moved(a)];
+        events.extend(button(a, true));
+        events.extend(button(a, false));
+        events.push(moved(b));
+        checkbox_frame(&ctx, &mut values, events);
+        checkbox_frame(&ctx, &mut values, vec![]);
+        assert_eq!((values[0], values[1]), (Some(true), Some(false)), "the clicked one changes, the one moved onto afterwards does not");
+    }
+
+    #[test]
+    fn checkbox_click_and_keyboard_toggle_once_and_drag_must_start_on_a_checkbox() {
+        let ctx = egui::Context::default();
+        let mut values = [Some(false), Some(false), None, Some(false), Some(false)];
+        checkbox_frame(&ctx, &mut values, vec![]);
+        // Pressing outside the checkboxes must not start a gesture on entry.
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(200.0, Some(true)));
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, None));
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values[0], Some(false));
+        for source_y in [88.0, 118.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(source_y, Some(true)));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, None));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+            assert_eq!(values[0], Some(false), "mixed and disabled sources cannot begin a drag");
+        }
+        for y in [28.0, 148.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, Some(true)));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, Some(false)));
+        }
+        assert_eq!(values[0], Some(true));
+        assert_eq!(values[4], Some(true));
+        ctx.memory_mut(|m| m.request_focus(egui::Id::unique(0usize)));
+        checkbox_frame(
+            &ctx,
+            &mut values,
+            vec![egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+        );
+        assert_eq!(values[0], Some(false), "keyboard activation still works");
+        // Fast clicks may deliver press and release together in one input frame.
+        // This also exercises clicked() without an active drag (outside the data lock).
+        for (index, y) in [(0, 28.0), (4, 148.0)] {
+            let before = values[index];
+            let mut events = checkbox_pointer(y, Some(true));
+            events.extend(checkbox_pointer(y, Some(false)));
+            checkbox_frame(&ctx, &mut values, events);
+            assert_eq!(values[index], before.map(|on| !on));
+        }
+    }
+
+    /// #2097: the drag speed comes from the slider range, not a much wider hard range.
+    #[test]
+    fn slider_scrub_speed_uses_the_slider_range() {
+        let slider = |min, max, slider_min, slider_max| ParamUi::Slider { min, max, slider_min, slider_max, decimals: 1 };
+        assert!((slider_scrub_speed(&slider(0.0, 10_000.0, 0.0, 1_000.0)) - 1_000.0 / 300.0).abs() < 1e-9);
+        assert!((slider_scrub_speed(&slider(0.0, 1.0e9, 0.0, 1.0)) - 1.0 / 300.0).abs() < 1e-9);
+        assert_eq!(slider_scrub_speed(&ParamUi::Number), 0.5);
+    }
 
     /// #488: an inline editor selects its whole text only as it opens. Should it be without the
     /// keyboard for a frame later (an input method, another handler), it takes the keyboard back

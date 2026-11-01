@@ -100,17 +100,11 @@ impl Cineon {
     fn knee(&self) -> f32 {
         1.0 - (self.rolloff / 100.0).clamp(0.0, 0.99)
     }
-    /// Normalised code value (code / 1023) → linear.
+    /// Normalized code value (code / 1023) → linear, raised to `1.7 / gamma`
+    /// ([`effectcraft_project::cineon_log_to_lin`], which Interpret Footage ▸ Cineon Settings
+    /// also uses with `1 / gamma`).
     pub fn log_to_lin(&self, v: f32) -> f32 {
-        let off = self.offset();
-        let code = v * 1023.0;
-        let mut lin = (10f32.powf((code - self.white) * 0.002 / 0.6) - off) / (1.0 - off).max(1e-6);
-        lin = lin.max(0.0).powf(1.7 / self.gamma.max(0.01));
-        let k = self.knee();
-        if k < 1.0 && lin > k {
-            let w = 1.0 - k;
-            lin = k + w * (1.0 - (-(lin - k) / w).exp());
-        }
+        let lin = effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff);
         self.ib + (self.iw - self.ib) * lin
     }
     /// Linear → normalised code value.
@@ -493,6 +487,87 @@ mod tests {
             assert!((back - v).abs() < 1e-3, "{code}: {back}");
         }
         assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
+    }
+
+    /// Interpret Footage ▸ Cineon Settings and the Cineon Converter's Log to Linear give the same
+    /// values for the same points and Highlight Rolloff when the converter's Gamma is 1.7 times
+    /// Cineon Settings' Gamma: the converter's default 1.7 and Cineon Settings' Gamma 1 both give
+    /// linear light (code 400 is 0.10251).
+    #[test]
+    fn cineon_converter_matches_interpret_footage() {
+        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
+        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0), (1.7, 50.0), (2.4, 50.0)] {
+            let mut img = Image::new(codes.len() as u32, 1);
+            for (x, code) in codes.iter().enumerate() {
+                let v = code / 1023.0;
+                img.set(x as u32, 0, [v, v, v, 1.0]);
+            }
+            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma * 1.7)), ("highlightRolloff", num(rolloff))];
+            let out = run("ec.utility.cineon", &vals, img);
+            let settings = effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
+            for (x, code) in codes.iter().enumerate() {
+                let footage = settings.convert(code / 1023.0);
+                let effect = out.img.data[x][0];
+                assert!((footage - effect).abs() < 1e-6, "gamma {gamma}, rolloff {rolloff}, code {code}: {footage} vs {effect}");
+            }
+        }
+        let linear = effectcraft_project::CineonSettings { gamma: 1.0, rolloff: 0.0, ..Default::default() };
+        assert!((linear.convert(400.0 / 1023.0) - 0.10251).abs() < 1e-4);
+    }
+
+    /// The Cineon Converter gives the same values as before Cineon Settings shared its
+    /// log-to-linear function, at the default Gamma (1.7) and at Gamma 2.4, for all three
+    /// conversion types.
+    #[test]
+    fn cineon_converter_output_is_unchanged() {
+        fn log_to_lin(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
+            let off = 10f32.powf((black - white) * 0.002 / 0.6);
+            let mut lin = (10f32.powf((v * 1023.0 - white) * 0.002 / 0.6) - off) / (1.0 - off).max(1e-6);
+            lin = lin.max(0.0).powf(1.7 / gamma.max(0.01));
+            let k = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k + w * (1.0 - (-(lin - k) / w).exp());
+            }
+            lin
+        }
+        fn lin_to_log(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
+            let off = 10f32.powf((black - white) * 0.002 / 0.6);
+            let mut lin = v;
+            let k = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k - w * (1.0 - (lin - k) / w).max(1e-6).ln();
+            }
+            lin = lin.max(0.0).powf(gamma.max(0.01) / 1.7);
+            (white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002) / 1023.0
+        }
+        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
+        for gamma in [None, Some(2.4)] {
+            for kind in 0..3 {
+                let mut img = Image::new(codes.len() as u32, 1);
+                for (x, code) in codes.iter().enumerate() {
+                    let v = code / 1023.0;
+                    img.set(x as u32, 0, [v, v, v, 1.0]);
+                }
+                let mut vals = vec![("conversionType", Value::Enum(kind))];
+                if let Some(g) = gamma {
+                    vals.push(("gamma", num(g)));
+                }
+                let out = run("ec.utility.cineon", &vals, img);
+                let g = gamma.unwrap_or(1.7) as f32;
+                for (x, code) in codes.iter().enumerate() {
+                    let v = code / 1023.0;
+                    let want = match kind {
+                        0 => lin_to_log(v, g, 20.0, 95.0, 685.0),
+                        1 => log_to_lin(v, g, 20.0, 95.0, 685.0),
+                        _ => lin_to_log(log_to_lin(v, g, 20.0, 95.0, 685.0), 1.7, 20.0, 95.0, 685.0),
+                    };
+                    let got = out.img.data[x][0];
+                    assert!((want - got).abs() < 1e-6, "gamma {g}, type {kind}, code {code}: {want} vs {got}");
+                }
+            }
+        }
     }
 
     #[test]

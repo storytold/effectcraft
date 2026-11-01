@@ -14,7 +14,7 @@ craft-pdf.workspace = true
 effectcraft-svg = { workspace = true }
 kurbo = { workspace = true }
 effectcraft-text = { workspace = true }
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 # Embedded TrueType / OpenType font programs (MIT OR Apache-2.0).
 skrifa = { workspace = true }
 # DCT (JPEG) images (MIT OR Apache-2.0 OR Zlib; pure Rust).
