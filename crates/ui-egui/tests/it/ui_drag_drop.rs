@@ -722,3 +722,49 @@ fn illustrator_import_offers_and_applies_retain_layer_sizes() {
     assert_eq!((f.width, f.height), (30, 20));
     assert!(f.layer.as_ref().unwrap().layer_size);
 }
+
+/// #2573: the empty viewer's footage button must finish the import by opening a
+/// composition, including when the native picker answers on a later frame.
+#[test]
+fn empty_viewer_footage_import_and_comp_undo_together() {
+    for asynchronous in [false, true] {
+        let dir = frames(if asynchronous { "empty-async" } else { "empty-sync" }, 1);
+        let path = dir.join("clip.png");
+        std::fs::write(&path, b"").unwrap();
+        let pick = path.to_string_lossy().to_string();
+        let mut s = Session { importer: Some(Arc::new(Stills)), ..Default::default() };
+        // An unrelated selection must not become the new comp's source.
+        s.execute("file.importPlaceholder", json!({"name": "Unrelated"})).unwrap();
+        let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+        h.state_mut().hooks.pick_files = Some(Box::new(|_| vec![]));
+        h.run_steps(3);
+        click_id(&mut h, "viewer.empty.import");
+        assert!(h.state().session.active_comp().is_none(), "cancelling does not compose the old selection");
+        let pending: Arc<std::sync::Mutex<Option<effectcraft_ui_egui::DialogDone>>> = Arc::default();
+        if asynchronous {
+            let queue = pending.clone();
+            h.state_mut().hooks.file_dialog_async = Some(Box::new(move |_, done| *queue.lock().unwrap() = Some(done)));
+        } else {
+            h.state_mut().hooks.pick_files = Some(Box::new(move |_| vec![pick.clone()]));
+        }
+        h.run_steps(3);
+        click_id(&mut h, "viewer.empty.import");
+        if asynchronous {
+            assert!(h.state().session.active_comp().is_none());
+            pending.lock().unwrap().take().expect("file picker opened")(vec![]);
+            h.run_steps(3);
+            assert!(h.state().session.active_comp().is_none(), "cancelling a delayed picker changes nothing");
+            click_id(&mut h, "viewer.empty.import");
+            pending.lock().unwrap().take().expect("picker can reopen")(vec![path.to_string_lossy().to_string()]);
+        }
+        step_until(&mut h, |h| h.state().session.active_comp().is_some());
+        let c = h.state().session.active_comp().unwrap();
+        assert_eq!((c.width, c.height), (64, 32));
+        assert_eq!(c.layers.len(), 1);
+        assert_eq!(c.layers[0].name, "clip.png");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(h.state().session.project.comps().count(), 0, "one undo removes the comp and import");
+        assert_eq!(h.state().session.project.items.len(), 1, "unrelated footage stays");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
