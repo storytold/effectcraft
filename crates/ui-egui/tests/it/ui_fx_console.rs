@@ -120,6 +120,37 @@ fn without_a_selected_layer_nothing_is_applied_and_the_status_says_why() {
 }
 
 #[test]
+/// When a modal dialog and the Effect Console are both open, Escape closes the console first and
+/// leaves the modal dialog open.  Before the fix, `escape_dialog` consumed Escape and the dialog
+/// was closed while the console stayed open.
+fn escape_closes_console_before_modal_dialog() {
+    use effectcraft_ui_egui::Dialog;
+
+    let (mut h, _l) = harness();
+    // Open a modal dialog (New Composition).
+    {
+        let ctx = h.ctx.clone();
+        effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "comp.new", json!({})).unwrap();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Some(Dialog::NewComp), "modal dialog is open");
+
+    // Open the Effect Console while the dialog is still open.
+    {
+        let ctx = h.ctx.clone();
+        effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.fxConsole", json!({})).unwrap();
+    }
+    h.run_steps(2);
+    assert!(open(&h), "Effect Console is open alongside the modal");
+
+    // Escape must close the console, not the dialog.
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(!open(&h), "Escape closes the Effect Console");
+    assert_eq!(h.state().dialog, Some(Dialog::NewComp), "modal dialog remains open");
+}
+
+#[test]
 /// Tab moves the selection down and Shift+Tab moves it back up, with Shift+Tab consumed before
 /// plain Tab so the modifiers are interpreted correctly.
 fn tab_and_shift_tab_cycle_selection() {
