@@ -193,6 +193,22 @@ fn saved_files_reopen_in_pretty_and_compact_form() {
     assert_eq!(Project::from_json(&p.to_json_compact()).unwrap(), p, "compact JSON");
 }
 
+/// A project file read back and saved again is the same text, indented and compact (Save Compact
+/// Project Files), with its saved view.
+#[test]
+fn project_files_save_again_byte_for_byte() {
+    let (p, cid) = project_with_layer();
+    let view = crate::SavedView { active_comp: Some(cid), open_comps: vec![cid], comp_times: [(cid, effectcraft_time::Tick(4_237_833_600))].into() };
+    for compact in [false, true] {
+        let text = p.to_file_json_with_view(&view, compact).unwrap();
+        let prefix = if compact { "{\"savedBy\":\"" } else { "{\n  \"savedBy\": \"" };
+        assert!(text.starts_with(&format!("{prefix}{}\"", crate::APP_VERSION)), "compact {compact}: {text}");
+        assert_eq!(text.contains('\n'), !compact);
+        let again = Project::from_json(&text).unwrap().to_file_json_with_view(&crate::saved_view(&text), compact).unwrap();
+        assert_eq!(again, text, "compact {compact}");
+    }
+}
+
 #[test]
 fn project_files_remember_the_open_comps() {
     let (p, cid) = project_with_layer();

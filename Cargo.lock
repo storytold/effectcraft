@@ -1095,6 +1095,16 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13afff77f38b5c11b73aa0#92d392cff132eaf53e13afff77f38b5c11b73aa0"
 
 [[package]]
+name = "craft-ecproj-format"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=246e8f837347ac642d6852df89e1425630111d21#246e8f837347ac642d6852df89e1425630111d21"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-fonts-build"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13afff77f38b5c11b73aa0#92d392cff132eaf53e13afff77f38b5c11b73aa0"
@@ -1783,6 +1793,7 @@ dependencies = [
 name = "effectcraft-project"
 version = "0.19.0"
 dependencies = [
+ "craft-ecproj-format",
  "effectcraft-color",
  "effectcraft-geom",
  "effectcraft-keyframe",

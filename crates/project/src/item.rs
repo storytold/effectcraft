@@ -272,26 +272,13 @@ impl Project {
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]), on one
     /// line when `compact` (Settings ▸ Project ▸ Save Compact Project Files).
     pub fn to_file_json_with_view(&self, view: &SavedView, compact: bool) -> Result<String, ProjectError> {
-        if self.schema > SCHEMA_VERSION {
-            return Err(ProjectError::Invalid(format!(
-                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
-                self.schema
-            )));
-        }
-        #[derive(Serialize)]
-        struct File<'a> {
-            #[serde(rename = "savedBy")]
-            saved_by: &'a str,
-            #[serde(flatten)]
-            view: &'a SavedView,
-            #[serde(flatten)]
-            project: &'a Project,
-        }
-        let file = File { saved_by: APP_VERSION, view, project: self };
+        craft_ecproj_format::check_schema(self.schema)
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        let file = craft_ecproj_format::File::new(APP_VERSION, view, self);
         file_check::check(&file)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
-        let text = if compact { serde_json::to_string(&file) } else { serde_json::to_string_pretty(&file) }
-            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let text =
+            if compact { file.to_json_compact() } else { file.to_json() }.map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
         #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
@@ -312,9 +299,7 @@ impl Project {
     /// hostile file still opens, within bounds, and the user can be told what changed.
     pub fn from_json_repaired(s: &str) -> Result<(Project, Vec<String>), ProjectError> {
         let mut p: Project = serde_json::from_str(s).map_err(|e| ProjectError::Invalid(e.to_string()))?;
-        if p.schema > SCHEMA_VERSION {
-            return Err(ProjectError::Invalid(format!("project schema {} is newer than this version supports ({SCHEMA_VERSION})", p.schema)));
-        }
+        craft_ecproj_format::check_schema(p.schema).map_err(|e| ProjectError::Invalid(e.to_string()))?;
         p.fix_next_id();
         let mut notes = vec![];
         for item in p.items.values_mut() {
