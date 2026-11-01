@@ -501,6 +501,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let v = p.get("value").ok_or_else(|| bad("prop.set", "missing `value`"))?.clone();
     let at = snapped_key_time(s, cid, lid, p, "prop.set")?;
+    let selected: Vec<Tick> = s.state.selected_keys.iter().filter(|k| k.layer == lid && k.prop == uid).map(|k| k.time).collect();
     let out = with_prop(s, "Change Property", merge_p(p), cid, lid, uid, |pr, lt| {
         let cur = pr.value_at(lt);
         let mut nv = cur.coerce_json(&v).ok_or_else(|| bad("prop.set", format!("can't use {v} for a {} property", cur.kind_name())))?;
@@ -510,7 +511,21 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         {
             nv = effectcraft_keyframe::Value::Scalar(x.clamp(min, max));
         }
-        pr.set_value_at(at.unwrap_or(lt), nv.clone());
+        let target = at.unwrap_or(lt);
+        // After Effects: editing the value with the CTI on one of several selected keys moves all
+        // the selected keys by the same change; between keys, or at an explicit other time, it only edits that key.
+        if selected.len() > 1 && target == lt && selected.contains(&target) && key_at(&pr.keys, target).is_some() && nv.interpolates() {
+            let delta: Vec<f64> = nv.components().iter().zip(pr.value_at(target).components()).map(|(n, o)| n - o).collect();
+            let range = if let effectcraft_project::ParamUi::Slider { min, max, .. } = pr.ui { Some((min, max)) } else { None };
+            for k in pr.keys.iter_mut().filter(|k| k.time != target && selected.contains(&k.time)) {
+                let moved: Vec<f64> = k.value.components().iter().zip(&delta).map(|(c, d)| c + d).collect();
+                k.value = k.value.with_components(&moved);
+                if let (Some((min, max)), effectcraft_keyframe::Value::Scalar(x)) = (range, &k.value) {
+                    k.value = effectcraft_keyframe::Value::Scalar(x.clamp(min, max));
+                }
+            }
+        }
+        pr.set_value_at(target, nv.clone());
         Ok(nv.to_json())
     })?;
     if p.get("timeBase").is_none() {

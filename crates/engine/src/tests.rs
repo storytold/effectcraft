@@ -45,6 +45,7 @@ pub(crate) mod roto;
 mod scale_comp;
 mod sequence;
 mod session;
+mod set_selected_keys;
 mod settings;
 mod shared_layers;
 mod shortcut_cmds;
