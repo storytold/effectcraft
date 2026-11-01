@@ -173,16 +173,36 @@
     if (item && item instanceof CompItem) {
       return item;
     }
+    if (app.project && app.project.items) {
+      for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (it instanceof CompItem && it.open) {
+          return it;
+        }
+      }
+      for (var j = 1; j <= app.project.numItems; j++) {
+        var it2 = app.project.item(j);
+        if (it2 instanceof CompItem) {
+          return it2;
+        }
+      }
+    }
     return null;
   }
 
   function getSelectedLayers(comp) {
     if (!comp) return [];
     var layers = comp.selectedLayers;
-    if (!layers || !(layers instanceof Array) || layers.length === 0) {
-      return [];
+    if (layers && layers instanceof Array && layers.length > 0) {
+      return layers;
     }
-    return layers;
+    if (comp.numLayers && comp.numLayers > 0) {
+      var topLayer = comp.layer(1);
+      if (topLayer) {
+        return [topLayer];
+      }
+    }
+    return [];
   }
 
   // ------------------------------------------------------------------
@@ -615,13 +635,16 @@
       return false;
     }
 
-    if (!resultsList.selection || currentMatches.length === 0) {
+    if (currentMatches.length === 0) {
       return false;
     }
 
-    var selIndex = resultsList.selection.index;
+    var selIndex = 0;
+    if (resultsList.selection && typeof resultsList.selection.index === "number") {
+      selIndex = resultsList.selection.index;
+    }
     if (selIndex < 0 || selIndex >= currentMatches.length) {
-      return false;
+      selIndex = 0;
     }
 
     var selectedEffect = currentMatches[selIndex];
@@ -638,6 +661,8 @@
       for (var l = 0; l < layers.length; l++) {
         if (layers[l] && layers[l].id !== undefined) {
           layerIds.push(layers[l].id);
+        } else if (layers[l] && layers[l].index !== undefined) {
+          layerIds.push(layers[l].index);
         }
       }
 
@@ -645,12 +670,17 @@
       app.beginUndoGroup(undoGroupName);
       undoStarted = true;
 
-      var res = app.run("effect.apply", {
-        comp: comp.id,
-        effect: selectedEffect.id,
-        layers: layerIds
-      });
+      var applyParams = {
+        effect: selectedEffect.id
+      };
+      if (comp && comp.id !== undefined) {
+        applyParams.comp = comp.id;
+      }
+      if (layerIds.length > 0) {
+        applyParams.layers = layerIds;
+      }
 
+      var res = app.run("effect.apply", applyParams);
       if (res && (res.effects || res.applied !== false)) {
         success = true;
       }
@@ -772,7 +802,13 @@
 
   try {
     win.addEventListener("keydown", handleKeyDown);
+    searchField.addEventListener("keydown", handleKeyDown);
+    resultsList.addEventListener("keydown", handleKeyDown);
   } catch (e) { }
+
+  resultsList.onDoubleClick = function () {
+    applySelectedEffect("enter");
+  };
 
   win.onClose = function () {
     try {
