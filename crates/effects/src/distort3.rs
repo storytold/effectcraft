@@ -751,9 +751,20 @@ fn warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Levenberg-Marquardt fallback limits: the step cap, the damping cap, and how many consecutive
+/// accepted steps may improve the residual by under 0.1 % before the pixel is given up.
+const LM_MAX_ITERS: usize = 40;
+const LM_LAMBDA_MAX: f64 = 1e12;
+const LM_STALL_STEPS: usize = 4;
+
 /// Warp's inverse map for buffer geometry `b` (padded): the source point of an output point
 /// (buffer px), by Newton iterations on the forward warp; `None` = transparent.
 fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f64)> + Sync + use<> {
+    warp_inverse_with(ctx, b, true)
+}
+
+/// [`warp_inverse`] with the Levenberg-Marquardt fallback switched on or off (off = Newton only).
+fn warp_inverse_with(ctx: &EffectCtx, b: &Buf, fallback: bool) -> impl Fn(f64, f64) -> Option<(f64, f64)> + Sync + use<> {
     let k = ctx.params.f("bend") / 100.0;
     let hd = ctx.params.f("horizontalDistortion") / 100.0;
     let vd = ctx.params.f("verticalDistortion") / 100.0;
@@ -797,15 +808,16 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
             sx -= (j11 * rx - j01 * ry) / det;
             sy -= (-j10 * rx + j00 * ry) / det;
         }
-        if !newton_ok || !resid(sx, sy).le(&0.5) {
+        if fallback && (!newton_ok || !resid(sx, sy).le(&0.5)) {
             // Newton fails where the forward map is singular (Fisheye / Twist at -100 % squeeze
             // the centre to a point) or overshoots: damped Levenberg-Marquardt from the output
             // point finds the source instead of leaving a transparent hole.
             (sx, sy) = (x, y);
             let mut lambda = 1e-2;
             let mut cur = resid(sx, sy);
-            for _ in 0..200 {
-                if cur < 1e-7 {
+            let mut stalled = 0;
+            for _ in 0..LM_MAX_ITERS {
+                if cur < 1e-7 || lambda >= LM_LAMBDA_MAX {
                     break;
                 }
                 let (fx, fy) = fwd(sx, sy);
@@ -825,10 +837,15 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
                 let (nx, ny) = (sx + dx, sy + dy);
                 let next = resid(nx, ny);
                 if next < cur {
+                    // Little progress for a few steps in a row: a pixel with no source.
+                    stalled = if cur - next < cur * 1e-3 { stalled + 1 } else { 0 };
                     (sx, sy, cur) = (nx, ny, next);
                     lambda = (lambda * 0.3).max(1e-12);
+                    if stalled >= LM_STALL_STEPS {
+                        break;
+                    }
                 } else {
-                    lambda = (lambda * 10.0).min(1e12);
+                    lambda = (lambda * 10.0).min(LM_LAMBDA_MAX);
                 }
             }
         }
