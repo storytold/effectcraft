@@ -58,7 +58,14 @@ pub fn parse_shortcut(s: &str) -> Option<(egui::Modifiers, egui::Key)> {
             "Physical" => {}
             "Shift" => m.shift = true,
             "Alt" => m.alt = true,
-            "Ctrl" => m.ctrl = true,
+            // Off macOS Ctrl is the command key: egui reports both, so a Ctrl shortcut (the
+            // Effect Console's Ctrl+Space) must expect both to match.
+            "Ctrl" => {
+                m.ctrl = true;
+                if !cfg!(target_os = "macos") {
+                    m.command = true;
+                }
+            }
             k => {
                 key = match k {
                     ";" => Some(egui::Key::Semicolon),
@@ -102,7 +109,50 @@ pub type Binding = (egui::Modifiers, egui::Key, String, Value);
 /// All bindings of the active keyboard shortcut preset, most modifiers first.
 pub fn bindings(session: &effectcraft_engine::Session) -> Vec<Binding> {
     let mut v: Vec<Binding> = Vec::new();
-    for (sc, b) in session.shortcuts().bindings() {
+    let all = session.shortcuts().bindings();
+    let has_ctrl = |sc: &str| sc.split('+').any(|p| p == "Ctrl");
+    // Off macOS a Ctrl shortcut parses to the same modifiers as the Cmd one with the same keys:
+    // the Cmd binding (the standard one) keeps them and the Ctrl one is not bound.
+    // We collect (modifiers, key, scope) triples so that two bindings collide only when they
+    // share both chord AND scope — a Timeline binding and a Composition one for different chords
+    // are not a collision.
+    // Build cmd_bindings with BOTH the base key and its shifted alias (when Shift is set),
+    // so that a Ctrl+Shift+} (CloseCurlyBracket) correctly matches Cmd+Shift+]
+    // (CloseBracket), whose shifted alias is CloseCurlyBracket.
+    let cmd_bindings: Vec<(egui::Modifiers, egui::Key, String)> = if cfg!(target_os = "macos") {
+        vec![]
+    } else {
+        let mut cb = Vec::new();
+        for (sc, b) in all.iter().filter(|(sc, _)| !has_ctrl(sc) && !sc.starts_with("Physical+")) {
+            if let Some((m, k)) = parse_shortcut(sc) {
+                cb.push((m, k, b.scope.clone()));
+                // Also register the shifted alias so Ctrl+Shift+} finds Cmd+Shift+].
+                if m.shift
+                    && let Some(alias) = shifted_alias(k)
+                {
+                    cb.push((m, alias, b.scope.clone()));
+                }
+            }
+        }
+        cb
+    };
+    // Check whether a Ctrl binding (modifiers `mk`, key `k`) collides with a Cmd binding
+    // in the same scope. Both the base key and its shifted alias are checked against
+    // cmd_bindings (which already includes expanded aliases for Cmd bindings).
+    let collides = |mk: egui::Modifiers, k: egui::Key, scope: &str| -> bool {
+        if cfg!(target_os = "macos") {
+            return false;
+        }
+        let keys_to_check: &[egui::Key] = if let Some(alias) = shifted_alias(k) {
+            &[k, alias]
+        } else {
+            &[k]
+        };
+        cmd_bindings.iter().any(|(cm, ck, cs)| {
+            *cm == mk && keys_to_check.contains(ck) && (cs == scope || cs.is_empty() || scope.is_empty())
+        })
+    };
+    for (sc, b) in all {
         if sc.starts_with("Physical+") {
             continue;
         }
@@ -112,6 +162,9 @@ pub fn bindings(session: &effectcraft_engine::Session) -> Vec<Binding> {
             continue;
         }
         if let Some((m, k)) = parse_shortcut(sc) {
+            if has_ctrl(sc) && collides(m, k, &b.scope) {
+                continue;
+            }
             if m.shift
                 && let Some(alias) = shifted_alias(k)
             {
@@ -330,6 +383,11 @@ fn panel_owns_enter(kind: PanelKind) -> bool {
 }
 
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
+    // When the Effect Console is open, it owns keyboard input (Escape, Enter, arrows, Tab, text).
+    // Application shortcuts must not run behind it or consume keys before it does.
+    if app.dialog_state.fx_console.is_some() {
+        return;
+    }
     let start = modifiers_at_start(ctx);
     if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         escape_dialog(app, ctx);
@@ -407,10 +465,38 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         }
         // Explicit physical bindings distinguish keys that a layout reports with the same
         // logical name (for example AZERTY's minus and right parenthesis).
-        let physical = physical_key.and_then(|key| {
-            app.session.shortcuts().bindings().into_iter().find_map(|(sc, b)| {
-                let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-                (k == key && mods_match(m, mods)).then(|| (b.command.clone(), b.params.clone()))
+        // Apply the same Cmd-collision policy as logical bindings: on non-macOS a physical
+        // Ctrl+… binding whose chord matches an existing Cmd binding is skipped.
+        let physical = physical_key.and_then(|phys_key| {
+            let all_sc = app.session.shortcuts().bindings();
+            // Collect Cmd binding chords (scope-aware) for collision detection.
+            let cmd_chords: Vec<(egui::Modifiers, egui::Key, String)> = if cfg!(target_os = "macos") {
+                vec![]
+            } else {
+                all_sc
+                    .iter()
+                    .filter(|(sc, _)| !sc.split('+').any(|p| p == "Ctrl") && !sc.starts_with("Physical+"))
+                    .filter_map(|(sc, b)| parse_shortcut(sc).map(|(m, k)| (m, k, b.scope.clone())))
+                    .collect()
+            };
+            all_sc.into_iter().find_map(|(sc, b)| {
+                let inner = sc.strip_prefix("Physical+")?;
+                let (m, k) = parse_shortcut(inner)?;
+                if k != phys_key || !mods_match(m, mods) {
+                    return None;
+                }
+                // Skip if this physical Ctrl binding collides with a Cmd one in the same scope.
+                let has_ctrl_part = inner.split('+').any(|p| p == "Ctrl");
+                if has_ctrl_part {
+                    let collides = cmd_chords.iter().any(|(cm, ck, cs)| {
+                        *cm == m && *ck == k
+                            && (cs == &b.scope || cs.is_empty() || b.scope.is_empty())
+                    });
+                    if collides {
+                        return None;
+                    }
+                }
+                Some((b.command.clone(), b.params.clone()))
             })
         });
         if let Some((id, params)) = physical {

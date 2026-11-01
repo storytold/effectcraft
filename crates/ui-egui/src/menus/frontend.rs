@@ -167,6 +167,10 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.dialog = Some(crate::Dialog::CommandPalette);
             Value::Null
         }
+        "app.fxConsole" => {
+            crate::panels::fx_console::open(app, ctx, p.get("query").and_then(Value::as_str).unwrap_or_default());
+            Value::Null
+        }
         "app.keyboardShortcuts" => {
             crate::panels::shortcut_editor::open(app);
             Value::Null

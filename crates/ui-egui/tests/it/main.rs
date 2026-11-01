@@ -37,6 +37,7 @@ mod ui_font_search;
 mod ui_form_fit;
 mod ui_frame_step;
 mod ui_fx_editors;
+mod ui_fx_console;
 mod ui_gpu;
 mod ui_gradient_editor;
 mod ui_gradient_handles;
