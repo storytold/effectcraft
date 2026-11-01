@@ -691,7 +691,7 @@ mod tests {
         let item = p.add_item("tone.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
         let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
         let layer = build::layer(&mut p, &comp, "tone.flac", LayerSource::Footage { item }, (0, 0), None);
-        comp.layers = vec![layer];
+        comp.layers = vec![layer].into();
         let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let mut project = Arc::new(p);
         let src = RenderSource {
@@ -739,7 +739,7 @@ mod tests {
         let item = p.add_item("tone.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
         let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
         let layer = build::layer(&mut p, &comp, "tone.flac", LayerSource::Footage { item }, (0, 0), None);
-        comp.layers = vec![layer];
+        comp.layers = vec![layer].into();
         let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let old = p;
         // A video-only edit: the layer is hidden, its name and label change.
