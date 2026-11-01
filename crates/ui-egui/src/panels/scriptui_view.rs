@@ -26,6 +26,8 @@ enum Act {
     Close(u32),
     /// A mouse event (`scriptui.mouse` parameters without window and widget).
     Mouse(u32, u32, Value),
+    /// A keyboard event (scriptui.key parameters without window).
+    Key(u32, u32, Value),
     /// A docked panel's new size (`scriptui.resize`).
     Resize(u32, [f32; 2]),
 }
@@ -507,6 +509,65 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
+fn find_focused_widget<'a>(w: &'a Widget, win: u32, fid: egui::Id) -> Option<&'a Widget> {
+    if egui::Id::unique(("sui-w", win, w.id)) == fid {
+        return Some(w);
+    }
+    for c in &w.children {
+        if let Some(found) = find_focused_widget(c, win, fid) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn key_events(ui: &egui::Ui, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
+    if !active {
+        return;
+    }
+    let focused_id = ui.memory(|m| m.focused());
+    let mut target_widget = 0;
+    let mut text_editing_focused = false;
+    if let Some(fid) = focused_id {
+        if let Some(target) = find_focused_widget(root, win, fid) {
+            target_widget = target.id;
+            text_editing_focused = target.kind == WidgetKind::EditText;
+        }
+    }
+    let (events, mods) = ui.input(|i| (i.events.clone(), i.modifiers));
+    for e in &events {
+        let egui::Event::Key { key, pressed: true, repeat: _, modifiers } = e else { continue };
+        let (key_str, key_name, is_nav) = match key {
+            egui::Key::ArrowUp => ("ArrowUp", "Up", true),
+            egui::Key::ArrowDown => ("ArrowDown", "Down", true),
+            egui::Key::ArrowLeft => ("ArrowLeft", "Left", false),
+            egui::Key::ArrowRight => ("ArrowRight", "Right", false),
+            egui::Key::Enter => ("Enter", "Enter", true),
+            egui::Key::Escape => ("Escape", "Escape", true),
+            egui::Key::Tab => ("Tab", "Tab", true),
+            _ => continue,
+        };
+        // Gate routing: if a textedit is actively editing, only route navigation/command keys
+        // (ArrowUp, ArrowDown, Enter, Escape, Tab) so normal typing is preserved and not consumed.
+        if text_editing_focused && !is_nav {
+            continue;
+        }
+        acts.push(Act::Key(
+            win,
+            target_widget,
+            json!({
+                "type": "keydown",
+                "key": key_str,
+                "keyName": key_name,
+                "altKey": modifiers.alt,
+                "ctrlKey": modifiers.ctrl,
+                "shiftKey": modifiers.shift,
+                "metaKey": modifiers.mac_cmd,
+            }),
+        ));
+    }
+}
+
 /// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
 fn snug(r: Rect, text: &str) -> Rect {
     let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
@@ -530,6 +591,15 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
                     o.insert("widget".into(), json!(id));
                 }
                 ("scriptui.mouse", v)
+            }
+            Act::Key(w, id, mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("window".into(), json!(w));
+                    if id > 0 {
+                        o.insert("widget".into(), json!(id));
+                    }
+                }
+                ("scriptui.key", v)
             }
         };
         match crate::menus::invoke(app, ctx, cmd, p) {
@@ -580,6 +650,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
                 draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
                 mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
+                key_events(ui, w.id, &w.root, w.modal || !blocked, &mut acts);
                 rect
             });
         if let Some(r) = resp {

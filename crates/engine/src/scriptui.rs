@@ -775,6 +775,31 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
     dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
 }
 
+/// `scriptui.key`: a keyboard event on a window or control: the script's `addEventListener`
+/// listeners receive a KeyboardEvent (`key`, `keyName`, modifiers).
+pub(crate) fn key(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.key";
+    let window = window_p(s, p, c)?;
+    let ty = p.get("type").and_then(Value::as_str).unwrap_or("keydown").to_ascii_lowercase();
+    if ty != "keydown" && ty != "keyup" {
+        return Err(crate::commands::bad(c, format!("unknown key event `{ty}` (keydown or keyup)")));
+    }
+    let widget = if p.get("widget").is_some() { widget_p(s, window, p, c)? } else { 0 };
+    let flag = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let key_str = p.get("key").and_then(Value::as_str).unwrap_or("");
+    let key_name = p.get("keyName").and_then(Value::as_str).unwrap_or(key_str);
+    let value = json!({
+        "type": ty,
+        "key": key_str,
+        "keyName": key_name,
+        "altKey": flag("altKey"),
+        "ctrlKey": flag("ctrlKey"),
+        "metaKey": flag("metaKey"),
+        "shiftKey": flag("shiftKey"),
+    });
+    dispatch(s, ScriptUiEvent { window, widget, kind: ty, value })
+}
+
 /// `scriptui.resize`: the host gave the window a new size (a docked panel's dock, #2585): the
 /// script's window takes it, lays itself out again and gets `onResizing` / `onResize`.
 pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
