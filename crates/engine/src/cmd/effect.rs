@@ -138,16 +138,14 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             // Never silently replace an installed file: a name collision is either a re-install
             // the user did not ask to overwrite or a bundle that would shadow a working plug-in,
             // and the update path is explicit (remove the old one first).
-            let size = src.metadata().map(|m| m.len()).map_err(|e| format!("cannot read its size: {e}"))?;
-            if size > MAX_INSTALL_BYTES {
-                return Err(format!("it is {} MiB, over the {} MiB install limit", size >> 20, MAX_INSTALL_BYTES >> 20));
-            }
             if is_panel {
                 let key = format!("{}/{name}", super::scripts::PANELS_DIR);
-                if cfg.read(&key).is_some() {
+                // Listed, not read: an existing panel whose text cannot be read is still a panel
+                // and must not be replaced (reading it would report it as absent).
+                if cfg.list(super::scripts::PANELS_DIR).iter().any(|n| n == &name) {
                     return Err(format!("{name} is already installed as a ScriptUI panel; remove it from the Scripts/ScriptUI Panels folder first to update"));
                 }
-                let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
+                let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
                 let code = String::from_utf8(bytes).map_err(|_| "panels are UTF-8 text (.jsx)".to_string())?;
                 cfg.write(&key, &code).map_err(|e| format!("cannot install panel: {e}"))?;
                 panels.push(json!(name));
@@ -157,7 +155,7 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             if cfg.files().is_file(&target) {
                 return Err(format!("{name} is already installed; remove it from the Plug-ins folder first to update"));
             }
-            let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("cannot read it: {e}"))?;
+            let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
             cfg.files().write(&target, &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
             // Load in-session now: a plug-in that cannot load is rolled back, so a broken
             // plug-in never makes every start fail.

@@ -268,10 +268,14 @@ folder the app runs at every start, so:
   so one collision does not undo the rest.
 * Files over 64 MiB are refused before they are read, rather than copied into a startup folder.
 * A `.wasm` is loaded once, in the same sandbox it runs in later (see below), so a module that
-  cannot load is reported and rolled back instead of failing every start. Nothing else runs at
-  install time; a panel's script runs when the panel opens, as with any installed panel.
-* There is no uninstall command: delete the file from the folder (the next start no longer
-  loads it). Replacing a plug-in means deleting the old file first.
+  cannot load is reported instead of failing every start. That load runs the module's start-up
+  code and its metadata exports; `ec_render` is never called, and a panel's script is not run at
+  install time (it runs when the panel opens, as with any installed panel). The copy made before
+  the load is then removed again — best effort: if removing it fails, the command says so and
+  names the file, and you delete it from `Plug-ins` yourself.
+* A `.wasm` is uninstalled by deleting it from `Plug-ins` (the next start no longer loads it):
+  there is no `effect.plugins.uninstall`. A panel installed here is an installed script, so
+  `file.uninstallScript {name}` removes it. Replacing either means removing it first.
 
 **The sandbox.** A plug-in runs in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter
 with no imports (no file, network or clock access), deterministic floats, a fuel budget per

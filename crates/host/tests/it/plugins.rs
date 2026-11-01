@@ -188,7 +188,7 @@ fn plugin_install_refuses_an_oversized_file() {
     let mut s = effectcraft_host::session();
     s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(config.path())));
     let Err(e) = s.execute("effect.plugins.install", json!({"path": big.to_string_lossy()})) else { panic!("an oversized plug-in was installed") };
-    assert!(e.to_string().contains("install limit"), "{e}");
+    assert!(e.to_string().contains("byte limit"), "{e}");
     assert!(!config.path().join("Plug-ins/big.wasm").exists(), "{e}");
 }
 

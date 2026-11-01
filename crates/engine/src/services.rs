@@ -3,6 +3,17 @@ use super::config;
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// [`Services::read_file`] for a copy that must not load an unbounded file: more than `max`
+    /// bytes is an error. The native one opens the file once, reads its size from that handle and
+    /// reads through a [`std::io::Read::take`] limit, so a file grown or swapped after the check
+    /// still cannot read past `max`.
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        let bytes = self.read_file(path)?;
+        if bytes.len() as u64 > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
+        Ok(bytes)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()>;
     /// Whether a file exists (the background footage check after open).
     fn exists(&self, path: &str) -> bool {
@@ -63,6 +74,26 @@ impl Services for FsServices {
         // A sparse file can claim far more than memory: an error, not an abort.
         bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
         file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
+        }
+        if meta.len() > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
+        // The size above came from this handle, and the read is capped too: a file that grows
+        // after the check still cannot read past `max`.
+        file.take(max + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
         Ok(bytes)
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
