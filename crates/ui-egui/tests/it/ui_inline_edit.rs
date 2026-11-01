@@ -12,7 +12,9 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4, "fps": 24})).unwrap();
     let comp = s.active_comp_id().unwrap().0;
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    // Arabic, Hebrew, Devanagari and Thai names typed below need installed system faces: draw
+    // tofu on a host without them rather than failing the missing-glyph gate.
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     (h, comp)
 }
@@ -538,6 +540,166 @@ fn arrow_keys_move_the_caret_in_rename_fields() {
     key(&mut h, Key::Enter);
     let layer_name = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().name.clone();
     assert_eq!(layer_name, "Pla-te");
+}
+
+/// A solid named `name` with its Transform group open in the Timeline; returns the layer, its
+/// Opacity uid and its Rotation uid.
+fn open_transform(h: &mut Harness<'_, EffectcraftApp>, name: &str) -> (u64, u64, u64) {
+    let (layer, opacity, rotation, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": name, "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.get("rotation").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    (layer, opacity, rotation)
+}
+
+fn expression(h: &Harness<'_, EffectcraftApp>, layer: u64, prop: u64) -> Option<String> {
+    let comp = h.state().session.active_comp().unwrap();
+    comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(prop).unwrap().expr.as_ref().map(|e| e.text.clone())
+}
+
+fn commit_expression(h: &mut Harness<'_, EffectcraftApp>) {
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+}
+
+/// #1072: Alt-clicking a stopwatch adds an expression and its editor takes the keyboard at once,
+/// the new expression selected, so typing replaces it (it took another click). That happens
+/// once: a field clicked next keeps the keyboard, and removing the expression with another
+/// Alt-click leaves nothing to take it.
+#[test]
+fn alt_clicking_a_stopwatch_focuses_the_new_expression() {
+    let (mut h, _) = harness();
+    let (layer, opacity, rotation) = open_transform(&mut h, "Plate");
+    let alt = Modifiers { alt: true, ..Modifiers::NONE };
+    let stopwatch = |h: &Harness<'_, EffectcraftApp>, prop: u64| center(h, &format!("timeline.prop.{prop}.stopwatch"));
+    let at = stopwatch(&h, opacity);
+    click_with(&mut h, at, alt);
+    assert!(expression(&h, layer, opacity).is_some(), "an expression was added");
+    type_text(&mut h, "50");
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some("50"), "typing replaced the new expression");
+    // A field clicked right after an Alt-click keeps the keyboard.
+    let at = stopwatch(&h, rotation);
+    click_with(&mut h, at, alt);
+    let added = expression(&h, layer, rotation).expect("an expression on Rotation");
+    let p = center(&h, "timeline.timecode");
+    click(&mut h, p, 2);
+    type_text(&mut h, "0:00:01:00");
+    key(&mut h, Key::Enter);
+    let frame = h.state().session.active_comp().unwrap().frame_rate.frame_at(h.state().session.time());
+    assert_eq!((frame, expression(&h, layer, rotation)), (24, Some(added)), "the time took the typing, not the expression");
+    // Alt-click again removes the expression; nothing takes the keyboard after it.
+    let at = stopwatch(&h, opacity);
+    click_with(&mut h, at, alt);
+    h.run_steps(5);
+    assert_eq!(expression(&h, layer, opacity), None);
+    assert!(!h.ctx.egui_wants_keyboard_input(), "nothing has the keyboard");
+}
+
+/// #1072: an expression added at the bottom of the Timeline brings its editor into view to take
+/// the keyboard (its row is added below the last one shown).
+#[test]
+fn an_expression_added_at_the_bottom_of_the_timeline_comes_into_view() {
+    let (mut h, _) = harness();
+    let (layer, opacity, _) = open_transform(&mut h, "Bottom");
+    for i in 0..40 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#406080"})).unwrap();
+    }
+    h.run_steps(3);
+    // Scroll to the end (the layer is at the bottom of the stack), then until Opacity is the
+    // last row shown.
+    h.state_mut().ui.timeline.scroll_y = 1.0e6;
+    h.run_steps(3);
+    let rows = h.state().auto.find("timeline.scroll").unwrap().rect;
+    let bottom = rows[1] + rows[3];
+    let row = h.state().auto.find(&format!("timeline.prop.{opacity}.row")).unwrap().rect;
+    h.state_mut().ui.timeline.scroll_y += row[1] + row[3] - bottom;
+    h.run_steps(3);
+    let row = h.state().auto.find(&format!("timeline.prop.{opacity}.row")).unwrap().rect;
+    assert!((row[1] + row[3] - bottom).abs() < 1.0, "Opacity is at the bottom: {row:?}");
+    let at = center(&h, &format!("timeline.prop.{opacity}.stopwatch"));
+    click_with(&mut h, at, Modifiers { alt: true, ..Modifiers::NONE });
+    let editor = h.state().auto.find(&format!("timeline.prop.{opacity}.expression")).expect("the editor is drawn").rect;
+    assert!(editor[1] >= rows[1] - 0.5 && editor[1] + editor[3] <= bottom + 0.5, "the editor is in view: {editor:?} in {rows:?}");
+    type_text(&mut h, "25");
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some("25"));
+}
+
+/// A primary-button drag from `from` to `to` with `modifiers` held from the press to the release.
+fn drag_with(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: Modifiers) {
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    for k in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+}
+
+/// #1072: with Alt held as it drops, a pick whip refers to an effect's property by its index,
+/// `effect("Slider Control")(1)`, as in After Effects; without Alt, by its name. Onto Effect
+/// Controls or the Timeline, and into the expression being edited (with a dimension).
+#[test]
+fn an_alt_pick_whip_refers_to_an_effect_property_by_index() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform, effects) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.select", json!({"layers": [l]})).unwrap();
+        for fx in ["Slider Control", "Point Control"] {
+            s.execute("effect.apply", json!({"layers": [l], "effect": fx})).unwrap();
+        }
+        let props = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.clone();
+        let effects: Vec<u64> = std::iter::once(props.sub("effects").unwrap().uid).chain(props.sub("effects").unwrap().groups().map(|g| g.uid)).collect();
+        (l, props.sub("transform").unwrap().get("opacity").unwrap().uid, props.sub("transform").unwrap().uid, effects)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.state_mut().ui.timeline.open_groups.extend(effects);
+    h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::EffectControls);
+    h.run_steps(3);
+    let props =
+        |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.clone();
+    let (slider, point) = (props(&h).prop("effects/#1/slider").unwrap().uid, props(&h).prop("effects/#2/point").unwrap().uid);
+    let expr = |h: &Harness<'_, EffectcraftApp>| props(h).find(opacity).unwrap().expr.clone().map(|e| e.text);
+    let alt = Modifiers { alt: true, ..Modifiers::NONE };
+    let whip = |h: &mut Harness<'_, EffectcraftApp>, target: &str, modifiers: Modifiers| {
+        let (from, to) = (center(h, &format!("timeline.prop.{opacity}.propertyPickWhip")), center(h, target));
+        drag_with(h, from, to, modifiers);
+    };
+    whip(&mut h, &format!("effectControls.prop.{slider}.value"), alt);
+    assert_eq!(expr(&h).as_deref(), Some("effect(\"Slider Control\")(1)"), "Alt onto Effect Controls");
+    let undo = h.state().session.history.undo.len();
+    whip(&mut h, &format!("effectControls.prop.{slider}.value"), Modifiers::NONE);
+    assert_eq!(expr(&h).as_deref(), Some("effect(\"Slider Control\")(\"Slider\")"), "without Alt, by name");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1, "one undo step");
+    whip(&mut h, &format!("timeline.prop.{slider}.name"), alt);
+    assert_eq!(expr(&h).as_deref(), Some("effect(\"Slider Control\")(1)"), "Alt onto the Timeline");
+    // Into the expression being edited, at the cursor, with the value it was dropped on.
+    let p = center(&h, &format!("timeline.prop.{opacity}.expression"));
+    click(&mut h, p, 1);
+    key(&mut h, Key::End);
+    type_text(&mut h, " + ");
+    let (from, to) = (center(&h, &format!("timeline.prop.{opacity}.pickWhip")), center(&h, &format!("effectControls.prop.{point}.value.1")));
+    drag_with(&mut h, from, to, alt);
+    assert_eq!(expr(&h).as_deref(), Some("effect(\"Slider Control\")(1) + effect(\"Point Control\")(1)[1]"));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(expr(&h).as_deref(), Some("effect(\"Slider Control\")(1)"), "undone in one step");
 }
 
 /// #1434: with several 3D layers selected, typing a Z Position sets Z on each of them; their X

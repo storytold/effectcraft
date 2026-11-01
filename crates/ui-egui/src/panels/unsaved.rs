@@ -16,7 +16,16 @@ use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
 /// Commands that replace or close the open project (Quit is asked when the window closes).
-const CLOSING: &[&str] = &["file.newProject", "file.open", "file.openRecent", "file.closeProject", "file.revert", "file.openDemoProject", "templates.create"];
+const CLOSING: &[&str] = &[
+    "file.newProject",
+    "file.open",
+    "file.openRecent",
+    "file.closeProject",
+    "file.revert",
+    "file.openDemoProject",
+    "templates.create",
+    "file.runShutdownScripts",
+];
 
 /// The command waiting on the prompt, and whether the user already answered it.
 #[derive(Clone, Debug, Default)]
@@ -56,6 +65,15 @@ pub fn on_close_requested(app: &mut EffectcraftApp, ctx: &egui::Context) {
     if ask(app, "app.quit", &json!({})) {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
     }
+}
+
+/// On macOS a close that nothing held open quits through `-[NSApplication terminate:]` instead:
+/// closing the window while AppKit's run loop is running crashes on a Mac with a Touch Bar
+/// (#341). `on_exit` still runs. A desktop host calls it last in `logic`, after
+/// `EffectcraftApp::tick` (which runs [`on_close_requested`]) and its own work. Returns whether
+/// that quit was scheduled; other platforms close the window as before.
+pub fn quit_on_close(ctx: &egui::Context) -> bool {
+    craft_quit::on_close_request(ctx)
 }
 
 /// The project's display name: its file name, or `Untitled Project.ecproj`.
@@ -207,9 +225,44 @@ mod tests {
         out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose))
     }
 
+    /// One frame of the dialogs with the window's close button pressed, through
+    /// [`on_close_requested`] and then [`quit_on_close`] as the app runs them; returns whether the
+    /// close was canceled and whether the platform quit was scheduled.
+    fn close_frame(app: &mut EffectcraftApp, ctx: &egui::Context) -> (bool, bool) {
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let mut quits = false;
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.auto.begin_frame();
+            on_close_requested(app, ui.ctx());
+            quits = quit_on_close(ui.ctx());
+            crate::panels::dialogs::show(app, ui.ctx());
+        });
+        out.textures_delta.clear();
+        let canceled = out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
+        (canceled, quits)
+    }
+
     fn modified(app: &mut EffectcraftApp) {
         app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64})).unwrap();
         assert!(app.session.is_dirty());
+    }
+
+    #[test]
+    fn shutdown_scripts_prompt_before_discarding_unsaved_work() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        let result = crate::menus::invoke(&mut app, &ctx, "file.runShutdownScripts", json!({})).unwrap();
+        assert_eq!(result, json!({"dialog": "unsavedChanges"}));
+        assert_eq!(app.session.project.comps().count(), 1);
+        assert!(app.session.is_dirty());
+        answer_with(&mut app, &ctx, Answer::Cancel);
+        assert_eq!(app.session.project.comps().count(), 1);
+        assert!(app.session.is_dirty());
+        crate::menus::invoke(&mut app, &ctx, "file.runShutdownScripts", json!({})).unwrap();
+        answer_with(&mut app, &ctx, Answer::Discard);
+        assert_eq!(app.session.project.comps().count(), 0);
+        assert!(!app.session.is_dirty() && app.dialog.is_none());
     }
 
     #[test]
@@ -339,5 +392,82 @@ mod tests {
         app.session.execute("edit.undo", json!({})).unwrap();
         assert!(!app.session.is_dirty());
         assert!(!frame(&mut app, &ctx, true));
+    }
+
+    /// Closing the window while AppKit's run loop is running crashes on a Mac with a Touch Bar
+    /// (#341). On macOS the close is canceled and the app quits through
+    /// `-[NSApplication terminate:]`. Other platforms close the window.
+    #[test]
+    fn closing_a_saved_project_quits_through_the_platform_on_macos() {
+        let (mut app, ctx) = app();
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(close_frame(&mut app, &ctx), (macos, macos));
+        assert!(app.dialog.is_none(), "nothing to ask");
+    }
+
+    #[test]
+    fn closing_a_modified_project_asks_before_the_platform_quit() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        assert_eq!(close_frame(&mut app, &ctx), (true, false), "the prompt holds the window and nothing quits");
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+        answer_with(&mut app, &ctx, Answer::Cancel);
+        assert!(app.session.is_dirty() && !app.dialog_state.unsaved.quitting);
+        assert_eq!(close_frame(&mut app, &ctx), (true, false), "asked again after Cancel");
+        answer_with(&mut app, &ctx, Answer::Discard);
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(close_frame(&mut app, &ctx), (macos, macos), "Don't Save quits");
+    }
+
+    /// While the window is minimized or hidden, eframe runs `App::logic` without `App::ui` and
+    /// still handles a close: `logic` asks about a modified project.
+    #[test]
+    fn a_close_while_only_logic_runs_asks_about_a_modified_project() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let mut frame = eframe::Frame::_new_kittest();
+        let out = ctx.run_logic(&raw, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+        let canceled = out.viewport_commands.get(&egui::ViewportId::ROOT).is_some_and(|c| c.contains(&egui::ViewportCommand::CancelClose));
+        assert!(canceled, "the close is canceled");
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+    }
+
+    /// A file dialog answered in the frame that closes the window runs its command before the
+    /// close decision, so a change it makes is asked about.
+    #[test]
+    fn a_dialog_answer_runs_before_the_close_decision() {
+        let (mut app, ctx) = app();
+        assert!(!app.session.is_dirty());
+        let answer = crate::DialogAnswer { command: "comp.new".into(), key: "name", params: json!({"width": 64, "height": 64}), paths: vec!["Main".into()] };
+        app.dialog_answers.0.send(answer).unwrap();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let mut frame = eframe::Frame::_new_kittest();
+        let out = ctx.run_logic(&raw, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+        let canceled = out.viewport_commands.get(&egui::ViewportId::ROOT).is_some_and(|c| c.contains(&egui::ViewportCommand::CancelClose));
+        assert!(app.session.is_dirty(), "the answer ran");
+        assert!(canceled, "the close is canceled");
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+    }
+
+    /// The tick makes the close decision and leaves the platform quit to the host, which runs it
+    /// last in `logic`, after its own work (the desktop host shows the file dialogs asked for).
+    /// On macOS `logic` cancels the close and quits; other platforms close the window.
+    #[test]
+    fn the_platform_quit_runs_after_the_tick() {
+        let (mut app, ctx) = app();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let frame = eframe::Frame::_new_kittest();
+        let canceled =
+            |out: &egui::LogicOutput| out.viewport_commands.get(&egui::ViewportId::ROOT).is_some_and(|c| c.contains(&egui::ViewportCommand::CancelClose));
+        let out = ctx.run_logic(&raw, |ctx| app.tick(ctx, &frame));
+        assert!(!canceled(&out), "the tick leaves a saved project's close to the host");
+        let mut frame = eframe::Frame::_new_kittest();
+        let out = ctx.run_logic(&raw, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+        assert_eq!(canceled(&out), cfg!(target_os = "macos"), "logic quits through the platform on macOS");
+        assert!(app.dialog.is_none(), "nothing to ask");
     }
 }

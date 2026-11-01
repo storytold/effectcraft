@@ -581,7 +581,7 @@ fn push_piece(out: &mut String, p: Piece) {
 /// rewrite (which nests a call per arithmetic operator). The JavaScript parser and compiler
 /// recurse per level and a 2 MiB thread overflows its stack (aborting the app) at about 75
 /// nested brackets, so deeper expressions are rejected with an error instead. Constructs that
-/// nest without brackets count as part of a level ([`too_nested`]).
+/// nest without brackets count as part of a level (`too_nested`).
 pub const MAX_NESTING: usize = 32;
 /// Hard limit on bytes emitted by the array-math source rewrite.
 pub const MAX_REWRITTEN_BYTES: usize = 4 * 1024 * 1024;
@@ -608,7 +608,7 @@ const HEAVY: usize = 32;
 /// about 3 800 links).
 const LIGHT: usize = 6;
 
-/// One bracket level of [`too_nested`]'s walk.
+/// One bracket level of `too_nested`'s walk.
 #[derive(Default)]
 struct Level {
     /// `[`: commas separate elements (a loop in the parser), not operands.
@@ -710,7 +710,7 @@ fn too_nested(toks: &[Tok]) -> bool {
     too_nested_from(toks, 0)
 }
 
-/// [`too_nested`] for code that already sits `base` deep (a template substitution).
+/// `too_nested` for code that already sits `base` deep (a template substitution).
 fn too_nested_from(toks: &[Tok], base: usize) -> bool {
     let mut levels = vec![Level::default()];
     let mut prefix = 0usize;
@@ -803,6 +803,12 @@ pub fn check_nesting(src: &str) -> Result<(), String> {
         return Err(too_deep());
     }
     Ok(())
+}
+
+/// An error when plain JavaScript `src` (not rewritten: what `eval` and `Function` get at run
+/// time) nests deeper than [`MAX_NESTING`] levels.
+pub fn check_plain_nesting(src: &str) -> Result<(), String> {
+    if too_nested(&tokenize(src).0) { Err(too_deep()) } else { Ok(()) }
 }
 
 fn too_deep() -> String {

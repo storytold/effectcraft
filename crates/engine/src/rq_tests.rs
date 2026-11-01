@@ -67,11 +67,11 @@ fn add_configure_render() {
     let r = s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "png", "channels": "rgba"})).unwrap();
     assert!(r["outputPath"].as_str().unwrap().ends_with("_[#####].png"), "{r}");
     assert!(s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "jpeg", "channels": "rgba"})).is_err());
-    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": crate::tests_stubs::tmp_out("rq/out.mov")})).unwrap();
+    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": crate::tests::stubs::tmp_out("rq/out.mov")})).unwrap();
     assert_eq!(r["output"]["format"], "ProRes", "Output To with .mov switches to ProRes");
-    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")));
+    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")));
     // A second item that fails, a third that is unqueued.
-    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/fail.gif")})).unwrap();
+    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/fail.gif")})).unwrap();
     let c = s.execute("renderQueue.add", json!({"output": "/tmp/rq/skip.mp4"})).unwrap();
     s.execute("renderQueue.setRender", json!({"item": c["item"], "render": false})).unwrap();
     assert_eq!(s.project.render_queue[2].status.label(), "Unqueued");
@@ -79,12 +79,12 @@ fn add_configure_render() {
     assert_eq!(r["items"].as_array().unwrap().len(), 2);
     assert_eq!(
         ex.log.lock().unwrap().iter().map(std::path::PathBuf::from).collect::<Vec<_>>(),
-        [std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/fail.gif"))]
+        [std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/fail.gif"))]
     );
     let q = &s.project.render_queue;
     assert_eq!(q[0].status.label(), "Done");
     assert!(q[0].started.is_some() && q[0].render_time.is_some());
-    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")));
+    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")));
     assert_eq!(q[1].status, RenderStatus::Failed("boom".into()));
     assert_eq!(q[2].status.label(), "Unqueued");
     let events = s.drain_events();
@@ -117,6 +117,25 @@ fn persists_in_project_file() {
 }
 
 #[test]
+fn targa_sequence_output_module() {
+    let (mut s, _) = rq_session();
+    let a = s.execute("renderQueue.add", json!({"format": "tga", "output": "/out/[compName]_[#####].tga", "channels": "rgba"})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((format!("{:?}", om.format), om.channels.label()), ("TargaSequence".to_string(), "RGB + Alpha"));
+    assert!(a["outputPath"].as_str().unwrap().ends_with("_[#####].tga"), "{a}");
+    // Uncompressed: an 18-byte header and 4 bytes a pixel with alpha, 3 without.
+    assert_eq!(crate::render_queue::bytes_per_frame(om, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 4.0);
+    s.execute("renderQueue.setOutputModule", json!({"index": 1, "channels": "rgb"})).unwrap();
+    assert_eq!(crate::render_queue::bytes_per_frame(&s.project.render_queue[0].output, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 3.0);
+    let f = s.execute("renderQueue.formats", json!({})).unwrap();
+    let tga = f["formats"].as_array().unwrap().iter().find(|f| f["id"] == "TargaSequence").cloned();
+    assert_eq!(
+        tga,
+        Some(json!({"id": "TargaSequence", "label": "Targa Sequence", "extension": "tga", "sequence": true, "alpha": true, "audio": false, "available": true}))
+    );
+}
+
+#[test]
 fn failure_toast_names_the_first_reason() {
     struct Failing;
     impl Exporter for Failing {
@@ -130,8 +149,8 @@ fn failure_toast_names_the_first_reason() {
     }
     let mut s = demo();
     s.exporter = Some(Arc::new(Failing));
-    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/first.gif")})).unwrap();
-    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/second.gif")})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/first.gif")})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/second.gif")})).unwrap();
     s.execute("renderQueue.render", json!({})).unwrap();
     let events = s.drain_events();
     let toast = events.iter().find_map(|e| if let Event::Toast { message, error: true } = e { Some(message.as_str()) } else { None });
@@ -186,7 +205,7 @@ fn without_exporter() {
     s.execute("renderQueue.add", json!({})).unwrap();
     assert!(!s.is_enabled("renderQueue.render"));
     let f = s.execute("renderQueue.formats", json!({})).unwrap();
-    assert_eq!(f["formats"].as_array().unwrap().len(), 13);
+    assert_eq!(f["formats"].as_array().unwrap().len(), 14);
     assert_eq!(f["formats"][0]["available"], false);
 }
 

@@ -70,6 +70,16 @@ next to it.
 Agents: `file.importProject {"path": "/projects/titles.ecproj"}` returns the comps, the root comps,
 `primaryComp` (the only root comp, if there is one) and any missing media.
 
+## Finding a layer's source in the Project panel
+
+Right-click a layer in the Timeline or Composition panel and choose **Reveal Layer Source in
+Project** (also Layer ▸ Reveal ▸ Reveal Layer Source in Project). The Project panel opens, its
+search is cleared, the folders holding the source open, and the source item is selected.
+
+Layers whose image is generated inside the composition — text, shape, null, camera, light and
+3D primitive layers — have no Project item, so the command is not offered for them. Adjustment
+layers do have one: the solid that backs them.
+
 ## Interpret Footage
 
 Select a footage item in the Project panel and choose **File ▸ Interpret Footage ▸ Main…**
@@ -84,16 +94,21 @@ used, and layers that ran to the end of the footage keep doing so.
 | Fields, pixel aspect, loop | As in After Effects. |
 | **Assign Profile**, **Interpret As Linear Light** | The colour profile the file's values are in (the working space converts from it), and whether they are linear light. |
 | **Preserve RGB** | The file's values enter the composition unconverted: no colour profile, linear light or working-space conversion, and float files (OpenEXR, float TIFF) keep their linear values instead of being sRGB-encoded. Use it to convert chosen layers yourself with an OCIO effect, or to read data passes (depth, mist, normals) as numbers. |
+| **Cineon Settings** (DPX and Cineon files) | With *Logarithmic Conversion* on, the file's log code values are converted to the *Current Gamma* (1.7 by default; 1 gives linear light): the *10 Bit Black Point* (95) becomes the *Converted Black Point* (0), and with *Highlight Rolloff* at 0 the *10 Bit White Point* (685) becomes the *Converted White Point* (1023). *Highlight Rolloff* (20) bends the top 20% of the converted range into a curve, as the Cineon Converter effect does: the white point then converts to a level below the Converted White Point, and brighter code values stay below it. At 0, a 32 bpc project keeps over-range values. *Units* shows the converted points as 10-bit, 8-bit or float values. With Logarithmic Conversion off (the default), the code values are shown as stored. |
 
 Settings ▸ Import ▸ **Report Missing Frames** (on by default) lists the missing frame numbers
 when a sequence imports; Interpret Footage lists them too.
 
 **File ▸ Interpret Footage ▸ Remember Interpretation / Apply Interpretation** copy the alpha,
-fields, pixel aspect, loop and colour settings (Preserve RGB too) to other footage.
+fields, pixel aspect, loop and colour settings (Preserve RGB too, and Cineon Settings between
+DPX and Cineon files) to other footage.
 
 Agents: `file.interpretFootage {"items": [id], "frameRate": 24, "alpha": "premultiplied",
 "startTimecode": 1001, "preserveRgb": true}` (timecode or a frame number; `"overrideStart":
-false` goes back to Use Source File Timecode).
+false` goes back to Use Source File Timecode). Cineon Settings: `{"logConversion": true,
+"tenBitBlack": 95, "tenBitWhite": 685, "currentGamma": 1.7, "highlightRolloff": 20,
+"cineonUnits": "8bit", "convertedBlack": 0, "convertedWhite": 255}` (converted points in
+`cineonUnits`, else the footage's Units).
 
 ## Multi-layer OpenEXR
 
@@ -110,9 +125,19 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
 including files overwritten at the same path and byte size.
 
-- **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. Pick a numbered
-  file to replace it with that file's whole sequence (`file.replaceFootage {"path": …,
-  "sequence": false}` for one frame).
+- **Replace a layer's source** without rebuilding the layer: Alt-drag (Option-drag on macOS) a
+  footage item, composition or solid from the Project panel onto a layer in the Timeline. The
+  layer keeps its name, timing, transforms, keyframes, expressions, effects, masks, switches,
+  parenting and track matte; only its source changes. A source with audio adds Audio properties
+  when the layer has none. To replace several selected layers with the selected Project item, press
+  Ctrl+Alt+/ (Cmd+Opt+/). Compositions, footage and solids are interchangeable; folders, data files
+  and 3D models are not sources, and a composition can't be nested in itself. Alt-dragging onto a
+  layer is one layer at a time, as in After Effects.
+  Agents: `layer.replaceSource {"item": id, "layers": [ids]}`.
+- **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. A still stays a
+  still, and a sequence item keeps bringing the new numbered file's run; pass
+  `sequence: true` to bring a numbered still's whole run (`file.replaceFootage {"path": …,
+  "sequence": true}`), or `sequence: false` for one frame.
 - **Replace with Precomposition (used N times)**, right-clicking a footage item or solid in the
   Project panel, puts the item in a new composition of its size,
   pixel aspect and frame rate, in the same folder, and switches every layer in every composition
@@ -129,7 +154,8 @@ including files overwritten at the same path and byte size.
   File ▸ Open tries each missing file at the same place under the project's new folder, without
   marking the project modified.
 - **File ▸ Reload Footage** (Ctrl+Alt+L) reads the files again. A sequence picks up frames
-  added to its folder (a render still in progress) and keeps its interpretation.
+  added to its folder (a render still in progress) and keeps its interpretation; a still is
+  read as its one file, even when numbered files sit next to it.
 
 **File ▸ Dependencies ▸ Relink Missing Footage…** searches a chosen folder and its subfolders
 for missing source files on the desktop. It relinks unique exact filenames whose decoded type,

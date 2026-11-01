@@ -90,8 +90,11 @@ fn prefetch_waits_while_edits_keep_coming() {
     let mut s = Session::default();
     let c = s.execute("comp.new", json!({"name": "Drag", "width": 64, "height": 36, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
     let solid = s.execute("layer.newSolid", json!({"color": "#3080ff", "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
-    // Short steps: input time advances 50 ms per frame.
+    // Short steps between edits; the app clock below is advanced explicitly.
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(0.05).build_eframe(|_| EffectcraftApp::new(s));
+    // Prefetch waits for EDIT_QUIET on the app clock; a manual clock makes the pause
+    // deterministic instead of depending on how long the test host took to run the steps.
+    h.state_mut().use_manual_clock();
     settle(&mut h);
     let frame = |h: &Harness<'_, EffectcraftApp>| {
         let app = h.state();
@@ -116,6 +119,8 @@ fn prefetch_waits_while_edits_keep_coming() {
         assert_eq!(h.state().frames.inflight(), 0, "edit {i}");
     }
     // The edits pause: the frames around the current one fill in.
+    h.state_mut().clock_mut().advance(1.0);
+    h.run_steps(1);
     settle(&mut h);
     for _ in 0..20 {
         h.step();

@@ -10,4 +10,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"

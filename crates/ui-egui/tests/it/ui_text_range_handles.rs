@@ -194,3 +194,76 @@ fn a_bar_on_a_box_handle_leaves_it_the_press() {
     assert_eq!(layer.props.find(start).unwrap().value.as_f64(), 0.0, "Start stays");
     assert_ne!(scale(&h), before, "the handle scaled the layer");
 }
+
+/// The text the Timeline paints in property `uid`'s value field.
+fn timeline_value(h: &Harness<'_, EffectcraftApp>, uid: u64) -> String {
+    let e = h.state().auto.find(&format!("timeline.prop.{uid}.value")).unwrap_or_else(|| panic!("timeline.prop.{uid}.value isn't shown"));
+    let field = egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]));
+    h.output()
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) if field.contains(t.visual_bounding_rect().center()) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The centre of the first painted text that reads `label` exactly (a popup's option).
+fn text_at(h: &Harness<'_, EffectcraftApp>, label: &str) -> Option<Pos2> {
+    h.output().shapes.iter().find_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text() == label => Some(t.visual_bounding_rect().center()),
+        _ => None,
+    })
+}
+
+fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.event(Event::PointerMoved(p));
+    h.step();
+    h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// #1814: with Units = Index the Timeline shows the Range Selector's Start, End and Offset as
+/// counts, without the % sign they carry with Units = Percentage. Units is changed the way a
+/// user changes it: its Timeline popup, then the Index option.
+#[test]
+fn index_units_show_start_end_and_offset_without_a_percent_sign() {
+    let (s, ids) = setup();
+    let l = LayerId(ids.layer);
+    let layer = s.active_comp().unwrap().layer(l).unwrap().clone();
+    let text = layer.props.sub("text").unwrap();
+    let anim = animator(&s, ids.layer);
+    let selectors = anim.sub("selectors").unwrap();
+    let sel = selectors.groups().next().unwrap();
+    let (offset, units) = (sel.get("offset").unwrap().uid, sel.prop("advanced/units").unwrap().uid);
+    let advanced = sel.sub("advanced").unwrap().uid;
+    let mut h = harness(s);
+    let tl = &mut h.state_mut().ui.timeline;
+    tl.open_layers.insert(ids.layer);
+    let animators = text.sub("animators").unwrap().uid;
+    tl.open_groups.extend([text.uid, animators, anim.uid, selectors.uid, sel.uid, advanced]);
+    h.run_steps(3);
+    for uid in [ids.start, ids.end, offset] {
+        assert!(timeline_value(&h, uid).ends_with('%'), "Percentage units: {}", timeline_value(&h, uid));
+    }
+    // Units ▸ Index through the Timeline: open its popup, pick the option.
+    let units_value = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layer(l).unwrap().props.find(units).unwrap().value.clone();
+    assert_eq!(units_value(&h), effectcraft_engine::keyframe::Value::Enum(0), "Percentage to start with");
+    let field = h
+        .state()
+        .auto
+        .find(&format!("timeline.prop.{units}.value"))
+        .map(|e| pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0))
+        .expect("Units is shown");
+    click_at(&mut h, field);
+    let index = text_at(&h, "Index").expect("the Units popup lists Index");
+    click_at(&mut h, index);
+    assert_eq!(units_value(&h), effectcraft_engine::keyframe::Value::Enum(1), "the popup set Units to Index");
+    for uid in [ids.start, ids.end, offset] {
+        let v = timeline_value(&h, uid);
+        assert!(!v.is_empty() && !v.contains('%'), "Index units: {v:?}");
+    }
+}

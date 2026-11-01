@@ -421,7 +421,7 @@ fn right_click_in_effect_controls_shows_the_effect_menu() {
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
     h.run_steps(3);
-    let category = " Blur & Sharpen ⏵";
+    let category = " Blur & Sharpen";
     // An effect's header: its own menu.
     let header = rect_of(&h, &format!("effectControls.effect.{fill}")).center();
     right_click(&mut h, header);
@@ -776,6 +776,23 @@ fn effect_control_name_can_be_renamed_from_its_header() {
     assert_eq!(current_name(&h), "Speed");
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
     assert_eq!(current_name(&h), "Point Control");
+}
+
+// Regression test for #1497: double-clicking an effect parameter's name in Effect Controls did
+// nothing; it should reveal that property in the Timeline, as After Effects does.
+#[test]
+fn double_clicking_an_effect_property_name_reveals_it_in_the_timeline() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    let row = format!("timeline.prop.{}.name", x.point);
+    assert!(!ids(&h).contains(&row), "the effect's property is not in the Timeline before the double-click");
+    assert!(!h.state().ui.timeline.reveal_props.contains(&x.point));
+    let point = rect_of(&h, &format!("effectControls.prop.{}.name", x.point)).center();
+    double_click(&mut h, point);
+    h.run_steps(4);
+    assert!(h.state().ui.timeline.reveal_props.contains(&x.point), "the property is marked revealed in the Timeline");
+    assert!(ids(&h).contains(&row), "the Timeline shows the property's row");
 }
 
 #[test]

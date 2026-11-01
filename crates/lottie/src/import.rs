@@ -47,7 +47,9 @@ fn s<'a>(j: &'a Json, k: &str) -> Option<&'a str> {
 
 fn hex_color(sc: &str) -> [f32; 3] {
     let h = sc.trim_start_matches('#');
-    let c = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0) as f32 / 255.0;
+    let c = |i: usize| {
+        h.get(i..i + 2).filter(|x| x.bytes().all(|b| b.is_ascii_hexdigit())).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0) as f32 / 255.0
+    };
     [c(0), c(2), c(4)]
 }
 
@@ -141,7 +143,9 @@ pub fn import(
         let Some(id) = s(a, "id") else { continue };
         if a.get("layers").is_some() {
             let folder = cx.folder(project);
-            let (aw, ah) = (f(a, "w").map(|v| v as u32).unwrap_or(w), f(a, "h").map(|v| v as u32).unwrap_or(h));
+            let layer = precomp_layer_size(&doc, &assets, id);
+            let aw = f(a, "w").map(|v| v as u32).or(layer.map(|l| l.0)).unwrap_or(w);
+            let ah = f(a, "h").map(|v| v as u32).or(layer.map(|l| l.1)).unwrap_or(h);
             let arate = f(a, "fr").map(FrameRate::from_f64).unwrap_or(rate);
             let c = Comp::new(aw, ah, arate, duration);
             let nm = s(a, "nm").unwrap_or(id).to_string();
@@ -238,6 +242,19 @@ pub fn import(
     cx.items.push(id);
     project.fix_next_id();
     Ok(ImportResult { comp: id, items: cx.items, warnings: cx.im.warnings })
+}
+
+/// The `w`/`h` of the first precomp layer, in the main comp or in any asset, that shows asset `id`.
+/// lottie-spec gives a precomposition asset no size: the layer's `w`/`h` are its clipping rect.
+fn precomp_layer_size(doc: &Json, assets: &[Json], id: &str) -> Option<(u32, u32)> {
+    let lists = doc.get("layers").into_iter().chain(assets.iter().filter_map(|a| a.get("layers")));
+    lists.filter_map(Json::as_array).flatten().find_map(|l| {
+        if l.get("ty").and_then(Json::as_u64) != Some(0) || s(l, "refId") != Some(id) {
+            return None;
+        }
+        let (lw, lh) = f(l, "w").zip(f(l, "h"))?;
+        Some((lw.round().max(1.0) as u32, lh.round().max(1.0) as u32))
+    })
 }
 
 fn transform(im: &Im, ks: &Json, tr: &mut PropGroup, next: &mut u64) {
@@ -399,7 +416,14 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         l.in_point = tb.tick(ip);
         l.out_point = tb.tick(op.max(ip));
         l.start_time = tb.tick(f(j, "st").unwrap_or(0.0));
-        l.stretch = f(j, "sr").unwrap_or(1.0) * 100.0;
+        // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
+        let sr = f(j, "sr").unwrap_or(1.0);
+        l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
+            sr * 100.0
+        } else {
+            cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
+            100.0
+        };
         if j.get("ddd").and_then(Json::as_u64) == Some(1) {
             l.switches.three_d = true;
         }
@@ -483,5 +507,17 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
             l.parent = parent_id;
             l.track_matte = matte_id;
         }
+    }
+}
+
+#[cfg(test)]
+mod hex_color_tests {
+    use super::hex_color;
+
+    #[test]
+    fn hex_color_rejects_plus_sign() {
+        assert_eq!(hex_color("#+f0000"), [0.0, 0.0, 0.0]);
+        assert_eq!(hex_color("#zz0000"), [0.0, 0.0, 0.0]);
+        assert_eq!(hex_color("#ff0000"), [1.0, 0.0, 0.0]);
     }
 }

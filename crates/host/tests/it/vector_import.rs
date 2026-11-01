@@ -509,7 +509,7 @@ fn shapes_from_vector_layer_keeps_images_as_footage_layers() {
     assert_eq!(names, ["images.pdf Outlines", "Image", "Image", "images.pdf Outlines 1", "images.pdf"]);
     assert_eq!(c.layers[0].id.0, sid);
     assert_eq!(r["layers"].as_array().unwrap().len(), 2);
-    for l in &c.layers[1..3] {
+    for l in c.layers.iter().skip(1).take(2) {
         assert_eq!(l.parent.map(|p| p.0), Some(sid), "{}", l.name);
         assert!(matches!(l.source, effectcraft_project::LayerSource::Footage { .. }));
     }

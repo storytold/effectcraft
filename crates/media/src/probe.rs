@@ -23,9 +23,10 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
         let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
         correct_rate(&mut f, header.as_deref().and_then(video_rate));
+        trim_to_edits(&mut f, header.as_deref().and_then(video_shown));
         return Ok(f);
     }
-    let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
+    let bytes = crate::read_regular_file(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
         return probe_model(&path.to_string_lossy(), &bytes, &side_file_reader(path));
     }
@@ -38,7 +39,7 @@ fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
     let model = std::path::absolute(model).unwrap_or_else(|_| model.to_path_buf());
     move |uri| {
         let p = craft_docpath::resolve_absolute(uri, Some(&model)).ok()?;
-        std::fs::read(p).ok()
+        crate::read_regular_file(&p).ok()
     }
 }
 
@@ -107,11 +108,43 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let turn = video_turn(&bytes);
     let rate = video_rate(&bytes);
+    let shown = video_shown(&bytes);
+    // A WAV's cue points and XMP markers become the footage's markers.
+    let markers = crate::wav_markers::read(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
     let mut f = footage_from_info(path, src.info());
+    f.markers = markers;
     turn_footage(&mut f, turn);
     correct_rate(&mut f, rate);
+    trim_to_edits(&mut f, shown);
     Ok(f)
+}
+
+/// A movie lasts as long as its video edit list shows (#2592): the reader reports the media
+/// duration (`mdhd`), which for H.264 with B-frames runs past the last shown frame by the
+/// encoder delay the edit list trims (75 frames at 25 fps read as 3.04 s). Never lengthens.
+fn trim_to_edits(f: &mut Footage, shown: Option<Tick>) {
+    if f.kind == FootageKind::Video
+        && let Some(shown) = shown.filter(|s| *s > Tick::ZERO && *s < f.duration)
+    {
+        f.duration = shown;
+    }
+}
+
+/// How long the video track's edit list shows its media (`elst` segments, movie timescale):
+/// `None` without edits, or with an empty edit (a delayed start keeps the reader's duration).
+fn video_shown(bytes: &[u8]) -> Option<Tick> {
+    let file = filmcraft_isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    edits_shown(&t.edits, file.timescale)
+}
+
+fn edits_shown(edits: &[filmcraft_isobmff::Edit], timescale: u32) -> Option<Tick> {
+    if edits.is_empty() || timescale == 0 || edits.iter().any(|e| e.media_time < 0) {
+        return None;
+    }
+    let units = edits.iter().try_fold(0u64, |acc, e| acc.checked_add(e.segment_duration))?;
+    Some(Tick::from_units(i64::try_from(units).ok()?, i64::from(timescale)))
 }
 
 /// A movie's frame rate as its frame durations average to ([`video_rate`]), where the reader's
@@ -142,7 +175,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         (_, None) => FootageKind::Audio,
     };
     let rate = v.map_or(FrameRate::FPS_30, |v| rate_from_fc(v.frame_rate));
-    let codec = match (v, info.audio.as_ref()) {
+    let codec = match (v, info.audio()) {
         (Some(v), _) => v.codec.clone(),
         (None, Some(a)) => a.codec.clone(),
         _ => String::new(),
@@ -157,7 +190,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         native_rate: None,
         duration: if kind == FootageKind::Still { Tick::ZERO } else { Tick(info.duration.0) },
         has_video: v.is_some(),
-        has_audio: info.audio.is_some(),
+        has_audio: info.has_audio(),
         alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
         premul_color: [0.0; 3],
         loop_count: 1,
@@ -262,12 +295,19 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
 /// The rotation an MP4/MOV movie is shown with (a phone held upright records sideways frames and
 /// says so in its video track's header): the quarter turn nearest the track's rotation. Only the
 /// rotation counts; any mirroring, scaling or offset in the header is ignored, and other
-/// containers have none.
+/// containers have none. FilmCraft turns the frames of a pure 0/90/180/270° header itself, so this
+/// is only the quarter turn nearest to a header it does not turn.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
     let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
-    let Some(m) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video).map(|t| t.matrix) else {
+    let Some(track) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video) else {
         return Orientation::NoTransforms;
     };
+    // A pure rotation is already applied by FilmCraft's decoder (frames and size come out
+    // upright); only the headers it leaves as stored (mirrored, scaled, sheared) are turned here.
+    if track.display_rotation().is_some() {
+        return Orientation::NoTransforms;
+    }
+    let m = track.matrix;
     // [a b u; c d v; x y w]: (a, b) is where the picture's x axis points.
     let (a, b) = (m[0] as i64, m[1] as i64);
     match (a.abs() >= b.abs(), a >= 0, b >= 0) {
@@ -318,6 +358,24 @@ fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2592: an encoder-delayed H.264 track's edit list shows 75 frames at 25 fps (3 s at a
+    /// 1000 timescale), though its media runs a frame longer; empty edits and no edits leave it.
+    #[test]
+    fn the_edit_list_trims_a_movie_to_the_frames_it_shows() {
+        let edit = |segment_duration, media_time| filmcraft_isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
+        let shown = edits_shown(&[edit(3000, 1024)], 1000);
+        assert_eq!(shown, Some(Tick::from_units(3, 1)));
+        let mut f = Footage { kind: FootageKind::Video, duration: Tick::from_units(76, 25), ..Footage::default() };
+        trim_to_edits(&mut f, shown);
+        assert_eq!(f.duration, Tick::from_units(75, 25));
+        // Never longer than the reader's duration, and only for video.
+        trim_to_edits(&mut f, Some(Tick::from_units(4, 1)));
+        assert_eq!(f.duration, Tick::from_units(75, 25));
+        assert_eq!(edits_shown(&[edit(1000, -1), edit(3000, 0)], 1000), None);
+        assert_eq!(edits_shown(&[], 1000), None);
+        assert_eq!(edits_shown(&[edit(3000, 0)], 0), None);
+    }
 
     /// Durations (in 1/`timescale` s) of `n` frames at `rate` whose times are rounded to the timescale.
     fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {

@@ -1,4 +1,5 @@
 //! User-reported selection, Project deletion, and render-queue drop regressions.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, project::LayerId};
 use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
@@ -273,7 +274,7 @@ fn viewer_right_click_targets_hit_and_duplicate_preserves_group() {
         }
         assert!(h.state().frames.is_cached(&key));
         h.run_steps(3);
-        h.render().expect("offscreen context menu render").save(out).unwrap();
+        h.render_serialized().expect("offscreen context menu render").save(out).unwrap();
     }
     h.get_by_label("Duplicate").click();
     h.run_steps(3);
@@ -299,7 +300,7 @@ fn viewer_context_select_reaches_an_obscured_layer() {
         h.step();
     }
     h.run_steps(3);
-    h.get_by_label("Select ⏵").click();
+    h.get_by_label("Select").click();
     h.run_steps(3);
     h.get_by_label("Tile 1").click();
     h.run_steps(3);
@@ -433,7 +434,7 @@ fn workflow_snapshot() {
     }
     assert!(h.state().frames.is_cached(&key), "current composition rendered before capture");
     h.run_steps(3);
-    h.render().expect("offscreen UI render").save(out).unwrap();
+    h.render_serialized().expect("offscreen UI render").save(out).unwrap();
 }
 
 /// Filled rects painted this frame (flattening nested shape lists).
@@ -636,4 +637,81 @@ fn timeline_context_menu_creates_shapes_and_masks_from_text() {
     right_click(&mut h, at);
     assert!(h.query_by_label("Create Shapes from Text").is_none(), "no text conversion for a solid");
     assert!(h.query_by_label("Create Masks from Text").is_none(), "no text conversion for a solid");
+}
+
+// Regression test for #979 (#958): right-clicking a vector footage layer (SVG) in the Timeline
+// or the Composition viewer offered no Create Shapes from Vector Layer; raster layers must not.
+#[test]
+fn layer_context_menus_offer_create_shapes_from_vector_layer_for_vector_footage() {
+    use effectcraft_engine::project::LayerSource;
+    let dir = std::env::temp_dir().join(format!("ec-ui-vector-menu-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let svg = dir.join("logo.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20"><rect width="40" height="20" fill="#ff0000"/></svg>"##,
+    )
+    .unwrap();
+    let png = dir.join("photo.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 128, 255, 255])).save(&png).unwrap();
+    let mut s = effectcraft_host::session();
+    let item = s.execute("file.import", json!({"paths": [svg.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
+    let raster = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name":"Vec","width":320,"height":180,"duration":4})).unwrap();
+    // The raster layer sits below the SVG layer, so the viewer click below lands on the SVG.
+    let photo = s.execute("layer.addItem", json!({"item": raster})).unwrap()["layer"].as_u64().unwrap();
+    let logo = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let plate = s.execute("layer.newSolid", json!({"name":"Plate","width":40,"height":40,"color":"#406080"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let right_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerMoved(p));
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    let row = |h: &Harness<'_, EffectcraftApp>, id: u64| {
+        let r = rect(h, &format!("timeline.layer.{id}.row"));
+        pos2(r.min.x + 210.0, r.center().y)
+    };
+    let label = "Create Shapes from Vector Layer";
+    let shapes =
+        |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+    // A raster-less solid does not offer the conversion.
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.run_steps(3);
+    let at = row(&h, plate);
+    right_click(&mut h, at);
+    assert!(h.query_by_label(label).is_none(), "no vector conversion for a solid");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    // Nor does raster footage.
+    h.state_mut().session.execute("layer.select", json!({"layers": [photo]})).unwrap();
+    h.run_steps(3);
+    let at = row(&h, photo);
+    right_click(&mut h, at);
+    assert!(h.query_by_label(label).is_none(), "no vector conversion for raster footage");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    // The Timeline row of the SVG layer offers it, and it converts the layer.
+    h.state_mut().session.execute("layer.select", json!({"layers": [logo]})).unwrap();
+    h.run_steps(3);
+    let at = row(&h, logo);
+    right_click(&mut h, at);
+    h.get_by_label(label).click();
+    h.run_steps(3);
+    assert_eq!(shapes(&h), 1, "a shape layer was created from the SVG layer");
+    // The Composition viewer's menu offers it for the SVG layer under the pointer too.
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.state_mut().session.execute("prop.set", json!({"layer": plate, "path": "transform/position", "value": [40.0, 40.0]})).unwrap();
+    // The solid stays selected: the menu must follow the layer under the pointer, not the selection.
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.run_steps(3);
+    let comp = rect(&h, "viewer.comp");
+    right_click(&mut h, comp.center());
+    assert!(h.query_by_label(label).is_some(), "the viewer's context menu offers the vector conversion");
+    let _ = std::fs::remove_dir_all(&dir);
 }

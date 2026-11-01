@@ -44,6 +44,19 @@ pub fn bounds(p: &[[f64; 2]]) -> [f64; 4] {
     b
 }
 
+/// Crop `img` to `region` (layer pixels), with the layer offset of the crop's origin: the part
+/// of the frame the tracker reads. `None` when the region leaves too little of the frame.
+fn crop_region(img: &Image, off: [f64; 2], region: [f64; 4]) -> Option<(Image, [f64; 2])> {
+    let x0 = (region[0] + off[0]).floor().max(0.0) as i64;
+    let y0 = (region[1] + off[1]).floor().max(0.0) as i64;
+    let x1 = ((region[2] + off[0]).ceil() as i64).min(img.width as i64);
+    let y1 = ((region[3] + off[1]).ceil() as i64).min(img.height as i64);
+    if x1 <= x0 + 8 || y1 <= y0 + 8 {
+        return None;
+    }
+    Some((img.crop(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32), [off[0] - x0 as f64, off[1] - y0 as f64]))
+}
+
 /// Mask tracker state.
 #[derive(Clone, Debug)]
 pub struct MaskTracker {
@@ -52,8 +65,8 @@ pub struct MaskTracker {
     pub outline: Vec<[f64; 2]>,
     /// The last frame-to-frame motion (a constant-velocity guess for the next frame).
     velocity: Homography,
-    prev: Option<Image>,
-    prev_offset: [f64; 2],
+    /// The previous frame cropped to the region the next step reads, with its layer offset.
+    prev: Option<(Image, [f64; 2])>,
     /// Features used on the last step (layer pixels), for display and tests.
     pub last_features: usize,
 }
@@ -72,44 +85,39 @@ pub struct MaskStep {
 impl MaskTracker {
     /// Start on `frame` with the mask `outline` (a closed polyline in layer pixels).
     pub fn new(model: Model, outline: Vec<[f64; 2]>, frame: &Frame) -> MaskTracker {
-        MaskTracker { model, outline, velocity: Homography::IDENTITY, prev: Some(frame.img.clone()), prev_offset: frame.offset, last_features: 0 }
+        let mut t = MaskTracker { model, outline, velocity: Homography::IDENTITY, prev: None, last_features: 0 };
+        t.prev = t.region().and_then(|r| crop_region(frame.img, frame.offset, r));
+        t
+    }
+
+    /// Crop region (layer pixels) of the next step: the mask plus room for its motion.
+    fn region(&self) -> Option<[f64; 4]> {
+        let b = bounds(&self.outline);
+        if !(b[0].is_finite() && b[2] > b[0] && b[3] > b[1]) {
+            return None;
+        }
+        let margin = (0.35 * (b[2] - b[0]).max(b[3] - b[1])).max(32.0);
+        Some([b[0] - margin, b[1] - margin, b[2] + margin, b[3] + margin])
     }
 
     /// Track into `frame` (the next frame in either direction). `None` when the mask's pixels
     /// can't be followed (no texture, or the mask left the frame).
     pub fn step(&mut self, frame: &Frame) -> Option<MaskStep> {
-        let prev = self.prev.take()?;
-        let res = self.step_inner(&prev, self.prev_offset, frame);
-        self.prev = Some(frame.img.clone());
-        self.prev_offset = frame.offset;
-        let r = res?;
-        self.outline = self.outline.iter().map(|p| r.motion.apply(*p)).collect();
-        self.velocity = r.motion;
-        Some(r)
+        let (ca, oa) = self.prev.take()?;
+        let res = self.step_inner(ca, oa, frame);
+        if let Some(r) = &res {
+            self.outline = self.outline.iter().map(|p| r.motion.apply(*p)).collect();
+            self.velocity = r.motion;
+        }
+        self.prev = self.region().and_then(|r| crop_region(frame.img, frame.offset, r));
+        res
     }
 
-    fn step_inner(&mut self, prev: &Image, prev_off: [f64; 2], frame: &Frame) -> Option<MaskStep> {
+    fn step_inner(&mut self, ca: Image, oa: [f64; 2], frame: &Frame) -> Option<MaskStep> {
         let b = bounds(&self.outline);
-        if !(b[0].is_finite() && b[2] > b[0] && b[3] > b[1]) {
-            return None;
-        }
         let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
-        // Crop region (layer pixels): the mask plus room for its motion.
-        let margin = (0.35 * bw.max(bh)).max(32.0);
-        let (lx0, ly0, lx1, ly1) = (b[0] - margin, b[1] - margin, b[2] + margin, b[3] + margin);
-        // Both frames share one plane coordinate system: crop in the frames' image pixels.
-        let crop = |img: &Image, off: [f64; 2]| {
-            let x0 = (lx0 + off[0]).floor().max(0.0) as i64;
-            let y0 = (ly0 + off[1]).floor().max(0.0) as i64;
-            let x1 = ((lx1 + off[0]).ceil() as i64).min(img.width as i64);
-            let y1 = ((ly1 + off[1]).ceil() as i64).min(img.height as i64);
-            if x1 <= x0 + 8 || y1 <= y0 + 8 {
-                return None;
-            }
-            Some((img.crop(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32), [off[0] - x0 as f64, off[1] - y0 as f64]))
-        };
-        let (ca, oa) = crop(prev, prev_off)?;
-        let (cb, ob) = crop(frame.img, frame.offset)?;
+        // Both frames share one plane coordinate system: the crops are in image pixels.
+        let (cb, ob) = crop_region(frame.img, frame.offset, self.region()?)?;
         let factor = analysis_factor(ca.width.max(cb.width), ca.height.max(cb.height), 720);
         // Pyramids must share coordinates: use a common origin (layer pixels → plane).
         let levels = 3;
@@ -217,6 +225,22 @@ mod tests {
             let want: Vec<[f64; 2]> = ring.iter().map(|p| pose(f).apply(*p)).collect();
             let err = mt.outline.iter().zip(&want).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
             assert!(err < 1.5, "frame {f}: max vertex error {err}");
+        }
+    }
+
+    #[test]
+    fn follows_the_disk_through_a_frame_offset() {
+        let off = [40.0, -25.0];
+        let pose = |f: usize| Homography([[1.0, 0.0, 140.0 + 5.0 * f as f64], [0.0, 1.0, 110.0 - 3.0 * f as f64], [0.0, 0.0, 1.0]]);
+        let ring: Vec<[f64; 2]> = (0..24).map(|i| (i as f64 * 15.0).to_radians()).map(|a| [40.0 * a.cos(), 40.0 * a.sin()]).collect();
+        let layer = |f: usize| -> Vec<[f64; 2]> { ring.iter().map(|p| pose(f).apply(*p)).map(|q| [q[0] - off[0], q[1] - off[1]]).collect() };
+        let f0 = frame(&pose(0));
+        let mut mt = MaskTracker::new(Model::Translation, layer(0), &Frame { img: &f0, offset: off });
+        for f in 1..6 {
+            let img = frame(&pose(f));
+            mt.step(&Frame { img: &img, offset: off }).expect("tracked");
+            let err = mt.outline.iter().zip(&layer(f)).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+            assert!(err < 1.0, "frame {f}: max vertex error {err}");
         }
     }
 }

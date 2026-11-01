@@ -132,10 +132,34 @@ fn ffmpeg_available() -> bool {
     Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// `true` when this ffmpeg/ffprobe build actually ships an HEVC decoder. Distro "free" builds
+/// (e.g. Fedora's ffmpeg-free) ship without one — the tools run but cannot decode our stream, so
+/// the external oracle means nothing and the test skips rather than failing on a gap in the tool.
+fn hevc_decoder_available() -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-decoders"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).lines().any(|l| {
+                // Decoder rows look like ` V....D hevc ...`; match the codec name, not the text.
+                // Every row of `-decoders` is a decoder, so the flags column says nothing about
+                // that — its trailing `D` is "supports direct rendering method 1", which a
+                // build's hevc decoder may well lack (requiring it would skip a working oracle).
+                let mut it = l.split_whitespace();
+                it.next().is_some() && it.next() == Some("hevc")
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Decode the Annex-B stream with ffmpeg and require bit-exact equality and an empty stderr.
 fn check_ffmpeg(run: &Run, w: usize, h: usize, bd: u32, tag: &str) {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not found; skipping the ffmpeg oracle");
+        return;
+    }
+    if !hevc_decoder_available() {
+        eprintln!("ffmpeg has no HEVC decoder here; skipping the ffmpeg oracle");
         return;
     }
     let dir = std::env::temp_dir();
@@ -195,6 +219,10 @@ fn intra_8bit_quality_and_decoders() {
 #[test]
 fn ffprobe_stream_info() {
     if !ffmpeg_available() {
+        return;
+    }
+    if !hevc_decoder_available() {
+        eprintln!("ffmpeg has no HEVC decoder here; ffprobe cannot fully describe our stream, skipping");
         return;
     }
     let (w, h) = (130, 72);

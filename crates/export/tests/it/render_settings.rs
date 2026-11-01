@@ -45,7 +45,7 @@ fn custom(start: f64, end: f64) -> RenderSettings {
 }
 
 fn run_with(p: &Project, cid: ItemId, s: &RenderSettings, om: &OutputModule, path: &str, options: JobOptions, cancel: bool) -> (Result<Report, String>, Files) {
-    run_on(p, cid, s, om, path, options, None, cancel)
+    run_on(p, cid, s, om, path, options, (None, cancel))
 }
 
 /// [`run_with`] with an accelerator.
@@ -56,9 +56,9 @@ fn run_on(
     om: &OutputModule,
     path: &str,
     options: JobOptions,
-    accel: Option<&dyn Accelerator>,
-    cancel: bool,
+    execution: (Option<&dyn Accelerator>, bool),
 ) -> (Result<Report, String>, Files) {
+    let (accel, cancel) = execution;
     let files: Files = Default::default();
     let f = files.clone();
     let sink: Box<Sink> = Box::new(move |path: &str, data: Vec<u8>| f.lock().unwrap().push((path.to_string(), data)));
@@ -172,6 +172,31 @@ fn crop_roi_and_resize() {
     om.resize.lock_aspect = true;
     let z = png(&run(&p, cid, &s, &om, "/c/aspect_[#####].png"), 0);
     assert_eq!((z.width(), z.height()), (32, 24));
+}
+
+/// Resizing to the cropped frame's own dimensions must preserve every decoded PNG pixel.
+/// Compare against crop-only output for padding and scaled ROIs with both resize qualities.
+#[test]
+fn crop_resize_preserves_pixels_when_the_cropped_size_is_requested() {
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    for (crop, scale, expected) in [
+        (Crop { enabled: true, left: 16, right: 16, ..Default::default() }, 1.0, (32, 48)),
+        (Crop { enabled: true, left: -4, top: -2, ..Default::default() }, 1.0, (68, 50)),
+        (Crop { enabled: true, use_roi: true, roi: Some([0.0, 24.0, 32.0, 24.0]), ..Default::default() }, 0.5, (16, 12)),
+        (Crop { enabled: true, use_roi: true, roi: Some([0.0, 24.0, 32.0, 24.0]), ..Default::default() }, 2.0, (64, 48)),
+    ] {
+        let settings = RenderSettings { resolution: scale, ..custom(0.4, 0.44) };
+        let mut output = OutputModule { crop, ..OutputModule::for_format(OutputFormat::PngSequence) };
+        let reference = png(&run(&p, cid, &settings, &output, "/c/reference_[#####].png"), 0);
+        assert_eq!(reference.dimensions(), expected);
+        assert!(reference.pixels().any(|p| p.0[0] > 150), "the reference contains visible content");
+        for quality in [ResizeQuality::Low, ResizeQuality::High] {
+            output.resize = Resize { enabled: true, width: expected.0, height: 1, lock_aspect: true, quality };
+            let actual = png(&run(&p, cid, &settings, &output, "/c/resized_[#####].png"), 0);
+            assert_eq!(actual.dimensions(), expected);
+            assert!(actual == reference, "crop {crop:?}, scale {scale}, quality {quality:?}: pixels changed");
+        }
+    }
 }
 
 #[test]
@@ -456,7 +481,7 @@ fn a_job_renders_on_one_compositor() {
     let om = OutputModule::for_format(OutputFormat::PngSequence);
     let s = custom(0.0, 0.4);
     let render = |p: &Project, accel: &GreenAccel, path: &str| {
-        let (r, files) = run_on(p, cid, &s, &om, path, JobOptions::default(), Some(accel), false);
+        let (r, files) = run_on(p, cid, &s, &om, path, JobOptions::default(), (Some(accel), false));
         r.expect("export");
         (0..10).map(|i| png(&files, i)).collect::<Vec<_>>()
     };

@@ -119,3 +119,17 @@ fn dragging_bar_ends_trims_in_and_out() {
     let (i, o, s) = timing(&h, pre);
     assert!((i - 3.0).abs() < 1e-6 && (o - 8.0).abs() < 1.5 / 30.0 && s.abs() < 1e-6, "out extended to ~8 s, not slipped: in {i} out {o} start {s}");
 }
+
+/// With Frames and Frame Count Start at 1, In moves to 00061 but the Duration column still counts
+/// the layer's 120 frames (#1807).
+#[test]
+fn duration_column_counts_frames_from_any_frame_count() {
+    let (mut h, solid, _) = harness();
+    effectcraft_ui_egui::panels::timeline::set_column(&mut h.state_mut().ui.timeline, "in", true).unwrap();
+    effectcraft_ui_egui::panels::timeline::set_column(&mut h.state_mut().ui.timeline, "duration", true).unwrap();
+    h.state_mut().session.execute("file.projectSettings", json!({"timeDisplay": "frames", "frameStart": 1})).unwrap();
+    h.run_steps(3);
+    let cell = |h: &Harness<'_, EffectcraftApp>, kind: &str| h.state().auto.find(&format!("timeline.layer.{solid}.{kind}")).expect("cell").label.clone();
+    assert_eq!(cell(&h, "in"), "00061");
+    assert_eq!(cell(&h, "duration"), "00120");
+}

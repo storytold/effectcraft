@@ -7,6 +7,23 @@
 //
 // Plain functions only: the Rust side owns the logic.
 
+// ------------------------------------------------------------------ shortcuts
+
+/// Keep Duplicate on the app canvas instead of also opening the browser's bookmarks.
+/// The physical D key counts on layouts where it types no ASCII letter (e.g. Cyrillic), because
+/// eframe falls back to the key code there; it does not on Dvorak, where it types E.
+/// eframe still receives the key; other chords and HTML inputs keep their browser behavior.
+export function installCanvasShortcuts(canvas) {
+  canvas.addEventListener("keydown", (event) => {
+    if (event.target === canvas && (event.ctrlKey || event.metaKey)
+      && !event.shiftKey && !event.altKey && !event.isComposing
+      && (event.key.toLowerCase() === "d"
+        || (event.code === "KeyD" && !/^[a-z]$/i.test(event.key)))) {
+      event.preventDefault();
+    }
+  }, { capture: true });
+}
+
 // ------------------------------------------------------------------ storage
 
 const DIR = "effectcraft";
@@ -19,7 +36,7 @@ const enc = (k) => encodeURIComponent(k);
 const dec = (n) => decodeURIComponent(n);
 
 async function opfs() {
-  if (!navigator.storage || !navigator.storage.getDirectory) throw new Error("no OPFS");
+  if (!navigator.storage?.getDirectory) throw new Error("no OPFS");
   const root = await navigator.storage.getDirectory();
   const dir = await root.getDirectoryHandle(DIR, { create: true });
   // Probe a write: some browsers expose OPFS but only write it from workers.
@@ -116,7 +133,7 @@ export async function storeOpen(prefer) {
     try { backend = await make(); break; } catch (e) { console.info(`storage: ${make.name}: ${e.message ?? e}`); }
   }
   // Ask the browser not to evict the store under storage pressure (granted for installed apps).
-  try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch {}
+  try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch {}
   return backend.name;
 }
 
@@ -128,7 +145,7 @@ export async function storeDelete(key) { return backend.del(key); }
 /// Ask the browser to keep the origin's storage under pressure; resolves with whether it is.
 export async function storePersist() {
   try {
-    if (navigator.storage && navigator.storage.persist) return await navigator.storage.persist();
+    if (navigator.storage?.persist) return await navigator.storage.persist();
   } catch {}
   return false;
 }
@@ -227,7 +244,7 @@ export async function audioStart(workletUrl) {
       }
       if (gen !== generation) return;
       node = new AudioWorkletNode(c, "effectcraft-output", { numberOfInputs: 0, outputChannelCount: [2] });
-      node.port.onmessage = (e) => { if (e.data && e.data.underrun) underruns += e.data.underrun; };
+      node.port.onmessage = (e) => { if (e.data?.underrun) underruns += e.data.underrun; };
       kind = "worklet";
     } catch (e) {
       console.warn("audio: AudioWorklet unavailable, using ScriptProcessorNode", e);
@@ -318,11 +335,11 @@ function spawn(base) {
   const w = { worker, files: new Map(), ready: null, gpu: null };
   w.ready = new Promise((res, rej) => {
     worker.onmessage = (e) => {
-      if (e.data && e.data.type === "gpu") {
+      if (e.data?.type === "gpu") {
         w.gpu = e.data.gpu ? { adapter: e.data.gpu } : { cpu: e.data.error || "no GPU" };
         jobGpu = w.gpu;
       }
-      if (e.data && e.data.type === "ready") res();
+      if (e.data?.type === "ready") res();
     };
     worker.onerror = (e) => rej(new Error(e.message || "worker failed to start"));
   });
@@ -341,7 +358,7 @@ export function workerRun(id, json, files, base, onMessage) {
   } catch (e) {
     // `new Worker` throws at once when the page's origin is opaque (a sandboxed iframe): the job
     // fails like one whose worker didn't start.
-    setTimeout(() => onMessage("error", String((e && e.message) || e), null, null));
+    setTimeout(() => onMessage("error", String(e?.message || e), null, null));
     return;
   }
   running.set(id, w);
@@ -416,12 +433,12 @@ export function frameWorkerStart(base, onMessage, gpu) {
     // slot stays, and the failure is reported like a worker that died, after the caller has
     // recorded the index: frames then render on the page's thread (as with `?noworkers`).
     frameWorkers.push(null);
-    setTimeout(() => onMessage(index, undefined, undefined, String((e && e.message) || e || "frame worker failed")));
+    setTimeout(() => onMessage(index, undefined, undefined, String(e?.message || e || "frame worker failed")));
     return index;
   }
   worker.onmessage = (e) => {
     const m = e.data;
-    if (m && m.type === "frameReply") onMessage(index, m.json, m.bytes ? new Uint8Array(m.bytes) : null, undefined);
+    if (m?.type === "frameReply") onMessage(index, m.json, m.bytes ? new Uint8Array(m.bytes) : null, undefined);
   };
   worker.onerror = (e) => {
     onMessage(index, undefined, undefined, String(e.message || "frame worker failed"));
@@ -447,7 +464,7 @@ const cacheDirHandles = {};
 
 async function cacheDir(kind = "frames") {
   if (cacheDirHandles[kind]) return cacheDirHandles[kind];
-  if (!navigator.storage || !navigator.storage.getDirectory) throw new Error("no Origin Private File System");
+  if (!navigator.storage?.getDirectory) throw new Error("no Origin Private File System");
   let d = await navigator.storage.getDirectory();
   for (const n of [CACHE_ROOT, "v1", kind]) d = await d.getDirectoryHandle(n, { create: true });
   cacheDirHandles[kind] = d;
@@ -544,7 +561,7 @@ export async function cacheClear() {
 
 /// Whether this thread has WebGPU (`navigator.gpu`).
 export function hasWebGpu() {
-  return !!(self.navigator && self.navigator.gpu);
+  return !!self.navigator?.gpu;
 }
 
 /// Post a message ({type: "frame", json} or {type: "file", path, bytes}) to frame worker `index`.
@@ -652,7 +669,7 @@ export async function browseForget(name) {
 export async function browseRead(path) {
   const rel = path.replace(/^\/Folders\//, "");
   const folder = folders.get(rel.split("/")[0]);
-  const h = folder && folder.files.get(rel);
+  const h = folder?.files.get(rel);
   if (!h) throw new Error(`${path}: its folder is not open (reconnect it)`);
   return new Uint8Array(await (await h.getFile()).arrayBuffer());
 }
@@ -706,7 +723,7 @@ export function showDeviceLost(message, kept) {
     self.effectcraft
       .execute("file.save", {})
       .catch(() => self.effectcraft.execute("file.saveAs", { path: "/Untitled Project.ecproj" }))
-      .catch((e) => (text.textContent = `Saving failed: ${(e && e.message) || e}`));
+      .catch((e) => (text.textContent = `Saving failed: ${e?.message || e}`));
   const reload = document.createElement("button");
   reload.textContent = "Reload";
   reload.onclick = async () => {
@@ -714,7 +731,7 @@ export function showDeviceLost(message, kept) {
     try {
       await self.effectcraft.flush();
     } catch (e) {
-      text.textContent = `Writing to browser storage failed (${(e && e.message) || e}). Save the project, or reload anyway and lose the changes.`;
+      text.textContent = `Writing to browser storage failed (${e?.message || e}). Save the project, or reload anyway and lose the changes.`;
       reload.textContent = "Reload Anyway";
       reload.disabled = false;
       reload.onclick = () => location.reload();
