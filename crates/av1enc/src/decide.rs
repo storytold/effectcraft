@@ -157,7 +157,8 @@ impl Default for TxScratch {
 /// Saved encoder state of a block area (reconstruction, BlockDecoded flags).
 struct Snapshot {
     planes: [Vec<u16>; 3],
-    decoded: Box<[[[bool; 35]; 35]; 3]>,
+    /// BlockDecoded flags of the block area only (the only flags coding inside it can change).
+    decoded: [[[bool; 16]; 16]; 3],
 }
 
 pub(crate) struct Decider<'a> {
@@ -267,6 +268,13 @@ impl<'a> Decider<'a> {
         }
     }
 
+    /// The BlockDecoded cells `mark_decoded` can set for blocks inside (r, c, n4): rows and
+    /// columns `by + 1 .. by + 1 + step` / `bx + 1 ..` of `decoded[plane]`.
+    fn decoded_region(plane: usize, r: usize, c: usize, n4: usize) -> (usize, usize, usize) {
+        let s = (plane > 0) as usize;
+        ((r & 15) >> s, (c & 15) >> s, (n4 >> s).max(1))
+    }
+
     fn snapshot(&self, r: usize, c: usize, n4: usize) -> Snapshot {
         let planes = std::array::from_fn(|p| {
             let s = (p > 0) as usize;
@@ -278,7 +286,14 @@ impl<'a> Decider<'a> {
             }
             v
         });
-        Snapshot { planes, decoded: self.decoded.clone() }
+        let mut decoded = [[[false; 16]; 16]; 3];
+        for (p, d) in decoded.iter_mut().enumerate() {
+            let (by, bx, step) = Self::decoded_region(p, r, c, n4);
+            for i in 0..step {
+                d[i][..step].copy_from_slice(&self.decoded[p][by + i + 1][bx + 1..bx + 1 + step]);
+            }
+        }
+        Snapshot { planes, decoded }
     }
 
     fn restore(&mut self, snap: &Snapshot, r: usize, c: usize, n4: usize) {
@@ -290,7 +305,12 @@ impl<'a> Decider<'a> {
                 pl.data[y * pl.stride + x0..y * pl.stride + x0 + n].copy_from_slice(&snap.planes[p][i * n..i * n + n]);
             }
         }
-        self.decoded.clone_from(&snap.decoded);
+        for p in 0..3 {
+            let (by, bx, step) = Self::decoded_region(p, r, c, n4);
+            for i in 0..step {
+                self.decoded[p][by + i + 1][bx + 1..bx + 1 + step].copy_from_slice(&snap.decoded[p][i][..step]);
+            }
+        }
     }
 
     fn set_mvs(&mut self, r: usize, c: usize, n4: usize, mv: [i32; 2]) {
@@ -588,15 +608,22 @@ impl<'a> Decider<'a> {
             let comp = |d: i32| if d == 0 { 0.5 } else { 2.0 + 2.0 * log2_of(lg, (d.abs() / 8) as usize + 1) };
             comp(m[0] - pred_mv[0]) + comp(m[1] - pred_mv[1])
         };
-        let cost =
-            |m: [i32; 2]| -> f64 { self.sad_ref(&refr.planes[0], x0 + (m[1] >> 3), y0 + (m[0] >> 3), c * 4, r * 4, n) as f64 + self.lambda_sad * mv_bits(m) };
+        // `bound` is the cost to beat: the SAD stops early once the cost cannot be below it (the
+        // callers only accept a strictly lower cost, so the result is unchanged)
+        let cost = |m: [i32; 2], bound: f64| -> f64 {
+            let lb = self.lambda_sad * mv_bits(m);
+            self.sad_ref(&refr.planes[0], [x0 + (m[1] >> 3), y0 + (m[0] >> 3)], [c * 4, r * 4], n, [lb, bound]) as f64 + lb
+        };
+        // positions already evaluated cannot beat `best` again (costs are deterministic)
+        let mut seen: Vec<[i32; 2]> = Vec::with_capacity(64);
         let mut best = ([0, 0], f64::MAX);
         for &m in &cands {
             let m = [m[0] & !7, m[1] & !7];
-            if !valid(m) {
+            if !valid(m) || seen.contains(&m) {
                 continue;
             }
-            let cst = cost(m);
+            seen.push(m);
+            let cst = cost(m, best.1);
             if cst < best.1 {
                 best = (m, cst);
             }
@@ -617,10 +644,11 @@ impl<'a> Decider<'a> {
                 let center = best.0;
                 for d in [[-step, 0], [step, 0], [0, -step], [0, step]] {
                     let m = [center[0] + d[0], center[1] + d[1]];
-                    if !valid(m) {
+                    if !valid(m) || seen.contains(&m) {
                         continue;
                     }
-                    let cst = cost(m);
+                    seen.push(m);
+                    let cst = cost(m, best.1);
                     if cst < best.1 {
                         best = (m, cst);
                         moved = true;
@@ -631,15 +659,18 @@ impl<'a> Decider<'a> {
         }
         // half- then quarter-sample refinement (plus the exact neighbour candidates)
         let mut buf = vec![0u16; n * n];
-        let sub_cost = |m: [i32; 2], buf: &mut Vec<u16>| -> f64 {
+        let sub_cost = |m: [i32; 2], buf: &mut Vec<u16>, bound: f64| -> f64 {
             self.search_block(m, c * 4, r * 4, n, buf);
-            self.sad(0, c * 4, r * 4, n, buf) as f64 + self.lambda_sad * mv_bits(m)
+            let lb = self.lambda_sad * mv_bits(m);
+            self.sad_bounded(0, [c * 4, r * 4], n, buf, [lb, bound]) as f64 + lb
         };
+        let mut seen_sub: Vec<[i32; 2]> = Vec::with_capacity(24);
         for m in cands {
             if m[0] & 7 != 0 || m[1] & 7 != 0 {
                 let m = [m[0] & !1, m[1] & !1];
-                if valid(m) {
-                    let cst = sub_cost(m, &mut buf);
+                if valid(m) && !seen_sub.contains(&m) {
+                    seen_sub.push(m);
+                    let cst = sub_cost(m, &mut buf, best.1);
                     if cst < best.1 {
                         best = (m, cst);
                     }
@@ -650,10 +681,11 @@ impl<'a> Decider<'a> {
             let center = best.0;
             for d in [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]] {
                 let m = [center[0] + d[0] * step, center[1] + d[1] * step];
-                if !valid(m) {
+                if !valid(m) || seen_sub.contains(&m) {
                     continue;
                 }
-                let cst = sub_cost(m, &mut buf);
+                seen_sub.push(m);
+                let cst = sub_cost(m, &mut buf, best.1);
                 if cst < best.1 {
                     best = (m, cst);
                 }
@@ -739,7 +771,8 @@ impl<'a> Decider<'a> {
     }
 
     /// SAD of the source block at (x, y) (luma) against the reference block at (rx, ry).
-    fn sad_ref(&self, refp: &Plane, rx: i32, ry: i32, x: usize, y: usize, n: usize) -> u64 {
+    /// Stops after a row once `sad + lb >= bound` (the cost can no longer win).
+    fn sad_ref(&self, refp: &Plane, [rx, ry]: [i32; 2], [x, y]: [usize; 2], n: usize, [lb, bound]: [f64; 2]) -> u64 {
         let (vw, vh) = (self.g.width, self.g.height);
         let w = n.min(vw.saturating_sub(x));
         let h = n.min(vh.saturating_sub(y));
@@ -759,45 +792,16 @@ impl<'a> Decider<'a> {
                     sad += (s[j] as i32 - b as i32).unsigned_abs() as u64;
                 }
             }
+            if sad as f64 + lb >= bound {
+                return sad;
+            }
         }
         sad
     }
 
-    /// Sum of absolute Hadamard-transformed differences (4x4 or 8x8 sub-blocks) of a prediction
-    /// against the source, scaled to about the size of the SAD.
-    fn satd(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
-        let src = &self.src[p];
-        let k = n.min(8);
-        let mut total = 0u64;
-        let mut d = [0i32; 64];
-        for by in (0..n).step_by(k) {
-            for bx in (0..n).step_by(k) {
-                for i in 0..k {
-                    let row = &src.row(y + by + i)[x + bx..x + bx + k];
-                    for j in 0..k {
-                        d[i * k + j] = row[j] as i32 - pred[(by + i) * n + bx + j] as i32;
-                    }
-                }
-                for i in 0..k {
-                    hadamard(&mut d[i * k..i * k + k]);
-                }
-                let mut col = [0i32; 8];
-                let mut s = 0u64;
-                for j in 0..k {
-                    for i in 0..k {
-                        col[i] = d[i * k + j];
-                    }
-                    hadamard(&mut col[..k]);
-                    s += col[..k].iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
-                }
-                total += s / (k as u64 / 2);
-            }
-        }
-        total
-    }
-
-    /// SAD of a prediction against the source over the visible part of the block.
-    fn sad(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+    /// SAD of a prediction against the source over the visible part of the block. Stops after a row
+    /// once `sad + lb >= bound` (the cost can no longer win).
+    fn sad_bounded(&self, p: usize, [x, y]: [usize; 2], n: usize, pred: &[u16], [lb, bound]: [f64; 2]) -> u64 {
         let (vw, vh) = self.g.visible(p);
         let w = n.min(vw.saturating_sub(x));
         let h = n.min(vh.saturating_sub(y));
@@ -806,8 +810,58 @@ impl<'a> Decider<'a> {
         for i in 0..h {
             let row = &src.row(y + i)[x..x + w];
             s += row.iter().zip(&pred[i * n..i * n + w]).map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs()).sum::<u32>() as u64;
+            if s as f64 + lb >= bound {
+                return s;
+            }
         }
         s
+    }
+
+    /// Sum of absolute Hadamard-transformed differences (4x4 or 8x8 sub-blocks) of a prediction
+    /// against the source, scaled to about the size of the SAD.
+    fn satd(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        if n >= 8 { self.satd_k::<8>(p, x, y, n, pred) } else { self.satd_k::<4>(p, x, y, n, pred) }
+    }
+
+    /// `satd` with K x K Hadamard sub-blocks (fixed sizes so the butterflies vectorise).
+    fn satd_k<const K: usize>(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        let src = &self.src[p];
+        let mut total = 0u64;
+        for by in (0..n).step_by(K) {
+            for bx in (0..n).step_by(K) {
+                // d[i] holds row i of the differences
+                let mut d = [[0i32; K]; K];
+                for (i, di) in d.iter_mut().enumerate() {
+                    let row = &src.row(y + by + i)[x + bx..x + bx + K];
+                    let pr = &pred[(by + i) * n + bx..(by + i) * n + bx + K];
+                    for j in 0..K {
+                        di[j] = row[j] as i32 - pr[j] as i32;
+                    }
+                }
+                // vertical butterflies across rows (all columns at once)
+                let mut h = 1;
+                while h < K {
+                    for i0 in (0..K).step_by(2 * h) {
+                        for i in i0..i0 + h {
+                            let (a, b) = (d[i], d[i + h]);
+                            for j in 0..K {
+                                d[i][j] = a[j] + b[j];
+                                d[i + h][j] = a[j] - b[j];
+                            }
+                        }
+                    }
+                    h *= 2;
+                }
+                // horizontal butterflies within each row
+                let mut s = 0u64;
+                for di in d.iter_mut() {
+                    hadamard(di);
+                    s += di.iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
+                }
+                total += s / (K as u64 / 2);
+            }
+        }
+        total
     }
 
     fn sse(&self, p: usize, x: usize, y: usize, n: usize, blk: &[u16]) -> f64 {
@@ -1060,6 +1114,65 @@ mod tests {
         let t = log2_table();
         for v in 1..3000usize {
             assert_eq!(log2_of(t, v).to_bits(), (v as f64).log2().to_bits(), "{v}");
+        }
+    }
+
+    /// The SATD as it was before the fixed-size version: runtime block size, column gather.
+    fn satd_ref(src: &Plane, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        let k = n.min(8);
+        let mut total = 0u64;
+        let mut d = [0i32; 64];
+        for by in (0..n).step_by(k) {
+            for bx in (0..n).step_by(k) {
+                for i in 0..k {
+                    let row = &src.row(y + by + i)[x + bx..x + bx + k];
+                    for j in 0..k {
+                        d[i * k + j] = row[j] as i32 - pred[(by + i) * n + bx + j] as i32;
+                    }
+                }
+                for i in 0..k {
+                    hadamard(&mut d[i * k..i * k + k]);
+                }
+                let mut col = [0i32; 8];
+                let mut s = 0u64;
+                for j in 0..k {
+                    for i in 0..k {
+                        col[i] = d[i * k + j];
+                    }
+                    hadamard(&mut col[..k]);
+                    s += col[..k].iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
+                }
+                total += s / (k as u64 / 2);
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn satd_fixed_size_matches_runtime_size() {
+        let g = FrameGeom::new(100, 80);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for bd in [8u32, 10] {
+            let max = (1u64 << bd) - 1;
+            let mut mk = |w: usize, h: usize| {
+                let mut p = Plane::new(w, h);
+                p.data.iter_mut().for_each(|v| *v = (next() % (max + 1)) as u16);
+                p
+            };
+            let src = [mk(128, 128), mk(64, 64), mk(64, 64)];
+            let dec = Decider::new(&g, bd, 100, true, &src, None);
+            for n in [4usize, 8, 16, 32] {
+                let pred: Vec<u16> = (0..n * n).map(|_| (next() % (max + 1)) as u16).collect();
+                for (p, x, y) in [(0, 0, 0), (0, 32, 40), (1, 8, 4)] {
+                    assert_eq!(dec.satd(p, x, y, n, &pred), satd_ref(&src[p], x, y, n, &pred), "n {n} plane {p}");
+                }
+            }
         }
     }
 }
