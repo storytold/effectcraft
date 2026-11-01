@@ -78,7 +78,7 @@ impl Services for FsServices {
     }
     fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
         use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
+        let file = std::fs::File::open(path)?;
         let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
