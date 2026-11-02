@@ -67,7 +67,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    // wgpu's environment variables apply (`WGPU_BACKEND`, ...), as for SAM 2's own instance
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let adapter = pollster::block_on(
         instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }),
     )?;
