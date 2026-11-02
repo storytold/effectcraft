@@ -574,8 +574,12 @@ impl Chain {
             return Some(s);
         }
         let root = match object {
-            Some(_) => {
-                std::iter::successors(Some(f), |g| self.data.source_of(*g)).filter(|g| strokes(*g).iter().any(|s| s.kind == StrokeKind::Fg)).last().unwrap_or(f)
+            Some(o) => {
+                // one pass over the strokes, not one per frame on the way
+                let base = self.data.base?;
+                let on_the_way = |g: i64| (g == base || g.cmp(&base) == f.cmp(&base)) && g.abs_diff(base) <= f.abs_diff(base);
+                let fg = self.data.strokes.iter().filter(|s| s.object == o && s.kind == StrokeKind::Fg && on_the_way(s.frame));
+                fg.map(|s| s.frame).min_by_key(|g| g.abs_diff(base)).unwrap_or(f)
             }
             None => self.data.base?,
         };
