@@ -1265,6 +1265,18 @@ fn shape_content_bounds_are_the_visual_edges() {
     }
 }
 
+/// #2660: paragraph (box) text is outlined by its box, not by the glyphs, so the viewer shows one box.
+#[test]
+fn paragraph_text_content_bounds_are_its_box() {
+    let (mut p, cid, comp) = setup();
+    let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+    let doc = TextDoc { text: "HI".into(), size: 20.0, box_size: Some([150.0, 60.0]), box_pos: [-75.0, -30.0], ..Default::default() };
+    l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(doc));
+    p.comp_mut(cid).unwrap().layers.push(l.clone());
+    let ctx = crate::EvalCtx::new(&p, cid, p.comp(cid).unwrap(), Tick::ZERO);
+    assert_eq!(crate::content_bounds(&ctx, &l), Some([-75.0, -30.0, 75.0, 30.0]));
+}
+
 /// Solo is not time-dependent (as in After Effects): while any layer is soloed, the others stay
 /// excluded even when the playhead is outside the soloed layer's in-out range.
 #[test]

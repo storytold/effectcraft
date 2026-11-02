@@ -165,7 +165,16 @@ impl EffectcraftApp {
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
             proxy: Default::default(),
+            unmasked_layer: self.edited_masked_text(comp),
         }
+    }
+
+    /// The text layer of `comp` being edited, when it has masks: they would cut the text while
+    /// typing, so viewer frames render it without them (`request_frame_with`).
+    fn edited_masked_text(&self, comp: ItemId) -> Option<u64> {
+        let id = self.session.state.text_edit.as_ref()?.layer;
+        let layer = self.session.project.comp(comp)?.layer(id)?;
+        layer.masks().is_some_and(|m| !m.children.is_empty()).then_some(id.0)
     }
 
     fn request_frame_with(
@@ -179,6 +188,15 @@ impl EffectcraftApp {
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        request(&self.frames, &self.render_source(), key, comp, t, opts);
+        let mut src = self.render_source();
+        if let Some(id) = opts.unmasked_layer {
+            // ponytail: clones the project per request while a masked text is edited; cache it if big projects lag.
+            let mut p = (*src.project).clone();
+            if let Some(m) = p.comp_mut(comp).and_then(|c| c.layer_mut(effectcraft_engine::project::LayerId(id))).and_then(|l| l.props.sub_mut("masks")) {
+                m.children.clear();
+            }
+            src.project = Arc::new(p);
+        }
+        request(&self.frames, &src, key, comp, t, opts);
     }
 }

@@ -28,6 +28,10 @@ pub struct RenderOpts {
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,
+    /// Viewer only: the id of a text layer being edited whose masks the caller removed from the
+    /// project it renders (the text shows whole while typing). The renderer ignores it; it is in
+    /// the options so cached frames of the masked render are not reused.
+    pub unmasked_layer: Option<u64>,
 }
 
 impl RenderOpts {
@@ -50,6 +54,7 @@ impl Default for RenderOpts {
             nested_switches: true,
             draft_shadows: true,
             proxy: effectcraft_project::render_queue::ProxyUse::CurrentSettings,
+            unmasked_layer: None,
         }
     }
 }

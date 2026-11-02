@@ -769,13 +769,32 @@ impl<'a> Para<'a> {
         if self.width.is_none() {
             return std::iter::once(0..self.text.len()).collect();
         }
-        let opps: Vec<usize> = unicode_linebreak::linebreaks(self.text).map(|(p, _)| p).collect();
+        let opps = self.split_overlong_words(unicode_linebreak::linebreaks(self.text).map(|(p, _)| p).collect());
         let mut ranges = if self.para.every_line && opps.len() > 1 && opps.len() <= 1500 { self.optimal_breaks(&opps) } else { self.greedy_breaks(opps) };
         ranges.retain(|r| !r.is_empty());
         if ranges.is_empty() {
             ranges.push(0..self.text.len());
         }
         ranges
+    }
+
+    /// A word wider than a whole line has no break opportunity, so it would run past the box:
+    /// adds a break before every character of such a word (After Effects breaks it at the edge).
+    /// ponytail: breaks between chars, not grapheme clusters; use clusters if combining marks split.
+    fn split_overlong_words(&self, opps: Vec<usize>) -> Vec<usize> {
+        let max = self.line_avail(0).min(self.line_avail(1));
+        let mut out = Vec::with_capacity(opps.len());
+        let mut prev = 0usize;
+        for p in opps {
+            if p > prev && self.fits_w(&(prev..p)) > max {
+                out.extend(
+                    self.text.get(prev..p).into_iter().flat_map(|w| w.char_indices().skip(1).filter(|(_, c)| !c.is_whitespace()).map(move |(i, _)| prev + i)),
+                );
+            }
+            out.push(p);
+            prev = p;
+        }
+        out
     }
 
     /// Minimises the summed squared slack of every line but the last; with Justify All the last

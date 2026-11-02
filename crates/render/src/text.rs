@@ -855,6 +855,13 @@ pub fn glyph_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<(BezPath, CharXf)> {
     text_geom(ctx, layer).map(|t| t.glyphs.iter().map(|g| (g.path(), g.xf)).collect()).unwrap_or_default()
 }
 
+/// Layer-space `[x0, y0, x1, y1]` of a paragraph (box) text layer's box, `None` for point text.
+pub fn text_box(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 4]> {
+    let doc = source_text(ctx, layer)?;
+    let b = doc.box_size?;
+    Some([doc.box_pos[0], doc.box_pos[1], doc.box_pos[0] + b[0], doc.box_pos[1] + b[1]])
+}
+
 fn path_join(j: effectcraft_keyframe::LineJoin) -> effectcraft_path::Join {
     use effectcraft_keyframe::LineJoin;
     match j {

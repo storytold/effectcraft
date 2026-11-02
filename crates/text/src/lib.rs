@@ -654,6 +654,16 @@ mod tests {
         assert_eq!(l.char_of_byte(doc.byte_of(12)), 12);
     }
 
+    /// #2660: a word wider than the box breaks at the box edge instead of running past it.
+    #[test]
+    fn overlong_word_wraps_inside_the_box() {
+        let doc =
+            TextDoc { text: "fkdslfkdslfkdslfksdlfkdsdsdfkdslfkdslfkdslfksdlfkdsdsd".into(), size: 20.0, box_size: Some([100.0, 200.0]), ..Default::default() };
+        let l = layout_doc(&doc);
+        assert!(l.line_boxes.len() > 1, "{} lines", l.line_boxes.len());
+        assert!(l.line_boxes.iter().all(|b| b[2] <= 100.5), "{:?}", l.line_boxes);
+    }
+
     #[test]
     fn paragraph_box_offset_and_vertical_type() {
         let doc = TextDoc { text: "ab cd".into(), size: 20.0, box_size: Some([200.0, 100.0]), box_pos: [-100.0, -50.0], ..Default::default() };
