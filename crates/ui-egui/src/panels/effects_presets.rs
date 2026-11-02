@@ -532,9 +532,7 @@ fn contents_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Contex
     let mpop = egui::Id::unique("fx-contents-menu");
     let menu_resp = widgets::icon_button(ui, mr, Icon::Hamburger, false, t, egui::Id::unique("fx-menu")).on_hover_text(tr("Effects & Presets options"));
     a11y::menu_button(&menu_resp, tr("Effects & Presets options"), widgets::popup_is_open(ui, mpop));
-    if menu_resp.clicked() {
-        widgets::open_popup(ui, mpop);
-    }
+    widgets::open_on_press(ui, &menu_resp, mpop);
     app.auto.add("effects.menu", mr, "Effects & Presets options");
     let view = app.ui.effects_view.clone();
     let mark = |on: bool, l: &str| if on { format!("✓ {l}") } else { format!("    {l}") };

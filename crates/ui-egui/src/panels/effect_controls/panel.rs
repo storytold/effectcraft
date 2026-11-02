@@ -134,9 +134,7 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
     bp.text(about.center(), Align2::CENTER_CENTER, crate::i18n::tr("About..."), Tokens::ui(11.5), if aresp.hovered() { t.hot_text } else { t.text_dim });
     app.auto.add(&format!("effectControls.effect.{}.about", g.uid), about, "About");
     let apop = egui::Id::unique(("ec-about-pop", g.uid));
-    if aresp.clicked() {
-        widgets::open_popup(ui, apop);
-    }
+    widgets::open_on_press(ui, &aresp, apop);
     if let Some(spec) = effectcraft_engine::effects::find(effect) {
         let lines = vec![
             crate::i18n::effects::name(spec.id, spec.name),
