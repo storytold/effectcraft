@@ -76,22 +76,76 @@ fn merge_add_feeds_fill_below_and_drops_paint_above() {
     assert!((coverage(&img) - 80.0 * 40.0).abs() < 20.0, "{}", coverage(&img));
 }
 
-/// #1174: Adding Merge Paths to a shape layer's Contents, after the group that holds the
-/// shape and its paint, erased the render. The merge drops paints above it *in its group* —
-/// not paint that belongs to a group above it.
+/// A shape layer's Contents of two whole groups, each with its own red fill, and a Merge Paths in
+/// `mode`, with a green fill below it if `fill`. The rectangles span x 70..110 (on top) and 90..130.
+fn merged_groups(mode: u32, fill: bool) -> Image {
+    let (p, cid) = shape_comp(|ids| {
+        let (r1, f1) = (build::shape_rect(ids, [40.0, 40.0], [-10.0, 0.0], 0.0), build::shape_fill(ids, RED));
+        let (r2, f2) = (build::shape_rect(ids, [40.0, 40.0], [10.0, 0.0], 0.0), build::shape_fill(ids, RED));
+        let mut items = vec![
+            build::shape_group(ids, "Group 1", vec![r1, f1]),
+            build::shape_group(ids, "Group 2", vec![r2, f2]),
+            op(ids, "merge", &[("mode", Value::Enum(mode))]),
+        ];
+        if fill {
+            items.push(build::shape_fill(ids, GREEN));
+        }
+        items
+    });
+    frame(&p, cid)
+}
+
+/// #2175: Merge Paths below whole groups merges them. Their paths go into the merge and their own
+/// paints stop rendering, so the paint below it alone paints the result, in every mode.
 #[test]
-fn merge_paths_below_a_group_keeps_the_group_paint() {
-    for mode in [0u32, 1] {
-        let (p, cid) = shape_comp(|ids| {
-            let rect = build::shape_rect(ids, [40.0, 40.0], [0.0, 0.0], 0.0);
-            let fill = build::shape_fill(ids, RED);
-            vec![build::shape_group(ids, "Group 1", vec![rect, fill]), op(ids, "merge", &[("mode", Value::Enum(mode))])]
-        });
-        let img = frame(&p, cid);
-        let c = img.get(100, 50);
-        assert!(c[0] > 0.99 && c[1] < 0.01 && c[3] > 0.99, "mode {mode}: group rectangle must still render, got {c:?}");
-        assert!((coverage(&img) - 40.0 * 40.0).abs() < 20.0, "mode {mode}: {}", coverage(&img));
+fn merge_paths_below_groups_merges_them_in_every_mode() {
+    // Mode, area, and whether the top rectangle's own part, the overlap and the other's own part
+    // are covered.
+    let cases = [
+        (0, 60.0 * 40.0, [true, true, true]),
+        (1, 60.0 * 40.0, [true, true, true]),
+        (2, 20.0 * 40.0, [true, false, false]),
+        (3, 20.0 * 40.0, [false, true, false]),
+        (4, 40.0 * 40.0, [true, false, true]),
+    ];
+    for (mode, area, covered) in cases {
+        let img = merged_groups(mode, true);
+        assert!((coverage(&img) - area).abs() < 20.0, "mode {mode}: {}", coverage(&img));
+        for (x, inside) in [80, 100, 120].into_iter().zip(covered) {
+            let c = img.get(x, 50);
+            assert_eq!(c[3] > 0.99, inside, "mode {mode} at x {x}: {c:?}");
+            assert!(c[0] < 0.01, "mode {mode} at x {x}: the groups' red does not render: {c:?}");
+        }
     }
+}
+
+/// A Merge Paths with no paint below it paints nothing: the paint above it, in the groups too, has
+/// gone with its paths into the merge. `layer.addShapeItem` adds the paint (#2175).
+#[test]
+fn merge_paths_with_no_paint_below_renders_nothing() {
+    for mode in 0..5 {
+        assert_eq!(coverage(&merged_groups(mode, false)), 0.0, "mode {mode}");
+    }
+}
+
+/// A Merge Paths takes in a nested group's merged result, and only its own paint renders.
+#[test]
+fn merge_paths_take_in_a_nested_merge() {
+    let (p, cid) = shape_comp(|ids| {
+        let (r1, r2) = (build::shape_rect(ids, [40.0, 40.0], [-30.0, 0.0], 0.0), build::shape_rect(ids, [40.0, 40.0], [-10.0, 0.0], 0.0));
+        let inner = op(ids, "merge", &[("mode", Value::Enum(1))]);
+        let fill = build::shape_fill(ids, RED);
+        vec![
+            build::shape_group(ids, "Group 1", vec![r1, r2, inner, fill]),
+            build::shape_rect(ids, [20.0, 20.0], [-20.0, 0.0], 0.0),
+            op(ids, "merge", &[("mode", Value::Enum(2))]),
+            build::shape_fill(ids, GREEN),
+        ]
+    });
+    let img = frame(&p, cid);
+    assert!(alpha(&img, 80, 50) < 0.01, "the hole the outer merge cuts");
+    let c = img.get(60, 50);
+    assert!(c[1] > 0.99 && c[0] < 0.01, "the outer fill alone: {c:?}");
 }
 
 #[test]

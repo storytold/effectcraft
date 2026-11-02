@@ -6,6 +6,8 @@
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::LayerId;
+use effectcraft_engine::render::RenderOpts;
+use effectcraft_time::Tick;
 use effectcraft_ui_egui::{Dialog, EffectcraftApp};
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2};
 use egui_kittest::Harness;
@@ -90,6 +92,37 @@ fn shape_contents_add_menu_adds_wiggle_transform() {
     let layer = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
     let items: Vec<&str> = layer.props.sub("contents").unwrap().groups().map(|g| g.match_id.as_str()).collect();
     assert_eq!(items, ["group", "wiggler"]);
+}
+
+/// #2175: two shapes drawn with the tool, Add ▸ Merge Paths on the layer's Contents and Mode
+/// Subtract: the layer's list merges them, with a paint, and the top shape gets a hole.
+#[test]
+fn shape_contents_add_menu_merges_two_tool_shapes() {
+    let mut s = session();
+    let l =
+        s.execute("shape.newShape", json!({"kind": "rect", "size": [40, 40], "position": [160, 90], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    // The newest shape goes on top of the list.
+    s.execute("shape.newShape", json!({"kind": "rect", "size": [100, 100], "position": [160, 90], "fill": "#ff0000"})).unwrap();
+    let contents = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("contents").unwrap().uid;
+    let mut h = harness(s);
+    open_layer(&mut h, l);
+    click(&mut h, &format!("timeline.group.{contents}.add"));
+    let entry = h.get_by_label("Merge Paths").rect();
+    click_at(&mut h, entry.center());
+    let s = &mut h.state_mut().session;
+    let layer = s.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+    let c = layer.props.sub("contents").unwrap();
+    let items: Vec<&str> = c.groups().map(|g| g.match_id.as_str()).collect();
+    assert_eq!(items, ["group", "group", "merge", "fill"]);
+    let cid = s.active_comp_id().unwrap();
+    let frame = |s: &Session| s.render(cid, Tick::ZERO, RenderOpts::default());
+    // Mode Add: the new fill alone paints the union.
+    let added = frame(s).get(160, 90);
+    assert!(added[2] > added[0] && added[3] > 0.99, "the merged path takes the new blue fill, not the groups' red: {added:?}");
+    s.execute("prop.set", json!({"layer": l, "path": "contents/merge/mode", "value": 2})).unwrap();
+    let img = frame(s);
+    assert!(img.get(160, 90)[3] < 0.01, "Subtract cuts a hole: {:?}", img.get(160, 90));
+    assert!(img.get(120, 90)[3] > 0.99, "and keeps the rest: {:?}", img.get(120, 90));
 }
 
 /// A shape group's inner Contents is elided in After Effects: opening the group lists its items

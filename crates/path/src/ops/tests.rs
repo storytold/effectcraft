@@ -405,6 +405,9 @@ fn merge_modes_edge_cases() {
     let s = merge(&[sq(0.0, 0.0, 100.0), sq(0.0, 0.0, 50.0), sq(50.0, 50.0, 50.0)], MergeMode::Subtract);
     assert!(close(area(&[s]), 5000.0, 1e-6));
     assert!(merge(&[], MergeMode::Add).elements().is_empty());
+    // An empty top path leaves nothing to subtract from: the next path does not become the top.
+    assert!(merge(&[BezPath::new(), sq(0.0, 0.0, 100.0)], MergeMode::Subtract).elements().is_empty());
+    assert!(close(area(&[merge(&[sq(0.0, 0.0, 100.0), BezPath::new()], MergeMode::Subtract)]), 10000.0, 1e-6));
 }
 
 #[test]

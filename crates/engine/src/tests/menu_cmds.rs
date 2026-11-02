@@ -1805,6 +1805,67 @@ fn pasted_merge_paths_keeps_the_targets_paint() {
     assert_eq!(opaque_centroid(&s).2, before);
 }
 
+/// A new shape layer's Contents names after adding `items` and then Add ▸ Merge Paths.
+fn with_added_merge(s: &mut Session, items: &[&str]) -> (u64, Vec<String>) {
+    let l = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    for kind in items {
+        s.execute("layer.addShapeItem", json!({"layer": l, "kind": kind})).unwrap();
+    }
+    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge"})).unwrap();
+    (l, contents_names(s, l))
+}
+
+/// Add ▸ Merge Paths takes in every path and group above it, whatever stands around them, and
+/// paints the result: Mode Add, the paint below it kept, or the Tools bar's added in one undo step
+/// (#2175).
+#[test]
+fn add_merge_paths_goes_below_the_paths_and_paints_the_result() {
+    let mut s = comp();
+    // No paint: the Tools bar's Fill follows it (Stroke Width is 0 by default, so no Stroke).
+    let (l, names) = with_added_merge(&mut s, &["rect", "ellipse"]);
+    assert_eq!(names, ["Rectangle Path 1", "Ellipse Path 1", "Merge Paths 1", "Fill 1"]);
+    let contents = layer(&s, l).props.sub("contents").unwrap().clone();
+    let merge = contents.groups().find(|g| g.match_id == "merge").unwrap();
+    assert_eq!(merge.get("mode").unwrap().value, KV::Enum(1), "Mode Add");
+    let fill = contents.groups().find(|g| g.match_id == "fill").unwrap();
+    let [r, g, b] = s.state.shape_tool.fill.color;
+    assert_eq!(fill.get("color").unwrap().value.as_color(), [r, g, b, 1.0]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(contents_names(&s, l), ["Rectangle Path 1", "Ellipse Path 1"], "one undo step");
+    // Groups count as paths, and a paint below them is kept, with nothing added.
+    let (_, names) = with_added_merge(&mut s, &["rect", "group", "fill"]);
+    assert_eq!(names, ["Rectangle Path 1", "Group 1", "Merge Paths 1", "Fill 1"]);
+    // A paint between the paths stays above the merge and goes with them; a new one is added.
+    let (_, names) = with_added_merge(&mut s, &["rect", "fill", "ellipse"]);
+    assert_eq!(names, ["Rectangle Path 1", "Fill 1", "Ellipse Path 1", "Merge Paths 1", "Fill 1"]);
+    // Both of the Tools bar's paints, Stroke first as on a drawn shape.
+    s.execute("shape.toolOptions", json!({"strokeWidth": 3, "stroke": "#00ff00"})).unwrap();
+    let (_, names) = with_added_merge(&mut s, &["rect"]);
+    assert_eq!(names, ["Rectangle Path 1", "Merge Paths 1", "Stroke 1", "Fill 1"]);
+    // Scripts build the list themselves.
+    let a = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "rect"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "fill"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge", "append": true})).unwrap();
+    assert_eq!(contents_names(&s, a), ["Rectangle Path 1", "Fill 1", "Merge Paths 1"]);
+}
+
+/// Pasted with nothing selected, Merge Paths goes below the groups too, not above them where it
+/// would take in nothing (#2175).
+#[test]
+fn pasted_merge_paths_goes_below_the_targets_groups() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "none", "name": "A"})).unwrap()["layer"].as_u64().unwrap();
+    let merge = s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge"})).unwrap()["uid"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "none", "name": "B"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": b, "kind": "group"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": merge})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(contents_names(&s, b), ["Group 1", "Merge Paths 1"]);
+}
+
 /// Edit ▸ Duplicate with shape items selected duplicates them in their layer, above the
 /// original and named "Rectangle 2", not the layer (#227).
 #[test]
