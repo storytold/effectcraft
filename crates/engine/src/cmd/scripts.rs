@@ -31,8 +31,16 @@ pub const STARTUP_DIR: &str = "Scripts/Startup";
 pub const SHUTDOWN_DIR: &str = "Scripts/Shutdown";
 /// Commands that run script files or script code (a ScriptUI panel runs its script when it
 /// opens). Scripts and batches can't run them, and confined automation sessions refuse them.
-pub const RUNS_SCRIPTS: &[&str] =
-    &["script.run", "file.runScript", "file.runStartupScripts", "file.runShutdownScripts", "window.scriptPanel", "window.restoreScriptPanels"];
+pub const RUNS_SCRIPTS: &[&str] = &[
+    "script.run",
+    "file.runScript",
+    "file.runStartupScripts",
+    "file.runShutdownScripts",
+    "window.scriptPanel",
+    "window.restoreScriptPanels",
+    // File ▸ Import ▸ Converted Project… runs the installed converter's script.
+    "file.importConvertedProject",
+];
 /// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
 /// `$.evalFile` allow.
 const MAX_SCRIPT_BYTES: usize = 16 << 20;
