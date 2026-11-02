@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build, sign and package EffectCraft for Windows.
+  Build, sign and package Visualab Effects for Windows.
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
@@ -53,7 +53,7 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 if (-not $env:EFFECTCRAFT_BUILD_SHA) { $env:EFFECTCRAFT_BUILD_SHA = (git -C $Root rev-parse HEAD 2>$null) }
 if (-not $env:EFFECTCRAFT_BUILD_DATE) { $env:EFFECTCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
 
-Write-Output "EffectCraft $Version for Windows $Arch ($Target)"
+Write-Output "Visualab Effects $Version for Windows $Arch ($Target)"
 
 if (-not $SkipBuild) {
   # Static CRT: no VC++ redistributable needed. Scoped to the target so host build scripts and
@@ -116,7 +116,7 @@ foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE'
   if (Test-Path $p) { Copy-Item $p $Portable }
 }
 # portable.txt beside effectcraft.exe switches on portable mode: settings, shortcuts and recovery
-# files go to EffectCraftData\ next to the exe instead of %APPDATA% (#993; see app_dirs.rs).
+# files go to Visualab EffectsData\ next to the exe instead of %APPDATA% (#993; see app_dirs.rs).
 Copy-Item (Join-Path $PSScriptRoot 'portable.txt') $Portable
 $Zip = Join-Path $Dist "effectcraft-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue

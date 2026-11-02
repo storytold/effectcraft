@@ -1,6 +1,6 @@
 //! # effectcraft-automation (L5)
 //!
-//! Makes EffectCraft drivable by AI agents. See `docs/agents.md`.
+//! Makes Visualab Effects drivable by AI agents. See `docs/agents.md`.
 //!
 //! * [`McpServer`]: a Model Context Protocol server (JSON-RPC 2.0, newline-delimited over stdio),
 //!   hand-rolled on `serde_json`; no async runtime, starts instantly.

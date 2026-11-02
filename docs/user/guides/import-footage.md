@@ -1,11 +1,11 @@
 ---
 title: Import footage and image sequences
-description: Bring video, images and numbered image sequences into an EffectCraft project, and change how footage is read.
+description: Bring video, images and numbered image sequences into an Visualab Effects project, and change how footage is read.
 order: 50
 verified: 0.9.2
 ---
 
-Choose **File ▸ Import ▸ File...** (Ctrl+I) and pick your files, or drop files on the EffectCraft window. Numbered stills such as `shot_0001.png` can import as one sequence that plays like a movie.
+Choose **File ▸ Import ▸ File...** (Ctrl+I) and pick your files, or drop files on the Visualab Effects window. Numbered stills such as `shot_0001.png` can import as one sequence that plays like a movie.
 
 Shortcuts on this page use Ctrl. On macOS, use Cmd instead of Ctrl and Option instead of Alt.
 
@@ -22,14 +22,14 @@ You can also drop files or folders on the window. Files dropped on the Compositi
 1. Choose **File ▸ Import ▸ File...** and pick any one numbered file of the run.
 2. In the **Import Image Sequence** dialog, check the run it found. It also lists missing frames.
 3. Tick the sequence option, which is named after the file type, for example **PNG Sequence**. When it is off, the files import as separate stills. It is off by default.
-4. Set **Frame rate (fps)**. The default comes from **Sequence Footage** on the Import page of the preferences (**Edit ▸ Preferences ▸ Import...**; on macOS: **EffectCraft ▸ Settings... ▸ Import...**), which is 30 fps.
+4. Set **Frame rate (fps)**. The default comes from **Sequence Footage** on the Import page of the preferences (**Edit ▸ Preferences ▸ Import...**; on macOS: **Visualab Effects ▸ Settings... ▸ Import...**), which is 30 fps.
 5. Confirm. The run arrives as one footage item named like `shot_[0001-0250].png`.
 
 **Force alphabetical order** imports every image of that type in the folder in name order, whatever the numbering. Use it for files that are not numbered consistently.
 
 Stills in PNG, JPEG, TIFF, OpenEXR, BMP, WebP, Targa (`.tga`), Radiance HDR (`.hdr`), DPX and Cineon (`.cin`) can form a sequence. PSD, SVG and PDF files import one by one.
 
-If the numbering skips a frame, EffectCraft shows colour bars for it. Put the missing files in the folder and choose **File ▸ Reload Footage** to fill the gap.
+If the numbering skips a frame, Visualab Effects shows colour bars for it. Put the missing files in the folder and choose **File ▸ Reload Footage** to fill the gap.
 
 ## Change how footage is read
 

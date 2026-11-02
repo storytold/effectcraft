@@ -11,11 +11,7 @@ written only under a write root; with no write root nothing is written. Every en
 (`execute_command`, `command_run`, each `batch` step) is checked before it runs: its file
 parameters must be absolute paths inside the roots (symbolic links resolved, no `..`), and so must
 any other absolute path in its parameters. Save, Increment and Save and rendering the Render
-Queue are checked against the files they write (the open project's, the queued outputs);
-`renderQueue.add`, `render.preRender` and `file.createProxy` without an output file need a saved
-project, since an unsaved one's default output would go to the home folder (#2479). In a headless
-session the footage a project names, and what an imported file pulls in, is read only inside the
-roots too: footage outside them shows as missing (#2131). Scripts
+Queue are checked against the files they write (the open project's, the queued outputs). Scripts
 (`run_script`, `file.runScript`…), Execute File, Reveal in Finder, `$N` references to file paths
 in a batch, and the bridge's UI-driving tools (`ui_click`, `ui_key`, `ui_type`, `ui_drag`,
 `ui_set`, `script_ui`, `control`) are refused while confined. Without the flags nothing changes.
@@ -38,7 +34,7 @@ for the full catalog. Each tool has a title and read-only, destructive, idempote
 open-world hints. Tools with an optional output path are conservatively annotated as file writers.
 
 Unknown top-level tool argument keys return JSON-RPC `-32602` naming the key and accepted
-arguments. EffectCraft already rejects unknown engine command parameters; that behaviour is
+arguments. Visualab Effects already rejects unknown engine command parameters; that behaviour is
 preserved. Tool failures (including escaped panics) return `isError: true`, and so does any JSON
 result with a `failed` count above zero (a `command_batch` / `batch` with a failed step, a
 render whose queue items did not all finish), even though the other steps or items succeeded:
@@ -54,17 +50,6 @@ receive `resultType: complete` and list/read cache hints; document reads are nev
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"comp.new","params":{"width":640,"height":360}}}}
 {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"effectcraft://document"}}
 ```
-
-## Two outputs on one file
-
-Two outputs of one job that write the same file (two items with one Output To, a duplicated item,
-output modules or segments that meet) refuse the whole `renderQueue.render` before anything is
-written: the reply is `isError: true`, naming both items, and the queue is left as it was.
-Sequences clash only on the frames both write. Skip Existing Files leaves earlier frames alone
-only when the exporter can check the final destination; browser/memory sinks and storage-overflow
-renders still report collisions. Preflight checks every configured overflow destination, since free
-space can change during a render. A new item's default output name is numbered (`Main.mp4`,
-`Main_1.mp4`) when another item of the queue writes it.
 
 ## Progress and cancellation
 

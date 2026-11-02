@@ -55,7 +55,7 @@ if (-not $haveCert -and -not $haveAzure) {
 }
 
 $script:SignTool = Find-SignTool
-$common = @('sign', '/v', '/fd', 'SHA256', '/td', 'SHA256', '/d', 'EffectCraft', '/du', 'https://github.com/storytold/effectcraft')
+$common = @('sign', '/v', '/fd', 'SHA256', '/td', 'SHA256', '/d', 'Visualab Effects', '/du', 'https://github.com/wasigonzi/visualab-effects')
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "effectcraft-sign-$([IO.Path]::GetRandomFileName())"
 New-Item -ItemType Directory -Path $tmp | Out-Null
 

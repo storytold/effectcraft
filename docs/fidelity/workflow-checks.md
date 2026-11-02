@@ -74,7 +74,7 @@ The broader reference is the [official AE user guide](https://helpx.adobe.com/af
 The [publisher's 2026 Classroom in a Book sample](https://ptgmedia.pearsoncmg.com/images/9780135561430/samplepages/9780135561430_Sample.pdf)
 was also reviewed. Its Roto Brush lesson supplies future behavior cases for foreground/background
 strokes, alpha display modes, frame propagation, and freezing. Those cases are reference backlog,
-not verified EffectCraft parity; book artwork and lesson files are not copied into this repository.
+not verified Visualab Effects parity; book artwork and lesson files are not copied into this repository.
 
 Theme fixes use matched token backgrounds/text for fields, secondary buttons, notifications,
 and About links. Compact viewer footers omit render duration when it would collide with timecode.

@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#1b1c1f">
-  <meta name="description" content="EffectCraft: motion graphics and visual effects in the browser">
-  <title>EffectCraft</title>
+  <meta name="description" content="Visualab Effects: motion graphics and visual effects in the browser">
+  <title>Visualab Effects</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icon-256.png">
@@ -41,7 +41,7 @@
 </head>
 <body>
   <canvas id="effectcraft_canvas"></canvas>
-  <div id="loading"><img src="favicon.svg" alt=""><div id="status">Loading EffectCraft…</div></div>
+  <div id="loading"><img src="favicon.svg" alt=""><div id="status">Loading Visualab Effects…</div></div>
   <script type="module">
     import init, * as ec from "./effectcraft_web.js";
     const t0 = performance.now();
@@ -114,7 +114,7 @@
       window.effectcraftLoad.readyMs = performance.now() - t0;
     } catch (e) {
       const s = document.getElementById("status");
-      if (s) { s.className = "err"; s.textContent = "EffectCraft failed to start:\n" + (e && e.stack || e); }
+      if (s) { s.className = "err"; s.textContent = "Visualab Effects failed to start:\n" + (e && e.stack || e); }
       window.effectcraftLoad.error = String(e);
       throw e;
     }

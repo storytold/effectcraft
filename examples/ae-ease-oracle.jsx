@@ -14,7 +14,7 @@ cases = [
 ];
 for (i = 0; i <= 20; i++) times.push(i / 20);
 try {
-    comp = app.project.items.addComp("EffectCraft original ease oracle", 64, 64, 1, 2, 20);
+    comp = app.project.items.addComp("Visualab Effects original ease oracle", 64, 64, 1, 2, 20);
     layer = comp.layers.addText("Original behavioral probe");
     p = layer.property("ADBE Transform Group").property("ADBE Rotate Z");
     for (i = 0; i < cases.length; i++) {

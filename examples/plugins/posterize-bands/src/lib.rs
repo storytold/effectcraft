@@ -1,4 +1,4 @@
-//! Posterize Bands: an example EffectCraft effect plug-in (plug-in API v1, see
+//! Posterize Bands: an example Visualab Effects effect plug-in (plug-in API v1, see
 //! `docs/plugins.md`). It quantizes each pixel's luminance into `levels` bands and mixes a tint
 //! colour in by `mix` percent, optionally only above a `threshold`.
 //!
@@ -16,7 +16,7 @@ const MANIFEST: &str = r#"{
   "name": "Posterize Bands",
   "category": "Stylize",
   "version": "1.0.0",
-  "author": "EffectCraft contributors",
+  "author": "Visualab Effects contributors",
   "description": "Quantizes luminance into tinted bands.",
   "params": [
     {"id": "levels", "name": "Levels", "type": "slider", "default": 4, "min": 2, "max": 64, "sliderMax": 16, "decimals": 0},

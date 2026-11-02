@@ -73,7 +73,7 @@ fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
             }
         }
         FileDialog::OpenProject => {
-            let f = parented(frame).add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file();
+            let f = parented(frame).add_filter("Visualab Effects Project", &["ecproj", "ecprojx"]).pick_file();
             Box::pin(async move { path(f.await) })
         }
         FileDialog::Folder => {
@@ -84,7 +84,7 @@ fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
             let at = std::path::Path::new(&default);
             let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let mut d = if project {
-                parented(frame).add_filter("EffectCraft Project", &["ecproj"])
+                parented(frame).add_filter("Visualab Effects Project", &["ecproj"])
             } else if ext.is_empty() {
                 parented(frame)
             } else {

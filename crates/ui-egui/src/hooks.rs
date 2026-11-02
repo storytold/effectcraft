@@ -9,7 +9,7 @@ pub type SystemThemeFn = Box<dyn Fn(&egui::Context) -> Option<egui::Theme>>;
 pub enum FileDialog {
     /// Files to open or import with these extensions; several when `many`.
     Open { exts: Vec<String>, many: bool },
-    /// An EffectCraft project to open.
+    /// An Visualab Effects project to open.
     OpenProject,
     /// A folder.
     Folder,
@@ -62,10 +62,6 @@ pub struct Hooks {
     /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
     /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.
     pub device_lost: Option<Box<dyn Fn(Option<Result<String, String>>)>>,
-    /// Runs on the worker thread right before the GPU compositor is built (desktop). Tests hold
-    /// it to look at the interface while the compositor is still being prepared, or make it
-    /// panic to check that a failing build never reaches the UI thread.
-    pub before_gpu_build: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Hooks {

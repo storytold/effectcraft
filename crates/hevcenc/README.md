@@ -1,6 +1,6 @@
 # effectcraft-hevcenc
 
-Clean-room, pure-Rust HEVC / H.265 encoder for EffectCraft's MP4 export (layer L0, `std` only,
+Clean-room, pure-Rust HEVC / H.265 encoder for Visualab Effects's MP4 export (layer L0, `std` only,
 no `unsafe`, builds for `wasm32-unknown-unknown`).
 
 ## What it produces

@@ -52,7 +52,7 @@ pub fn request(method: String, params: JsValue) -> js_sys::Promise {
         let (req, rx) = ControlRequest::new(method.clone(), params.clone());
         let sent = TX.with(|t| t.borrow().as_ref().is_some_and(|tx| tx.send(req).is_ok()));
         if !sent {
-            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("EffectCraft is not running yet"));
+            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("Visualab Effects is not running yet"));
             return;
         }
         PENDING.with(|p| p.borrow_mut().push((rx, resolve, reject)));

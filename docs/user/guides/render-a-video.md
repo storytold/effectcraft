@@ -49,4 +49,4 @@ Click **Render Settings:** and choose **Time Span: Work Area Only** or **Time Sp
 
 ## Export a Lottie animation instead
 
-Choose **File ▸ Export ▸ Lottie JSON...** to write a composition as `.json` or `.lottie`. EffectCraft lists anything Lottie cannot express. To open one, choose **File ▸ Import ▸ Lottie...**.
+Choose **File ▸ Export ▸ Lottie JSON...** to write a composition as `.json` or `.lottie`. Visualab Effects lists anything Lottie cannot express. To open one, choose **File ▸ Import ▸ Lottie...**.

@@ -1,4 +1,4 @@
-# Hosting EffectCraft for the web
+# Hosting Visualab Effects for the web
 
 `effectcraft-web-<version>.zip` (from the GitHub release, or `packaging/web/package.sh`) holds a
 static site in `effectcraft-web-<version>/`:
@@ -40,7 +40,7 @@ longer, serve each release from its own versioned path (`/effectcraft/0.4.0/`).
   and `.js` files, since their names don't change between releases (see above).
 - **HTTPS:** WebGPU (and the clipboard) only work in a secure context, which means `https://`
   or `http://localhost`. Over plain HTTP elsewhere, the app falls back to WebGL2.
-- **No special isolation headers:** EffectCraft doesn't use `SharedArrayBuffer`, so it doesn't
+- **No special isolation headers:** Visualab Effects doesn't use `SharedArrayBuffer`, so it doesn't
   need `Cross-Origin-Opener-Policy` or `Cross-Origin-Embedder-Policy`. If your site already sends
   COEP `require-corp`, also send `Cross-Origin-Resource-Policy: same-origin` (or `cross-origin`
   when the files live on a CDN) on the app's files.
@@ -58,25 +58,12 @@ location /effectcraft/ {
 
 Local test: `python3 -m http.server 8765` inside the folder, then open http://localhost:8765/.
 
-## Startup project (optional)
-
-To choose what the page opens on load, add an `effectcraft-config.json` next to `index.html`:
-
-```json
-{"startup":"empty"}
-```
-
-`"empty"` restores the last visit's project and otherwise starts blank (never the demo); `"demo"`
-always opens the demo project without saving the session (the last visit's project stays); `"last"` (the default) restores the last visit's project and shows
-the demo on a first visit. Serve the file with `Cache-Control: no-cache`. Details:
-[docs/web.md](https://github.com/storytold/effectcraft/blob/main/docs/web.md#startup-project).
-
 ## Embedding in a page (iframe)
 
 ```html
 <iframe
   src="https://example.com/effectcraft/"
-  title="EffectCraft"
+  title="Visualab Effects"
   style="width: 100%; height: 720px; border: 0;"
   allow="fullscreen; clipboard-read; clipboard-write"
   allowfullscreen>
@@ -98,7 +85,7 @@ the demo on a first visit. Serve the file with `Cache-Control: no-cache`. Detail
 
 ## Renderer selection and fallback flags
 
-EffectCraft renders with wgpu. It uses **WebGPU** when the browser has it and falls back to
+Visualab Effects renders with wgpu. It uses **WebGPU** when the browser has it and falls back to
 **WebGL2** on its own. URL query flags override this, and they work on the iframe `src` too:
 
 | Flag | Effect |
