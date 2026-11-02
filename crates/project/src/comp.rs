@@ -366,8 +366,16 @@ impl Comp {
     /// changed: here or, `elsewhere`, outside these layers (markers, layers that draw nothing,
     /// other comps and items). `None` when the edit can reach any frame: a comp setting, a layer
     /// reorder, Solo turning on or off, an environment layer. A layer's audio counts when `heard`
-    /// says something draws it.
-    pub fn changed_spans(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool, elsewhere: bool) -> Option<Vec<(Tick, Tick)>> {
+    /// says something draws it. `touched` layers draw differently in spans the caller adds (a
+    /// precomp whose comp changed): they reach the layers that read them, not their own frames.
+    pub fn changed_spans(
+        &self,
+        o: &Comp,
+        with_markers: bool,
+        heard: &dyn Fn(LayerId) -> bool,
+        elsewhere: bool,
+        touched: &[LayerId],
+    ) -> Option<Vec<(Tick, Tick)>> {
         fn has_expression(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
                 Node::Prop(p) => p.expr.is_some(),
@@ -407,13 +415,15 @@ impl Comp {
         // The layers the change reaches besides: expressions, then whatever reads a reached layer.
         let both = || self.layers.iter().chain(&o.layers);
         let mut reached: Vec<LayerId> = Vec::new();
-        if !changed.is_empty() || elsewhere {
+        if !changed.is_empty() || elsewhere || !touched.is_empty() {
             reached.extend(both().filter(|l| has_expression(&l.props)).map(|l| l.id));
         }
         // (each pass adds a layer or stops: at most one pass per layer)
         loop {
-            let read =
-                |l: &&Layer| !reached.contains(&l.id) && l.referenced_layers().iter().any(|r| *r != l.id && (changed.contains(r) || reached.contains(r)));
+            let read = |l: &&Layer| {
+                !reached.contains(&l.id)
+                    && l.referenced_layers().iter().any(|r| *r != l.id && (changed.contains(r) || reached.contains(r) || touched.contains(r)))
+            };
             let more: Vec<LayerId> = both().filter(read).map(|l| l.id).collect();
             if more.is_empty() {
                 break;
@@ -428,11 +438,7 @@ impl Comp {
             }
             cuts.extend([l.in_point, l.out_point]);
         }
-        // A frame at `t` samples cameras, lights and transforms over its shutter,
-        // `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
-        let (a, p) = (self.shutter_angle / 360.0, self.shutter_phase / 360.0);
-        let fd = self.frame_duration().seconds();
-        let (before, after) = (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd));
+        let (before, after) = self.shutter_margin();
         // Between two cuts the same layers are active; outside them no changed layer is.
         cuts.sort_unstable();
         cuts.dedup();
@@ -447,6 +453,15 @@ impl Comp {
             })
             .collect();
         Some(spans)
+    }
+
+    /// How far a change at a time reaches the frames before and after it through the shutter: a
+    /// frame at `t` samples cameras, lights and transforms over its shutter,
+    /// `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
+    pub fn shutter_margin(&self) -> (Tick, Tick) {
+        let (a, p) = (self.shutter_angle / 360.0, self.shutter_phase / 360.0);
+        let fd = self.frame_duration().seconds();
+        (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd))
     }
 
     /// Some layer is soloed: only the soloed layers draw.

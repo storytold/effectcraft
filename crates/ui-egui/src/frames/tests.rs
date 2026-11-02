@@ -1565,7 +1565,10 @@ fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
         q.comp_mut(outer).unwrap().layers.insert(0, effectcraft_engine::project::Layer { id: reader, ..r });
         pick(&mut q, outer, reader, pre_layer);
         let (frames, disk) = kept(&q, outer, edit);
-        assert!(!disk && frames != all, "{name}: a waveform in the outer comp draws the precomp's audio: {frames:?}");
+        assert!(
+            !disk && frames.contains(&60) && !frames.contains(&10) && !frames.contains(&100),
+            "{name}: a waveform in the outer comp draws the precomp's audio: {frames:?}"
+        );
     }
 }
 
@@ -1630,6 +1633,72 @@ fn an_expression_reaches_only_the_frames_of_its_layer() {
         assert!((0..kept_from).all(|i| kept.contains(&i)) && !kept.contains(&42), "{name}: {kept:?}");
         for i in kept {
             assert_eq!(render(&p0, i), render(&p1, i), "{name}: kept frame {i} draws other pixels now");
+        }
+    }
+}
+
+/// An edit inside a precomp re-renders only the frames where the precomp shows what it changed:
+/// shifted by the precomp layer's start, scaled by its stretch, and its whole span under a time
+/// remap. Every frame kept renders as before.
+#[test]
+fn an_edit_in_a_precomp_reaches_only_where_it_shows() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{LayerId, Value, build};
+    use effectcraft_engine::render::render_frame;
+    use serde_json::json;
+    let mut s = Session::default();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let inner = ItemId(id(s.execute("comp.new", json!({"name": "Inner", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"));
+    let solid = |s: &mut Session| {
+        let l = id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000", "width": 6, "height": 6})).unwrap(), "layer");
+        for (t, x) in [(0.0, 0.0), (4.0, 16.0)] {
+            s.execute("prop.addKey", json!({"comp": inner.0, "layer": l, "path": "transform/position", "time": t, "value": [x, 8.0, 0.0]})).unwrap();
+        }
+        LayerId(l)
+    };
+    let (a, b) = (solid(&mut s), solid(&mut s));
+    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 16, "height": 16, "duration": 6, "frameRate": 30})).unwrap(), "comp"));
+    let pre = LayerId(id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer"));
+    let fr = s.project.comp(outer).unwrap().frame_rate;
+    let t = |f: i64| fr.tick_of(f);
+    let mut p0 = (*s.project).clone();
+    for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
+        let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
+    }
+    let n = fr.frame_at(p0.comp(outer).unwrap().duration);
+    // The precomp starts at frame 15; `layout` sets its stretch and time remap.
+    let place = |p: &mut Project, stretch: f64, remap: bool| {
+        let l = p.comp_mut(outer).unwrap().layer_mut(pre).unwrap();
+        (l.start_time, l.in_point, l.out_point, l.stretch) = (t(15), t(15), t(15) + Tick((t(120).0 as f64 * stretch / 100.0) as i64), stretch);
+        if remap {
+            let mut uid = 9_000_000;
+            l.props.children.push(build::Ids(&mut uid).prop("timeRemap", "Time Remap", Value::Scalar(1.5)).into());
+        }
+    };
+    // Trim B (inner frames 30–60) to end at 45.
+    let trim = |p: &mut Project| p.comp_mut(inner).unwrap().layer_mut(b).unwrap().out_point = t(45);
+    for (name, stretch, remap, kept_frames, dirty_frames) in [
+        ("offset", 100.0, false, vec![30, 55, 80, 130], vec![60, 75]),
+        ("stretched", 200.0, false, vec![30, 100, 140, 179], vec![105, 135]),
+        ("time remap", 100.0, true, vec![5], vec![30, 100]),
+    ] {
+        let mut q = p0.clone();
+        place(&mut q, stretch, remap);
+        let q = Arc::new(q);
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: outer.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&q, 1, outer);
+        (0..n).for_each(|i| insert(&f, k(id0, i)));
+        let mut q1 = q.clone();
+        trim(Arc::make_mut(&mut q1));
+        let kept = f.cached_frames(&k(f.content_of(&q1, 2, outer), 0));
+        assert!(kept_frames.iter().all(|i| kept.contains(i)) && !dirty_frames.iter().any(|i| kept.contains(i)), "{name}: {kept:?}");
+        for i in kept {
+            assert!(
+                render_frame(&q, outer, t(i), 1.0).data == render_frame(&q1, outer, t(i), 1.0).data,
+                "{name}: kept frame {i} renders differently after the edit"
+            );
         }
     }
 }

@@ -341,26 +341,10 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
 }
 
 /// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
-/// ([`Comp::changed_spans`]), a frame wider either side for rounding. Layers that can't change the
-/// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count, nor does
-/// the audio of layers no effect draws it from (`heard`, of both states). Expressions can read
-/// anything, so whatever changed (`outside` this comp too) reaches the layers that have one.
+/// ([`Project::dirty_spans`]), a frame wider either side for rounding.
 fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard, outside: bool) -> Option<Vec<(i64, i64)>> {
-    let picture = |p: &Project| {
-        let mut c = p.comp(comp)?.clone();
-        let quiet = p.silent_layers(comp, &c, heard);
-        c.layers.retain(|l| !quiet.contains(&l.id));
-        Some(c)
-    };
-    let (a, b) = (picture(old)?, picture(new)?);
-    let fr = b.frame_rate;
-    let elsewhere = heard.expressions && (outside || old.comp(comp) != new.comp(comp));
-    Some(
-        b.changed_spans(&a, false, &|l| heard.picked(comp, l), elsewhere)?
-            .into_iter()
-            .map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1)))
-            .collect(),
-    )
+    let fr = new.comp(comp)?.frame_rate;
+    Some(new.dirty_spans(old, comp, heard, outside)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
@@ -849,17 +833,23 @@ impl Frames {
         {
             return (*base_id, Some(base.clone()));
         }
-        // Only layers of this comp changed: its frames outside the spans they reach (and a frame
-        // either side for rounding) keep drawing the same pixels, so a nudge, cut or trim recaches
-        // only the frames it touched (#1641). Expressions can read anything at any time, so with
-        // them a change elsewhere in the project (another comp, an item's name) reaches the
-        // frames of the layers that have one.
-        let base_tree = |id, c| match bases.get(&comp.0).and_then(|(_, base)| base.item(id)).map(|i| &i.kind) {
+        // Only comps changed (not the footage, solids or settings they draw): its frames outside
+        // the spans the edit reaches (and a frame either side for rounding) keep drawing the same
+        // pixels, so a nudge, cut or trim, here or in a precomp, recaches only the frames it
+        // touched (#1641). Expressions can read anything at any time, so with them a change
+        // elsewhere in the project (another comp, an item's name) reaches the frames of the
+        // layers that have one.
+        let base_comp = |id: ItemId| bases.get(&comp.0).and_then(|(_, base)| base.item(id)).map(|i| &i.kind);
+        let base_tree = |id, c| match base_comp(id) {
             Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
             _ => c,
         };
+        let base_comps = |id, c| match base_comp(id) {
+            Some(ItemKind::Comp(b)) => b,
+            _ => c,
+        };
         if let Some((base_id, base)) = bases.get(&comp.0)
-            && comp_content_with(project, comp, base, base_tree, false) == comp_content_with(base, comp, base, |_, c| c, false)
+            && comp_content_with(project, comp, base, base_comps, false) == comp_content_with(base, comp, base, |_, c| c, false)
             && let Some(dirty) = dirty_frames(base, project, comp, &heard, comp_content_with(project, comp, base, base_tree, true) != *base_id)
             && let Ok(mut cache) = self.cache.lock()
         {

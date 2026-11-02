@@ -30,6 +30,7 @@ pub use effectcraft_keyframe as keyframe;
 pub use effectcraft_keyframe::{Keyframe, Value};
 
 mod comp;
+mod dirty;
 mod footage;
 mod item;
 mod layer;
