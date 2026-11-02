@@ -264,25 +264,30 @@ pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize
     }
     let low = Plane::luma(img);
     let step = (size / 2).max(1);
-    let mut cands: Vec<(f32, usize, usize)> = Vec::new();
-    for y in (0..=h - size).step_by(step) {
-        for x in (0..=w - size).step_by(step) {
-            // Variance of the picture inside the box (the flattest boxes hold the least detail).
-            let (mut s, mut sq, mut n, mut opaque) = (0.0f32, 0.0f32, 0.0f32, true);
-            for yy in y..y + size {
-                for xx in x..x + size {
-                    let v = low.data[yy * w + xx];
-                    s += v;
-                    sq += v * v;
-                    n += 1.0;
-                    opaque &= img.data[yy * w + xx][3] > 0.5;
+    // Candidate rows in parallel; the sort below is a total order (variance, y, x), so the
+    // result does not depend on the collection order.
+    let rows: Vec<usize> = (0..=h - size).step_by(step).collect();
+    let mut cands: Vec<(f32, usize, usize)> = rows
+        .par_iter()
+        .flat_map_iter(|&y| {
+            let data = low.data.as_slice();
+            let alpha = img.data.as_slice();
+            (0..=w - size).step_by(step).filter_map(move |x| {
+                // Variance of the picture inside the box (the flattest boxes hold the least detail).
+                let (mut s, mut sq, mut n, mut opaque) = (0.0f32, 0.0f32, 0.0f32, true);
+                for yy in y..y + size {
+                    for xx in x..x + size {
+                        let v = data[yy * w + xx];
+                        s += v;
+                        sq += v * v;
+                        n += 1.0;
+                        opaque &= alpha[yy * w + xx][3] > 0.5;
+                    }
                 }
-            }
-            if opaque {
-                cands.push((sq / n - (s / n).powi(2), x, y));
-            }
-        }
-    }
+                opaque.then(|| (sq / n - (s / n).powi(2), x, y))
+            })
+        })
+        .collect();
     cands.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
     cands.into_iter().take(count).map(|(_, x, y)| (x, y, size)).collect()
 }
@@ -479,16 +484,7 @@ pub(crate) fn sampling_boxes(ctx: &EffectCtx, img: &Image, scale: f64) -> Vec<(u
 
 /// The grain level (0.5..2) measured in the sample boxes of `img`.
 fn grain_level(img: &Image, boxes: &[(usize, usize, usize)]) -> f32 {
-    let mut m = vec![false; img.data.len()];
-    let w = img.width as usize;
-    for &(x, y, s) in boxes {
-        for yy in y..y + s {
-            for xx in x..x + s {
-                m[yy * w + xx] = true;
-            }
-        }
-    }
-    let st = crate::noise2::grain_stats_masked(img, Some(&m));
+    let st = crate::noise2::grain_stats_boxes(img, boxes);
     let s = (st.std[0] + st.std[1] + st.std[2]) / 3.0;
     if boxes.is_empty() { 1.0 } else { (s / 0.02).clamp(0.5, 2.0) }
 }

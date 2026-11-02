@@ -11,7 +11,8 @@ use crate::{EffectcraftApp, widgets};
 
 pub fn placeholder(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, p: PanelKind) {
     let t = app.tokens;
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr_args("{} — coming soon", &[&(p.title())]), Tokens::ui(12.0), t.text_faint);
+    let name = crate::i18n::label(app, "window.panel", p.title());
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr_args("{} — coming soon", &[&name]), Tokens::ui(12.0), t.text_faint);
 }
 
 /// Preview panel: transport controls, the shortcut whose options are shown, and that
@@ -24,7 +25,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     // The panel scrolls when it is shorter than its controls (the default workspace shows just
     // the transport row, as in After Effects).
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("preview-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("preview-scroll"), rect);
     let panel_clip = ui.clip_rect();
     ui.set_clip_rect(rect.intersect(panel_clip));
     let y = rect.min.y + 12.0 - scroll.offset;
@@ -42,7 +43,10 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (icon, cmd, tip) in buttons {
         let r = Rect::from_min_size(pos2(x, y), vec2(bw, 28.0));
         let icon = if cmd == "playback.toggle" && app.playback.playing { Icon::Pause } else { icon };
-        if widgets::icon_button(ui, r, icon, cmd == "playback.toggle" && app.playback.playing, &t, egui::Id::new(("pv", cmd))).on_hover_text(tip).clicked() {
+        if widgets::icon_button(ui, r, icon, cmd == "playback.toggle" && app.playback.playing, &t, egui::Id::unique(("pv", cmd)))
+            .on_hover_text(tr(tip))
+            .clicked()
+        {
             // The play button plays with the options of the shortcut shown below.
             let params = if cmd == "playback.toggle" { json!({"shortcut": current.id()}) } else { json!({}) };
             let _ = crate::menus::invoke(app, &ctx, cmd, params);
@@ -61,7 +65,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut yy = y + 46.0;
 
     // Shortcut.
-    label(yy, "Shortcut");
+    label(yy, tr("Shortcut"));
     let names: Vec<String> = PreviewShortcut::ALL.iter().map(|s| s.label().to_string()).collect();
     if let Some(i) = dropdown_row(
         app,
@@ -91,14 +95,14 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let row = if i < 4 { i / 2 } else { i - 2 };
         let cx = x0 + col as f32 * 110.0 - 2.0;
         let cy = yy + row as f32 * 22.0;
-        if check_row(app, ui, &p, pos2(cx, cy), key, text, on) {
+        if check_row(app, ui, &p, pos2(cx, cy), key, tr(text), on) {
             changes.push(json!({"shortcut": current.id(), key: !on}));
         }
     }
     yy += 4.0 * 22.0 + 6.0;
 
     // Range (and the pre/post-roll of Play Around Current Time).
-    label(yy, "Range");
+    label(yy, tr("Range"));
     let ranges: Vec<String> = PreviewRange::ALL.iter().map(|r| r.label().to_string()).collect();
     let range_ids = ["workArea", "workAreaExtended", "entireDuration", "aroundCurrentTime"];
     if let Some(i) = dropdown_row(
@@ -116,8 +120,15 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if o.range == PreviewRange::AroundCurrentTime {
         for (k, (key, text, v)) in [("preRoll", "Pre-roll", o.pre_roll), ("postRoll", "Post-roll", o.post_roll)].into_iter().enumerate() {
             let lx = xv + k as f32 * 100.0;
-            p.text(pos2(lx, yy), Align2::LEFT_CENTER, text, Tokens::ui(11.5), t.text_dim);
-            let (r, nv, _) = widgets::hot_number_at(ui, pos2(lx + 52.0, yy - 9.0), egui::Id::new(("pv-roll", key)), v, 0.05, (0.0, 600.0), 1, "s", &t);
+            p.text(pos2(lx, yy), Align2::LEFT_CENTER, tr(text), Tokens::ui(11.5), t.text_dim);
+            let (r, nv, _) = widgets::hot_number_at(
+                ui,
+                pos2(lx + 52.0, yy - 9.0),
+                egui::Id::unique(("pv-roll", key)),
+                v,
+                &widgets::HotSpec { speed: 0.05, range: (0.0, 600.0), decimals: 1, suffix: "s" },
+                &t,
+            );
             app.auto.add(&format!("preview.{key}"), r, text);
             if let Some(nv) = nv {
                 changes.push(json!({"shortcut": current.id(), key: nv}));
@@ -127,7 +138,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Play From.
-    label(yy, "Play From");
+    label(yy, tr("Play From"));
     let froms: Vec<String> = PlayFrom::ALL.iter().map(|f| f.label().to_string()).collect();
     if let Some(i) = dropdown_row(
         app,
@@ -144,7 +155,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Frame Rate, Skip, Resolution.
     let comp_fps = app.session.active_comp().map(|c| c.frame_rate.as_f64());
-    label(yy, "Frame Rate");
+    label(yy, tr("Frame Rate"));
     const RATES: [f64; 12] = [8.0, 10.0, 12.0, 12.5, 15.0, 23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 60.0];
     let auto = format!("({:.2}) Auto", comp_fps.unwrap_or(0.0));
     let mut rates = vec![auto.clone()];
@@ -160,13 +171,20 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let sx = xv + 106.0;
     p.text(pos2(sx, yy), Align2::LEFT_CENTER, tr("Skip"), Tokens::ui(12.0), t.text_dim);
-    let (r, nv, _) = widgets::hot_number_at(ui, pos2(sx + 30.0, yy - 9.0), egui::Id::new("pv-skip"), o.skip as f64, 0.1, (0.0, 99.0), 0, "", &t);
+    let (r, nv, _) = widgets::hot_number_at(
+        ui,
+        pos2(sx + 30.0, yy - 9.0),
+        egui::Id::unique("pv-skip"),
+        o.skip as f64,
+        &widgets::HotSpec { speed: 0.1, range: (0.0, 99.0), decimals: 0, suffix: "" },
+        &t,
+    );
     app.auto.add("preview.skip", r, "Skip");
     if let Some(nv) = nv {
         changes.push(json!({"shortcut": current.id(), "skip": nv.round() as u32}));
     }
     yy += 24.0;
-    label(yy, "Resolution");
+    label(yy, tr("Resolution"));
     let ress: Vec<String> = PreviewResolution::ALL.iter().map(|r| r.label().to_string()).collect();
     let res_ids = ["auto", "full", "half", "third", "quarter", "custom"];
     if let Some(i) = dropdown_row(
@@ -181,15 +199,21 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         changes.push(json!({"shortcut": current.id(), "resolution": res_ids[i]}));
     }
     if o.resolution == PreviewResolution::Custom {
-        let (r, nv, _) =
-            widgets::hot_number_at(ui, pos2(xv + 106.0, yy - 9.0), egui::Id::new("pv-custom-res"), o.custom_resolution as f64, 0.1, (1.0, 40.0), 0, "", &t);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(xv + 106.0, yy - 9.0),
+            egui::Id::unique("pv-custom-res"),
+            o.custom_resolution as f64,
+            &widgets::HotSpec { speed: 0.1, range: (1.0, 40.0), decimals: 0, suffix: "" },
+            &t,
+        );
         app.auto.add("preview.customResolution", r, "Custom Resolution");
         if let Some(nv) = nv {
             changes.push(json!({"shortcut": current.id(), "customResolution": nv.round() as u32}));
         }
     }
     yy += 24.0;
-    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "fullScreen", "Full Screen", o.full_screen) {
+    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "fullScreen", tr("Full Screen"), o.full_screen) {
         changes.push(json!({"shortcut": current.id(), "fullScreen": !o.full_screen}));
     }
     yy += 24.0;
@@ -197,7 +221,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // What stopping does.
     p.text(pos2(x0, yy), Align2::LEFT_CENTER, tr_args("On ({}) stop:", &[&(current.label())]), Tokens::ui(11.5), t.text_dim);
     yy += 20.0;
-    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "playCachedFrames", "If caching, play cached frames", o.play_cached_frames) {
+    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "playCachedFrames", tr("If caching, play cached frames"), o.play_cached_frames) {
         changes.push(json!({"shortcut": current.id(), "playCachedFrames": !o.play_cached_frames}));
     }
     yy += 22.0;
@@ -240,7 +264,7 @@ fn fmt_rate(r: f64) -> String {
 fn check_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: egui::Pos2, key: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(pos2(at.x, at.y - 8.0), vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("pv-check", key))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("pv-check", key))).changed();
     p.text(pos2(r.max.x + 5.0, at.y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     app.auto.add(&format!("preview.{key}"), r, text);
     clicked
@@ -250,7 +274,7 @@ fn check_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at:
 /// returns the chosen index.
 fn dropdown_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, key: &str, text: &str, items: &[String], current: Option<usize>) -> Option<usize> {
     let t = app.tokens;
-    let pid = egui::Id::new(("pv-pop", key));
+    let pid = egui::Id::unique(("pv-pop", key));
     if widgets::dropdown(ui, r, text, &t, pid.with("btn")).clicked() {
         let open: bool = ui.data(|d| d.get_temp(pid.with("open")).unwrap_or(false));
         ui.data_mut(|d| d.insert_temp(pid.with("open"), !open));
@@ -318,7 +342,7 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let clip = Rect::from_min_max(pos2(bar.min.x, top - 14.0), pos2(bar.max.x, top - 4.0));
         p.rect_filled(clip, 1.0, if m.clipped[c] { red } else { t.field_bg });
         let id = if c == 0 { "audio.clipLeft" } else { "audio.clipRight" };
-        if ui.interact(clip, egui::Id::new(id), Sense::click()).clicked() {
+        if ui.interact(clip, egui::Id::unique(id), Sense::click()).clicked() {
             app.meter.clipped[c] = false;
         }
         app.auto.add(id, clip, if c == 0 { "Left clip indicator" } else { "Right clip indicator" });
@@ -362,6 +386,10 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
+/// The History panel: every state of the session's branching history, indented under the state it
+/// grew from, with the current state highlighted and future/abandoned branches dimmed. Only the
+/// rows in view are drawn; the current state is scrolled into view when it changes. Clicking a
+/// state runs `edit.history.goto`, reporting a failure in `app.ui.status`.
 pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -370,7 +398,7 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let nodes = app.session.history_tree();
     let row_h = 22.0;
     let cur = nodes.iter().position(|n| n.current).unwrap_or(0);
-    let scroll_id = egui::Id::new("history-scroll");
+    let scroll_id = egui::Id::unique("history-scroll");
     let mut scroll = widgets::PanelScroll::begin(ui, scroll_id, rect);
     // The current state scrolls into view when it changes (undo, redo, a new step).
     if ui.data(|d| d.get_temp::<usize>(scroll_id.with("current"))) != Some(cur) {
@@ -390,7 +418,7 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for n in nodes.iter().skip(first).take(visible) {
         let r = Rect::from_min_size(pos2(rect.min.x, y), vec2(rect.width(), row_h));
         y += row_h;
-        let resp = ui.interact(r, egui::Id::new(("hist", n.id.as_str())), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("hist", n.id.as_str())), Sense::click());
         if n.current {
             p.rect_filled(r, 0.0, t.row_selected);
         } else if resp.hovered() {
@@ -419,11 +447,14 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
+/// The Markers panel: the active comp's markers in time order, each with its timecode and comment;
+/// clicking a row moves the current time to that marker. Shows a hint when the comp has none and
+/// draws nothing without an active comp.
 pub fn markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let Some(c) = app.session.active_comp_arc() else { return };
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("markers-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("markers-scroll"), rect);
     let mut y = rect.min.y + 8.0 - scroll.offset;
     if c.markers.is_empty() {
         p.text(rect.center(), Align2::CENTER_CENTER, tr("No composition markers"), Tokens::ui(12.0), t.text_faint);
@@ -437,7 +468,7 @@ pub fn markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let tc = crate::panels::timecode(&app.session, &c, m.time);
         p.text(pos2(r.min.x + 12.0, r.center().y), Align2::LEFT_CENTER, tc, Tokens::mono(11.5), t.timecode);
         p.text(pos2(r.min.x + 120.0, r.center().y), Align2::LEFT_CENTER, &m.comment, Tokens::ui(12.0), t.text);
-        if ui.interact(r, egui::Id::new(("mk", m.time.0)), Sense::click()).clicked() {
+        if ui.interact(r, egui::Id::unique(("mk", m.time.0)), Sense::click()).clicked() {
             app.session.set_time(m.time);
         }
     }

@@ -433,13 +433,7 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
     let mirror = ctx.params.b("mirrorEdges");
     let phase = ctx.params.f("phase") / 360.0;
     let hshift = ctx.params.b("horizontalPhaseShift");
-    let (nw, nh, noff) = if ctx.adjustment {
-        (b.img.width, b.img.height, b.offset)
-    } else {
-        let ow = (lw * ctx.params.f("outputWidth") / 100.0).max(1.0 / s);
-        let oh = (lh * ctx.params.f("outputHeight") / 100.0).max(1.0 / s);
-        ((ow * s).round().max(1.0) as u32, (oh * s).round().max(1.0) as u32, [(ow - lw) * 0.5 * s, (oh - lh) * 0.5 * s])
-    };
+    let (nw, nh, noff) = crate::motion_tile_frame(ctx, b.offset, (b.img.width, b.img.height), s);
     let mut out = Image::new(nw, nh);
     let src = &b.img;
     out.rows_mut().for_each(|(y, row)| {

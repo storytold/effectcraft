@@ -10,8 +10,9 @@ use crate::context::{Enc, GpuImage, Params};
 
 /// Blur `src` (an unpadded plane buffer) as `d` says. Returns the padded, blurred image.
 pub(crate) fn apply(e: &mut Enc, src: &GpuImage, d: &PlaneDof) -> Option<GpuImage> {
-    let (w, h) = (src.width + 2 * d.pad, src.height + 2 * d.pad);
-    if !e.g.fits(w + 1, h) || d.radius.len() != w as usize * h as usize || d.levels.is_empty() {
+    // Saturating, so an oversized padding is refused by `fits` below instead of wrapping around.
+    let (w, h) = (src.width.saturating_add(d.pad.saturating_mul(2)), src.height.saturating_add(d.pad.saturating_mul(2)));
+    if !e.g.fits(w.saturating_add(1), h) || d.radius.len() != w as usize * h as usize || d.levels.is_empty() {
         return None;
     }
     let padded = e.image(w, h);
@@ -26,7 +27,7 @@ pub(crate) fn apply(e: &mut Enc, src: &GpuImage, d: &PlaneDof) -> Option<GpuImag
         padded
     };
     let prefix = e.image(w + 1, h);
-    e.dispatch("bokeh_prefix", &Params::default(), &boosted, None, &prefix, None, (h.div_ceil(64), 1));
+    e.dispatch("bokeh_prefix", &Params::default(), crate::context::KernelImages { src: &boosted, aux: None, out: &prefix }, None, (h.div_ceil(64), 1));
     // Radius map, then every level's spans.
     let mut data: Vec<f32> = d.radius.as_ref().clone();
     let mut levels = vec![];

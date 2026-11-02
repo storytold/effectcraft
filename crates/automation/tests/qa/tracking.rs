@@ -52,7 +52,7 @@ fn shake_offset(f: u32) -> (i64, i64) {
 
 /// Import a sequence at 12 fps and make a comp of it; returns (comp, layer).
 fn plate_comp(qa: &mut Qa, first: &str, name: &str) -> (Value, Value) {
-    let item = qa.exec("file.import", json!({"paths": [first]}))["items"][0].clone();
+    let item = qa.exec("file.import", json!({"paths": [first], "sequence": true}))["items"][0].clone();
     qa.exec("file.interpretFootage", json!({"items": [item.clone()], "frameRate": 12}));
     let comp = qa.exec("comp.new", json!({"name": name, "width": 160, "height": 90, "frameRate": 12, "duration": 1}))["comp"].clone();
     let layer = qa.exec("layer.addItem", json!({"item": item}))["layer"].clone();

@@ -344,6 +344,23 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
     *g != before
 }
 
+/// The spec id of the parameter that an instance of `spec` saved at `id` (`a/b/param`) is now:
+/// `id` itself when the spec still has it, the new id of a renamed parameter
+/// ([`PARAM_ID_ALIASES`]), or the twirl-down path of a top-level parameter that moved into a
+/// group, as [`upgrade_instance`] finds them. Returns `None` when no parameter matches.
+pub fn current_param_id(spec: &EffectSpec, id: &str) -> Option<&'static str> {
+    if let Some(ps) = spec.params.iter().find(|ps| ps.id == id) {
+        return Some(ps.id);
+    }
+    if let Some((_, _, new)) = PARAM_ID_ALIASES.iter().find(|(e, old, _)| *e == spec.id && *old == id) {
+        return Some(new);
+    }
+    if id.contains('/') {
+        return None;
+    }
+    spec.params.iter().find(|ps| ps.id.rsplit('/').next() == Some(id)).map(|ps| ps.id)
+}
+
 /// Bring an effect instance saved before project schema 2 into effect space (#227).
 ///
 /// Layers without a source rectangle (shape, text) have comp-sized effect bounds centred on
@@ -499,6 +516,22 @@ mod tests {
         assert_eq!(pr.ui, popup.ui);
     }
 
+    /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the
+    /// option it chose, by label.
+    #[test]
+    fn shift_channels_half_on_and_full_off_are_remapped_by_label() {
+        const OLD: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Half On", "Full Off"];
+        for (saved, want) in [(9u32, 10u32), (10, 9), (1, 1)] {
+            let mut next = 1;
+            let (spec, mut g) = instance("ec.channel.shiftchannels", &mut next);
+            let pr = g.get_mut("takeGreenFrom").unwrap();
+            pr.ui = ParamUi::Popup { options: OLD.iter().map(|s| s.to_string()).collect() };
+            pr.value = Value::Enum(saved);
+            upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE);
+            assert_eq!(g.get("takeGreenFrom").unwrap().value, Value::Enum(want), "saved {saved}");
+        }
+    }
+
     /// #514: Apply Color LUT's LUT was hidden (set only by commands) and the OCIO files were
     /// plain text; old projects get the Choose… file parameter, keeping the path.
     #[test]
@@ -541,6 +574,21 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
         assert!(g.get("smoothness").is_none());
         assert_eq!(prop_at(&mut g, "stabilization/smoothness").unwrap().value, Value::Scalar(12.0));
+    }
+
+    /// A saved parameter id maps to the parameter `upgrade_instance` moves it to.
+    #[test]
+    fn current_param_id_follows_renames_and_twirl_down_moves() {
+        let stab = find(crate::warp_stab::ID).unwrap();
+        assert_eq!(current_param_id(stab, "stabilization/smoothness"), Some("stabilization/smoothness"));
+        assert_eq!(current_param_id(stab, "smoothness"), Some("stabilization/smoothness"));
+        let ctc = find("ec.color.changetocolor").unwrap();
+        assert_eq!(current_param_id(ctc, "tolerance"), Some("toleranceGroup/hue"));
+        // Radio Waves' old Velocity is the growth speed, not the new Velocity.
+        let waves = find("ec.generate.radiowaves").unwrap();
+        assert_eq!(current_param_id(waves, "velocity"), Some("waveMotion/expansion"));
+        assert_eq!(current_param_id(stab, "noSuchParam"), None);
+        assert_eq!(current_param_id(stab, "other/smoothness"), None);
     }
 
     #[test]
@@ -717,7 +765,13 @@ not a stroke",
         let data = effectcraft_track::roto::RotoData {
             base: Some(0),
             span: [0, 10],
-            strokes: vec![effectcraft_track::roto::Stroke { kind: effectcraft_track::roto::StrokeKind::Fg, frame: 0, radius: 5.0, points: vec![[2.0, 2.0]] }],
+            strokes: vec![effectcraft_track::roto::Stroke {
+                kind: effectcraft_track::roto::StrokeKind::Fg,
+                frame: 0,
+                radius: 5.0,
+                points: vec![[2.0, 2.0]],
+                object: 0,
+            }],
         };
         roto.get_mut(crate::roto::STROKES).unwrap().value = Value::Str(data.to_json());
         to_effect_space(spec, &mut roto, SIZE, D, &own);

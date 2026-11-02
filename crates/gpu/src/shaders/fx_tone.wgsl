@@ -20,6 +20,14 @@ fn fxt_rem360(x: f32) -> f32 {
 }
 
 // Levels (Individual Controls) channel `i` (data: 5 × (ib, iw, g, ob, ow, identity)).
+// color_fx::levels_gamma: unclipped values below 0 mirror the curve.
+fn fxt_gamma(t: f32, g: f32) -> f32 {
+    if (t >= 0.0) {
+        return powz(t, 1.0 / g);
+    }
+    return -powz(-t, 1.0 / g);
+}
+
 fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     let o = i * 6u;
     if (data[o + 5u] != 0.0) {
@@ -32,7 +40,7 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     if (clip_w) {
         t = min(t, 1.0);
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * powz(max(t, 0.0), 1.0 / max(data[o + 2u], 0.01));
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, max(data[o + 2u], 0.01));
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).
@@ -44,8 +52,7 @@ fn fxt_level(o: u32, v: f32) -> f32 {
     if (data[o + 6u] != 0.0) {
         t = min(t, 1.0);
     }
-    t = powz(max(t, 0.0), 1.0 / data[o + 2u]);
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * t;
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, data[o + 2u]);
 }
 
 fn fxt_level_ident(o: u32) -> bool {
@@ -177,7 +184,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let aa = max(a, 0.0);
                 var nc: vec3<f32>;
                 for (var i = 0u; i < 3u; i++) {
-                    nc[i] = fxt_lv(i + 1u, fxt_lv(0u, c[i], cb, cw), cb, cw);
+                    nc[i] = fxt_lv(0u, fxt_lv(i + 1u, c[i], cb, cw), cb, cw);
                 }
                 let na = clamp(clamp(fxt_lv(4u, aa, cb, cw), 0.0, 1.0), 0.0, 1.0);
                 o = vec4<f32>(nc * na, na);

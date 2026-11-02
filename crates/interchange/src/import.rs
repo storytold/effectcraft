@@ -143,6 +143,11 @@ pub fn import(
     if depth > MAX_DEPTH {
         return Err(Error::TooDeep(MAX_DEPTH));
     }
+    // FilmCraft's parser expands internal entities without a node limit (#2129); Final Cut Pro
+    // and FCPXML exports never declare any.
+    if matches!(format, TimelineFormat::Fcp7Xml | TimelineFormat::Fcpxml) && bytes.windows(8).any(|w| w == b"<!ENTITY") {
+        return Err(Error::XmlEntities);
+    }
     let fc_opts = filmcraft_interchange::ImportOptions {
         base_dir: opts.base_dir.clone(),
         edl_frame_rate: opts.edl_frame_rate.map(|f| {
@@ -271,7 +276,7 @@ impl Importer<'_> {
             MediaKind::AudioOnly => FootageKind::Audio,
             MediaKind::Still => FootageKind::Still,
             MediaKind::ImageSequence => FootageKind::Sequence,
-            _ if v.is_none() && info.audio.is_some() => FootageKind::Audio,
+            _ if v.is_none() && info.has_audio() => FootageKind::Audio,
             _ => FootageKind::Video,
         };
         let _ = name;
@@ -284,7 +289,7 @@ impl Importer<'_> {
             frame_rate: rate_in(info.frame_rate()),
             duration: tick_in(info.duration),
             has_video: kind != FootageKind::Audio,
-            has_audio: info.audio.is_some() || kind == FootageKind::Audio,
+            has_audio: info.has_audio() || kind == FootageKind::Audio,
             alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
             codec: v.map(|v| v.codec.clone()).unwrap_or_default(),
             missing: true,

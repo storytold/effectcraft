@@ -1,7 +1,6 @@
 //! Sony photo RAW adapter. Sensor decoding stays in LightCraft's pinned, first-party
 //! clean-room crate; no embedded preview is substituted for an unsupported sensor format.
 
-use std::io::Read;
 use std::path::Path;
 
 use effectcraft_project::Footage;
@@ -19,13 +18,13 @@ const MAX_EDGE: usize = 16_384;
 const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
-    let file = std::fs::File::open(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(MediaError::Unsupported(format!("{}: Sony photo RAW exceeds the 256 MiB file limit", path.display())));
-    }
-    Ok(bytes)
+    crate::read_regular_file_limited(path, MAX_FILE_BYTES).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            MediaError::Unsupported(format!("{}: Sony photo RAW exceeds the 256 MiB file limit", path.display()))
+        } else {
+            MediaError::Io(format!("{}: {e}", path.display()))
+        }
+    })
 }
 
 pub(crate) fn recognizes(path: &str, bytes: &[u8]) -> bool {

@@ -48,6 +48,8 @@ pub enum Icon {
     Speaker,
     Solo,
     Lock,
+    /// An open padlock: the shackle lifted clear of the body on the right.
+    LockOpen,
     Shy,
     Collapse,
     Quality,
@@ -110,6 +112,8 @@ pub enum Icon {
     Fullscreen,
     Channel,
     Exposure,
+    /// Stroke width: three bars, thin to thick.
+    StrokeWidth,
     // links
     Chat,
     Globe,
@@ -159,6 +163,14 @@ impl Pen16<'_> {
     }
     fn dot(&self, x: f32, y: f32, r: f32) {
         self.painter.circle_filled(self.p(x, y), r * self.s(), self.color);
+    }
+    /// A filled dot in its own colour, for the icons that are coloured in After Effects too (the
+    /// channel picker's red, green and blue). The tint's alpha is kept, so a dimmed button stays
+    /// dimmed.
+    fn dot_colored(&self, x: f32, y: f32, r: f32, color: Color32) {
+        // `gamma_multiply` keeps the premultiplied channels consistent, so a dimmed tint dims the
+        // circle instead of darkening it twice.
+        self.painter.circle_filled(self.p(x, y), r * self.s(), color.gamma_multiply(self.color.a() as f32 / 255.0));
     }
     fn rect(&self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let r = Rect::from_min_max(self.p(x0, y0), self.p(x1, y1));
@@ -402,6 +414,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(8.0, 7.0, 3.0, 180.0, 360.0);
             pen.dot(8.0, 10.5, 1.0);
         }
+        LockOpen => {
+            pen.rect(3.5, 7.0, 12.5, 14.0);
+            pen.arc(8.0, 4.0, 3.0, 180.0, 360.0);
+            pen.line(&[(5.0, 4.0), (5.0, 7.0)]);
+            pen.dot(8.0, 10.5, 1.0);
+        }
         Shy => {
             pen.circle(8.0, 8.0, 5.8);
             pen.dot(6.0, 7.0, 0.8);
@@ -540,6 +558,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.circle(8.0, 8.0, 4.2);
         }
+        StrokeWidth => {
+            pen.rect_fill(2.5, 3.0, 13.5, 3.75);
+            pen.rect_fill(2.5, 6.5, 13.5, 8.0);
+            pen.rect_fill(2.5, 10.5, 13.5, 13.0);
+        }
         Hamburger => {
             for y in [4.5, 8.0, 11.5] {
                 pen.line(&[(3.0, y), (13.0, y)]);
@@ -638,9 +661,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(6.0, 14.0), (2.0, 14.0), (2.0, 10.0)]);
         }
         Channel => {
-            pen.circle(6.0, 6.5, 3.6);
-            pen.circle(10.0, 6.5, 3.6);
-            pen.circle(8.0, 10.0, 3.6);
+            // After Effects draws this one in colour: red, green and blue, as the channels it picks
+            // between. The circles keep the geometry this icon already had; only their fill changes.
+            pen.dot_colored(6.0, 6.5, 3.6, Color32::from_rgb(226, 58, 58));
+            pen.dot_colored(10.0, 6.5, 3.6, Color32::from_rgb(58, 200, 88));
+            pen.dot_colored(8.0, 10.0, 3.6, Color32::from_rgb(64, 120, 235));
         }
         Exposure => {
             pen.circle(8.0, 8.0, 5.5);

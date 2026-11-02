@@ -191,7 +191,7 @@ impl Block {
                         v[t * dim + hh * hd..][..hd].copy_from_slice(&s[2 * hd..]);
                     }
                 }
-                nn::attention(&q, &k, &v, n, n, heads, hd, Some(&self.bias))
+                nn::attention(&q, &k, &v, nn::AttentionShape { query_tokens: n, key_tokens: n, heads, head_dim: hd }, Some(&self.bias))
             })
             .collect();
         // Un-window into the real grid, project, residual.
@@ -325,7 +325,7 @@ impl Attn {
     fn forward(&self, q: &[f32], nq: usize, k: &[f32], v: &[f32], nk: usize) -> Vec<f32> {
         let (q, k, v) = (self.q.forward(q, nq), self.k.forward(k, nk), self.v.forward(v, nk));
         let heads = 8;
-        let o = nn::attention(&q, &k, &v, nq, nk, heads, self.q.out / heads, None);
+        let o = nn::attention(&q, &k, &v, nn::AttentionShape { query_tokens: nq, key_tokens: nk, heads, head_dim: self.q.out / heads }, None);
         self.out.forward(&o, nq)
     }
 }

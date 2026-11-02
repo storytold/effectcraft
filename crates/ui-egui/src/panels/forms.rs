@@ -152,7 +152,7 @@ fn is_pdf(p: &Value) -> bool {
 }
 
 /// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After
-/// Effects' "<format> Sequence" checkbox in its Import dialog does (rfd's native dialog can't
+/// Effects' `<format> Sequence` checkbox in its Import dialog does (rfd's native dialog can't
 /// carry a checkbox), with Force Alphabetical Order and the frame rate. `p`: the import's
 /// parameters. Returns whether the dialog opened. The checkbox starts off, as in After Effects:
 /// unticked, the picked files import as stills. Dropped files and agents' `file.import` don't
@@ -206,6 +206,304 @@ fn value_fields(name: &str, v: &effectcraft_engine::keyframe::Value) -> Option<V
     })
 }
 
+/// The New Composition from Selection dialog's title and fields.
+fn new_comp_from_selection_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>) {
+    let names: Vec<(String, Value)> =
+        s.state.project_selection.iter().enumerate().filter_map(|(i, id)| s.project.item(*id).map(|it| (it.name.clone(), json!(i)))).collect();
+    let names: Vec<(&str, Value)> = names.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
+    let still = if s.prefs.import.still_footage == "seconds" { s.prefs.import.still_seconds } else { 10.0 };
+    (
+        "New Composition from Selection".into(),
+        vec![
+            Field::choice("single", "Create", &[("Single Composition", json!(true)), ("Multiple Compositions", json!(false))], 0),
+            Field::choice("dimensionsFrom", "Use Dimensions From", &names, 0),
+            Field::num("duration", "Still Duration (seconds)", still),
+            Field::bool("addToRenderQueue", "Add to Render Queue", false),
+            Field::bool("sequence", "Sequence Layers", false),
+            Field::bool("overlap", "Overlap", false),
+            Field::num("overlapDuration", "Duration (seconds)", 1.0),
+            Field::choice(
+                "transition",
+                "Transition",
+                &[("Off", json!("off")), ("Dissolve Front Layer", json!("dissolveFront")), ("Cross Dissolve Front and Back Layers", json!("crossDissolve"))],
+                0,
+            ),
+        ],
+    )
+}
+
+/// The Interpret Footage dialog for the selected footage (or its proxy), if there is one.
+fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &mut Value) -> Option<(String, Vec<Field>)> {
+    let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
+        (_, Some(px)) if proxy => Some(px.footage.clone()),
+        (effectcraft_engine::project::ItemKind::Footage(f), _) if !proxy => Some(f.clone()),
+        _ => None,
+    });
+    let f = f?;
+    let hex = |c: [f32; 3]| format!("#{:02x}{:02x}{:02x}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
+    let mut fields = vec![
+        // Main Options ▸ Alpha.
+        Field::choice(
+            "alpha",
+            "Alpha",
+            &[
+                ("Interpret Straight - Unmatted", json!("straight")),
+                ("Interpret Premultiplied - Matted With Color", json!("premultiplied")),
+                ("Ignore", json!("ignore")),
+                ("Guess", json!("guess")),
+            ],
+            f.alpha as usize,
+        ),
+        Field::text("matteColor", "Matte color (premultiplied)", &hex(f.premul_color)),
+        Field::bool("invertAlpha", "Invert Alpha", f.invert_alpha),
+        // Main Options ▸ Frame Rate, Fields and Pulldown, Other Options.
+        Field::num("frameRate", "Assume this frame rate", f.frame_rate.as_f64()),
+        Field::choice(
+            "fields",
+            "Separate Fields",
+            &[("Off", json!("off")), ("Upper Field First", json!("upper")), ("Lower Field First", json!("lower"))],
+            f.fields as usize,
+        ),
+        Field::num("pixelAspect", "Pixel Aspect Ratio", f.pixel_aspect),
+        Field::num("loop", "Loop (times)", f.loop_count as f64),
+        // Color.
+        Field::choice(
+            "colorProfile",
+            "Assign Profile",
+            &[
+                ("Embedded / sRGB", json!("auto")),
+                ("sRGB IEC61966-2.1", json!("srgb")),
+                ("HDTV (Rec. 709)", json!("rec709")),
+                ("Rec. 2020", json!("rec2020")),
+                ("Display P3", json!("p3")),
+                ("ACEScg", json!("acescg")),
+                ("ACES2065-1", json!("aces2065")),
+                ("Rec. 2100 PQ", json!("rec2100pq")),
+                ("Rec. 2100 HLG", json!("rec2100hlg")),
+            ],
+            f.color_profile.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::ALL.iter().position(|x| *x == c).unwrap_or(0)),
+        ),
+        Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
+        Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
+    ];
+    // Color ▸ Cineon Settings (DPX and Cineon files). The converted points show in the
+    // footage's Units, and `pointUnits` reads them back in those units when Units changes.
+    if f.is_cineon_file() {
+        use effectcraft_engine::project::CineonUnits;
+        let c = f.cineon;
+        let units: Vec<(&str, Value)> = CineonUnits::ALL.iter().map(|u| (u.label(), json!(u.id()))).collect();
+        fields.extend([
+            Field::note("cineonSettings", "Cineon Settings"),
+            Field::bool("logConversion", "Logarithmic Conversion", c.log_conversion),
+            Field::num("convertedBlack", "Converted Black Point", c.units.from_ten_bit(f64::from(c.converted_black))),
+            Field::num("convertedWhite", "Converted White Point", c.units.from_ten_bit(f64::from(c.converted_white))),
+            Field::num("tenBitBlack", "10 Bit Black Point", f64::from(c.black)),
+            Field::num("tenBitWhite", "10 Bit White Point", f64::from(c.white)),
+            Field::num("currentGamma", "Current Gamma", f64::from(c.gamma)),
+            Field::num("highlightRolloff", "Highlight Rolloff", f64::from(c.rolloff)),
+            Field::choice("cineonUnits", "Units", &units, CineonUnits::ALL.iter().position(|u| *u == c.units).unwrap_or(0)),
+        ]);
+        if !base.is_object() {
+            *base = json!({});
+        }
+        if let Some(m) = base.as_object_mut() {
+            m.insert("pointUnits".into(), json!(c.units.id()));
+        }
+    }
+    // After Frame Rate: an image sequence's frames (missing ones show colour bars, as in
+    // After Effects), then Start Timecode.
+    let mut timing = Vec::new();
+    if f.kind == effectcraft_engine::project::FootageKind::Sequence {
+        let gaps = match effectcraft_engine::sequence::missing_report(&f.sequence) {
+            _ if f.alphabetical => "files in alphabetical order".into(),
+            Some(gaps) => format!("{gaps} shown as color bars"),
+            None => "no missing frames".into(),
+        };
+        timing.push(Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())));
+    }
+    if f.kind != effectcraft_engine::project::FootageKind::Still {
+        timing.push(Field::choice(
+            "overrideStart",
+            "Start Timecode",
+            &[("Use Source File Timecode", json!(false)), ("Override Start", json!(true))],
+            usize::from(f.start_timecode.is_some()),
+        ));
+        timing.push(Field::text("startTimecode", "Override Start", &f.timecode(0)));
+    }
+    let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
+    fields.splice(at..at, timing);
+    Some((if proxy { "Interpret Footage: Proxy".into() } else { "Interpret Footage".into() }, fields))
+}
+
+/// The Project Settings dialog's title and fields.
+fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>) {
+    let st = &s.project.settings;
+    // The catalogue row is `Mercury GPU Acceleration ({})`, so the value goes through
+    // tr_args: wrapping the assembled string in tr() would look up the backend's name.
+    let gpu_label = match &s.accel {
+        Some(a) => tr_args("Mercury GPU Acceleration ({})", &[&a.name()]),
+        None => tr("Mercury GPU Acceleration (no GPU: software)").to_string(),
+    };
+    let depth = match st.bit_depth.label() {
+        l if l.starts_with("16") => 1,
+        l if l.starts_with("32") => 2,
+        _ => 0,
+    };
+    (
+        "Project Settings".into(),
+        vec![
+            Field::choice(
+                "bitDepth",
+                "Depth",
+                &[("8 bits per channel", json!(8)), ("16 bits per channel", json!(16)), ("32 bits per channel (float)", json!(32))],
+                depth,
+            ),
+            Field::choice(
+                "timeDisplay",
+                "Time display style",
+                &[
+                    ("Timecode", json!("timecode")),
+                    ("Frames", json!("frames")),
+                    ("Feet + Frames (35mm)", json!("feet35")),
+                    ("Feet + Frames (16mm)", json!("feet16")),
+                ],
+                {
+                    use effectcraft_engine::project::TimeDisplayStyle as T;
+                    match st.time_display {
+                        T::Timecode => 0,
+                        T::Frames => 1,
+                        T::Feet35 => 2,
+                        T::Feet16 => 3,
+                    }
+                },
+            ),
+            // Time Display Style ▸ Frames ▸ Frame Count (also numbers Feet + Frames).
+            Field::choice("frameStart", "Frame count", &[("Start at 0", json!(0)), ("Start at 1", json!(1))], usize::from(st.frame_start == 1)),
+            Field::choice(
+                "colorEngine",
+                "Color engine",
+                &[("Adobe-style built-in", json!("adobe")), ("OCIO (built-in ACES config)", json!("ocio"))],
+                usize::from(st.color_engine == effectcraft_engine::project::ColorEngine::Ocio),
+            ),
+            Field::choice(
+                "workingSpace",
+                "Working space",
+                &[
+                    ("None", json!("none")),
+                    ("sRGB IEC61966-2.1", json!("srgb")),
+                    ("HDTV (Rec. 709)", json!("rec709")),
+                    ("Rec. 2020", json!("rec2020")),
+                    ("Display P3", json!("p3")),
+                    ("ACEScg", json!("acescg")),
+                    ("ACES2065-1", json!("aces2065")),
+                ],
+                st.working_space.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::WORKING.iter().position(|x| *x == c).unwrap_or(0)),
+            ),
+            // With Working Space None (After Effects' Working Gamma, 2.2 or 2.4).
+            Field::choice("workingGamma", "Working gamma", &[("2.2", json!(2.2)), ("2.4", json!(2.4))], usize::from(st.working_gamma_24())),
+            Field::bool("linearize", "Linearize working space", st.linearize),
+            Field::bool("blendLinear", "Blend colors using 1.0 gamma", st.blend_linear),
+            Field::choice(
+                "hdr",
+                "HDR on SDR displays and outputs",
+                &[("Clip", json!("clip")), ("Compand", json!("compand")), ("Tone map", json!("toneMap"))],
+                st.hdr as usize,
+            ),
+            Field::choice(
+                "outputSpace",
+                "Output color space",
+                &[
+                    ("sRGB IEC61966-2.1 (default)", json!("default")),
+                    ("HDTV (Rec. 709)", json!("rec709")),
+                    ("Rec. 2020", json!("rec2020")),
+                    ("Display P3", json!("p3")),
+                    ("Rec. 2100 PQ (HDR)", json!("rec2100pq")),
+                    ("Rec. 2100 HLG (HDR)", json!("rec2100hlg")),
+                ],
+                {
+                    use effectcraft_engine::project::ColorSpace as C;
+                    match st.output_space {
+                        Some(C::Rec709) => 1,
+                        Some(C::Rec2020) => 2,
+                        Some(C::DisplayP3) => 3,
+                        Some(C::Rec2100Pq) => 4,
+                        Some(C::Rec2100Hlg) => 5,
+                        _ => 0,
+                    }
+                },
+            ),
+            // Video Rendering and Effects ▸ Use.
+            Field::choice(
+                "renderer",
+                "Video rendering and effects",
+                &[(gpu_label.as_str(), json!("gpu")), ("Mercury Software Only", json!("software"))],
+                usize::from(!st.gpu_acceleration),
+            ),
+        ],
+    )
+}
+
+/// The Export Adobe Premiere Pro Project dialog's title and fields.
+fn export_timeline_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>) {
+    let name = s.active_comp_id().and_then(|c| s.project.item(c)).map(|i| i.name.clone()).unwrap_or_else(|| "Composition".into());
+    let dir = s.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map(|d| d.to_path_buf()).unwrap_or_default();
+    let path = dir.join(format!("{name}.xml")).to_string_lossy().to_string();
+    (
+        "Export Adobe Premiere Pro Project".into(),
+        vec![
+            Field::note("note", "Writes Final Cut Pro XML (.xml), which Premiere Pro opens with File ▸ Import. Native .prproj files are not written."),
+            Field::save_path("path", "File", &path),
+            Field::choice(
+                "format",
+                "Format",
+                &[
+                    ("Final Cut Pro XML (.xml) – Premiere Pro", json!("xml")),
+                    ("FCPXML (.fcpxml)", json!("fcpxml")),
+                    ("OpenTimelineIO (.otio)", json!("otio")),
+                    ("CMX 3600 EDL (.edl, V1 only)", json!("edl")),
+                    ("AAF (.aaf)", json!("aaf")),
+                    ("OMF (.omf, audio)", json!("omf")),
+                ],
+                0,
+            ),
+            Field::choice(
+                "prerender",
+                "Pre-render (ProRes 4444)",
+                &[
+                    ("Layers Premiere can't show (text, shapes, effects…)", json!("unsupported")),
+                    ("All layers", json!("all")),
+                    ("None (leave them out)", json!("none")),
+                ],
+                0,
+            ),
+            Field::choice("precomps", "Precomps", &[("Nested sequences", json!("nest")), ("Pre-render", json!("prerender"))], 0),
+        ],
+    )
+}
+
+/// The Layer ▸ Transform value dialog for the property named by `p` (default Position).
+fn transform_form(p: &Value, layer: Option<&effectcraft_engine::project::Layer>, lt: effectcraft_engine::time::Tick) -> (String, Vec<Field>) {
+    let prop = p.get("prop").and_then(Value::as_str).unwrap_or("position");
+    let cur = layer.and_then(|l| l.transform()).and_then(|tr| tr.get(if prop == "anchorPoint" { "anchor" } else { prop })).map(|pr| pr.value_at(lt));
+    let v = cur.map(|c| c.as_vec3()).unwrap_or([0.0; 3]);
+    let three = layer.is_some_and(|l| l.is_3d());
+    let title = match prop {
+        "anchor" => "Anchor Point",
+        "position" => "Position",
+        "scale" => "Scale",
+        "orientation" => "Orientation",
+        "rotation" => "Rotation",
+        _ => "Opacity",
+    };
+    let fields = match prop {
+        "rotation" | "opacity" => vec![Field::num("value", if prop == "rotation" { "Degrees" } else { "Opacity (%)" }, v[0])],
+        "orientation" => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1]), Field::num("value[2]", "Z", v[2])],
+        _ if three => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1]), Field::num("value[2]", "Z", v[2])],
+        _ => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1])],
+    };
+    (title.into(), fields)
+}
+
 /// If `id` is a dialog command invoked without its parameters, open its form and return true.
 pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let s = &app.session;
@@ -213,7 +511,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let layer = comp.and_then(|c| s.state.selected_layers.first().and_then(|l| c.layer(*l)));
     let t = s.time();
     let lt = layer.map(|l| l.layer_time(t)).unwrap_or(t);
-    let base = p.clone();
+    let mut base = p.clone();
     let (title, fields): (String, Vec<Field>) = match id {
         // Photoshop files: Import Kind (Footage / Composition / – Retain Layer Sizes). Dropped
         // files start at Settings ▸ Import ▸ Default Drag Import As.
@@ -281,27 +579,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             let Some(fields) = value_fields(&pr.name, &pr.value_at(l.layer_time(t))) else { return false };
             (pr.name.clone(), fields)
         }
-        "layer.setTransform" if !has(p, &["value"]) => {
-            let prop = p.get("prop").and_then(Value::as_str).unwrap_or("position");
-            let cur = layer.and_then(|l| l.transform()).and_then(|tr| tr.get(if prop == "anchorPoint" { "anchor" } else { prop })).map(|pr| pr.value_at(lt));
-            let v = cur.map(|c| c.as_vec3()).unwrap_or([0.0; 3]);
-            let three = layer.is_some_and(|l| l.is_3d());
-            let title = match prop {
-                "anchor" => "Anchor Point",
-                "position" => "Position",
-                "scale" => "Scale",
-                "orientation" => "Orientation",
-                "rotation" => "Rotation",
-                _ => "Opacity",
-            };
-            let fields = match prop {
-                "rotation" | "opacity" => vec![Field::num("value", if prop == "rotation" { "Degrees" } else { "Opacity (%)" }, v[0])],
-                "orientation" => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1]), Field::num("value[2]", "Z", v[2])],
-                _ if three => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1]), Field::num("value[2]", "Z", v[2])],
-                _ => vec![Field::num("value[0]", "X", v[0]), Field::num("value[1]", "Y", v[1])],
-            };
-            (title.into(), fields)
-        }
+        "layer.setTransform" if !has(p, &["value"]) => transform_form(p, layer, lt),
         "path.freeTransform" if !has(p, &["scale", "rotation", "offset"]) => (
             "Free Transform Points".into(),
             vec![
@@ -377,32 +655,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
         "file.newCompFromSelection"
             if s.state.project_selection.len() > 1 && !has(p, &["single", "dimensionsFrom", "duration", "sequence", "addToRenderQueue"]) =>
         {
-            let names: Vec<(String, Value)> =
-                s.state.project_selection.iter().enumerate().filter_map(|(i, id)| s.project.item(*id).map(|it| (it.name.clone(), json!(i)))).collect();
-            let names: Vec<(&str, Value)> = names.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
-            let still = if s.prefs.import.still_footage == "seconds" { s.prefs.import.still_seconds } else { 10.0 };
-            (
-                "New Composition from Selection".into(),
-                vec![
-                    Field::choice("single", "Create", &[("Single Composition", json!(true)), ("Multiple Compositions", json!(false))], 0),
-                    Field::choice("dimensionsFrom", "Use Dimensions From", &names, 0),
-                    Field::num("duration", "Still Duration (seconds)", still),
-                    Field::bool("addToRenderQueue", "Add to Render Queue", false),
-                    Field::bool("sequence", "Sequence Layers", false),
-                    Field::bool("overlap", "Overlap", false),
-                    Field::num("overlapDuration", "Duration (seconds)", 1.0),
-                    Field::choice(
-                        "transition",
-                        "Transition",
-                        &[
-                            ("Off", json!("off")),
-                            ("Dissolve Front Layer", json!("dissolveFront")),
-                            ("Cross Dissolve Front and Back Layers", json!("crossDissolve")),
-                        ],
-                        0,
-                    ),
-                ],
-            )
+            new_comp_from_selection_form(s)
         }
         "layer.sequence" if !has(p, &["overlap"]) => (
             "Sequence Layers".into(),
@@ -422,189 +675,36 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             ],
         ),
         "file.interpretFootage" | "file.interpretProxy"
-            if !has(p, &["frameRate", "alpha", "loop", "pixelAspect", "colorProfile", "fields", "invertAlpha", "matteColor", "linearLight", "startFrame"]) =>
+            if !has(
+                p,
+                &[
+                    "frameRate",
+                    "alpha",
+                    "loop",
+                    "pixelAspect",
+                    "colorProfile",
+                    "fields",
+                    "invertAlpha",
+                    "matteColor",
+                    "linearLight",
+                    "startFrame",
+                    "logConversion",
+                    "cineonUnits",
+                    "pointUnits",
+                    "convertedBlack",
+                    "convertedWhite",
+                    "tenBitBlack",
+                    "tenBitWhite",
+                    "currentGamma",
+                    "highlightRolloff",
+                ],
+            ) =>
         {
             let proxy = id == "file.interpretProxy";
-            let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
-                (_, Some(px)) if proxy => Some(px.footage.clone()),
-                (effectcraft_engine::project::ItemKind::Footage(f), _) if !proxy => Some(f.clone()),
-                _ => None,
-            });
-            let Some(f) = f else { return false };
-            let hex = |c: [f32; 3]| format!("#{:02x}{:02x}{:02x}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
-            let mut fields = vec![
-                // Main Options ▸ Alpha.
-                Field::choice(
-                    "alpha",
-                    "Alpha",
-                    &[
-                        ("Interpret Straight - Unmatted", json!("straight")),
-                        ("Interpret Premultiplied - Matted With Color", json!("premultiplied")),
-                        ("Ignore", json!("ignore")),
-                        ("Guess", json!("guess")),
-                    ],
-                    f.alpha as usize,
-                ),
-                Field::text("matteColor", "Matte color (premultiplied)", &hex(f.premul_color)),
-                Field::bool("invertAlpha", "Invert Alpha", f.invert_alpha),
-                // Main Options ▸ Frame Rate, Fields and Pulldown, Other Options.
-                Field::num("frameRate", "Assume this frame rate", f.frame_rate.as_f64()),
-                Field::choice(
-                    "fields",
-                    "Separate Fields",
-                    &[("Off", json!("off")), ("Upper Field First", json!("upper")), ("Lower Field First", json!("lower"))],
-                    f.fields as usize,
-                ),
-                Field::num("pixelAspect", "Pixel Aspect Ratio", f.pixel_aspect),
-                Field::num("loop", "Loop (times)", f.loop_count as f64),
-                // Color.
-                Field::choice(
-                    "colorProfile",
-                    "Assign Profile",
-                    &[
-                        ("Embedded / sRGB", json!("auto")),
-                        ("sRGB IEC61966-2.1", json!("srgb")),
-                        ("HDTV (Rec. 709)", json!("rec709")),
-                        ("Rec. 2020", json!("rec2020")),
-                        ("Display P3", json!("p3")),
-                        ("ACEScg", json!("acescg")),
-                        ("ACES2065-1", json!("aces2065")),
-                        ("Rec. 2100 PQ", json!("rec2100pq")),
-                        ("Rec. 2100 HLG", json!("rec2100hlg")),
-                    ],
-                    f.color_profile.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::ALL.iter().position(|x| *x == c).unwrap_or(0)),
-                ),
-                Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
-                Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
-            ];
-            // After Frame Rate: an image sequence's frames (missing ones show colour bars, as in
-            // After Effects), then Start Timecode.
-            let mut timing = Vec::new();
-            if f.kind == effectcraft_engine::project::FootageKind::Sequence {
-                let gaps = match effectcraft_engine::sequence::missing_report(&f.sequence) {
-                    _ if f.alphabetical => "files in alphabetical order".into(),
-                    Some(gaps) => format!("{gaps} shown as color bars"),
-                    None => "no missing frames".into(),
-                };
-                timing.push(Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())));
-            }
-            if f.kind != effectcraft_engine::project::FootageKind::Still {
-                timing.push(Field::choice(
-                    "overrideStart",
-                    "Start Timecode",
-                    &[("Use Source File Timecode", json!(false)), ("Override Start", json!(true))],
-                    usize::from(f.start_timecode.is_some()),
-                ));
-                timing.push(Field::text("startTimecode", "Override Start", &f.timecode(0)));
-            }
-            let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
-            fields.splice(at..at, timing);
-            (if proxy { "Interpret Footage: Proxy".into() } else { "Interpret Footage".into() }, fields)
+            let Some(form) = interpret_footage_form(s, proxy, &mut base) else { return false };
+            form
         }
-        "file.projectSettings" if p.as_object().is_none_or(|m| m.is_empty()) => {
-            let st = &s.project.settings;
-            // The catalogue row is `Mercury GPU Acceleration ({})`, so the value goes through
-            // tr_args: wrapping the assembled string in tr() would look up the backend's name.
-            let gpu_label = match &s.accel {
-                Some(a) => tr_args("Mercury GPU Acceleration ({})", &[&a.name()]),
-                None => tr("Mercury GPU Acceleration (no GPU: software)").to_string(),
-            };
-            let depth = match st.bit_depth.label() {
-                l if l.starts_with("16") => 1,
-                l if l.starts_with("32") => 2,
-                _ => 0,
-            };
-            (
-                "Project Settings".into(),
-                vec![
-                    Field::choice(
-                        "bitDepth",
-                        "Depth",
-                        &[("8 bits per channel", json!(8)), ("16 bits per channel", json!(16)), ("32 bits per channel (float)", json!(32))],
-                        depth,
-                    ),
-                    Field::choice(
-                        "timeDisplay",
-                        "Time display style",
-                        &[
-                            ("Timecode", json!("timecode")),
-                            ("Frames", json!("frames")),
-                            ("Feet + Frames (35mm)", json!("feet35")),
-                            ("Feet + Frames (16mm)", json!("feet16")),
-                        ],
-                        {
-                            use effectcraft_engine::project::TimeDisplayStyle as T;
-                            match st.time_display {
-                                T::Timecode => 0,
-                                T::Frames => 1,
-                                T::Feet35 => 2,
-                                T::Feet16 => 3,
-                            }
-                        },
-                    ),
-                    Field::choice(
-                        "colorEngine",
-                        "Color engine",
-                        &[("Adobe-style built-in", json!("adobe")), ("OCIO (built-in ACES config)", json!("ocio"))],
-                        usize::from(st.color_engine == effectcraft_engine::project::ColorEngine::Ocio),
-                    ),
-                    Field::choice(
-                        "workingSpace",
-                        "Working space",
-                        &[
-                            ("None", json!("none")),
-                            ("sRGB IEC61966-2.1", json!("srgb")),
-                            ("HDTV (Rec. 709)", json!("rec709")),
-                            ("Rec. 2020", json!("rec2020")),
-                            ("Display P3", json!("p3")),
-                            ("ACEScg", json!("acescg")),
-                            ("ACES2065-1", json!("aces2065")),
-                        ],
-                        st.working_space.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::WORKING.iter().position(|x| *x == c).unwrap_or(0)),
-                    ),
-                    // With Working Space None (After Effects' Working Gamma, 2.2 or 2.4).
-                    Field::choice("workingGamma", "Working gamma", &[("2.2", json!(2.2)), ("2.4", json!(2.4))], usize::from(st.working_gamma_24())),
-                    Field::bool("linearize", "Linearize working space", st.linearize),
-                    Field::bool("blendLinear", "Blend colors using 1.0 gamma", st.blend_linear),
-                    Field::choice(
-                        "hdr",
-                        "HDR on SDR displays and outputs",
-                        &[("Clip", json!("clip")), ("Compand", json!("compand")), ("Tone map", json!("toneMap"))],
-                        st.hdr as usize,
-                    ),
-                    Field::choice(
-                        "outputSpace",
-                        "Output color space",
-                        &[
-                            ("sRGB IEC61966-2.1 (default)", json!("default")),
-                            ("HDTV (Rec. 709)", json!("rec709")),
-                            ("Rec. 2020", json!("rec2020")),
-                            ("Display P3", json!("p3")),
-                            ("Rec. 2100 PQ (HDR)", json!("rec2100pq")),
-                            ("Rec. 2100 HLG (HDR)", json!("rec2100hlg")),
-                        ],
-                        {
-                            use effectcraft_engine::project::ColorSpace as C;
-                            match st.output_space {
-                                Some(C::Rec709) => 1,
-                                Some(C::Rec2020) => 2,
-                                Some(C::DisplayP3) => 3,
-                                Some(C::Rec2100Pq) => 4,
-                                Some(C::Rec2100Hlg) => 5,
-                                _ => 0,
-                            }
-                        },
-                    ),
-                    // Video Rendering and Effects ▸ Use.
-                    Field::choice(
-                        "renderer",
-                        "Video rendering and effects",
-                        &[(gpu_label.as_str(), json!("gpu")), ("Mercury Software Only", json!("software"))],
-                        usize::from(!st.gpu_acceleration),
-                    ),
-                ],
-            )
-        }
+        "file.projectSettings" if p.as_object().is_none_or(|m| m.is_empty()) => project_settings_form(s),
         "layer.autoTrace" if !has(p, &["channel", "timeSpan", "threshold"]) => (
             "Auto-trace".into(),
             vec![
@@ -661,40 +761,14 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
         }
         // File ▸ Export ▸ Adobe Premiere Pro Project…: Final Cut Pro XML (or FCPXML / OTIO / EDL).
         "file.exportTimeline" if !has(p, &["path"]) => {
-            let name = s.active_comp_id().and_then(|c| s.project.item(c)).map(|i| i.name.clone()).unwrap_or_else(|| "Composition".into());
-            let dir = s.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map(|d| d.to_path_buf()).unwrap_or_default();
-            let path = dir.join(format!("{name}.xml")).to_string_lossy().to_string();
-            (
-                "Export Adobe Premiere Pro Project".into(),
-                vec![
-                    Field::note("note", "Writes Final Cut Pro XML (.xml), which Premiere Pro opens with File ▸ Import. Native .prproj files are not written."),
-                    Field::save_path("path", "File", &path),
-                    Field::choice(
-                        "format",
-                        "Format",
-                        &[
-                            ("Final Cut Pro XML (.xml) – Premiere Pro", json!("xml")),
-                            ("FCPXML (.fcpxml)", json!("fcpxml")),
-                            ("OpenTimelineIO (.otio)", json!("otio")),
-                            ("CMX 3600 EDL (.edl, V1 only)", json!("edl")),
-                            ("AAF (.aaf)", json!("aaf")),
-                            ("OMF (.omf, audio)", json!("omf")),
-                        ],
-                        0,
-                    ),
-                    Field::choice(
-                        "prerender",
-                        "Pre-render (ProRes 4444)",
-                        &[
-                            ("Layers Premiere can't show (text, shapes, effects…)", json!("unsupported")),
-                            ("All layers", json!("all")),
-                            ("None (leave them out)", json!("none")),
-                        ],
-                        0,
-                    ),
-                    Field::choice("precomps", "Precomps", &[("Nested sequences", json!("nest")), ("Pre-render", json!("prerender"))], 0),
-                ],
-            )
+            // Its pre-renders run as a job in Window ▸ Progress, not with the window waiting (#2269).
+            match base.as_object_mut() {
+                Some(m) => {
+                    m.insert("background".into(), json!(true));
+                }
+                None => base = json!({"background": true}),
+            }
+            export_timeline_form(s)
         }
         "file.importPlaceholder" | "file.replaceWithPlaceholder" if p.as_object().is_none_or(|m| m.is_empty()) => (
             "New Placeholder".into(),
@@ -823,12 +897,12 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     .inner
                     .rect
                 }
-                FieldKind::Bool(b) => ui.checkbox(b, "").rect,
+                FieldKind::Bool(b) => crate::widgets::labelled_checkbox(ui, b, "").rect,
                 FieldKind::Choice { options, sel } => {
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
                     // ellipsis instead of widening the form past the dialog (#978).
-                    egui::ComboBox::from_id_salt(("form", fl.key.as_str()))
+                    craft_ui::ComboBox::from_id_salt(("form", fl.key.as_str()))
                         .selected_text(tr(&cur))
                         .width(240.0)
                         .truncate()
@@ -953,13 +1027,13 @@ pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Toke
     let mut close = false;
     super::dialogs::modal(ctx, "View Options", vec2(360.0, 330.0), t, |ui| {
         let v = &mut app.ui.viewer;
-        ui.checkbox(&mut v.show_layer_controls, tr("Layer controls"));
-        ui.checkbox(&mut v.show_masks, tr("Masks"));
-        ui.checkbox(&mut v.rulers, tr("Rulers"));
-        ui.checkbox(&mut v.guides, tr("Guides"));
-        ui.checkbox(&mut v.grid, tr("Grid"));
-        ui.checkbox(&mut v.safe_margins, tr("Title/action safe"));
-        ui.checkbox(&mut v.transparency_grid, tr("Transparency grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_layer_controls, tr("Layer controls"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_masks, tr("Masks"));
+        crate::widgets::labelled_checkbox(ui, &mut v.rulers, tr("Rulers"));
+        crate::widgets::labelled_checkbox(ui, &mut v.guides, tr("Guides"));
+        crate::widgets::labelled_checkbox(ui, &mut v.grid, tr("Grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.safe_margins, tr("Title/action safe"));
+        crate::widgets::labelled_checkbox(ui, &mut v.transparency_grid, tr("Transparency grid"));
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent)).clicked() {
@@ -1052,8 +1126,90 @@ mod tests {
         let params = app.dialog_state.form.params();
         assert!(params.get("note").is_none());
         assert_eq!(params["format"], "xml");
-        let r = app.session.execute("file.exportTimeline", params).unwrap();
-        assert_eq!(r["path"], path.as_str());
+        assert_eq!(params["background"], true, "the dialog exports in the background");
+        assert!(app.session.execute("file.exportTimeline", params).unwrap()["job"].is_string());
+        app.session.wait_jobs();
+        let done = app.session.job_log.last().unwrap();
+        assert_eq!((done.status.as_str(), &done.result["path"]), ("done", &json!(path)));
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
+    }
+
+    #[test]
+    fn interpretation_menu_applies_explicit_cineon_parameters_without_a_dialog() {
+        use effectcraft_engine::project::{Footage, FootageKind, ItemKind, Proxy};
+        for command in ["file.interpretFootage", "file.interpretProxy"] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            let footage = Footage { path: "/m/scan.dpx".into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
+            let project = std::sync::Arc::make_mut(&mut app.session.project);
+            let item = project.add_item("scan.dpx", Default::default(), None, ItemKind::Footage(footage.clone()));
+            project.item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
+            app.session.state.project_selection = vec![item];
+            let ctx = egui::Context::default();
+            for params in [
+                json!({"logConversion": true}),
+                json!({"cineonUnits": "10bit"}),
+                json!({"pointUnits": "10bit"}),
+                json!({"convertedBlack": 10.0}),
+                json!({"convertedWhite": 900.0}),
+                json!({"tenBitBlack": 90.0}),
+                json!({"tenBitWhite": 690.0}),
+                json!({"currentGamma": 2.2}),
+                json!({"highlightRolloff": 30.0}),
+            ] {
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(app.dialog.is_none(), "{command}: {params}");
+            }
+            let item = app.session.project.item(item).unwrap();
+            let footage = if command == "file.interpretProxy" {
+                &item.proxy.as_ref().unwrap().footage
+            } else {
+                let ItemKind::Footage(footage) = &item.kind else { panic!("not footage") };
+                footage
+            };
+            assert!(footage.cineon.log_conversion);
+            assert_eq!(footage.cineon.gamma, 2.2);
+            assert_eq!(footage.cineon.converted_white, 900.0);
+        }
+    }
+
+    /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in
+    /// the footage's Units, and choosing other Units reads the shown values in the old ones.
+    #[test]
+    fn interpret_footage_shows_cineon_settings_for_dpx() {
+        use effectcraft_engine::project::{CineonUnits, Footage, FootageKind, ItemKind};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let still =
+            |path: &str| ItemKind::Footage(Footage { path: path.into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() });
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let dpx = project.add_item("scan.dpx", Default::default(), None, still("/m/scan.dpx"));
+        let png = project.add_item("still.png", Default::default(), None, still("/m/still.png"));
+        let keys = |app: &EffectcraftApp| app.dialog_state.form.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>();
+        app.session.state.project_selection = vec![png];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(!keys(&app).iter().any(|k| k == "logConversion"), "{:?}", keys(&app));
+        app.session.state.project_selection = vec![dpx];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        for k in ["logConversion", "convertedBlack", "convertedWhite", "tenBitBlack", "tenBitWhite", "currentGamma", "highlightRolloff", "cineonUnits"] {
+            assert!(keys(&app).iter().any(|x| x == k), "{k}: {:?}", keys(&app));
+        }
+        // Units ▸ 8-bit with Converted White Point still showing 1023 (10-bit).
+        let form = &mut app.dialog_state.form;
+        for f in form.fields.iter_mut() {
+            match (f.key.as_str(), &mut f.kind) {
+                ("cineonUnits", FieldKind::Choice { sel, .. }) => *sel = 1,
+                ("logConversion", FieldKind::Bool(b)) => *b = true,
+                _ => {}
+            }
+        }
+        let params = form.params();
+        assert_eq!((params["pointUnits"].as_str(), params["cineonUnits"].as_str()), (Some("10bit"), Some("8bit")), "{params}");
+        app.session.execute("file.interpretFootage", params).unwrap();
+        let Some(ItemKind::Footage(f)) = app.session.project.item(dpx).map(|i| &i.kind) else { panic!("not footage") };
+        assert!(f.cineon.log_conversion && f.cineon.units == CineonUnits::EightBit, "{:?}", f.cineon);
+        assert!((f.cineon.converted_white - 1023.0).abs() < 1e-3, "{:?}", f.cineon);
+        // Opened again, the point shows in 8-bit units.
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        let white = app.dialog_state.form.fields.iter().find(|f| f.key == "convertedWhite").map(|f| f.kind.clone());
+        assert!(matches!(white, Some(FieldKind::Number { value, .. }) if (value - 255.0).abs() < 1e-6), "{white:?}");
     }
 }
