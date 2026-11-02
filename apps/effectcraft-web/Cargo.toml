@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-web"
-description = "EffectCraft in the browser (wasm32): eframe web runner, persistent browser storage (OPFS / IndexedDB), Web Audio, Web Worker renders, PWA, window.effectcraft API"
+description = "Visualab Effects in the browser (wasm32): eframe web runner, persistent browser storage (OPFS / IndexedDB), Web Audio, Web Worker renders, PWA, window.effectcraft API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,8 +37,6 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",
-    "AbortController",
-    "AbortSignal",
     "CssStyleDeclaration",
     "Document",
     "Element",
@@ -53,12 +51,6 @@ web-sys = { version = "0.3", features = [
     "HtmlInputElement",
     "Location",
     "Navigator",
-    "ReadableStream",
-    "ReadableStreamDefaultReader",
-    "Request",
-    "RequestCache",
-    "RequestInit",
-    "Response",
     "Url",
     "UrlSearchParams",
     "Window",

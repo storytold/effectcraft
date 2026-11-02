@@ -1,6 +1,6 @@
 # effectcraft-svg
 
-SVG import for EffectCraft: `.svg` files import as footage (rasterised at any scale, so
+SVG import for Visualab Effects: `.svg` files import as footage (rasterised at any scale, so
 Continuously Rasterize stays sharp) and Layer ▸ Create ▸ Create Shapes from Vector Layer turns
 them into editable shape layers.
 
