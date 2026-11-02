@@ -49,6 +49,27 @@ fn animate_text_adds_animators_with_companion_properties() {
     let _ = s.render(cid, s.time(), Default::default());
 }
 
+/// `animator` counts from 1, as `#n` references do: the commands that take it say so, and 0 fails
+/// with an error that says so (agents reading `uid|index` tried 0).
+#[test]
+fn animator_indices_count_from_1_and_say_so() {
+    let (mut s, t) = session();
+    let uid = s.execute("layer.addTextAnimator", json!({"layer": t, "property": "position"})).unwrap()["animator"].as_u64().unwrap();
+    for id in ["layer.addTextAnimatorProperty", "layer.addTextSelector", "text.animatorFontAxes"] {
+        let spec = crate::cmd::command_specs().iter().find(|c| c.id == id).unwrap();
+        assert!(spec.params.contains("animator?: uid|index (1-based)"), "{id}: {}", spec.params);
+    }
+    for (id, p) in [
+        ("layer.addTextAnimatorProperty", json!({"layer": t, "animator": 0, "property": "fillHue"})),
+        ("layer.addTextSelector", json!({"layer": t, "animator": 0, "kind": "wiggly"})),
+    ] {
+        let e = s.execute(id, p).unwrap_err().to_string();
+        assert!(e.contains("no animator 0") && e.contains("1-based"), "{id}: {e}");
+    }
+    let r = s.execute("layer.addTextSelector", json!({"layer": t, "animator": 1, "kind": "wiggly"})).unwrap();
+    assert_eq!(r["animator"].as_u64(), Some(uid));
+}
+
 #[test]
 fn add_property_and_selectors_with_undo_redo() {
     let (mut s, t) = session();

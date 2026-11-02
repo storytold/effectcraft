@@ -59,7 +59,11 @@ fn animator_uid(s: &Session, l: &Layer, p: &Value, cmd: &str) -> Result<u64> {
         if let Some(g) = list.iter().find(|g| g.uid == n) {
             return Ok(g.uid);
         }
-        return list.get((n as usize).wrapping_sub(1)).map(|g| g.uid).ok_or_else(|| bad(cmd, format!("no animator {n}")));
+        let count = if list.len() == 1 { "1 animator".to_string() } else { format!("{} animators", list.len()) };
+        return list
+            .get((n as usize).wrapping_sub(1))
+            .map(|g| g.uid)
+            .ok_or_else(|| bad(cmd, format!("no animator {n}: `animator` is a uid or a 1-based index, and the layer has {count}")));
     }
     for (lid, uid) in &s.state.selected_props {
         if *lid != l.id {
@@ -454,7 +458,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Property",
             [],
             None,
-            "{layer?, animator?: uid|index, property: (see layer.addTextAnimator)}",
+            "{layer?, animator?: uid|index (1-based), property: (see layer.addTextAnimator)}",
             has_animator,
             add_animator_prop
         ),
@@ -463,7 +467,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Text Selector",
             [],
             None,
-            "{layer?, animator?: uid|index, kind: range|wiggly|expression}",
+            "{layer?, animator?: uid|index (1-based), kind: range|wiggly|expression}",
             has_animator,
             add_selector
         ),
@@ -482,7 +486,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Variable Font Axes",
             ["Animation", "Animate Text"],
             None,
-            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index}",
+            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index (1-based)}",
             has_text_layer,
             font_axes
         ),
