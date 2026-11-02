@@ -47,7 +47,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
     let (mut proj, repaired) =
-        Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project EffectCraft can open: {e}")))?;
+        Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project Visualab Effects can open: {e}")))?;
     // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
@@ -61,17 +61,17 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         let more = repaired.len().saturating_sub(3);
         let shown = repaired.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
         let more = if more > 0 { format!(" and {more} more") } else { String::new() };
-        s.toast(format!("This project had values outside EffectCraft's limits, corrected when it opened: {shown}{more}."));
+        s.toast(format!("This project had values outside Visualab Effects's limits, corrected when it opened: {shown}{more}."));
     }
     if let Some((_, first, why)) = refused.first() {
         let n = refused.len();
         s.toast(format!("{n} footage item{} marked missing: {}.", if n == 1 { "" } else { "s" }, crate::doc_path::refusal(first, *why)));
     }
-    // Written by a newer EffectCraft: what this version doesn't know would be lost on saving.
+    // Written by a newer Visualab Effects: what this version doesn't know would be lost on saving.
     let saved_by = effectcraft_project::saved_by(&text);
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         s.toast(format!(
-            "This project was saved by EffectCraft {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
+            "This project was saved by Visualab Effects {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
             effectcraft_project::APP_VERSION
         ));
     }
@@ -87,8 +87,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
 /// project opened from an XML copy saves as XML again). Fails, writing nothing, when the project
 /// wouldn't read back.
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
-    let compact = s.prefs.project.compact_project_files && !crate::xml_project::is_xml_path(path);
-    let json = s.project.to_file_json_with_view(&s.saved_view(), compact)?;
+    let json = s.project.to_file_json_with_view(&s.saved_view())?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
 }
 
@@ -125,8 +124,7 @@ fn revert(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 /// File ▸ Import; with `addToComp` (files dropped on the Timeline or the Composition viewer) they
-/// also become layers of the active comp ([`add_to_comp`]); with `newComp` (the empty viewer's
-/// New Composition From Footage) they become one new composition instead ([`new_comp`]).
+/// also become layers of the active comp ([`add_to_comp`]).
 ///
 /// With `background` (files dropped on the window or picked in the Import dialog) the files are
 /// probed on a background thread, so decoding a slow video doesn't freeze the app: the job shows
@@ -176,10 +174,10 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(r)
 }
 
-/// After an import (its result `r`): with `newComp`, the new items become one new composition;
-/// otherwise with `addToComp`, layers of `target`. What couldn't be added joins the result's errors.
+/// After an import (its result `r`): with `addToComp`, the new items become layers of `target`;
+/// what couldn't be added joins the result's errors.
 fn finish_import(s: &mut Session, r: &mut Value, target: Option<ItemId>, p: &Value) {
-    let errors = if b_p(p, "newComp").unwrap_or(false) { new_comp(s, r) } else { add_to_comp(s, r, target, p) };
+    let errors = add_to_comp(s, r, target, p);
     if !errors.is_empty()
         && let Some(e) = r.get_mut("errors").and_then(Value::as_array_mut)
     {
@@ -193,7 +191,18 @@ fn finish_import(s: &mut Session, r: &mut Value, target: Option<ItemId>, p: &Val
 /// Project panel) and the other footage. `target` stays open. Returns what couldn't be added.
 pub(crate) fn add_to_comp(s: &mut Session, r: &Value, target: Option<ItemId>, p: &Value) -> Vec<String> {
     let Some(cid) = target.filter(|_| p.get("addToComp").and_then(Value::as_bool).unwrap_or(false)) else { return vec![] };
-    let add = imported(s, r);
+    let ids = |k: &str| r.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).collect::<Vec<u64>>();
+    let comps = ids("comps");
+    let in_comps: std::collections::HashSet<u64> = comps
+        .iter()
+        .filter_map(|c| s.project.comp(ItemId(*c)))
+        .flat_map(|c| c.layers.iter())
+        .filter_map(|l| match l.source {
+            LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Solid { item } => Some(item.0),
+            _ => None,
+        })
+        .collect();
+    let add: Vec<u64> = comps.iter().copied().chain(ids("items").into_iter().filter(|i| !in_comps.contains(i))).collect();
     let mut errors = vec![];
     for (k, item) in add.into_iter().enumerate() {
         let mut params = json!({"comp": cid.0, "item": item, "time": p.get("time"), "position": p.get("position")});
@@ -208,55 +217,6 @@ pub(crate) fn add_to_comp(s: &mut Session, r: &Value, target: Option<ItemId>, p:
         s.open_comp(cid);
     }
     errors
-}
-
-/// What an import (its result `r`) made that belongs in a comp: the comps of layered files
-/// (their layers' footage, in their precomps too, stays in the Project panel), then the other items,
-/// without those comps again or the files' folders.
-fn imported(s: &Session, r: &Value) -> Vec<u64> {
-    let ids = |k: &str| r.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).collect::<Vec<u64>>();
-    let comps = ids("comps");
-    let mut in_comps = std::collections::HashSet::new();
-    let mut todo = comps.clone();
-    while let Some(c) = todo.pop() {
-        for l in s.project.comp(ItemId(c)).into_iter().flat_map(|c| c.layers.iter()) {
-            match l.source {
-                LayerSource::Comp { item } if in_comps.insert(item.0) => todo.push(item.0),
-                LayerSource::Footage { item } | LayerSource::Solid { item } => {
-                    in_comps.insert(item.0);
-                }
-                _ => {}
-            }
-        }
-    }
-    let rest = ids("items").into_iter().filter(|i| !in_comps.contains(i) && !comps.contains(i) && !s.project.item(ItemId(*i)).is_some_and(|it| it.is_folder()));
-    comps.iter().copied().chain(rest).collect()
-}
-
-/// With `newComp`, make one composition of the footage and solids an import (its result `r`)
-/// made, as New Comp from Selection does with `single` (first item on top, its settings). A comp
-/// the import made (a layered file) already is the composition, so it stays out, as does data
-/// footage; none left, no new comp. Returns what went wrong.
-fn new_comp(s: &mut Session, r: &Value) -> Vec<String> {
-    let items: Vec<ItemId> = imported(s, r)
-        .into_iter()
-        .map(ItemId)
-        .filter(|i| {
-            s.project.item(*i).is_some_and(|it| match &it.kind {
-                ItemKind::Footage(f) => f.kind != FootageKind::Data,
-                ItemKind::Solid(_) => true,
-                ItemKind::Comp(_) | ItemKind::Folder => false,
-            })
-        })
-        .collect();
-    if items.is_empty() {
-        return vec![];
-    }
-    s.state.project_selection = items;
-    match s.execute("file.newCompFromSelection", json!({"single": true})) {
-        Ok(_) => vec![],
-        Err(e) => vec![e.to_string()],
-    }
 }
 
 /// File ▸ Import, all in one go (scripts and commands built on it); see [`import_cmd`].
@@ -274,7 +234,7 @@ struct PendingImport {
     comps: Vec<u64>,
     items: Vec<u64>,
     errors: Vec<String>,
-    /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
+    /// Visualab Effects projects merged in (`file.importProject` results); never added to a comp.
     projects: Vec<Value>,
 }
 
@@ -404,7 +364,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
-    // EffectCraft projects import as projects, as After Effects imports an .aep.
+    // Visualab Effects projects import as projects, as After Effects imports an .aep.
     let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
     let mut projects = vec![];
     for path in project_paths {
@@ -785,7 +745,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "File...",
             ["File", "Import"],
             Some("Cmd+I"),
-            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default false: picked or dropped files import as stills, as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), newComp?: bool (make one new composition of the footage and solids imported, as file.newCompFromSelection with single; a layered file imported as a composition is that composition and gets no other; takes precedence over addToComp), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
+            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default: a numbered still brings its run, except dropped files (drag), which import as stills as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
             always,
             import_cmd
         ),
