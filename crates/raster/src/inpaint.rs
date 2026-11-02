@@ -679,8 +679,8 @@ impl Frames {
             Frames::Spilled(h) => Some((h.w, h.h)),
         }
     }
-    /// Bilinear sample of one pixel. Spilled frames decode at most once per cached frame
-    /// and never clone a whole frame just to read a pixel (the trace hot path, #2570).
+    /// Bilinear sample of one pixel. A spilled frame reads only the 2x2 support from disk, so
+    /// the hot trace path never decodes or clones a whole frame (#2570).
     pub fn sample(&self, k: usize, x: f64, y: f64) -> Px {
         match self {
             Frames::Memory(v) => v[k].sample_bilinear_clamped(x, y),
@@ -722,7 +722,9 @@ pub struct SpillHandle {
 
 struct SpillInner {
     path: std::path::PathBuf,
-    cache: std::sync::Mutex<Vec<(usize, Image)>>,
+    /// Kept open so sampling can use positioned reads: several trace threads read the same
+    /// file at once, and a shared file offset would need a lock around every read (#2570).
+    file: std::fs::File,
     error: std::sync::Mutex<Option<String>>,
 }
 
@@ -803,49 +805,121 @@ impl SpillHandle {
         img
     }
 
-    /// Read a cached frame, decoding it on a miss. The cache keeps the last few frames so
-    /// flow tracing across neighbouring frames does not re-read the file per pixel.
-    fn cached(&self, k: usize) -> Image {
-        if let Ok(mut cache) = self.inner.cache.lock()
-            && let Some(pos) = cache.iter().position(|(kk, _)| *kk == k)
-        {
-            let e = cache.remove(pos);
-            let img = e.1.clone();
-            cache.push(e);
-            return img;
-        }
-        let img = self.load_frame(k);
-        if let Ok(mut cache) = self.inner.cache.lock() {
-            if cache.len() >= 6 {
-                cache.remove(0);
-            }
-            cache.push((k, img.clone()));
-        }
-        img
-    }
-
+    /// Read a whole frame, decoding it.
     pub fn get(&self, k: usize) -> Image {
-        self.cached(k)
+        self.load_frame(k)
     }
 
-    /// Bilinear sample without cloning the frame on a cache hit.
-    pub fn sample(&self, k: usize, x: f64, y: f64) -> Px {
-        if let Ok(mut cache) = self.inner.cache.lock() {
-            if let Some(pos) = cache.iter().position(|(kk, _)| *kk == k) {
-                let e = cache.remove(pos);
-                let px = e.1.sample_bilinear_clamped(x, y);
-                cache.push(e);
-                return px;
-            }
-            let img = self.load_frame(k);
-            let px = img.sample_bilinear_clamped(x, y);
-            if cache.len() >= 6 {
-                cache.remove(0);
-            }
-            cache.push((k, img));
-            return px;
+    /// A positioned read: `pread`/`seek_read` use the shared handle without touching a shared
+    /// file offset, so tracing threads do not serialise on the file.
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.inner.file.read_exact_at(buf, off)
         }
-        self.load_frame(k).sample_bilinear_clamped(x, y)
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            let mut done = 0usize;
+            while done < buf.len() {
+                match self.inner.file.seek_read(&mut buf[done..], off.saturating_add(done as u64)) {
+                    Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                    Ok(n) => done += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = std::fs::File::open(&self.inner.path)?;
+            f.seek(SeekFrom::Start(off))?;
+            f.read_exact(buf)
+        }
+    }
+
+    /// One pixel decoded from `buf` at index `i` (transparent if `buf` is short).
+    fn px_at(&self, buf: &[u8], i: usize) -> Px {
+        if self.bpc <= 8 {
+            let j = i * 4;
+            [
+                buf.get(j).copied().unwrap_or(0) as f32 / 255.0,
+                buf.get(j + 1).copied().unwrap_or(0) as f32 / 255.0,
+                buf.get(j + 2).copied().unwrap_or(0) as f32 / 255.0,
+                buf.get(j + 3).copied().unwrap_or(0) as f32 / 255.0,
+            ]
+        } else {
+            let base = i * 16;
+            let mut p = [0.0f32; 4];
+            for (c, v) in p.iter_mut().enumerate() {
+                let at = base + c * 4;
+                let Some(b) = buf.get(at..at + 4).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
+                    return [0.0; 4];
+                };
+                *v = f32::from_bits(u32::from_le_bytes(b));
+            }
+            p
+        }
+    }
+
+    /// The two horizontally adjacent pixels (`x`, `x + 1`, both clamped) of row `y` (clamped),
+    /// read straight from the spill file.
+    fn edge(&self, k: usize, y: i64, x: i64) -> Option<(Px, Px)> {
+        let (w, h) = (self.w, self.h);
+        if w == 0 || h == 0 || k >= self.n {
+            return None;
+        }
+        let (iw, ih) = (i64::try_from(w).ok()?, i64::try_from(h).ok()?);
+        let y = y.clamp(0, ih - 1) as usize;
+        let xa = x.clamp(0, iw - 1) as usize;
+        let xb = x.saturating_add(1).clamp(0, iw - 1) as usize;
+        let bpp = self.bytes_per_px();
+        let off = k
+            .checked_mul(w)
+            .and_then(|v| v.checked_mul(h))
+            .and_then(|v| v.checked_add(y.checked_mul(w)?))
+            .and_then(|v| v.checked_add(xa))
+            .and_then(|v| v.checked_mul(bpp));
+        let Some(off) = off.and_then(|v| u64::try_from(v).ok()) else {
+            self.record_error("spill: sample offset overflow".into());
+            return None;
+        };
+        // One read covers both pixels unless the right edge clamps them together. A stack buffer
+        // keeps the per-sample allocation out of the trace loop.
+        let len = (xb - xa + 1) * bpp;
+        let mut held = [0u8; 32];
+        let buf = held.get_mut(..len)?;
+        if let Err(e) = self.read_at(off, buf) {
+            self.record_error(format!("spill {}: {e}", self.path().display()));
+            return None;
+        }
+        let a = self.px_at(buf, 0);
+        let b = if xb > xa { self.px_at(buf, 1) } else { a };
+        Some((a, b))
+    }
+
+    /// Bilinear sample of one pixel, reading only its 2x2 support. Matches
+    /// `Image::sample_bilinear_clamped` exactly, with the same edge clamping.
+    pub fn sample(&self, k: usize, x: f64, y: f64) -> Px {
+        let fx = x - 0.5;
+        let fy = y - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = ((fx - x0) as f32, (fy - y0) as f32);
+        // `as i64` saturates NaN and out-of-range values, as in `sample_bilinear_clamped`.
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let (Some((a, b)), Some((c, d))) = (self.edge(k, y0, x0), self.edge(k, y0.saturating_add(1), x0)) else {
+            return [0.0; 4];
+        };
+        let mut o = [0.0; 4];
+        for i in 0..4 {
+            let top = a[i] + (b[i] - a[i]) * tx;
+            let bot = c[i] + (d[i] - c[i]) * tx;
+            o[i] = top + (bot - top) * ty;
+        }
+        o
     }
 
     pub fn write_frame(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
@@ -902,7 +976,7 @@ impl SpillHandle {
         let path = tmp.into_temp_path().keep().map_err(|e| e.error)?;
         let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         file.set_len(total as u64)?;
-        let inner = std::sync::Arc::new(SpillInner { path, cache: std::sync::Mutex::new(Vec::new()), error: std::sync::Mutex::new(None) });
+        let inner = std::sync::Arc::new(SpillInner { path, file, error: std::sync::Mutex::new(None) });
         Ok(SpillHandle { inner, w, h, n, bpc })
     }
 
@@ -1260,6 +1334,10 @@ pub fn fill_sequence_with(
         if streaming {
             for t in 0..n {
                 let img = opaque_fill(store.take(t), &holes[t].to_vec());
+                // A failed spill read leaves a black frame; never hand it to the sink.
+                if store.has_error() {
+                    return None;
+                }
                 if let Some(cb) = sink.as_mut()
                     && cb(t, &img).is_err()
                 {
@@ -1268,7 +1346,11 @@ pub fn fill_sequence_with(
             }
             return Some(Vec::new());
         }
-        return Some((0..n).map(|t| opaque_fill(store.take(t), &holes[t].to_vec())).collect());
+        let out: Vec<Image> = (0..n).map(|t| opaque_fill(store.take(t), &holes[t].to_vec())).collect();
+        if store.has_error() {
+            return None;
+        }
+        return Some(out);
     };
     // Frames before t0 are complete already.
     for t in 0..t0 {
@@ -1283,6 +1365,9 @@ pub fn fill_sequence_with(
         } else {
             out[t] = Some(img);
         }
+    }
+    if store.has_error() {
+        return None;
     }
     let mut done = 2;
     let left0 = propagated_left[t0].to_vec();
@@ -1535,5 +1620,39 @@ mod tests {
         let lit = fill_sequence(&input, &FillOpts { lighting: 1.0, ..Default::default() }, &mut |_, _| true).expect("fill");
         let score = |o: &[Image]| (0..6).map(|t| psnr(&o[t], &gts[t], Some(&input.holes[t].to_vec()))).sum::<f64>();
         assert!(score(&lit) > score(&plain), "lit {} vs plain {}", score(&lit), score(&plain));
+    }
+
+    /// `SpillHandle::sample` reads only the 2x2 support; it must still agree with sampling the
+    /// decoded frame, including the edges and coordinates outside the image (#2570 review).
+    #[test]
+    fn spilled_samples_match_the_decoded_frame() {
+        let (w, h, n) = (7u32, 5u32, 3usize);
+        for bpc in [8u8, 32] {
+            let mut frames = Vec::new();
+            for k in 0..n {
+                let mut img = Image::new(w, h);
+                for (i, p) in img.data.iter_mut().enumerate() {
+                    *p = [(i % 7) as f32 / 7.0, (k * 3 + i % 5) as f32 / 5.0, 0.25, 1.0];
+                }
+                frames.push(img);
+            }
+            let spill = SpillHandle::create(w as usize, h as usize, n, bpc).expect("spill");
+            for (k, img) in frames.iter().enumerate() {
+                spill.write_frame(k, img).expect("write");
+            }
+            let spilled = Frames::Spilled(spill.clone());
+            assert!(!spilled.has_error());
+            for k in 0..n {
+                let decoded = spill.get(k);
+                for &(x, y) in &[(0.0, 0.0), (0.5, 0.5), (3.4, 2.6), (6.5, 4.5), (7.9, 5.9), (-1.0, -1.0), (2.25, 3.75)] {
+                    let a = spilled.sample(k, x, y);
+                    let b = decoded.sample_bilinear_clamped(x, y);
+                    for c in 0..4 {
+                        assert!((a[c] - b[c]).abs() <= 1e-6, "bpc {bpc} frame {k} at ({x}, {y}) channel {c}: {} vs {}", a[c], b[c]);
+                    }
+                }
+            }
+            assert!(!spilled.has_error(), "sampling a valid spill records no error");
+        }
     }
 }
