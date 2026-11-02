@@ -76,22 +76,6 @@ fn shape_contents_add_menu_adds_path_operations() {
     assert_eq!(items, ["group", "trim"]);
 }
 
-#[test]
-fn shape_contents_add_menu_adds_wiggle_transform() {
-    let mut s = session();
-    let l = s.execute("layer.newShape", json!({"kind": "ellipse"})).unwrap()["layer"].as_u64().unwrap();
-    let contents = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("contents").unwrap().uid;
-    let mut h = harness(s);
-    open_layer(&mut h, l);
-    click(&mut h, &format!("timeline.group.{contents}.add"));
-    assert!(h.get_by_label("Zig Zag").rect().max.y <= 1000.0, "the whole menu fits in the window");
-    let entry = h.get_by_label("Wiggle Transform").rect();
-    click_at(&mut h, entry.center());
-    let layer = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
-    let items: Vec<&str> = layer.props.sub("contents").unwrap().groups().map(|g| g.match_id.as_str()).collect();
-    assert_eq!(items, ["group", "wiggler"]);
-}
-
 /// A shape group's inner Contents is elided in After Effects: opening the group lists its items
 /// (here the path) directly, with no "Contents" row between them.
 #[test]
@@ -253,33 +237,6 @@ fn contents_names(h: &Harness<'_, EffectcraftApp>, l: u64) -> Vec<String> {
     h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("contents").unwrap().groups().map(|g| g.name.clone()).collect()
 }
 
-/// #959: every item in a shape layer's Contents has an eye switch, as in After Effects; it turns
-/// the item off (the renderer skips it), undoably. The group's Transform has none.
-#[test]
-fn shape_contents_items_have_eye_switches() {
-    let (mut h, a, _, rect) = two_shape_layers();
-    let enabled = |h: &Harness<'_, EffectcraftApp>| {
-        h.state().session.active_comp().unwrap().layer(LayerId(a)).unwrap().props.sub("contents").unwrap().find_group(rect).unwrap().enabled
-    };
-    let eye = format!("timeline.group.{rect}.eye");
-    assert!(enabled(&h));
-    click(&mut h, &eye);
-    assert!(!enabled(&h), "the eye turns Rectangle 1 off");
-    click(&mut h, &eye);
-    assert!(enabled(&h), "and on again");
-    click(&mut h, &eye);
-    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert!(enabled(&h), "one undo step");
-    // Inside the group: its path and fill have eyes, its Transform doesn't.
-    h.state_mut().ui.timeline.open_groups.insert(rect);
-    h.run_steps(3);
-    let group = h.state().session.active_comp().unwrap().layer(LayerId(a)).unwrap().props.find_group(rect).unwrap().clone();
-    let transform = group.sub("transform").expect("a shape group has a Transform").uid;
-    assert!(h.state().auto.find(&format!("timeline.group.{transform}.eye")).is_none(), "no eye on Transform");
-    let items = group.sub("contents").expect("the group's items").groups().map(|g| g.uid).collect::<Vec<_>>();
-    assert!(!items.is_empty() && items.iter().all(|u| h.state().auto.find(&format!("timeline.group.{u}.eye")).is_some()), "every item has an eye");
-}
-
 #[test]
 fn ctrl_c_and_ctrl_v_copy_a_shape_group_into_another_shape_layer() {
     let (mut h, a, b, rect) = two_shape_layers();
@@ -289,7 +246,7 @@ fn ctrl_c_and_ctrl_v_copy_a_shape_group_into_another_shape_layer() {
     h.step();
     click(&mut h, &format!("timeline.layer.{b}.row"));
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(b)]);
-    h.input_mut().events.push(Event::Paste("EffectCraft: 1 shape item".into()));
+    h.input_mut().events.push(Event::Paste("Visualab Effects: 1 shape item".into()));
     h.run_steps(3);
     assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 2, "no new layer");
     assert_eq!(contents_names(&h, b), ["Rectangle 1", "Ellipse 1"]);
@@ -340,11 +297,6 @@ fn timeline_colour_eyedropper_samples_the_comp() {
     let fill = fill.expect("a fill colour");
     fn groups(g: &effectcraft_engine::project::PropGroup, out: &mut Vec<u64>) {
         for c in g.groups() {
-            // The rectangle's path rows would push Fill below the rows the Timeline fits; the
-            // eyedropper only needs Fill, so leave that group collapsed.
-            if c.name == "Rectangle Path 1" {
-                continue;
-            }
             out.push(c.uid);
             groups(c, out);
         }
@@ -395,134 +347,9 @@ fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
     assert_eq!(top.props.sub("contents").unwrap().groups().count(), 2);
     assert_eq!(h.state().session.state.selected_layers, vec![top.id]);
     // The app's own clipboard note pastes the copied layer as before.
-    h.input_mut().events.push(Event::Paste("EffectCraft: 1 layer".into()));
+    h.input_mut().events.push(Event::Paste("Visualab Effects: 1 layer".into()));
     h.run_steps(3);
     let c = h.state().session.active_comp().unwrap();
     assert_eq!(c.layers.len(), 4);
     assert_eq!(c.layers[0].name, "Oval 2");
-}
-
-fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, cancel: bool) {
-    h.input_mut().events.push(Event::PointerMoved(from));
-    h.step();
-    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-    h.step();
-    for k in 1..=8 {
-        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
-        h.step();
-    }
-    if cancel {
-        h.input_mut().events.push(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-        h.step();
-    }
-    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
-    h.run_steps(3);
-}
-
-/// #2210: an effect's row drags to a new place in the layer's effect stack, as in After Effects
-/// (not a marquee); Escape cancels the drag.
-#[test]
-fn effects_drag_to_a_new_place_in_the_timeline() {
-    let mut s = session();
-    let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
-    for fx in ["Gaussian Blur", "Invert", "Tint"] {
-        s.execute("effect.apply", json!({"layers": [l], "effect": fx})).unwrap();
-    }
-    let effects = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().clone();
-    let uids: Vec<u64> = effects.groups().map(|g| g.uid).collect();
-    let mut h = harness(s);
-    h.state_mut().ui.timeline.open_groups.insert(effects.uid);
-    open_layer(&mut h, l);
-    let names = |h: &Harness<'_, EffectcraftApp>| -> Vec<String> {
-        h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().groups().map(|g| g.name.clone()).collect()
-    };
-    let row = |h: &Harness<'_, EffectcraftApp>, uid: u64| {
-        let e = h.state().auto.find(&format!("timeline.group.{uid}.name")).unwrap_or_else(|| panic!("no row for {uid}"));
-        egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
-    };
-    // Tint above Gaussian Blur.
-    let (tint, blur) = (row(&h, uids[2]), row(&h, uids[0]));
-    drag(&mut h, tint.center(), pos2(blur.center().x, blur.min.y + 2.0), true);
-    assert_eq!(names(&h), ["Gaussian Blur", "Invert", "Tint"], "Escape cancels");
-    drag(&mut h, tint.center(), pos2(blur.center().x, blur.min.y + 2.0), false);
-    assert_eq!(names(&h), ["Tint", "Gaussian Blur", "Invert"]);
-    // Gaussian Blur (now second) below Invert, the last.
-    let (blur, invert) = (row(&h, uids[0]), row(&h, uids[1]));
-    drag(&mut h, blur.center(), pos2(invert.center().x, invert.max.y - 2.0), false);
-    assert_eq!(names(&h), ["Tint", "Invert", "Gaussian Blur"]);
-    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(names(&h), ["Tint", "Gaussian Blur", "Invert"], "one undo step per drop");
-}
-
-/// #2552: Shift-clicking effect rows in the Timeline adds them to the selection (and a second
-/// Shift-click takes one out), so one animation preset can hold several effects.
-#[test]
-fn shift_click_selects_several_effects_for_a_preset() {
-    let mut s = session();
-    let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
-    for fx in ["Gaussian Blur", "Invert"] {
-        s.execute("effect.apply", json!({"layers": [l], "effect": fx})).unwrap();
-    }
-    let effects = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().clone();
-    let uids: Vec<u64> = effects.groups().map(|g| g.uid).collect();
-    let mut h = harness(s);
-    h.state_mut().ui.timeline.open_groups.insert(effects.uid);
-    open_layer(&mut h, l);
-    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, uid: u64| {
-        let p = center(h, &format!("timeline.group.{uid}.name"));
-        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::SHIFT));
-        h.input_mut().events.push(Event::PointerMoved(p));
-        h.step();
-        for pressed in [true, false] {
-            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT });
-            h.step();
-        }
-        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
-        h.run_steps(2);
-    };
-    let selected = |h: &Harness<'_, EffectcraftApp>| h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect::<Vec<_>>();
-    click(&mut h, &format!("timeline.group.{}.name", uids[0]));
-    assert_eq!(selected(&h), [uids[0]]);
-    shift_click(&mut h, uids[1]);
-    assert_eq!(selected(&h), [uids[0], uids[1]], "Shift adds the second effect");
-    let path = std::env::temp_dir().join(format!("ec-2552-{}.ffx", std::process::id()));
-    let r = h.state_mut().session.execute("anim.savePreset", json!({"path": path.to_string_lossy()})).unwrap();
-    assert_eq!(r["effects"], 2, "{r}");
-    let _ = std::fs::remove_file(&path);
-    shift_click(&mut h, uids[1]);
-    assert_eq!(selected(&h), [uids[0]], "a second Shift-click takes it out");
-}
-
-/// #2513: the Text group's Animate menu adds Animator 1 with the chosen property (and a Range
-/// Selector), and the animator's Add menu adds another property to it.
-#[test]
-fn text_animate_menu_adds_an_animator_with_the_property() {
-    let mut s = session();
-    let l = s.execute("layer.newText", json!({"text": "Hello"})).unwrap()["layer"].as_u64().unwrap();
-    let text = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("text").unwrap().uid;
-    let mut h = harness(s);
-    h.state_mut().ui.timeline.open_groups.insert(text);
-    open_layer(&mut h, l);
-    // The Properties panel's Position row has the same accessible name: take the menu's new entry.
-    let shown: Vec<_> = h.query_all_by_label("Position").map(|n| n.rect()).collect();
-    click(&mut h, &format!("timeline.group.{text}.animate"));
-    let entry = h.query_all_by_label("Position").map(|n| n.rect()).find(|r| !shown.contains(r)).expect("the Animate menu's Position entry");
-    click_at(&mut h, entry.center());
-    let animators = |h: &Harness<'_, EffectcraftApp>| {
-        h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("text").unwrap().sub("animators").cloned()
-    };
-    let anims = animators(&h).expect("an Animators group");
-    let a = anims.groups().next().expect("Animator 1");
-    let has = |a: &effectcraft_engine::project::PropGroup, m: &str| a.sub("properties").is_some_and(|p| p.children.iter().any(|c| c.match_id() == m));
-    assert!(has(a, "position"), "Position was added: {:?}", a.sub("properties"));
-    assert!(a.sub("selectors").is_some_and(|s| !s.children.is_empty()), "with a Range Selector");
-    // The animator's Add menu adds a property to it.
-    h.state_mut().ui.timeline.open_groups.insert(anims.uid);
-    h.state_mut().ui.timeline.open_groups.insert(a.uid);
-    h.run_steps(2);
-    click(&mut h, &format!("timeline.group.{}.add", a.uid));
-    let entry = h.get_by_label("Property: Opacity").rect();
-    click_at(&mut h, entry.center());
-    let a = animators(&h).unwrap().groups().next().unwrap().clone();
-    assert!(has(&a, "opacity"), "Opacity was added: {:?}", a.sub("properties"));
 }

@@ -1,4 +1,4 @@
-//! Exact media time for EffectCraft (shared design with FilmCraft).
+//! Exact media time for Visualab Effects (shared design with FilmCraft).
 //!
 //! All time is an integer number of [`Tick`]s at [`TICKS_PER_SECOND`] = 254 016 000 000/s. That
 //! rate divides evenly into every broadcast frame duration (23.976, 24, 25, 29.97, 30, 48, 50,

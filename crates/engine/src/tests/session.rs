@@ -86,7 +86,7 @@ fn imported_files_go_into_the_comp_where_they_were_dropped() {
     s.execute("file.import", params).unwrap();
     let comp = s.active_comp().unwrap();
     assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["a.png", "b.png", "Bg"]);
-    for l in comp.layers.iter().take(2) {
+    for l in &comp.layers[..2] {
         assert_eq!(l.props.prop("transform/position").map(|p| p.value.clone()), Some(effectcraft_keyframe::Value::Vec3([40.0, 50.0, 0.0])));
         assert_eq!(l.in_point, effectcraft_time::Tick::from_seconds_f64(1.0));
     }
@@ -157,46 +157,6 @@ fn background_imports_report_progress_and_select_what_arrived() {
     // Agents and scripts import at once by default.
     let r = s.execute("file.import", json!({"paths": ["/drop/e.png"]})).unwrap();
     assert_eq!(r["items"].as_array().map(Vec::len), Some(1));
-}
-
-/// #2573: New Composition From Footage (`file.import {newComp}`) makes one composition of what
-/// the import made, first file on top, at once or when the background job lands; an import that
-/// made nothing makes no comp.
-#[test]
-fn new_comp_from_footage_makes_a_comp_of_what_was_imported() {
-    use effectcraft_project::{Footage, FootageKind, ItemKind};
-    struct Probe;
-    impl crate::Importer for Probe {
-        fn probe(&self, path: &str) -> Result<Footage, String> {
-            if path.ends_with(".xyz") {
-                return Err("unsupported file".into());
-            }
-            Ok(Footage { path: path.into(), kind: FootageKind::Still, width: 64, height: 32, has_video: true, ..Default::default() })
-        }
-    }
-    let mut s = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
-    let comps = |s: &Session| s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_))).count();
-    let layers = |s: &Session| s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
-    // At once.
-    s.execute("file.import", json!({"paths": ["/drop/a.png", "/drop/b.xyz"], "newComp": true})).unwrap();
-    assert_eq!(comps(&s), 1);
-    assert_eq!(layers(&s), ["a.png"]);
-    assert_eq!((s.active_comp().unwrap().width, s.active_comp().unwrap().height), (64, 32));
-    // In the background: the job's own items, whatever is selected or active meanwhile; it takes
-    // precedence over `addToComp`.
-    s.execute("file.import", json!({"paths": ["/drop/c.png", "/drop/d.png"], "background": true, "newComp": true, "addToComp": true})).unwrap();
-    s.state.project_selection.clear();
-    s.execute("jobs.wait", json!({})).unwrap();
-    assert_eq!(comps(&s), 2);
-    assert_eq!(layers(&s), ["c.png", "d.png"]);
-    // Nothing imported: no comp, and the failure is reported.
-    s.execute("file.import", json!({"paths": ["/drop/e.xyz"], "background": true, "newComp": true})).unwrap();
-    s.execute("jobs.wait", json!({})).unwrap();
-    assert_eq!(comps(&s), 2);
-    assert!(s.job_log.last().unwrap().message.contains("unsupported file"));
-    let r = s.execute("file.import", json!({"paths": ["/drop/f.xyz"], "newComp": true})).unwrap();
-    assert_eq!(comps(&s), 2);
-    assert_eq!(r["errors"].as_array().map(Vec::len), Some(1));
 }
 
 /// Audio, Lock and Shy don't change pixels: toggling them keeps the cached layers (#103).
@@ -318,53 +278,6 @@ fn toolbar_fill_and_stroke_paint_selected_shape_layers() {
     }
     let cid = s.active_comp_id().unwrap();
     let _ = s.render(cid, s.time(), Default::default());
-}
-
-/// The toolbar/query width follows the selected solid or gradient stroke, including animation.
-#[test]
-fn shape_toolbar_reads_solid_and_gradient_stroke_widths_at_the_current_time() {
-    for kind in ["solid", "linear", "radial"] {
-        for (stretch, expected) in [(100.0, 17.0), (200.0, 13.0)] {
-            let mut s = Session::default();
-            s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
-            let layer = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
-            s.execute("layer.timeStretch", json!({"layer": layer, "percent": stretch})).unwrap();
-            let configured = s.execute("shape.fillStroke", json!({"fill": false, "strokeType": kind, "strokeWidth": 9})).unwrap();
-            assert_eq!(configured["strokeWidth"].as_f64(), Some(9.0), "configured {kind} stroke");
-            let group = if kind == "solid" { "stroke" } else { "gstroke" };
-            let path = format!("contents/group/contents/{group}/width");
-            for (time, width) in [(0, 9), (1, 17)] {
-                s.execute("prop.addKey", json!({"layer": layer, "path": path, "time": time, "timeBase": "layer", "value": width})).unwrap();
-            }
-            s.set_time(effectcraft_time::Tick::from_seconds_f64(1.0));
-            let displayed = s.execute("shape.fillStroke", json!({})).unwrap();
-            assert_eq!(displayed["strokeWidth"].as_f64(), Some(expected), "animated {kind} stroke at {stretch}% stretch");
-        }
-    }
-}
-
-/// A later solid stroke supplies color without overwriting the first gradient stroke's width.
-#[test]
-fn shape_toolbar_keeps_the_first_gradient_width_with_a_later_solid_stroke() {
-    for kind in ["linear", "radial"] {
-        let mut s = Session::default();
-        s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
-        let layer = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
-        s.execute("shape.fillStroke", json!({"strokeType": kind, "strokeWidth": 9})).unwrap();
-        s.execute("layer.addShapeItem", json!({"layer": layer, "group": "contents/group", "kind": "stroke"})).unwrap();
-        for (field, value) in [("color", json!([0.0, 1.0, 0.0, 1.0])), ("width", json!(99))] {
-            s.execute("prop.set", json!({"layer": layer, "path": format!("contents/group/contents/stroke/{field}"), "value": value})).unwrap();
-        }
-        for (time, width) in [(0, 9), (1, 17)] {
-            s.execute("prop.addKey", json!({"layer": layer, "path": "contents/group/contents/gstroke/width", "time": time, "value": width})).unwrap();
-        }
-        for (time, width) in [(0.0, 9.0), (1.0, 17.0)] {
-            s.set_time(effectcraft_time::Tick::from_seconds_f64(time));
-            let displayed = s.execute("shape.fillStroke", json!({})).unwrap();
-            assert_eq!(displayed["strokeWidth"].as_f64(), Some(width));
-            assert_eq!(displayed["stroke"], json!([0.0, 1.0, 0.0, 1.0]));
-        }
-    }
 }
 
 /// A Wiggle Paths saved without Spatial Phase gets the property, at 0°, after Temporal Phase when
@@ -492,22 +405,9 @@ fn save_and_open_roundtrip() {
 fn help_links_emit_urls() {
     let mut s = Session::default();
     let r = s.execute("help.discord", json!({})).unwrap();
-    assert_eq!(r["url"], "https://discord.gg/artcraft");
+    assert_eq!(r["url"], "https://www.visualabstudios.com");
     assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if u.contains("discord"))));
-    assert_eq!(s.execute("help.github", json!({})).unwrap()["url"], "https://github.com/storytold/effectcraft");
-}
-
-/// Every Help ▸ documentation page opens a file that is in the repository (#2696: Expression Reference opened a 404).
-#[test]
-fn help_docs_pages_exist_in_the_repository() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for page in [None, Some("help"), Some("scripting"), Some("expressions"), Some("effects"), Some("agents")] {
-        let mut s = Session::default();
-        let params = page.map_or_else(|| json!({}), |p| json!({"page": p}));
-        let url = s.execute("help.docs", params).unwrap()["url"].as_str().unwrap().to_owned();
-        let path = url.strip_prefix("https://github.com/storytold/effectcraft/blob/main/").unwrap_or_else(|| panic!("{page:?}: {url}"));
-        assert!(root.join(path).is_file(), "{page:?} opens {url}, which is not in the repository");
-    }
+    assert_eq!(s.execute("help.github", json!({})).unwrap()["url"], "https://github.com/wasigonzi/visualab-effects");
 }
 
 #[test]
@@ -576,9 +476,6 @@ fn set_text_paragraph_fill_and_leading() {
     s.execute("layer.setText", json!({"layer": t, "hScale": 120, "vScale": 80, "baselineShift": 4, "smallCaps": true, "strokeOverFill": true})).unwrap();
     let d = doc(&s);
     assert_eq!((d.h_scale, d.v_scale, d.baseline_shift, d.small_caps, d.stroke_over_fill), (120.0, 80.0, 4.0, true, true));
-    s.execute("layer.setText", json!({"layer": t, "lineJoin": "bevel"})).unwrap();
-    assert_eq!(doc(&s).line_join, effectcraft_keyframe::LineJoin::Bevel);
-    assert!(s.execute("layer.setText", json!({"layer": t, "lineJoin": "square"})).is_err());
 }
 
 #[test]

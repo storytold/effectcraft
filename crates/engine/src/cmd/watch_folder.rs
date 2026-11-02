@@ -1,4 +1,4 @@
-//! File ▸ Watch Folder…: render farm without a farm. EffectCraft watches a folder for project
+//! File ▸ Watch Folder…: render farm without a farm. Visualab Effects watches a folder for project
 //! files (`.ecproj`, at the top level or one folder down, e.g. the folders File ▸ Dependencies ▸
 //! Collect Files writes) whose Render Queue has queued items, renders them, and writes a status
 //! file next to each project (`<project>.status.json`: `rendering`, then `done` or `failed`, with

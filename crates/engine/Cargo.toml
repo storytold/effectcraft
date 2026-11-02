@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-engine"
-description = "The EffectCraft engine: session, undo history, editor state and the command registry every frontend (UI, CLI, control channel, MCP) dispatches through"
+description = "The Visualab Effects engine: session, undo history, editor state and the command registry every frontend (UI, CLI, control channel, MCP) dispatches through"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -39,9 +39,3 @@ rayon = { workspace = true }
 image = { workspace = true }
 web-time = { workspace = true }
 exr = { workspace = true }
-
-# Native file identity and SAM 2 inference; browsers keep the built-in engines.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-same-file = { workspace = true }
-tempfile = { workspace = true }
-effectcraft-sam2 = { workspace = true }

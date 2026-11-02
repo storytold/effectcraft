@@ -579,7 +579,7 @@ fn leave_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 /// Photo Filter's Filter menu: the conventional camera filters (Wratten-style warming /
 /// cooling conversion and light-balancing filters) and plain colours, as 8-bit sRGB values
-/// chosen for EffectCraft; the last entry, Custom, uses the Color parameter.
+/// chosen for Visualab Effects; the last entry, Custom, uses the Color parameter.
 pub const PHOTO_FILTERS: [(&str, [u8; 3]); 21] = [
     ("Warming Filter (85)", [240, 140, 30]),
     ("Warming Filter (LBA)", [245, 155, 25]),

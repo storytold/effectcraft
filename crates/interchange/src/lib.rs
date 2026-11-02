@@ -20,7 +20,7 @@
 //!   placeholders.
 //! - [`export`]: a composition → one sequence with one track per layer (bottom layer = V1),
 //!   footage clips with their timing, Motion and Opacity; precomps as nested sequences; solids as
-//!   colour mattes; layers only EffectCraft can draw (text, shapes, effects, masks, 3D…) are
+//!   colour mattes; layers only Visualab Effects can draw (text, shapes, effects, masks, 3D…) are
 //!   either left out or pre-rendered by the caller (ProRes 4444 with alpha, see
 //!   [`plan_prerender`]) and referenced as media.
 //!

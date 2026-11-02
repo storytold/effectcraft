@@ -781,7 +781,7 @@ mod tests {
     }
 
     /// After Effects 2026 (cases 812-814): Luma Key on a vertical black-to-white ramp (row y
-    /// has level (y + 0.5) / 1080 × 255), Threshold 140, Tolerance 20. EffectCraft ramped the
+    /// has level (y + 0.5) / 1080 × 255), Threshold 140, Tolerance 20. Visualab Effects ramped the
     /// matte over the tolerance (case 719: a 50 % grey kept 80 % of its alpha where AE keys it
     /// out).
     #[test]
@@ -800,7 +800,7 @@ mod tests {
             let o = run("ec.key.luma", &set, ramp());
             (0..1080).map(|y| o.get(0, y)[3]).collect::<Vec<f32>>()
         };
-        // Key Out Darker (AE 2 = EffectCraft 1): keyed up to row 592, kept from 593.
+        // Key Out Darker (AE 2 = Visualab Effects 1): keyed up to row 592, kept from 593.
         let d = key(1, 0.0, 0.0);
         assert!(d[..593].iter().all(|a| *a == 0.0) && d[593..].iter().all(|a| *a == 1.0), "{:?}", &d[588..598]);
         // Key Out Similar: AE keys rows 509..=677 (levels 120.3..160.0) and keeps the rest; the

@@ -1,12 +1,12 @@
-# Releasing EffectCraft
+# Releasing Visualab Effects
 
 Every push to the `release` branch runs [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 It builds signed installers for macOS and Windows, packages for Linux and FreeBSD, and the web
 build, then creates or updates a
-**draft** GitHub Release named `EffectCraft v<version>`. Nobody sees a draft until a maintainer
+**draft** GitHub Release named `Visualab Effects v<version>`. Nobody sees a draft until a maintainer
 publishes it.
 
-User-facing names say **EffectCraft**. Files, binaries and ids stay lowercase
+User-facing names say **Visualab Effects**. Files, binaries and ids stay lowercase
 (`effectcraft-<version>-<platform>-<arch>.<ext>`).
 
 ## Cutting a release
@@ -19,14 +19,14 @@ User-facing names say **EffectCraft**. Files, binaries and ids stay lowercase
    cargo xtask version set 0.4.0       # or 0.4.0-rc.1; updates Cargo.toml and Cargo.lock
    ```
 
-   Open a PR titled `Release: EffectCraft v0.4.0` with that change (`Cargo.toml` and our crates
+   Open a PR titled `Release: Visualab Effects v0.4.0` with that change (`Cargo.toml` and our crates
    in `Cargo.lock` only) and merge it.
 2. **Check the gate.** Run `cargo xtask ci` on `main` (it runs clippy and the tests in release
    mode, as CI does), and check that `main`'s CI is green on every platform.
 3. **Push `main` to `release`** (a fast-forward): `git push origin main:release`. The `release`
    branch is protected; only maintainers can push to it. The workflow starts by itself.
 4. **Wait for the draft.** When every job is green (macOS notarization is the slow part), the
-   Releases page has a draft `EffectCraft v0.4.0`, tagged `v0.4.0` on the pushed commit, with
+   Releases page has a draft `Visualab Effects v0.4.0`, tagged `v0.4.0` on the pushed commit, with
    every artifact and `SHA256SUMS.txt`. Its notes are generated from the merged PRs.
 5. **Check it.** Download an installer or two, check them against `SHA256SUMS.txt`, and run
    `effectcraft --version` / `effectcraft-cli --version`. Read the job summaries: a `::warning::`
@@ -71,18 +71,18 @@ The MSI's setup wizard ([`installer-ui.wxs`](../packaging/windows/installer-ui.w
 choose the install folder; upgrades and repairs reuse it, and `INSTALLFOLDER="..."` picks it for a
 silent (`/qn`) install. [`packaging-lint.yml`](../.github/workflows/packaging-lint.yml) install-tests
 that with stub binaries ([`test-msi.ps1`](../packaging/windows/test-msi.ps1)): a custom folder,
-an upgrade that keeps it, a repair, uninstall, and the all-users default folder (`Program Files\ArtCraft\EffectCraft`). The wizard pages
+an upgrade that keeps it, a repair, uninstall, and the all-users default folder (`Program Files\Visualab\Visualab Effects`). The wizard pages
 themselves are checked by hand.
 
 The portable zip ships [`portable.txt`](../packaging/windows/portable.txt) beside `effectcraft.exe`.
-That marker (or an `EffectCraft.portable` file) switches on portable mode: the settings folder
-(preferences, shortcuts, recovery files, logs, plug-ins) becomes `EffectCraftData\` next to the
-exe instead of `%APPDATA%\EffectCraft`. If that folder isn't writable the app logs a warning and
+That marker (or an `Visualab Effects.portable` file) switches on portable mode: the settings folder
+(preferences, shortcuts, recovery files, logs, plug-ins) becomes `Visualab EffectsData\` next to the
+exe instead of `%APPDATA%\Visualab Effects`. If that folder isn't writable the app logs a warning and
 uses `%APPDATA%`. The MSI has no marker. The logic is in `crates/host/src/app_dirs.rs` and works
 the same on macOS and Linux; `EFFECTCRAFT_CONFIG_DIR` still wins over it.
 
 Every binary reports its version: `effectcraft --version`, `effectcraft-cli --version` and
-*Help › About EffectCraft*.
+*Help › About Visualab Effects*.
 
 ### Linux: the glibc baseline
 
@@ -104,7 +104,7 @@ ports.ubuntu.com. It ships the tarball only, needs glibc 2.39 (Ubuntu 24.04+, De
 ### Linux: AppImage updates and Flatpak
 
 Each AppImage embeds update information
-(`gh-releases-zsync|storytold|effectcraft|latest|effectcraft-*-linux-<arch>.AppImage.zsync`), and
+(`gh-releases-zsync|wasigonzi|visualab-effects|latest|effectcraft-*-linux-<arch>.AppImage.zsync`), and
 the `.zsync` file published beside it lets [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate)
 and AppImageLauncher fetch only the changed blocks from the newest published (non-pre-release)
 version. `package.sh` writes the `.zsync` when `zsyncmake` (the `zsync` package) is installed; the

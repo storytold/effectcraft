@@ -1,4 +1,4 @@
-//! Geometry for EffectCraft: 2D/3D vectors, 3×3 (2D projective) and 4×4 matrices, rectangles and
+//! Geometry for Visualab Effects: 2D/3D vectors, 3×3 (2D projective) and 4×4 matrices, rectangles and
 //! the layer-transform composition used by the compositor.
 //!
 //! Conventions follow After Effects' public documentation: y grows downwards, angles are degrees

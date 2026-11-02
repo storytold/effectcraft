@@ -45,7 +45,7 @@ fn validate(metadata: &Value) -> Result<(), String> {
         let name = package["name"].as_str().unwrap_or("");
         let active = nodes.iter().any(|node| node["id"] == package["id"]);
         if active && matches!(name, "hayro" | "hayro-interpret" | "hayro-cmap" | "krilla") {
-            return Err(format!("{name}: EffectCraft must use craft-pdf with only the read feature"));
+            return Err(format!("{name}: Visualab Effects must use craft-pdf with only the read feature"));
         }
     }
     Ok(())

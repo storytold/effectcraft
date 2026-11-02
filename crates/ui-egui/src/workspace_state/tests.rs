@@ -59,7 +59,7 @@ fn corrupt_future_or_unknown_workspace_keeps_defaults_and_original_file() {
     }
 }
 
-/// A file written by EffectCraft 0.10 (craft-libs 5c874d51): the Default workspace with
+/// A file written by Visualab Effects 0.10 (craft-libs 5c874d51): the Default workspace with
 /// Preview floating, Render Queue floating in its own native window, Align closed,
 /// Effects & Presets moved into the Project group and Audio split beside the Timeline,
 /// saved as "My Layout"; then Layer closed.

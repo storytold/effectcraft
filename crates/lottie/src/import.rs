@@ -1,4 +1,4 @@
-//! Lottie document → EffectCraft compositions (the inverse of [`crate::export`]).
+//! Lottie document → Visualab Effects compositions (the inverse of [`crate::export`]).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

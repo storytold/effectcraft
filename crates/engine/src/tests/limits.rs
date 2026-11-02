@@ -53,7 +53,7 @@ fn a_hostile_project_opens_within_the_limits_and_says_what_changed() {
         let r = s.execute("file.open", json!({"path": path})).unwrap();
         let repaired = r["repaired"].as_array().unwrap();
         assert!(repaired.iter().any(|n| n.as_str().unwrap().contains("4000000000 × 0 px → 30000 × 1 px")), "{path}: {repaired:?}");
-        let toast = s.drain_events().into_iter().any(|e| matches!(e, Event::Toast { message, .. } if message.contains("outside EffectCraft's limits")));
+        let toast = s.drain_events().into_iter().any(|e| matches!(e, Event::Toast { message, .. } if message.contains("outside Visualab Effects's limits")));
         assert!(toast, "{path}");
         let (cid, c) = s.project.comps().next().map(|(id, c)| (*id, c.clone())).unwrap();
         assert_eq!((c.width, c.height), (limits::MAX_SIZE, 1));

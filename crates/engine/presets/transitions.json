@@ -1,6 +1,6 @@
 {
   "format": "effectcraft.animationPresets/1",
-  "notes": "Original EffectCraft transition presets (MIT OR Apache-2.0), written from scratch on EffectCraft's own Transition effects. Key times are seconds from the current time (layer time); effect paths are the effect's parameter ids; layer paths are property paths such as transform/opacity.",
+  "notes": "Original Visualab Effects transition presets (MIT OR Apache-2.0), written from scratch on Visualab Effects's own Transition effects. Key times are seconds from the current time (layer time); effect paths are the effect's parameter ids; layer paths are property paths such as transform/opacity.",
   "presets": [
     {
       "id": "fadeIn",

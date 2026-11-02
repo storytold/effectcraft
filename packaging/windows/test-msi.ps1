@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Install-test the EffectCraft MSI's folder handling with stub binaries (no Rust build).
+  Install-test the Visualab Effects MSI's folder handling with stub binaries (no Rust build).
 
 .DESCRIPTION
   Builds the MSI around two stand-in executables as 0.0.1 the way releases before this installer
@@ -11,7 +11,7 @@
     3. upgrades to 0.0.3 the same way (found from the Path value 0.0.2 wrote),
     4. repairs a damaged (unversioned) CLI there with the wizard's Repair mode,
     5. uninstalls: files, the App Paths registration and the desktop shortcut go,
-    6. installs 0.0.3 with no folder and DESKTOPSHORTCUT=0: it must land in Program Files\ArtCraft\EffectCraft (ALLUSERS=1) with no
+    6. installs 0.0.3 with no folder and DESKTOPSHORTCUT=0: it must land in Program Files\Visualab\Visualab Effects (ALLUSERS=1) with no
        desktop shortcut, then uninstalls.
   The installs before step 6 take the default desktop shortcut, which upgrades keep.
   The wizard itself needs a person (or the snapshot steps in the PR); this covers what msiexec /qn
@@ -27,7 +27,7 @@ trap { Write-Output "FAILED: $_"; exit 1 }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $AppPaths = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe'
 # A per-machine install's desktop is the Public one.
-$DesktopLink = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'EffectCraft.lnk'
+$DesktopLink = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Visualab Effects.lnk'
 
 function Invoke-Native([string] $What, [scriptblock] $Block) {
   Write-Output "==> $What"
@@ -94,9 +94,9 @@ foreach ($v in '0.0.1', '0.0.2', '0.0.3') {
 }
 
 # Spaces and a non-ASCII letter (written as a char so the script's own encoding doesn't matter).
-$Custom = Join-Path $env:SystemDrive "EffectCraft Test $([char]0x00DC)nicode\My Apps"
-$Default = Join-Path $env:ProgramFiles 'ArtCraft\EffectCraft'
-if (Test-Path -LiteralPath $AppPaths) { throw 'EffectCraft is already installed here; run this on a clean machine' }
+$Custom = Join-Path $env:SystemDrive "Visualab Effects Test $([char]0x00DC)nicode\My Apps"
+$Default = Join-Path $env:ProgramFiles 'Visualab\Visualab Effects'
+if (Test-Path -LiteralPath $AppPaths) { throw 'Visualab Effects is already installed here; run this on a clean machine' }
 
 Invoke-Msiexec 'install the legacy package to a custom folder' @('/i', "`"$($Msi['0.0.1'])`"", "INSTALLFOLDER=`"$Custom`"")
 Assert-InstalledIn $Custom -NoPathValue
@@ -112,8 +112,8 @@ Assert-InstalledIn $Custom
 Assert-DesktopShortcut $true
 # Read single values: Get-ItemProperty throws on some machines' malformed Uninstall entries.
 $arp = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft') { $_.GetValue('DisplayVersion') } })
-if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one EffectCraft 0.0.3 in Apps, found: $($arp -join ', ')" }
+  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'Visualab Effects') { $_.GetValue('DisplayVersion') } })
+if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one Visualab Effects 0.0.3 in Apps, found: $($arp -join ', ')" }
 
 # Repair the way the wizard's Repair button does: damage the CLI in place (a later write time, as a
 # user edit or corruption would have), repair with the wizard's REINSTALLMODE, compare contents.

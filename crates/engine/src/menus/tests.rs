@@ -27,7 +27,7 @@ fn platform_entries(mac: bool) -> Vec<(Vec<String>, MenuEntry)> {
 fn top_level_order_matches_after_effects() {
     let mac: Vec<String> =
         parse(TREE, true).unwrap().iter().filter_map(|n| if let MenuNode::Submenu { label, .. } = n { Some(label.clone()) } else { None }).collect();
-    assert_eq!(mac, ["EffectCraft", "File", "Edit", "Composition", "Layer", "Effect", "Animation", "View", "Window", "Help"]);
+    assert_eq!(mac, ["Visualab Effects", "File", "Edit", "Composition", "Layer", "Effect", "Animation", "View", "Window", "Help"]);
     let other: Vec<String> =
         parse(TREE, false).unwrap().iter().filter_map(|n| if let MenuNode::Submenu { label, .. } = n { Some(label.clone()) } else { None }).collect();
     assert_eq!(other, ["File", "Edit", "Composition", "Layer", "Effect", "Animation", "View", "Window", "Help"]);

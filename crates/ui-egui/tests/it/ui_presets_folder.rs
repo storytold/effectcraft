@@ -1,6 +1,5 @@
 //! Effects & Presets: copy the configured folder path through the contents menu.
 
-use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::panels::effects_presets::PresetFile;
 use effectcraft_ui_egui::{ControlRequest, EffectcraftApp, control, dock::PanelKind};
@@ -11,7 +10,7 @@ use serde_json::json;
 fn expected_folder() -> String {
     let path = std::env::var("EC_PRESETS_DIR").unwrap_or_else(|_| {
         let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap();
-        std::path::Path::new(&home).join("Documents/EffectCraft/Presets").to_str().unwrap().to_string()
+        std::path::Path::new(&home).join("Documents/Visualab Effects/Presets").to_str().unwrap().to_string()
     });
     if path.is_empty() { path } else { std::path::absolute(path).unwrap().to_str().unwrap().to_string() }
 }
@@ -53,7 +52,7 @@ fn presets_menu_copies_the_configured_folder_without_editing_the_project() {
         click(&mut h, "effects.menu");
         h.run_steps(3);
         if let Ok(path) = std::env::var("PRESETS_FOLDER_SNAPSHOT") {
-            h.render_serialized().unwrap().save(path).unwrap();
+            h.render().unwrap().save(path).unwrap();
         }
         assert_eq!(click(&mut h, "effects.copyPresetsFolderPath"), [expected.as_str()]);
         h.run_steps(2);
@@ -157,7 +156,7 @@ fn shared_preset_rows_search_apply_and_undo_the_selected_definition() {
         assert_eq!(h.state().session.active_comp().unwrap().layers[0].props.prop("transform/opacity").unwrap().value.as_f64(), expected);
         assert_eq!(h.state().session.history.undo.len(), history + 1);
         if let Ok(dir) = std::env::var("PRESET_CACHE_SNAPSHOTS") {
-            h.render_serialized().unwrap().save(format!("{dir}/{name}.png")).unwrap();
+            h.render().unwrap().save(format!("{dir}/{name}.png")).unwrap();
         }
         h.state_mut().session.execute("edit.undo", json!({})).unwrap();
         h.run_steps(2);

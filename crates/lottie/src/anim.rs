@@ -1,4 +1,4 @@
-//! Animated properties: EffectCraft keyframes ↔ Lottie keyframes.
+//! Animated properties: Visualab Effects keyframes ↔ Lottie keyframes.
 //!
 //! A Lottie keyframe holds the start value `s` of a segment and the segment's normalised cubic
 //! Bezier ease: `o` (out tangent of this key) and `i` (in tangent of the next key), each with `x`
@@ -73,22 +73,9 @@ fn is_spatial(p: &Property) -> bool {
 }
 
 /// Export a property as a Lottie animatable property (`{a, k}` plus `x` for expressions).
-/// `label` names the property in warnings. Muted keys are omitted: Lottie has no mute state, and
-/// the remaining keys carry the animation the renderer shows.
+/// `label` names the property in warnings.
 pub(crate) fn export_prop(ex: &mut Ex, p: &Property, conv: &dyn Fn(&Value) -> Json, label: &str) -> Json {
-    let muted = p.keys.iter().any(|k| k.muted);
-    if muted {
-        ex.warn(format!("{label}: muted keyframes are not exported"));
-    }
-    let active: Vec<Keyframe>;
-    let keys: &[Keyframe] = if muted {
-        active = p.keys.iter().filter(|k| !k.muted).cloned().collect();
-        &active
-    } else {
-        &p.keys
-    };
-    let mut out =
-        if keys.is_empty() { json!({"a": 0, "k": conv(&p.value)}) } else { json!({"a": 1, "k": export_keys(ex, keys, is_spatial(p), p.hold_only, conv)}) };
+    let mut out = if p.keys.is_empty() { json!({"a": 0, "k": conv(&p.value)}) } else { json!({"a": 1, "k": export_keys(ex, p, conv)}) };
     if let Some(e) = p.expr.as_ref().filter(|e| e.enabled && !e.text.trim().is_empty()) {
         if ex.include_expressions {
             out["x"] = json!(e.text);
@@ -99,18 +86,20 @@ pub(crate) fn export_prop(ex: &mut Ex, p: &Property, conv: &dyn Fn(&Value) -> Js
     out
 }
 
-fn export_keys(ex: &Ex, keys: &[Keyframe], spatial: bool, hold_only: bool, conv: &dyn Fn(&Value) -> Json) -> Vec<Json> {
+fn export_keys(ex: &Ex, p: &Property, conv: &dyn Fn(&Value) -> Json) -> Vec<Json> {
+    let keys = &p.keys;
+    let spatial = is_spatial(p);
     let mut out = Vec::with_capacity(keys.len());
     for (i, k) in keys.iter().enumerate() {
         let mut o = json!({"t": r6(ex.tb.frame(k.time)), "s": wrap(conv(&k.value))});
         if i + 1 == keys.len() {
-            if k.out_interp == Interp::Hold || hold_only {
+            if k.out_interp == Interp::Hold || p.hold_only {
                 o["h"] = json!(1);
             }
             out.push(o);
             continue;
         }
-        if k.out_interp == Interp::Hold || hold_only || !k.value.interpolates() {
+        if k.out_interp == Interp::Hold || p.hold_only || !k.value.interpolates() {
             o["h"] = json!(1);
             out.push(o);
             continue;

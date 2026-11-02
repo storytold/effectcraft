@@ -51,7 +51,7 @@ fn set_channels(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 /// Shift Channels' Take … From menu. After Effects' ten options come first, in its order, so a
 /// project or script that sets 10 ("Full Off" there) turns the channel off here too; "Half On" is
-/// an EffectCraft extra and sits last.
+/// an Visualab Effects extra and sits last.
 const SHIFT_ORDER: [Src; 11] =
     [Src::Alpha, Src::Red, Src::Green, Src::Blue, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Off, Src::Half];
 const SHIFT_NAMES: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Full Off", "Half On"];

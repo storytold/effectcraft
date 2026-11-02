@@ -1,6 +1,6 @@
 //! Menu entries whose implementation is owned by another milestone (3D, render queue/export,
 //! time remapping, pen/mask-vertex editing, motion tracking, layer styles…) or that have no
-//! EffectCraft equivalent yet. They are registered so the menu bar matches After Effects, and are
+//! Visualab Effects equivalent yet. They are registered so the menu bar matches After Effects, and are
 //! always disabled. When a feature lands, delete its line here and register the real command
 //! with the same id (the menu tree in `menus.rs` already points at it).
 

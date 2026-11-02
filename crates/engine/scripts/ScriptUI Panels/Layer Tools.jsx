@@ -1,4 +1,4 @@
-// Layer Tools — an EffectCraft sample ScriptUI panel (original work, MIT OR Apache-2.0).
+// Layer Tools — an Visualab Effects sample ScriptUI panel (original work, MIT OR Apache-2.0).
 //
 // Installed in the ScriptUI Panels folder it docks like any panel (Window ▸ Layer Tools.jsx);
 // run from File ▸ Scripts it opens as a floating palette. Buttons act on the selected layers of

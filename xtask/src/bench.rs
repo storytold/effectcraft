@@ -462,7 +462,7 @@ fn generate(bin: &Path, dir: &Path, name: &str, regen: bool) -> Result<Scenario,
         start: 0.0,
     };
     match name {
-        "demo" => Ok(Scenario { name: name.into(), source: vec!["--demo".into()], comp: "EffectCraft Intro".into(), fps: 30_000.0 / 1001.0, start: 0.0 }),
+        "demo" => Ok(Scenario { name: name.into(), source: vec!["--demo".into()], comp: "Visualab Effects Intro".into(), fps: 30_000.0 / 1001.0, start: 0.0 }),
         "layers" => {
             build_project(bin, &layers_cmds(), &projects.join("layers.ecproj"))?;
             Ok(project("layers.ecproj", "Layers"))

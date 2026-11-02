@@ -1,4 +1,4 @@
-// Rename Layers — an EffectCraft sample script (original work, MIT OR Apache-2.0).
+// Rename Layers — an Visualab Effects sample script (original work, MIT OR Apache-2.0).
 //
 // Renames the selected layers of the active composition (all layers when none are selected):
 // find & replace, then an optional prefix, suffix and running number. One undo step.

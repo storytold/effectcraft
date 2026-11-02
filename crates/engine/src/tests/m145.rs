@@ -459,7 +459,7 @@ fn save_a_copy_as_xml_opens_again() {
     let path = tmp("copy.ecprojx");
     s.execute("file.saveCopyAsXml", json!({"path": path.to_string_lossy()})).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("<?xml") && text.contains("<EffectCraftProject"));
+    assert!(text.starts_with("<?xml") && text.contains("<Visualab EffectsProject"));
     let before = s.project.to_json();
     let mut t = Session::default();
     t.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();

@@ -289,12 +289,12 @@ pub fn default_folder() -> PathBuf {
     if cfg!(target_os = "macos")
         && let Some(h) = &home
     {
-        return h.join("Library/Caches/EffectCraft/Disk Cache");
+        return h.join("Library/Caches/Visualab Effects/Disk Cache");
     }
     if cfg!(windows)
         && let Some(l) = std::env::var_os("LOCALAPPDATA")
     {
-        return PathBuf::from(l).join("EffectCraft").join("Disk Cache");
+        return PathBuf::from(l).join("Visualab Effects").join("Disk Cache");
     }
     if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(x).join("effectcraft/disk-cache");
@@ -841,7 +841,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-4";
+const RENDER_VERSION: &str = "effectcraft-render-3";
 
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
@@ -1091,7 +1091,7 @@ mod tests {
         let comp = Comp::new(2, 2, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
         let id = project.add_item("Cached composition", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
         let key = frame_key(comp_content_key(&project, id), 0, 1000, 0);
-        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-3"), 0, 1000, 0);
+        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-2"), 0, 1000, 0);
         let dir = tmpdir("previous-renderer");
         {
             let cache = DiskCache::open(&dir, 1 << 30).unwrap();
@@ -1278,7 +1278,7 @@ mod tests {
         let f = Footage { path: "/virtual.mov".into(), width: 16, height: 9, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
         let fid = p.add_item("virtual.mov", effectcraft_color::Label::None, None, ItemKind::Footage(f));
         let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
-        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)].into();
+        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)];
         let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
 
         let id = |mark: u64| move |path: &str| (path == "/virtual.mov").then_some((8, mark));

@@ -152,9 +152,8 @@ fn clear_recent_presets(s: &mut Session, _: &Value) -> Result<Value> {
 
 fn save_copy_xml(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.saveCopyAsXml", "missing `path` (.ecprojx)"))?;
-    s.refuse_export(path)?;
-    let xml = crate::xml_project::to_xml(&s.project.to_file_json_with_view(&s.saved_view(), false)?).map_err(EngineError::Other)?;
-    s.write_output(path, xml.as_bytes())?;
+    let xml = crate::xml_project::to_xml(&s.project.to_file_json_with_view(&s.saved_view())?).map_err(EngineError::Other)?;
+    s.services.write_file(path, xml.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Saved an XML copy to {path}"));
     Ok(json!({"path": path, "bytes": xml.len()}))
 }
@@ -241,7 +240,7 @@ fn replace_with_precomp(s: &mut Session, p: &Value) -> Result<Value> {
             let ids: Vec<ItemId> = proj.items.keys().copied().filter(|c| *c != comp).collect();
             for cid in ids {
                 if let Some(c) = proj.comp_mut(cid) {
-                    for l in c.layers.iter_mut_where(|l| is_user(l)) {
+                    for l in c.layers.iter_mut().filter(|l| is_user(l)) {
                         l.source = LayerSource::Comp { item: comp };
                         n += 1;
                     }
@@ -439,7 +438,7 @@ pub fn system_report(s: &Session) -> Value {
         issues.push("Export is not available in this build.".to_string());
     }
     json!({
-        "app": format!("EffectCraft {}", env!("CARGO_PKG_VERSION")),
+        "app": format!("Visualab Effects {}", env!("CARGO_PKG_VERSION")),
         "os": crate::sysinfo::os_version(),
         "arch": std::env::consts::ARCH,
         "cpu": crate::sysinfo::cpu_name(),

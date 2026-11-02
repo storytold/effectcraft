@@ -1,4 +1,4 @@
-// An EffectCraft engine instance in a Web Worker (src/worker.rs, src/frames.rs,
+// An Visualab Effects engine instance in a Web Worker (src/worker.rs, src/frames.rs,
 // crates/engine/src/offload.rs and remote.rs). The page sends the compiled module, then:
 // - job workers: footage files and jobs (Render Queue, analyses, Roto Brush); the worker replies
 //   with JSON messages and rendered files. With `gpu: true` it opens its own WebGPU device and

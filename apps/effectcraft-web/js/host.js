@@ -1,4 +1,4 @@
-// Browser services for the EffectCraft web app (imported by the wasm module through
+// Browser services for the Visualab Effects web app (imported by the wasm module through
 // wasm-bindgen; see src/persist.rs, src/audio.rs and src/worker.rs):
 //
 // - storage: the Origin Private File System, or IndexedDB where OPFS can't write;
@@ -713,7 +713,7 @@ export function showDeviceLost(message, kept) {
   title.textContent = "The graphics device was lost";
   const text = document.createElement("p");
   text.textContent =
-    "EffectCraft can't update the display any more. Your project is still open. " +
+    "Visualab Effects can't update the display any more. Your project is still open. " +
     (kept ? "Reload to continue: the project and its unsaved changes come back." : "This session isn't kept in browser storage: save the project before you reload.");
   const detail = document.createElement("small");
   detail.textContent = message;

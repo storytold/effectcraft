@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
-The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
+The authoritative assessment of how close Visualab Effects is to After Effects, and how much work is
 left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 [ROADMAP](../ROADMAP.md) summarises both. Deep dives: [effects-parity.md](effects-parity.md),
 [scripting-parity.md](scripting-parity.md), [file-format-parity.md](file-format-parity.md),
@@ -114,13 +114,13 @@ compositing and effects dominate; audio is light). Hours are to full parity for 
 
 | Area | Weight | Breadth | Ready | Hours | Biggest gaps (details in [gaps.md](gaps.md)) |
 |---|---:|---:|---:|---:|---|
-| Project, footage and import | 8% | 92% | 55% | 25–45 | No relative paths or relinking when a project moves; TGA/HDR/DPX/MXF/AVI import since #745, #756, #767, #1701 (no DV or MPEG-4 Part 2 AVI yet); #431, #324, #552 and #351 are closed |
+| Project, footage and import | 8% | 92% | 55% | 25–45 | No relative paths or relinking when a project moves; Media Browser lists AVI, which it can't import (TGA/HDR/DPX/MXF import since #745, #756, #767); #431, #324, #552 and #351 are closed |
 | Compositions, layers and compositing | 13% | 98% | 60% | 30–55 | 32-bpc blend modes differed from After Effects (#494, closed); expand precomps in place (#601); #527, #510, #513, #539 and #540 are closed |
 | Animation: keyframes, graph editor, motion paths, puppet | 15% | 97% | 55% | 35–60 | Only scalar ease is measured against After Effects (168 samples); puppet lag (#586); #456, #457, #355, #553 and #318 are closed; Proportional Scrubbing (26.2) |
-| Expressions and scripting | 7% | 93% | 65% | 20–40 | `.jsxbin`, a global scope shared between scripts, script shortcuts (`#include` landed, #759; Startup/Shutdown folders run); external editor (#364); see [scripting-parity.md](scripting-parity.md) |
+| Expressions and scripting | 7% | 93% | 65% | 20–40 | `.jsxbin`, Startup/Shutdown folders, script shortcuts (`#include` landed, #759); external editor (#364); see [scripting-parity.md](scripting-parity.md) |
 | Shapes, masks and roto | 9% | 93% | 45% | 30–50 | Open mask and shape issues (#1004, #999, #1042, #932); #510, #513, #527, #509 and #303 are closed; paste SVG/AI as shape layers (26.3; SVG markup pastes since #738) |
 | Text and typography | 7% | 94% | 50% | 20–35 | CJK text in comps renders wrongly (#453); paragraph alignment inverted (#316); soft text at Fit (#417, mostly fixed by #444); toolbar font options (#550); #483 and #583 are closed; variable-font filter landed (#741) |
-| Effects and animation presets | 14% | 85% | 40% | 70–130 | All 306 effects exist, but rendered output is unmeasured against After Effects; 76 built-in presets (text, Transitions, Backgrounds, Behaviors) against After Effects' 621 ([effects-parity.md](effects-parity.md)); open effect bugs (#580 crash, #463, #369, #473, #474; #514 and #526 are closed); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
+| Effects and animation presets | 14% | 85% | 40% | 70–130 | All 306 effects exist, but rendered output is unmeasured against After Effects; 54 built-in presets (text, Transitions, Backgrounds) against After Effects' 621 ([effects-parity.md](effects-parity.md)); open effect bugs (#580 crash, #463, #369, #473, #474; #514 and #526 are closed); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
 | 3D (Classic and Advanced) | 6% | 82% | 35% | 35–65 | No FBX/USD/STL models, no Substance materials, mesh displacement unverified; no 3D transform gizmos (#392, #347); reflections (#261); camera aperture (#260); #489 and #315 are closed |
 | Tracking and AI-assisted tools | 5% | 80% | 35% | 35–70 | Object Matte (26.2) has the effect, the viewer tool (click / box), background tracking, Freeze and the 26.5 disk cache, not yet compared with After Effects; Roto Brush (MobileSAM) and face tracking (MediaPipe) unmeasured against After Effects; camera-tracker view (#505) |
 | Preview and cache | 7% | 92% | 40% | 25–50 | Playback stutters on cached frames (#595, #304); late audio (#504, #335); #329 and #554 are closed; no benchmark against After Effects |
@@ -139,7 +139,7 @@ Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensio
 | UI/UX fidelity | 65% | 60–120 | After Effects-shaped menus (587 entries), panels, workspaces, shortcuts; many interaction issues still open; multi-monitor only as separate panel windows (#486 open); Effect Controls not yet like 26.5's | [ui-parity.md](ui-parity.md) |
 | File formats | 50% | 130–230 | `.aep` / `.aepx` / `.mogrt` / `.ffx` can't be read; strong modern codecs (H.264, HEVC, AV1, VP9, ProRes) | [file-format-parity.md](file-format-parity.md) |
 | Hardware | 40% | 60–120 | wgpu GPU on Metal/Vulkan/Direct3D 12/WebGPU with CPU fallback; no hardware decode/encode; Direct3D 12 compositor fails (#613); no video-out hardware | [hardware-parity.md](hardware-parity.md) |
-| Localization | 24% | 60–110 + review | Average coverage of After Effects' 10 non-English languages (measured catalog rows over ≈ 4,200 strings): menus in 10 languages, panels in 7, effects in Simplified Chinese and Japanese; After Effects ships 11 languages fully | [localization-parity.md](localization-parity.md) |
+| Localization | 18% | 60–110 + review | Average coverage of After Effects' 10 non-English languages (measured catalog rows over ≈ 3,900 strings): menus in 10 languages, panels in 6, effects in none; After Effects ships 11 languages fully | [localization-parity.md](localization-parity.md) |
 | Performance | 35% | 50–100 | Internal numbers only; users report stutter and slow scrubbing | [gaps.md](gaps.md#g5-performance-at-real-world-scale) |
 | Stability | 45% | 40–80 | Open crash reports #580, #501, #426, #341, #234, #879 (#591, #306 and #511 are closed); no CI runs the tests on pull requests | [gaps.md](gaps.md#g3-stability-and-a-green-main) |
 | Platforms | 65% | 30–60 | Releases for macOS, Windows x64/x86/ARM64, Linux, FreeBSD and the web (more than After Effects), but Linux and Windows users hit basic bugs | [gaps.md](gaps.md#g2-real-user-reliability-on-every-platform) |
@@ -171,7 +171,8 @@ Checked on 10 October 2026 when the mainstream and essentials numbers were added
 
 ## Mainstream practitioner and essentials user
 
-Two narrower questions, computed the same way in every craft app. The stage still follows the full-target number and the
+Two narrower questions, computed the same way in every craft app (craftrules
+`standards/progress-docs.md`, "Numbers"). The stage still follows the full-target number and the
 [alpha gate](roadmap.md#alpha-gate).
 
 ### Mainstream practitioner
@@ -428,7 +429,7 @@ the disk cache in the formats wave; the 3D Camera Tracker in M12.6.)
 | Import | 97% | 0.5 | JPX / JBIG2 images and predefined non-Identity CJK CMaps inside PDF/AI files, Illustrator EPS relying on Adobe procsets, PSD 3D layers (M13.12: mesh shadings — free-form / lattice Gouraud triangles, Coons and tensor patches — and function-based shadings, CCITT G3 / G4 images, knockout / isolated transparency groups with group alpha and soft masks on the group's result, `/W2` vertical metrics, EPS text with embedded Type 1 / CFF or bundled fonts, and Create Shapes from Vector Layer keeping images as parented footage layers in paint order; M13.6: PDF/AI text with embedded TrueType / CFF / Type 1 / Type 3 fonts and standard-14 fallback to the bundled fonts, Flate / DCT / inline / stencil images with soft masks, Indexed and ICC alternates, luminosity / alpha soft masks, the 16 blend modes, tiling patterns, calculator functions, any page via `file.import page` and the Import dialog, clip groups kept by Create Shapes from Vector Layer as layer masks / Merge Paths; PSD smart-object perspective quads and placed-layer warps — named styles and custom quilt meshes — baked as placed; PDF / PDF-compatible AI / EPS vector footage with Continuously Rasterize, layered composition import and Create Shapes from Vector Layer, and PSD smart objects with embedded files landed in M13.2; PSD as footage/composition/retain layer sizes, SVG footage earlier; PDF / AI Composition - Retain Layer Sizes crops each layer to its artwork in place, #1536) |
 | Automation | ≈ 99% | 0.1 | `.jsxbin` (AUT-2: concave / self-intersecting `onDraw` fills, real images in `drawImage`, image controls and icon buttons landed in M13.11; ScriptUI resource strings, `onDraw`/ScriptUIGraphics, live `onChanging`, `Socket`, Essential Graphics hooks — `addToMotionGraphicsTemplate(As)`, `canAddToMotionGraphicsTemplate`, `exportAsMotionGraphicsTemplate`, `motionGraphicsTemplateName`, controller count/names — and Watch Folder landed in M13.7; the core object model landed in M14.4; ScriptUI windows/dialogs/dockable panels with `scriptui.*` agent commands, File ▸ Scripts install + sample scripts, and the effect plug-in API (EFF-6, WebAssembly) landed in M13.1) |
 | Shapes | ≈ 80% | 1.5 | Lottie can't carry stroke taper/wave (stroke Taper and Wave, Dash 2/Gap 2/Dash 3/Gap 3 and radial-gradient Highlight Length/Angle landed in M13.5; pen tool for shape paths and vertex editing in M6.5) |
-| Compositions | ≈ 81% | 3.3 | Mocha-style planar tracks for templates; nested comp markers on the precomp layer bar; a dialog for Scale Composition (After Effects' File ▸ Scripts ▸ Scale Composition.jsx), which runs headless as `comp.scale {factor \| width \| height}` (#2208: the comp, every unparented layer's Position and Scale with all keys, camera Zoom and guides; nested precomps and expressions stay as they are) (Preserve frame rate / resolution when nested and nested comps showing nothing past their end landed in M4.9–M4.10; Pre-compose keeping the comp's settings and New Comp from Selection's dialog in M3.12; CMP-7: Essential Graphics mirrored and linked properties landed in M13.11; Font and uniform Scale controls, Composition ▸ Open in Essential Graphics, Save Frame As ▸ Photoshop Layers / ProEXR and the VR Comp Editor landed in M13.7; the marker dialog, Composition Flowchart, Essential Graphics with master properties, `.ectemplate` templates and Responsive Design — Time landed: CMP-6, CMP-7) |
+| Compositions | ≈ 81% | 3.3 | Mocha-style planar tracks for templates; nested comp markers on the precomp layer bar (Preserve frame rate / resolution when nested and nested comps showing nothing past their end landed in M4.9–M4.10; Pre-compose keeping the comp's settings and New Comp from Selection's dialog in M3.12; CMP-7: Essential Graphics mirrored and linked properties landed in M13.11; Font and uniform Scale controls, Composition ▸ Open in Essential Graphics, Save Frame As ▸ Photoshop Layers / ProEXR and the VR Comp Editor landed in M13.7; the marker dialog, Composition Flowchart, Essential Graphics with master properties, `.ectemplate` templates and Responsive Design — Time landed: CMP-6, CMP-7) |
 | Animation | 70% | 9.0 | puppet depth beyond pins, recording, rigging and follow-through (G2: the expression pick whip scrolls the Timeline when held at its top or bottom, #362; dropped on one of a property's values it picks that dimension (`position[0]`), #363; every property has a property pick whip in the Parent & Link column, which adds the reference as its expression or replaces the one it has, and pick whips drop on Effect Controls properties too, #363; the inline expression field grows while typing and its bottom edge drags it taller or shorter, #371; an angle's revolutions scrub and take typing in Effect Controls, the Timeline and Properties, #93; puppet pin recording with Record Options landed in M13.1; pin selection, rotate/scale handles, nulls for pins and Follow-Through in M13.14–M13.16), Wiggler/Smoother/Motion Sketch (motion-path handles and the graph editor transform box landed in M5.8; keyframe colour labels and Select Keyframe Label Group, Graph Editor snapping to markers / layer ends in M13.5) |
 | Text | ≈ 96% | 0.3 | no extruded strokes (G2: the font menus list every installed family with its own styles — before, only a project asking for a font read the system fonts — and `text.fonts` / MCP `list_fonts` list them for agents; M13.12: the Variable Font Axes animator re-spaces the text — advances follow the animated axes; M13.6: variable font axes in the character style — `layer.setText variations`, the Character panel's Variable Font Axes fields — shape with HVAR / gvar advances and draw at that design-space position; OpenType features — stylistic sets, discretionary ligatures, contextual / stylistic alternates, swash, titling, ordinals, fractions, figure styles, true small caps / all small caps and superior / inferior glyphs with faux fallback — per character with the Character panel's OpenType popup and `text.fontFeatures` landed in M13.2; vertical Roman / Tate-Chu-Yoko, forced LTR paragraphs, caret on animated and path text, Variable Font Axes and Lottie style runs landed in M13.5; extruded, bevelled text in M7.6; per-character styles, paragraph settings, on-canvas editing and the `sourceText` style API in M9.9–M9.10) |
 | Web | 98% | 0.1 | No shared-memory threads inside one engine instance (the decided design is one engine instance per worker; a threaded build needs nightly `build-std`) (M13.30: Render Queue, analyses and Content-Aware Fill render on each job worker's own WebGPU device in passes, particles and Advanced 3D read back under keys, layer buffers in the browser's disk cache; browser storage, Web Audio, Web Worker renders/analyses, WebGPU viewer and offline install landed in M15.2; viewer frames in frame workers fed by project diffs, Roto Brush propagation in a worker, non-blocking `wait: true` jobs and a browser Media Browser (File System Access folders, browser storage) in M13.10; WEB-1 in M13.24: GPU effects and the GPU compositor in the frame workers on their own WebGPU devices with deferred readbacks (frames render in passes; Backend Auto per comp), the disk cache in the Origin Private File System (written by the workers with sync access handles, LRU under the settings' limit, served after a reload), the storage manager (Settings ▸ Disk ▸ Browser Storage, `storage.info` / `storage.persist` / `storage.clear`), and a WGSL constant Chrome rejected (it disabled every GPU kernel in Chrome) fixed) |
@@ -546,7 +547,7 @@ axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
   readback staging buffers are reused and the 8/16 bpc quantisation after each layer is fused
   into the layer's composite. `bench --gpu` on an M4 Pro under load (both binaries run back to
   back, median of 15): Lower Third 1920×1080 GPU warm 21.0 → 4.1 ms/frame (viewer 11.1 → 2.6;
-  Half 10.1 → 3.1), EffectCraft Intro 27.5 → 7.8 (viewer 21.7 → 3.6), 3D Showcase ≈ 95 → ≈ 60
+  Half 10.1 → 3.1), Visualab Effects Intro 27.5 → 7.8 (viewer 21.7 → 3.6), 3D Showcase ≈ 95 → ≈ 60
   (viewer ≈ 80 → ≈ 40), Adjustment Layers 93 → 36. In steady state the only transfer left is
   the frame's own readback (0.0 MB uploads per frame on every demo comp; the adjustment
   footprint is now cached and uploaded once).
@@ -694,7 +695,7 @@ Fixes from measured reports:
 
 ### Update: plug-ins and extensions as in After Effects; ease presets become a ScriptUI panel
 
-EffectCraft's core keeps After Effects parity; what After Effects users get from third parties is
+Visualab Effects's core keeps After Effects parity; what After Effects users get from third parties is
 an extension, on the same extension points After Effects has ([plugins.md](plugins.md) compares
 them: scripts, ScriptUI panels, effect plug-ins, with a guide to writing a panel).
 
@@ -832,10 +833,10 @@ meanwhile. Footage, solids, proxies and the project settings are hashed by value
 states are kept, so a long drag doesn't hold on to every intermediate state. The disk cache's
 content key now also covers proxies and Use Proxy.
 
-Since (M13.30–M13.31): the Tools bar and About dialog carry the ArtCraft mark. The
+Since (M13.30–M13.31): the Tools bar and About dialog carry the Visualab mark. The
 Home screen is laid out like After Effects' and covers the whole workspace. A left rail holds New
 Project / Open Project, the Home, Templates and Learn pages and, at its foot, the community
-links. The Home page has a "Welcome to EffectCraft" heading, quick-start tiles (New Composition,
+links. The Home page has a "Welcome to Visualab Effects" heading, quick-start tiles (New Composition,
 Open Demo Project, Import Footage, New from Template) and the recent projects as a filterable
 table with thumbnails and Name / Opened ("3 hours ago") / Size / Kind columns. New automation ids:
 `home.filter`, `home.templates`, `home.file.import`.
@@ -895,7 +896,7 @@ content keys), audio scrubbing, four snapshot slots.
 
 ### Update: M3.14 project files
 
-Project files name the version that wrote them (`savedBy`); opening one that a newer EffectCraft
+Project files name the version that wrote them (`savedBy`); opening one that a newer Visualab Effects
 saved warns that what this version doesn't know is lost on saving (`file.open` reports
 `savedBy`). Saving checks that the file reads back first, so a value JSON can't hold (NaN)
 fails the save with a message instead of writing a project that can never be opened (the file
@@ -998,7 +999,7 @@ public ICC specification and baked into a 3D LUT for the viewer).
 
 #### M13.26: Premiere Pro interop via timeline interchange
 
-| Feature | After Effects | EffectCraft | Status |
+| Feature | After Effects | Visualab Effects | Status |
 |---|---|---|---|
 | File ▸ Import ▸ Adobe Premiere Pro Project… | reads `.prproj` | reads Final Cut Pro XML (Premiere's File ▸ Export ▸ Final Cut Pro XML), FCPXML, OTIO, EDL, AAF and OMF (`file.importTimeline`): comps, layers by track, timing/speed/reverse/holds, Motion and Opacity keyframes, dissolves as opacity keys, nested sequences as precomps, audio layers with levels, bins as folders, missing media as placeholders | ≈ 85% |
 | File ▸ Export ▸ Adobe Premiere Pro Project… | writes `.prproj` | writes Final Cut Pro XML `.xml` (also FCPXML, OTIO, EDL, AAF, OMF; `file.exportTimeline`): clips per layer with timing, Motion, Opacity and levels; precomps nested; rendered-only layers pre-rendered to ProRes 4444 with alpha | ≈ 85% |

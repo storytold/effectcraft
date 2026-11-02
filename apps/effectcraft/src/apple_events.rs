@@ -1,6 +1,6 @@
 //! macOS open-documents and quit Apple events.
 //!
-//! Finder double-clicks, Open With, drops on the Dock icon and `open -a EffectCraft x.ecproj` don't
+//! Finder double-clicks, Open With, drops on the Dock icon and `open -a Visualab Effects x.ecproj` don't
 //! pass paths on the command line: LaunchServices sends the running (or just-launched) app a
 //! `kAEOpenDocuments` ('odoc') Apple event. winit 0.30 doesn't handle it and owns the
 //! `NSApplicationDelegate`, so the project never opened. Handling it ourselves needs Objective-C

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- EffectCraft test fixture (original work, MIT OR Apache-2.0): basic shapes, groups, transforms. -->
+<!-- Visualab Effects test fixture (original work, MIT OR Apache-2.0): basic shapes, groups, transforms. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 400 200">
   <title>Basic shapes</title>
   <rect id="bg" x="0" y="0" width="400" height="200" fill="#202830"/>

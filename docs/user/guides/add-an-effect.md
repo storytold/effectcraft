@@ -18,7 +18,7 @@ Shortcuts on this page use Ctrl. On macOS, use Cmd instead of Ctrl.
 3. Open **Window ▸ Effect Controls** (F3), or choose **Effect ▸ Effect Controls**. The effect's settings are listed there. **Gaussian Blur** has **Blurriness**, **Blur Dimensions** and **Repeat Edge Pixels**.
 4. Change a value. Click the stopwatch beside it to animate it, as in [Animate with keyframes](animate-with-keyframes.md).
 
-If no layer is selected when you double-click an effect, EffectCraft shows **Select a layer to apply to**. Select a layer and try again.
+If no layer is selected when you double-click an effect, Visualab Effects shows **Select a layer to apply to**. Select a layer and try again.
 
 ## Remove or reuse effects
 

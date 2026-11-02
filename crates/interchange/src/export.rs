@@ -17,7 +17,7 @@ use crate::{Error, Result, TimelineFormat, par_fraction, rate_out, tick_out};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PrerenderMode {
-    /// Nothing is rendered: layers only EffectCraft can draw are left out (with a warning), and
+    /// Nothing is rendered: layers only Visualab Effects can draw are left out (with a warning), and
     /// effects, masks, parenting… of footage layers are dropped.
     None,
     /// Layers a timeline cannot represent (text, shapes, effects, masks, 3D, parenting, track
@@ -138,7 +138,7 @@ fn unsupported(project: &Project, comp: &Comp, l: &Layer, format: TimelineFormat
     if l.is_3d() {
         return Some("3D layer".into());
     }
-    if l.styles_change_pixels() {
+    if l.props.sub("layerStyles").is_some_and(|g| !g.children.is_empty()) {
         return Some("layer styles".into());
     }
     if l.props.get("timeRemap").is_some_and(|p| p.is_animated()) {
@@ -155,7 +155,12 @@ fn unsupported(project: &Project, comp: &Comp, l: &Layer, format: TimelineFormat
         return Some(format!("blend mode {}", l.blend_mode.label()));
     }
     // Premiere's Basic Motion in the interchange formats has one (uniform) scale.
-    if l.transform().and_then(|t| t.get("scale")).is_some_and(non_uniform_scale) {
+    if let Some(s) = l.transform().and_then(|t| t.get("scale"))
+        && std::iter::once(&s.value).chain(s.keys.iter().map(|k| &k.value)).any(|v| {
+            let a = v.as_vec3();
+            (a[0] - a[1]).abs() > 1e-9
+        })
+    {
         return Some("non-uniform scale".into());
     }
     if l.preserve_transparency {
@@ -576,7 +581,10 @@ impl Exporter<'_> {
             }
         }
         if let Some(p) = tr.get("scale") {
-            let uniform = !non_uniform_scale(p);
+            let uniform = std::iter::once(&p.value).chain(p.keys.iter().map(|k| &k.value)).all(|v| {
+                let a = v.as_vec3();
+                (a[0] - a[1]).abs() < 1e-9
+            });
             m.params.insert("scale".into(), param_out(p, &to_clip, |v| fp::ParamValue::Float(v.as_vec3()[1])));
             if !uniform {
                 m.params.insert("scale_width".into(), param_out(p, &to_clip, |v| fp::ParamValue::Float(v.as_vec3()[0])));
@@ -628,16 +636,6 @@ fn differs(v: &Value, def: [f64; 2]) -> bool {
     (a[0] - def[0]).abs() > 1e-6 || (a[1] - def[1]).abs() > 1e-6
 }
 
-/// Whether a scale property is non-uniform at some point: active key values, or the static
-/// value when every key is muted (muted keys are not exported, #1894).
-fn non_uniform_scale(p: &Property) -> bool {
-    let non_uniform = |v: &Value| {
-        let a = v.as_vec3();
-        (a[0] - a[1]).abs() > 1e-9
-    };
-    if p.keys.iter().any(|k| !k.muted) { p.keys.iter().filter(|k| !k.muted).any(|k| non_uniform(&k.value)) } else { non_uniform(&p.value) }
-}
-
 /// The clip's `id` effect, or a new instance of it (None if the registry has no such effect).
 fn effect_or_new(ti: &fp::TrackItem, id: &str) -> Option<fp::EffectInstance> {
     ti.effect(id).cloned().or_else(|| fp::find_effect(id).map(|e| e.instance()))
@@ -653,9 +651,7 @@ fn set_effect(ti: &mut fp::TrackItem, e: fp::EffectInstance) {
 /// A property → a FilmCraft parameter (layer-time keys → clip-time keys).
 fn param_out(p: &Property, to_clip: &impl Fn(Tick) -> filmcraft_time::Tick, conv: impl Fn(&Value) -> fp::ParamValue) -> fp::Param {
     let mut out = fp::Param::new(conv(&p.value));
-    // XML timelines have no mute state: leave muted keys out, as the Lottie exporter does, so
-    // the exported animation matches what the renderer shows (#1894).
-    for k in p.keys.iter().filter(|k| !k.muted) {
+    for k in &p.keys {
         let mut fk = fp::Keyframe::new(to_clip(k.time), conv(&k.value));
         fk.interp = match k.out_interp {
             Interp::Linear => fp::Interpolation::Linear,
@@ -688,12 +684,8 @@ fn media_info(name: &str, kind: MediaKind, duration: Tick, video: Option<VideoSp
             color: Default::default(),
             has_alpha,
             bitrate: None,
-            hdr: None,
         }),
-        audio_streams: audio
-            .then(|| AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) })
-            .into_iter()
-            .collect(),
+        audio: audio.then(|| AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) }),
         container: String::new(),
         start_timecode: None,
         file_size: None,

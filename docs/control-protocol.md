@@ -41,11 +41,11 @@ printf '{"id":1,"method":"engine.execute","params":{"command":"comp.new","params
 | UI commands (via either) | | `timeline.column {column, visible?}` (av, keys, label, num, comment, switches, modes, parent, in, out, duration, stretch), `timeline.sourceName {value?}`, `timeline.search {query}`, `timeline.reveal.<kind>` / `timeline.revealAdd.<kind>` (the property shortcuts and Shift+shortcut: position, scale, rotation, opacity, anchor, effects, masks, feather, levels, animated, and the double-press sets maskPath, maskOpacity, timeRemap, expressions, material, paint, selected, missingEffects, waveform), `timeline.keyAt.<anchor\|position\|scale\|rotation\|opacity>` (Alt+Shift+A/P/S/R/T), `timeline.twirlSelected` ``(Ctrl/Cmd+`)``, `timeline.collapseAll`, `flowchart.options {layers?, effects?, solids?, direction?: lr\|tb, comp?}`, `flowchart.graph {comp?}` → `{nodes, edges}`, `window.workspace {name}` (all After Effects workspaces). |
 | `engine.commands` | `{filter?, enabledOnly?}` | `[{id, label, menu, shortcut, params, enabled, why}]` |
 | `ui.menu.list` | `{}` | The menu tree with enablement. |
-| `render.frame` | `{comp?, time?, max_side?, path?, base64?, write?}` | Renders a comp frame through the session, independent of the viewer zoom or resolution. `comp` is an id or name (default: the active comp), `time` is in comp seconds (default: the CTI), `max_side` caps the longest side (0 = full size). Writes a PNG to `path` (default: a temp file) and returns `{comp, time, width, height, path}`. With `base64: true` it returns `{…, png: "<base64>"}` and writes no file unless `write: true` also requests a guarded write in the same app operation. |
+| `render.frame` | `{comp?, time?, max_side?, path?, base64?}` | Renders a comp frame through the session, independent of the viewer zoom or resolution. `comp` is an id or name (default: the active comp), `time` is in comp seconds (default: the CTI), `max_side` caps the longest side (0 = full size). Writes a PNG to `path` (default: a temp file) and returns `{comp, time, width, height, path}`. With `base64: true` it returns `{…, png: "<base64>"}` and writes no file. |
 
 Useful query commands for `engine.execute` (they aren't journaled or undoable): `project.summary`,
 `comp.info {comp?}`, `layer.tree {layer, comp?, depth?, time?}` (every node has a `path`),
-`prop.get {layer, path, comp?, time?}` (a popup (enum) property also lists its `options`, `[{value, label}]`, as `layer.tree` does), `editor.state`, `command.list {filter?, enabledOnly?, schemas?}`,
+`prop.get {layer, path, comp?, time?}`, `editor.state`, `command.list {filter?, enabledOnly?, schemas?}`,
 `command.describe {command}` (params doc and JSON Schema), `app.capabilities` (version, counts,
 export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the background
 `footage.check` after File ▸ Open).
@@ -103,7 +103,7 @@ Points are logical window coordinates. A target is `{id}` (the element's centre;
 | `ui.click` | `{id \| x,y, button?: left\|right\|middle, count?, modifiers?}` |
 | `ui.move` | `{id \| x,y}` |
 | `ui.drag` | `{from: target, to: target, steps? (12), modifiers?}`: press, move, release |
-| `ui.scroll` | `{id \| x,y, dx?, dy?, unit?: point\|line, source?: wheel\|trackpad, pinch?, modifiers?}`: `line` is a mouse wheel (zooms the viewers); `point` (default) is a pixel-precise scroll; `source: trackpad` pans the viewers (as on macOS); with no `source` the viewers take a scroll in points as a wheel until one moves on both axes (a trackpad: from then on it pans); `pinch` is a trackpad pinch's zoom factor |
+| `ui.scroll` | `{id \| x,y, dx, dy}` |
 | `ui.key` | `{key}`, for example `Space`, `F9`, `Cmd+Z`, `Cmd+Shift+Z`, `PageDown`, `Escape` |
 | `ui.type` | `{text}`: text input into the focused field |
 
@@ -239,7 +239,7 @@ group's drag bar), `panel.tabs.more.<Panel>`, `panel.menu.<Panel>` (≡), `panel
 
 Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
 closed panels with where each goes back, the lock, and each floating window's desktop place. A
-version 1 file (EffectCraft 0.10 and earlier) and the older unversioned record of
+version 1 file (Visualab Effects 0.10 and earlier) and the older unversioned record of
 named workspaces load with every panel in place: the current layout, the named workspaces,
 floating windows and their native window places. A column of stacked frames becomes tab groups
 split top to bottom: each open frame keeps all its tabs and its height (as a fixed size), and a

@@ -1,6 +1,6 @@
 //! Auto-save and crash recovery (PRJ-7).
 //!
-//! - **Auto-save**: every *n* minutes a dirty project is written to an "EffectCraft Auto-Save"
+//! - **Auto-save**: every *n* minutes a dirty project is written to an "Visualab Effects Auto-Save"
 //!   folder next to it (or a custom folder) as `<name> auto-save N.ecproj`, the After Effects
 //!   naming. Slots rotate through 1…max versions, overwriting the oldest. Writes are atomic
 //!   (temporary file + rename), so a crash mid-write never damages the previous auto-save.
@@ -17,7 +17,7 @@ use crate::config::{ConfigStore, FileOps, StdFiles};
 use crate::prefs::Prefs;
 
 /// Folder created next to a project for its auto-saves.
-pub const AUTOSAVE_FOLDER: &str = "EffectCraft Auto-Save";
+pub const AUTOSAVE_FOLDER: &str = "Visualab Effects Auto-Save";
 /// Crash-recovery sentinel in the config store.
 pub const SENTINEL: &str = "session.lock";
 const EXT: &str = "ecproj";

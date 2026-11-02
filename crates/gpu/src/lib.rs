@@ -1,4 +1,4 @@
-//! The EffectCraft GPU compositor (Mercury GPU Acceleration's counterpart), on wgpu compute
+//! The Visualab Effects GPU compositor (Mercury GPU Acceleration's counterpart), on wgpu compute
 //! shaders: Metal, Vulkan, Direct3D 12 and WebGPU.
 //!
 //! The CPU [`Renderer`] stays the reference and keeps rendering layer *content* (sources, masks,

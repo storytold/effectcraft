@@ -141,7 +141,7 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
         let lines = vec![
             crate::i18n::effects::name(spec.id, spec.name),
             format!("Category: {}", crate::i18n::effects::category(spec.category)),
-            "EffectCraft built-in effect (MIT OR Apache-2.0)".to_string(),
+            "Visualab Effects built-in effect (MIT OR Apache-2.0)".to_string(),
         ];
         let _ = widgets::popup_menu(ui, apop, about.left_bottom(), &lines, None);
     }
@@ -166,16 +166,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let comp_name = app.session.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx {
-        project: &snap_project,
-        comp_id: cid,
-        comp: &comp,
-        time: app.session.time(),
-        expr: snap_expr.as_deref(),
-        footage: None,
-        property_overrides: &[],
-        media_overrides: &[],
-    };
+    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp: &comp, time: app.session.time(), expr: snap_expr.as_deref(), footage: None };
     let hdr = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
     p.text(pos2(hdr.min.x + 10.0, hdr.center().y), Align2::LEFT_CENTER, format!("{} • {}", comp_name, layer.name), Tokens::ui(11.5), t.text_dim);
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
@@ -192,7 +183,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         bp.text(
             pos2(body.center().x, body.min.y + 40.0),
             Align2::CENTER_CENTER,
-            crate::i18n::tr("No effects. Drag one from Effects & Presets."),
+            "No effects. Drag one from Effects & Presets.",
             Tokens::ui(12.0),
             t.text_faint,
         );

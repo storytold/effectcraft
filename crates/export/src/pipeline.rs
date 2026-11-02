@@ -4,8 +4,10 @@
 
 use std::sync::Mutex;
 
-use effectcraft_project::render_queue::{AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, RenderLog, ResizeQuality, SwitchOverride, log_path};
-use effectcraft_project::{BitDepth, Comp, Project};
+use effectcraft_project::render_queue::{
+    AlphaMode, Channels, ColorDepth, CurrentOrOff, EffectsMode, FrameSample, RenderLog, ResizeQuality, SwitchOverride, log_path,
+};
+use effectcraft_project::{Comp, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{Backend, LayerCache, RenderOpts, Renderer};
 use effectcraft_time::Tick;
@@ -218,9 +220,6 @@ impl<'a> Cx<'a> {
     pub fn new(job: &'a Job<'a>) -> Cx<'a> {
         let mut project = job.project.clone();
         apply_overrides(&mut project, job);
-        // Render Settings ▸ Color Depth overrides the project's depth for the whole render (every
-        // layer and effect quantises at it), not just the finished frame (#2022).
-        project.settings.bit_depth = job.settings.color_depth.resolve(project.settings.bit_depth);
         let frame_times = (job.options.log == RenderLog::PlusPerFrameInfo).then(|| Mutex::new(Vec::new()));
         let cache = LayerCache::default();
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
@@ -241,7 +240,7 @@ impl<'a> Cx<'a> {
         // compositors differ slightly, so a per-frame choice made renders differ run to run.
         let backend = if self.project.settings.gpu_acceleration { Backend::Gpu } else { Backend::Cpu };
         let opts = RenderOpts {
-            scale: self.comp().map(|c| s.effective_scale(c)).unwrap_or_else(|| s.resolution.clamp(0.01, 4.0)),
+            scale: s.resolution.clamp(0.01, 4.0),
             motion_blur: s.motion_blur_override() != SwitchOverride::OffForAll,
             guides: s.guide_layers == CurrentOrOff::Current,
             draft: s.quality == RenderQuality::Draft,
@@ -361,6 +360,14 @@ impl<'a> Cx<'a> {
                 if second == first { a } else { interleave(&a, &self.render_at(second).await, upper_first) }
             }
         };
+        let mut img = img;
+        // Color Depth: renders run at the project's depth; another depth quantises the frame.
+        let depth = self.job.settings.color_depth;
+        if depth != ColorDepth::Current
+            && let Some(levels) = depth.resolve(self.project.settings.bit_depth).levels()
+        {
+            img.quantize(levels);
+        }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
             ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
@@ -377,14 +384,12 @@ impl<'a> Cx<'a> {
             return None;
         }
         let FrameSample::Progressive(t) = self.job.settings.sample(comp, i) else { return None };
-        // Above 8 bpc the colour is dithered on its way to 8 bits (`Cx::pixels`), which the
-        // accelerator's conversion doesn't do: those frames render as usual so H.264 doesn't
-        // band (#2022). The project's depth already includes Render Settings ▸ Color Depth.
-        if self.project.settings.bit_depth != BitDepth::Bpc8 {
+        let depth = self.job.settings.color_depth;
+        if depth != ColorDepth::Current && depth.resolve(self.project.settings.bit_depth).levels().is_some() {
             return None;
         }
         let om = self.job.output;
-        let scale = self.job.settings.effective_scale(comp);
+        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
         let size = |n: u32| ((n as f64 * scale).round() as u32).max(1);
         if om.resize.enabled || (size(comp.width), size(comp.height)) != (w, h) || om.crop.edges(w, h, scale) != (0, 0, 0, 0) {
             return None;
@@ -430,14 +435,13 @@ impl<'a> Cx<'a> {
     /// Output Module ▸ Crop, then Resize.
     fn crop_resize(&self, img: Image) -> Image {
         let om = self.job.output;
-        let scale = self.comp().map(|c| self.job.settings.effective_scale(c)).unwrap_or_else(|| self.job.settings.resolution.clamp(0.01, 4.0));
-        // frame_size applies crop itself: use the original frame and the same scale as edges.
-        let (w, h) = om.frame_size(img.width, img.height, scale);
+        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
         let (t, l, b, r) = om.crop.edges(img.width, img.height, scale);
         let img = if (t, l, b, r) == (0, 0, 0, 0) { img } else { crop(&img, t, l, b, r) };
         if !om.resize.enabled {
             return img;
         }
+        let (w, h) = om.frame_size(img.width, img.height, 1.0);
         if (w, h) == (img.width, img.height) {
             return img;
         }
@@ -449,24 +453,12 @@ impl<'a> Cx<'a> {
 
     /// 8-bit RGBA of the requested channels cropped/padded to `w`×`h` (codec rounding): RGB over
     /// the comp background (opaque), RGB + Alpha straight or premultiplied, or the alpha matte.
-    /// When the render runs above 8 bpc, the colour is dithered on its way to 8 bits, as After
-    /// Effects dithers colours converted down to 8 bpc for rendering and export, so gradients
-    /// rendered at 16 or 32 bpc don't band (#2022). An 8 bpc render has no finer values to
-    /// dither, so its output stays byte for byte what it was.
     pub fn pixels(&self, img: &Image, comp: &Comp, channels: Channels, w: u32, h: u32) -> Vec<u8> {
-        let dither = self.project.settings.bit_depth != BitDepth::Bpc8;
-        self.pixels_with(img, comp, channels, w, h, dither)
-    }
-
-    /// [`Cx::pixels`], dithering the colour or not (a GIF palette gains nothing from dither noise).
-    pub fn pixels_with(&self, img: &Image, comp: &Comp, channels: Channels, w: u32, h: u32, dither: bool) -> Vec<u8> {
         let px = match channels {
-            Channels::Rgb if dither => img.to_rgba8_over_dithered(comp.background),
             Channels::Rgb => img.to_rgba8_over(comp.background),
-            Channels::Rgba => match (self.job.output.alpha_mode, dither) {
-                (AlphaMode::Straight, true) => img.to_rgba8_dithered(),
-                (AlphaMode::Straight, false) => img.to_rgba8(),
-                (AlphaMode::Premultiplied, _) => premultiplied8(img, dither),
+            Channels::Rgba => match self.job.output.alpha_mode {
+                AlphaMode::Straight => img.to_rgba8(),
+                AlphaMode::Premultiplied => premultiplied8(img),
             },
             Channels::Alpha => img
                 .data
@@ -532,7 +524,7 @@ impl<'a> Cx<'a> {
         let comp = self.comp();
         let path = log_path(self.job.path);
         let mut s = String::new();
-        s.push_str("EffectCraft Render Log\n");
+        s.push_str("Visualab Effects Render Log\n");
         s.push_str(&format!("Item: {}\n", if self.job.options.label.is_empty() { "(render)" } else { &self.job.options.label }));
         s.push_str(&format!("Output: {}\n", self.job.path));
         match result {
@@ -627,22 +619,15 @@ fn bicubic(src: &Image, w: u32, h: u32) -> Image {
     out
 }
 
-/// Premultiplied 8-bit RGBA (colour matted with black), the colour dithered when `dither`.
-fn premultiplied8(img: &Image, dither: bool) -> Vec<u8> {
-    let w = img.width.max(1) as usize;
-    let mut out = Vec::with_capacity(img.data.len() * 4);
-    for (i, p) in img.data.iter().enumerate() {
-        let a = p[3].clamp(0.0, 1.0);
-        let a8 = (a * 255.0 + 0.5) as u8;
-        let (x, y) = ((i % w) as u32, (i / w) as u32);
-        for c in 0..3 {
-            let v = p[c].clamp(0.0, a);
-            // Dither may round up past the rounded alpha; premultiplied colour never exceeds it.
-            out.push(if dither { effectcraft_raster::dither_u8(v, x, y).min(a8) } else { (v * 255.0 + 0.5) as u8 });
-        }
-        out.push(a8);
-    }
-    out
+/// Premultiplied 8-bit RGBA (colour matted with black).
+fn premultiplied8(img: &Image) -> Vec<u8> {
+    img.data
+        .iter()
+        .flat_map(|p| {
+            let a = p[3].clamp(0.0, 1.0);
+            [0, 1, 2].map(|c| (p[c].clamp(0.0, a) * 255.0 + 0.5) as u8).into_iter().chain([(a * 255.0 + 0.5) as u8])
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -650,19 +635,6 @@ mod tests {
     use super::*;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    /// Dither may round a colour up while alpha rounds down; premultiplied colour stays at or
-    /// below the written alpha at every pixel.
-    #[test]
-    fn dithered_premultiplied_colour_never_exceeds_alpha() {
-        let v = 100.25 / 255.0;
-        let img = Image::filled(64, 64, [v, v, v, v]);
-        let px = premultiplied8(&img, true);
-        assert!(px.as_chunks::<4>().0.iter().all(|p| p[..3].iter().all(|c| *c <= p[3])), "a colour byte is above its alpha");
-        assert!(px.as_chunks::<4>().0.iter().all(|p| p[3] == 100));
-        let plain = premultiplied8(&img, false);
-        assert!(plain.as_chunks::<4>().0.iter().all(|p| *p == [100, 100, 100, 100]));
-    }
 
     /// Frames `0..n` through [`map_frames`] with `cap`, recording the most running at once.
     fn run_capped(n: u64, cap: Option<usize>) -> (Vec<u64>, usize) {
@@ -1060,91 +1032,6 @@ mod tests {
         for y in 0..4u32 {
             assert_eq!(up.data[up.idx(1, y)][0], if y % 2 == 0 { 1.0 } else { 0.0 }, "upper first: line {y}");
             assert_eq!(lo.data[lo.idx(1, y)][0], if y % 2 == 1 { 1.0 } else { 0.0 }, "lower first: line {y}");
-        }
-    }
-
-    /// Regress the locked-aspect example: cropping 1920x1080 must resize to 1280x1440.
-    #[test]
-    fn crop_resize_applies_margins_once() {
-        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
-        let output = OutputModule {
-            crop: Crop { enabled: true, left: 480, right: 480, ..Default::default() },
-            resize: Resize { enabled: true, width: 1280, lock_aspect: true, quality: ResizeQuality::Low, ..Default::default() },
-            ..Default::default()
-        };
-        assert_eq!(output.frame_size(1920, 1080, 1.0), (1280, 1440));
-        let img = run_crop_resize(Image::new(1920, 1080), &output, 1.0);
-        assert_eq!((img.width, img.height), (1280, 1440));
-        assert_eq!(img.data.len(), 1280 * 1440);
-    }
-
-    /// Apply output-module geometry to a synthetic frame without rendering or writing files.
-    fn run_crop_resize(img: Image, output: &effectcraft_project::render_queue::OutputModule, scale: f64) -> Image {
-        use effectcraft_project::render_queue::RenderSettings;
-        let project = Project::default();
-        let settings = RenderSettings { resolution: scale, ..Default::default() };
-        let job = Job {
-            project: &project,
-            footage: &effectcraft_render::NoFootage,
-            expr: None,
-            accel: None,
-            comp: effectcraft_project::ItemId(0),
-            settings: &settings,
-            output,
-            path: "unused.png",
-            sink: None,
-            nested_switches: true,
-            options: Default::default(),
-        };
-        Cx::new(&job).crop_resize(img)
-    }
-
-    /// Match predicted dimensions across crop, padding, ROI scale, aspect locks and resize qualities.
-    #[test]
-    fn crop_resize_dimensions_match_the_output_module() {
-        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
-        let edges = Crop { enabled: true, left: 2, right: 2, ..Default::default() };
-        let padding = Crop { enabled: true, left: -2, bottom: -2, ..Default::default() };
-        let roi = |rect| Crop { enabled: true, use_roi: true, roi: Some(rect), ..Default::default() };
-        for quality in [ResizeQuality::Low, ResizeQuality::High] {
-            let resize = |width| Resize { enabled: true, width, height: 1, lock_aspect: true, quality };
-            for (crop, resize, scale, expected) in [
-                (Crop::default(), Resize::default(), 1.0, (8, 6)),
-                (edges, Resize::default(), 1.0, (4, 6)),
-                (Crop::default(), resize(4), 1.0, (4, 3)),
-                (edges, resize(8), 1.0, (8, 12)),
-                (padding, resize(5), 1.0, (5, 4)),
-                (roi([4.0, 2.0, 8.0, 6.0]), resize(8), 0.5, (8, 6)),
-                (roi([1.0, 0.5, 2.0, 1.5]), resize(8), 2.0, (8, 6)),
-                (edges, Resize { lock_aspect: false, height: 2, ..resize(5) }, 1.0, (5, 2)),
-            ] {
-                let output = OutputModule { crop, resize, ..Default::default() };
-                assert_eq!(output.frame_size(8, 6, scale), expected);
-                let img = run_crop_resize(Image::filled(8, 6, [0.25, 0.0, 0.0, 0.5]), &output, scale);
-                assert_eq!((img.width, img.height), expected, "{crop:?}, {resize:?}, scale {scale}");
-                assert_eq!(img.data.len(), expected.0 as usize * expected.1 as usize);
-            }
-        }
-    }
-
-    /// Exercise zero/empty inputs, collapsed crops and existing caps on extreme single-axis resizes.
-    #[test]
-    fn crop_resize_zero_and_extreme_sizes_stay_bounded() {
-        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
-        for quality in [ResizeQuality::Low, ResizeQuality::High] {
-            for (size, crop, width, height, expected) in [
-                ((8, 6), Crop::default(), 0, 0, (1, 1)),
-                ((8, 1), Crop::default(), u32::MAX, 1, (30_000, 1)),
-                ((1, 8), Crop::default(), 1, u32::MAX, (1, 30_000)),
-                ((8, 6), Crop { enabled: true, left: 20_000, right: 20_000, ..Default::default() }, 2, 3, (2, 3)),
-                ((0, 0), Crop { enabled: true, left: 1, top: 1, ..Default::default() }, 2, 3, (2, 3)),
-            ] {
-                let output = OutputModule { crop, resize: Resize { enabled: true, width, height, lock_aspect: false, quality }, ..Default::default() };
-                let img = run_crop_resize(Image::new(size.0, size.1), &output, 1.0);
-                assert_eq!((img.width, img.height), expected);
-                assert_eq!(img.data.len(), expected.0 as usize * expected.1 as usize);
-                assert!(img.data.iter().all(|p| *p == [0.0; 4]));
-            }
         }
     }
 

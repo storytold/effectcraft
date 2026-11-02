@@ -1,4 +1,4 @@
-# EffectCraft — egui 0.37 migration plan
+# Visualab Effects — egui 0.37 migration plan
 
 Current landing status, 2026-10-25: the working tree includes main `991904888a20b7da72b2a4880b21c7d912154736` and pins egui `6d518fc799681571963842f95b55a6b68431b15a`, winit `a517b3846ee8457d84ee4975110bfda6797c44dc` and shared UI `25da1314d443171b4adeaad2cd9454b273f35c6f`. The final IME adapter uses ordered native reset request identifiers and `ImeResetCompleted`; the earlier tombstone-only description below is historical.
 
@@ -54,9 +54,9 @@ independent review; no new test, native-IME or final dependency-graph acceptance
 Every future push or new pull request still needs a fresh, explicit human approval of the exact
 commit range and its validation; this document is not publication evidence.
 
-Scope: `storytold/effectcraft` only (this checkout). Shared work in `storytold/craft-libs`
+Scope: `wasigonzi/visualab-effects` only (this checkout). Shared work in `storytold/craft-libs`
 (PR 199 and the CL-2 capture helper), the suite egui fork and the suite winit fork are dependencies
-with their own plans; this document records what EffectCraft needs from them, not what they should
+with their own plans; this document records what Visualab Effects needs from them, not what they should
 do. Sibling apps, their plans and their dependency bumps are out of scope.
 
 This plan deliberately separates:
@@ -72,9 +72,9 @@ This plan deliberately separates:
 
 | Item | Value |
 | --- | --- |
-| EffectCraft implementation checkout | `/home/codex/work/CraftApps/egui037-migration-20261022/effectcraft-implementation` |
-| Current EffectCraft worktree | HEAD `049070d65c66a73f322b496b22521816e0018f14`; dirty migration worktree. The lock and manifests still use the local integration patch, not final immutable pins. |
-| EffectCraft historical planning baseline | `9581b53c3f8945683252af0eb5fac79e0e43aed4` (`Release 0.16.0`, 2026-10-22), retained for baseline comparisons only |
+| Visualab Effects implementation checkout | `/home/codex/work/CraftApps/egui037-migration-20261022/effectcraft-implementation` |
+| Current Visualab Effects worktree | HEAD `049070d65c66a73f322b496b22521816e0018f14`; dirty migration worktree. The lock and manifests still use the local integration patch, not final immutable pins. |
+| Visualab Effects historical planning baseline | `9581b53c3f8945683252af0eb5fac79e0e43aed4` (`Release 0.16.0`, 2026-10-22), retained for baseline comparisons only |
 | Branch | `codex/egui-037-plan-20261022` |
 | Workspace | single root workspace `Cargo.toml` (`resolver = "3"`, members `crates/*`, `apps/*`, `xtask`) |
 | Lockfile | `Cargo.lock`, lock format 4 |
@@ -165,14 +165,14 @@ Platform cfgs that the migration must respect:
   `cargo xtask bench` (`xtask/src/bench.rs`), and the headless `ui_egui::bench::Driver`
   (`crates/ui-egui/src/bench.rs:13-108`).
 
-## 2. What actually changes in egui 0.37 that affects EffectCraft
+## 2. What actually changes in egui 0.37 that affects Visualab Effects
 
 This section is limited to changes visible in the pinned sources. It corrects two assumptions that
 must not enter the plan:
 
 - **`App::logic` / `App::ui` and `Context::run_ui` are not new in 0.37.** They already exist in
   0.36.2 (`egui-0.36.2/crates/eframe/src/epi.rs:167,182`; `egui-0.36.2/crates/egui/src/context.rs:794`),
-  and EffectCraft already uses them (`crates/ui-egui/src/lib.rs:1852-1935`, `apps/effectcraft/src/main.rs:426-456`,
+  and Visualab Effects already uses them (`crates/ui-egui/src/lib.rs:1852-1935`, `apps/effectcraft/src/main.rs:426-456`,
   `apps/effectcraft-web/src/app.rs:88-122`). The migration is **not** a wholesale update-to-ui rewrite.
 - **`Context::run_logic` is not a substitute for a pass.** It does not interpret time or events;
   `run_logic` only refreshes viewport state (`egui-0.37.0/crates/egui/src/context.rs:1190-1218`).
@@ -248,7 +248,7 @@ There is **no** `PointerSource` in the target fork: `Event::PointerButton` keeps
 These are the app-specific risks, each with a source anchor and a planned assertion.
 
 1. **`default_fonts` is no longer a default feature of `egui`/`epaint`.** eframe still enables it by
-   default, but EffectCraft disables eframe defaults and re-enables only
+   default, but Visualab Effects disables eframe defaults and re-enables only
    `default_fonts`, `wgpu`, `accesskit`, `links`, `wayland`, `x11`
    (`crates/ui-egui/Cargo.toml:25`, `apps/effectcraft/Cargo.toml:18`). The app relies on
    `FontDefinitions::default()` at `theme.rs:334`; the feature must stay explicitly enabled on the
@@ -258,7 +258,7 @@ These are the app-specific risks, each with a source anchor and a planned assert
    definitions include `NotoEmoji-Regular` and `emoji-icon-font` unconditionally
    (`egui-0.36.2/crates/epaint/src/text/fonts.rs:490-580`). In 0.37 they are behind
    `monochrome_emoji_fonts`, and the default only adds the small `egui-icons` font
-   (`egui-0.37.0/crates/epaint/src/text/font_definitions.rs:105-180`). EffectCraft's own chrome is
+   (`egui-0.37.0/crates/epaint/src/text/font_definitions.rs:105-180`). Visualab Effects's own chrome is
    affected. A read-only cmap audit of the fonts actually bundled by this app and by egui found:
    - `✔` U+2714 (menu check gutter, `menus.rs:2176`) is in **only** NotoEmoji and emoji-icon-font;
    - `▣` U+25A3 (Media Browser folder, `media_panels.rs:198`; Essential Graphics media row,
@@ -271,7 +271,7 @@ These are the app-specific risks, each with a source anchor and a planned assert
 3. **Clipboard support became an eframe feature.** 0.36.2's eframe always enabled
    `egui-winit/clipboard` (`egui-0.36.2/crates/eframe/Cargo.toml:152`). 0.37 gates it behind
    `clipboard` (`egui-0.37.0/crates/eframe/Cargo.toml:142-144`), which is in eframe's default set
-   but not enabled by EffectCraft's `default-features = false` manifests. Without it, cut/copy/paste
+   but not enabled by Visualab Effects's `default-features = false` manifests. Without it, cut/copy/paste
    to the OS clipboard silently degrade to an in-app simulated clipboard
    (`egui-winit-0.37.0/Cargo.toml:44-46`), breaking Edit ▸ Copy/Paste, text-field paste and
    `menus.rs:1867-1906` which maps clipboard events back to command keys.
@@ -298,18 +298,18 @@ These are the app-specific risks, each with a source anchor and a planned assert
    `tests/ui_presets_folder.rs:40` (`ja`). Fontconfig on this planning host lists no faces at all, so
    those tests would panic rather than draw tofu until a CJK face is installed or the opt-out is used.
 8. **`Ui::id` → `Ui::scope_id`, `UiBuilder::id` → `scope_id`, `Panel` constructors take
-   `impl AsIdSalt`.** EffectCraft does not use `SidePanel`/`TopBottomPanel`, and uses
+   `impl AsIdSalt`.** Visualab Effects does not use `SidePanel`/`TopBottomPanel`, and uses
    `CentralPanel::default()` only (`dock_ui.rs:475`, `prefs_live.rs:207`), so no panel-order
    rewrite is needed. The root `Ui` is already the app surface (`lib.rs:1905-1935`,
    `lib.rs:1614-1723`). Never call `Context::root_ui` from a panel or a test closure: it panics
    while the root Ui is borrowed (`context.rs:1005-1055`).
 9. **Style defaults changed** (roomier buttons, larger corner radii; `#8617`, `#8445`).
-   EffectCraft pins `item_spacing`, `button_padding`, `interact_size.y`, `menu_margin`, scroll style
+   Visualab Effects pins `item_spacing`, `button_padding`, `interact_size.y`, `menu_margin`, scroll style
    and all widget corner radii from tokens (`theme.rs:510-530`, `theme.rs:474-495`), so the visible
    impact should be small, but atom-based `Button`/`ComboBox` layout can still move geometry. This
    is a geometry/pixel test target, not an assumption.
 10. **Menus/popups and text editing changed** (`#7802`, `#7624`, `#8572`, `#8548`, `#8763`,
-    `#8628`). EffectCraft builds its own menu bar and keyboard navigation
+    `#8628`). Visualab Effects builds its own menu bar and keyboard navigation
     (`menus.rs:2025-2050`, `menu_keys.rs`), with `MenuConfig` style overrides. Regression tests must
     cover hover-switch, arrows, submenu opening, outside-click close, and a button acting on a
     focused `TextEdit`'s selection (the `#8763` case). Container tooltips now also show when their
@@ -344,9 +344,9 @@ These are the app-specific risks, each with a source anchor and a planned assert
 
 ## 3. Fork, winit and craft-libs integration decisions
 
-### 3.1 What EffectCraft actually needs from the suite fork
+### 3.1 What Visualab Effects actually needs from the suite fork
 
-EffectCraft has no `vendor/` directory and no local egui patch. Its only `[patch.crates-io]` entry is
+Visualab Effects has no `vendor/` directory and no local egui patch. Its only `[patch.crates-io]` entry is
 `hayro-syntax`, inherited from the craft-libs PDF stack (`Cargo.toml:213-214`); it is unrelated to
 egui and must stay.
 
@@ -359,7 +359,7 @@ CL-2F are approved as one immutable unit at P1; P4 adds extended native/language
 a second compatibility graph (§10). There is no stock or intermediate-fork production stage;
 stock 0.37.0 is a measurement control only.
 
-| Fork patch | EffectCraft use | Decision |
+| Fork patch | Visualab Effects use | Decision |
 | --- | --- | --- |
 | E1 `viewport_hooks` | not used (craft-tablet only) | keep in fork; no app change |
 | E2+E3 surface fit / wgpu error scopes | protects windows whose surface exceeds the adapter limit and reports configure/renderer failures; relevant to the app's "never crash" rule and its device-loss handling | **keep, benefit**; verify with a required-adapter `ui_gpu.rs` run and a device-loss test |
@@ -368,7 +368,7 @@ stock 0.37.0 is a measurement control only.
 | E6 IME focus | stock `TextEdit`s | keep |
 | E7/E19 letter keys on non-Latin layouts | shortcuts (`menus::parse_shortcut`, `handle_shortcuts`); requires winit W25 | **keep**; manual platform test |
 | E8 `TextEdit` glyph clipping | stock fields (Thai/Vietnamese/Arabic marks) | keep |
-| E9 `Style::right_to_left` | app never sets it; its dock/layout is custom LTR | keep in fork; **do not enable** in EffectCraft (would mirror stock widgets inside an unmirrored custom layout) |
+| E9 `Style::right_to_left` | app never sets it; its dock/layout is custom LTR | keep in fork; **do not enable** in Visualab Effects (would mirror stock widgets inside an unmirrored custom layout) |
 | E10 web named keys / Latin codes | web keyboard behaviour | keep; no app change |
 | E11 vello_cpu multithreading | not used | keep in fork |
 | E14 `FontTweak::fallback_align` | the app installs system fallback faces (`theme.rs:388-430`) | keep; **optional follow-up** to set it for CJK/Indic fallbacks, with screenshot proof |
@@ -382,11 +382,11 @@ stock 0.37.0 is a measurement control only.
 | **P7c** (new prerequisite) | selected upstream fixes `#8763` (a button/menu command acting on a focused `TextEdit` selection) and `#8748` (hidden parent not updating deferred child viewports) | **in P8**; tested in §5.6/§5.8. Local workarounds are not the final unit. |
 
 Removal conditions are the fork's own (`PATCHES.md`): each patch goes when an egui/winit release in
-use contains it. EffectCraft must not add a second copy of any of these fixes locally.
+use contains it. Visualab Effects must not add a second copy of any of these fixes locally.
 
 ### 3.2 Winit patches that matter here
 
-| Patch | Why EffectCraft needs it | Gate |
+| Patch | Why Visualab Effects needs it | Gate |
 | --- | --- | --- |
 | W1 mixed-DPI rect | window placement and monitor hit tests (`apps/effectcraft/src/window.rs`) | Windows mixed-DPI manual test |
 | W2/W5/W20/W21 X11 IME | the app's editable fields and expression editor | X11 IME under Xvfb+WM (qualified parts only; §8.7) |
@@ -417,25 +417,25 @@ focus/target/generation changes.
   relative to current `main`, missing `craft-platform` and reverting security/settings/docking/
   printer fixes) or audit merge `ec8840a` (stale lock, egui 0.36.2) as trees. The historical API
   port `8614e4a` and README `1764bca` on old `main` `4919088` are superseded by the merged base.
-- EffectCraft pins `craft-ui` to the **reviewed CL-1 merge/rebase SHA on craft-libs `main` after the
+- Visualab Effects pins `craft-ui` to the **reviewed CL-1 merge/rebase SHA on craft-libs `main` after the
   port**, not to the PR head. That revision must keep its egui dependency on registry `0.37` so
-  EffectCraft's `[patch.crates-io]` (not a git URL patch) can redirect it.
+  Visualab Effects's `[patch.crates-io]` (not a git URL patch) can redirect it.
 - **CL-2 capture completion helper.** The shared plan's selected design is a bounded, cancelable
   per-request completion slot with a weak callback reference, aggregate image-byte and request
-  limits, and an explicit viewport wake-up after the slot lock is released. EffectCraft is one of
+  limits, and an explicit viewport wake-up after the slot lock is released. Visualab Effects is one of
   the eleven existing craft-ui consumers, so it pins **CL-1 + CL-2F in the same atomic dependency
   stage** as P1; only the DesignCraft/GridCraft pilots use the reviewed provisional CL-2 revision,
   and their adapters are reviewed before CL-2F freezes the API. Any consumer with an incompatible
-  existing craft-ui bump must reconcile it in that same stage. EffectCraft does not pin the
+  existing craft-ui bump must reconcile it in that same stage. Visualab Effects does not pin the
   provisional revision. **No app-local result channel** and no generic UI compatibility layer.
-  EffectCraft keeps its own request ids, paths, crop, deadlines and reply JSON.
+  Visualab Effects keeps its own request ids, paths, crop, deadlines and reply JSON.
 - `craft-ui`'s production API used here (`docking::{Action, Zone, Placement, resolve_drop, zone_rect, drop_zone}`,
   `layout::{split_rect, SplitAxis, SplitSize, ResizeHandle, ResizeHandleStyle}`) is unchanged by
-  the port; the additive `printing::tick` is not used by EffectCraft.
+  the port; the additive `printing::tick` is not used by Visualab Effects.
 - PR 198 / the fork language work is adopted only where §3.1 says so. The app keeps its own
   catalogs (`i18n.rs`, `i18n/ui.rs`, `i18n/effects.rs`) and its own text engine; it does not adopt
   craft-text line breaking or a shared translation layer.
-- Blocking: CL-1 and CL-2F must land before the EffectCraft dependency-pin PR can be reviewed
+- Blocking: CL-1 and CL-2F must land before the Visualab Effects dependency-pin PR can be reviewed
   honestly. Until then, implementation may use a local pinned SHA only for development, never in a
   publication branch, and never a machine-local path patch.
 
@@ -482,7 +482,7 @@ Consequences, all pre-existing in 0.36.2:
   ticks, engine-event draining, the unsaved-close guard and the window-title update **do not run**
   on ordinary logic-only ticks.
 - A discarded pass re-runs the `run_ui` closure, so `logic` runs again for the same frame.
-  `Grid` requests a discard on first show (`egui-0.37.0/crates/egui/src/grid.rs:468`); EffectCraft
+  `Grid` requests a discard on first show (`egui-0.37.0/crates/egui/src/grid.rs:468`); Visualab Effects
   has 18 `Grid::new` sites across dialogs/settings/forms.
 - The control channel's `AfterInput` replies are completed in `logic` as soon as `synthetic` is
   empty, which is before the pass applies the last synthetic event (`lib.rs:1893-1901`,
@@ -681,7 +681,7 @@ Notes:
     adopted. `egui_kittest` depends on `egui` with `default-features = false`; only kittest's own
     `[dev-dependencies]` enable `default_fonts`/`monochrome_emoji_fonts`, and a dependency's
     dev-dependencies do **not** propagate. The workspace `egui` features above are therefore what
-    EffectCraft's library and integration-test builds receive; do not rely on kittest to enable
+    Visualab Effects's library and integration-test builds receive; do not rely on kittest to enable
     fonts. If a test root resolves `egui` independently, it must enable the font features itself
     or install controlled fonts, and the actual graph is checked per production/test root.
   - `monochrome_emoji_fonts` is enabled at the workspace `egui` dependency so `✔`/`▣` survive
@@ -889,7 +889,7 @@ highest-value custom controls), not a claim of screen-reader parity.
   - **No new document-sized allocation.** Building the new bounded payload must not clone the full
     document; the baseline `TextEdit` already clones whole buffers for change detection/undo, and
     that pre-existing cost is measured separately.
-  - **EffectCraft custom adapter (viewer_text).** The producer at `viewer_text.rs:568` must supply
+  - **Visualab Effects custom adapter (viewer_text).** The producer at `viewer_text.rs:568` must supply
     the logical model text from the edited layer's `TextDoc` (committed text), not display-bidi
     text, with preedit excluded (`viewer-text-preedit` stays a display-only temp value), plus the
     editor's owner generation unconditionally. Convert `TextEdit.anchor/caret` (character
@@ -902,7 +902,7 @@ highest-value custom controls), not a claim of screen-reader parity.
     tested there. The payload is scoped to the viewport that owns the focused editor (floating
     panel windows and the main window cannot share state).
   - **Atomic compatibility.** `IMEOutput` loses `Copy` when the payload is owned. The P8 fork SHA,
-    all egui-family crates, the `craft-ui` revision and EffectCraft's single `IMEOutput` literal
+    all egui-family crates, the `craft-ui` revision and Visualab Effects's single `IMEOutput` literal
     (`viewer_text.rs:568`; there are no destructures in this repo) must change in one dependency
     unit. Do not land a mixed stock/fork lock, and do not claim a stock-0.37 app build after this
     stage: the literal would not compile against stock `IMEOutput` (§11.13).
@@ -1060,7 +1060,7 @@ struct PendingShot {
 - Device loss must be handled from `tick` (see §4.2); the `ui()` early return currently means a
   device lost while hidden is not acted on (`lib.rs:1905-1910`). Add a logic-only test that a
   reported failure closes the window and keeps the auto-save.
-- 0.37 `Frame::set_wgpu_surface_config` is fixed (`#8442`); EffectCraft does not use it. Do not add it
+- 0.37 `Frame::set_wgpu_surface_config` is fixed (`#8442`); Visualab Effects does not use it. Do not add it
   as part of this migration.
 
 ### 5.9 Language and screen readers (fork-only stage)
@@ -1095,9 +1095,9 @@ effectcraft / effectcraft-web / effectcraft-cli
   -> winit (direct, same git rev)
 ```
 
-- Every egui-family crate EffectCraft resolves must come from the same git revision. `cargo tree -d`
+- Every egui-family crate Visualab Effects resolves must come from the same git revision. `cargo tree -d`
   must show no second egui family, and `cargo tree -i winit@0.30.13` exactly one source.
-- Publication: EffectCraft is an application, so a git egui/winit dependency is acceptable in its
+- Publication: Visualab Effects is an application, so a git egui/winit dependency is acceptable in its
   lock, but no branch names, no `path` patches and no machine-local checkout may appear in a
   publication branch. The `aiongg` candidate SHAs are comparison inputs and must not appear in a
   publication lock. `craft-libs` consumers keep their own patches; the app's `[patch.crates-io]`
@@ -1446,7 +1446,7 @@ git grep -n 'with_accessibility_check(false)' -- crates apps # must be empty
    `3832c47ef68a0e6214f2c1e85f3526b6adcb686e`; historical `8614e4a`/`1764bca` on old `main`
    `4919088` and the stale `b68de8c`/`ec8840a` trees must not be merged. The final immutable
    craft-ui revision must keep registry `egui 0.37` and include CL-1 plus CL-2F.
-3. **CL-2F.** EffectCraft requires the approved craft-ui slot helper at the CL-2F freeze in the
+3. **CL-2F.** Visualab Effects requires the approved craft-ui slot helper at the CL-2F freeze in the
    same atomic stage as P1; only the Design/Grid pilots use the provisional CL-2 revision. If
    CL-2F slips, P1 cannot claim screenshot completion done; no app-local channel or unbounded
    queue is an acceptable substitute.
@@ -1525,7 +1525,7 @@ git grep -n 'with_accessibility_check(false)' -- crates apps # must be empty
 
 The user clarified that reviewed plans remain local and implementation proceeds before publication. The earlier requirement to publish/land this plan first is superseded; pushes and PR publication still require explicit approval.
 
-Canonical `storytold/effectcraft` `main` now resolves to `f6ef1a790625657259f449f3f4f0773d7df449bb`. The owned checkout was fast-forwarded to this revision. Earlier baseline SHAs and line anchors above are retained as historical review evidence; use this new revision and its exact lockfile for current-main integration and paired measurements. The original refs remain reachable.
+Canonical `wasigonzi/visualab-effects` `main` now resolves to `f6ef1a790625657259f449f3f4f0773d7df449bb`. The owned checkout was fast-forwarded to this revision. Earlier baseline SHAs and line anchors above are retained as historical review evidence; use this new revision and its exact lockfile for current-main integration and paired measurements. The original refs remain reachable.
 
 Preserve queue4096/click1–512/drag<=2048 validation and refusal-without-mutation test; these limits differ from FilmCraft. Preserve chrono feature split.
 

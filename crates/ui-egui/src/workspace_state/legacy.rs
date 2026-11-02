@@ -1,4 +1,4 @@
-//! Workspace files of earlier versions: EffectCraft's own dock tree (craft-libs 5c874d51 and
+//! Workspace files of earlier versions: Visualab Effects's own dock tree (craft-libs 5c874d51 and
 //! before), read into private copies of its types and turned into craft-ui workspaces.
 //!
 //! - Version 1 (`{version: 1, workspace, dock, floating, …, panel_windows}`) keeps the current

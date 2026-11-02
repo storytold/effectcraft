@@ -1,7 +1,7 @@
 # Plug-ins and extensions
 
-EffectCraft's core aims at After Effects parity. What After Effects users get from third parties
-(effect plug-ins, scripts, ScriptUI panels) is an extension in EffectCraft too, and EffectCraft
+Visualab Effects's core aims at After Effects parity. What After Effects users get from third parties
+(effect plug-ins, scripts, ScriptUI panels) is an extension in Visualab Effects too, and Visualab Effects
 offers the same kinds of extension points as After Effects so that anyone can write their own.
 
 ## Extension points compared with After Effects
@@ -9,21 +9,21 @@ offers the same kinds of extension points as After Effects so that anyone can wr
 From After Effects' public documentation (the user guide's scripting pages and the Scripting
 Guide):
 
-| After Effects | EffectCraft | |
+| After Effects | Visualab Effects | |
 |---|---|---|
 | Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (plug-in API v1) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
 | Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples; a subfolder (one level) is a submenu named after it | Same |
 | File ▸ Scripts ▸ Run Script File… (`.jsx`, `.jsxbin`) | `.jsx` / `.js` | Gap: `.jsxbin` (an undocumented binary encoding) |
 | File ▸ Scripts ▸ Recent Script Files: the 10 most recently run scripts; Cmd+Option+Shift+D (Ctrl+Alt+Shift+D on Windows) reruns one | File ▸ Scripts ▸ Recent Script Files lists the 10 scripts run last (script files and File ▸ Scripts entries, newest first, kept in the settings); Cmd+Alt+Shift+D runs the most recent one again (`file.runScript {"recent": 0}`, a key that can be changed in Edit ▸ Keyboard Shortcuts) | Same |
 | ExtendScript preprocessor directives (`#include`, `#target`, `#targetengine`) | `#include` / `//@include` / `#includepath` inline files relative to the script (once each, depth-limited, file gate applies); `#target`, `#targetengine`, `#strict` are ignored | Same |
-| `Scripts/Startup` and `Scripts/Shutdown`: run in alphabetical order when the app starts and quits | `Scripts/Startup/` and `Scripts/Shutdown/` in the settings folder, in alphabetical order (case ignored): the Startup scripts run at launch before a project opens, and the Shutdown scripts run as the desktop app quits, after the project is closed. A Startup script that fails is reported in a toast and in the log, a Shutdown script that fails is reported in the log, and the next script still runs | Partial: each script runs in its own global scope, so variables and functions a Startup script defines are not available to later scripts; a Startup script's modal dialog stays open while the next scripts run and the app starts; a Shutdown script's modal dialogs close as if canceled; the web app runs no Shutdown scripts |
+| `Scripts/Startup` and `Scripts/Shutdown`: run in alphabetical order when the app starts and quits | Not run | Gap |
 | `Scripts/ScriptUI Panels`: listed at the bottom of the Window menu, dockable like the app's own panels, `this` is the panel | `Scripts/ScriptUI Panels/` in the settings folder (File ▸ Scripts ▸ Install ScriptUI Panel… copies one there), listed at the bottom of the Window menu (a subfolder, one level, is a submenu named after it), docked like any panel, `this` is the panel; the panels open when the app quits open again at the next launch | Same. Where a panel was docked isn't kept: workspace layouts aren't saved between launches |
-| Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Edit ▸ Keyboard Shortcuts lists the scripts of File ▸ Scripts under File ▸ Scripts (`file.runScript {"name": "<file name>"}`); a key given to one is saved with the preset, File ▸ Scripts shows it, and pressing it runs the script as its menu entry does | Same. After Effects binds a key to a script's place in the alphabetical list (`ExecuteScriptMenuItem01`…), and EffectCraft binds it to the script's file name. The Window menu entries of ScriptUI panels aren't offered |
+| Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Shortcuts bind to commands and menu entries; the File ▸ Scripts and Window menu entries of scripts aren't offered | Gap |
 | Running a script from the command line (`afterfx -r script.jsx`) | `effectcraft-cli script`, the control channel's and MCP's `script.run` | Same purpose, other entry points |
 | `app.settings` (kept in the preferences between sessions) | Kept in `script_settings.json` in the settings folder (`script.settings.get` / `script.settings.save`) | Same |
 | Allow Scripts to Write Files and Access Network | Settings ▸ Scripting & Expressions | Same |
 
-The settings folder is `~/Library/Application Support/EffectCraft` on macOS, `%APPDATA%\EffectCraft`
+The settings folder is `~/Library/Application Support/Visualab Effects` on macOS, `%APPDATA%\Visualab Effects`
 on Windows and `$XDG_CONFIG_HOME/effectcraft` (or `~/.config/effectcraft`) on Linux
 ([preferences.md](preferences.md)); the web app keeps it in browser storage.
 
@@ -39,10 +39,6 @@ journaled and the same as the UI's action. The `effectcraft-script` crate's docs
   file.jsx`, or `script.run {code, name}` over the control channel and MCP.
 * Install one: File ▸ Scripts ▸ Install Script File… (or copy it into `Scripts/` in the settings
   folder). It is listed in File ▸ Scripts at once (After Effects asks for a restart).
-* Run one at every launch or quit: copy it into `Scripts/Startup/` or `Scripts/Shutdown/` in the
-  settings folder. These scripts are not listed in File ▸ Scripts. `file.runStartupScripts` and
-  `file.runShutdownScripts` run them and return `{ran, waiting, failed}`; the desktop app calls them at
-  launch and quit, and the web app calls `file.runStartupScripts` at launch.
 * `file.scripts.list` lists installed and bundled scripts and panels; `file.runScript {name}` runs
   one; `file.uninstallScript {name}` removes an installed one.
 * A subfolder of `Scripts/` is a submenu of File ▸ Scripts named after the folder, and its scripts
@@ -57,7 +53,7 @@ A ScriptUI panel is a script that builds its user interface into the panel it is
 Put it in `Scripts/ScriptUI Panels/` in the settings folder (or use File ▸ Scripts ▸ Install
 ScriptUI Panel…) and it is listed at the bottom of the Window menu under its file name; choosing it
 runs the script and docks its panel as a tab, which you can move, float, maximize and close like any
-other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when EffectCraft
+other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when Visualab Effects
 quits open again at the next launch (`window.restoreScriptPanels`, which the desktop and web apps
 run at start-up; the list is `scriptui_panels.json` in the settings folder).
 
@@ -113,7 +109,7 @@ examples.
 
 ## Bundled extensions
 
-Optional tools that ship with EffectCraft but are not part of its core: they are scripts on the
+Optional tools that ship with Visualab Effects but are not part of its core: they are scripts on the
 public scripting API, like the third-party scripts After Effects users install, and are listed
 with the bundled samples (`file.scripts.list` reports them as `extension`). A script of the same
 name in your Scripts folders takes their place.
@@ -152,7 +148,7 @@ example of a keyframe tool.
 
 ## Effect plug-ins
 
-EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 1**).
+Visualab Effects loads third-party effects through a small, versioned plug-in API (**API version 1**).
 A plug-in effect behaves exactly like a built-in one: it is listed in Effects & Presets (and the
 Effect menu) under its category, applied by id (`effect.apply {"effect": "org.example.posterize"}`)
 or display name, its parameters are ordinary properties (keyframes, expressions, Effect Controls,
@@ -163,7 +159,7 @@ There are two ways to write one:
 | | WebAssembly plug-in | Rust plug-in |
 |---|---|---|
 | What | a `.wasm` (or `.wat`) module | a type implementing `effectcraft_effects::plugin::EffectPlugin` |
-| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
+| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links Visualab Effects's crates |
 | Sandbox | yes: no imports (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
 | Platforms | desktop and CLI (the wasmi interpreter, crate feature `effectcraft-plugin/wasm`); not the web build | everywhere |
 
@@ -194,7 +190,7 @@ Every plug-in describes itself with a JSON manifest:
   "name": "Posterize Bands",
   "category": "Stylize",
   "version": "1.0.0",
-  "author": "EffectCraft contributors",
+  "author": "Visualab Effects contributors",
   "description": "Quantizes luminance into tinted bands.",
   "params": [
     {"id": "levels", "name": "Levels", "type": "slider", "default": 4, "min": 2, "max": 64, "sliderMax": 16, "decimals": 0},
@@ -241,7 +237,7 @@ plain Rust (no dependencies):
 ```sh
 cd examples/plugins/posterize-bands
 cargo build --release --target wasm32-unknown-unknown
-# then, in EffectCraft: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
+# then, in Visualab Effects: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
 # or headless:
 effectcraft-cli exec effect.plugins.load '{"path": "target/wasm32-unknown-unknown/release/posterize_bands.wasm"}'
 ```

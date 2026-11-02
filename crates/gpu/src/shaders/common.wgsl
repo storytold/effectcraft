@@ -1,4 +1,4 @@
-// EffectCraft GPU compositor: shared bindings and helpers.
+// Visualab Effects GPU compositor: shared bindings and helpers.
 //
 // Every kernel uses the same bind group: a uniform block of parameters, two input textures
 // (premultiplied RGBA f32, read with textureLoad), one output storage texture and a read-only

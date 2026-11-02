@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="EffectCraft" Manufacturer="Learning Machines LLC" Version="$(var.Version)" UpgradeCode="AACA8593-C6ED-40A8-BA6C-CB325D8529F9" Scope="perUserOrMachine" Compressed="yes" Language="1033">
-    <SummaryInformation Description="EffectCraft motion graphics and visual effects" Manufacturer="Learning Machines LLC" />
+  <Package Name="Visualab Effects" Manufacturer="Visualab Studios" Version="$(var.Version)" UpgradeCode="AACA8593-C6ED-40A8-BA6C-CB325D8529F9" Scope="perUserOrMachine" Compressed="yes" Language="1033">
+    <SummaryInformation Description="Visualab Effects motion graphics and visual effects" Manufacturer="Visualab Studios" />
     <?include $(sys.SOURCEFILEDIR)install-policy.wxi?>
     <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
          (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of EffectCraft is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Visualab Effects is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <!-- The setup wizard (installer-ui.wxs): pick the folder on a fresh install. -->
     <UIRef Id="EffectcraftUI" />
 
     <Icon Id="EffectcraftIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="EffectcraftIcon.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://getartcraft.com/apps/effectcraft" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://getartcraft.com/apps/effectcraft" />
-    <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.visualabstudios.com/apps/effectcraft" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://www.visualabstudios.com/apps/effectcraft" />
+    <Property Id="ARPHELPLINK" Value="https://www.visualabstudios.com" />
 
     <!-- An upgrade, repair or silent reinstall goes where the installed copy already is: the App Paths
          "Path" value written below, or for releases before this installer change (no Path value; they
@@ -36,18 +36,18 @@
     <SetProperty Id="DESKTOPSHORTCUT" Value="[PREVIOUSDESKTOPSHORTCUT]" After="CraftLoadOption1U" Sequence="both" Condition="WIX_UPGRADE_DETECTED" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="CraftSuiteFolder" Name="ArtCraft">
-        <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
+      <Directory Id="CraftSuiteFolder" Name="Visualab">
+        <Directory Id="INSTALLFOLDER" Name="Visualab Effects" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
     <StandardDirectory Id="DesktopFolder" />
 
-    <Feature Id="Main" Title="EffectCraft" Level="1">
+    <Feature Id="Main" Title="Visualab Effects" Level="1">
       <ComponentGroupRef Id="EffectcraftFiles" />
     </Feature>
-  <Property Id="CRAFT_OPTION_1_M" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_MSearch" Root="HKLM" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
-    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1M" Value="[CRAFT_OPTION_1_M]" After="LaunchConditions" Sequence="both" Condition="ALLUSERS = 1" /><Property Id="CRAFT_OPTION_1_U" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_USearch" Root="HKCU" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
+  <Property Id="CRAFT_OPTION_1_M" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_MSearch" Root="HKLM" Type="raw" Key="Software\Visualab Effects" Name="DesktopShortcut" />
+    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1M" Value="[CRAFT_OPTION_1_M]" After="LaunchConditions" Sequence="both" Condition="ALLUSERS = 1" /><Property Id="CRAFT_OPTION_1_U" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_USearch" Root="HKCU" Type="raw" Key="Software\Visualab Effects" Name="DesktopShortcut" />
     </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1U" Value="[CRAFT_OPTION_1_U]" After="CraftLoadOption1M" Sequence="both" Condition="ALLUSERS &lt;&gt; 1" /></Package>
 
   <Fragment>
@@ -57,14 +57,14 @@
       </Component>
       <Component Id="EffectcraftApp" Guid="BA719860-95FE-4154-B265-47006B8E9083">
         <File Id="EffectcraftExe" Source="$(var.BinDir)\effectcraft.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EffectCraft" Description="EffectCraft motion graphics and visual effects" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="EffectcraftIcon.ico" IconIndex="0" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Visualab Effects" Description="Visualab Effects motion graphics and visual effects" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="EffectcraftIcon.ico" IconIndex="0" />
         </File>
 
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Value="[#EffectcraftExe]" Type="string" />
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
         <!-- The desktop shortcut choice, for the next upgrade (empty: none). -->
-        <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="DesktopShortcut" Value="[DESKTOPSHORTCUT]" Type="string" />
-      <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Visualab Effects" Name="DesktopShortcut" Value="[DESKTOPSHORTCUT]" Type="string" />
+      <RegistryValue Root="HKMU" Key="Software\Visualab Effects" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
 
       <Component Id="EffectcraftCli">
@@ -73,8 +73,8 @@
 
       <!-- A component under the user's profile folders needs an HKCU key path (ICE38, ICE43). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
-        <Shortcut Id="DesktopShortcut" Name="EffectCraft" Description="EffectCraft motion graphics and visual effects" Target="[#EffectcraftExe]" WorkingDirectory="INSTALLFOLDER" Icon="EffectcraftIcon.ico" IconIndex="0" />
-        <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
+        <Shortcut Id="DesktopShortcut" Name="Visualab Effects" Description="Visualab Effects motion graphics and visual effects" Target="[#EffectcraftExe]" WorkingDirectory="INSTALLFOLDER" Icon="EffectcraftIcon.ico" IconIndex="0" />
+        <RegistryValue Root="HKMU" Key="Software\Visualab Effects" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

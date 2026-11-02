@@ -1,4 +1,4 @@
-# EffectCraft test fixture: a unit cube with texture coordinates and normals (original work).
+# Visualab Effects test fixture: a unit cube with texture coordinates and normals (original work).
 mtllib cube.mtl
 o Cube
 v -0.5 -0.5  0.5

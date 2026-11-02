@@ -9,10 +9,10 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// The first schema in which effect positions are in effect space (see [`SCHEMA_VERSION`]).
 pub const SCHEMA_EFFECT_SPACE: u32 = 2;
 
-/// The EffectCraft version, written into project files as `savedBy`.
+/// The Visualab Effects version, written into project files as `savedBy`.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The EffectCraft version that wrote a project file (its `savedBy`), when it says.
+/// The Visualab Effects version that wrote a project file (its `savedBy`), when it says.
 pub fn saved_by(text: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Meta {

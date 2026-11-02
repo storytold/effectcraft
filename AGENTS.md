@@ -1,15 +1,15 @@
-# EffectCraft — rules for agents and contributors
+# Visualab Effects — rules for agents and contributors
 
 These rules apply to every human and AI contributor. `CLAUDE.md` holds the working instructions; this
 file holds the rules that must never be broken. When the two disagree, this file wins.
 
 ## Never crash
 
-People trust EffectCraft with hours of work. A malformed project, PSD, SVG, Lottie or media file, a bad
+People trust Visualab Effects with hours of work. A malformed project, PSD, SVG, Lottie or media file, a bad
 expression or script, a broken plug-in, a bad control-channel or MCP argument, a corrupt preferences file
 or a full disk must produce an error the user (or agent) can act on, never a crash and never lost work.
 **This rule outranks feature work:** don't ship a feature by adding a panic path, and fix a crash before
-building on top of it.
+building on top of it. Full standard: [craftrules `standards/never-crash.md`](https://github.com/storytold/craftrules/blob/main/standards/never-crash.md).
 
 - **Fail with `Result<T, E>`** through the crate's error type and propagate with `?`; add context
   (`map_err`, an error variant) rather than discarding it. Lenient readers fall back and record the repair.
@@ -68,7 +68,7 @@ reproduce an image (for example, point lists traced from someone else's icon).
    ```
    Also add one line for the asset to [`ATTRIBUTION.md`](ATTRIBUTION.md). `cargo xtask assets` (part of
    `cargo xtask ci`) fails if any asset lacks a sidecar or index entry.
-4. **Screenshots** in the repo may show only EffectCraft (or other open projects), with media we generated
+4. **Screenshots** in the repo may show only Visualab Effects (or other open projects), with media we generated
    or media that is itself openly licensed. Never commit screenshots of Adobe products.
 5. **Local reference material stays local.** After Effects reference screenshots and notes live only in
    `plan/aftereffects/` (gitignored). They must never be committed, bundled, embedded, traced or shipped.
@@ -76,10 +76,10 @@ reproduce an image (for example, point lists traced from someone else's icon).
    `crates/engine/src/demo.rs`, generators in `crates/effects`) are original work under the project licence
    and are listed in `ATTRIBUTION.md`.
 7. **When in doubt, leave it out** and draw or generate it yourself.
-8. **The one exception: first-party ArtCraft brand marks.** The ArtCraft name and logos in `docs/brand/`
-   are trademarks of the ArtCraft Team, not open source, usable only unmodified and only in the context of
-   EffectCraft under `docs/brand/LICENSE-brand.txt` (forks and modified versions must remove them). They still
-   need a sidecar and an `ATTRIBUTION.md` row (licence `LicenseRef-ArtCraft-Trademark`). No other
+8. **The one exception: first-party Visualab brand marks.** The Visualab name and logos in `docs/brand/`
+   are trademarks of the Visualab Team, not open source, usable only unmodified and only in the context of
+   Visualab Effects under `docs/brand/LICENSE-brand.txt` (forks and modified versions must remove them). They still
+   need a sidecar and an `ATTRIBUTION.md` row (licence `LicenseRef-Visualab-Trademark`). No other
    non-open asset is allowed, and this exception never covers third-party marks (Adobe, Discord, GitHub
    and other logos stay out; draw a generic icon instead).
 
@@ -108,7 +108,8 @@ a command, everything is agent-drivable, and the quality gates (`cargo xtask ci`
 - **Time goes through `chrono`** (workspace dependency). Never hand-roll UTC/calendar conversion (days-to-date algorithms, leap-year math); a crate owns only its output format string. The one exception is range extension: past the years chrono can represent, shift the date by whole 400-year Gregorian cycles (146,097 days, after which the calendar repeats), let chrono compute the month and day, and add the cycles back to the year (splitting seconds into hours, minutes and seconds is plain arithmetic).
 
 Shared real-file test corpora (Photoshop-authored PSDs, etc.) live in
-[`storytold/photocraft-corpus`](https://github.com/storytold/photocraft-corpus).
+[`wasigonzi/photocraft-corpus`](https://github.com/wasigonzi/photocraft-corpus), explained in
+[craftrules `standards/test-corpora.md`](https://github.com/storytold/craftrules/blob/main/standards/test-corpora.md).
 Never commit large binary fixtures to this repo; fetch them pinned by commit and sha256-verified,
 as PhotoCraft does with `cargo xtask corpus`.
 
@@ -117,11 +118,11 @@ as PhotoCraft does with `cargo xtask corpus`.
 
 - [ROADMAP.md](ROADMAP.md): stage, headline numbers and what's next
 - [docs/gaps.md](docs/gaps.md): every known shortfall against After Effects, ranked, and the prioritised workstreams (G1–G9); read it before choosing work
-- [docs/target-app-parity.md](docs/target-app-parity.md): the parity numbers and how they were measured, with the per-area docs it links (UI, file formats, hardware, localization, effects, scripting)
+- [docs/target-app-parity.md](docs/target-app-parity.md): the parity numbers and how they were measured, with the per-area docs it links (UI, file formats, hardware, localization, effects, scripting); progress docs follow [craftrules `standards/progress-docs.md`](https://github.com/storytold/craftrules/blob/main/standards/progress-docs.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, gates, commits, how to add things
 - [docs/architecture.md](docs/architecture.md): layers, data model, commands, pipeline
 - [docs/testing.md](docs/testing.md): oracle tests, criteria, benchmarks
-- [docs/agents.md](docs/agents.md): driving EffectCraft over MCP / the control channel, and the agent work loop
+- [docs/agents.md](docs/agents.md): driving Visualab Effects over MCP / the control channel, and the agent work loop
 - [docs/control-protocol.md](docs/control-protocol.md): control-channel method reference
 - [docs/contributors.md](docs/contributors.md): the About window's contributor and model credits
 - [ATTRIBUTION.md](ATTRIBUTION.md): asset index
@@ -135,13 +136,11 @@ as PhotoCraft does with `cargo xtask corpus`.
   username has a `[people.<username>]` entry in `contributors/people.toml`. If not, ask them once
   whether they want to be credited by more than their username: a real name, a display name, and/or
   their public GitHub profile name (`sync_github_name = true`). If yes, add **only their own** entry
-  (copy the template at the top of the file)
+  (copy the template at the top of the file, or run
+  `python3 ../../craftrules/scripts/contributors.py --add-me . --real-name "…" --sync-github-name`)
   and include it in their PR, committed as them. If no, change nothing: they are credited as
   `@username` anyway.
 - Never add, edit, guess or copy anyone else's entry or name (not from git config, commit authors or
   GitHub profiles). Never hand-edit `contributors.json`.
-
-## CI workflows
-- Workflows in `.github/workflows/` call the shared workflows in [`storytold/craft-common-actions`](https://github.com/storytold/craft-common-actions) at `@main`, with their inputs and secrets. No other jobs: if no shared workflow does what's needed, it doesn't go here.
-- Don't add or change CI in a feature or fix PR. If the existing workflows can't build or test a change, link an existing craft-common-actions issue or PR, or open a new issue, or a PR only for a small fix that is safe for every app and does not increase CI time.
-- Some workflow files here still run their own jobs. Don't add to them. Moving a job into craft-common-actions is its own task, never part of another PR, and the job stays here until a shared workflow runs it.
+- Maintainers refresh the stats with `python3 ../../craftrules/scripts/contributors.py .` (it also
+  re-verifies who wrote each `people.toml` entry; `--check` only verifies).

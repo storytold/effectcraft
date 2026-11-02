@@ -807,7 +807,6 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.exportTemplate";
     let cid = eg_comp(s, p)?;
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ectemplate)"))?.to_string();
-    s.refuse_export(&path)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let eg = comp.essential.clone().filter(|e| !e.controls.is_empty()).ok_or_else(|| bad(C, "the composition has no Essential Graphics controls"))?;
     let comp_name = s.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
@@ -848,7 +847,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     let manifest = json!({
         "format": TEMPLATE_FORMAT,
         "version": TEMPLATE_VERSION,
-        "generator": format!("EffectCraft {}", env!("CARGO_PKG_VERSION")),
+        "generator": format!("Visualab Effects {}", env!("CARGO_PKG_VERSION")),
         "name": name,
         "comp": cid.0,
         "compName": comp_name,
@@ -869,7 +868,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     entries.insert(0, ("project.ecproj".into(), sub.to_json().into_bytes()));
     entries.insert(0, ("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap_or_default()));
     let bytes = effectcraft_lottie::zip::store(&entries);
-    s.write_output(&path, &bytes)?;
+    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Exported template “{name}” to {path}"));
     Ok(json!({"path": path, "name": name, "bytes": bytes.len(), "controls": eg.flat().len(), "items": deps.len()}))
 }
@@ -879,12 +878,12 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     let entries = effectcraft_lottie::zip::read_stored(bytes);
     let get = |n: &str| entries.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
     let manifest: Value =
-        serde_json::from_slice(&get("manifest.json").ok_or("not an EffectCraft template (no manifest.json)")?).map_err(|e| format!("manifest.json: {e}"))?;
+        serde_json::from_slice(&get("manifest.json").ok_or("not an Visualab Effects template (no manifest.json)")?).map_err(|e| format!("manifest.json: {e}"))?;
     if manifest.get("format").and_then(Value::as_str) != Some(TEMPLATE_FORMAT) {
-        return Err("not an EffectCraft template".into());
+        return Err("not an Visualab Effects template".into());
     }
     if manifest.get("version").and_then(Value::as_u64).unwrap_or(0) > TEMPLATE_VERSION as u64 {
-        return Err("the template was made by a newer EffectCraft".into());
+        return Err("the template was made by a newer Visualab Effects".into());
     }
     let text = String::from_utf8(get("project.ecproj").ok_or("template has no project.ecproj")?).map_err(|e| e.to_string())?;
     let mut project = Project::from_json(&text).map_err(|e| e.to_string())?;

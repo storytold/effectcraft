@@ -1,6 +1,6 @@
 //! Edit ▸ Keyboard Shortcuts: After Effects' visual shortcut editor.
 //!
-//! Top: the preset menu (EffectCraft Default = After Effects' defaults, read-only; custom presets
+//! Top: the preset menu (Visualab Effects Default = After Effects' defaults, read-only; custom presets
 //! can be duplicated, renamed, deleted, imported and exported) and the search field. Middle: an
 //! on-screen keyboard for the toggled (or held) modifiers, keys coloured by what they run in
 //! that combination: purple for application-wide commands, green for panel-specific ones, both
@@ -49,8 +49,6 @@ const PANEL_COLOR: Color32 = Color32::from_rgb(0x3f, 0xa8, 0x6c);
 
 pub fn open(app: &mut EffectcraftApp) {
     app.dialog_state.shortcuts = EditorState::default();
-    // Scripts copied into the Scripts folder since the table was built are listed too.
-    app.session.scripts_changed();
     app.dialog = Some(Dialog::Shortcuts);
 }
 

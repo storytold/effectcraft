@@ -1,6 +1,6 @@
 {
   "format": "effectcraft.animationPresets/1",
-  "notes": "Original EffectCraft background presets (MIT OR Apache-2.0), written from scratch on EffectCraft's own generator, noise, colour and stylize effects. Apply to a solid or any layer with effects. Key times are seconds from the current time; most motion comes from expressions (time-based, so the background keeps moving for the layer's whole duration). Point values are fractions of the layer size; effect paths are the effect's parameter ids.",
+  "notes": "Original Visualab Effects background presets (MIT OR Apache-2.0), written from scratch on Visualab Effects's own generator, noise, colour and stylize effects. Apply to a solid or any layer with effects. Key times are seconds from the current time; most motion comes from expressions (time-based, so the background keeps moving for the layer's whole duration). Point values are fractions of the layer size; effect paths are the effect's parameter ids.",
   "presets": [
     {
       "id": "softGradientDrift",

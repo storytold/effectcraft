@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and package EffectCraft for FreeBSD:
+# Build and package Visualab Effects for FreeBSD:
 #
 #   $DIST/effectcraft-<version>-freebsd-<arch>.tar.gz   a /usr/local-style tree (<arch> is x86_64 or aarch64):
 #       effectcraft-<version>-freebsd-<arch>/{bin, share/applications, share/icons, share/mime,
@@ -51,7 +51,7 @@ if [[ "$DRY_RUN" = 0 ]] && [[ "$(uname -s)" != FreeBSD ]]; then
 fi
 BASENAME="effectcraft-$VERSION-freebsd-$ARCH"
 
-echo "==> EffectCraft $VERSION for FreeBSD $ARCH"
+echo "==> Visualab Effects $VERSION for FreeBSD $ARCH"
 
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"

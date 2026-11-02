@@ -13,7 +13,7 @@ use crate::{Backend, Error, base64};
 /// Protocol revisions we speak, newest first. We answer with the client's if we know it.
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "EffectCraft is an After Effects-class motion graphics compositor. Everything is an engine command: command_list discovers ids and params, command_run {id, params} runs them (undoable; command_batch runs several in order). Typical flow: command_run comp.new -> command_run layer.newText / layer.newSolid (returns the layer id) -> set_property / add_keyframe -> command_run effect.apply -> render_preview to look at the result. Inspect with doc_inspect, get_project, get_comp and get_layer (every property node carries its `path`, e.g. `transform/position`, `effects/#1/blurriness`). Times are seconds. In bridge mode (app started with `--control <port>`) screenshot and the ui_* tools show and operate the live window.";
+const INSTRUCTIONS: &str = "Visualab Effects is an After Effects-class motion graphics compositor. Everything is an engine command: command_list discovers ids and params, command_run {id, params} runs them (undoable; command_batch runs several in order). Typical flow: command_run comp.new -> command_run layer.newText / layer.newSolid (returns the layer id) -> set_property / add_keyframe -> command_run effect.apply -> render_preview to look at the result. Inspect with doc_inspect, get_project, get_comp and get_layer (every property node carries its `path`, e.g. `transform/position`, `effects/#1/blurriness`). Times are seconds. In bridge mode (app started with `--control <port>`) screenshot and the ui_* tools show and operate the live window.";
 
 // JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -171,7 +171,7 @@ impl McpServer {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false, "subscribe": false}},
-                    "serverInfo": {"name": "effectcraft", "title": format!("EffectCraft ({mode})"), "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "effectcraft", "title": format!("Visualab Effects ({mode})"), "version": env!("CARGO_PKG_VERSION")},
                     "instructions": instructions,
                     "_meta": {"effectcraftAutoSave": self.autosave_info()},
                 }))

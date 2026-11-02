@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
-Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
+Each piece of hardware After Effects uses, per platform, against Visualab Effects. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
 tracker; After Effects' from its documentation (Mercury GPU Acceleration, Multi-Frame Rendering,
 hardware-accelerated decode and encode, Mercury Transmit) and its bundle.
@@ -11,7 +11,7 @@ hardware-accelerated decode and encode, Mercury Transmit) and its bundle.
 in the browser too; hardware video decode and encode, video-out devices, tablets and multiple
 monitors are missing, and two GPU start-up failures are open.
 
-| Feature | After Effects 2026 | EffectCraft macOS | Windows | Linux | Web | Notes / evidence |
+| Feature | After Effects 2026 | Visualab Effects macOS | Windows | Linux | Web | Notes / evidence |
 |---|---|---|---|---|---|---|
 | GPU compositing and effects | Mercury GPU (Metal; CUDA / OpenCL / DirectX on Windows) | yes, Metal via wgpu | Vulkan yes; **Direct3D 12 fails** (FXC can't compile the `pointwise` kernel, #613) | Vulkan | WebGPU, in frame workers | 280 of 306 effects on the GPU, checked against the CPU renderer; Fractal and the analysis/tool effects stay on the CPU ([effects-parity.md](effects-parity.md)) |
 | CPU fallback and device-loss recovery | yes | yes | yes; Windows ARM64 Adreno panic after device loss (#591, closed) | yes | yes (#225 fixed) | Out of video memory falls back to the CPU (#106) |
@@ -23,7 +23,7 @@ monitors are missing, and two GPU start-up failures are open.
 | HDR display | HDR monitoring on EDR / HDR displays | tone-mapped SDR view; no EDR output | no HDR output | no | no | Colour engine handles HDR maths (Rec. 2100 PQ/HLG output files) |
 | Pen tablets (pressure, tilt) | yes, for Paint and Roto | Brushes panel has pressure options, but no tablet pressure is read | same | same | same | Paint strokes store pressure per vertex; input never fills it |
 | Multiple monitors | panels and windows across screens | panels move into their own native windows on any screen (Move Panel to New Window; desktop builds) | same | same (#486) | — | gap 20 |
-| Touch / trackpad gestures | pinch zoom in viewers | Composition and Layer viewers: two-finger scroll pans, pinch zooms around the pointer (Alt + scroll and the mouse wheel zoom too); Timeline pinch zooms time | two-finger scroll pans once it moves diagonally (a pixel-precise wheel keeps zooming); pinch arrives as Ctrl + scroll and zooms | same | same | No rotate or swipe gestures; tested in `ui_viewer_trackpad.rs` (UI logic, not on hardware) |
+| Touch / trackpad gestures | pinch zoom in viewers | egui pointer and scroll; no pinch-to-zoom audited | — | — | — | — |
 | Audio hardware | Core Audio / ASIO / WASAPI, device choice, latency | cpal output; preview sound late after a start offset (#504 open; #554 closed) | cpal | cpal (ALSA) | Web Audio | No input or device latency settings |
 | Machine learning acceleration | Apple Neural Engine / GPU for Object Matte, Roto Brush 3 | CPU inference (pure Rust, rayon) | CPU | CPU | CPU | No GPU inference for MobileSAM or MediaPipe |
 | Memory management | RAM reserve, disk cache | RAM Reserved, Reduce Cache When Low on Memory, disk cache | same | same | OPFS disk cache | good |

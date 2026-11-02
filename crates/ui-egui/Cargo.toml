@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-ui-egui"
-description = "The EffectCraft egui frontend (swappable): docking panels, composition viewer, timeline, effect controls, control channel"
+description = "The Visualab Effects egui frontend (swappable): docking panels, composition viewer, timeline, effect controls, control channel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -45,7 +45,6 @@ sys-locale = { workspace = true }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 pollster = "1"
-effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
 exr = { workspace = true }
 

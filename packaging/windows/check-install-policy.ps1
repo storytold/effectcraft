@@ -55,9 +55,9 @@ try {
     if ($properties['UpgradeCode'].Trim('{}') -ne $policy.upgradeCode) { throw 'Launcher upgrade identity changed.' }
     $dirs = @{}
     foreach ($row in (Read-Rows $database 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $dirs[$row[0]] = @($row[1],$row[2]) }
-    if ($dirs['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or $dirs['CraftSuiteFolder'][1] -ne 'ArtCraft' -or
+    if ($dirs['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or $dirs['CraftSuiteFolder'][1] -ne 'Visualab' -or
         $dirs['CraftSuiteFolder'][0] -ne 'LocalProgramsFolder' -or $dirs['LocalProgramsFolder'][0] -ne 'LocalAppDataFolder') {
-      throw 'Launcher new-install folder must be under the per-user ArtCraft suite root.'
+      throw 'Launcher new-install folder must be under the per-user Visualab suite root.'
     }
     foreach ($explicit in @('', 'F:\Chosen exact launcher')) {
       Set-SessionProperty $session 'PREVIOUSINSTALLFOLDER' 'E:\Existing exact launcher'
@@ -76,7 +76,7 @@ try {
         throw 'Launcher registration or shortcut preference changed unexpectedly.'
       }
     }
-    Write-Output 'PASS ArtCraft Launcher: per-user scope, suite folder, remembered/custom paths and existing registration. No installation performed.'
+    Write-Output 'PASS Visualab Launcher: per-user scope, suite folder, remembered/custom paths and existing registration. No installation performed.'
     return
   }
   if ($properties['ALLUSERS'] -ne '2' -or $properties['MSIINSTALLPERUSER'] -ne '1') {
@@ -88,7 +88,7 @@ try {
     $directories[$row[0]] = @($row[1], $row[2])
   }
   if ($directories['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or
-      $directories['CraftSuiteFolder'][1] -ne 'ArtCraft') { throw 'Expected the app under the ArtCraft suite folder.' }
+      $directories['CraftSuiteFolder'][1] -ne 'Visualab') { throw 'Expected the app under the Visualab suite folder.' }
   $programs = $directories['CraftSuiteFolder'][0]
   if ($programs -eq 'ProgramFiles6432Folder') { $programs = $directories[$programs][0] }
   if ($programs -notin 'ProgramFilesFolder', 'ProgramFiles64Folder') {
@@ -162,7 +162,7 @@ try {
   $machineRoot = if ((Get-PackageTemplate $database) -match '^Intel') {
     if (Get-SessionProperty $session 'VersionNT64') { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
   } elseif ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
-  $machineFolder = (Join-Path $machineRoot "ArtCraft\$($policy.name)") + '\'
+  $machineFolder = (Join-Path $machineRoot "Visualab\$($policy.name)") + '\'
   foreach ($scope in @('1', '')) {
     Set-SessionProperty $session 'ALLUSERS' $scope
     Set-SessionProperty $session 'INSTALLFOLDER' ''
@@ -172,14 +172,14 @@ try {
       if ($session.EvaluateCondition($row[2]) -eq 1 -and $session.DoAction($row[0]) -ne 1) { throw "$($row[0]) failed." }
     }
     $folder = Get-SessionProperty $session 'INSTALLFOLDER'
-    $wanted = if ($scope -eq '1') { $machineFolder } else { (Join-Path $env:LOCALAPPDATA "Programs\ArtCraft\$($policy.name)") + '\' }
+    $wanted = if ($scope -eq '1') { $machineFolder } else { (Join-Path $env:LOCALAPPDATA "Programs\Visualab\$($policy.name)") + '\' }
     if ($folder -ine $wanted) { throw "Wizard default folder for ALLUSERS='$scope' is '$folder', expected '$wanted'." }
   }
   # Replay the wizard's compiled folder actions in sequence order, as the full UI runs them. A remembered
   # folder must win over the new-install default, and a folder the user typed must survive both.
   $uiFolderActions = @(Read-Rows $database 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallUISequence`' 3 |
     Where-Object { $_[0] -match '^Craft(Restore|Default)' } | Sort-Object { [int]$_[1] })
-  $userDefault = (Join-Path $env:LOCALAPPDATA "Programs\ArtCraft\$($policy.name)") + '\'
+  $userDefault = (Join-Path $env:LOCALAPPDATA "Programs\Visualab\$($policy.name)") + '\'
   foreach ($case in @(
       @('1', 'D:\Remembered user app', 'E:\Remembered machine app', '', 'E:\Remembered machine app'),
       @('', 'D:\Remembered user app', 'E:\Remembered machine app', '', 'D:\Remembered user app'),

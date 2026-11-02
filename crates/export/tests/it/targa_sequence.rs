@@ -1,6 +1,6 @@
 //! Targa sequence output: every file is an uncompressed TGA (Truevision TGA 2.0 specification:
 //! an 18-byte header, BGR(A) pixels, top-left origin, the alpha bits in the image descriptor)
-//! holding exactly the pixels the lossless PNG sequence of the same job writes, and EffectCraft's
+//! holding exactly the pixels the lossless PNG sequence of the same job writes, and Visualab Effects's
 //! own Targa import (#745) reads the frames back as the same picture.
 //!
 //! The comp is 7×4 @ 10 fps, 3 frames: frame 0 is the background alone, frames 1 and 2 add a

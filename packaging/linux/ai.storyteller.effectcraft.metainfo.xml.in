@@ -5,14 +5,14 @@
   <id>ai.storyteller.effectcraft</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
-  <name>EffectCraft</name>
+  <name>Visualab Effects</name>
   <summary>Motion graphics and visual effects compositor</summary>
   <developer id="ai.storyteller">
-    <name>Learning Machines LLC</name>
+    <name>Visualab Studios</name>
   </developer>
   <description>
     <p>
-      EffectCraft is an open-source motion graphics and visual effects compositor: layers with
+      Visualab Effects is an open-source motion graphics and visual effects compositor: layers with
       keyframes and a graph editor, masks and shapes, text animators, expressions, 3D cameras and
       lights, over 300 effects and a render queue, with GPU compositing.
     </p>
@@ -20,10 +20,10 @@
   <launchable type="desktop-id">ai.storyteller.effectcraft.desktop</launchable>
   <icon type="stock">ai.storyteller.effectcraft</icon>
   <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
-  <url type="homepage">https://getartcraft.com/apps/effectcraft</url>
-  <url type="bugtracker">https://github.com/storytold/effectcraft/issues</url>
-  <url type="help">https://github.com/storytold/effectcraft</url>
-  <url type="contact">https://discord.gg/artcraft</url>
+  <url type="homepage">https://www.visualabstudios.com/apps/effectcraft</url>
+  <url type="bugtracker">https://github.com/wasigonzi/visualab-effects/issues</url>
+  <url type="help">https://github.com/wasigonzi/visualab-effects</url>
+  <url type="contact">https://www.visualabstudios.com</url>
   <categories>
     <category>Graphics</category>
     <category>RasterGraphics</category>
@@ -38,7 +38,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Demo composition with text layers, timeline and properties</caption>
-      <image type="source">https://raw.githubusercontent.com/storytold/effectcraft/05955c08b4fd025f1a09882df72e6dbff1a8148a/docs/images/effectcraft-hero.png</image>
+      <image type="source">https://raw.githubusercontent.com/wasigonzi/visualab-effects/05955c08b4fd025f1a09882df72e6dbff1a8148a/docs/images/effectcraft-hero.png</image>
     </screenshot>
   </screenshots>
   <branding>

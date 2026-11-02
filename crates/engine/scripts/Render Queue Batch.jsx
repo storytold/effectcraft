@@ -1,4 +1,4 @@
-// Render Queue Batch — an EffectCraft sample script (original work, MIT OR Apache-2.0).
+// Render Queue Batch — an Visualab Effects sample script (original work, MIT OR Apache-2.0).
 //
 // Adds the compositions selected in the Project panel (every composition when none are
 // selected) to the Render Queue, each with an output file named after the comp in a folder you

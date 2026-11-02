@@ -15,7 +15,7 @@ platform, fonts, color settings, source files, and project parameters.
 | Animation | AE-sampled values for scalar, spatial, multidimensional and expression-driven properties, timing and interpolation | Eight scalar Rotation/ease cases, 168 samples verified against AE 26.3x87; auto-Bezier spatial tangents (ten keys, three paths) match AE 26.3; other cases remain open |
 | Render fidelity | Original test scenes compared at 8/16/32 bpc, specified color spaces and alpha conventions; edges, impulses, gradients and temporal sequences | Most AE-rendered comparisons remain open; CPU/GPU agreement alone is insufficient |
 | Media and delivery | Real footage import, seek, frame rates, audio sync, relinking, image sequences, codec/container metadata and exports checked in downstream tools | Actual work fixtures still required |
-| Performance | Matched AE/EffectCraft input-to-present and export timings at 1080p/4K, warm/cold caches, memory/VRAM and long sessions | No claim of beating AE or measured blur response yet |
+| Performance | Matched AE/Visualab Effects input-to-present and export timings at 1080p/4K, warm/cold caches, memory/VRAM and long sessions | No claim of beating AE or measured blur response yet |
 | Platforms | Native Windows, macOS and Linux runs with recorded GPU, driver, backend, device limits and fault cases | RTX 5090 Vulkan viewer/effect CPU comparisons pass; Direct3D FXC setup fails; other platforms not validated in this pass |
 | Recovery | Save/reopen, interrupted render, invalid input, exhausted resources, lost GPU and cache failures without silent corruption | Catching compositor setup failure does not repair an OS graphics bugcheck |
 

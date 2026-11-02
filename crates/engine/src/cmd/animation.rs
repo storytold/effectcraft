@@ -1,4 +1,4 @@
-//! Animation menu: animation presets (EffectCraft's own JSON format), Add Keyframe, Keyframe
+//! Animation menu: animation presets (Visualab Effects's own JSON format), Add Keyframe, Keyframe
 //! Assistant (Exponential Scale), text animators/selectors, and the
 //! Reveal Properties commands.
 
@@ -10,16 +10,11 @@ use effectcraft_project::{GroupKind, Layer, LayerId, LayerSource, Node, Project,
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::effect::{effect_time_error, retime_effect};
 use super::{CommandSpec, bad, frontend, has_comp, has_keys, has_layers, layer_mut, layers_p, match_path_of, resolve_effect_path, selected_leaf_props, str_p};
 use crate::{EngineError, KeyRef, Result, Session, cmd};
 
 /// Preset file format version tag (`*.ecpreset`, JSON).
 pub const PRESET_TAG: &str = "effectcraftAnimationPreset";
-/// The preset format version that `anim.savePreset` writes.
-pub const PRESET_VERSION: u64 = 2;
-/// The first preset version that stores effect keys relative to the earliest key (#1971).
-const RELATIVE_EFFECT_KEYS: u64 = 2;
 
 fn has_selected_props(s: &Session) -> std::result::Result<(), String> {
     has_comp(s)?;
@@ -50,27 +45,13 @@ fn selected_effects(s: &Session) -> Vec<(LayerId, PropGroup)> {
         .collect()
 }
 
-/// The earliest key anywhere in `groups`, nested controls included.
-fn earliest_key<'a>(groups: impl IntoIterator<Item = &'a PropGroup>) -> Option<Tick> {
-    let mut first: Option<Tick> = None;
-    for g in groups {
-        g.walk("", &mut |_, pr| {
-            if let Some(t) = pr.keys.iter().map(|k| k.time).min() {
-                first = Some(first.map_or(t, |f| f.min(t)));
-            }
-        });
-    }
-    first
-}
-
 // ---------------------------------------------------------------- presets
 
 fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("anim.savePreset", "missing `path`"))?.to_string();
-    s.refuse_export(&path)?;
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
     let t = s.time();
-    let mut effects: Vec<(LayerId, PropGroup)> = selected_effects(s);
+    let effects: Vec<(LayerId, PropGroup)> = selected_effects(s);
     let effect_uids: Vec<Uid> = effects.iter().map(|(_, g)| g.uid).collect();
     let mut props = vec![];
     for (lid, uid) in selected_leaf_props(s) {
@@ -86,11 +67,7 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("anim.savePreset", "select properties or effects to save"));
     }
     // Key times are stored relative to the earliest key so the preset applies at the CTI.
-    let first =
-        props.iter().flat_map(|(_, _, pr)| pr.keys.iter().map(|k| k.time)).chain(earliest_key(effects.iter().map(|(_, g)| g))).min().unwrap_or(Tick::ZERO);
-    for (_, g) in &mut effects {
-        retime_effect(g, 1.0, "anim.savePreset", |t| Ok(Tick(t.0.checked_sub(first.0).ok_or_else(|| effect_time_error("anim.savePreset"))?)))?;
-    }
+    let first = props.iter().flat_map(|(_, _, pr)| pr.keys.iter().map(|k| k.time)).min().unwrap_or(Tick::ZERO);
     let props_json: Vec<Value> = props
         .iter()
         .map(|(_, mp, pr)| {
@@ -105,9 +82,9 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name")
         .map(str::to_string)
         .unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-    let doc = json!({PRESET_TAG: PRESET_VERSION, "name": name, "properties": props_json, "effects": fx_json});
+    let doc = json!({PRESET_TAG: 1, "name": name, "properties": props_json, "effects": fx_json});
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-    s.write_output(&path, text.as_bytes())?;
+    s.services.write_file(&path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     Ok(json!({"path": path, "properties": props.len(), "effects": effects.len()}))
 }
 
@@ -136,7 +113,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         _ => return Err(bad("anim.applyPreset", "missing `path` (or inline `preset`)")),
     };
     if doc.get(PRESET_TAG).is_none() {
-        return Err(bad("anim.applyPreset", "not an EffectCraft animation preset"));
+        return Err(bad("anim.applyPreset", "not an Visualab Effects animation preset"));
     }
     let (cid, ids) = layers_p(s, p)?;
     if ids.is_empty() {
@@ -148,16 +125,8 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         s.save_prefs();
         s.prefs_revision += 1;
     }
-    let mut effects: Vec<PropGroup> =
+    let effects: Vec<PropGroup> =
         doc["effects"].as_array().map(|a| a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()).unwrap_or_default();
-    // Older presets stored effect keys at the source layer's times.
-    if doc[PRESET_TAG].as_u64().unwrap_or(1) < RELATIVE_EFFECT_KEYS
-        && let Some(first) = earliest_key(&effects)
-    {
-        for g in &mut effects {
-            retime_effect(g, 1.0, "anim.applyPreset", |t| Ok(Tick(t.0.checked_sub(first.0).ok_or_else(|| effect_time_error("anim.applyPreset"))?)))?;
-        }
-    }
     let props: Vec<(String, Property)> = doc["properties"]
         .as_array()
         .map(|a| {
@@ -199,7 +168,6 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                     if let Some(spec) = spec {
                         effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), size);
                     }
-                    retime_effect(&mut g, 1.0, "anim.applyPreset", |t| Ok(Tick(t.0.checked_add(lt.0).ok_or_else(|| effect_time_error("anim.applyPreset"))?)))?;
                     g.reassign_uids(&mut next);
                     next += 1;
                     fx.children.push(Node::Group(g));
@@ -244,7 +212,7 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
     }
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
     let t = s.time();
-    let n = s.edit("Add Keyframe", None, |proj, state| {
+    let n = s.edit("Add Keyframe", None, |proj, _| {
         let mut n = 0;
         for (lid, uid) in &targets {
             let l = layer_mut(proj, cid, *lid)?;
@@ -260,9 +228,6 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
                 pr.set_value_at(lt, v);
             }
             n += 1;
-            if pr.match_id == "type" {
-                super::prop::sync_polystar_property(proj, state, cid, *lid, *uid, t)?;
-            }
         }
         Ok(n)
     })?;
@@ -272,8 +237,7 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
 /// Selected keys grouped by (layer, property).
 fn keys_by_prop(s: &Session) -> BTreeMap<(LayerId, Uid), Vec<Tick>> {
     let mut m: BTreeMap<(LayerId, Uid), Vec<Tick>> = BTreeMap::new();
-    let Some(comp) = s.active_comp() else { return m };
-    for k in super::prop::editable_keys(comp, &s.state.selected_keys) {
+    for k in &s.state.selected_keys {
         m.entry((k.layer, k.prop)).or_default().push(k.time);
     }
     m

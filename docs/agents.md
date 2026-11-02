@@ -1,12 +1,8 @@
-# Driving EffectCraft from agents
+# Driving Visualab Effects from agents
 
-Everything in EffectCraft is an engine command with a stable id and JSON params. Menus, shortcuts,
+Everything in Visualab Effects is an engine command with a stable id and JSON params. Menus, shortcuts,
 panel gestures, the CLI, the control channel and MCP all go through the same commands, so anything a
 user can do, an agent can do too. There are three ways in:
-
-Render-queue outputs cannot replace footage, proxies or the project file. See
-[render source protection](file-format-parity.md#render-source-protection) for aliases, default names and sequence
-limits. This guard does not change ordinary-file overwrite defaults or add another confirmation API.
 
 | Interface | Best for | Needs a window |
 |---|---|---|
@@ -58,13 +54,13 @@ The release packages ship `effectcraft-cli` alongside the desktop app, so no bui
 
 | Install | CLI |
 |---|---|
-| Windows (MSI) | `%LOCALAPPDATA%\Programs\ArtCraft\EffectCraft\effectcraft-cli.exe` by default (`C:\Program Files\ArtCraft\EffectCraft\effectcraft-cli.exe` for an all-users install, under `Program Files (x86)` instead for the 32-bit build, or wherever you installed it otherwise), not on `PATH` |
+| Windows (MSI) | `%LOCALAPPDATA%\Programs\Visualab\Visualab Effects\effectcraft-cli.exe` by default (`C:\Program Files\Visualab\Visualab Effects\effectcraft-cli.exe` for an all-users install, under `Program Files (x86)` instead for the 32-bit build, or wherever you installed it otherwise), not on `PATH` |
 | Linux (deb, rpm) | `/usr/bin/effectcraft-cli` |
 | macOS | the separate `effectcraft-cli-<version>-macos-<arch>.zip` release asset (the `.app` holds only the desktop app) |
 
 ```sh
 # Windows (PowerShell), default install folder
-claude mcp add effectcraft -- "$env:LOCALAPPDATA\Programs\ArtCraft\EffectCraft\effectcraft-cli.exe" mcp
+claude mcp add effectcraft -- "$env:LOCALAPPDATA\Programs\Visualab\Visualab Effects\effectcraft-cli.exe" mcp
 # Linux, or macOS with the CLI unzipped onto PATH
 claude mcp add effectcraft -- effectcraft-cli mcp
 ```
@@ -81,7 +77,7 @@ and transport errors also flush outstanding changes. Queries do not rotate the s
 A failed checkpoint adds a warning to the tool reply; the edit remains in memory and the next
 call retries. Use `save_project {path}` to a writable location before disconnecting if warned.
 
-Each server has its own folder under `<config directory>/EffectCraft Auto-Save/MCP/` (or
+Each server has its own folder under `<config directory>/Visualab Effects Auto-Save/MCP/` (or
 `<custom Auto-Save folder>/MCP/`). The maximum-version setting applies within that folder.
 `--autosave` enables these checkpoints regardless of the desktop's Auto-Save toggle and interval;
 it reads settings without writing desktop preferences, shortcuts or crash-recovery state.
@@ -112,7 +108,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `run_script {code, name?}` | Run JavaScript with the After Effects-style scripting object model (`app.project`, `comp.layers.addText(…)`, `layer.property("ADBE Transform Group").property("ADBE Position").setValueAtTime(…)`…). Returns `{ok, result, output, error: {message, line, column}}`; edits are undoable. |
 | `get_project` / `get_comp {comp?}` | Project items, comp settings and layers. |
 | `get_layer {layer, comp?, time?, depth?, flat?}` | A layer's property tree (`depth` limits how many group levels expand). Every node has a `path`. |
-| `get_property {layer, path, comp?, time?}` | A leaf property's value at a time, keyframes and expression; a popup (enum) property adds `options` (`[{value, label}]`, zero-based values, also in `get_layer`). Group paths (for example `geometryOptions`) contain children: inspect them with `get_layer`, then query a leaf such as `geometryOptions/extrusionDepth`. |
+| `get_property {layer, path, comp?, time?}` | A leaf property's value at a time, keyframes and expression. Group paths (for example `geometryOptions`) contain children: inspect them with `get_layer`, then query a leaf such as `geometryOptions/extrusionDepth`. |
 | `set_property {layer, path, value?, time?, timeBase?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe (`timeBase: "comp"` for comp seconds); with `expression` it sets an expression. |
 | `add_keyframe {layer, path, time+value \| keys:[...], timeBase?, interpolation?, comp?}` | Adds keys (layer seconds, or comp seconds with `timeBase: "comp"`), then optionally applies linear/bezier/hold/easyEase. |
 | `list_effects {filter?, compact?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters; `compact` lists only ids, names and categories. |
@@ -204,7 +200,7 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
   default to layer time; pass `timeBase: "comp"` to supply comp seconds on offset or
   stretched layers. `run_script`'s `setValueAtTime` and `keyTime` also use comp time. Without an
   explicit engine time base, subtract the layer's start time before keying an unstretched layer
-  ([#257](https://github.com/storytold/effectcraft/issues/257)).
+  ([#257](https://github.com/wasigonzi/visualab-effects/issues/257)).
 - **Moving a layer in time.** `execute_command layer.timing {"layers":["Scene 2"],"start":5.1}` sets
   the start time in comp seconds and moves the in and out points with it.
 - **Loops in scripts.** `run_script` can call any engine command with `app.run(id, params)`, for
@@ -216,25 +212,8 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
   or call `save_project {"path": …}` after each milestone.
 - **Environment light.** `layer.newLight` also accepts `"kind":"Environment"`: an equirectangular
   image that metallic surfaces reflect. Set its `lightOptions/source` to a footage, comp or solid
-  layer by layer id; with no source it uses the comp's Environment Layer (`layer.environment`),
-  or a default studio environment — bright above and toward the initial camera, dark below and
-  behind, at a dim 0.3 mean level — of the light's colour × intensity when there is none; either
-  way the light brightens the scene. A selected Source or Environment Layer that fails to
-  render — a deleted layer, missing footage — lights nothing instead: the light never silently
-  falls back to the studio default. It has `castsShadows`/`shadowDarkness`/`shadowDiffusion`
-  like the other lights: Cast Shadows shades the scene from the image's dominant bright region
-  (the default environment's key, or a source image's brightest area; an image without a
-  sufficiently strong dominant direction has none — a uniform one, or opposing bright regions
-  that cancel — so it casts no shadow) — the region weighted by the light's colour, so a
-  coloured light shadows from the regions it actually lights (opposing red and blue regions
-  cancel to a white light, but a red light's shadow comes from the red one) — occluding only
-  that key's share of the light, so the
-  shadow stays partial like After Effects' area-light shadows, and soft by default (a penumbra
-  of at least 8 pixels or four map texels, plus Shadow Diffusion). It only lights
-  Advanced 3D comps, so creating one (or changing a light's type to Environment) switches a
-  Classic 3D comp to Advanced 3D
-  ([#261](https://github.com/storytold/effectcraft/issues/261),
-  [#2436](https://github.com/storytold/effectcraft/issues/2436)).
+  layer by layer id; with no source it uses the comp's Environment Layer (`layer.environment`)
+  ([#261](https://github.com/wasigonzi/visualab-effects/issues/261)).
 
 ### Cookbook (from end-to-end QA)
 
@@ -293,10 +272,10 @@ build real projects through these interfaces; they are worked examples of everyt
   then `keys.velocity {"outSpeed":0,"outInfluence":33.33}`.
 * **Gradients**: `set_property {"path":"contents/gfill/colors","value":["#0080ff","#ffff00"]}` or
   `{"colors":[[0,"#0080ff"],[1,[1,1,0]]],"opacities":[[0,1],[1,0.5]]}`.
-* **Image sequences**: `file.import {"paths":["/r/shot_0001.png"], "sequence": true}` imports the
-  file's whole numbered run as one item (several picked frames: that range; a folder: each run in
-  it, also without `sequence`). Without `"sequence": true` a picked or dropped numbered file imports
-  as one still, as in After Effects; `"alphabetical": true`: Force Alphabetical Order, the files
+* **Image sequences**: `file.import {"paths":["/r/shot_0001.png"]}` imports the file's whole
+  numbered run as one item (several picked frames: that range; a folder: each run in it;
+  `"sequence": false`: one still; dropped files, `"drag": true`, import as stills unless
+  `"sequence": true`, as in After Effects; `"alphabetical": true`: Force Alphabetical Order, the files
   play one after another) at `frameRate` or 30 fps (Settings ▸ Import). Missing frames show
   colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
   "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
@@ -319,28 +298,6 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
-  **A render never writes one file twice either:** when two outputs of the job (two items, a
-  `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
-  refused before anything is written, naming both items. Sequences clash only on frames both
-  write. A later item with Skip Existing Files leaves the earlier one's frames alone only when
-  the exporter can check the final destination. Browser/memory sinks and storage-overflow renders still report collisions.
-  Preflight compares every configured overflow destination, since available space can change during a render. Default
-  names are numbered like footage collisions when another queue item writes them
-  (`renderQueue.add`, `render.preRender`, `comp.saveFrameAs {queue}`, `file.createProxy`: a second
-  `Main` renders to `Main_1.mp4`); a name you give is kept, and `renderQueue.duplicate` copies the
-  output as it is, so change one with `renderQueue.setOutput` or turn it off.
-* **Other files written to a path you give** follow the same footage rule, with no flag and no
-  prompt: `comp.saveFrameAs` (also `…Psd`, `…Exr`), `file.exportLottie`, `file.saveCopy`,
-  `file.saveCopyAsXml`, `file.collectFiles` (every copy and the collected project; nothing is
-  written if one would land on a file the project reads), `file.exportTimeline` (and the movies it
-  pre-renders), `essential.exportTemplate`, `anim.savePreset`, `view.exportGuides`,
-  `shortcuts.export`, the control channel's `render.frame` / `ui.screenshot` with a `path`, the
-  MCP `render_frame` tool and `effectcraft-cli render-frame --out`. Footage (every frame of a
-  sequence), a proxy and the project file are refused with the reason and left untouched.
-  `file.checkOutput {path}` says beforehand (`{blocked, source, reason}`). Not covered: Save /
-  Save As / Increment and Save / auto-save (they write the project's own file), script `File`
-  writes (a script may rewrite a data file it also imports), and files the app extracts for
-  itself (template media, vector images).
 * **Essential Graphics**: controls can be addressed by name (`essential.set {"layer":"#1",
   "control":"Title","value":"John Smith"}`); a command that targets an explicit `comp` runs even
   when the active comp would disable it (`essential.exportTemplate {"comp":"Lower Third", …}`).
@@ -417,9 +374,8 @@ Face tracking's trained model works like Roto Brush's (below): `face.models` lis
 tracker and MediaPipe Face Landmarker with its authors and licence; `face.model.download {id}` /
 `face.model.install {path, id?}` install it (verified); `face.model.select {id:
 classical|mediapipe-face}` chooses it; `face.model.remove {id}` deletes it. Downloads and loading
-run in the background; `"wait": true` waits for the requested operation (or returns its error).
-Download/install do not change the selected model. After installing, use
-`face.model.select {id, wait:true}` to select and load it before tracking. `track.mask` with a
+run in the background; `"wait": true` on download, install or select returns once the model is in
+use (or with its error), which scripts need before tracking. `track.mask` with a
 face method returns `faceModel`, the engine it tries first (the classical one when the model finds
 no face in the mask).
 
@@ -490,12 +446,7 @@ and Origin), `camera.createFromSolve {kind: text|solid|null|shadowCatcher, point
 {center, normal, size?}, multiple?}` (Create Text / Solid / Null / Shadow Catcher, Camera and Light,
 Create Multiple …), `camera.deletePoints {points?, wait?}` (re-solves; with Auto-delete Points
 Across Time the same feature's other tracks go too) and `camera.create` (the Create Camera button).
-Each edit is one undo step; the first create adds the one-node "3D Tracker Camera" keyed on every frame.
-
-`camera.exportBlender {path: ".py", layer?, effect?, sensorWidth?: 36, unitScale?: 0.01,
-startFrame?: 1, includePoints?: true}` exports the solve as an executable Blender scene script:
-baked camera/lens/focus, synced video background, points and ground. See
-[Blender camera export](blender-camera-export.md) for framing, assumptions and limitations.
+Each is one undo step; the first create adds the one-node "3D Tracker Camera" keyed on every frame.
 Changing the layer's frames clears the analysis; changing `effects/#1/shotType`,
 `effects/#1/horizontalAngleOfView`, `effects/#1/advanced/solveMethod` re-solves the stored tracks.
 
@@ -526,22 +477,11 @@ reference. Matte settings are ordinary properties (`effects/#1/rotoBrushMatte/se
 
 Trained model (Roto Brush 2.0 / 3.0):
 - `roto.models` lists the built-in engine and every registered model, with its authors,
-  licence, size, app download URL (empty for install-only models), checkpoint `source` and `sourceFile`,
-  SHA-256 and whether it is installed, selected and active.
-- `roto.model.download {id}` fetches and verifies weights when the registry provides an app download URL;
-  `roto.model.install {path, id?}` installs a file you already have. SAM 2 is Install from File only until
-  a storytold-controlled mirror is available; its size and SHA-256 are verified before installation.
-- `roto.model.select {id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large}` chooses which one Roto Brush uses (SAM 2 also tracks the object through the clip, see [roto-brush-sam2.md](roto-brush-sam2.md); `roto.status` then reports `source` and per-frame `tracker.frames` with `confidence` and `occluded`). Loading runs
-  in the background. `"wait": true` waits for the requested operation; download/install load the model
-  only if it is already selected. They do not activate an unselected model: after installation, use
-  `roto.model.select {id, wait:true}` to select and load it. Unrelated model work can return a retryable
-  busy error rather than reporting that a waiting selection has finished.
-- `roto.propagate` never falls back to the classic engine silently: a chosen model that is not installed, or failed
-  to load, is an error, and without `"wait": true` so is a model still loading. `roto.status` reports `model`
-  (`selected`, `installed`, `active`, `loading`, `error`) and a `notice` while the chosen model is not the one in use.
-  Tracked frames are saved in the project with the instance (`tracker.saved` names their model): they apply while the
-  strokes and span are unchanged, whichever model Settings choose (`notice` says when that differs), and a new
-  Propagate replaces them.
+  licence, size, URL, SHA-256 and whether it is installed, selected and active.
+- `roto.model.download {id}` fetches and verifies the official weights in the background;
+  `roto.model.install {path, id?}` installs a file you already have.
+- `roto.model.select {id: classical|mobilesam}` chooses which one Roto Brush uses. Loading runs
+  in the background; `"wait": true` (also on download and install) returns once it is in use.
 - `roto.model.remove {id}` deletes the installed weights.
 - The `version` property (`effects/#1/version`: 0 = 1.0, 1 = 2.0, 2 = 3.0) picks between the
   classic engine (1.0) and the chosen model (2.0, 3.0).
@@ -600,7 +540,7 @@ indices): character attributes
 3. `layer.setText {"range":[6,11], "size":40, "fill":"#ff5500"}` styles the selection (the
    Character panel does the same); with an empty range it sets the style the next typed text takes.
 4. `edit.copy`, `edit.paste`, `edit.pasteTextMatchFormatting` and `edit.pasteTextFormattingOnly`
-   work on the selected text; `text.endEdit` commits (an empty Type-tool layer is kept, as After Effects does).
+   work on the selected text; `text.endEdit` commits (an empty Type-tool layer is removed).
 
 Fonts: `text.fonts` (MCP `list_fonts`) lists every family a text layer can use, bundled and installed, with its
 styles, origin (`bundled`, `system`, `user`), `variable` (it has variation axes) and own-language name
@@ -643,9 +583,7 @@ A dialog's `show()` waits for the user: the `script.run` / `file.runScript` repl
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
 that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
-`window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
-`file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes
-the project first). Scripts' `app.settings`:
+`window.restoreScriptPanels` (the panels open when the app last quit). Scripts' `app.settings`:
 `script.settings.get {"section": …, "key": …}` and `script.settings.save {…, "value": …}`.
 Extension points and the bundled extensions: [plugins.md](plugins.md).
 
@@ -684,13 +622,6 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   Dragged onto another property's name or value, in the Timeline or Effect Controls
   (`effectControls.prop.<uid>.value[.<d>]`), it runs `prop.pickWhip`: the reference replaces the
   property's expression, or is added as one, and the expression is enabled.
-* Parent and Track Matte for several layers: on a selected layer's row, the Timeline's Parent
-  menu and pick whip (`timeline.layer.<id>.parent`, `timeline.layer.<id>.pickWhip`) and its Track
-  Matte menu and pick whip (`timeline.layer.<id>.trackMatte`,
-  `timeline.layer.<id>.trackMattePickWhip`) set every selected layer's (on an unselected row,
-  that layer's), in one undo step. Directly: `layer.setParent {layers, parent}` and
-  `layer.setTrackMatte {layers, matte, kind}`, where `kind: "preserve"` keeps each layer's
-  own matte mode.
 * A property's menu (right-click its name; entries `timeline.prop.<uid>.menu.<entry>`): Reset
   (`prop.reset`: no expression, and the property's default value, an effect parameter's or a
   Transform property's; an animated property keeps its keyframes and gets the default as a
@@ -813,7 +744,7 @@ composition itself at any zoom.
 ### Effects & Presets
 
 The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
-the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
+the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/Visualab Effects/Presets`
 using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
 not exist yet; this action does not create it.
 Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies

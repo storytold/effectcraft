@@ -862,7 +862,7 @@ fn save_as(s: &mut Session, p: &Value) -> Result<Value> {
         "format": TEMPLATE_FORMAT,
         "version": TEMPLATE_VERSION,
         "kind": "project",
-        "generator": format!("EffectCraft {}", env!("CARGO_PKG_VERSION")),
+        "generator": format!("Visualab Effects {}", env!("CARGO_PKG_VERSION")),
         "name": name,
         "description": str_p(p, "description").unwrap_or_default(),
         "category": str_p(p, "category").filter(|c| !c.is_empty()).unwrap_or("My Templates"),

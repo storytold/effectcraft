@@ -4,7 +4,7 @@
 //! - **Photoshop Layers** writes a layered PSD (crates/psd's writer): one pixel layer per comp
 //!   layer, each rendered in isolation (solo, Normal mode, 100% opacity) and cropped to its
 //!   pixels, carrying the layer's blend mode and opacity, plus the flattened frame as the merged
-//!   image. Photoshop (and EffectCraft's PSD import) rebuild the frame from the layers.
+//!   image. Photoshop (and Visualab Effects's PSD import) rebuild the frame from the layers.
 //! - **ProEXR** writes one multi-layer OpenEXR (half-float-free, 32-bit float, linear light,
 //!   premultiplied): the composite as `R`, `G`, `B`, `A` plus one `<layer name>.R/G/B/A` channel
 //!   set per layer (the layer-prefixed channel convention multi-layer EXR readers use).
@@ -195,7 +195,6 @@ pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
 
 fn frame_args(s: &Session, p: &Value, cmd: &str, ext: &str) -> Result<(String, ItemId, Tick, f64)> {
     let path = str_p(p, "path").ok_or_else(|| bad(cmd, format!("missing `path` (.{ext})")))?.to_string();
-    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let t = f_p(p, "time").map(Tick::from_seconds_f64).unwrap_or(s.time());
     let scale = f_p(p, "scale").unwrap_or(1.0).clamp(0.01, 4.0);
@@ -205,7 +204,7 @@ fn frame_args(s: &Session, p: &Value, cmd: &str, ext: &str) -> Result<(String, I
 fn save_psd(s: &mut Session, p: &Value) -> Result<Value> {
     let (path, cid, t, scale) = frame_args(s, p, "comp.saveFrameAsPsd", "psd")?;
     let (bytes, n, w, h) = layered_psd(s, cid, t, scale)?;
-    s.write_output(&path, &bytes)?;
+    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Saved {n} layers to {path}"));
     Ok(json!({"path": path, "layers": n, "width": w, "height": h, "time": t.seconds()}))
 }
@@ -213,7 +212,7 @@ fn save_psd(s: &mut Session, p: &Value) -> Result<Value> {
 fn save_exr(s: &mut Session, p: &Value) -> Result<Value> {
     let (path, cid, t, scale) = frame_args(s, p, "comp.saveFrameAsExr", "exr")?;
     let (bytes, channels, w, h) = layered_exr(s, cid, t, scale)?;
-    s.write_output(&path, &bytes)?;
+    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Saved a multi-layer EXR to {path}"));
     Ok(json!({"path": path, "channels": channels, "width": w, "height": h, "time": t.seconds()}))
 }

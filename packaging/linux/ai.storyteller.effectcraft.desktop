@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=EffectCraft
+Name=Visualab Effects
 GenericName=Motion Graphics Editor
 Comment=Motion graphics and visual effects compositor
 Exec=effectcraft %F

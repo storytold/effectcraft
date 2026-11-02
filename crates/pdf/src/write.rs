@@ -1,4 +1,4 @@
-//! A minimal PDF writer for generating test files (EffectCraft does not export PDF).
+//! A minimal PDF writer for generating test files (Visualab Effects does not export PDF).
 
 /// Numbered objects `(number, dictionary, stream data)` (streams Flate-compressed unless the
 /// dictionary names its own `/Filter`, in which case the data is written as given), a

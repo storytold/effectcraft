@@ -1,6 +1,6 @@
 # effectcraft-opusenc
 
-Clean-room, pure-Rust Opus encoder for EffectCraft's WebM export audio (layer L0, `std` only,
+Clean-room, pure-Rust Opus encoder for Visualab Effects's WebM export audio (layer L0, `std` only,
 no `unsafe`, builds for `wasm32-unknown-unknown`).
 
 All three Opus modes, 20 ms packets (one frame per packet), 48 kHz float input, mono or stereo:

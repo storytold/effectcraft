@@ -1,4 +1,4 @@
-//! File ▸ Import ▸ EffectCraft Project: merge another `.ecproj` (or its XML copy) into the
+//! File ▸ Import ▸ Visualab Effects Project: merge another `.ecproj` (or its XML copy) into the
 //! current project, as After Effects imports an `.aep` into the open project. The imported
 //! items land in a folder named after the file; every id is shifted past the current project's
 //! so nothing collides, and the whole import is one undo step.
@@ -12,7 +12,7 @@ use crate::{EngineError, Result, Session, cmd};
 
 const C: &str = "file.importProject";
 
-/// Whether `path` names a project EffectCraft imports as a project (not as footage).
+/// Whether `path` names a project Visualab Effects imports as a project (not as footage).
 pub(crate) fn is_project_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.ends_with(".ecproj") || lower.ends_with(".ecprojx")
@@ -23,7 +23,7 @@ fn read_project(s: &Session, path: &str) -> Result<(Project, Option<String>)> {
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
     let text = String::from_utf8(bytes).map_err(|_| bad(C, format!("{path} is not a text project file")))?;
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
-    let project = Project::from_json(&text).map_err(|e| bad(C, format!("{path} is not a project EffectCraft can open: {e}")))?;
+    let project = Project::from_json(&text).map_err(|e| bad(C, format!("{path} is not a project Visualab Effects can open: {e}")))?;
     Ok((project, effectcraft_project::saved_by(&text)))
 }
 
@@ -97,7 +97,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let primary = if let [one] = roots.as_slice() { Some(one.0) } else { None };
     let mut warnings = vec![];
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
-        warnings.push(format!("saved by EffectCraft {v}, newer than this version ({})", effectcraft_project::APP_VERSION));
+        warnings.push(format!("saved by Visualab Effects {v}, newer than this version ({})", effectcraft_project::APP_VERSION));
     }
     if !missing.is_empty() {
         warnings.push(format!("{} footage file{} missing", missing.len(), if missing.len() == 1 { " is" } else { "s are" }));
@@ -117,7 +117,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
         "file.importProject",
-        "EffectCraft Project...",
+        "Visualab Effects Project...",
         ["File", "Import"],
         None,
         "{path (.ecproj or .ecprojx)} — merges the project into a folder named after the file; returns {folder, items, comps, rootComps, primaryComp (the only root comp, else null), missingMedia, warnings}",

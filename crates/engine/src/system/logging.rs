@@ -5,12 +5,12 @@
 //! terminal, so that file is what a bug report can attach. The last few hundred warnings and
 //! errors are also kept in memory for the System Compatibility Report.
 //!
-//! Levels by default ([`DEFAULT_FILTER`]): `info` for EffectCraft's own crates, `warn` for
+//! Levels by default ([`DEFAULT_FILTER`]): `info` for Visualab Effects's own crates, `warn` for
 //! everything else (wgpu and naga are chatty). `RUST_LOG` replaces that (a level such as `debug`, or per target:
 //! `effectcraft=debug,wgpu=warn`).
 //!
 //! Help ▸ Enable Logging ([`set_enabled`], the `help.enableLogging` command) additionally appends
-//! every EffectCraft record to `Logs/EffectCraft Log.txt`, across launches.
+//! every Visualab Effects record to `Logs/Visualab Effects Log.txt`, across launches.
 //!
 //! Frontends call [`install`] (or [`install_with`] for another default, as the CLI does with `warn`)
 //! once at startup and the desktop app [`attach_session_log`] once the settings folder is known; records logged before that are kept (up to [`MAX_PENDING`]) and
@@ -196,7 +196,7 @@ pub fn log_dir(config_dir: Option<&Path>) -> PathBuf {
 
 /// Help ▸ Enable Logging's file inside `config_dir` (the settings folder), or the temporary folder.
 pub fn log_path(config_dir: Option<&Path>) -> PathBuf {
-    log_dir(config_dir).join("EffectCraft Log.txt")
+    log_dir(config_dir).join("Visualab Effects Log.txt")
 }
 
 fn numbered(dir: &Path, n: usize) -> PathBuf {
@@ -357,7 +357,7 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
-    /// Without `RUST_LOG`, EffectCraft's own info records and everyone's warnings are shown.
+    /// Without `RUST_LOG`, Visualab Effects's own info records and everyone's warnings are shown.
     #[test]
     fn the_default_filter_shows_effectcraft_info_and_other_crates_warnings() {
         let f = parse_filter(DEFAULT_FILTER);

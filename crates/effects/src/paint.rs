@@ -118,7 +118,7 @@ pub struct BrushTip {
     pub spacing: f64,
 }
 
-/// The Brushes panel's preset tips: original EffectCraft data (a size ladder of hard and soft
+/// The Brushes panel's preset tips: original Visualab Effects data (a size ladder of hard and soft
 /// round tips plus a few flat calligraphic tips).
 pub const BRUSH_PRESETS: &[BrushTip] = &[
     BrushTip { name: "Hard Round 1 px", diameter: 1.0, angle: 0.0, roundness: 100.0, hardness: 100.0, spacing: 25.0 },

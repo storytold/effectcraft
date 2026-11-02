@@ -1,6 +1,6 @@
 # effectcraft-av1enc
 
-Clean-room, pure-Rust AV1 encoder for EffectCraft's MP4 / WebM export (layer L0, `std` only,
+Clean-room, pure-Rust AV1 encoder for Visualab Effects's MP4 / WebM export (layer L0, `std` only,
 no `unsafe`, builds for `wasm32-unknown-unknown`).
 
 Output is decoded **bit-exactly** by libdav1d (`ffmpeg -c:v libdav1d`, checked in

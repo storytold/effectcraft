@@ -1,8 +1,8 @@
 {
-  description = "EffectCraft — motion graphics and visual effects, a free alternative to After Effects, in pure Rust";
+  description = "Visualab Effects — motion graphics and visual effects, a free alternative to After Effects, in pure Rust";
 
   inputs = {
-    # EffectCraft needs edition 2024 and rustc ≥ 1.95, so the flake tracks unstable. Consumers on a
+    # Visualab Effects needs edition 2024 and rustc ≥ 1.95, so the flake tracks unstable. Consumers on a
     # release channel can retarget it: `inputs.effectcraft.inputs.nixpkgs.follows = "nixpkgs";`
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
