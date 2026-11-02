@@ -151,7 +151,9 @@ pub fn build_now(app: &EffectcraftApp, ctx: &egui::Context) -> NativeMenu {
         }
     }
     let mut menu = build(app);
-    if text_field_window(ctx).is_some() {
+    // On macOS a file dialog takes the keys over the field behind it (#1986).
+    let dialog = cfg!(target_os = "macos") && app.file_dialogs.count() > 0;
+    if text_field_window(ctx).is_some() && !dialog {
         enable(app, &mut menu.menus);
     }
     menu
@@ -380,6 +382,31 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     h.finish()
 }
 
+/// Keeps the native menu in step with native file dialogs within a frame. The menu syncs at the
+/// frame's start, but a dialog opened by the frame's commands is counted only after that: sync
+/// again then, so its Edit items step aside before the next key (#1986). The second sync runs
+/// only when the dialog count changed.
+#[derive(Default)]
+pub struct MenuSync {
+    /// Native file dialogs on screen at the last sync.
+    dialogs: usize,
+}
+
+impl MenuSync {
+    /// The frame's sync, before its commands run.
+    pub fn before(&mut self, app: &mut EffectcraftApp, update: impl FnOnce(&mut EffectcraftApp)) {
+        update(app);
+        self.dialogs = app.file_dialogs.count();
+    }
+
+    /// After the frame's commands: sync again if a file dialog opened or closed meanwhile.
+    pub fn after(&mut self, app: &mut EffectcraftApp, update: impl FnOnce(&mut EffectcraftApp)) {
+        if app.file_dialogs.count() != self.dialogs {
+            self.before(app, update);
+        }
+    }
+}
+
 /// The window whose text field has the keyboard: a floating panel's own OS window, or the main
 /// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
 /// egui text field).
@@ -491,6 +518,32 @@ mod tests {
         let mut s = effectcraft_engine::Session::default();
         s.execute("file.openDemoProject", json!({})).unwrap();
         EffectcraftApp::new(s)
+    }
+
+    /// A file dialog opened by the frame's commands syncs the menu a second time (#1986); a
+    /// frame without one syncs it once.
+    #[test]
+    fn menu_syncs_again_when_a_frame_opens_a_file_dialog() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let pending: std::sync::Arc<std::sync::Mutex<Vec<crate::DialogDone>>> = Default::default();
+        let queue = pending.clone();
+        app.hooks.file_dialog_async = Some(Box::new(move |_, done| queue.lock().unwrap().push(done)));
+        let mut sync = MenuSync::default();
+        // A fake menu: records the dialog count each update sees.
+        let mut updates = Vec::new();
+        let mut frame = |app: &mut EffectcraftApp, command: Option<&str>| {
+            sync.before(app, |a| updates.push(a.file_dialogs.count()));
+            if let Some(id) = command {
+                crate::menus::invoke(app, &ctx, id, json!({})).unwrap();
+            }
+            sync.after(app, |a| updates.push(a.file_dialogs.count()));
+        };
+        frame(&mut app, None);
+        frame(&mut app, Some("file.importMultiple"));
+        frame(&mut app, None);
+        assert_eq!(updates, [0, 0, 1, 1], "no dialog: one update; dialog opened: a second one that sees it");
+        assert_eq!(pending.lock().unwrap().len(), 1, "a dialog was shown");
     }
 
     #[test]
@@ -822,6 +875,24 @@ mod tests {
         assert!(edits_text("edit.copy") && edits_text("edit.paste"));
         assert!(!edits_text("layer.newNull"));
     }
+    /// #1986: a file dialog opened while a text field has the keyboard takes Cmd+A: the field
+    /// behind it does not keep the Edit items enabled.
+    #[test]
+    fn a_file_dialog_takes_the_edit_keys_from_a_focused_text_field() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| ui.text_edit_singleline(&mut text).request_focus());
+            out.textures_delta.clear();
+        }
+        let select_all = |m: &NativeMenu| m.items().into_iter().any(|i| i.command == "edit.selectAll" && i.enabled);
+        assert!(select_all(&build_now(&app, &ctx)));
+        app.hooks.file_dialog_async = Some(Box::new(|_, _| {}));
+        crate::menus::invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        assert_eq!(select_all(&build_now(&app, &ctx)), !cfg!(target_os = "macos"));
+    }
+
     /// #2459: while a text field has the keyboard the Edit menu's Undo and Redo act on the field and
     /// read plain "Undo" / "Redo"; the project history labels come back once focus leaves.
     #[test]
