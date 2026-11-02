@@ -13,7 +13,9 @@ use std::sync::Arc;
 use effectcraft_color::Label;
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, LayerId, LayerSource, build};
 use effectcraft_raster::Image;
-use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, Frames, HoleMask, SpillHandle, dilate};
+use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, Frames, HoleMask, dilate};
+#[cfg(not(target_arch = "wasm32"))]
+use effectcraft_raster::inpaint::SpillHandle;
 use effectcraft_render::{Accelerator, EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -174,9 +176,9 @@ pub struct FillPlan {
 /// copy (16) until it finishes (#1789): when even that is more than `available`, the error to
 /// report up front, instead of running out of memory partway through.
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
-    // After phases 2-4 the fill holds only the bit-packed hole masks (1 bit/pixel) plus a
-    // handful of working frames, so the per-pixel cost is ~1/4 of a byte.
-    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)) / 4;
+    // The fill still allocates a full-range `propagated` buffer (~17 bytes/pixel/frame)
+    // plus the input frames while reading, so guard against that peak.
+    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(17);
     (need > available).then(|| {
         let gb = |b: u64| b as f64 / 1e9;
         format!(
@@ -230,13 +232,18 @@ pub(crate) async fn run_plan(
         effectcraft_project::BitDepth::Bpc8 => 8,
         _ => 32,
     };
-    let spill_path = std::env::temp_dir().join(format!("effectcraft-fill-{}.bin", crate::offload::next_id()));
-    let spill = SpillHandle::create(spill_path, w as usize, h as usize, times.len(), bpc).map_err(|e| e.to_string())?;
     let mut holes = Vec::with_capacity(times.len());
+    #[cfg(target_arch = "wasm32")]
+    let mut frames = Vec::with_capacity(times.len());
+    #[cfg(not(target_arch = "wasm32"))]
+    let spill = SpillHandle::create(w as usize, h as usize, times.len(), bpc).map_err(|e| e.to_string())?;
     for (k, t) in times.iter().enumerate() {
         let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(*t), layer, w, h)).await;
         holes.push(HoleMask::from_vec(&dilate(&hole, w as usize, h as usize, plan.expand)));
-        spill.write_frame(k, &img);
+        #[cfg(target_arch = "wasm32")]
+        frames.push(img);
+        #[cfg(not(target_arch = "wasm32"))]
+        spill.write_frame(k, &img)?;
         if !progress(k as u64 + 1, n * 3) {
             return Err(crate::render_queue::CANCELLED.into());
         }
@@ -256,23 +263,41 @@ pub(crate) async fn run_plan(
     }
     let opts = FillOpts { method: FillMethod::from_name(&plan.method).unwrap_or_default(), lighting: plan.lighting, ..Default::default() };
     message(filling_status(fill.is_some(), opts.method));
-    let input = FillInput { frames: Frames::Spilled(spill), holes, references };
+    #[cfg(target_arch = "wasm32")]
+    let input_frames = Frames::Memory(frames);
+    #[cfg(not(target_arch = "wasm32"))]
+    let input_frames = Frames::Spilled(spill);
+    let input = FillInput { frames: input_frames, holes, references };
     let cpu = effectcraft_raster::inpaint::CpuFill;
     let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
     let progress = std::rc::Rc::new(std::cell::RefCell::new(progress));
     let dir = &plan.dir;
     let paths: Vec<String> = (0..n as usize).map(|k| std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
     let mut paths_out = Vec::with_capacity(n as usize);
+    let mut sink_error: Option<String> = None;
     let mut sink = |idx: usize, img: &Image| -> std::result::Result<(), String> {
-        services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
-        paths_out.push(paths[idx].clone());
-        if !(progress.borrow_mut())(2 * n + idx as u64 + 1, n * 3) {
-            return Err(crate::render_queue::CANCELLED.to_string());
-        }
-        Ok(())
+        let r = (|| -> std::result::Result<(), String> {
+            services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
+            paths_out.push(paths[idx].clone());
+            if !(progress.borrow_mut())(2 * n + idx as u64 + 1, n * 3) {
+                return Err(crate::render_queue::CANCELLED.to_string());
+            }
+            Ok(())
+        })();
+        if let Err(e) = &r
+            && sink_error.is_none() {
+                sink_error = Some(e.clone());
+            }
+        r
     };
-    let produced = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| (progress.borrow_mut())(n + (d as u64 * n / t.max(1) as u64), n * 3), Some(&mut sink))
-        .ok_or(crate::render_queue::CANCELLED)?;
+    let produced = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| (progress.borrow_mut())(n + (d as u64 * n / t.max(1) as u64), n * 3), Some(&mut sink));
+    if produced.is_none() {
+        if let Some(e) = sink_error.take() {
+            return Err(e);
+        }
+        return Err(crate::render_queue::CANCELLED.into());
+    }
+    let produced = produced.unwrap_or_default();
     // Non-streaming fallback (tests): write any retained images.
     if !produced.is_empty() {
         for (k, img) in produced.iter().enumerate() {

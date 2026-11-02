@@ -648,7 +648,7 @@ impl HoleMask {
 }
 
 /// Where a fill's input frames live. `Memory` keeps them in RAM (tests, small ranges);
-/// `Spilled` stores them on disk and memory-maps them, so a whole range costs ~0 RAM.
+/// `Spilled` stores them on disk and reads them on demand, so a whole range costs ~0 RAM.
 #[derive(Clone)]
 pub enum Frames {
     Memory(Vec<Image>),
@@ -674,27 +674,49 @@ impl Frames {
 }
 
 /// A spill file holding `n` frames of `w x h` pixels at `bpc` bits per channel.
-/// Frames are read back on demand (no memory mapping, to stay `unsafe`-free).
+/// Frames are read back on demand. The path is shared (reference-counted) so clones
+/// do not delete the file prematurely (#2570 review).
 #[derive(Clone)]
 pub struct SpillHandle {
-    pub path: std::path::PathBuf,
+    inner: std::sync::Arc<SpillInner>,
     pub w: usize,
     pub h: usize,
     pub n: usize,
     pub bpc: u8,
 }
 
+struct SpillInner {
+    path: std::path::PathBuf,
+    cache: std::sync::Mutex<Vec<(usize, Image)>>,
+}
+
+impl Drop for SpillInner {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl SpillHandle {
+    pub fn path(&self) -> &std::path::Path {
+        &self.inner.path
+    }
+
     pub fn get(&self, k: usize) -> Image {
+        if let Ok(cache) = self.inner.cache.lock() {
+            if let Some((_, img)) = cache.iter().find(|(kk, _)| *kk == k) {
+                return img.clone();
+            }
+        }
         let px = self.w * self.h;
         let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
-        let off = k * px * bytes_per_px;
-        let len = px * bytes_per_px;
+        let off = k.saturating_mul(px).saturating_mul(bytes_per_px);
+        let len = px.saturating_mul(bytes_per_px);
         let mut buf = vec![0u8; len];
-        if let Ok(mut f) = std::fs::File::open(&self.path) {
+        if let Ok(mut f) = std::fs::File::open(self.path()) {
             use std::io::{Read, Seek, SeekFrom};
-            let _ = f.seek(SeekFrom::Start(off as u64));
-            let _ = f.read_exact(&mut buf);
+            if f.seek(SeekFrom::Start(off as u64)).is_ok() {
+                let _ = f.read_exact(&mut buf);
+            }
         }
         let mut img = Image::new(self.w as u32, self.h as u32);
         if self.bpc <= 8 {
@@ -715,29 +737,22 @@ impl SpillHandle {
                 }
             }
         }
+        if let Ok(mut cache) = self.inner.cache.lock() {
+            if cache.len() >= 4 {
+                cache.remove(0);
+            }
+            cache.push((k, img.clone()));
+        }
         img
     }
 
-    pub fn create(path: std::path::PathBuf, w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
-        let bytes_per_px: usize = if bpc <= 8 { 4 } else { 16 };
-        let total = n * w * h * bytes_per_px;
-        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
-        file.set_len(total as u64)?;
-        Ok(SpillHandle { path, w, h, n, bpc })
-    }
-
-    pub fn write_frame(&self, k: usize, img: &Image) {
+    pub fn write_frame(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
         let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
         let px = self.w * self.h;
-        let off = k * px * bytes_per_px;
-        let mut file = match std::fs::OpenOptions::new().write(true).open(&self.path) {
-            Ok(f) => f,
-            Err(_) => return,
-        };
+        let off = k.checked_mul(px).and_then(|v| v.checked_mul(bytes_per_px)).ok_or("overflow")?;
+        let mut file = std::fs::OpenOptions::new().write(true).open(self.path()).map_err(|e| e.to_string())?;
         use std::io::{Seek, SeekFrom, Write};
-        if file.seek(SeekFrom::Start(off as u64)).is_err() {
-            return;
-        }
+        file.seek(SeekFrom::Start(off as u64)).map_err(|e| e.to_string())?;
         if self.bpc <= 8 {
             let mut buf = vec![0u8; px * 4];
             for (i, p) in img.data.iter().enumerate() {
@@ -746,7 +761,7 @@ impl SpillHandle {
                 buf[i * 4 + 2] = (p[2] * 255.0).round().clamp(0.0, 255.0) as u8;
                 buf[i * 4 + 3] = (p[3] * 255.0).round().clamp(0.0, 255.0) as u8;
             }
-            let _ = file.write_all(&buf);
+            file.write_all(&buf).map_err(|e| e.to_string())?;
         } else {
             let mut buf = vec![0u8; px * 16];
             for (i, p) in img.data.iter().enumerate() {
@@ -755,14 +770,20 @@ impl SpillHandle {
                     buf[base + c * 4..base + c * 4 + 4].copy_from_slice(&p[c].to_le_bytes());
                 }
             }
-            let _ = file.write_all(&buf);
+            file.write_all(&buf).map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
-}
 
-impl Drop for SpillHandle {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+    pub fn create(w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
+        let bytes_per_px: usize = if bpc <= 8 { 4 } else { 16 };
+        let total = n.checked_mul(w).and_then(|v| v.checked_mul(h)).and_then(|v| v.checked_mul(bytes_per_px)).ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, "overflow"))?;
+        let tmp = tempfile::NamedTempFile::with_prefix("effectcraft-fill-")?;
+        let path = tmp.into_temp_path().keep().map_err(|e| e.error)?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        file.set_len(total as u64)?;
+        let inner = std::sync::Arc::new(SpillInner { path, cache: std::sync::Mutex::new(Vec::new()) });
+        Ok(SpillHandle { inner, w, h, n, bpc })
     }
 }
 
@@ -784,6 +805,8 @@ struct TraceContext<'a> {
     known: &'a (dyn Fn(usize, i64, i64) -> bool + Sync),
     frames: &'a Frames,
     ref_images: &'a [Option<Image>],
+    w: usize,
+    h: usize,
     max: usize,
 }
 
@@ -798,8 +821,7 @@ struct TraceStart {
 /// Trace a point to the nearest visible frame: (sampled colour, frames travelled).
 fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usize)> {
     let n = context.frames.len();
-    let first = context.frames.get(0);
-    let (w, h) = (first.width as f64, first.height as f64);
+    let (w, h) = (context.w as f64, context.h as f64);
     let (mut px, mut py) = (start.x, start.y);
     let mut k = start.frame as i64;
     for d in 1..=context.max {
@@ -901,7 +923,9 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             let hl = input.holes[i].to_vec();
             let img = opaque_fill(backend.membrane(&f, &hl), &hl);
             if let Some(cb) = sink.as_mut() {
-                let _ = cb(i, &img);
+                if cb(i, &img).is_err() {
+                    return None;
+                }
             }
             if !streaming {
                 out.push(img);
@@ -920,11 +944,11 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     let references = std::mem::take(&mut input.references);
     let mut is_ref = vec![false; n];
     let mut ref_images: Vec<Option<Image>> = vec![None; n];
-    for (k, img) in &references {
-        if *k < n && img.width as usize == w && img.height as usize == h {
-            ref_images[*k] = Some(img.clone());
-            holes[*k] = HoleMask::zeros(w * h);
-            is_ref[*k] = true;
+    for (k, img) in references {
+        if k < n && img.width as usize == w && img.height as usize == h {
+            ref_images[k] = Some(img);
+            holes[k] = HoleMask::zeros(w * h);
+            is_ref[k] = true;
         }
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
@@ -943,7 +967,7 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     }
     // 2. Propagation (and the lighting-correction border ring).
     let known = |k: usize, x: i64, y: i64| !holes[k].get(y as usize * w + x as usize);
-    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &input.frames, ref_images: &ref_images, max: n };
+    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &input.frames, ref_images: &ref_images, w, h, max: n };
     let ring_r = 2usize;
     let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
@@ -974,6 +998,7 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             // Lighting correction: membrane of the border mismatch, added to propagated pixels.
             if o.lighting > 0.0 && !filled.is_empty() {
                 let grown = dilate(&holes[t].to_vec(), w, h, ring_r);
+                let frame_t = input.frames.get(t);
                 let mut diff = vec![[0.0f32; 4]; w * h];
                 let mut dk = vec![true; w * h];
                 for i in 0..w * h {
@@ -982,7 +1007,7 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
                     } else if grown[i]
                         && let Some(v) = sample(i)
                     {
-                        let a = input.frames.get(t).data[i];
+                        let a = frame_t.data[i];
                         diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
                     }
                 }
@@ -1007,31 +1032,50 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
         return Some(propagated.into_iter().enumerate().map(|(i, (img, _))| opaque_fill(img, &holes[i].to_vec())).collect());
     };
     // Frames before t0 are complete already.
-    for (t, slot) in out.iter_mut().enumerate().take(t0) {
-        *slot = Some(std::mem::take(&mut propagated[t].0));
+    for t in 0..t0 {
+        let img = std::mem::take(&mut propagated[t].0);
+        let prepared = opaque_fill(img.clone(), &holes[t].to_vec());
+        out[t] = Some(img);
+        if let Some(cb) = sink.as_mut() {
+            if cb(t, &prepared).is_err() {
+                return None;
+            }
+        }
+        propagated[t].1 = Vec::new();
     }
     let mut done = 2;
     out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
     if let Some(cb) = sink.as_mut()
         && let Some(img) = &out[t0] {
-            let _ = cb(t0, img);
+        let prepared = opaque_fill(img.clone(), &holes[t0].to_vec());
+        if cb(t0, &prepared).is_err() {
+            return None;
         }
+    }
     propagated[t0] = (Image::default(), Vec::new());
     done += 1;
     if !progress(done, total) {
         return None;
     }
     for t in t0 + 1..n {
-        // Taken, not cloned: each propagated frame is freed once its output exists.
-        let (img, left) = std::mem::take(&mut propagated[t]);
-        let (img, left) = (&img, &left);
-        if !left.iter().any(|b| *b) {
-            out[t] = Some(img.clone());
+        let complete = !propagated[t].1.iter().any(|b| *b);
+        if complete {
+            out[t] = Some(std::mem::take(&mut propagated[t].0));
         } else {
+            let (img, left) = &propagated[t];
             // Warp the previous result here along the backward flow (t → t − 1).
             // Frames after `t0` are filled in order, so the previous one is set.
             let Some(prev) = out[t - 1].as_ref() else {
                 out[t] = Some(backend.patch(img, left, None, o.patch, o.seed));
+                if let Some(cb) = sink.as_mut() {
+                    if let Some(i) = &out[t] {
+                        let prepared = opaque_fill(i.clone(), &holes[t].to_vec());
+                        if cb(t, &prepared).is_err() {
+                            return None;
+                        }
+                    }
+                }
+                propagated[t] = (Image::default(), Vec::new());
                 continue;
             };
             let mut warped = img.clone();
@@ -1052,8 +1096,11 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
         }
         if let Some(cb) = sink.as_mut()
             && let Some(img) = &out[t] {
-                let _ = cb(t, img);
+            let prepared = opaque_fill(img.clone(), &holes[t].to_vec());
+            if cb(t, &prepared).is_err() {
+                return None;
             }
+        }
         propagated[t] = (Image::default(), Vec::new());
         done += 1;
         if !progress(done, total) {

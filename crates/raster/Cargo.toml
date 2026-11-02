@@ -13,4 +13,4 @@ workspace = true
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
 rayon = { workspace = true }
-memmap2 = "0.9"
+tempfile = { workspace = true }

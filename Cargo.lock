@@ -1833,8 +1833,8 @@ version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
- "memmap2",
  "rayon",
+ "tempfile",
 ]
 
 [[package]]
