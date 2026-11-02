@@ -9,7 +9,7 @@
 use egui::{Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::i18n::tr;
-use crate::widgets::{open_popup, popup_is_open, pressed_outside, select_all};
+use crate::widgets::{open_on_press, popup_is_open, pressed_outside, select_all};
 
 /// A colour button for egui-laid-out rows and dialogs: a swatch that opens [`color_popup`]. Don't
 /// use egui's `color_edit_button_rgb(a)` for project colours: they read linear values, so the
@@ -21,18 +21,16 @@ pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
     let stroke = if resp.hovered() { ui.visuals().widgets.hovered.fg_stroke } else { ui.visuals().widgets.inactive.bg_stroke };
     ui.painter().rect_filled(rect, 2.0, srgb32(*c));
     ui.painter().rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
-    if resp.clicked() {
-        open_popup(ui, resp.id);
-    }
+    open_on_press(ui, &resp, resp.id);
     if color_popup(ui, resp.id, rect.left_bottom(), c) {
         resp.mark_changed();
     }
     resp
 }
 
-/// The colour picker as a popup at `pos`, bound to `c`, opened with [`open_popup`]. Returns true
-/// when the colour changed (Cancel, Escape and the original swatch change it back; the eyedropper
-/// changes it to the colour it samples).
+/// The colour picker as a popup at `pos`, bound to `c`, opened with `widgets::open_popup` or a
+/// trigger's [`open_on_press`]. Returns true when the colour changed (Cancel, Escape and the
+/// original swatch change it back; the eyedropper changes it to the colour it samples).
 pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3]) -> bool {
     if !popup_is_open(ui, id) {
         return false;

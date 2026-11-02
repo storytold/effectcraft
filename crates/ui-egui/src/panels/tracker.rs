@@ -182,9 +182,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let dd = Rect::from_min_size(pos2(field_x, y), vec2(field_w, 20.0));
     let name = source.and_then(|s| srcs.iter().find(|(l, _)| *l == s)).map(|(_, n)| n.clone()).unwrap_or_else(|| "None".into());
     let did = egui::Id::unique("tracker-source-dd");
-    if widgets::dropdown(ui, dd, &name, &t, did).clicked() {
-        widgets::open_popup(ui, did);
-    }
+    let sresp = widgets::dropdown(ui, dd, &name, &t, did);
+    widgets::open_on_press(ui, &sresp, did);
     app.auto.add("tracker.motionSource", dd, "Motion Source");
     let mut opts: Vec<String> = vec!["None".into()];
     opts.extend(srcs.iter().map(|(_, n)| n.clone()));
@@ -207,8 +206,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let dd = Rect::from_min_size(pos2(field_x, y), vec2(field_w, 20.0));
     let cname = cur.and_then(|(_, u)| trackers.iter().find(|(g, _)| *g == u)).map(|(_, n)| n.clone()).unwrap_or_else(|| "None".into());
     let did = egui::Id::unique("tracker-current-dd");
-    if widgets::dropdown(ui, dd, &cname, &t, did).clicked() && !trackers.is_empty() {
-        widgets::open_popup(ui, did);
+    let cresp = widgets::dropdown(ui, dd, &cname, &t, did);
+    if !trackers.is_empty() {
+        widgets::open_on_press(ui, &cresp, did);
     }
     app.auto.add("tracker.currentTrack", dd, "Current Track");
     let names: Vec<String> = trackers.iter().map(|(_, n)| n.clone()).collect();
@@ -238,8 +238,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let dd = Rect::from_min_size(pos2(field_x, y), vec2(field_w, 20.0));
     let kind = settings.as_ref().map(|s| s.kind).unwrap_or_default();
     let did = egui::Id::unique("tracker-type-dd");
-    if widgets::dropdown(ui, dd, if enabled { kind.label() } else { "" }, &t, did).clicked() && enabled {
-        widgets::open_popup(ui, did);
+    let tresp = widgets::dropdown(ui, dd, if enabled { kind.label() } else { "" }, &t, did);
+    if enabled {
+        widgets::open_on_press(ui, &tresp, did);
     }
     app.auto.add("tracker.trackType", dd, "Track Type");
     let kinds: Vec<String> = TrackKind::ALL.iter().map(|k| k.label().to_string()).collect();
@@ -378,9 +379,8 @@ fn mask_mode(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, p
     let method = app.session.state.mask_track_method;
     let dd = Rect::from_min_size(pos2(field_x, y), vec2(field_w, 20.0));
     let did = egui::Id::unique("tracker-mask-method-dd");
-    if widgets::dropdown(ui, dd, method.label(), &t, did).clicked() {
-        widgets::open_popup(ui, did);
-    }
+    let mresp = widgets::dropdown(ui, dd, method.label(), &t, did);
+    widgets::open_on_press(ui, &mresp, did);
     app.auto.add("tracker.mask.method", dd, "Method");
     let labels: Vec<String> = MaskMethod::ALL.iter().map(|m| m.label().to_string()).collect();
     if let Some(i) = widgets::popup_menu(ui, did, dd.left_bottom(), &labels, MaskMethod::ALL.iter().position(|m| *m == method)) {

@@ -196,6 +196,34 @@ fn the_templates_dialog_is_named() {
     assert!(defaults >= 4, "the default slots are drop-downs: {defaults}");
 }
 
+/// The panel's drop-downs open on the press and take the entry the button comes up over, as After
+/// Effects' do (#2686): Render Settings is up while the button is still down, moving onto "Draft
+/// Settings" keeps it up, and the release there applies the template and closes the list.
+#[test]
+fn a_drop_down_browses_on_the_press_and_applies_on_the_release() {
+    let mut h = harness();
+    click(&mut h, "renderQueue.item.1.twirl");
+    let settings = |h: &Harness<'_, EffectcraftApp>| h.state().session.project.render_queue[0].settings.name.clone();
+    assert_eq!(settings(&h), "Best Settings");
+    let at = center(&h, "renderQueue.item.1.renderSettings");
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    // (The accessibility tree is one pass behind the drawing.)
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Draft Settings").is_some(), "the press opens the list, while the button is still down");
+    assert_eq!(settings(&h), "Best Settings", "and chooses nothing yet");
+    let row = h.get_by_label_contains("Draft Settings").rect().center();
+    h.input_mut().events.push(Event::PointerMoved(row));
+    h.step();
+    assert!(h.query_by_label_contains("Draft Settings").is_some(), "moving onto an entry keeps the list open");
+    h.input_mut().events.push(Event::PointerButton { pos: row, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(settings(&h), "Draft Settings", "the release over the entry applies it");
+    // (The trigger echoes the chosen template now, so ask about another entry.)
+    assert!(h.query_by_label_contains("DV Settings").is_none(), "and closes the list");
+}
+
 /// A pick with the mouse leaves no widget with the keyboard focus: egui pauses the application's
 /// shortcuts (Space, Ctrl+Z) while one has it (#776's rule for the Project panel).
 #[test]
