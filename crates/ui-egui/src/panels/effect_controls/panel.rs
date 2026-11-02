@@ -3,6 +3,28 @@ use super::editors::{curves_editor, editor_height, histogram_only, levels_editor
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
 
+/// Plain Left/Right disclose selected effect headers before global layer nudges run.
+pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
+    if app.ui.focused != crate::dock::PanelKind::EffectControls || !matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight) {
+        return false;
+    }
+    let Some(comp) = app.session.active_comp() else { return false };
+    let Some(layer) = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) else { return false };
+    let Some(effects) = layer.effects() else { return false };
+    let mut handled = false;
+    for g in effects.groups() {
+        if matches!(&g.kind, GroupKind::Effect { .. }) && app.session.state.selected_props.contains(&(layer.id, g.uid)) {
+            if key == egui::Key::ArrowLeft {
+                app.ui.fx_closed.insert(g.uid);
+            } else {
+                app.ui.fx_closed.remove(&g.uid);
+            }
+            handled = true;
+        }
+    }
+    handled
+}
+
 // ---------------------------------------------------------------------------------------------
 
 /// Open the rename field on effect `uid` (Enter with the effect selected), name selected.
