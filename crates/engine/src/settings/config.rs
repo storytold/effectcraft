@@ -212,6 +212,9 @@ fn create_temp(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
 /// Write `data` to `path` atomically: write a temporary file next to it, flush it to disk, then
 /// rename it over `path`. A crash at any point leaves either the old file or the new one, never a
 /// torn file, and concurrent writers each publish a whole file of their own.
+///
+/// A symlink at `path` is followed: the file it points to is the one replaced, with the temporary
+/// file in that file's folder, and the link stays as it was (#2873). A link to nothing is an error.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     atomic_write_with(path, data, |f, data| {
         use std::io::Write;
@@ -224,6 +227,8 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// given the temporary file, already created. A failed write or rename removes the temporary
 /// file and leaves `path` untouched.
 pub fn atomic_write_with(path: &Path, data: &[u8], write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
+    let target = follow_links(path)?;
+    let path = target.as_path();
     let (mut f, tmp) = create_temp(path)?;
     let written = write(&mut f, data);
     // Closed before the rename (Windows can't rename an open file).
@@ -233,4 +238,37 @@ pub fn atomic_write_with(path: &Path, data: &[u8], write: impl FnOnce(&mut std::
         return Err(e);
     }
     Ok(())
+}
+
+/// Most symlinks followed from one path, the limit Linux uses.
+const MAX_LINKS: usize = 40;
+
+/// The file a write to `path` replaces: `path` itself, or the file at the end of the chain of
+/// symlinks that starts there. Renaming over a link would replace the link and leave the file it
+/// points to as it was. A link to nothing is an error: the save would land wherever it points, in
+/// the empty mount point of a drive that isn't plugged in, for one.
+fn follow_links(path: &Path) -> std::io::Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    let mut followed = 0;
+    loop {
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if followed == MAX_LINKS {
+                    return Err(std::io::Error::other(format!("{}: too many levels of symbolic links", path.display())));
+                }
+                followed += 1;
+                // a relative target is relative to the link's folder; `join` keeps an absolute one
+                let next = path.parent().unwrap_or(Path::new("")).join(std::fs::read_link(&path)?);
+                if matches!(std::fs::symlink_metadata(&next), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("the symbolic link points to {}, which doesn't exist", next.display()),
+                    ));
+                }
+                path = next;
+            }
+            // not a link (or nothing there yet: a new file); the write itself reports any other problem
+            _ => return Ok(path),
+        }
+    }
 }

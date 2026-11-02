@@ -367,6 +367,26 @@ fn script_file_and_eval() {
     assert!(err.contains(".jsxbin scripts are not supported: run the .jsx source") && !err.contains("SyntaxError"), "{err}");
 }
 
+/// A save through a symlink edits the file the link points to, and the link stays (#2873).
+#[cfg(unix)]
+#[test]
+fn a_save_through_a_symlink_edits_the_file_it_points_to() {
+    let real = tmp("through-link.ecproj");
+    let r = real.to_str().unwrap();
+    ok_json(&["exec", "project.newFolder", r#"{"name":"start"}"#, "--empty", "--save-as", r]);
+    let link = tmp("through-link-alias.ecproj");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink("through-link.ecproj", &link).unwrap();
+    let l = link.to_str().unwrap();
+    ok_json(&["exec", "project.newFolder", r#"{"name":"via-save"}"#, "--project", l, "--save"]);
+    ok_json(&["exec", "project.newFolder", r#"{"name":"via-save-as"}"#, "--project", l, "--save-as", l]);
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the save replaced the link");
+    let saved = std::fs::read_to_string(&real).unwrap();
+    for name in ["via-save", "via-save-as"] {
+        assert!(saved.contains(&format!("\"{name}\"")), "{r} lost {name}");
+    }
+}
+
 /// `render --out` (#300): a relative path is relative to the working directory like `--project`,
 /// not to the project's folder (which doubled a path that already named it).
 #[test]
