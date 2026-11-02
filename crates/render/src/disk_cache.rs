@@ -544,22 +544,24 @@ impl DiskCache {
         }
     }
 
-    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) {
+    /// Queue a write; `false` when it was dropped (a full queue).
+    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
             self.write_now(kind, key, &payload);
+            true
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (m, cv) = &*self.queue;
-            let Ok(mut q) = m.lock() else { return };
+            let Ok(mut q) = m.lock() else { return false };
             let full = match kind {
                 Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
                 _ => q.jobs.len() >= QUEUE_LIMIT,
             };
             if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
+                return false;
             }
             if kind == Kind::Frame {
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
@@ -568,6 +570,7 @@ impl DiskCache {
                 q.jobs.push_back(Job::Write(kind, key, payload));
             }
             cv.notify_all();
+            true
         }
     }
 
@@ -633,12 +636,13 @@ impl DiskCache {
         decode_frame(&p)
     }
 
-    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes).
-    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        if self.contains(Kind::Frame, key) || rgba.len() != width as usize * height as usize * 4 {
-            return;
+    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes). `true`
+    /// when it is on disk or queued; `false` when refused (wrong size, a full queue).
+    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) -> bool {
+        if rgba.len() != width as usize * height as usize * 4 {
+            return false;
         }
-        self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba));
+        self.contains(Kind::Frame, key) || self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba))
     }
 
     pub fn get_layer(&self, key: u128) -> Option<Buf> {
@@ -651,7 +655,7 @@ impl DiskCache {
         if self.contains(Kind::Layer, key) {
             return;
         }
-        self.enqueue(Kind::Layer, key, encode_layer(buf));
+        let _ = self.enqueue(Kind::Layer, key, encode_layer(buf));
     }
 
     /// Write a layer buffer synchronously (tests).
@@ -672,7 +676,7 @@ impl DiskCache {
         if self.contains(Kind::Matte, k) {
             return;
         }
-        self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
+        let _ = self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
     }
 
     /// Write a frame synchronously (tests).
@@ -1139,7 +1143,8 @@ mod tests {
         assert_eq!(back.img, b.img);
         assert_eq!((back.offset, back.scale), (b.offset, b.scale));
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
-        dc.put_frame(7, 20, 10, &rgba);
+        assert!(dc.put_frame(7, 20, 10, &rgba));
+        assert!(!dc.put_frame(8, 2, 2, &[0; 3]), "a wrong-size frame is refused");
         dc.flush();
         assert_eq!(dc.get_frame(7).unwrap().rgba, rgba);
         let st = dc.stats();

@@ -520,9 +520,9 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
-    /// Disk keys [`Frames::persist_missing`] queued.
+    /// Disk keys [`Frames::persist_missing`] queued (a refused write is removed, to retry).
     #[cfg(not(target_arch = "wasm32"))]
-    persisted: Mutex<HashSet<u128>>,
+    persisted: Arc<Mutex<HashSet<u128>>>,
 }
 
 impl Default for Frames {
@@ -573,7 +573,7 @@ impl Default for Frames {
             remote: None,
             remote_busy: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            persisted: Mutex::default(),
+            persisted: Arc::default(),
         }
     }
 }
@@ -921,10 +921,15 @@ impl Frames {
         if missing.is_empty() {
             return;
         }
+        let persisted = self.persisted.clone();
         let work = move || {
             for (dk, img) in missing {
                 let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-                dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba);
+                if !dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    && let Ok(mut q) = persisted.lock()
+                {
+                    q.remove(&dk);
+                }
             }
         };
         match &self.pool {
