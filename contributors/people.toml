@@ -123,3 +123,7 @@ sync_github_name = true
 real_name = "Arshiya Rahgozar"
 display_name = "Arshiya"
 sync_github_name = false
+
+[people.JonRC]
+real_name = "Jonathan Cardoso"
+display_name = "Jonathan Cardoso"

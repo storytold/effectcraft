@@ -11,6 +11,7 @@ mod ms_rounded_footage;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_audio_sample_positions;
 mod opus_roundtrip;
+mod prores_color;
 mod render_settings;
 mod roundtrip;
 mod targa_sequence;
