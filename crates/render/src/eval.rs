@@ -214,7 +214,14 @@ impl<'a> EvalCtx<'a> {
 
     /// Layer space → comp (world) space, including parents.
     pub fn world_matrix(&self, layer: &Layer) -> Mat4 {
-        let mut m = self.local_matrix_par(layer, self.par_ratio(layer));
+        self.parent_matrix(layer) * self.local_matrix_par(layer, self.par_ratio(layer))
+    }
+
+    /// The space a layer's Position and Rotation live in → comp (world) space: its parents'
+    /// transforms, without their pixel aspect, which children don't inherit (identity without a
+    /// parent).
+    pub fn parent_matrix(&self, layer: &Layer) -> Mat4 {
+        let mut m = Mat4::IDENTITY;
         let mut cur = layer.parent;
         let mut guard = 0;
         while let Some(pid) = cur {

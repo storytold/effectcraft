@@ -2890,6 +2890,155 @@ fn rotate_tool_counts_revolutions_both_ways() {
     assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one drag, one undo step");
 }
 
+/// A harness whose Box is a child of Plate (anchor 320,180) with `plate` set on Plate first, at
+/// parent-space position (200, 120). Returns the two layers' ids.
+fn rotate_child_harness(plate: serde_json::Value) -> (Harness<'static, EffectcraftApp>, u64, u64) {
+    let mut h = harness();
+    let (parent, child) = (layer_id(&h, "Plate"), layer_id(&h, "Box"));
+    let s = &mut h.state_mut().session;
+    for (path, value) in plate.as_object().unwrap() {
+        s.execute("prop.set", json!({"layer": parent, "path": format!("transform/{path}"), "value": value})).unwrap();
+    }
+    s.execute("layer.setParent", json!({"layers": [child], "parent": parent, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/position", "value": [200.0, 120.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    (h, parent, child)
+}
+
+/// Goes round comp point `pivot` with the Rotation tool, 10° clockwise a frame for 400°, starting
+/// inside the 80 px box to its right. The rotations of `layers` on each frame, from the pointer's
+/// first move on.
+fn rotate_round(h: &mut Harness<'static, EffectcraftApp>, pivot: [f32; 2], layers: &[u64]) -> Vec<Vec<f64>> {
+    let center = screen(h, pivot);
+    let r = (screen(h, [pivot[0] + 30.0, pivot[1]]) - center).x;
+    let at = |deg: f64| center + vec2((deg.to_radians().cos() as f32) * r, (deg.to_radians().sin() as f32) * r);
+    let press = center + vec2(r * 0.3, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(press));
+    h.input_mut().events.push(Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let mut seen = vec![];
+    for i in 0..=40 {
+        h.input_mut().events.push(Event::PointerMoved(at(i as f64 * 10.0)));
+        h.step();
+        let comp = h.state().session.active_comp().unwrap();
+        seen.push(layers.iter().map(|l| comp.layer(LayerId(*l)).unwrap().props.prop("transform/rotation").unwrap().value.as_f64()).collect());
+    }
+    let end = at(400.0);
+    h.input_mut().events.push(Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    seen
+}
+
+/// Layer `i` of `rotate_round` turned by `step`° on every frame once the drag was under way.
+fn assert_turns_by(seen: &[Vec<f64>], i: usize, step: f64) {
+    let v: Vec<f64> = seen.iter().map(|f| f[i]).collect();
+    let live: Vec<f64> = v.iter().copied().skip_while(|x| *x == v[0]).collect();
+    assert!(live.len() > 30, "layer {i} hardly turned: {v:?}");
+    assert!(live.windows(2).all(|w| (w[1] - w[0] - step).abs() < 0.5), "layer {i} should turn {step}° a frame: {v:?}");
+}
+
+/// #2870: a child of a moved parent turns about its anchor where it shows, not about its raw
+/// Position read as comp pixels.
+#[test]
+fn rotate_tool_turns_a_child_of_a_moved_parent_smoothly() {
+    let (mut h, _, child) = rotate_child_harness(json!({"position": [420.0, 240.0]}));
+    assert_turns_by(&rotate_round(&mut h, [300.0, 180.0], &[child]), 0, 10.0);
+}
+
+/// #2870: under a mirrored parent the value runs opposite to the pointer, so the layer on screen
+/// still follows it.
+#[test]
+fn rotate_tool_follows_the_pointer_under_a_flipped_parent() {
+    let (mut h, _, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    assert_turns_by(&rotate_round(&mut h, [440.0, 120.0], &[child]), 0, -10.0);
+}
+
+/// #2870: a parent's rotation offsets the angle but not the turn.
+#[test]
+fn rotate_tool_turns_a_child_of_a_rotated_parent_smoothly() {
+    let (mut h, _, child) = rotate_child_harness(json!({"rotation": 90.0}));
+    assert_turns_by(&rotate_round(&mut h, [380.0, 60.0], &[child]), 0, 10.0);
+}
+
+/// #2870: under a parent scaled unevenly the angle is the one in parent space, so the layer's edge
+/// stays under the pointer, which covers uneven degrees per frame.
+#[test]
+fn rotate_tool_measures_in_parent_space_under_a_stretched_parent() {
+    let (mut h, _, child) = rotate_child_harness(json!({"scale": [200.0, 100.0]}));
+    let seen = rotate_round(&mut h, [80.0, 120.0], &[child]);
+    let mut turned = 0.0_f64;
+    let mut last = 0.0_f64;
+    let want: Vec<f64> = (0..=40)
+        .map(|i| {
+            let a = (i as f64 * 10.0).to_radians();
+            let ang = a.sin().atan2(a.cos() / 2.0).to_degrees();
+            turned += (ang - last + 180.0).rem_euclid(360.0) - 180.0;
+            last = ang;
+            turned
+        })
+        .collect();
+    let end = seen.last().unwrap()[0];
+    assert!((end - want[40]).abs() < 1.0, "the layer follows the pointer in parent space: {end}, want {}", want[40]);
+    assert!(seen.windows(2).all(|w| (w[1][0] - w[0][0]).abs() < 30.0), "no jump: {seen:?}");
+}
+
+/// #2870: a parent's pixel aspect isn't inherited by its child, so it doesn't move the pivot either.
+#[test]
+fn rotate_tool_ignores_a_parents_pixel_aspect() {
+    let mut h = harness();
+    let child = layer_id(&h, "Box");
+    let s = &mut h.state_mut().session;
+    let parent = s.execute("layer.newSolid", json!({"name": "Wide", "color": "#000000", "width": 100, "height": 100, "pixelAspect": 2.0})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [parent], "switch": "video", "value": false})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [500.0, 300.0]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [child], "parent": parent, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/position", "value": [100.0, 60.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    assert_turns_by(&rotate_round(&mut h, [550.0, 310.0], &[child]), 0, 10.0);
+}
+
+/// #2870: every selected layer turns the same way on screen, whichever way its own parent is
+/// flipped: the value of a layer whose parent is mirrored relative to the grabbed one's runs opposite.
+#[test]
+fn rotate_tool_turns_a_mixed_selection_the_same_way_on_screen() {
+    let (mut h, plate, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    let s = &mut h.state_mut().session;
+    let new = |s: &mut Session, name: &str| {
+        s.execute("layer.newSolid", json!({"name": name, "color": "#00ff00", "width": 20, "height": 20})).unwrap()["layer"].as_u64().unwrap()
+    };
+    let (free, sibling) = (new(s, "Free"), new(s, "Sibling"));
+    s.execute("layer.setParent", json!({"layers": [sibling], "parent": plate, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": free, "path": "transform/rotation", "value": 15.0})).unwrap();
+    s.execute("layer.select", json!({"layers": [child, free, sibling]})).unwrap();
+    h.run_steps(2);
+    let seen = rotate_round(&mut h, [440.0, 120.0], &[child, free, sibling]);
+    assert_turns_by(&seen, 0, -10.0);
+    assert_turns_by(&seen, 1, 10.0);
+    assert_turns_by(&seen, 2, -10.0);
+}
+
+/// #2870: a 3D child turns about its anchor as the camera shows it, and with its value running
+/// opposite under a flipped parent.
+#[test]
+fn rotate_tool_turns_a_3d_child_about_its_anchor_through_the_camera() {
+    let (mut h, _, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    let s = &mut h.state_mut().session;
+    s.execute("layer.setSwitch", json!({"layers": [child], "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({"name": "Cam", "type": "oneNode"})).unwrap()["layer"].as_u64().unwrap();
+    let at = s.active_comp().unwrap().layer(LayerId(cam)).unwrap().props.prop("transform/position").unwrap().value.as_vec3();
+    // One comp-plane unit to the right moves everything in the comp plane one pixel to the left.
+    s.execute("prop.set", json!({"layer": cam, "path": "transform/position", "value": [at[0] + 100.0, at[1], at[2]]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.run_steps(2);
+    assert_turns_by(&rotate_round(&mut h, [340.0, 120.0], &[child]), 0, -10.0);
+}
+
 /// Mask vertices multi-select with the Selection tool: Shift-click adds a vertex to the
 /// selection and Shift-clicking it again removes it; a plain click collapses to one (#1004).
 #[test]

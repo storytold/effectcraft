@@ -34,15 +34,19 @@ pub(super) enum Gesture {
     },
     Rotate {
         layer: LayerId,
-        center: Pos2,
-        /// The pointer's angle about the centre on the last frame (degrees, as atan2 gives it).
+        /// Comp → the space the pointer's angle is measured in, and the pivot there (see
+        /// `rotate_frame`): comp pixels, not screen points, so zooming mid-drag doesn't turn it.
+        c2p: Mat3,
+        pivot: [f64; 2],
+        /// The pointer's angle about the pivot on the last frame (degrees, as atan2 gives it).
         last_angle: f64,
         /// The turn so far, summed frame by frame so it keeps counting past a full revolution in
         /// either direction (After Effects: 1x +0.0°, −1x −90.0°…) instead of wrapping at ±180°.
         turned: f64,
         start_rot: f64,
-        /// The other selected layers and their rotations: they turn by the same angle.
-        others: Vec<(LayerId, f64)>,
+        /// The other selected layers, their rotations and turn direction relative to this layer
+        /// (−1 when one parent is flipped): they turn by the same angle on screen.
+        others: Vec<(LayerId, f64, f64)>,
     },
     Anchor {
         layer: LayerId,
