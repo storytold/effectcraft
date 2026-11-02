@@ -146,9 +146,10 @@ fn is_layered(p: &Value) -> bool {
     imports_ext(p, &["psd", "psb"])
 }
 
-/// The import includes a PDF or Illustrator file (which may have several pages).
+/// The import includes a PDF or Illustrator file, or a VectorCraft document read through its
+/// PDF (which may have several pages).
 fn is_pdf(p: &Value) -> bool {
-    imports_ext(p, &["pdf", "ai"])
+    imports_ext(p, &["pdf", "ai", "vectorcraft"])
 }
 
 /// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After

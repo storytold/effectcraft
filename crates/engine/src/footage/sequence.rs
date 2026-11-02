@@ -97,7 +97,7 @@ fn extension(path: &str) -> String {
 
 /// Stills that can form a sequence (not layered or vector documents, which import as comps).
 fn sequenceable(path: &str) -> bool {
-    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb")
+    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb" | "vectorcraft")
 }
 
 /// The run a still belongs to: (folder, name prefix, extension); alphabetical runs ignore the
@@ -313,6 +313,17 @@ mod tests {
         assert_eq!(a, [Source::Sequence { files: strs(&["/s/a_0001.png", "/s/a_0002.png", "/s/a_0010.png", "/s/b_1.png", "/s/c.png"]), alphabetical: true }]);
         assert_eq!(a[0].name(), "a_0001.png");
         assert_eq!(sequences(&t, &strs(&["/s/a_0001.png", "/s/c.png"]), false).len(), 1);
+    }
+
+    /// VectorCraft documents list as media in the Media Browser and import from a folder, each on
+    /// its own, as SVG files do: numbered ones don't form a sequence.
+    #[test]
+    fn vectorcraft_documents_are_media_but_not_sequences() {
+        assert_eq!(crate::media_browser::kind_of("/art/Poster.VECTORCRAFT"), Some("image"));
+        let t = Table(vec!["/art/frame_0001.vectorcraft", "/art/frame_0002.vectorcraft"]);
+        let on = SequenceOptions::default();
+        assert_eq!(group(&t, &strs(&["/art/frame_0001.vectorcraft"]), on), [Source::File("/art/frame_0001.vectorcraft".into())]);
+        assert_eq!(group(&t, &strs(&["/art"]), on), [Source::File("/art/frame_0001.vectorcraft".into()), Source::File("/art/frame_0002.vectorcraft".into())]);
     }
 
     /// #431: `file.import` brings picked or dropped numbered stills in as stills; only a folder or
