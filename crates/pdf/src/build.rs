@@ -3,6 +3,10 @@
 
 use effectcraft_svg::{Affine, BezPath, FillRule, Geom, Group, Node, Paint, Shape, Stroke};
 
+/// The most elements a path being built holds: an operator that would add more stops the
+/// PostScript program, or the PDF content stream.
+pub(crate) const MAX_PATH: usize = 1 << 20;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Plain,

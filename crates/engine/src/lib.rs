@@ -15,6 +15,7 @@ pub mod camera_track;
 pub mod commands;
 pub mod config;
 pub mod demo;
+pub mod doc_path;
 pub mod footage_check;
 pub mod footage_reload;
 pub mod guard;
@@ -344,6 +345,11 @@ fn one_view() -> u8 {
     1
 }
 
+/// `t` as a current time of `comp`: a frame within its duration.
+fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {
+    comp.frame_rate.snap_nearest(t.min(comp.duration - comp.frame_duration()).max(Tick::ZERO))
+}
+
 /// What Copy with Property Links / Copy Expression Only put on the clipboard.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkClip {
@@ -508,6 +514,8 @@ pub struct Session {
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
+    /// Footage paths that came from a document, with that document ([`doc_path`]).
+    pub stored_paths: doc_path::StoredPaths,
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
@@ -608,6 +616,7 @@ impl Default for Session {
             next_task_id: 1,
             learn: None,
             check_footage_on_open: false,
+            stored_paths: Default::default(),
             footage_stamps: Default::default(),
             footage_scan: None,
             script_calls: ScriptCalls::default(),
@@ -860,11 +869,7 @@ impl Session {
 
     pub fn set_time(&mut self, t: Tick) {
         if let Some(c) = self.state.active_comp {
-            let comp = self.project.comp(c);
-            let t = match comp {
-                Some(comp) => comp.frame_rate.snap_nearest(t.clamp(Tick::ZERO, comp.duration - comp.frame_duration())),
-                None => t,
-            };
+            let t = self.project.comp(c).map_or(t, |comp| comp_frame_at(comp, t));
             self.state.times.insert(c, t);
             if self.prefs.general.sync_time_related_items {
                 self.sync_related_times(c, t);
@@ -983,15 +988,24 @@ impl Session {
         self.events.push(Event::OpenComp(id));
     }
 
-    /// The open compositions, as a project file records them ([`effectcraft_project::SavedView`]).
+    /// The open compositions and their current times, as a project file records them
+    /// ([`effectcraft_project::SavedView`]).
     pub fn saved_view(&self) -> effectcraft_project::SavedView {
-        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone() }
+        let comp_times = self.state.times.iter().filter(|(id, _)| self.project.comp(**id).is_some()).map(|(id, t)| (*id, *t)).collect();
+        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone(), comp_times }
     }
 
-    /// Reopen the compositions a project file was saved with (#748). Ids that no longer name a
-    /// comp are skipped; with none left the project stays on the comp [`Session::replace_project`]
-    /// opened (its first), as files from before the view was saved do.
+    /// Reopen the compositions a project file was saved with (#748), each at its saved current
+    /// time (#1714). Ids that no longer name a comp are skipped; with none left the project stays
+    /// on the comp [`Session::replace_project`] opened (its first), as files from before the view
+    /// was saved do.
     pub fn restore_view(&mut self, view: &effectcraft_project::SavedView) {
+        for (id, t) in &view.comp_times {
+            if let Some(comp) = self.project.comp(*id) {
+                let t = comp_frame_at(comp, *t);
+                self.state.times.insert(*id, t);
+            }
+        }
         let mut open: Vec<ItemId> = Vec::new();
         for id in view.open_comps.iter().copied().filter(|id| self.project.comp(*id).is_some()) {
             if !open.contains(&id) {
@@ -1128,6 +1142,7 @@ impl Session {
             job.wait();
         }
         self.render_job = None;
+        self.stored_paths = Default::default();
         self.stop_track();
         self.track_job = None;
         self.stop_mask_track();
@@ -1226,6 +1241,8 @@ mod tests_camera_track;
 mod tests_codec_options;
 #[cfg(test)]
 mod tests_color_view;
+#[cfg(test)]
+mod tests_delete_keys;
 #[cfg(test)]
 mod tests_disk_cache;
 #[cfg(test)]

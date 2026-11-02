@@ -1,8 +1,8 @@
 //! Dropping onto the Composition viewer: footage, comps and solids from the
 //! Project panel and files from the Media Browser become layers centred where they are dropped
-//! (#85), and an effect from Effects & Presets goes on the layer under the pointer, outlined
-//! while it is dragged (#88). Agents do the same with `layer.addItem {position}`,
-//! `mediaBrowser.import {position}` and `effect.apply {layers}`.
+//! (#85), and an effect or animation preset from Effects & Presets goes on the layer under the
+//! pointer, outlined while it is dragged (#88). Agents do the same with `layer.addItem {position}`,
+//! `mediaBrowser.import {position}`, `effect.apply {layers}` and the preset commands.
 
 use effectcraft_engine::project::{ItemId, ItemKind};
 use effectcraft_engine::render::EvalCtx;
@@ -33,6 +33,15 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Pain
             })
             .into_iter()
             .collect(),
+        DragPayload::Preset { preset, .. } => layer_at(ectx, at)
+            .map(|l| {
+                if let Some((_, q, _)) = layer_quad(ectx, l) {
+                    painter.add(egui::Shape::closed_line(q.iter().map(|c| map.to_screen(*c)).collect(), stroke));
+                }
+                preset.apply_to(l.id.0)
+            })
+            .into_iter()
+            .collect(),
         DragPayload::Item(item) => {
             // The layer's frame, centred on the pointer.
             if let Some([w, h]) = app.session.project.item(ItemId(*item)).and_then(|it| frame_size(&it.kind, ectx.comp.pixel_aspect)) {
@@ -45,7 +54,9 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Pain
         DragPayload::Files(paths) => vec![("mediaBrowser.import", json!({"paths": paths, "addToComp": true, "position": at}))],
         DragPayload::Property { .. } => vec![],
     };
-    if actions.first().is_some_and(|(id, _)| *id != "effect.apply") {
+    // Layer drops outline the target layer; the others outline the whole viewer.
+    let layer_drop = matches!(payload.as_ref(), DragPayload::Effect(_) | DragPayload::Preset { .. });
+    if !layer_drop && !actions.is_empty() {
         painter.rect_stroke(map.area, 0.0, stroke, StrokeKind::Inside);
     }
     if ctx.input(|i| i.pointer.any_released()) {

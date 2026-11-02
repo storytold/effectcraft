@@ -14,7 +14,7 @@ use std::rc::Rc;
 use effectcraft_svg::{Affine, BezPath, Cap, FillRule, Join, Paint, Stroke};
 use kurbo::{PathEl, Point};
 
-use crate::build::Builder;
+use crate::build::{Builder, MAX_PATH};
 use crate::font::Font;
 use crate::object::{ascii85, is_white, parse_num};
 
@@ -441,7 +441,14 @@ impl Interp {
                                 break;
                             }
                         }
-                        other => self.push(other.clone()),
+                        // Other items count against the budget as names do.
+                        other => {
+                            r = self.spend(1);
+                            if r.is_err() {
+                                break;
+                            }
+                            self.push(other.clone());
+                        }
                     }
                 }
                 self.calls -= 1;
@@ -456,11 +463,7 @@ impl Interp {
     }
 
     fn exec_name(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
-        if self.budget == 0 {
-            self.b.skip("PostScript (operation limit)");
-            return Err(Flow::Quit);
-        }
-        self.budget -= 1;
+        self.spend(1)?;
         if let Some(v) = self.lookup(n) {
             return match v {
                 V::Proc(_) => self.exec_obj(v, src),
@@ -473,6 +476,21 @@ impl Interp {
         self.builtin(n, src)
     }
 
+    /// Count `n` operations against the budget, and stop the program when fewer are left. An
+    /// operator that makes, reads or copies path elements counts each one as an operation.
+    fn spend(&mut self, n: usize) -> Result<(), Flow> {
+        match self.budget.checked_sub(n) {
+            Some(left) => {
+                self.budget = left;
+                Ok(())
+            }
+            None => {
+                self.b.skip("PostScript (operation limit)");
+                Err(Flow::Quit)
+            }
+        }
+    }
+
     fn device_scale(&self) -> f64 {
         self.gs.ctm.determinant().abs().sqrt()
     }
@@ -483,13 +501,34 @@ impl Interp {
         Point::new(x, y)
     }
 
-    fn move_to(&mut self, p: Point) {
+    /// Stop the program when a path of `len` elements would be longer than [`MAX_PATH`].
+    fn path_fits(&mut self, len: usize) -> Result<(), Flow> {
+        if len <= MAX_PATH {
+            return Ok(());
+        }
+        self.b.skip("PostScript (path limit)");
+        Err(Flow::Quit)
+    }
+
+    /// [`Self::path_fits`] for the current path with `n` more elements.
+    fn room(&mut self, n: usize) -> Result<(), Flow> {
+        self.path_fits(self.gs.path.elements().len().saturating_add(n))
+    }
+
+    fn move_to(&mut self, p: Point) -> Result<(), Flow> {
+        // A moveto right after a moveto replaces it (PostScript Language Reference §8.2, `moveto`).
+        if matches!(self.gs.path.elements().last(), Some(PathEl::MoveTo(_))) {
+            self.gs.path.pop();
+        }
+        self.room(1)?;
         let q = self.gs.ctm * p;
         self.gs.path.move_to(q);
         self.gs.cur = Some(q);
         self.gs.start = Some(q);
+        Ok(())
     }
-    fn line_to(&mut self, p: Point) {
+    fn line_to(&mut self, p: Point) -> Result<(), Flow> {
+        self.room(1 + usize::from(self.gs.cur.is_none()))?;
         let q = self.gs.ctm * p;
         if self.gs.cur.is_none() {
             self.gs.path.move_to(q);
@@ -497,20 +536,23 @@ impl Interp {
         }
         self.gs.path.line_to(q);
         self.gs.cur = Some(q);
+        Ok(())
     }
-    fn curve_to(&mut self, a: Point, b: Point, c: Point) {
+    fn curve_to(&mut self, a: Point, b: Point, c: Point) -> Result<(), Flow> {
+        self.room(1 + usize::from(self.gs.cur.is_none()))?;
         let m = self.gs.ctm;
         if self.gs.cur.is_none() {
             self.gs.path.move_to(m * a);
         }
         self.gs.path.curve_to(m * a, m * b, m * c);
         self.gs.cur = Some(m * c);
+        Ok(())
     }
     fn current_user(&self) -> Point {
         self.gs.ctm.inverse() * self.gs.cur.unwrap_or_default()
     }
 
-    fn arc(&mut self, neg: bool) {
+    fn arc(&mut self, neg: bool) -> Result<(), Flow> {
         let a2 = self.popn();
         let a1 = self.popn();
         let r = self.popn();
@@ -540,16 +582,23 @@ impl Interp {
         let (a1, sweep) = ((a1 % 360.0).to_radians(), sweep.to_radians());
         let start = Point::new(c.x + r * a1.cos(), c.y + r * a1.sin());
         if self.gs.cur.is_some() {
-            self.line_to(start);
+            self.line_to(start)?;
         } else {
-            self.move_to(start);
+            self.move_to(start)?;
         }
         let arc = kurbo::Arc::new(c, (r, r), a1, sweep, 0.0);
         let m = self.gs.ctm;
-        arc.to_cubic_beziers(0.1, |p1, p2, p3| {
+        // kurbo divides an arc into more curves the larger the radius (about 3.7 × 10^49 for a
+        // quarter turn at a radius of 10^300, more than a usize can count), so each one counts
+        // against the budget and the path limit.
+        let mut curves = arc.append_iter(0.1);
+        while let Some(PathEl::CurveTo(p1, p2, p3)) = curves.next() {
+            self.room(1)?;
+            self.spend(1)?;
             self.gs.path.curve_to(m * p1, m * p2, m * p3);
             self.gs.cur = Some(m * p3);
-        });
+        }
+        Ok(())
     }
 
     fn paint(&mut self, fill: Option<FillRule>, stroke: bool) {
@@ -569,11 +618,16 @@ impl Interp {
         self.b.fill_stroke(path, Affine::IDENTITY, fill.map(|r| (Paint::Color(self.gs.color), 1.0, r)), st);
     }
 
-    fn rect_path(&mut self) -> Vec<BezPath> {
+    fn rect_path(&mut self) -> Result<Vec<BezPath>, Flow> {
         // x y w h, or an array / string of numbers.
         let top = self.pop();
         let nums: Vec<f64> = match &top {
-            V::Array(_) | V::Proc(_) => top.items().unwrap_or_default().iter().filter_map(V::num).collect(),
+            V::Array(_) | V::Proc(_) => {
+                let items = top.items().unwrap_or_default();
+                // An array's rectangles count against the budget, five path elements each.
+                self.spend(items.len() / 4 * 5)?;
+                items.iter().filter_map(V::num).collect()
+            }
             V::Num(h) => {
                 let w = self.popn();
                 let y = self.popn();
@@ -582,8 +636,10 @@ impl Interp {
             }
             _ => vec![],
         };
+        self.path_fits(nums.len() / 4 * 5)?;
         let m = self.gs.ctm;
-        nums.as_chunks::<4>()
+        Ok(nums
+            .as_chunks::<4>()
             .0
             .iter()
             .map(|r| {
@@ -595,7 +651,7 @@ impl Interp {
                 p.close_path();
                 p
             })
-            .collect()
+            .collect())
     }
 
     fn grestore(&mut self) {
@@ -799,10 +855,12 @@ impl Interp {
                 let c = matches!(self.pop(), V::Bool(true));
                 self.exec_obj(if c { t } else { f }, src)?;
             }
+            // Each pass of a loop counts against the budget.
             "repeat" => {
                 let p = self.pop();
                 let k = self.popn().clamp(0.0, 1e6) as usize;
                 for _ in 0..k {
+                    self.spend(1)?;
                     match self.exec_obj(p.clone(), src) {
                         Err(Flow::Exit) => break,
                         r => r?,
@@ -816,6 +874,7 @@ impl Interp {
                 let mut i = self.popn();
                 let mut guard = 0;
                 while inc != 0.0 && ((inc > 0.0 && i <= lim) || (inc < 0.0 && i >= lim)) && guard < 1_000_000 {
+                    self.spend(1)?;
                     self.push(V::Num(i));
                     match self.exec_obj(p.clone(), src) {
                         Err(Flow::Exit) => break,
@@ -828,6 +887,7 @@ impl Interp {
             "loop" => {
                 let p = self.pop();
                 for _ in 0..1_000_000 {
+                    self.spend(1)?;
                     match self.exec_obj(p.clone(), src) {
                         Err(Flow::Exit) => break,
                         r => r?,
@@ -840,6 +900,7 @@ impl Interp {
                     V::Dict(d) => {
                         let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                         for (k, v) in items {
+                            self.spend(1)?;
                             self.push(V::Lit(k.into()));
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
@@ -851,6 +912,7 @@ impl Interp {
                     V::Str(s) => {
                         let bytes = s.borrow().clone();
                         for c in bytes {
+                            self.spend(1)?;
                             self.push(V::Num(c as f64));
                             match self.exec_obj(p.clone(), src) {
                                 Err(Flow::Exit) => break,
@@ -860,6 +922,7 @@ impl Interp {
                     }
                     a => {
                         for v in a.items().unwrap_or_default() {
+                            self.spend(1)?;
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
                                 Err(Flow::Exit) => break,
@@ -1117,6 +1180,7 @@ impl Interp {
             "languagelevel" => self.push(V::Num(3.0)),
             "version" | "product" => self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec())))),
             "save" => {
+                self.spend(self.gs.path.elements().len())?;
                 self.saved.push(self.gs.clone());
                 self.gs.depth = self.b.depth();
                 self.push(V::Null);
@@ -1146,6 +1210,7 @@ impl Interp {
             }
             // Graphics state.
             "gsave" => {
+                self.spend(self.gs.path.elements().len())?;
                 let mut g = self.gs.clone();
                 g.depth = self.b.depth();
                 self.saved.push(g);
@@ -1306,21 +1371,21 @@ impl Interp {
             }
             "moveto" => {
                 let p = self.user_point();
-                self.move_to(p);
+                self.move_to(p)?;
             }
             "rmoveto" => {
                 let d = self.user_point();
                 let c = self.current_user();
-                self.move_to(Point::new(c.x + d.x, c.y + d.y));
+                self.move_to(Point::new(c.x + d.x, c.y + d.y))?;
             }
             "lineto" => {
                 let p = self.user_point();
-                self.line_to(p);
+                self.line_to(p)?;
             }
             "rlineto" => {
                 let d = self.user_point();
                 let c = self.current_user();
-                self.line_to(Point::new(c.x + d.x, c.y + d.y));
+                self.line_to(Point::new(c.x + d.x, c.y + d.y))?;
             }
             "curveto" | "rcurveto" => {
                 let p3 = self.user_point();
@@ -1329,25 +1394,27 @@ impl Interp {
                 if n == "rcurveto" {
                     let c = self.current_user();
                     let o = |p: Point| Point::new(c.x + p.x, c.y + p.y);
-                    self.curve_to(o(p1), o(p2), o(p3));
+                    self.curve_to(o(p1), o(p2), o(p3))?;
                 } else {
-                    self.curve_to(p1, p2, p3);
+                    self.curve_to(p1, p2, p3)?;
                 }
             }
             "closepath" => {
                 if self.gs.cur.is_some() {
+                    self.room(1)?;
                     self.gs.path.close_path();
                     self.gs.cur = self.gs.start;
                 }
             }
-            "arc" => self.arc(false),
-            "arcn" => self.arc(true),
+            "arc" => self.arc(false)?,
+            "arcn" => self.arc(true)?,
             "currentpoint" => {
                 let c = self.current_user();
                 self.push(V::Num(c.x));
                 self.push(V::Num(c.y));
             }
             "pathbbox" => {
+                self.spend(self.gs.path.elements().len())?;
                 let r = kurbo::Shape::bounding_box(&self.gs.path);
                 let inv = self.gs.ctm.inverse();
                 let (a, b) = (inv * Point::new(r.x0, r.y0), inv * Point::new(r.x1, r.y1));
@@ -1366,13 +1433,14 @@ impl Interp {
             "stroke" => self.paint(None, true),
             "clip" | "eoclip" => {
                 let rule = if n == "clip" { FillRule::NonZero } else { FillRule::EvenOdd };
+                self.spend(self.gs.path.elements().len())?;
                 let p = self.gs.path.clone();
                 if !p.elements().iter().all(|e| matches!(e, PathEl::MoveTo(_))) {
                     self.b.clip(p, rule);
                 }
             }
             "rectfill" | "rectstroke" | "rectclip" => {
-                let paths = self.rect_path();
+                let paths = self.rect_path()?;
                 if n == "rectstroke" && matches!(self.st.last(), Some(V::Array(_))) {
                     self.pop();
                 }
@@ -1607,9 +1675,9 @@ impl Interp {
     /// A string's glyph outlines (device space) from the current point, with an extra
     /// displacement `extra(index, code)` (user space) after each glyph; moves the current
     /// point.
-    fn text_path(&mut self, bytes: &[u8], mut extra: impl FnMut(usize, u32) -> (f64, f64)) -> Option<(BezPath, String)> {
-        let d = self.gs.font.clone()?;
-        let (font, m) = self.font_of(&d)?;
+    fn text_path(&mut self, bytes: &[u8], mut extra: impl FnMut(usize, u32) -> (f64, f64)) -> Result<Option<(BezPath, String)>, Flow> {
+        let Some(d) = self.gs.font.clone() else { return Ok(None) };
+        let Some((font, m)) = self.font_of(&d) else { return Ok(None) };
         let mut p = self.current_user();
         let mut path = BezPath::new();
         let mut text = String::new();
@@ -1624,8 +1692,8 @@ impl Interp {
             let (ex, ey) = extra(i, code);
             p += adv + kurbo::Vec2::new(ex, ey);
         }
-        self.move_to(p);
-        Some((path, text))
+        self.move_to(p)?;
+        Ok(Some((path, text)))
     }
 
     fn fill_text(&mut self, path: BezPath, text: &str) {
@@ -1641,11 +1709,12 @@ impl Interp {
         }
     }
 
-    fn show_with(&mut self, s: &[u8], extra: impl FnMut(usize, u32) -> (f64, f64)) {
-        match self.text_path(s, extra) {
+    fn show_with(&mut self, s: &[u8], extra: impl FnMut(usize, u32) -> (f64, f64)) -> Result<(), Flow> {
+        match self.text_path(s, extra)? {
             Some((path, text)) => self.fill_text(path, &text),
             None => self.b.skip("text (no font)"),
         }
+        Ok(())
     }
 
     /// Text and font operators (PostScript Language Reference §5.1, §8.2).
@@ -1703,20 +1772,20 @@ impl Interp {
             "StandardEncoding" | "ISOLatin1Encoding" => self.push(encoding_array(n)),
             "show" => {
                 let s = self.pop_string();
-                self.show_with(&s, |_, _| (0.0, 0.0));
+                self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "ashow" => {
                 let s = self.pop_string();
                 let ay = self.popn();
                 let ax = self.popn();
-                self.show_with(&s, |_, _| (ax, ay));
+                self.show_with(&s, |_, _| (ax, ay))?;
             }
             "widthshow" => {
                 let s = self.pop_string();
                 let ch = self.popn() as u32;
                 let cy = self.popn();
                 let cx = self.popn();
-                self.show_with(&s, |_, c| if c == ch { (cx, cy) } else { (0.0, 0.0) });
+                self.show_with(&s, |_, c| if c == ch { (cx, cy) } else { (0.0, 0.0) })?;
             }
             "awidthshow" => {
                 let s = self.pop_string();
@@ -1725,18 +1794,18 @@ impl Interp {
                 let ch = self.popn() as u32;
                 let cy = self.popn();
                 let cx = self.popn();
-                self.show_with(&s, |_, c| if c == ch { (cx + ax, cy + ay) } else { (ax, ay) });
+                self.show_with(&s, |_, c| if c == ch { (cx + ax, cy + ay) } else { (ax, ay) })?;
             }
             "kshow" | "cshow" => {
                 // The procedure between characters is not run.
                 let s = self.pop_string();
                 self.pop();
-                self.show_with(&s, |_, _| (0.0, 0.0));
+                self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "xshow" | "yshow" | "xyshow" => {
                 let disp: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
                 let s = self.pop_string();
-                self.explicit_show(&s, &disp, n);
+                self.explicit_show(&s, &disp, n)?;
             }
             "glyphshow" => {
                 let name = self.pop().key();
@@ -1747,7 +1816,7 @@ impl Interp {
                 let tmp = transformed(&d, Affine::IDENTITY);
                 tmp.borrow_mut().insert("Encoding".into(), array(e));
                 self.gs.font = Some(tmp);
-                self.show_with(b"A", |_, _| (0.0, 0.0));
+                self.show_with(b"A", |_, _| (0.0, 0.0))?;
                 self.gs.font = Some(d);
             }
             "charpath" => {
@@ -1755,14 +1824,17 @@ impl Interp {
                 let s = self.pop_string();
                 let saved = std::mem::take(&mut self.gs.path);
                 let start = self.gs.start;
-                match self.text_path(&s, |_, _| (0.0, 0.0)) {
+                match self.text_path(&s, |_, _| (0.0, 0.0))? {
                     Some((glyphs, _)) => {
-                        let mut p = saved;
-                        p.extend(glyphs);
+                        // The outlines join the path: each element counts against the budget and
+                        // the path limit.
+                        self.gs.path = saved;
+                        self.room(glyphs.elements().len() + 1)?;
+                        self.spend(glyphs.elements().len())?;
+                        self.gs.path.extend(glyphs);
                         if let Some(c) = self.gs.cur {
-                            p.move_to(c);
+                            self.gs.path.move_to(c);
                         }
-                        self.gs.path = p;
                         self.gs.start = start;
                     }
                     None => self.gs.path = saved,
@@ -1812,7 +1884,7 @@ impl Interp {
 
     /// `xshow` / `yshow` / `xyshow`: glyph displacements from a number array instead of the
     /// advances.
-    fn explicit_show(&mut self, s: &[u8], disp: &[f64], n: &str) {
+    fn explicit_show(&mut self, s: &[u8], disp: &[f64], n: &str) -> Result<(), Flow> {
         let step = if n == "xyshow" { 2 } else { 1 };
         let d: Vec<(f64, f64)> = (0..s.len())
             .map(|k| {
@@ -1827,13 +1899,13 @@ impl Interp {
             .collect();
         let Some(fd) = self.gs.font.clone() else {
             self.b.skip("text (no font)");
-            return;
+            return Ok(());
         };
-        let Some((font, m)) = self.font_of(&fd) else { return };
+        let Some((font, m)) = self.font_of(&fd) else { return Ok(()) };
         self.show_with(s, move |k, c| {
             let adv = m * Point::new(font.width(c), 0.0) - m * Point::ZERO;
             let (dx, dy) = d.get(k).copied().unwrap_or((0.0, 0.0));
             (dx - adv.x, dy - adv.y)
-        });
+        })
     }
 }

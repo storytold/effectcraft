@@ -163,8 +163,10 @@ pub struct Hooks {
     pub app_action: Option<Box<dyn Fn(&str) -> bool>>,
     /// Shows a command's file dialog without blocking the frame and calls `done` with the
     /// answer (the host then asks for a repaint). Used in place of the blocking pickers above for
-    /// the commands' dialogs (File ▸ Import, Open, Save As…) where a modal dialog's nested event
-    /// loop inside a frame is unsafe: on macOS a drag over the window then aborted the app (#511).
+    /// the commands' dialogs (File ▸ Import, Open, Save As…) where blocking the frame is unsafe or
+    /// leaves the window unresponsive: on macOS a nested modal event loop there aborted the app on
+    /// a drag over the window (#511), and on Linux a blocking desktop-portal dialog never pumps
+    /// events, so the compositor marks the window as not responding (#1275).
     pub file_dialog_async: Option<Box<dyn Fn(FileDialog, DialogDone)>>,
     /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
     /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.

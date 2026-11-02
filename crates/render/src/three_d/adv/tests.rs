@@ -238,6 +238,73 @@ fn shadows_darken_the_receiver() {
 }
 
 #[test]
+fn accepts_shadows_only_draws_just_the_shadow() {
+    // #1691: a shadow catcher (card or plane primitive, "Accepts Shadows: Only") in front of a
+    // red backdrop card, an invisible sphere casting onto it, a point light behind the camera.
+    let (mut p, cid) = project(200, 150);
+    let red = p.add_item(
+        "R",
+        Default::default(),
+        None,
+        ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 0.0, 0.0], width: 400, height: 400, pixel_aspect: 1.0 }),
+    );
+    add(&mut p, cid, LayerSource::Solid { item: red }, |l| {
+        l.switches.three_d = true;
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 300.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(0));
+    });
+    let white = p.add_item(
+        "W",
+        Default::default(),
+        None,
+        ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 1.0, 1.0], width: 400, height: 400, pixel_aspect: 1.0 }),
+    );
+    add(&mut p, cid, LayerSource::Solid { item: white }, |l| {
+        l.switches.three_d = true;
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 200.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(2));
+    });
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Sphere }, |l| {
+        set(l, "geometryOptions/radius", Value::Scalar(30.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 50.0]));
+        set(l, "materialOptions/castsShadows", Value::Enum(2));
+    });
+    add(&mut p, cid, LayerSource::Light { kind: LightKind::Point }, |l| {
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, -300.0]));
+        set(l, "lightOptions/castsShadows", Value::Bool(true));
+    });
+    let check = |img: &crate::Image, what: &str| {
+        let (mid, side) = (img.data[75 * 200 + 100], img.data[75 * 200 + 60]);
+        // Unshadowed: the catcher is see-through, the lit red card behind it shows.
+        assert!(side[0] > 0.5 && side[1] < side[0] * 0.25 && side[3] > 0.99, "{what}: side {side:?}");
+        // Shadowed: black over the red card.
+        assert!(mid[0] < 0.02 && mid[3] > 0.99, "{what}: shadow {mid:?} vs side {side:?}");
+    };
+    check(&render(&p, cid), "card");
+    // Nothing behind the catcher: only the shadow is opaque.
+    let solo = |p: &Project| {
+        let mut q = p.clone();
+        q.comp_mut(cid).unwrap().layers.pop();
+        let img = render(&q, cid);
+        let (mid, side) = (img.data[75 * 200 + 100], img.data[75 * 200 + 60]);
+        assert!(side[3] < 1e-3, "unshadowed catcher is transparent: {side:?}");
+        assert!(mid[3] > 0.5 && mid[0] < 1e-3, "shadow is black: {mid:?}");
+    };
+    solo(&p);
+    // The same with a plane primitive as the catcher.
+    let layers = &mut p.comp_mut(cid).unwrap().layers;
+    layers.remove(2);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Plane }, |l| {
+        set(l, "geometryOptions/width", Value::Scalar(400.0));
+        set(l, "geometryOptions/height", Value::Scalar(400.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 200.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(2));
+    });
+    check(&render(&p, cid), "plane");
+    solo(&p);
+}
+
+#[test]
 fn cards_and_environment_light() {
     let (mut p, cid) = project(120, 90);
     let sid = p.add_item(

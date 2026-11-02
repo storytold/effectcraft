@@ -455,6 +455,12 @@ pub trait Accelerator: Send + Sync {
     fn auto_pick(&self) -> Option<&AutoPick> {
         None
     }
+    /// Whether the accelerator can still render frames. `false` once it has stopped for good
+    /// (its device was lost or retired): every frame it is asked for falls back to the CPU, so
+    /// callers that limit frames in flight for it can stop doing so.
+    fn available(&self) -> bool {
+        true
+    }
     /// Deferred readbacks: where a GPU readback cannot be waited for (WebGPU in a browser
     /// worker), a frame renders in *passes*. A readback the accelerator does not have yet is
     /// started, the step returns a cheap placeholder and the pass is marked missed
@@ -532,7 +538,9 @@ pub struct RenderOpts {
     /// Output scale relative to comp pixels (1 = Full, 0.5 = Half…).
     pub scale: f64,
     pub motion_blur: bool,
-    /// Render guide layers (viewer only).
+    /// Render guide layers (viewer only). Only the top-level comp's own guide layers: nested
+    /// comps (precomps, collapsed precomps, comps read by effects) never draw theirs, as in
+    /// After Effects (see [`Renderer::nested_opts`]).
     pub guides: bool,
     /// Draft quality: fewer motion-blur samples, bilinear only.
     pub draft: bool,
@@ -736,9 +744,16 @@ impl<'a> Renderer<'a> {
         sub
     }
 
+    /// The render options one level down (precomps, collapsed precomps, comps read by effects):
+    /// guide layers render only in their own comp, never when it is nested.
+    fn nested_opts(&self) -> RenderOpts {
+        RenderOpts { guides: false, ..self.opts }
+    }
+
     /// A renderer for nested work (precomps, layers read by effects): one level deeper.
     fn nested(&self) -> Renderer<'a> {
         Renderer {
+            opts: self.nested_opts(),
             depth: self.depth + 1,
             outer: None,
             opacity_mul: 1.0,
@@ -829,7 +844,10 @@ impl<'a> Renderer<'a> {
         if let Some(slot) = slot {
             *slot = Some(link);
         }
-        Some((Renderer { depth: self.depth + 1, outer, opacity_mul: opacity, collapse3d: Some(c3), through, through_lost, ..*self }, nctx))
+        Some((
+            Renderer { opts: self.nested_opts(), depth: self.depth + 1, outer, opacity_mul: opacity, collapse3d: Some(c3), through, through_lost, ..*self },
+            nctx,
+        ))
     }
 
     pub(crate) fn opacity_mul(&self) -> f32 {
@@ -2094,7 +2112,7 @@ impl<'a> Renderer<'a> {
     /// applied).
     pub fn visible_layers(&self, ctx: &EvalCtx<'a>) -> Vec<&'a Layer> {
         let (comp, t) = (ctx.comp, ctx.time);
-        let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(t));
+        let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
         comp.layers
             .iter()
             .rev()
@@ -2396,7 +2414,11 @@ mod tests_footage_size;
 #[cfg(test)]
 mod tests_frame_blend;
 #[cfg(test)]
+mod tests_guides;
+#[cfg(test)]
 mod tests_mask_blur;
+#[cfg(test)]
+mod tests_mask_expansion;
 #[cfg(test)]
 mod tests_nested;
 #[cfg(test)]

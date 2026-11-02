@@ -439,13 +439,56 @@ const TRADITIONAL_CHINESE: &[Row] = &[];
 /// `CC` series, the `VR` set, the `OCIO` set, `Cryptomatte`, `EXtractoR`, `IDentifier`,
 /// `Key Light`, `Unmult`, `Twirl (Legacy)` and the two EffectCraft-only effects) repeat that
 /// English name here rather than being left out.
-const JAPANESE_EFFECTS: &[Row] = &[];
+///
+/// The rows below were read from the installed After Effects 2026 (26.5) Japanese interface
+/// (its generated Effect menu and its Effects & Presets panel).
+const JAPANESE_EFFECTS: &[Row] = &[
+    ("ec.blur.bilateral", "Bilateral Blur", "ブラー（バイラテラル）"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "ブラー（カメラレンズ）"),
+    ("ec.blur.channel", "Channel Blur", "ブラー（チャンネル）"),
+    ("ec.blur.compound", "Compound Blur", "ブラー（合成）"),
+    ("ec.blur.directional", "Directional Blur", "ブラー（方向）"),
+    ("ec.blur.fastbox", "Fast Box Blur", "高速ボックスブラー"),
+    ("ec.blur.gaussian", "Gaussian Blur", "ブラー（ガウス）"),
+    ("ec.blur.radial", "Radial Blur", "ブラー（放射状）"),
+    ("ec.color.lumetri", "Lumetri Color", "Lumetri カラー"),
+    ("ec.key.colorkey", "Color Key", "カラーキー"),
+    ("ec.key.luma", "Luma Key", "ルミナンスキー"),
+    ("ec.key.spill", "Spill Suppressor", "スピルサプレッション"),
+    ("ec.obsolete.basic3d", "Basic 3D", "基本 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "基本テキスト"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "ブラー（ガウス）（レガシー）"),
+    ("ec.obsolete.lightning", "Lightning", "稲妻"),
+    ("ec.obsolete.pathtext", "Path Text", "パステキスト"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "ピクセルモーションブラー"),
+];
 
 /// Traditional Chinese (`zh-hant`) category labels, keyed by the registry's English category.
 const TRADITIONAL_CHINESE_CATEGORIES: &[(&str, &str)] = &[];
 
 /// Japanese (`ja`) category labels, keyed by the registry's English category.
-const JAPANESE_CATEGORIES: &[(&str, &str)] = &[];
+const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D チャンネル"),
+    ("Audio", "オーディオ"),
+    ("Blur & Sharpen", "ブラー＆シャープ"),
+    ("Channel", "チャンネル"),
+    ("Color Correction", "カラー補正"),
+    ("Distort", "ディストーション"),
+    ("Expression Controls", "式制御"),
+    ("Immersive Video", "イマーシブビデオ"),
+    ("Keying", "キーイング"),
+    ("Matte", "マット"),
+    ("Noise & Grain", "ノイズ＆グレイン"),
+    ("Obsolete", "旧バージョン"),
+    ("Paint", "描画"),
+    ("Perspective", "遠近"),
+    ("Simulation", "シミュレーション"),
+    ("Stylize", "スタイライズ"),
+    ("Text", "テキスト"),
+    ("Time", "時間"),
+    ("Transition", "トランジション"),
+    ("Utility", "ユーティリティ"),
+];
 
 /// The 21 category folder names the generated Effect menu and Effects & Presets draw, in
 /// Simplified Chinese. Read from the installed After Effects 2026 (26.5.0.89) Simplified Chinese
@@ -521,14 +564,17 @@ mod tests {
 
     /// The languages that have no rows yet, with the table a translator fills in for each. A new
     /// language is added here and to [`catalog`]; the test then guards its rows as they arrive.
-    const PENDING: &[(&str, &[Row])] = &[("zh-hant", TRADITIONAL_CHINESE), ("ja", JAPANESE_EFFECTS)];
+    const PENDING: &[(&str, &[Row])] = &[("zh-hant", TRADITIONAL_CHINESE)];
+
+    /// The languages whose tables are being filled in: guarded like [`PENDING`] row by row.
+    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS)];
 
     /// A pending language may lag Simplified Chinese but may not invent ids or disagree about
     /// which effect an id names: a translator fills these tables row by row. While they are
     /// empty the test is a no-op, which is why the slot ships before the data does.
     #[test]
     fn a_pending_language_only_uses_known_ids() {
-        for (language, rows) in PENDING {
+        for (language, rows) in PENDING.iter().chain(PARTIAL) {
             let mut ids: Vec<&str> = vec![];
             for (id, english, translated) in *rows {
                 let Some((_, hans_english, _)) = SIMPLIFIED_CHINESE.iter().find(|(hans_id, _, _)| hans_id == id) else {
@@ -606,6 +652,9 @@ mod tests {
         assert_eq!(category("Blur & Sharpen"), "模糊和锐化");
         assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery");
         assert_eq!(category("Not A Category"), "Not A Category");
+        set_current("ja");
+        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "ブラー（ガウス）");
+        assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery", "a row a partial table lacks draws the registry name");
         set_current("en");
     }
 

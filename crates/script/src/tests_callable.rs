@@ -94,3 +94,10 @@ fn calling_without_a_name_is_a_script_error() {
     let o = ok(&mut s, "var c = app.project.items.addComp('N', 100, 100, 1, 1, 25); var l = c.layers.addNull(); l.name = 'Ctl'; l");
     assert_eq!(o.result, json!({ "type": "[object AVLayer]", "name": "Ctl" }));
 }
+
+#[test]
+fn app_preferences_save_to_disk_is_callable() {
+    let mut s = session();
+    let o = ok(&mut s, "app.preferences.saveToDisk(); app.preferences.reload(); [typeof app.preferences.saveToDisk, app.preferences.getPrefAsLong('a', 'b')]");
+    assert_eq!(o.result, json!(["function", 0]));
+}

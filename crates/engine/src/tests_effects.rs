@@ -741,3 +741,56 @@ fn effect_colour_labels_set_clear_undo_and_round_trip() {
     let l = old.comp(s.active_comp_id().unwrap()).unwrap().layer(LayerId(a)).unwrap().clone();
     assert_eq!(l.effects().unwrap().groups().next().unwrap().label, None);
 }
+
+/// #1746: a preset saved from an effect property (`effects/ec.control.slider/slider`, `#2` for the second
+/// instance) applies back to the same layer instead of landing in `skipped`.
+#[test]
+fn preset_round_trips_effect_properties_by_match_name() {
+    let (mut s, a, _) = comp_with_two_solids();
+    apply(&mut s, a, "Slider Control");
+    apply(&mut s, a, "Slider Control");
+    let slider = |s: &Session, n: usize| match layer(s, a).effects().unwrap().groups().nth(n).unwrap().get("slider").unwrap().value {
+        KV::Scalar(v) => v,
+        ref other => panic!("not a scalar: {other:?}"),
+    };
+    for (n, value) in [(1, 30.0), (2, 70.0)] {
+        s.execute("prop.set", json!({"layer": a, "path": format!("effects/#{n}/slider"), "value": value})).unwrap();
+    }
+    for n in [1, 2] {
+        let path = std::env::temp_dir().join(format!("ec-1746-{}-{n}.ecpreset", std::process::id())).to_string_lossy().to_string();
+        s.execute("prop.select", json!({"layer": a, "path": format!("effects/#{n}/slider")})).unwrap();
+        s.execute("anim.savePreset", json!({"path": path})).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let want = if n == 1 { "effects/ec.control.slider/slider" } else { "effects/ec.control.slider#2/slider" };
+        assert!(saved.contains(want), "{saved}");
+        s.execute("prop.set", json!({"layer": a, "path": format!("effects/#{n}/slider"), "value": 0.0})).unwrap();
+        let r = s.execute("anim.applyPreset", json!({"path": path, "layers": [a]})).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(r["applied"], 1, "{r}");
+        assert_eq!(r["skipped"], json!([]), "{r}");
+        assert_eq!(slider(&s, n - 1), if n == 1 { 30.0 } else { 70.0 });
+    }
+}
+
+/// #1746: Edit ▸ Copy of an effect property writes the same `effects/ec.blur.gaussian/blurriness` path,
+/// and Paste (the value, or Copy Expression Only) sets that property of the other layer's effect.
+#[test]
+fn copied_effect_property_pastes_onto_the_same_effect() {
+    let (mut s, a, b) = comp_with_two_solids();
+    apply(&mut s, a, "Gaussian Blur");
+    apply(&mut s, b, "Gaussian Blur");
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/blurriness", "value": 12.5})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "effects/#1/blurriness"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let r = s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(r["values"], 1, "{r}");
+    assert_eq!(layer(&s, b).props.prop("effects/#1/blurriness").unwrap().value, KV::Scalar(12.5));
+    s.execute("prop.setExpression", json!({"layer": a, "path": "effects/#1/blurriness", "expression": "time * 10"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "effects/#1/blurriness"})).unwrap();
+    s.execute("edit.copyExpressionOnly", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let r = s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(r["expressions"], 1, "{r}");
+    assert_eq!(layer(&s, b).props.prop("effects/#1/blurriness").unwrap().expr.as_ref().unwrap().text, "time * 10");
+}

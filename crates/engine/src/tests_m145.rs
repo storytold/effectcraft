@@ -281,6 +281,28 @@ fn import_export_helpers() {
 }
 
 #[test]
+fn render_queue_resolves_a_bare_project_filename_against_the_working_directory() {
+    use effectcraft_project::render_queue::{OutputFormat, RenderQueueItem};
+    let mut s = session();
+    let cid = s.active_comp_id().unwrap();
+    let mut item = RenderQueueItem::new(1, cid);
+    item.output.output = "clip.mp4".into();
+    item.output.format = OutputFormat::H264;
+
+    // `--project ./proj.ecproj`: the parent is `.`, so the output goes beside the project.
+    s.path = Some("./proj.ecproj".into());
+    let dotted = s.resolve_output(&item).unwrap();
+
+    // `--project proj.ecproj`: the parent is the empty path, which must mean the same folder
+    // rather than the unsaved-project default (#1427).
+    s.path = Some("proj.ecproj".into());
+    let bare = s.resolve_output(&item).unwrap();
+
+    assert_eq!(PathBuf::from(&bare), PathBuf::from(&dotted), "a bare filename resolved to {bare} instead of {dotted}");
+    assert_eq!(PathBuf::from(&bare), PathBuf::from("./clip.mp4"));
+}
+
+#[test]
 fn render_queue_uses_default_folder_bit_depth_names_and_segments() {
     use effectcraft_project::render_queue::{OutputFormat, RenderQueueItem};
     let mut s = session();
@@ -347,6 +369,34 @@ fn execute_file_needs_the_gate_and_asks_first() {
     assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if u.starts_with("file://"))));
     s.execute("prefs.set", json!({"key": "scripting.warnExecutingFiles", "value": false})).unwrap();
     assert!(s.execute("file.executeFile", p).unwrap().get("opened").is_some());
+}
+
+#[test]
+fn a_script_cannot_confirm_executing_a_file_for_itself() {
+    // Warn User When Executing Files: only the user answers the question (#1246).
+    let mut s = session();
+    let f = tmp("script-run.txt");
+    std::fs::write(&f, "x").unwrap();
+    let path = f.to_string_lossy().to_string();
+    let opened = |s: &mut Session| s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(_)));
+    // Without the gate a script can't run files at all, confirmed or not.
+    assert!(s.execute_for_script("file.executeFile", json!({"path": path, "confirmed": true})).is_err());
+    s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
+    s.drain_events();
+    // A script asserting `confirmed` still gets the question, directly or in a batch.
+    let r = s.execute_for_script("file.executeFile", json!({"path": path, "confirmed": true})).unwrap();
+    assert!(r.get("needsConfirmation").is_some(), "{r}");
+    assert!(!opened(&mut s));
+    let steps = json!({"steps": [{"command": "file.executeFile", "params": {"path": path, "confirmed": true}}]});
+    let r = s.execute_for_script("engine.batch", steps).unwrap();
+    assert!(r.to_string().contains("needsConfirmation"), "{r}");
+    assert!(!opened(&mut s));
+    // The user's answer from the frontend's question still opens it.
+    assert!(s.execute("file.executeFile", json!({"path": path, "confirmed": true})).unwrap().get("opened").is_some());
+    assert!(opened(&mut s));
+    // With the warning off a script's request opens the file without a question, as before.
+    s.execute("prefs.set", json!({"key": "scripting.warnExecutingFiles", "value": false})).unwrap();
+    assert!(s.execute_for_script("file.executeFile", json!({"path": path})).unwrap().get("opened").is_some());
 }
 
 // ---------------------------------------------------------------- Edit ▸ History, recent lists

@@ -325,3 +325,87 @@ fn hostile_fbx_files_fail_cleanly() {
     assert!(matches!(parse(v6.as_bytes(), &|_| None), Err(ModelError::Unsupported(_))));
     assert!(parse(b"Objects: {\n Model: 1, \"Model::Empty\", \"Null\" {\n }\n}\n", &|_| None).is_err());
 }
+
+/// A version-7400 binary FBX holding one top-level node `A` with uncompressed arrays of type
+/// `t` (`b'b'`, `b'i'`, `b'f'`, `b'd'`, `b'l'`) and `len` elements each.
+fn binary_arrays(arrays: &[(u8, usize)]) -> Vec<u8> {
+    let mut props = vec![];
+    for &(t, len) in arrays {
+        let size = match t {
+            b'd' | b'l' => 8,
+            b'f' | b'i' => 4,
+            _ => 1,
+        };
+        props.push(t);
+        props.extend((len as u32).to_le_bytes());
+        props.extend(0u32.to_le_bytes());
+        props.extend(((len * size) as u32).to_le_bytes());
+        props.extend(std::iter::repeat_n(1u8, len * size));
+    }
+    let mut out = BINARY_MAGIC.to_vec();
+    out.extend(7400u32.to_le_bytes());
+    let end = out.len() + 13 + 1 + props.len();
+    out.extend((end as u32).to_le_bytes());
+    out.extend((arrays.len() as u32).to_le_bytes());
+    out.extend((props.len() as u32).to_le_bytes());
+    out.push(1);
+    out.push(b'A');
+    out.extend(props);
+    out
+}
+
+#[test]
+fn fbx_arrays_are_charged_for_the_memory_they_keep() {
+    // A boolean array is one byte per element on the wire but eight once kept as `Prop::Ints`:
+    // the budget counts the eight (#1234).
+    let n = 10_000;
+    let bin = binary_arrays(&[(b'b', n)]);
+    assert!(read_within(&bin, &Budget::new(n * 8)).is_ok());
+    let e = read_within(&bin, &Budget::new(n * 8 - 1)).unwrap_err();
+    assert!(e.to_string().contains("memory limit"), "{e}");
+    // 32-bit floats widen to f64 the same way.
+    assert!(read_within(&binary_arrays(&[(b'f', n)]), &Budget::new(n * 4)).is_err());
+    // Several arrays each within the budget but not together.
+    let bin = binary_arrays(&[(b'i', n), (b'd', n), (b'b', n)]);
+    assert!(read_within(&bin, &Budget::new(n * 24)).is_ok());
+    assert!(read_within(&bin, &Budget::new(n * 20)).is_err());
+    // ASCII values count too.
+    let (_, doc) = read(ASCII.as_bytes()).unwrap();
+    let values = value_bytes(&doc).unwrap();
+    assert!(values > 45 * std::mem::size_of::<Prop>(), "{values}");
+    assert!(parse_within(ASCII.as_bytes(), &|_| None, values - 1).unwrap_err().to_string().contains("memory limit"));
+}
+
+/// [`ASCII`] with two more Models instancing its geometry: `Copy` with the same two materials,
+/// `Red only` with just the first.
+fn instanced_scene() -> String {
+    ASCII
+        .replace(
+            "\tMaterial: 400,",
+            "\tModel: 301, \"Model::Copy\", \"Mesh\" {\n\t}\n\tModel: 302, \"Model::Red only\", \"Mesh\" {\n\t}\n\tMaterial: 400,",
+        )
+        .replace(
+            "\tC: \"OO\",500,300\n",
+            "\tC: \"OO\",500,300\n\tC: \"OO\",301,0\n\tC: \"OO\",100,301\n\tC: \"OO\",400,301\n\tC: \"OO\",500,301\n\tC: \"OO\",302,0\n\tC: \"OO\",100,302\n\tC: \"OO\",400,302\n",
+        )
+}
+
+#[test]
+fn fbx_models_instancing_one_geometry_share_its_mesh() {
+    let m = parse(instanced_scene().as_bytes(), &|_| None).unwrap();
+    let mesh_of = |name: &str| {
+        let n = m.nodes.iter().position(|n| n.name == name).unwrap();
+        // The mesh sits on the node, or on its geometric-offset child.
+        m.nodes[n].mesh.or_else(|| m.nodes[n].children.iter().find_map(|&c| m.nodes[c].mesh)).unwrap()
+    };
+    assert_eq!(mesh_of("Shape"), mesh_of("Copy"), "same geometry and materials: one mesh");
+    assert_ne!(mesh_of("Shape"), mesh_of("Red only"), "different materials: its own mesh");
+    assert_eq!(m.meshes.len(), 2);
+    // A budget with room for one copy of the geometry's mesh, but not three, still imports.
+    let one = parse(ASCII.as_bytes(), &|_| None).unwrap();
+    let mesh = mesh_bytes(&one.meshes[0]).unwrap();
+    let (_, doc) = read(instanced_scene().as_bytes()).unwrap();
+    let values = value_bytes(&doc).unwrap();
+    assert!(parse_within(instanced_scene().as_bytes(), &|_| None, values + 2 * mesh).is_ok());
+    assert!(parse_within(instanced_scene().as_bytes(), &|_| None, values + mesh).is_err());
+}

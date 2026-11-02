@@ -225,3 +225,22 @@ fn import_dialog_offers_mxf() {
     assert!(offered.iter().any(|e| e == "mxf"), "offered {offered:?}");
     assert!(offered.iter().any(|e| e == "mov"));
 }
+
+/// #1059: opening the demo from the start screen and immediately pressing Spacebar previews
+/// the demo — the start screen's keyboard focus must not outlive it.
+#[test]
+fn space_previews_after_opening_the_demo_from_home() {
+    let mut h = {
+        let s = Session::default();
+        let mut app = EffectcraftApp::new(s);
+        app.ui.start_screen = true;
+        Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app)
+    };
+    h.run_steps(3);
+    let demo = rect(&h, "home.file.openDemoProject");
+    click_at(&mut h, demo.center());
+    assert!(h.state().session.active_comp().is_some(), "the demo comp is open");
+    assert!(!h.state().ui.start_screen, "the start screen closed");
+    key(&mut h, Key::Space);
+    assert!(h.state().playback.playing, "Space previews the demo (#1059)");
+}

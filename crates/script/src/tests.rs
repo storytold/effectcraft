@@ -127,6 +127,65 @@ fn fill_parameters_use_documented_match_names() {
 }
 
 #[test]
+fn stroke_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE Stroke-0002` is Stroke's Color in After Effects, not All Masks.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("S", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE Stroke"), out = [];
+           for (var i = 1; i <= 11; i++) out.push(fx.property("ADBE Stroke-" + ("000" + i).slice(-4)).name);
+           out.push(fx.property("Color").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Path",
+            "Color",
+            "Brush Size",
+            "Brush Hardness",
+            "Opacity",
+            "Spacing",
+            "Paint Style",
+            "Start",
+            "End",
+            "All Masks",
+            "Stroke Sequentially",
+            "ADBE Stroke-0002"
+        ])
+    );
+}
+
+#[test]
+fn hue_saturation_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE HUE SATURATION-0004` is Master Hue in After Effects. The per-channel controls,
+    // which After Effects doesn't expose, are numbered after its parameters so none takes an AE number.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("H", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE HUE SATURATION"), out = [];
+           var n = [2, 4, 5, 6, 7, 8, 9, 10];
+           for (var i = 0; i < n.length; i++) out.push(fx.property("ADBE HUE SATURATION-" + ("000" + n[i]).slice(-4)).name);
+           out.push(fx.property("Red Hue").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Channel Control",
+            "Master Hue",
+            "Master Saturation",
+            "Master Lightness",
+            "Colorize",
+            "Colorize Hue",
+            "Colorize Saturation",
+            "Colorize Lightness",
+            "ADBE HUE SATURATION-0011"
+        ])
+    );
+}
+
+#[test]
 fn undo_steps_without_a_group() {
     let mut s = session();
     ok(&mut s, r#"var c = app.project.items.addComp("A", 100, 100, 1, 1, 24); c.layers.addNull(); c.layers.addNull();"#);
@@ -185,6 +244,18 @@ fn errors_inside_a_function_wrapper_report_the_failing_line() {
     let e = o.error.expect("range error");
     assert!(e.message.contains("out of range"), "{e:?}");
     assert_eq!(e.line, Some(3), "{e:?}");
+}
+
+/// The first use of an undefined name is the one inside the function that reads it: a mention
+/// before it, in a comment, a string or another function, doesn't move the report (#1161).
+#[test]
+fn an_undefined_name_mentioned_earlier_reports_its_use_in_the_reading_function() {
+    let mut s = session();
+    let code = "// nope is mentioned here\nvar text = 'nope';\nfunction other() { return nope; }\n(function () {\n  var a = 1;\n  nope.call();\n})();\n";
+    let o = run_code(&mut s, code, "earlier.jsx");
+    let e = o.error.expect("reference error");
+    assert!(e.message.contains("nope"), "{e:?}");
+    assert_eq!(e.line, Some(6), "{e:?}");
 }
 
 #[test]
@@ -427,6 +498,32 @@ fn save_frame_to_png_writes_behind_the_file_gate() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     // IHDR width and height.
     assert_eq!((u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap())), (40, 30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1246: with Warn User When Executing Files on, a script that asserts `confirmed` itself still
+/// gets the question; only the user's answer opens the file.
+#[test]
+fn a_script_cannot_confirm_executing_a_file_for_itself() {
+    let dir = std::env::temp_dir().join(format!("ec-script-exec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("run.txt");
+    std::fs::write(&f, "x").unwrap();
+    let q = serde_json::to_string(&f.to_string_lossy()).unwrap();
+    let mut s = session();
+    // The user allows file access; the warning stays on (the default).
+    s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
+    s.drain_events();
+    let opened = |s: &mut Session| s.drain_events().iter().any(|e| matches!(e, effectcraft_engine::Event::OpenUrl(_)));
+    for code in [
+        format!("JSON.stringify(app.run('file.executeFile', {{path: {q}, confirmed: true}}))"),
+        format!("JSON.stringify(app.run('engine.batch', {{steps: [{{command: 'file.executeFile', params: {{path: {q}, confirmed: true}}}}]}}))"),
+        format!("new File({q}).execute()"),
+    ] {
+        let o = ok(&mut s, &code);
+        assert!(!o.result.to_string().contains("opened") || o.result == json!(false), "{code}: {:?}", o.result);
+        assert!(!opened(&mut s), "{code} opened the file without asking");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1258,6 +1355,80 @@ fn effect_parameter_interpolation_and_ease() {
     assert_eq!(o.result, json!([true, true, 16.67, 33.33, true]));
 }
 
+/// #1531: the per-key methods act on a comp that isn't the active one too. Activating the keys'
+/// comp brought back its own (empty) key selection over the keys named, so the interpolation and
+/// the ease were silently dropped once another comp with a layer had been made first.
+#[test]
+fn key_interpolation_and_ease_apply_outside_the_active_comp() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var a = app.project.items.addComp("A", 400, 400, 1, 10, 20); a.layers.addNull();
+        var c = app.project.items.addComp("C", 400, 400, 1, 10, 20);
+        var n = c.layers.addNull(); n.threeDLayer = true;
+        var p = n.property("ADBE Transform Group").property("ADBE Rotate Y");
+        p.setValueAtTime(1, 0); p.setValueAtTime(2, -178);
+        for (var j = 1; j <= 2; j++) {
+          p.setInterpolationTypeAtKey(j, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+          p.setTemporalEaseAtKey(j, [new KeyframeEase(0, 60)], [new KeyframeEase(0, 60)]);
+        }
+        [p.keyOutInterpolationType(1) == KeyframeInterpolationType.BEZIER,
+         p.keyInInterpolationType(2) == KeyframeInterpolationType.BEZIER,
+         p.keyOutTemporalEase(1)[0].influence,
+         Math.round(p.valueAtTime(1.25, false) * 100) / 100]
+        "#,
+    );
+    let v = o.result;
+    assert_eq!((&v[0], &v[1], &v[2]), (&json!(true), &json!(true), &json!(60)), "{v}");
+    // Eased, not the linear -44.5.
+    assert!(v[3].as_f64().is_some_and(|x| (x - -44.5).abs() > 1.0), "{v}");
+}
+
+/// #1531: a key the user selected in the property's comp stays selected, and only the named key
+/// changes (on the old code the change went to the selected key instead).
+/// The active comp's own key selection is untouched.
+#[test]
+fn a_per_key_method_in_another_comp_changes_only_its_key_and_keeps_both_selections() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var C = app.project.items.addComp('C', 100, 100, 1, 10, 20);
+        var p = C.layers.addNull().transform.rotation;
+        p.setValuesAtTimes([0, 1, 2], [0, 90, 180]);
+        var A = app.project.items.addComp('A', 100, 100, 1, 10, 20);
+        A.openInViewer();
+        var q = A.layers.addNull().transform.opacity;
+        q.setValuesAtTimes([0, 1], [0, 100]);
+        app.run('edit.deselectAll', {});
+        q.setSelectedAtKey(2, true);
+        // the user selected key 3 of C earlier: C remembers it while A is active
+        p.setSelectedAtKey(3, true);
+        p.setInterpolationTypeAtKey(1, KeyframeInterpolationType.HOLD);
+        p.setTemporalEaseAtKey(2, [new KeyframeEase(0, 80)]);
+        var hold = KeyframeInterpolationType.HOLD;
+        var out = [p.keyOutInterpolationType(1) == hold, p.keyOutInterpolationType(3) == hold, p.keyInInterpolationType(3) == hold,
+          p.keyInTemporalEase(2)[0].influence, p.keyInTemporalEase(3)[0].influence,
+          q.keySelected(1), q.keySelected(2)];
+        p.removeKey(1);
+        out.push(p.numKeys, p.keyTime(1), p.keyValue(1), q.keySelected(2), app.project.activeItem.name);
+        // C's remembered selection is live again once C is active: still the user's key (now 2)
+        C.openInViewer();
+        out.push(p.keySelected(1), p.keySelected(2));
+        out;
+        "#,
+    );
+    let v = o.result.as_array().unwrap();
+    let ease = |i: usize| v[i].as_f64().unwrap();
+    assert_eq!(&v[..3], &[json!(true), json!(false), json!(false)], "only key 1 holds: {v:?}");
+    assert!((ease(3) - 80.0).abs() < 1e-6, "key 2 eased: {v:?}");
+    assert!((ease(4) - 80.0).abs() > 1e-6, "key 3 untouched: {v:?}");
+    assert_eq!(&v[5..7], &[json!(false), json!(true)], "A's key selection kept: {v:?}");
+    assert_eq!(&v[7..12], &[json!(2), json!(1), json!(90), json!(true), json!("A")], "key 1 removed, A still active: {v:?}");
+    assert_eq!(&v[12..], &[json!(false), json!(true)], "C's key selection kept, the target key not added: {v:?}");
+}
+
 /// #808: sourcePointToComp and compPointToSource follow the layer's transform.
 #[test]
 fn source_point_conversions_follow_the_layer_transform() {
@@ -1374,4 +1545,43 @@ fn scripted_levels_alpha_controls_resolve_from_the_effect() {
         "#,
     );
     assert_eq!(o.result, json!([0.5, 0.5]));
+}
+
+/// After Effects resolves the Transform properties and Source Text from the layer itself, without
+/// naming their group: `layer.property("Position")` (#1348).
+#[test]
+fn layer_property_resolves_transform_and_source_text_shortcuts() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("x", 100, 100, 1, 5, 30);
+        var t = c.layers.addText("hi");
+        var s = c.layers.addSolid([1, 0, 0], "s", 100, 100, 1);
+        var listed = [t.property("Source Text"), s.property("Position"), s.property("Opacity"), s.property("Scale")].join(", ");
+        s.property("Position").setValue([30, 40]);
+        s.property("Opacity").setValue(25);
+        t.property("Source Text").setValue("bye");
+        s.threeDLayer = true;
+        [listed, s.property("Position").value[0], s.property("Opacity").value, t.property("Source Text").value.text,
+         s.property("ADBE Position").matchName, s("Anchor Point").matchName, s.property("Rotation").matchName,
+         s.property("X Rotation").matchName, s.property("Orientation").matchName]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "[object Property], [object Property], [object Property], [object Property]",
+            30,
+            25,
+            "bye",
+            "ADBE Position",
+            "ADBE Anchor Point",
+            "ADBE Rotate Z",
+            "ADBE Rotate X",
+            "ADBE Orientation"
+        ])
+    );
+    let (_, c) = comp_named(&s, "x");
+    assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
 }

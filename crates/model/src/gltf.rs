@@ -39,13 +39,15 @@ pub fn split_glb(b: &[u8]) -> Result<(&[u8], Option<&[u8]>)> {
     while o + 8 <= total {
         let len = u32_at(o).unwrap_or(0) as usize;
         let ty = u32_at(o + 4).unwrap_or(0);
-        let data = b.get(o + 8..o + 8 + len).ok_or_else(|| perr("GLB chunk runs past the end of the file"))?;
+        let past_end = || perr("GLB chunk runs past the end of the file");
+        let end = (o + 8).checked_add(len).ok_or_else(past_end)?;
+        let data = b.get(o + 8..end).ok_or_else(past_end)?;
         match ty {
             CHUNK_JSON if json.is_none() => json = Some(data),
             CHUNK_BIN if bin.is_none() => bin = Some(data),
             _ => {}
         }
-        o += 8 + len;
+        o = end;
     }
     Ok((json.ok_or_else(|| perr("GLB without a JSON chunk"))?, bin))
 }
@@ -115,8 +117,25 @@ struct Doc<'a> {
 fn arr<'v>(v: &'v Value, k: &str) -> &'v [Value] {
     v.get(k).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
 }
+/// A non-negative integer field; one too large for `usize` counts as absent (#1235).
 fn idx(v: &Value, k: &str) -> Option<usize> {
-    v.get(k).and_then(Value::as_u64).map(|x| x as usize)
+    v.get(k).and_then(Value::as_u64).and_then(|x| usize::try_from(x).ok())
+}
+/// Node indices in an array field (out-of-range ones are dropped).
+fn indices(v: &Value, k: &str) -> Vec<usize> {
+    arr(v, k).iter().filter_map(Value::as_u64).filter_map(|c| usize::try_from(c).ok()).collect()
+}
+
+/// The most components an accessor without a buffer view (all zeros) may have: nothing in the
+/// file backs its count, so it is capped instead of checked against a buffer (#1235).
+const MAX_ZERO_COMPONENTS: usize = 1 << 24;
+
+/// Where an accessor's elements lie in its buffer: `count` elements of `elem` bytes, `stride`
+/// apart from `base`, all checked to be inside `buf`.
+struct Span<'b> {
+    buf: &'b [u8],
+    base: usize,
+    stride: usize,
 }
 fn num(v: &Value, k: &str, d: f64) -> f64 {
     v.get(k).and_then(Value::as_f64).unwrap_or(d)
@@ -132,6 +151,39 @@ fn nums<const N: usize>(v: &Value, k: &str, d: [f64; N]) -> [f64; N] {
 }
 
 impl Doc<'_> {
+    /// The accessor's element count and total components (`count * n`), checked; and its span in
+    /// the buffer, validated before anything is allocated from the count. `None` for an
+    /// accessor without a buffer view, whose components are all zero.
+    fn layout(&self, acc: &Value, n: usize, csize: usize) -> Result<(usize, usize, Option<Span<'_>>)> {
+        let count = match acc.get("count") {
+            None => 0,
+            Some(c) => c.as_u64().and_then(|c| usize::try_from(c).ok()).ok_or_else(|| perr("accessor count is not a valid size"))?,
+        };
+        let total = count.checked_mul(n).ok_or_else(|| perr("accessor count is too large"))?;
+        let Some(bv) = idx(acc, "bufferView") else {
+            if total > MAX_ZERO_COMPONENTS {
+                return Err(perr(format!("accessor without a bufferView has {total} components (at most {MAX_ZERO_COMPONENTS})")));
+            }
+            return Ok((count, total, None));
+        };
+        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
+        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
+        let past = || perr("accessor reads past its buffer");
+        let base = idx(view, "byteOffset").unwrap_or(0).checked_add(idx(acc, "byteOffset").unwrap_or(0)).ok_or_else(past)?;
+        let elem = csize * n;
+        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
+        if stride < elem {
+            return Err(perr(format!("bufferView byteStride {stride} is smaller than its {elem}-byte elements")));
+        }
+        if count > 0 {
+            let end = (count - 1).checked_mul(stride).and_then(|o| o.checked_add(base)).and_then(|o| o.checked_add(elem)).ok_or_else(past)?;
+            if end > buf.len() {
+                return Err(past());
+            }
+        }
+        Ok((count, total, Some(Span { buf, base, stride })))
+    }
+
     /// An accessor as `f32` rows of `n` components (normalised integers mapped to 0..1 / -1..1).
     fn floats(&self, a: usize) -> Result<(Vec<f32>, usize)> {
         let acc = arr(self.j, "accessors").get(a).ok_or_else(|| perr(format!("no accessor {a}")))?;
@@ -145,7 +197,6 @@ impl Doc<'_> {
             "MAT4" => 16,
             t => return Err(perr(format!("accessor type `{t}`"))),
         };
-        let count = idx(acc, "count").unwrap_or(0);
         let ct = idx(acc, "componentType").unwrap_or(5126);
         let norm = acc.get("normalized").and_then(Value::as_bool).unwrap_or(false);
         let csize = match ct {
@@ -154,17 +205,13 @@ impl Doc<'_> {
             5125 | 5126 => 4,
             _ => return Err(perr(format!("componentType {ct}"))),
         };
-        let mut out = vec![0.0f32; count * n];
-        let Some(bv) = idx(acc, "bufferView") else {
+        let (count, total, span) = self.layout(acc, n, csize)?;
+        let mut out = vec![0.0f32; total];
+        let Some(Span { buf, base, stride }) = span else {
             // No buffer view: all zeros (sparse substitution is not supported).
             return Ok((out, n));
         };
-        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
-        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
-        let base = idx(view, "byteOffset").unwrap_or(0) + idx(acc, "byteOffset").unwrap_or(0);
-        let elem = csize * n;
         // Matrices of 1/2-byte components pad columns to 4 bytes; ignored (rare).
-        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
         for i in 0..count {
             for c in 0..n {
                 let o = base + i * stride + c * csize;
@@ -207,18 +254,14 @@ impl Doc<'_> {
             "VEC2" => 2,
             _ => 1,
         };
-        let count = idx(acc, "count").unwrap_or(0);
         let csize = match ct {
             5120 | 5121 => 1,
             5122 | 5123 => 2,
             _ => 4,
         };
-        let Some(bv) = idx(acc, "bufferView") else { return Ok(vec![0; count * n]) };
-        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
-        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
-        let base = idx(view, "byteOffset").unwrap_or(0) + idx(acc, "byteOffset").unwrap_or(0);
-        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(csize * n);
-        let mut out = Vec::with_capacity(count * n);
+        let (count, total, span) = self.layout(acc, n, csize)?;
+        let Some(Span { buf, base, stride }) = span else { return Ok(vec![0; total]) };
+        let mut out = Vec::with_capacity(total);
         for i in 0..count {
             for c in 0..n {
                 let o = base + i * stride + c * csize;
@@ -268,7 +311,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             arr(&j, "bufferViews").get(bv).and_then(|v| {
                 let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
                 let o = idx(v, "byteOffset").unwrap_or(0);
-                b.get(o..o + idx(v, "byteLength").unwrap_or(0)).map(<[u8]>::to_vec)
+                b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
             })
         } else {
             None
@@ -366,13 +409,13 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             skin: idx(n, "skin"),
             camera: idx(n, "camera"),
             light: n.get("extensions").and_then(|e| e.get("KHR_lights_punctual")).and_then(|e| idx(e, "light")),
-            children: arr(n, "children").iter().filter_map(Value::as_u64).map(|c| c as usize).collect(),
+            children: indices(n, "children"),
         });
     }
 
     let scene = idx(&j, "scene").unwrap_or(0);
     let roots: Vec<usize> = match arr(&j, "scenes").get(scene) {
-        Some(s) => arr(s, "nodes").iter().filter_map(Value::as_u64).map(|c| c as usize).collect(),
+        Some(s) => indices(s, "nodes"),
         None => {
             // No scene: every node that is nobody's child.
             let mut child = vec![false; nodes.len()];
@@ -389,7 +432,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
 
     let mut skins = vec![];
     for s in arr(&j, "skins") {
-        let joints: Vec<usize> = arr(s, "joints").iter().filter_map(Value::as_u64).map(|c| c as usize).collect();
+        let joints: Vec<usize> = indices(s, "joints");
         let inverse_bind = match idx(s, "inverseBindMatrices") {
             Some(a) => {
                 let (f, _) = d.floats(a)?;

@@ -320,7 +320,12 @@ fn pack(s: &Scene) -> [Vec<u8>; 7] {
     let lit = !(s.lights.is_empty() && s.env.is_none() && s.ambient == [0.0; 3]);
     globals.extend([e.rotation, lit as u32 as f32, 0.0, 0.0]);
     let mats = s.materials.iter().flat_map(|m| {
-        let flags = (m.double_sided as u32) | (m.unlit as u32) << 1 | (m.accepts_lights as u32) << 2 | (m.receives_shadows as u32) << 3 | (m.alpha_mode << 8);
+        let flags = (m.double_sided as u32)
+            | (m.unlit as u32) << 1
+            | (m.accepts_lights as u32) << 2
+            | (m.receives_shadows as u32) << 3
+            | (m.shadows_only as u32) << 4
+            | (m.alpha_mode << 8);
         [
             m.base[0],
             m.base[1],

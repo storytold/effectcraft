@@ -376,6 +376,7 @@ pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu
         }
     }
     let params = if params.is_null() { json!({}) } else { params };
+    let (command, params) = crate::menus::menu_choice(app, command, params);
     let r = crate::menus::invoke(app, ctx, &command, params);
     if let Err(e) = &r {
         app.ui.status = e.clone();
@@ -610,6 +611,23 @@ mod tests {
         let spec2 = build(&app);
         assert_ne!(spec1.structure(), spec2.structure());
         assert!(spec2.items().iter().any(|i| i.command == "file.openRecent" && i.label == "Recent Test.ecproj"));
+    }
+
+    /// #1630: a checked Window menu entry closes its panel; an unchecked one opens it.
+    #[test]
+    fn window_menu_entry_toggles_its_panel() {
+        use crate::dock::PanelKind;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let choose = |app: &mut EffectcraftApp| {
+            let spec = build(app);
+            let id = spec.items().into_iter().find(|i| i.command == "window.panel" && i.params["panel"] == "align").unwrap().id.clone();
+            activate(app, &ctx, &spec, &id).unwrap();
+        };
+        choose(&mut app);
+        assert!(app.ui.dock.contains(PanelKind::Align));
+        choose(&mut app);
+        assert!(!app.ui.dock.contains(PanelKind::Align));
     }
 
     #[test]

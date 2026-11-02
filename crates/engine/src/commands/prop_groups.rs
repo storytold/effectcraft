@@ -100,6 +100,22 @@ pub(crate) fn selected_contents(s: &Session) -> Vec<(LayerId, Uid)> {
     out
 }
 
+/// Text animators and their selectors selected on the active comp's text layers, top to bottom.
+/// A selector inside a selected animator isn't listed, since it is copied with it.
+pub(crate) fn selected_animator_items(s: &Session) -> Vec<(LayerId, Uid)> {
+    let mut out = vec![];
+    let Some(c) = s.active_comp().filter(|_| !s.state.selected_props.is_empty()) else { return out };
+    for l in c.layers.iter().filter(|l| matches!(l.source, LayerSource::Text)) {
+        if let Some(animators) = l.props.group("text/animators") {
+            let selected = |u: Uid| s.state.selected_props.contains(&(l.id, u));
+            let mut uids = vec![];
+            collect_selected(animators, &selected, &mut uids, 0);
+            out.extend(uids.into_iter().map(|u| (l.id, u)));
+        }
+    }
+    out
+}
+
 fn collect_selected(g: &PropGroup, selected: &dyn Fn(Uid) -> bool, out: &mut Vec<Uid>, depth: usize) {
     if depth > super::shape_stroke::MAX_DEPTH {
         return;
@@ -127,8 +143,9 @@ pub(crate) fn cut_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> Result<
 }
 
 /// Edit ▸ Paste with shape items on the clipboard: copies go into each selected shape layer's
-/// Contents, above its topmost selected item (in that item's group), else on top. Names stay
-/// unique in their group ("Rectangle 2"…), and the copies are selected.
+/// Contents, above its topmost selected item (in that item's group), else on top (paints and path
+/// operations alone: at the bottom). Names stay unique in their group ("Rectangle 2"…), and the
+/// copies are selected.
 pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "edit.paste";
     let clip = s.state.contents_clipboard.clone();
@@ -140,6 +157,9 @@ pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(c, "select a shape layer to paste shape items into"));
     }
     let sel = selected_contents(s);
+    let acts_on_above = clip.iter().all(|g| !matches!(g.match_id.as_str(), "group" | "rect" | "ellipse" | "star" | "path"));
+    // Merge Paths clears the draws above it, so at the bottom it would erase the paints (#1681).
+    let has_merge = clip.iter().any(|g| g.match_id == "merge");
     let label = match clip.as_slice() {
         [g] => format!("Paste {}", g.name),
         _ => "Paste".to_string(),
@@ -154,11 +174,19 @@ pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
                 let parent = l.props.parent_of(*u)?;
                 Some((parent.uid, parent.children.iter().position(|n| n.uid() == *u)?))
             });
+            let unselected = spot.is_none();
             let (parent, at) = match spot {
                 Some((pu, i)) => (l.props.find_group_mut(pu), i),
                 None => (l.props.sub_mut("contents"), 0),
             };
             let parent = parent.ok_or_else(|| bad(c, "the layer has no contents"))?;
+            // Trim Paths, Wiggle Paths, fills… act on the items above them (as Add places them),
+            // so with nothing selected they go to the bottom: on top they'd affect nothing (#1681).
+            let at = match unselected {
+                true if has_merge => merge_spot(parent),
+                true if acts_on_above => parent.children.len(),
+                _ => at,
+            };
             for (k, g) in clip.iter().enumerate() {
                 let mut g = g.clone();
                 g.reassign_uids(&mut next);
@@ -174,8 +202,21 @@ pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"contents": pasted.iter().map(|(_, u)| *u).collect::<Vec<_>>()}))
 }
 
-/// Edit ▸ Duplicate with shape items selected: each is copied in place, above the original and
-/// named as After Effects does ("Rectangle 1" → "Rectangle 2"), and the copies are selected.
+/// Where Merge Paths goes in `contents` when nothing is selected: before the first paint, so the
+/// paints still draw the merged path (the renderer drops the draws above a Merge Paths), else after
+/// the last path item.
+fn merge_spot(contents: &PropGroup) -> usize {
+    let is = |n: &Node, ids: &[&str]| matches!(n, Node::Group(g) if ids.contains(&g.match_id.as_str()));
+    let paints = ["fill", "stroke", "gfill", "gstroke"];
+    match contents.children.iter().position(|n| is(n, &paints)) {
+        Some(i) => i,
+        None => contents.children.iter().rposition(|n| is(n, &["rect", "ellipse", "star", "path"])).map_or(0, |i| i + 1),
+    }
+}
+
+/// Edit ▸ Duplicate with shape items, text animators or selectors selected: each is copied in
+/// place, above the original and named as After Effects does ("Rectangle 1" → "Rectangle 2"),
+/// and the copies are selected.
 pub(crate) fn duplicate_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> Result<Value> {
     let c = "edit.duplicate";
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
@@ -183,7 +224,7 @@ pub(crate) fn duplicate_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> R
         let mut next = proj.next_id;
         let mut out = vec![];
         for (lid, uid) in items {
-            let parent = layer_mut(proj, cid, *lid)?.props.parent_of_mut(*uid).ok_or_else(|| bad(c, "the shape item is gone"))?;
+            let parent = layer_mut(proj, cid, *lid)?.props.parent_of_mut(*uid).ok_or_else(|| bad(c, "the group is gone"))?;
             let Some((i, Node::Group(g))) = parent.children.iter().enumerate().find(|(_, n)| n.uid() == *uid) else { continue };
             let mut g = g.clone();
             g.reassign_uids(&mut next);

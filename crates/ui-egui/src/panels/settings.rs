@@ -664,6 +664,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.vertical(|ui| {
                 ui.set_width(180.0);
                 egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                    // The rows touch, so the pointer never falls between two of them.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     for p in &all {
                         let (r, resp) = ui.allocate_exact_size(vec2(176.0, 24.0), egui::Sense::click());
                         let sel = page == p.id;

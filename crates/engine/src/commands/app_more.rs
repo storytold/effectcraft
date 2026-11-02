@@ -245,7 +245,8 @@ fn has_footage(s: &Session) -> std::result::Result<(), String> {
 
 /// `File.execute()` from scripts (and agents): open a file with its default application.
 /// Needs Allow Scripts to Write Files and Access Network; with Warn User When Executing Files on,
-/// the frontend asks first (`confirmed: true` skips the question).
+/// the frontend asks first. `confirmed: true` is the frontend's answer to that question: a
+/// script can't give it for itself (#1246), so a script's request always asks.
 fn execute_file(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.executeFile", "missing `path`"))?;
     if !s.prefs.scripting.allow_scripts_write_files {
@@ -257,7 +258,8 @@ fn execute_file(s: &mut Session, p: &Value) -> Result<Value> {
     if !std::path::Path::new(path).exists() {
         return Err(bad("file.executeFile", format!("no file {path}")));
     }
-    if s.prefs.scripting.warn_executing_files && !b_p(p, "confirmed").unwrap_or(false) {
+    let confirmed = b_p(p, "confirmed").unwrap_or(false) && !s.running_for_script();
+    if s.prefs.scripting.warn_executing_files && !confirmed {
         s.events.push(Event::Frontend { command: "app.confirmExecute".into(), params: json!({"path": path}) });
         return Ok(json!({"needsConfirmation": path}));
     }

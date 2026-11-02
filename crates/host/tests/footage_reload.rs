@@ -213,3 +213,80 @@ fn a_new_project_importing_an_overwritten_file_shows_the_new_pixels() {
     let cid = s.active_comp_id().unwrap();
     assert!(near(pixel(&s, cid, 32, 24), BLUE), "stale pixels from the earlier project: {:?}", pixel(&s, cid, 32, 24));
 }
+
+fn layered_comp(s: &mut Session, path: &str, import_as: &str) -> ItemId {
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": import_as})).unwrap();
+    ItemId(r["comps"][0].as_u64().unwrap())
+}
+
+/// Composition imports create their sources before probing ordinary footage (#1070).
+#[test]
+fn fresh_layered_composition_import_refreshes_its_sources() {
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let path = tmp(&format!("fresh-{import_as}.psd"));
+        let (red, blue) = (flat(RED, false), flat(BLUE, false));
+        assert_eq!(red.len(), blue.len(), "the overwritten file has the same byte size");
+        std::fs::write(&path, red).unwrap();
+        let mut s = effectcraft_host::session();
+        let old_comp = layered_comp(&mut s, &path, import_as);
+        assert!(near(pixel(&s, old_comp, 32, 24), RED));
+        s.execute_checked("file.newProject", json!({})).unwrap();
+        save(&path, &blue);
+        s.drain_events();
+        let comp = layered_comp(&mut s, &path, import_as);
+        assert_eq!(comp, old_comp, "new projects reuse their item ids");
+        assert!(!s.drain_events().contains(&effectcraft_engine::Event::PurgeCaches), "import must retain the RAM preview");
+        assert!(near(pixel(&s, comp, 32, 24), BLUE), "layered import showed {:?}", pixel(&s, comp, 32, 24));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn layered_reimport_refreshes_existing_layers_and_keeps_unrelated_decoded_files() {
+    let path = tmp("layered-reimport.psd");
+    let other = tmp("layered-unchanged.psd");
+    std::fs::write(&path, flat(RED, false)).unwrap();
+    std::fs::write(&other, flat(GREEN, false)).unwrap();
+    let mut s = effectcraft_host::session();
+    let comp = layered_comp(&mut s, &path, "compositionLayerSizes");
+    let r = s.execute_checked("file.import", json!({"paths": [&other]})).unwrap();
+    let other_item = ItemId(r["items"][0].as_u64().unwrap());
+    let other_footage = footage(&s, other_item);
+    let cached = s.footage.frame(other_item, &other_footage, Tick::ZERO).unwrap();
+    assert!(near(pixel(&s, comp, 32, 24), RED));
+    let before = s.project.clone();
+    let undo = s.history.undo.len();
+    save(&path, &flat(BLUE, false));
+    s.drain_events();
+    layered_comp(&mut s, &path, "compositionLayerSizes");
+    assert!(!s.drain_events().contains(&effectcraft_engine::Event::PurgeCaches), "import must retain the RAM preview");
+    assert!(near(pixel(&s, comp, 32, 24), BLUE), "existing layers see the refreshed source");
+    assert!(std::sync::Arc::ptr_eq(&cached, &s.footage.frame(other_item, &other_footage, Tick::ZERO).unwrap()));
+    assert_eq!(s.history.undo.len(), undo + 1, "composition import stays one undo step");
+    s.undo();
+    assert!(std::sync::Arc::ptr_eq(&s.project, &before));
+    assert!(near(pixel(&s, comp, 32, 24), BLUE), "undo does not undo an external file write");
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(other).unwrap();
+}
+
+#[test]
+fn background_import_refreshes_layered_sources_before_the_probe_job_finishes() {
+    let path = tmp("layered-background.psd");
+    let other = tmp("layered-background.png");
+    std::fs::write(&path, flat(RED, false)).unwrap();
+    image::RgbaImage::from_pixel(64, 48, image::Rgba([0, 255, 0, 255])).save(&other).unwrap();
+    let mut s = effectcraft_host::session();
+    let comp = layered_comp(&mut s, &path, "compositionLayerSizes");
+    assert!(near(pixel(&s, comp, 32, 24), RED));
+    save(&path, &flat(BLUE, false));
+    s.drain_events();
+    let r = s.execute_checked("file.import", json!({"paths": [&path, &other], "importAs": "compositionLayerSizes", "background": true})).unwrap();
+    assert_eq!(r["started"], true, "ordinary footage is probed in a background job");
+    assert!(near(pixel(&s, comp, 32, 24), BLUE), "composition sources are refreshed before the job is applied");
+    s.wait_jobs();
+    assert!(!s.drain_events().contains(&effectcraft_engine::Event::PurgeCaches), "import must retain the RAM preview");
+    assert!(near(pixel(&s, s.active_comp_id().unwrap(), 32, 24), BLUE));
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(other).unwrap();
+}

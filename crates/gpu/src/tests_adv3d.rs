@@ -17,11 +17,13 @@ use crate::Gpu;
 /// A device of the test's own (the test holds [`crate::tests::hold_gpu_lock`]).
 fn gpu() -> Option<Gpu> {
     crate::tests::hold_gpu_lock();
-    let g = Gpu::headless();
-    if g.is_none() {
-        eprintln!("effectcraft-gpu adv3d tests: no GPU adapter, skipping");
+    match Gpu::try_headless() {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("effectcraft-gpu adv3d tests: no GPU ({e}), skipping");
+            crate::tests::require_gpu("effectcraft-gpu adv3d tests", Err(&e))
+        }
     }
-    g
 }
 
 fn add(p: &mut Project, cid: ItemId, src: LayerSource, edit: impl FnOnce(&mut effectcraft_project::Layer)) {
@@ -151,6 +153,18 @@ fn gpu_matches_cpu_unlit_and_full_frames() {
     let gimg = r.comp_frame(cid, Tick::ZERO);
     let diff = cpu.data.iter().zip(&gimg.data).filter(|(a, b)| (0..4).any(|k| (a[k] - b[k]).abs() > 3.0 / 255.0)).count();
     assert!((diff as f64) < 0.02 * cpu.data.len() as f64, "{diff} pixels differ");
+}
+
+#[test]
+fn gpu_matches_cpu_shadow_catcher() {
+    // #1691: the floor plane as a shadow catcher ("Accepts Shadows: Only").
+    let Some(g) = gpu() else { return };
+    let (mut p, cid) = scene_project();
+    let floor = p.comp_mut(cid).unwrap().layers.last_mut().unwrap();
+    set(floor, "materialOptions/acceptsShadows", Value::Enum(2));
+    let s = scene(&p, cid);
+    assert!(s.materials.iter().any(|m| m.shadows_only) && !s.shadows.is_empty());
+    compare(&s, &g);
 }
 
 #[test]

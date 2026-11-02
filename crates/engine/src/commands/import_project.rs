@@ -27,40 +27,24 @@ fn read_project(s: &Session, path: &str) -> Result<(Project, Option<String>)> {
     Ok((project, effectcraft_project::saved_by(&text)))
 }
 
-/// Footage paths relative to the imported project's folder become absolute when the file is
-/// there; returns the footage paths that are missing.
-fn resolve_footage(s: &Session, project: &mut Project, dir: &std::path::Path) -> Vec<String> {
+/// Footage paths stored in the imported project are resolved against its file
+/// ([`crate::doc_path::resolve_footage`]): relative ones become paths beside it, and items whose
+/// path is not followed are marked missing. Returns the footage paths that are missing, as stored.
+fn resolve_footage(s: &Session, project: &mut Project, path: &str) -> Vec<String> {
+    let stored: std::collections::HashMap<ItemId, String> =
+        project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some((i.id, f.path.clone())) } else { None }).collect();
+    let refused = crate::doc_path::resolve_footage(project, Some(path));
     let services = s.services.clone();
-    let resolve = |raw: &mut String| -> bool {
-        if raw.is_empty() || services.exists(raw) {
-            return true;
-        }
-        if std::path::Path::new(raw.as_str()).is_absolute() {
-            return false;
-        }
-        let joined = dir.join(raw.as_str()).to_string_lossy().to_string();
-        if services.exists(&joined) {
-            *raw = joined;
-            true
-        } else {
-            false
-        }
-    };
-    let mut missing = vec![];
-    for it in project.items.values_mut() {
-        if let ItemKind::Footage(f) = &mut it.kind {
-            if f.sequence.is_empty() {
-                if !resolve(&mut f.path) {
-                    missing.push(f.path.clone());
-                }
-            } else {
-                let mut all = true;
-                for frame in &mut f.sequence {
-                    all &= resolve(frame);
-                }
-                if !all {
-                    missing.push(f.path.clone());
-                }
+    let exists = |p: &String| p.is_empty() || services.exists(p);
+    let mut missing: Vec<String> = refused.iter().map(|(_, p, _)| p.clone()).collect();
+    for it in project.items.values() {
+        if let ItemKind::Footage(f) = &it.kind {
+            if refused.iter().any(|(id, _, _)| *id == it.id) {
+                continue;
+            }
+            let present = if f.sequence.is_empty() { exists(&f.path) } else { f.sequence.iter().all(exists) };
+            if !present {
+                missing.push(stored.get(&it.id).cloned().unwrap_or_else(|| f.path.clone()));
             }
         }
     }
@@ -79,8 +63,8 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let (mut sub, saved_by) = read_project(s, &path)?;
     crate::upgrade_effects(&mut sub);
     let file = std::path::Path::new(&path);
-    let dir = file.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    let missing = resolve_footage(s, &mut sub, &dir);
+    let missing = resolve_footage(s, &mut sub, &path);
+    s.stored_paths.add(&sub, Some(&path));
     // The imported project's own render queue stays behind (as for templates).
     let base = s.project.next_id;
     if sub.next_id.checked_add(base).is_none() {

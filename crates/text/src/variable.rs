@@ -154,11 +154,15 @@ pub fn char_advance_delta(g: &CharGlyph, deltas: &[(String, f32)]) -> Option<f64
     Some((varied - own) as f64 * sx)
 }
 
-/// The first installed face with variation axes (system fonts are scanned), for tests and
-/// demos: (face, its axes).
+/// The first installed face with variation axes and Latin glyphs (system fonts are scanned), for
+/// tests and demos: (face, its axes). Faces without an `H` or `A` (the name-and-`fvar`-only
+/// fonts tests add) are skipped.
 pub fn find_variable_face() -> Option<(FaceId, Vec<FontAxis>)> {
     fonts::scan_system();
-    (0..fonts::all_faces().len()).map(|f| (f, font_axes(f))).find(|(_, a)| a.iter().any(|x| x.max > x.min))
+    (0..fonts::all_faces().len())
+        .filter(|&f| fonts::face(f).glyph('H').or_else(|| fonts::face(f).glyph('A')).is_some())
+        .map(|f| (f, font_axes(f)))
+        .find(|(_, a)| a.iter().any(|x| x.max > x.min))
 }
 
 #[cfg(test)]

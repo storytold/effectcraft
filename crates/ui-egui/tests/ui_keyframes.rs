@@ -562,3 +562,39 @@ fn speed_graph_handle_drags_upward_past_the_top() {
     // The speed per pixel depends on the graph's fitted scale; only the proportion matters.
     assert!(short > 0.0 && long > 9.0 * short, "40 px up gave {short}, 400 px up gave {long}");
 }
+
+/// #1617: with Easy Ease both keys sit at speed 0 in the speed graph, so fitting the selection to
+/// its keys and handles framed -1..1 while the curve between them peaks far above. Opening the
+/// Graph Editor on selected keys and Fit Selection both frame the curve's peak, and a lone
+/// selected key frames its neighbouring segments.
+#[test]
+fn speed_graph_fit_selection_frames_the_curve_between_the_keys() {
+    let (mut h, id, uid) = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
+    s.execute("keys.selectAll", json!({})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    let keys = h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop("transform/opacity").unwrap().keys.clone();
+    let peak = (0..=100)
+        .map(|i| effectcraft_engine::keyframe::velocity(&keys, effectcraft_engine::time::Tick::from_seconds_f64(i as f64 / 100.0), false)[0].abs())
+        .fold(0.0, f64::max);
+    assert!(peak > 100.0, "the eased curve peaks above its average speed: {peak}");
+    h.state_mut().ui.timeline.graph_mode = "speed".into();
+    h.state_mut().ui.timeline.graph_editor = true;
+    h.run_steps(4);
+    let frames_peak = |h: &Harness<'_, EffectcraftApp>, what: &str| {
+        let (lo, hi) = h.state().ui.timeline.graph_range.expect("a fitted range");
+        assert!(lo <= 0.0 && hi > peak * 0.9, "{what}: range {lo}..{hi}, the curve peaks at {peak}");
+    };
+    frames_peak(&h, "on open");
+    h.state_mut().ui.timeline.graph_range = Some((-1.0, 1.0));
+    let fit = h.state().auto.find("timeline.graph.fitSelection").expect("the Fit Selection button").rect;
+    click_with(&mut h, pos2(fit[0] + fit[2] / 2.0, fit[1] + fit[3] / 2.0), Default::default());
+    frames_peak(&h, "Fit Selection");
+    let last = keys[1].time.seconds();
+    h.state_mut().session.execute("keys.select", json!({"keys": [{"layer": id.0, "prop": uid, "time": last}]})).unwrap();
+    assert_eq!(h.state().session.state.selected_keys.len(), 1);
+    h.state_mut().ui.timeline.graph_range = Some((-1.0, 1.0));
+    click_with(&mut h, pos2(fit[0] + fit[2] / 2.0, fit[1] + fit[3] / 2.0), Default::default());
+    frames_peak(&h, "lone key");
+}

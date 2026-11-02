@@ -67,6 +67,26 @@ fn window_menu_opens_the_new_panels() {
     }
 }
 
+/// #1630: choosing a checked panel in the Window menu closes it, as in After Effects (it only
+/// brought the panel to the front, so the check mark never went away); choosing it again opens it.
+#[test]
+fn window_menu_closes_a_checked_panel() {
+    let mut h = harness();
+    let shown = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().ui.dock.contains(PanelKind::Align) || h.state().ui.floating.iter().any(|f| f.panels.contains(&PanelKind::Align))
+    };
+    open(&mut h, "align");
+    assert!(shown(&h));
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label("✔ Align").expect("Window ▸ Align, checked").rect().center();
+    click_at(&mut h, at);
+    assert!(!shown(&h), "Align closed");
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label(" Align").expect("Window ▸ Align, unchecked").rect().center();
+    click_at(&mut h, at);
+    assert!(shown(&h), "Align open again");
+}
+
 #[test]
 fn scopes_switch_kind() {
     let mut h = harness();

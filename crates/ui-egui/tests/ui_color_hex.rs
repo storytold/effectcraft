@@ -114,6 +114,32 @@ fn is_open(h: &Harness<'_, [f32; 3]>) -> bool {
     h.query_by_role_and_label(Role::TextInput, "#").is_some()
 }
 
+/// #1476: the click that opens the picker must not close it. The picker's area only reports its
+/// real position from its second pass — on the pass it first draws, its rect is at the origin —
+/// so a click on a swatch outside that stale rect was read as a press outside the popup and the
+/// picker flashed and closed in the frame it opened.
+#[test]
+fn a_click_that_opens_the_picker_does_not_close_it_in_the_same_frame() {
+    let mut h = Harness::builder().with_size(vec2(560.0, 400.0)).build_ui_state(
+        |ui, c: &mut [f32; 3]| {
+            // Away from the top-left corner: the stale first-pass rect covers it.
+            ui.allocate_space(vec2(440.0, 120.0));
+            ui.horizontal(|ui| {
+                ui.add_space(440.0);
+                widgets::srgb_color_button(ui, c);
+            });
+        },
+        [1.0, 0.0, 0.0],
+    );
+    h.run_steps(2);
+    let button = h.get_by_role(Role::ColorWell).rect().center();
+    h.input_mut().events.push(Event::PointerMoved(button));
+    h.input_mut().events.push(Event::PointerButton { pos: button, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.input_mut().events.push(Event::PointerButton { pos: button, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(is_open(&h), "the click that opens the picker must not close it");
+}
+
 #[test]
 fn the_dialog_colour_button_stores_srgb() {
     let mut h = picker([1.0, 1.0, 1.0]);

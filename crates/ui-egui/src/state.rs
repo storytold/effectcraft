@@ -643,9 +643,6 @@ pub struct UiState {
     /// Levels (Individual Controls) editor: shown channel per effect uid.
     #[serde(default)]
     pub fx_levels_channel: BTreeMap<u64, usize>,
-    /// Effects & Presets: favourite effect ids (starred).
-    #[serde(default)]
-    pub effects_favorites: BTreeSet<String>,
     /// Effects & Presets: recently applied effect ids, most recent first.
     #[serde(default)]
     pub effects_recent: Vec<String>,
@@ -734,7 +731,6 @@ impl Default for UiState {
             fx_curve_channel: BTreeMap::new(),
             fx_curve_pencil: BTreeSet::new(),
             fx_levels_channel: BTreeMap::new(),
-            effects_favorites: BTreeSet::new(),
             effects_recent: Vec::new(),
             effects_view: EffectsView::default(),
             snapping: true,

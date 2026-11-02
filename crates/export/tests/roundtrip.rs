@@ -613,3 +613,28 @@ fn wav_and_aiff_audio_only() {
         }
     }
 }
+
+/// An AIFF EffectCraft renders imports back (#1428): plain 16-bit and AIFF-C `fl32`.
+#[test]
+fn rendered_aiff_imports_back() {
+    use effectcraft_export::render_queue::AudioFormat;
+    let d = out_dir("aiff-import");
+    let wav = d.join("tone.wav");
+    write_tone(&wav, 2.0);
+    let (p, cid) = project(Some(&wav));
+    let pool = MediaPool::new();
+    for (format, name) in [(AudioFormat::S16, "s16.aif"), (AudioFormat::F32, "f32.aif")] {
+        // 44.1 kHz, not the 48 kHz the samples are read back at: a wrong rate shows in the duration.
+        let om = OutputModule { audio_sample_rate: 44_100, audio_channels: 2, audio_format: format, ..OutputModule::for_format(OutputFormat::Aiff) };
+        let path = d.join(name);
+        assert!(run(&p, cid, &pool, &om, &path).audio);
+        let f = effectcraft_media::probe(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(f.has_audio && !f.has_video, "{name}");
+        assert_eq!(f.duration, Tick::from_seconds_f64(1.2), "{name}: 52 920 frames at 44.1 kHz");
+        // Tone on the left, silence on the right: the two channels are read as two.
+        let s = MediaPool::new().audio_samples(&f, Tick::from_seconds_f64(0.3), 24_000, 48_000);
+        let (l, r) = (rms(s.iter().step_by(2).copied()), rms(s.iter().skip(1).step_by(2).copied()));
+        assert!((l - 0.3536).abs() < 0.01, "{name}: left RMS {l}");
+        assert!(r < 0.01, "{name}: right RMS {r}");
+    }
+}

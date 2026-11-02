@@ -115,6 +115,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         if !items.is_empty() {
             return super::prop_groups::duplicate_contents(s, &items);
         }
+        // Text animators or their selectors selected → duplicate them inside their text layers.
+        let items = super::prop_groups::selected_animator_items(s);
+        if !items.is_empty() {
+            return super::prop_groups::duplicate_contents(s, &items);
+        }
     }
     let (cid, ids) = layers_p(s, p)?;
     let new = s.edit("Duplicate", None, |proj, st| {
@@ -328,7 +333,8 @@ fn paste_properties(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let lt = l.layer_time(t);
             for (path, v) in &values {
-                if let Some(pr) = l.props.prop_mut(path)
+                let path = super::resolve_effect_path(l, path);
+                if let Some(pr) = l.props.prop_mut(&path)
                     && let Some(v) = pr.value.coerce_json(&v.to_json())
                 {
                     pr.set_value_at(lt, v);
@@ -458,7 +464,8 @@ fn paste_links(s: &mut Session, clip: LinkClip) -> Result<Value> {
         for lid in &ids {
             let l = super::layer_mut(proj, cid, *lid)?;
             for (path, e) in &pairs {
-                if let Some(pr) = l.props.prop_mut(path) {
+                let path = super::resolve_effect_path(l, path);
+                if let Some(pr) = l.props.prop_mut(&path) {
                     pr.expr = Some(e.clone());
                     n += 1;
                 }
@@ -495,6 +502,13 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if let Some(clip) = s.state.link_clipboard.clone() {
         return paste_links(s, clip);
+    }
+    // A copied Mask Path / shape Path pasted onto Position becomes a motion path (#1425).
+    if let [(_, effectcraft_keyframe::Value::Path(path))] = s.state.value_clipboard.as_slice()
+        && let Some(target) = super::anim::path_target(s, p)?
+    {
+        let path = path.clone();
+        return super::anim::paste_path(s, p, target, &path);
     }
     if !s.state.value_clipboard.is_empty() {
         return paste_properties(s, p);
@@ -808,8 +822,30 @@ fn original_path(s: &Session) -> Option<String> {
     }
 }
 
+/// Whether Edit Original may hand `path` to the system's default app: a regular file (after
+/// following links) whose name, and the name it links to, have a media extension the footage
+/// importer takes. Anything else (a folder or app bundle, a script, a shortcut) is refused.
+pub(crate) fn openable_original(path: &str) -> std::result::Result<(), String> {
+    let media = |p: &std::path::Path| {
+        let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        crate::media_browser::kind_of(&p.to_string_lossy()).is_some_and(|k| k != "project") || matches!(ext.as_str(), "pdf" | "ai" | "eps")
+    };
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
+    let real = std::fs::canonicalize(path).map_err(|e| format!("cannot open “{name}”: {e}"))?;
+    if !real.is_file() {
+        return Err(format!("“{name}” is not a file"));
+    }
+    if !media(std::path::Path::new(path)) || !media(&real) {
+        return Err(format!("Edit Original opens media files only; “{name}” is not one"));
+    }
+    Ok(())
+}
+
 fn edit_original(s: &mut Session, _: &Value) -> Result<Value> {
-    let path = original_path(s).ok_or_else(|| super::bad("edit.editOriginal", "select a footage item or layer"))?;
+    let stored = original_path(s).ok_or_else(|| super::bad("edit.editOriginal", "select a footage item or layer"))?;
+    let path = s.stored_path(&stored).map_err(|why| super::bad("edit.editOriginal", crate::doc_path::refusal(&stored, why)))?;
+    let path = path.to_string_lossy();
+    openable_original(&path).map_err(|e| super::bad("edit.editOriginal", e))?;
     let url = super::layer_menu::file_url(&path);
     s.events.push(crate::Event::OpenUrl(url.clone()));
     Ok(json!({"url": url}))
@@ -952,20 +988,67 @@ fn always_ok(_: &Session) -> std::result::Result<(), String> {
 mod tests {
     use serde_json::json;
 
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out").join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     /// Edit Original opens the footage as a well-formed `file://` URL, whatever its name contains.
     #[test]
     fn edit_original_opens_an_encoded_file_url() {
+        let clip = tmp("edit-original-url").join("take #1.mov");
+        std::fs::write(&clip, b"").unwrap();
+        let clip = clip.to_string_lossy().into_owned();
+        let url = super::super::layer_menu::file_url(&clip);
+        assert!(url.ends_with("/take%20%231.mov"), "{url}");
         let mut s = crate::Session::default();
         let id = s
             .edit("add", None, |p, _| {
-                let f = effectcraft_project::Footage { path: "/clips/take #1.mov".into(), ..Default::default() };
+                let f = effectcraft_project::Footage { path: clip.clone(), ..Default::default() };
                 Ok(p.add_item("take", effectcraft_color::Label::Lavender, None, effectcraft_project::ItemKind::Footage(f)))
             })
             .unwrap();
         s.state.project_selection = vec![id];
         s.drain_events();
         let r = s.execute("edit.editOriginal", json!({})).unwrap();
-        assert_eq!(r["url"], "file:///clips/take%20%231.mov");
-        assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if u == "file:///clips/take%20%231.mov")));
+        assert_eq!(r["url"], url.as_str());
+        assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if *u == url)));
+    }
+
+    /// Only regular media files reach the system opener.
+    #[test]
+    fn edit_original_opens_media_files_only() {
+        let d = tmp("edit-original-kinds");
+        for f in ["clip.mov", "Still.PNG", "run.bat", "app.desktop", "clip.mov.lnk"] {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+        for f in ["Tool.app", "folder.mov"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        let ok = |f: &str| super::openable_original(&d.join(f).to_string_lossy()).is_ok();
+        assert!(ok("clip.mov") && ok("Still.PNG"));
+        for f in ["run.bat", "app.desktop", "clip.mov.lnk", "Tool.app", "folder.mov", "missing.mov", ""] {
+            assert!(!ok(f), "{f}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("app.desktop"), d.join("link.png")).unwrap();
+            assert!(!ok("link.png"), "a media name linking to another kind of file");
+        }
+        // The command refuses without opening anything.
+        let mut s = crate::Session::default();
+        let path = d.join("run.bat").to_string_lossy().into_owned();
+        let id = s
+            .edit("add", None, |p, _| {
+                let f = effectcraft_project::Footage { path, ..Default::default() };
+                Ok(p.add_item("bat", effectcraft_color::Label::Lavender, None, effectcraft_project::ItemKind::Footage(f)))
+            })
+            .unwrap();
+        s.state.project_selection = vec![id];
+        s.drain_events();
+        assert!(s.execute("edit.editOriginal", json!({})).is_err());
+        assert!(!s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(_))));
     }
 }

@@ -132,7 +132,7 @@ fn is_script_name(name: &str) -> bool {
 }
 
 /// One path component on every platform: not empty, `.` or `..`, and without `/`, `\` or NUL.
-fn is_bare_name(name: &str) -> bool {
+pub(crate) fn is_bare_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
@@ -140,7 +140,7 @@ fn is_bare_name(name: &str) -> bool {
 /// stream), ending in `.` or a space (Windows drops them), or a device name, which names a device
 /// in any folder and with any extension (`con.jsx`): `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
 /// `CONOUT$`, `COM0`–`COM9` and `LPT0`–`LPT9` (also with `¹²³`).
-fn windows_unsafe_name(name: &str) -> bool {
+pub(crate) fn windows_unsafe_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
     let port = |p: &str| {
         let mut n = stem.strip_prefix(p).unwrap_or_default().chars();

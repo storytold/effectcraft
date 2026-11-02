@@ -77,6 +77,19 @@ fn proexr_writes_layer_prefixed_channels_and_the_composite() {
     assert!(at("R", 16, 16) < 0.5, "multiplied by 50% blue (linear)");
 }
 
+#[test]
+fn proexr_names_a_non_ascii_layer_with_underscores_instead_of_panicking() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8, "frameRate": 24, "duration": 1})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "你好", "color": "#ff0000"})).unwrap();
+    let dir = out_dir("frame-exr-non-ascii");
+    let path = dir.join("frame.exr").to_string_lossy().to_string();
+    let r = s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+    let names: Vec<&str> = r["channels"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    assert!(names.contains(&"__.R") && names.contains(&"__.A"), "{names:?}");
+    assert!(std::path::Path::new(&path).exists());
+}
+
 /// Save a 32×32 comp holding one opaque solid of `color` (an sRGB-encoded triple) as ProEXR and
 /// return the centre pixel of the composite and of the solid's own layer: `[R, G, B]` each.
 fn proexr_centre(color: [f64; 3], bit_depth: u64) -> ([f32; 3], [f32; 3]) {

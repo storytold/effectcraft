@@ -19,6 +19,8 @@ pub(crate) struct FontEnv {
     pub xdg_config_home: Option<PathBuf>,
     /// `FONTCONFIG_FILE`: the main configuration file instead of the standard ones.
     pub fontconfig_file: Option<PathBuf>,
+    /// `FONTCONFIG_PATH`: ordered search folders, before the standard configuration folders.
+    pub fontconfig_path: Option<std::ffi::OsString>,
     /// The main configuration files tried when `FONTCONFIG_FILE` is unset (the first that exists).
     pub fontconfig_roots: Vec<PathBuf>,
     /// Folders scanned if they exist (the usual system folders and the Flatpak host folders).
@@ -34,6 +36,7 @@ impl FontEnv {
             xdg_data_dirs: var("XDG_DATA_DIRS"),
             xdg_config_home: var("XDG_CONFIG_HOME").map(PathBuf::from),
             fontconfig_file: var("FONTCONFIG_FILE").map(PathBuf::from),
+            fontconfig_path: var("FONTCONFIG_PATH"),
             fontconfig_roots: ["/etc/fonts/fonts.conf", "/usr/local/etc/fonts/fonts.conf"].map(PathBuf::from).to_vec(),
             fixed: [
                 "/usr/share/fonts",
@@ -87,10 +90,7 @@ const MAX_FILE_BYTES: u64 = 1 << 20;
 /// The font folders named by the fontconfig configuration.
 pub(crate) fn fontconfig_dirs(env: &FontEnv) -> Vec<PathBuf> {
     let mut st = Reader { env, out: Vec::new(), seen: HashSet::new() };
-    let root = match &env.fontconfig_file {
-        Some(f) => Some(f.clone()),
-        None => env.fontconfig_roots.iter().find(|p| p.is_file()).cloned(),
-    };
+    let root = fontconfig_root(env);
     if let Some(root) = root {
         st.file(&root, 0);
     }
@@ -100,6 +100,40 @@ pub(crate) fn fontconfig_dirs(env: &FontEnv) -> Vec<PathBuf> {
         st.include(&c.join("fontconfig/conf.d"), 0);
     }
     st.out
+}
+
+/// Select the main file as fontconfig does: absolute names bypass the search path;
+/// relative names (or `fonts.conf`) use FONTCONFIG_PATH, then the standard folders.
+fn fontconfig_root(env: &FontEnv) -> Option<PathBuf> {
+    if let Some(file) = &env.fontconfig_file
+        && file.is_absolute()
+    {
+        return Some(file.clone());
+    }
+    if env.fontconfig_file.is_none() && env.fontconfig_path.is_none() {
+        return env.fontconfig_roots.iter().find(|p| readable_config(p)).cloned();
+    }
+    let file = env.fontconfig_file.as_deref().unwrap_or_else(|| Path::new("fonts.conf"));
+    let mut dirs = Vec::new();
+    if let Some(path) = &env.fontconfig_path {
+        let mut paths = std::env::split_paths(path).peekable();
+        while let Some(mut dir) = paths.next() {
+            // Fontconfig ignores a final empty item; an interior empty item names `/`.
+            if dir.as_os_str().is_empty() {
+                if paths.peek().is_none() {
+                    continue;
+                }
+                dir = PathBuf::from("/");
+            }
+            dirs.push(dir);
+        }
+    }
+    dirs.extend(env.fontconfig_roots.iter().filter_map(|p| p.parent().map(Path::to_path_buf)));
+    dirs.into_iter().map(|dir| dir.join(file)).find(|p| readable_config(p))
+}
+
+fn readable_config(path: &Path) -> bool {
+    path.is_file() && std::fs::File::open(path).is_ok()
 }
 
 struct Reader<'a> {
@@ -370,5 +404,110 @@ mod tests {
         let faces = src.faces();
         assert!(faces.iter().any(|f| f.family == "Noto Serif" && f.origin == "system"), "{:?}", faces.iter().map(|f| &f.family).collect::<Vec<_>>());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fontconfig_path_selects_the_first_existing_config_in_search_order() {
+        let root = temp("config-search");
+        let first = root.join("first");
+        let second = root.join("second");
+        write(&first.join("fonts.conf"), "<fontconfig><dir>/first/fonts</dir></fontconfig>");
+        write(&second.join("fonts.conf"), "<fontconfig><dir>/second/fonts</dir></fontconfig>");
+        let mut env = env_in(&root);
+        env.fontconfig_path = Some(std::env::join_paths([root.join("missing"), first.clone(), second.clone()]).unwrap());
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/first/fonts")]);
+        env.fontconfig_path = Some(std::env::join_paths([second, first]).unwrap());
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/second/fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_relative_selected_config_uses_the_search_path_and_keeps_relative_includes() {
+        let root = temp("selected-config");
+        let config = root.join("config");
+        write(&config.join("chosen.conf"), "<fontconfig><include>conf.d</include></fontconfig>");
+        write(&config.join("conf.d/10-fonts.conf"), "<fontconfig><dir prefix=\"relative\">../../fonts</dir></fontconfig>");
+        let mut env = env_in(&root);
+        env.fontconfig_path = Some(config.clone().into_os_string());
+        env.fontconfig_file = Some(PathBuf::from("chosen.conf"));
+        assert_eq!(fontconfig_dirs(&env), [config.join("conf.d/../../fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_absolute_selected_config_bypasses_the_search_path() {
+        let root = temp("absolute-config");
+        write(&root.join("search/fonts.conf"), "<fontconfig><dir>/wrong/fonts</dir></fontconfig>");
+        write(&root.join("selected.conf"), "<fontconfig><dir>/selected/fonts</dir></fontconfig>");
+        let mut env = env_in(&root);
+        env.fontconfig_path = Some(root.join("search").into_os_string());
+        env.fontconfig_file = Some(root.join("selected.conf"));
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/selected/fonts")]);
+        env.fontconfig_file = Some(root.join("missing.conf"));
+        assert!(fontconfig_dirs(&env).is_empty(), "an explicit missing file does not pick another config");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn configuration_search_falls_back_to_standard_folders() {
+        let root = temp("default-config");
+        let config = root.join("etc/fonts");
+        write(&config.join("fonts.conf"), "<fontconfig><dir>/default/fonts</dir></fontconfig>");
+        write(&config.join("selected.conf"), "<fontconfig><dir>/selected/fonts</dir></fontconfig>");
+        let mut env = env_in(&root);
+        env.fontconfig_path = Some(root.join("missing").into_os_string());
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/default/fonts")]);
+        env.fontconfig_file = Some(PathBuf::from("selected.conf"));
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/selected/fonts")]);
+        env.fontconfig_path = None;
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/selected/fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_search_preserves_non_unicode_folder_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = temp("non-unicode-config");
+        let config = root.join(std::ffi::OsStr::from_bytes(b"config-\xff"));
+        write(&config.join("fonts.conf"), "<fontconfig><dir>/configured/fonts</dir></fontconfig>");
+        let mut env = env_in(&root);
+        env.fontconfig_path = Some(config.into_os_string());
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/configured/fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_search_skips_unreadable_files() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Cleanup {
+            root: PathBuf,
+            file: PathBuf,
+            permissions: std::fs::Permissions,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.file, self.permissions.clone());
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let root = temp("unreadable-config");
+        let first = root.join("first/fonts.conf");
+        let second = root.join("second/fonts.conf");
+        write(&first, "<fontconfig><dir>/unreadable/fonts</dir></fontconfig>");
+        write(&second, "<fontconfig><dir>/readable/fonts</dir></fontconfig>");
+        let _cleanup = Cleanup { root: root.clone(), file: first.clone(), permissions: std::fs::metadata(&first).unwrap().permissions() };
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&first).is_ok() {
+            eprintln!("skipped: this process can read mode-000 files");
+            return;
+        }
+        let mut env = env_in(&root);
+        env.fontconfig_roots = vec![first.clone(), second.clone()];
+        env.fontconfig_path = Some(std::env::join_paths([first.parent().unwrap(), second.parent().unwrap()]).unwrap());
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/readable/fonts")]);
+        env.fontconfig_path = None;
+        assert_eq!(fontconfig_dirs(&env), [PathBuf::from("/readable/fonts")]);
     }
 }

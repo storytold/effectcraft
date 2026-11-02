@@ -441,6 +441,18 @@ try {
   const comps = await js(`effectcraft.inspect().then(i => i.activeComp)`);
   if (!comps) throw new Error("reopened project has no active comp");
   report.steps.reopen = { ...opened, activeComp: comps };
+
+  // Files the page holds (browser storage, no std::fs): a script opens one next to the project,
+  // and the footage check finds the imported media instead of marking it missing.
+  const hf = await js(`(async () => {
+    const p = await effectcraft.addFile(new File(["from the page"], "script-data.txt"));
+    await effectcraft.saveToBrowser("/host-files.ecproj");
+    const run = await effectcraft.execute("script.run", {code: "var f = new File(" + JSON.stringify(p) + "); writeLn(f.open('r') ? f.read() : f.error);"});
+    return {output: run.output, footage: await effectcraft.execute("footage.check", {wait: true})};
+  })()`);
+  report.steps.hostFiles = hf;
+  check(hf.output === "from the page", `a script opens a file the page holds (${hf.output})`);
+  check(hf.footage.checked > 0 && hf.footage.missing === 0, `stored footage isn't missing (${JSON.stringify(hf.footage)})`);
   report.steps.final = { screenshot: await shot("02-after") };
 
   // Persistence: the session, imported media, settings and a project saved to browser storage

@@ -272,8 +272,11 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     // Variable Font Axes: one value per axis of a variable font (`character.axis.<tag>`).
-    let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
+    let resolved = effectcraft_engine::text::resolve(&doc.font, &doc.style);
+    let face = resolved.face;
     let axes = effectcraft_engine::text::variable::font_axes(face);
+    // A named instance (`Black`) sets the axes the text doesn't set itself.
+    let instance = effectcraft_engine::text::fonts::instance_variations(&resolved);
     if !axes.is_empty() {
         y += 26.0;
         p.text(pos2(x0, y + 7.0), Align2::LEFT_CENTER, tr("Variable Font Axes"), Tokens::semibold(11.0), t.text_dim);
@@ -282,7 +285,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let fx = x0 + col as f32 * (w / 2.0);
             let fy = y + 20.0 + row as f32 * 24.0;
             let tag = a.tag.trim_end().to_string();
-            let v = doc.variations.iter().find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
+            let v = doc.variations.iter().chain(&instance).find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
             p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, &tag, Tokens::semibold(10.5), t.text_dim);
             let (r, nv, _) =
                 widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::new(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);

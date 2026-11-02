@@ -88,6 +88,21 @@ impl Ctx<'_> {
     }
 }
 
+/// The file an external image asset (`u` + `p`) names, taken from `base_dir`, the folder of the
+/// Lottie file. Only local files, or files on the network share the Lottie file is on, are
+/// imported (see `craft_docpath`).
+fn external_image(stored: &str, base_dir: &str) -> Result<String, String> {
+    let doc = (!base_dir.is_empty()).then(|| {
+        let doc = std::path::Path::new(base_dir).join("lottie.json");
+        std::path::absolute(&doc).unwrap_or(doc)
+    });
+    match craft_docpath::resolve(stored, doc.as_deref()) {
+        Ok(path) if path.is_absolute() => Ok(path.to_string_lossy().into_owned()),
+        Ok(_) => Err(format!("{stored} is relative and the Lottie file's folder is not known")),
+        Err(why) => Err(format!("{stored}: {why}")),
+    }
+}
+
 /// Import a Lottie document (JSON or a stored `.lottie` archive) into `project` as a new
 /// composition. `store` saves embedded images and returns the file path to use;
 /// `base_dir` resolves external image references.
@@ -145,8 +160,13 @@ pub fn import(
                 (cx.store)(&ImportedImage { id: id.to_string(), name: nm.clone(), bytes: data, ext: ext.into() })
             } else {
                 let u = s(a, "u").unwrap_or("");
-                let rel = format!("{u}{p}");
-                Some(if rel.starts_with('/') || cx.base_dir.is_empty() { rel } else { format!("{}/{rel}", cx.base_dir.trim_end_matches('/')) })
+                match external_image(&format!("{u}{p}"), cx.base_dir) {
+                    Ok(path) => Some(path),
+                    Err(why) => {
+                        cx.im.warn(format!("image asset `{id}` is not imported: {why}"));
+                        continue;
+                    }
+                }
             };
             let Some(path) = path else {
                 cx.im.warn(format!("image asset `{id}` could not be stored"));

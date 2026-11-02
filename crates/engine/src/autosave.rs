@@ -47,6 +47,11 @@ pub struct AutoSaveState {
 #[derive(Clone)]
 pub struct PendingWrite {
     pub path: PathBuf,
+    pub(crate) slot: u32,
+    pub(crate) revision: u64,
+    /// Originating project identity: the path changes on Save As, the epoch on Open/New.
+    pub(crate) project_path: Option<String>,
+    pub(crate) project_epoch: u64,
     handle: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<std::io::Result<()>>>>>,
 }
 
@@ -57,9 +62,16 @@ impl std::fmt::Debug for PendingWrite {
 }
 
 impl PendingWrite {
-    pub fn spawn(path: PathBuf, work: impl FnOnce() -> std::io::Result<()> + Send + 'static) -> std::io::Result<PendingWrite> {
+    pub fn spawn(
+        path: PathBuf,
+        slot: u32,
+        revision: u64,
+        project_path: Option<String>,
+        project_epoch: u64,
+        work: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    ) -> std::io::Result<PendingWrite> {
         let h = std::thread::Builder::new().name("autosave".into()).spawn(work)?;
-        Ok(PendingWrite { path, handle: std::sync::Arc::new(std::sync::Mutex::new(Some(h))) })
+        Ok(PendingWrite { path, slot, revision, project_path, project_epoch, handle: std::sync::Arc::new(std::sync::Mutex::new(Some(h))) })
     }
     pub fn is_finished(&self) -> bool {
         self.handle.lock().map(|h| h.as_ref().is_none_or(|h| h.is_finished())).unwrap_or(true)

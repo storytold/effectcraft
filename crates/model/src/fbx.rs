@@ -32,6 +32,57 @@ pub const BINARY_MAGIC: &[u8] = b"Kaydara FBX Binary  \0\x1a\0";
 const MAX_DEPTH: usize = 64;
 /// Largest decoded array accepted (bytes).
 const MAX_ARRAY_BYTES: usize = 1 << 30;
+/// Most memory one import may keep: parsed arrays as stored (8 bytes per element, whatever the
+/// wire type) plus the meshes built from them (#1234).
+const MAX_IMPORT_BYTES: usize = 1 << 31;
+
+/// What is left of an import's memory budget.
+struct Budget(std::cell::Cell<usize>);
+
+impl Budget {
+    fn new(bytes: usize) -> Budget {
+        Budget(std::cell::Cell::new(bytes))
+    }
+    /// Take `bytes` (None: a size that overflowed) from the budget, or fail the import before
+    /// anything that large is allocated.
+    fn take(&self, bytes: Option<usize>, what: &str) -> Result<()> {
+        let left = self.0.get();
+        match bytes.filter(|&b| b <= left) {
+            Some(b) => {
+                self.0.set(left - b);
+                Ok(())
+            }
+            None => Err(perr(format!("FBX: {what} would take the import past its {} MiB memory limit", MAX_IMPORT_BYTES >> 20))),
+        }
+    }
+}
+
+/// Bytes a mesh keeps.
+fn mesh_bytes(m: &Mesh) -> Option<usize> {
+    m.primitives.iter().try_fold(0usize, |acc, p| {
+        let n = p.positions.len().checked_mul(12)?.checked_add(p.normals.len().checked_mul(12)?)?.checked_add(p.uvs.len().checked_mul(8)?)?;
+        let n = n.checked_add(p.tangents.len().checked_mul(16)?)?.checked_add(p.joints.len().checked_mul(8)?)?.checked_add(p.weights.len().checked_mul(16)?)?;
+        acc.checked_add(n)?.checked_add(p.indices.len().checked_mul(4)?)
+    })
+}
+
+/// Bytes the values under `nodes` keep. Used for ASCII files, which hold array elements as
+/// one `Prop` each and are parsed before they can be counted (the text itself bounds them).
+fn value_bytes(nodes: &[FbxNode]) -> Option<usize> {
+    nodes.iter().try_fold(0usize, |acc, n| {
+        let own = n.props.iter().try_fold(0usize, |a, p| {
+            let extra = match p {
+                Prop::Ints(v) => v.len().checked_mul(8)?,
+                Prop::Floats(v) => v.len().checked_mul(8)?,
+                Prop::Str(v) => v.len(),
+                Prop::Bytes(v) => v.len(),
+                Prop::Int(_) | Prop::Float(_) => 0,
+            };
+            a.checked_add(std::mem::size_of::<Prop>())?.checked_add(extra)
+        })?;
+        acc.checked_add(own)?.checked_add(value_bytes(&n.children)?)
+    })
+}
 
 /// One property value of an FBX node.
 #[derive(Clone, Debug, PartialEq)]
@@ -126,7 +177,17 @@ impl FbxNode {
 /// Read an FBX file (binary or ASCII) into its top-level nodes and the file version
 /// (e.g. 7400).
 pub fn read(bytes: &[u8]) -> Result<(u32, Vec<FbxNode>)> {
-    if bytes.starts_with(BINARY_MAGIC) { read_binary(bytes) } else { read_ascii(&String::from_utf8_lossy(bytes)) }
+    read_within(bytes, &Budget::new(MAX_IMPORT_BYTES))
+}
+
+fn read_within(bytes: &[u8], budget: &Budget) -> Result<(u32, Vec<FbxNode>)> {
+    if bytes.starts_with(BINARY_MAGIC) {
+        read_binary(bytes, budget)
+    } else {
+        let (version, nodes) = read_ascii(&String::from_utf8_lossy(bytes))?;
+        budget.take(value_bytes(&nodes), "its values")?;
+        Ok((version, nodes))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -136,6 +197,7 @@ struct Bin<'a> {
     d: &'a [u8],
     /// 64-bit record offsets (version 7500 and later).
     wide: bool,
+    budget: &'a Budget,
 }
 
 impl Bin<'_> {
@@ -207,7 +269,7 @@ impl Bin<'_> {
     }
 
     fn prop(&self, pos: &mut usize, pend: usize) -> Result<Prop> {
-        let sub = Bin { d: self.d.get(..pend).ok_or_else(|| perr("FBX: truncated property"))?, wide: self.wide };
+        let sub = Bin { d: self.d.get(..pend).ok_or_else(|| perr("FBX: truncated property"))?, wide: self.wide, budget: self.budget };
         let t = sub.arr::<1>(pos)?[0];
         Ok(match t {
             b'Y' => Prop::Int(i16::from_le_bytes(sub.arr(pos)?) as i64),
@@ -234,6 +296,9 @@ impl Bin<'_> {
                     _ => 1,
                 };
                 let want = len.checked_mul(size).filter(|&n| n <= MAX_ARRAY_BYTES).ok_or_else(|| perr("FBX: array too large"))?;
+                // Elements are kept as f64/i64 (booleans and 32-bit values widen), so the budget
+                // is charged for what is kept, not for the wire bytes.
+                sub.budget.take(len.checked_mul(8), "an array")?;
                 let data = sub.take(pos, clen)?;
                 let raw = match enc {
                     0 => data.to_vec(),
@@ -263,10 +328,10 @@ fn object_name(b: &[u8]) -> String {
     }
 }
 
-fn read_binary(bytes: &[u8]) -> Result<(u32, Vec<FbxNode>)> {
+fn read_binary(bytes: &[u8], budget: &Budget) -> Result<(u32, Vec<FbxNode>)> {
     let mut pos = BINARY_MAGIC.len();
-    let version = Bin { d: bytes, wide: false }.u32(&mut pos)?;
-    let bin = Bin { d: bytes, wide: version >= 7500 };
+    let version = Bin { d: bytes, wide: false, budget }.u32(&mut pos)?;
+    let bin = Bin { d: bytes, wide: version >= 7500, budget };
     let mut nodes = vec![];
     while pos < bytes.len() {
         match bin.record(&mut pos, 0) {
@@ -728,7 +793,13 @@ fn short_name(full: &str) -> &str {
 
 /// Parse an FBX file into a model. `resolve(uri)` reads texture files next to it.
 pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
-    let (version, doc) = read(bytes)?;
+    parse_within(bytes, resolve, MAX_IMPORT_BYTES)
+}
+
+/// [`parse`] keeping at most `limit` bytes of arrays and meshes.
+fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: usize) -> Result<Model> {
+    let budget = Budget::new(limit);
+    let (version, doc) = read_within(bytes, &budget)?;
     if version != 0 && version < 7000 {
         return Err(ModelError::Unsupported(format!("FBX {}.{} (only FBX 7.x files are read)", version / 1000, version % 1000 / 100)));
     }
@@ -835,19 +906,28 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         Some(materials.len() - 1)
     };
 
-    // One mesh per Model with Mesh geometry (material slots are per Model).
+    // One mesh per Model with Mesh geometry (material slots are per Model). Models instancing the
+    // same geometry with the same materials share one mesh rather than each building a copy.
     let mut meshes: Vec<Mesh> = vec![];
+    let mut mesh_of: HashMap<(i64, Vec<usize>), usize> = HashMap::new();
     for &id in &model_ids {
         let Some(&ni) = node_of.get(&id) else { continue };
         let Some(gid) = links.iter().find(|l| l.1 == id && kind(l.0) == Some("Geometry")).map(|l| l.0) else { continue };
         let Some(geom) = by_id.get(&gid) else { continue };
         let mats: Vec<usize> =
             links.iter().filter(|l| l.1 == id && kind(l.0) == Some("Material")).filter_map(|l| material_index(l.0, &mut materials, &mut textures)).collect();
-        let normal_mapped: Vec<bool> = materials.iter().map(|m| m.normal_tex.is_some()).collect();
         let name = nodes.get(ni).map(|n| n.name.clone()).unwrap_or_default();
-        let Some(mesh) = build_mesh(&name, geom, &mats, &|m| normal_mapped.get(m).copied().unwrap_or(false)) else { continue };
-        meshes.push(mesh);
-        let mesh_index = meshes.len() - 1;
+        let mesh_index = match mesh_of.get(&(gid, mats.clone())) {
+            Some(&i) => i,
+            None => {
+                let normal_mapped: Vec<bool> = materials.iter().map(|m| m.normal_tex.is_some()).collect();
+                let Some(mesh) = build_mesh(&name, geom, &mats, &|m| normal_mapped.get(m).copied().unwrap_or(false)) else { continue };
+                budget.take(mesh_bytes(&mesh), &format!("mesh `{name}`"))?;
+                meshes.push(mesh);
+                mesh_of.insert((gid, mats), meshes.len() - 1);
+                meshes.len() - 1
+            }
+        };
         let geo = by_id.get(&id).and_then(|o| geometric(&Props70::of(o)));
         match geo {
             Some(matrix) => {

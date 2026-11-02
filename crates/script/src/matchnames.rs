@@ -399,7 +399,8 @@ pub fn shape_kind(name: &str) -> Option<&'static str> {
 }
 
 /// Effects whose documented parameter match names are not numbered in display order:
-/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`.
+/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`. Params of
+/// these effects that After Effects doesn't have are numbered after the listed ones (#1405).
 const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "fillMask", 1),
     ("ec.generate.fill", "color", 2),
@@ -408,7 +409,41 @@ const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "opacity", 5),
     ("ec.generate.fill", "invert", 6),
     ("ec.generate.fill", "allMasks", 7),
+    ("ec.generate.stroke", "path", 1),
+    ("ec.generate.stroke", "color", 2),
+    ("ec.generate.stroke", "brushSize", 3),
+    ("ec.generate.stroke", "brushHardness", 4),
+    ("ec.generate.stroke", "opacity", 5),
+    ("ec.generate.stroke", "spacing", 6),
+    ("ec.generate.stroke", "paintStyle", 7),
+    ("ec.generate.stroke", "start", 8),
+    ("ec.generate.stroke", "end", 9),
+    ("ec.generate.stroke", "allMasks", 10),
+    ("ec.generate.stroke", "strokeSequentially", 11),
+    // -0001 is a hidden parameter and -0003 Channel Range, which we don't have; the per-channel
+    // controls are ours (After Effects edits the selected channel with the Master ones).
+    ("ec.color.huesaturation", "channelControl", 2),
+    ("ec.color.huesaturation", "hue", 4),
+    ("ec.color.huesaturation", "saturation", 5),
+    ("ec.color.huesaturation", "lightness", 6),
+    ("ec.color.huesaturation", "colorize", 7),
+    ("ec.color.huesaturation", "colorizeHue", 8),
+    ("ec.color.huesaturation", "colorizeSaturation", 9),
+    ("ec.color.huesaturation", "colorizeLightness", 10),
 ];
+
+/// The `-NNNN` number of the param `id` at 0-based `pos` among `fx`'s `params`.
+fn param_number(fx: &str, params: &[Node], id: &str, pos: usize) -> usize {
+    let listed = |p: &str| PARAM_NUMBERS.iter().find(|(f, q, _)| *f == fx && *q == p).map(|(_, _, n)| *n);
+    if let Some(n) = listed(id) {
+        return n;
+    }
+    let Some(last) = PARAM_NUMBERS.iter().filter(|(f, _, _)| *f == fx).map(|(_, _, n)| *n).max() else {
+        return pos + 1;
+    };
+    let unlisted_before = params.iter().take(pos).filter(|c| listed(c.match_id()).is_none()).count();
+    last + unlisted_before + 1
+}
 
 /// Match name of the node at the end of `chain` (layer root's children → … → node). `effect`
 /// params are numbered `<effect match name>-0001…` in parameter order, like After Effects.
@@ -432,11 +467,8 @@ pub fn node(chain: &[&Node]) -> String {
             let fx = parent.and_then(Node::as_group);
             match fx {
                 Some(g) => {
-                    let i = PARAM_NUMBERS
-                        .iter()
-                        .find(|(fx, p, _)| *fx == g.match_id && *p == id)
-                        .map(|(_, _, n)| *n)
-                        .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0) + 1);
+                    let pos = g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0);
+                    let i = param_number(&g.match_id, &g.children, id, pos);
                     format!("{}-{i:04}", effect(&g.match_id))
                 }
                 None => own(),

@@ -1,10 +1,14 @@
-//! File dialogs that don't block the frame (macOS), for `Hooks::file_dialog_async`.
+//! File dialogs that don't block the frame (macOS and Linux), for `Hooks::file_dialog_async`.
 //!
 //! A blocking `rfd::FileDialog` runs a nested modal event loop inside eframe's frame, that is
 //! inside winit's event handler. On macOS a file dragged over the window while that loop ran
 //! re-entered winit's handler, which panics across the Objective-C boundary and aborts the app
-//! (#511). `rfd::AsyncFileDialog` shows the dialog as a sheet on the window and returns at once;
-//! the answer arrives when the sheet closes, outside the frame, and the app runs the command then.
+//! (#511). On Linux the blocking dialog is worse than slow: rfd uses the XDG desktop portal, so
+//! the main thread sits waiting on the portal's answer and never pumps winit's events — the
+//! window stops answering the compositor and the desktop offers to force-quit the app while the
+//! Open dialog is up (#1275). `rfd::AsyncFileDialog` shows the dialog as a sheet on the window
+//! (macOS) or through the portal from a worker thread (Linux) and returns at once; the answer
+//! arrives when the dialog closes, outside the frame, and the app runs the command then.
 
 use effectcraft_ui_egui::{DialogDone, FileDialog};
 use rfd::{AsyncFileDialog, FileHandle};

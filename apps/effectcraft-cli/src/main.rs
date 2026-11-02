@@ -16,6 +16,8 @@
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
+//!     [--progress]  report progress on stderr when it is not a terminal, up to four lines a second:
+//!     `progress <frames done> <frames total> <seconds elapsed> <seconds left, or - when unknown>`
 //! effectcraft-cli render --template T.ectemplate [--values V.json] --out FILE
 //! effectcraft-cli render-frame --template T.ectemplate [--values V.json] [--time S] [--out F.png]
 //! effectcraft-cli render F.ecproj --queue                    render the project's Render Queue
@@ -106,6 +108,8 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
+                                           --progress: progress lines on stderr when it is not a terminal
+                                           (progress <frames done> <total> <seconds elapsed> <seconds left|->)
   render/render-frame --template T.ectemplate [--values V.json]   render one template instance
   bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   per-layer/effect render timings;
                                            --play N renders N consecutive frames with/without the layer cache;
@@ -189,6 +193,7 @@ const FLAGS: &[&str] = &[
     "--small",
     "--adv3d",
     "--autosave",
+    "--progress",
 ];
 
 struct Args {
@@ -263,8 +268,18 @@ fn value_arg(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| json!(s))
 }
 
+/// The command line as text. `std::env::args` panics on an argument that is not Unicode (a
+/// Latin-1 file name on Linux). Every argument is used as a string, and a lossy copy would read or
+/// write another file than the one named, so such an argument is a usage error naming it.
+fn utf8_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    raw.into_iter().map(|a| a.into_string().map_err(|a| format!("argument `{}` is not valid Unicode", a.to_string_lossy()))).collect()
+}
+
 fn main() {
-    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let raw = match utf8_args(std::env::args_os().skip(1)) {
+        Ok(raw) => raw,
+        Err(e) => fail_usage(&e),
+    };
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -493,6 +508,9 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             };
             let mut b = backend(args, true)?;
             let r = b.exec(&id, params)?;
+            if let Some(e) = failed_render(&id, &r) {
+                return Err(Failure::Error(e));
+            }
             let saved = maybe_save(&mut b, args)?;
             emit(&with_saved(r, saved), json_out);
         }
@@ -515,6 +533,9 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 };
                 i += 1;
                 let r = b.exec(id, params).map_err(|e| Failure::Error(format!("{id}: {e}")))?;
+                if let Some(e) = failed_render(id, &r) {
+                    return Err(Failure::Error(format!("{id}: {e}")));
+                }
                 if !json_out {
                     emit(&r, false);
                 }
@@ -637,6 +658,21 @@ fn positional<const N: usize>(args: &Args, usage: &str) -> Result<[String; N], F
     Ok(std::array::from_fn(|i| args.pos[i].clone()))
 }
 
+/// `renderQueue.render` reports a failed item in its result, not as an error. Under `run`/`exec`
+/// that item fails the command (#1426), as it fails `render --queue`.
+fn failed_render(id: &str, r: &Value) -> Option<String> {
+    if id != "renderQueue.render" {
+        return None;
+    }
+    let failed: Vec<String> = r["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| Some(format!("{}: {}", i["compName"].as_str().unwrap_or("?"), i["status"].get("Failed")?.as_str().unwrap_or("failed"))))
+        .collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
+}
+
 fn with_saved(v: Value, saved: Option<String>) -> Value {
     match saved {
         None => v,
@@ -660,11 +696,10 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     let mut s = session(args)?;
     if args.opt("--template").is_some() {
         template::prepare(&mut s, args)?;
-    } else {
-        match &args.project {
-            Some(p) => s.execute("file.open", json!({"path": p})).map_err(|e| Failure::Error(e.to_string()))?,
-            None => s.execute("file.openDemoProject", json!({})).map_err(|e| Failure::Error(e.to_string()))?,
-        };
+    } else if let Some(p) = &args.project {
+        s.execute("file.open", json!({"path": p})).map_err(|e| Failure::Error(e.to_string()))?;
+    } else if args.flag("--demo") || !args.flag("--empty") {
+        s.execute("file.openDemoProject", json!({})).map_err(|e| Failure::Error(e.to_string()))?;
     }
     let err = |e: effectcraft_engine::EngineError| Failure::Error(e.to_string());
     if !args.flag("--queue") {
@@ -742,8 +777,21 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     }
     s.execute("renderQueue.render", json!({"wait": false})).map_err(err)?;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    // `--progress`: one line per update for a program reading stderr (a terminal gets the live line).
+    let lines = args.flag("--progress") && !tty;
+    let (mut last_line, mut last_done) = (std::time::Instant::now(), u64::MAX);
     while s.is_rendering() {
         std::thread::sleep(std::time::Duration::from_millis(100));
+        if lines
+            && last_line.elapsed() >= std::time::Duration::from_millis(250)
+            && let Some(p) = s.render_progress()
+            && p.done != last_done
+        {
+            last_line = std::time::Instant::now();
+            last_done = p.done;
+            let left = p.remaining.map_or_else(|| "-".to_string(), |r| format!("{r:.1}"));
+            note!("progress {} {} {:.1} {left}", p.done, p.total, p.item_elapsed);
+        }
         if tty && let Some(p) = s.render_progress() {
             let left = p.remaining.map(|r| format!(", ~{r:.1}s left")).unwrap_or_default();
             let _ = write!(
@@ -1268,6 +1316,18 @@ mod tests {
         let a = parse(&["render", "t.ecproj", "--comp=Main", "--work-area", "--out", "x.mp4", "--json"]).unwrap();
         assert_eq!((a.project.as_deref(), a.opt("--comp"), a.opt("--out")), (Some("t.ecproj"), Some("Main"), Some("x.mp4")));
         assert!(a.flag("--work-area") && a.flag("--json"));
+    }
+
+    /// `std::env::args` panicked on an argument that is not Unicode; it is a usage error naming
+    /// it, and Unicode arguments pass through unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_arguments_are_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let args = [OsString::from("render-frame"), OsString::from("--out"), OsString::from_vec(b"caf\xe9.png".to_vec())];
+        assert_eq!(utf8_args(args).unwrap_err(), "argument `caf\u{fffd}.png` is not valid Unicode");
+        assert_eq!(utf8_args([OsString::from("info"), OsString::from("caf\u{e9}.png")]).unwrap(), ["info", "caf\u{e9}.png"]);
     }
 
     /// Every `--option` the CLI reads is declared in VALUED or FLAGS, so none is refused.

@@ -769,10 +769,14 @@ impl Crop {
         if self.use_roi
             && let Some([x, y, rw, rh]) = self.roi
         {
-            let l = (x * scale).round() as i32;
-            let t = (y * scale).round() as i32;
-            let r = w as i32 - ((x + rw) * scale).round() as i32;
-            let b = h as i32 - ((y + rh) * scale).round() as i32;
+            // The quad arrives unvalidated (control channel or a hand-edited project):
+            // clamp like the sibling edge fields (plus/minus 20 000) and subtract
+            // without overflow.
+            let conv = |v: f64| v.round().clamp(-20_000.0, 20_000.0) as i32;
+            let l = conv(x * scale);
+            let t = conv(y * scale);
+            let r = (w as i32).saturating_sub(conv((x + rw) * scale));
+            let b = (h as i32).saturating_sub(conv((y + rh) * scale));
             return (t, l, b, r);
         }
         (self.top, self.left, self.bottom, self.right)
@@ -1094,8 +1098,8 @@ impl OutputModule {
     /// scale `scale`: after Crop and Resize (before codec rounding).
     pub fn frame_size(&self, w: u32, h: u32, scale: f64) -> (u32, u32) {
         let (t, l, b, r) = self.crop.edges(w, h, scale);
-        let cw = (w as i32 - l - r).max(1) as u32;
-        let ch = (h as i32 - t - b).max(1) as u32;
+        let cw = (w as i32).saturating_sub(l).saturating_sub(r).max(1) as u32;
+        let ch = (h as i32).saturating_sub(t).saturating_sub(b).max(1) as u32;
         if !self.resize.enabled {
             return (cw, ch);
         }
@@ -1641,6 +1645,22 @@ mod tests {
         assert_eq!(s.frame_count(&c), 30);
         assert_eq!(s.first_frame(&c), 30);
         assert!(s.frame_time(&c, 0) >= Tick::from_seconds_f64(1.0));
+    }
+
+    #[test]
+    fn hostile_roi_cannot_overflow_crop_math() {
+        // `-1e12` saturates to `i32::MIN` on conversion: `w as i32 - l` must saturate,
+        // not overflow, and still yield a usable (degenerate) frame size.
+        let c = Comp::new(1920, 1080, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        let rs = RenderSettings::default();
+        let mut m = OutputModule::for_format(OutputFormat::PngSequence);
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([-1e12, -1e12, 200.0, 200.0]), ..Default::default() };
+        let (w, h) = m.output_size(&c, &rs);
+        assert!((w, h) == (1, 1), "degenerate but valid: {w}x{h}");
+        // Sane ROIs are unaffected (existing behavior).
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
+        let half = RenderSettings { resolution: 0.5, ..Default::default() };
+        assert_eq!(m.output_size(&c, &half), (400, 200));
     }
 
     #[test]

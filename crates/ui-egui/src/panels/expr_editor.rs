@@ -2,6 +2,7 @@
 //! Font Size, Syntax Highlighting, Line Numbers, Auto-complete (Tab accepts), Bracket Matching
 //! and Word Wrap. The Composition viewer uses the shared diagnostics in `expr_bar`.
 
+use effectcraft_engine::commands::expr_tools::language_menu;
 use effectcraft_engine::prefs::Scripting;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Rect, Stroke, pos2, vec2};
@@ -211,6 +212,37 @@ pub fn completions(text: &str, cursor: usize) -> (String, Vec<&'static str>) {
     (word, c)
 }
 
+/// How `name` is called, from the Expression Language menu's signatures: `None` for a
+/// property, `Some(true)` for a function that takes arguments, `Some(false)` for one that never
+/// does.
+fn call_shape(name: &str) -> Option<bool> {
+    let calls: Vec<&str> =
+        language_menu().into_iter().flat_map(|(_, items)| items).filter_map(|(_, text)| text.strip_prefix(name)?.strip_prefix('(')).collect();
+    (!calls.is_empty()).then(|| calls.iter().any(|rest| !rest.starts_with(')')))
+}
+
+/// Accepts the first auto-complete candidate at char index `cursor`: inserts the rest of the
+/// name, plus `()` for a function (#1393), and returns the new cursor: between the parentheses,
+/// or after them when the function takes no arguments.
+pub fn accept_completion(buf: &mut String, cursor: usize) -> Option<usize> {
+    let (word, cands) = completions(buf, cursor);
+    let first = cands.first()?;
+    let at = byte_of(buf, cursor);
+    let rest = &first[word.len()..];
+    let end = cursor + first.chars().count() - word.chars().count();
+    let already_called = buf.get(at..).is_some_and(|after| after.starts_with('('));
+    match call_shape(first).filter(|_| !already_called) {
+        Some(takes_args) => {
+            buf.insert_str(at, &format!("{rest}()"));
+            Some(end + if takes_args { 1 } else { 2 })
+        }
+        None => {
+            buf.insert_str(at, rest);
+            Some(end)
+        }
+    }
+}
+
 /// Colour runs for JavaScript: (byte start, byte end, colour).
 pub fn highlight(text: &str, base: Color32, sx: &Syntax) -> Vec<(usize, usize, Color32)> {
     let b = text.as_bytes();
@@ -320,15 +352,10 @@ pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, p: 
     if p.auto_complete
         && child.memory(|m| m.has_focus(id))
         && let Some(c) = cursor
+        && !completions(buf, c).1.is_empty()
+        && child.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
     {
-        let (word, cands) = completions(buf, c);
-        if let Some(first) = cands.first()
-            && child.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-        {
-            let at = byte_of(buf, c);
-            buf.insert_str(at, &first[word.len()..]);
-            accepted = Some(c + first.chars().count() - word.chars().count());
-        }
+        accepted = accept_completion(buf, c);
     }
     let out = egui::TextEdit::multiline(buf)
         .id(id)
@@ -444,5 +471,39 @@ mod contrast_tests {
         assert_eq!(col("var"), Some(sx.keyword));
         assert_eq!(col("12"), Some(sx.number));
         assert_eq!(col("// note"), Some(sx.comment));
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    /// #1393: accepting a function inserts the call, with the cursor between the parentheses
+    /// (after them when the function takes no arguments); a property stays a bare name.
+    #[test]
+    fn accepting_a_function_completion_inserts_the_call() {
+        let mut buf = String::from("x = loopO");
+        assert_eq!(accept_completion(&mut buf, 9), Some(12));
+        assert_eq!(buf, "x = loopOut()");
+
+        let mut buf = String::from("wigg");
+        assert_eq!(accept_completion(&mut buf, 4), Some(7));
+        assert_eq!(buf, "wiggle()");
+
+        let mut buf = String::from("isClo");
+        assert_eq!(accept_completion(&mut buf, 5), Some(10));
+        assert_eq!(buf, "isClosed()");
+
+        let mut buf = String::from("tim");
+        assert_eq!(accept_completion(&mut buf, 3), Some(4));
+        assert_eq!(buf, "time");
+    }
+
+    /// Completing a name already followed by its call does not add a second pair.
+    #[test]
+    fn accepting_before_an_existing_call_keeps_one_pair_of_parentheses() {
+        let mut buf = String::from("loopO(\"cycle\")");
+        assert_eq!(accept_completion(&mut buf, 5), Some(7));
+        assert_eq!(buf, "loopOut(\"cycle\")");
     }
 }

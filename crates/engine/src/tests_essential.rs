@@ -275,6 +275,55 @@ fn template_export_import_round_trip_with_overrides() {
 }
 
 #[test]
+fn template_import_writes_media_only_into_its_media_folder() {
+    let root = out_dir("ectemplate-names");
+    let dir = root.join("a").join("b");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (mut s, card, _solid, _ids) = card();
+    let src = dir.join("Src.ectemplate");
+    s.execute("essential.exportTemplate", json!({"comp": card.0, "path": src.to_string_lossy()})).unwrap();
+    let mut entries = effectcraft_lottie::zip::read_stored(&std::fs::read(&src).unwrap());
+    std::fs::remove_file(&src).unwrap();
+    let abs = root.join("abs").join("x").to_string_lossy().replace('\\', "/");
+    for name in [
+        "../x",
+        "media/../../x",
+        "media/1/../../../x",
+        &format!("media/{abs}"),
+        &format!("media/6{abs}"),
+        "media/C:\\x",
+        "media/7/C:\\x",
+        "media/x/clip.png",
+        "media/8/sub/clip.png",
+        "media/2/..",
+        "media/3/",
+        "media/4/clip.png",
+        "media/5/clip.png",
+    ] {
+        entries.push((name.to_string(), b"data".to_vec()));
+    }
+    let path = dir.join("T.ectemplate");
+    std::fs::write(&path, effectcraft_lottie::zip::store(&entries)).unwrap();
+    s.execute("essential.importTemplate", json!({"path": path.to_string_lossy()})).unwrap();
+
+    let media = dir.join("T Media");
+    fn files(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(d).unwrap().map(|e| e.unwrap().path()) {
+            if e.is_dir() { files(&e, out) } else { out.push(e) }
+        }
+    }
+    let mut found = vec![];
+    files(&root, &mut found);
+    let in_item = |f: &std::path::Path| f.parent().and_then(std::path::Path::parent) == Some(media.as_path());
+    for f in &found {
+        assert!(f == &path || in_item(f), "written outside an item folder of the media folder: {f:?}");
+    }
+    let mut names: Vec<String> = found.iter().filter(|f| in_item(f)).map(|f| f.strip_prefix(&media).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    names.sort();
+    assert_eq!(names, ["4/clip.png", "5/clip.png"]);
+}
+
+#[test]
 fn media_replacement_swaps_footage_per_instance() {
     use std::sync::Arc;
     // Two "footage" items rendered by a fake source: item → solid colour.

@@ -156,8 +156,9 @@ of the project:
 
 Frames without effects that the WebGPU compositor can finish alone still render on the page
 (they stay on the GPU, no readback); everything else (frames with effects, 3D runs, the Software
-Only renderer, WebGL2) goes to the workers. If no worker is usable, frames render on the page's
-thread as before. `effectcraft.info().frameWorkers` reports `{workers, alive, busy, rendered,
+Only renderer, WebGL2) goes to the workers. If no worker is usable (one that failed to start, or
+one the browser refused to create, as in a sandboxed iframe), frames render on the page's thread
+as before. `effectcraft.info().frameWorkers` reports `{workers, alive, busy, rendered,
 failed, lastMs, syncs, syncBytes, gpu, gpuFrames, lastPasses, diskHits}` (`gpu`: each worker's
 adapter, `{cpu: why}` without one, `null` until it reported).
 
@@ -413,7 +414,8 @@ no npm packages): load, the GPU path (WebGPU → GPU compositor, viewer on the G
 in the viewer, `render.frame`, Render Queue GIF and PNG sequence (`.zip`) downloads, a background
 render in a worker while measuring the page's event-loop gaps (must stay under 400 ms) and its
 progress, the AudioContext starting on a (simulated) key press and a tone playing through it
-with the meters moving, Save As and re-opening the saved project, persistence across a reload
+with the meters moving, Save As and re-opening the saved project, a script opening a file from
+browser storage and the footage check finding stored media, persistence across a reload
 (session snapshot, a stored project, imported media, a setting, Open Recent) and an offline
 reload through the service worker. It writes screenshots and `report.json`:
 
@@ -424,13 +426,20 @@ node apps/effectcraft-web/tests/smoke.mjs --url http://127.0.0.1:8765/ --out tar
 
 `apps/effectcraft-web/tests/workers.mjs` checks the job-worker plumbing (`js/host.js`,
 `web/worker.js`) under Node with a fake `Worker`, without a build: a replaced file is sent to a
-reused worker again even at the same size, and a worker that fails to start fails its job and is
-terminated (`node apps/effectcraft-web/tests/workers.mjs`).
+reused worker again even at the same size, a worker that fails to start fails its job and is
+terminated, and a `new Worker` that throws (a sandboxed iframe) fails the job and reports the
+frame worker dead instead of stopping startup (`node apps/effectcraft-web/tests/workers.mjs`).
 
 `apps/effectcraft-web/tests/page.mjs` checks page-side helpers of `js/host.js` the same way with
 a fake DOM: a picked file that can't be read is reported while the others are added, and the
 device-lost notice saves, flushes before reloading and reports a failed flush
 (`node apps/effectcraft-web/tests/page.mjs`).
+
+`apps/effectcraft-web/tests/storage.mjs` checks the IndexedDB storage backend of `js/host.js`
+with a fake IndexedDB: a put or delete resolves only once its transaction has committed, and one
+whose transaction aborts after its request succeeded (or whose request fails or throws) rejects
+and leaves the stored entry as it was, so the flush keeps it for a retry (#1242)
+(`node apps/effectcraft-web/tests/storage.mjs`).
 
 It also checks the M13.10 paths: viewer frames rendered in frame workers while scrubbing with the
 CPU renderer (project synced as diffs, event-loop gaps under 400 ms), a `wait: true` render that

@@ -48,6 +48,7 @@ pub mod settings;
 pub mod shortcut_editor;
 pub mod templates;
 pub mod text_panels;
+pub mod text_range_handles;
 pub mod timeline;
 pub mod tracker;
 pub mod unsaved;
@@ -75,10 +76,47 @@ pub enum DragPayload {
     Item(u64),
     /// An effect id from Effects & Presets.
     Effect(String),
+    /// An animation preset from Effects & Presets, with its display name for the drag ghost.
+    Preset { preset: PresetRef, name: String },
     /// A property dragged from the timeline (to the Essential Graphics panel).
     Property { layer: u64, prop: u64 },
     /// Files from the Media Browser (import; into the timeline: import and add).
     Files(Vec<String>),
+}
+
+/// An animation preset in Effects & Presets.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PresetRef {
+    /// A text animation preset id (`layer.applyTextPreset`).
+    Text(String),
+    /// A built-in animation preset id, e.g. a transition (`anim.applyBuiltinPreset`).
+    Builtin(String),
+    /// A user `.ecpreset` file path (`anim.applyPreset`).
+    File(String),
+}
+
+impl PresetRef {
+    /// The command and params that apply the preset to the selected layers.
+    pub fn command(&self) -> (&'static str, serde_json::Value) {
+        match self {
+            PresetRef::Text(id) => ("layer.applyTextPreset", serde_json::json!({"preset": id})),
+            PresetRef::Builtin(id) => ("anim.applyBuiltinPreset", serde_json::json!({"preset": id})),
+            PresetRef::File(path) => ("anim.applyPreset", serde_json::json!({"path": path})),
+        }
+    }
+
+    /// The command and params that apply the preset to `layer` (a drop target).
+    pub fn apply_to(&self, layer: u64) -> (&'static str, serde_json::Value) {
+        let (id, mut params) = self.command();
+        if let Some(obj) = params.as_object_mut() {
+            // `layer.applyTextPreset` takes one `layer`; the animation preset commands take `layers`.
+            match self {
+                PresetRef::Text(_) => obj.insert("layer".into(), serde_json::json!(layer)),
+                PresetRef::Builtin(_) | PresetRef::File(_) => obj.insert("layers".into(), serde_json::json!([layer])),
+            };
+        }
+        (id, params)
+    }
 }
 
 /// Layers carried by a Project item drag. Dragging a selected item uses the
@@ -247,5 +285,20 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     });
     if close || crate::widgets::pressed_outside(ui.ctx(), &area.response) {
         ui.ctx().data_mut(|d| d.remove::<(PanelKind, egui::Pos2)>(id));
+    }
+}
+
+#[cfg(test)]
+mod preset_drop_tests {
+    use super::PresetRef;
+    use serde_json::json;
+
+    #[test]
+    fn preset_drops_target_the_layer_with_each_commands_param() {
+        assert_eq!(PresetRef::Text("typewriter".into()).apply_to(7), ("layer.applyTextPreset", json!({"preset": "typewriter", "layer": 7})));
+        assert_eq!(PresetRef::Builtin("fadeIn".into()).apply_to(7), ("anim.applyBuiltinPreset", json!({"preset": "fadeIn", "layers": [7]})));
+        assert_eq!(PresetRef::File("/p/a.ecpreset".into()).apply_to(7), ("anim.applyPreset", json!({"path": "/p/a.ecpreset", "layers": [7]})));
+        // Double-click applies to the selection: no layer given.
+        assert_eq!(PresetRef::Text("typewriter".into()).command(), ("layer.applyTextPreset", json!({"preset": "typewriter"})));
     }
 }

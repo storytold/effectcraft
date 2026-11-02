@@ -44,7 +44,8 @@ fn with_prop<T>(
 ) -> Result<T> {
     let t = s.time_of(cid);
     let linear = s.prefs.general.default_spatial_linear;
-    s.edit(label, merge, |proj, _| {
+    s.edit(label, merge, |proj, state| {
+        let mut next = proj.next_id;
         let l = layer_mut(proj, cid, lid)?;
         let lt = l.layer_time(t);
         let pr = l.props.find_mut(uid).ok_or_else(|| bad("prop", "property vanished"))?;
@@ -59,8 +60,59 @@ fn with_prop<T>(
                 k.spatial_out = [0.0; 3];
             }
         }
+        if pr.match_id == "type" {
+            let removed = sync_polystar_type(l, uid, lt, &mut next)?;
+            if !removed.is_empty() {
+                state.selected_props.retain(|(layer, prop)| *layer != lid || !removed.contains(prop));
+                state.selected_keys.retain(|key| key.layer != lid || !removed.contains(&key.prop));
+            }
+        }
+        proj.next_id = next;
         Ok(r)
     })
+}
+
+/// A static Polygon has no inner controls; switching to Star creates them in schema order
+/// with AE's switch defaults (#1685). Animated/expression-driven types need the controls at
+/// every time, including when the current value is Polygon.
+fn sync_polystar_type(layer: &mut Layer, uid: Uid, time: Tick, next: &mut Uid) -> Result<Vec<Uid>> {
+    if !matches!(layer.source, effectcraft_project::LayerSource::Shape) {
+        return Ok(vec![]);
+    }
+    let Some(group) =
+        layer.props.parent_of_mut(uid).filter(|g| g.match_id == "star" && matches!(g.kind, GroupKind::Indexed) && g.get("type").is_some_and(|p| p.uid == uid))
+    else {
+        return Ok(vec![]);
+    };
+    let Some(kind) = group.get("type") else { return Ok(vec![]) };
+    let needs_inner = kind.is_animated() || kind.has_expression() || kind.value_at(time) == effectcraft_keyframe::Value::Enum(0);
+    if !needs_inner {
+        let mut removed = vec![];
+        group.children.retain(|node| {
+            if let effectcraft_project::Node::Prop(p) = node
+                && matches!(p.match_id.as_str(), "innerRadius" | "innerRoundness")
+            {
+                removed.push(p.uid);
+                return false;
+            }
+            true
+        });
+        return Ok(removed);
+    }
+    for (inner, name, outer, value, ui) in [
+        ("innerRadius", "Inner Radius", "outerRadius", 50.0, effectcraft_project::ParamUi::Pixels),
+        ("innerRoundness", "Inner Roundness", "outerRoundness", 0.0, effectcraft_project::ParamUi::Percent),
+    ] {
+        if group.get(inner).is_none() {
+            let uid = *next;
+            *next = next.checked_add(1).ok_or_else(|| bad("prop", "property ids exhausted"))?;
+            let prop = Property::new(uid, inner, name, effectcraft_keyframe::Value::Scalar(value)).with_ui(ui);
+            let index =
+                group.children.iter().position(|n| matches!(n, effectcraft_project::Node::Prop(p) if p.match_id == outer)).unwrap_or(group.children.len());
+            group.children.insert(index, effectcraft_project::Node::Prop(prop));
+        }
+    }
+    Ok(vec![])
 }
 
 /// Explicit command key times default to layer time; readers and the CTI use comp time.
@@ -241,7 +293,9 @@ pub(crate) fn proportional_share(index: usize, count: usize) -> f64 {
 }
 
 /// `prop.set`; with `selected`, also on the other selected layers: the same value, or with
-/// `offset` (a scrub) the same change from each layer's own value. With `offset` and
+/// `offset` (a scrub) the same change from each layer's own value. A typed value with `dims`
+/// (the components edited, e.g. `[2]` for Z) sets only those components on the other layers,
+/// which keep the rest of their own value (#1434). With `offset` and
 /// `proportional` (Proportional Scrubbing) each layer takes [`proportional_share`] of the change
 /// by its place in the selection order, the scrubbed layer too. One undo step (with `merge`,
 /// one that a continuing scrub keeps folding into).
@@ -261,6 +315,23 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
         .then(|| s.state.selected_layers.iter().copied().filter(|o| *o == lid || twins.iter().any(|(t, _)| t == o)).collect());
     let share = |l: LayerId| order.as_ref().map_or(1.0, |o| o.iter().position(|x| *x == l).map_or(1.0, |i| proportional_share(i, o.len())));
     let scalar = p.get("value").is_some_and(Value::is_number);
+    // Typed into some components only: the others stay each layer's own.
+    let dims: Option<Vec<usize>> = match (&delta, p.get("dims").and_then(Value::as_array), &new) {
+        (None, Some(a), Some(_)) if !scalar => Some(a.iter().filter_map(Value::as_u64).filter_map(|d| usize::try_from(d).ok()).collect()),
+        _ => None,
+    };
+    let typed = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid| {
+        if let (Some(dims), Some(n)) = (&dims, &new)
+            && let Some(mut c) = current_components(s, cid, olid, ouid)
+        {
+            for &d in dims {
+                if let (Some(slot), Some(v)) = (c.get_mut(d), n.get(d)) {
+                    *slot = *v;
+                }
+            }
+            q["value"] = json!(c);
+        }
+    };
     // `p` aimed at (layer, prop) with its value moved by `k` × the change.
     let shifted = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid, k: f64| {
         if let Some(d) = &delta
@@ -291,6 +362,7 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let mut q = twin_params(p, olid, ouid);
             shifted(s, &mut q, olid, ouid, k);
+            typed(s, &mut q, olid, ouid);
             // (a layer that can't take it, e.g. a clamped or static property, keeps its value)
             let _ = set(s, &q);
         }
@@ -967,6 +1039,7 @@ fn delete_keys(s: &mut Session, _: &Value) -> Result<Value> {
     let sel = s.state.selected_keys.clone();
     s.edit("Delete Keyframes", None, |proj, st| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let mut removed = 0usize;
         for k in &sel {
             if let Some(pr) = comp.layer_mut(k.layer).and_then(|l| l.props.find_mut(k.prop))
                 && let Some(i) = key_at(&pr.keys, k.time)
@@ -975,10 +1048,13 @@ fn delete_keys(s: &mut Session, _: &Value) -> Result<Value> {
                     pr.value = pr.keys[0].value.clone();
                 }
                 pr.keys.remove(i);
+                removed += 1;
             }
         }
         st.selected_keys.clear();
-        Ok(json!(sel.len()))
+        // The keys actually removed: a selected key that is gone (or listed twice) isn't counted,
+        // so a caller can tell that a delete changed nothing.
+        Ok(json!(removed))
     })
 }
 
@@ -1229,7 +1305,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Property Value",
             [],
             None,
-            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all)}",
+            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value)}",
             has_layers,
             set_selected
         ),

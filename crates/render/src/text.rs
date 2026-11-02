@@ -147,15 +147,6 @@ fn unit_of(based: BasedOn, g: &CharGlyph, lay: &TextLayout) -> (usize, usize) {
     }
 }
 
-fn unit_count(based: BasedOn, lay: &TextLayout) -> usize {
-    match based {
-        BasedOn::Characters => lay.chars,
-        BasedOn::CharactersExcludingSpaces => lay.chars_no_space,
-        BasedOn::Words => lay.words,
-        BasedOn::Lines => lay.lines,
-    }
-}
-
 fn layer_seed(layer: &Layer, seed: f64) -> u64 {
     (seed as i64 as u64) ^ layer.id.0.wrapping_mul(0x9E37_79B9)
 }
@@ -179,6 +170,23 @@ fn range_params(ctx: &EvalCtx, layer: &Layer, sel: &PropGroup, n: usize) -> Rang
     }
 }
 
+/// A Range Selector as the viewer's bars see it (#1011): Based On, whether Units is Index, and
+/// Start / End / Offset as the fractions the renderer uses.
+pub fn range_bars(ctx: &EvalCtx, layer: &Layer, sel: &PropGroup, lay: &TextLayout) -> (BasedOn, bool, Range) {
+    let adv = sel.sub("advanced");
+    let based = BasedOn::from_index(adv.map(|a| ctx.e(layer, a, "basedOn")).unwrap_or(0));
+    let index = adv.is_some_and(|a| ctx.e(layer, a, "units") == 1);
+    (based, index, range_params(ctx, layer, sel, lay.units(based)))
+}
+
+/// The Start / End value that puts a Range Selector bar at fraction `f` of the `n` units, with
+/// Offset `offset` (a fraction): the bar's place less the Offset, within 0..100%, or in whole
+/// units with Units = Index.
+pub fn range_value_of(f: f64, offset: f64, units_index: bool, n: usize) -> f64 {
+    let v = (f - offset).clamp(0.0, 1.0);
+    if units_index { (v * n as f64).round() } else { v * 100.0 }
+}
+
 /// Selection of every glyph by an animator's selectors, per dimension.
 pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &TextLayout) -> Vec<[f64; 3]> {
     let sels: Vec<&PropGroup> = anim.sub("selectors").map(|s| s.groups().filter(|g| g.enabled).collect()).unwrap_or_default();
@@ -199,7 +207,7 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
         };
         let mode = Mode::from_index(mode);
         let based = BasedOn::from_index(based);
-        let n = unit_count(based, lay);
+        let n = lay.units(based);
         let values: Box<dyn Fn(usize, usize, [f64; 3]) -> [f64; 3]> = match sel.match_id.as_str() {
             "rangeSelector" => {
                 let r = range_params(ctx, layer, sel, n);

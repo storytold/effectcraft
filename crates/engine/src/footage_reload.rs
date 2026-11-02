@@ -32,12 +32,13 @@ pub type Scan = Arc<Mutex<Option<Vec<(String, Option<Stamp>)>>>>;
 /// The files footage items read: each item's file and every frame of an image sequence. Image
 /// sequences count only with Automatically Reload Footage set to All Footage (After Effects'
 /// default, Non-Sequence Footage, leaves them alone: thousands of frames on a share add up).
+/// Items with a stored path that is not followed ([`crate::doc_path`]) are not watched.
 fn watched(s: &Session) -> BTreeSet<String> {
     let sequences = s.prefs.import.auto_reload_footage == "all";
     let mut paths = BTreeSet::new();
     for it in s.project.items.values() {
         if let ItemKind::Footage(f) = &it.kind {
-            if !f.sequence.is_empty() && !sequences {
+            if (!f.sequence.is_empty() && !sequences) || s.stored_paths.check(f).is_err() {
                 continue;
             }
             if !f.path.is_empty() {
@@ -136,8 +137,10 @@ fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usi
     let mut failed = BTreeSet::new();
     for i in ids {
         if let Some(ItemKind::Footage(f)) = s.project.item(*i).map(|x| &x.kind) {
-            // Probed the way it imports by default, so a sequence is found as one.
-            let nf = match s.probe_footage(&f.path) {
+            // Probed the way it imports by default, so a sequence is found as one. A path that
+            // is not followed is not read.
+            let probed = s.stored_paths.check(f).map_err(|(p, why)| crate::doc_path::refusal(&p, why)).and_then(|_| s.probe_footage(&f.path));
+            let nf = match probed {
                 Ok(p) => refreshed(s, f, p),
                 Err(_) if undoable => Footage { missing: true, ..f.clone() },
                 Err(_) => {

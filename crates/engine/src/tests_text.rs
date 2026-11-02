@@ -2,7 +2,7 @@
 //! undo/redo and serde round-trips).
 
 use effectcraft_keyframe::Value as KV;
-use effectcraft_project::{Node, Project, PropGroup};
+use effectcraft_project::{LayerId, Node, Project, PropGroup};
 use serde_json::json;
 
 use crate::Session;
@@ -243,4 +243,28 @@ fn menus_have_text_animation_entries() {
     }
     assert!(s.is_enabled("layer.enablePerChar3D"));
     assert!(!s.is_enabled("layer.addTextSelector"), "needs an animator");
+}
+
+/// Duplicate with a Range Selector selected under a text animator copies the selector, not the
+/// whole text layer (#1665); a selected animator is copied the same way.
+#[test]
+fn duplicate_copies_selected_text_selector_not_the_layer() {
+    let (mut s, t) = session();
+    s.execute("layer.addTextAnimator", json!({"layer": t, "properties": ["tracking"]})).unwrap();
+    let anims = |s: &Session| s.active_comp().unwrap().layer(LayerId(t)).unwrap().props.group("text/animators").unwrap().clone();
+    let selectors = |s: &Session| -> Vec<u64> { anims(s).groups().next().unwrap().sub("selectors").unwrap().groups().map(|g| g.uid).collect() };
+    let sel = selectors(&s)[0];
+
+    s.execute("prop.select", json!({"layer": t, "prop": sel, "selectKeys": false})).unwrap();
+    s.execute("edit.duplicate", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1, "no second text layer");
+    assert_eq!(selectors(&s).len(), 2, "the selector is copied");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(selectors(&s), vec![sel]);
+
+    let anim = anims(&s).groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": t, "prop": anim, "selectKeys": false})).unwrap();
+    s.execute("edit.duplicate", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+    assert_eq!(anims(&s).groups().count(), 2, "the animator is copied");
 }

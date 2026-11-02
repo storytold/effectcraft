@@ -113,7 +113,7 @@ fn import_project_merges_with_fresh_ids_and_one_undo() {
     // A relative footage path resolves next to the imported project; a missing one is reported.
     let data = t.project.items.values().find(|i| i.name == "data.json").unwrap();
     let ItemKind::Footage(f) = &data.kind else { panic!("footage") };
-    assert_eq!(std::path::Path::new(&f.path), dir.join("data.json"));
+    assert_eq!(std::fs::canonicalize(&f.path).unwrap(), std::fs::canonicalize(dir.join("data.json")).unwrap());
     assert_eq!(r["missingMedia"], json!(["/offline/gone.mov"]));
 
     // One undo step removes all of it; redo brings it back.
