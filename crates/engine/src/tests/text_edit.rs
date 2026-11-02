@@ -930,12 +930,14 @@ fn fonts_lists_bundled_and_installed_families() {
     let r = s.execute("text.fonts", json!({})).unwrap();
     let fams = r["families"].as_array().unwrap();
     assert_eq!(r["count"].as_u64().unwrap() as usize, fams.len());
-    let inter = fams.iter().find(|f| f["family"] == "Inter").unwrap();
-    assert_eq!(inter["origin"], "bundled");
-    assert!(inter["styles"].as_array().unwrap().contains(&json!("Bold")));
     // Installed fonts are listed without any layer having asked for one.
     use effectcraft_text::fonts::FontSource as _;
     let installed = effectcraft_text::fonts::DirectorySource::system().faces();
+    // An installed Inter takes the bundled faces' place, and the family says where it comes from.
+    let inter = fams.iter().find(|f| f["family"] == "Inter").unwrap();
+    let inter_installed = installed.iter().any(|face| face.family == "Inter");
+    assert_eq!(inter["origin"], if inter_installed { "system" } else { "bundled" });
+    assert!(inter["styles"].as_array().unwrap().contains(&json!("Bold")));
     for face in &installed {
         assert!(fams.iter().any(|f| f["family"].as_str().unwrap().eq_ignore_ascii_case(&face.family)), "{} not listed", face.family);
     }
@@ -944,9 +946,10 @@ fn fonts_lists_bundled_and_installed_families() {
     assert_eq!(r["families"][0]["family"], "Noto Serif");
     // The bundled face is Regular; the OS can also provide Bold, Italic, or other faces.
     // Model `add_source()` on the independent directory inventory: a system face whose family
-    // and primary style duplicate an earlier face is skipped, with its named instances.
+    // and primary style duplicate an earlier system face is skipped, with its named instances (one
+    // that duplicates the bundled Regular is kept and takes its place).
     let mut expected_styles = std::collections::BTreeSet::from(["regular".to_string()]);
-    let mut retained = std::collections::BTreeSet::from([("noto serif".to_string(), "regular".to_string())]);
+    let mut retained = std::collections::BTreeSet::new();
     for face in installed.iter().filter(|face| face.family.eq_ignore_ascii_case("Noto Serif")) {
         if retained.insert((face.family.to_ascii_lowercase(), face.style.to_ascii_lowercase())) {
             expected_styles.insert(face.style.to_ascii_lowercase());
@@ -1017,7 +1020,11 @@ fn fonts_filter_variable_families() {
     let all = s.execute("text.fonts", json!({})).unwrap();
     let fams = all["families"].as_array().unwrap();
     let flag = |name: &str| fams.iter().find(|f| f["family"] == name).map(|f| f["variable"].clone());
-    assert_eq!(flag("Inter"), Some(json!(false)), "the bundled fonts are static");
+    // The bundled fonts are static; a variable Inter installed here takes their place.
+    use effectcraft_text::fonts::FontSource as _;
+    let installed = effectcraft_text::fonts::DirectorySource::system().faces();
+    let inter_variable = installed.iter().any(|f| f.family == "Inter" && f.variable);
+    assert_eq!(flag("Inter"), Some(json!(inter_variable)), "the bundled fonts are static");
     assert_eq!(flag(FAMILY), Some(json!(true)));
     let var = s.execute("text.fonts", json!({"variable": true})).unwrap();
     let listed = var["families"].as_array().unwrap();
@@ -1033,7 +1040,33 @@ fn fonts_filter_variable_families() {
     // The font menu's rows.
     let menu = crate::font_menu(&s.prefs);
     assert!(menu.iter().any(|r| r.family == FAMILY && r.variable));
-    assert!(menu.iter().any(|r| r.family == "Inter" && !r.variable));
+    assert!(menu.iter().any(|r| r.family == "Inter" && r.variable == inter_variable));
+}
+
+/// A variable Inter in the user's font folder is not hidden by the bundled Inter Regular, whose
+/// family and style it shares: `text.fonts` lists Inter as installed and variable. A child
+/// process, since the font goes into the process-global font database.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn fonts_list_an_installed_variable_copy_of_a_bundled_family() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_INSTALLED_INTER";
+    const TEST: &str = "tests::text_edit::fonts_list_an_installed_variable_copy_of_a_bundled_family";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", TEST, "--nocapture"]).env(CHILD, "1").output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ec-installed-inter-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Inter-Variable.ttf"), pinned_variable_font("Inter")).unwrap();
+    effectcraft_text::fonts::add_source(&effectcraft_text::fonts::DirectorySource { dirs: vec![dir.clone()] });
+    let r = Session::default().execute("text.fonts", json!({"query": "inter"})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let inter = r["families"].as_array().unwrap().iter().find(|f| f["family"] == "Inter").unwrap();
+    assert_eq!((&inter["origin"], &inter["variable"]), (&json!("system"), &json!(true)), "{inter}");
+    // The bundled faces still fill the styles the installed font lacks.
+    assert!(inter["styles"].as_array().unwrap().contains(&json!("Italic")), "{inter}");
 }
 
 /// A variable font of `name` and `fvar` only: one `wght` axis 100..900 (default 300, style
