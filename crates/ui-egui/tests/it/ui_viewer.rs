@@ -2508,6 +2508,95 @@ fn handle_drags_scale_about_the_anchor_and_follow_the_pointer() {
     assert!(close(scale(&h), [162.5, 162.5]), "{:?}", scale(&h));
 }
 
+/// #2860: Shift on an edge handle keeps the proportions as it does on a corner: the ratio comes
+/// from the pointer along the handle's own axis and applies to both, about the anchor point
+/// wherever that is, to every selected layer; the handle still snaps.
+#[test]
+fn shift_on_an_edge_handle_keeps_the_proportions() {
+    let mut h = harness();
+    let layers = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect::<Vec<_>>();
+    let (box_id, plate) = (layers[0], layers[1]);
+    let scale = |h: &Harness<'_, EffectcraftApp>, id: LayerId| {
+        let l = h.state().session.active_comp().unwrap().layer(id).unwrap().clone();
+        l.props.prop("transform/scale").unwrap().value.as_vec3()
+    };
+    let set = |h: &mut Harness<'_, EffectcraftApp>, id: LayerId, path: &str, v: serde_json::Value| {
+        h.state_mut().session.execute("prop.set", json!({"layer": id.0, "path": path, "value": v})).unwrap();
+    };
+    // Shift-drag the box's `handle` to `to` (comp pixels), from the scale `from`.
+    let drag = |h: &mut Harness<'_, EffectcraftApp>, handle: usize, from: [f64; 2], to: [f32; 2]| {
+        set(h, box_id, "transform/scale", json!([from[0], from[1], 100]));
+        h.run_steps(2);
+        let edge = rect(h, &format!("viewer.handle.{}.{handle}", box_id.0)).center();
+        let to = screen(h, to);
+        drag_path(h, &[edge, to], egui::Modifiers::SHIFT);
+        scale(h, box_id)
+    };
+    let close = |a: [f64; 3], b: [f64; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    // The 80×80 box spans (280, 140)–(360, 220), its anchor in the middle at (320, 180). Each
+    // edge counts along its own axis: the pointer's other coordinate doesn't matter.
+    for (handle, to, want) in [
+        (5, [380.0, 200.0], 150.0), // the right edge, 40 px from the anchor, to 60
+        (7, [260.0, 170.0], 150.0), // the left
+        (6, [300.0, 240.0], 150.0), // the bottom
+        (4, [340.0, 100.0], 200.0), // the top, to 80
+    ] {
+        let s = drag(&mut h, handle, [100.0, 100.0], to);
+        assert!(close(s, [want, want]), "handle {handle}: {s:?}");
+    }
+    // A layer that isn't square keeps its own proportions.
+    let s = drag(&mut h, 5, [200.0, 100.0], [440.0, 180.0]);
+    assert!(close(s, [300.0, 150.0]), "{s:?}");
+    // Past the anchor both axes flip, as a corner's do.
+    let s = drag(&mut h, 5, [100.0, 100.0], [280.0, 180.0]);
+    assert!(close(s, [-100.0, -100.0]), "{s:?}");
+    // Without Shift an edge still scales its one axis.
+    set(&mut h, box_id, "transform/scale", json!([100, 100, 100]));
+    h.run_steps(2);
+    let edge = rect(&h, &format!("viewer.handle.{}.5", box_id.0)).center();
+    let to = screen(&h, [380.0, 180.0]);
+    drag_path(&mut h, &[edge, to], Default::default());
+    assert!(close(scale(&h, box_id), [150.0, 100.0]), "{:?}", scale(&h, box_id));
+
+    // With the anchor point off centre, 20 px left of the right edge and 30 px above the bottom
+    // one, the box spans (260, 130)–(340, 210) and each edge handle sits off the anchor's lines.
+    set(&mut h, box_id, "transform/anchor", json!([60, 50, 0]));
+    for (handle, to, want) in [
+        (5, [360.0, 180.0], 200.0), // 20 px from the anchor to 40
+        (7, [230.0, 180.0], 150.0), // 60 to 90
+        (6, [320.0, 240.0], 200.0), // 30 to 60
+        (4, [320.0, 80.0], 200.0),  // 50 to 100
+    ] {
+        let s = drag(&mut h, handle, [100.0, 100.0], to);
+        assert!(close(s, [want, want]), "off-centre handle {handle}: {s:?}");
+    }
+
+    // The right edge snaps to the comp's, with the anchor off centre too: x reaches 640.
+    h.state_mut().session.execute("view.snapping", json!({"value": true})).unwrap();
+    let s = drag(&mut h, 5, [100.0, 100.0], [637.0, 180.0]);
+    assert!((s[0] - 1600.0).abs() < 0.01 && (s[1] - 1600.0).abs() < 0.01, "{s:?}");
+    set(&mut h, box_id, "transform/anchor", json!([40, 40, 0]));
+    let s = drag(&mut h, 5, [100.0, 100.0], [637.0, 200.0]);
+    assert!((s[0] - 800.0).abs() < 0.01 && (s[1] - 800.0).abs() < 0.01, "{s:?}");
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+
+    // The other selected layers scale by the same ratio, keeping their own proportions, in one
+    // undo step.
+    set(&mut h, plate, "transform/scale", json!([50, 80, 100]));
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0, plate.0]})).unwrap();
+    set(&mut h, box_id, "transform/scale", json!([100, 100, 100]));
+    h.run_steps(2);
+    let undo0 = h.state().session.history.undo.len();
+    let edge = rect(&h, &format!("viewer.handle.{}.5", box_id.0)).center();
+    let to = screen(&h, [380.0, 180.0]);
+    drag_path(&mut h, &[edge, to], egui::Modifiers::SHIFT);
+    assert!(close(scale(&h, box_id), [150.0, 150.0]), "{:?}", scale(&h, box_id));
+    assert!(close(scale(&h, plate), [75.0, 120.0]), "{:?}", scale(&h, plate));
+    assert_eq!(h.state().session.history.undo.len(), undo0 + 1, "one undo step");
+}
+
 /// #491: with several layers selected, a handle drag scales all of them by the same ratio, each
 /// about its own anchor point, in one undo step.
 #[test]

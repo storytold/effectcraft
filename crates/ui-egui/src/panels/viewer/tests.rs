@@ -152,6 +152,45 @@ fn edge_pan_speed_moves_toward_the_edge() {
     assert!(corner.x < 0.0 && corner.y < 0.0, "{corner:?}");
 }
 
+/// #2860: Shift on an edge handle takes the ratio along the handle's one axis for both: the other
+/// coordinate (the anchor point may sit off the handle's line) plays no part.
+#[test]
+fn uniform_edge_drag_ratio_follows_the_handles_axis() {
+    let x = [true, false];
+    let y = [false, true];
+    assert_eq!(drag_ratio([40.0, 0.0], [60.0, 25.0], x, true), [1.5, 1.5], "anchor on the handle's line");
+    assert_eq!(drag_ratio([20.0, -10.0], [40.0, 500.0], x, true), [2.0, 2.0], "off-centre anchor");
+    assert_eq!(drag_ratio([-20.0, 30.0], [999.0, 60.0], y, true), [2.0, 2.0], "the bottom edge counts along y");
+    assert_eq!(drag_ratio([40.0, 0.0], [-40.0, 0.0], x, true), [-1.0, -1.0], "past the anchor both axes flip");
+    assert_eq!(drag_ratio([0.0, -10.0], [80.0, 20.0], x, true), [1.0, 1.0], "the edge sits on the anchor: the scale stays");
+    // Without Shift the other axis stays; a corner keeps its diagonal.
+    assert_eq!(drag_ratio([20.0, -10.0], [40.0, 500.0], x, false), [2.0, 1.0]);
+    assert_eq!(drag_ratio([40.0, 40.0], [80.0, 50.0], [true, true], true), [1.625, 1.625]);
+}
+
+/// #2860: a Shift-dragged edge handle snaps along its line from the anchor point, keeping the
+/// proportions; a handle on the anchor's line can't reach a line parallel to it, and one whose
+/// edge sits on the anchor point doesn't scale at all.
+#[test]
+fn uniform_edge_handle_snaps_along_its_line_from_the_anchor() {
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+    let x = [true, false];
+    let m = Mat3::IDENTITY;
+    // The right edge, on the anchor's line: x snaps, a y correction has nothing to move along.
+    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, |_| [3.0, 0.0]);
+    assert!(near(f, [1.575, 1.575]), "{f:?}");
+    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, |_| [0.0, 2.0]);
+    assert!(near(f, [1.5, 1.5]), "{f:?}");
+    // Off the anchor's line the handle moves along both: y snaps as well, the nearer one wins.
+    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 1.0]);
+    assert!(near(f, [1.9, 1.9]), "{f:?}");
+    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, |_| [1.0, 3.0]);
+    assert!(near(f, [2.05, 2.05]), "{f:?}");
+    // The edge sits on the anchor point: the pointer can't scale it, so neither does a snap.
+    let f = snap_handle([1.0, 1.0], [0.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 1.0]);
+    assert!(near(f, [1.0, 1.0]), "{f:?}");
+}
+
 /// Every 3D view names its own `view.3d.*` command: a typo in that mapping would fall back to the
 /// English label silently, which is what the viewer showed before (#2691).
 #[test]

@@ -1389,7 +1389,7 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
             }
             Gesture::Scale { layer, start_scale, start_local, handle, anchor, axes, l2c, inv, others } => {
                 let lp = inv.apply(gv2(cpt[0], cpt[1]));
-                let uniform = mods.shift && axes == [true, true];
+                let uniform = mods.shift;
                 let f = drag_ratio(start_local, [lp.x - anchor[0], lp.y - anchor[1]], axes, uniform);
                 // The handle snaps (to the comp's and other layers' edges, corners and centres),
                 // so a layer scales exactly to them, e.g. to the comp's size.
