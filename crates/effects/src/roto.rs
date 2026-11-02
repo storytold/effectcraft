@@ -707,7 +707,7 @@ impl Chain {
         max_pending_bytes: usize,
     ) -> Result<Option<TrackSummary>, String> {
         let Some(tracker) = self.model.as_ref().and_then(|m| m.tracker()) else { return Ok(None) };
-        let (Some(_), true) = (self.data.base, self.data.span[1] >= self.data.span[0]) else { return Err("no base frame".into()) };
+        let (Some(base), true) = (self.data.base, self.data.span[1] >= self.data.span[0]) else { return Err("no base frame".into()) };
         // Frames of the span that already have a tracked result (this session's, or the saved
         // tracking) are kept: only the rest is tracked. A correction stroke changes the keys of the
         // frames from it on (both directions), so only those come back here.
@@ -730,7 +730,10 @@ impl Chain {
         for &obj in &objects {
             let mut prompts = vec![];
             let mut carried: Option<(i64, Arc<FrameSeg>)> = None;
-            for f in self.data.stroke_frames().into_iter().filter(|f| self.data.in_span(*f)) {
+            // from the base outwards on each side, so each carry goes on from the one before
+            let mut frames: Vec<i64> = self.data.stroke_frames().into_iter().filter(|f| self.data.in_span(*f)).collect();
+            frames.sort_by_key(|f| (*f < base, f.abs_diff(base)));
+            for f in frames {
                 let strokes = self.data.strokes_of(f, obj);
                 if !strokes.iter().any(|s| s.kind == StrokeKind::Fg) {
                     continue;
@@ -757,6 +760,7 @@ impl Chain {
                     prompts.push((f, p));
                 }
             }
+            prompts.sort_by_key(|q| q.0);
             by_object.push(prompts);
         }
         // objects without a foreground prompt cannot be followed
@@ -1651,6 +1655,33 @@ mod tests {
         let correction = boxes[0].iter().find(|(g, _)| *g == 2).and_then(|(_, b)| *b).expect("a box prompt");
         // the tracked disk carried to frame 2 spans x 29..59
         assert!(correction[0] <= 29.0 && correction[2] >= 59.0, "the box holds the whole disk: {correction:?}");
+    }
+
+    #[test]
+    fn corrections_before_the_base_carry_on_from_each_other() {
+        let mut data = RotoData::default();
+        for (frame, object) in [(3, 0), (3, 1), (2, 0), (1, 0)] {
+            data.add(Stroke { kind: StrokeKind::Fg, frame, radius: 3.0, points: vec![[35.0, 40.0]], object }, 3, [0, 3]);
+        }
+        data.span = [0, 3];
+        assert_eq!(data.base, Some(3));
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("corrections-before-the-base".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        let fake = Arc::new(ClickSquares::default());
+        chain.model = Some(fake.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        let mut prompt_reads = vec![];
+        let mut get = |f: i64| {
+            if fake.0.lock().unwrap().is_empty() {
+                prompt_reads.push(f);
+            }
+            Some(Arc::new(frame(f as f64 / 25.0)))
+        };
+        chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(prompt_reads, [3, 2, 3, 1, 2, 3], "object 0: the base, then 2 from 3, then 1 from 2; object 1: the base");
+        let frames: Vec<Vec<i64>> = fake.0.lock().unwrap().iter().map(|o| o.iter().map(|q| q.0).collect()).collect();
+        assert_eq!(frames, [vec![1, 2, 3], vec![3]], "prompts reach the tracker in frame order");
     }
 
     #[test]
