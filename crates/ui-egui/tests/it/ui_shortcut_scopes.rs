@@ -186,9 +186,12 @@ fn the_menu_bars_key_equivalents_follow_the_focused_scope() {
 
     // Copy with Property Links' chord in the Project panel.
     let mut app = self::app();
+    let clip = app.session.execute("file.importPlaceholder", json!({"name": "Clip"})).unwrap()["item"].as_u64().unwrap();
+    app.session.state.project_selection = vec![effectcraft_engine::project::ItemId(clip)];
     let clipboard = app.session.state.clipboard.len();
     app.ui.focused = PanelKind::Project;
     menu_item(&mut app, "edit.copyWithPropertyLinks", true);
+    assert!(app.session.state.interpretation.is_some(), "Remember Interpretation ran");
     assert_eq!(app.session.state.clipboard.len(), clipboard);
 }
 
