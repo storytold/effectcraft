@@ -16,8 +16,8 @@ log = { workspace = true }
 
 # Native only (D1): candle is not built for wasm32, where this crate is empty.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-candle-core = "=0.9.2"
-candle-nn = "=0.9.2"
+candle-core = "=0.11.0"
+candle-nn = "=0.11.0"
 # The optional GPU path (wgpu compute, any vendor); the CPU path stays the reference.
 wgpu = { workspace = true }
 pollster = { workspace = true }
