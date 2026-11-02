@@ -525,10 +525,12 @@ fn embedded_glyphs_are_reported_when_dropped() {
     let glyph = |ch: &str, fam: &str| json!({"ch": ch, "size": 100, "style": "Regular", "w": 60, "fFamily": fam, "data": {"shapes": []}});
     let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [], "layers": [],
         "fonts": {"list": [{"fName": "Sans-Regular", "fFamily": "Sans", "fStyle": "Regular"}]},
-        "chars": [glyph("A", "Sans"), glyph("B", "Sans"), glyph("C", "Serif")]});
-    let mut q = Project::default();
-    let imp = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap();
-    assert_eq!(imp.warnings, ["embedded glyphs (`chars`) of Sans, Serif are not imported; text uses the installed fonts"]);
+        "chars": [glyph("A", "Sans"), glyph("B", ""), glyph("C", "Serif")]});
+    let warnings = |doc: &Json| import(&mut Project::default(), doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().warnings;
+    // A blank family name is left out, not listed as "of , …".
+    assert_eq!(warnings(&doc), ["embedded glyphs (`chars`) of Sans, Serif are not imported; text uses the installed fonts"]);
+    let blank = json!({"w": 20, "h": 20, "fr": 30, "layers": [], "chars": [glyph("A", " ")]});
+    assert_eq!(warnings(&blank), ["embedded glyphs (`chars`) are not imported; text uses the installed fonts"]);
 }
 
 #[test]
