@@ -225,6 +225,60 @@ fn a_pin_added_to_a_bent_mesh_moves_nothing() {
     }
 }
 
+fn mesh_count(s: &mut Session, id: u64) -> usize {
+    s.execute("puppet.info", json!({"layer": id})).unwrap()["meshes"].as_array().unwrap().len()
+}
+
+/// #2865: where the deformed layer is empty a click makes nothing: no copy of the art it has moved
+/// off, no undo step, no error.
+#[test]
+fn a_pin_where_the_deformed_layer_is_empty_creates_nothing() {
+    let (mut s, id) = setup();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [90, 30]})).unwrap();
+    s.set_time(Tick::from_seconds_f64(1.0));
+    s.execute("puppet.movePin", json!({"layer": id, "pin": "Puppet Pin 1", "position": [10, 70]})).unwrap();
+    s.execute("puppet.movePin", json!({"layer": id, "pin": "Puppet Pin 2", "position": [90, 70]})).unwrap();
+    let (cid, t) = (s.active_comp_id().unwrap(), Tick::from_seconds_f64(1.0));
+    let before = s.render(cid, t, RenderOpts::default());
+    let revision = s.revision;
+    let lid = effectcraft_project::LayerId(id);
+    // The solid's top, which the pins have carried 40 px down; and well off it.
+    for at in [[50, 10], [300, 300]] {
+        assert!(!crate::commands::puppet::places_pin(&s, cid, lid, [at[0] as f64, at[1] as f64], t), "{at:?}");
+        let r = s.execute("puppet.addPin", json!({"layer": id, "position": at})).unwrap();
+        assert_eq!(r["pin"], Value::Null, "{at:?}");
+        assert_eq!(s.revision, revision, "{at:?} changed the project");
+    }
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 2));
+    assert_eq!(s.render(cid, t, RenderOpts::default()), before);
+    // On the deformed shape a pin still goes on the mesh.
+    assert!(crate::commands::puppet::places_pin(&s, cid, lid, [50.0, 70.0], t));
+    assert!(s.execute("puppet.addPin", json!({"layer": id, "position": [50, 70]})).unwrap()["pin"].is_u64());
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 3));
+}
+
+/// #2865: art no mesh has still takes its own mesh; the gap beside it takes none. The first pin of
+/// a layer is as ever: it finds the art nearest the click.
+#[test]
+fn only_unmeshed_art_takes_a_new_mesh() {
+    let (mut s, id) = setup();
+    for x in [[0, 30], [60, 100]] {
+        s.execute("mask.new", json!({"layer": id, "vertices": [[x[0], 0], [x[1], 0], [x[1], 60], [x[0], 60]], "closed": true})).unwrap();
+    }
+    s.execute("puppet.addPin", json!({"layer": id, "position": [46, 30]})).unwrap();
+    assert_eq!(mesh_count(&mut s, id), 1, "the first pin");
+    s.undo();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
+    // In the gap, past reach of the left piece's mesh (Expansion takes it to x 33).
+    assert_eq!(s.execute("puppet.addPin", json!({"layer": id, "position": [46, 30]})).unwrap()["pin"], Value::Null);
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 1));
+    s.execute("puppet.addPin", json!({"layer": id, "position": [80, 30]})).unwrap();
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 2), "the right piece gets its own mesh");
+    s.execute("puppet.addPin", json!({"layer": id, "position": [80, 50]})).unwrap();
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 3), "and the next pin goes on it");
+}
+
 #[test]
 fn puppet_pin_kinds_and_mesh_options() {
     let (mut s, id) = setup();

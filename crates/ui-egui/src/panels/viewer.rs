@@ -1092,7 +1092,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.drag_started()
         && !text_owns
@@ -1680,7 +1682,9 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.clicked()
         && !text_owns

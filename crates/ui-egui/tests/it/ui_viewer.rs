@@ -1657,6 +1657,42 @@ fn puppet_pins_go_on_the_deformed_mesh_and_the_tool_stays_on_the_rigged_layer() 
     assert!(!rigged(&h, plate));
 }
 
+/// #2865: a press where the deformed layer is empty, though on its original bounds, adds nothing:
+/// a click leaves the rig alone and a drag from there is a pin marquee.
+#[test]
+fn puppet_press_where_the_deformed_layer_is_empty_is_a_marquee_not_a_copy() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("edit.clear", json!({"layers": ["Plate"]})).unwrap();
+    s.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
+    let id = s.state.selected_layers[0].0;
+    let a = s.execute("puppet.addPin", json!({"layer": id, "position": [10, 40]})).unwrap()["pin"].as_u64().unwrap();
+    let b = s.execute("puppet.addPin", json!({"layer": id, "position": [70, 40]})).unwrap()["pin"].as_u64().unwrap();
+    // Carry the Box 60 px right: its left part (comp x 280..340) is now empty.
+    s.execute("puppet.movePin", json!({"layer": id, "pin": a, "position": [70, 40]})).unwrap();
+    s.execute("puppet.movePin", json!({"layer": id, "pin": b, "position": [130, 40]})).unwrap();
+    h.state_mut().ui.tool = Tool::Puppet;
+    h.run_steps(3);
+    let rig = |h: &mut Harness<'_, EffectcraftApp>| {
+        let info = h.state_mut().session.execute("puppet.info", json!({"layer": id})).unwrap();
+        let meshes = info["meshes"].as_array().unwrap().clone();
+        (meshes.len(), meshes.iter().map(|m| m["pins"].as_array().unwrap().len()).sum::<usize>())
+    };
+    let at = screen(&h, [285.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(rig(&mut h), (1, 2), "the click made nothing");
+    let comp = rect(&h, "viewer.comp");
+    drag(&mut h, at, comp.max - vec2(4.0, 4.0));
+    assert_eq!(rig(&mut h), (1, 2), "nor did the drag");
+    let mut sel: Vec<u64> = h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect();
+    sel.sort();
+    assert_eq!(sel, [a, b], "the drag's marquee selected the pins");
+    // On the deformed shape a click still pins it.
+    let at = screen(&h, [380.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(rig(&mut h), (1, 3));
+}
+
 /// Filled circles painted this frame (flattening nested shape lists).
 fn circles(h: &Harness<'_, EffectcraftApp>) -> Vec<egui::epaint::CircleShape> {
     fn walk(s: &egui::Shape, out: &mut Vec<egui::epaint::CircleShape>) {
