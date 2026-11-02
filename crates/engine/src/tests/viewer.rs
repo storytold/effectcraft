@@ -302,7 +302,7 @@ fn toggle_closed_respects_path_and_vertex_selection() {
     s.state.selected_props = vec![(LayerId(lid), b)];
     s.state.selected_vertices = vec![crate::VertexRef { layer: LayerId(lid), mask: a, index: 1 }];
     s.execute("path.toggleClosed", json!({})).unwrap();
-    assert!(shape_path(&s, lid, a).closed, "vertices take precedence over property selection");
+    assert!(shape_path(&s, lid, a).closed, "selected points and properties both describe target paths");
     assert!(shape_path(&s, lid, b).closed);
     s.state.selected_vertices.clear();
     s.state.selected_props = vec![(LayerId(lid), a), (LayerId(lid), leaf), (LayerId(lid), b)];
@@ -321,6 +321,31 @@ fn toggle_closed_respects_path_and_vertex_selection() {
     s.execute("path.toggleClosed", json!({})).unwrap();
     assert!(!shape_path(&s, lid, a).closed);
     assert!(!shape_path(&s, lid, b).closed, "layer selection addresses all editable paths");
+}
+
+#[test]
+fn toggle_closed_combines_property_and_shape_group_selections() {
+    let mut s = comp();
+    let a = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let (lid, a_path) = (a["layer"].as_u64().unwrap(), a["path"].as_u64().unwrap());
+    let b = s.execute("shape.newPath", json!({"layer": lid, "vertices": [[10, 10], [90, 10], [90, 90]], "closed": true})).unwrap();
+    let (b_path, b_group) = (b["path"].as_u64().unwrap(), b["group"].as_u64().unwrap());
+    let c_path =
+        s.execute("shape.newPath", json!({"layer": lid, "vertices": [[20, 20], [80, 20], [80, 80]], "closed": true})).unwrap()["path"].as_u64().unwrap();
+    s.execute("prop.select", json!({"layer": lid, "prop": a_path})).unwrap();
+    s.execute("prop.select", json!({"layer": lid, "prop": b_group, "add": true})).unwrap();
+    assert!(s.state.selected_vertices.iter().all(|v| v.mask == a_path), "only the path property implies selected vertices");
+    assert!(!s.state.selected_vertices.is_empty());
+    assert!(s.state.selected_props.contains(&(LayerId(lid), b_group)));
+    let result = s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(result["paths"], json!(2));
+    assert!(!shape_path(&s, lid, a_path).closed);
+    assert!(!shape_path(&s, lid, b_path).closed, "the added shape group is included alongside implied vertices");
+    assert!(shape_path(&s, lid, c_path).closed, "unselected sibling stays unchanged");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(shape_path(&s, lid, a_path).closed);
+    assert!(shape_path(&s, lid, b_path).closed, "both selected paths undo together");
+    assert!(shape_path(&s, lid, c_path).closed);
 }
 
 #[test]

@@ -38,19 +38,18 @@ fn targets(s: &Session) -> Result<Vec<Target>> {
         props: s.state.selected_props.iter().filter(|(lid, _)| s.state.selected_layers.contains(lid)).copied().collect(),
         time: s.time(),
     };
+    let whole_layers = selection.vertices.is_empty() && selection.props.is_empty();
     let mut targets = Vec::new();
     for layer in comp.layers.iter() {
-        let selected_layer = if !selection.vertices.is_empty() {
-            selection.vertices.iter().any(|v| v.layer == layer.id)
-        } else if !selection.props.is_empty() {
-            selection.props.iter().any(|(lid, _)| *lid == layer.id)
-        } else {
+        let selected_layer = if whole_layers {
             s.state.selected_layers.contains(&layer.id)
+        } else {
+            selection.vertices.iter().any(|v| v.layer == layer.id) || selection.props.iter().any(|(lid, _)| *lid == layer.id)
         };
         if !selected_layer || layer.switches.locked {
             continue;
         }
-        collect(&selection, layer, &layer.props, &mut Vec::new(), selection.props.is_empty(), &mut targets)?;
+        collect(&selection, layer, &layer.props, &mut Vec::new(), whole_layers, &mut targets)?;
     }
     if targets.is_empty() {
         return Err(bad("path.toggleClosed", "select an unlocked mask or Bezier shape path"));
@@ -70,11 +69,10 @@ fn collect(selection: &Selection, layer: &Layer, group: &PropGroup, route: &mut 
         && let Some(prop) = group.get("path")
         && let KV::Path(path) = prop.value_at(layer.layer_time(selection.time))
     {
-        let selected = if selection.vertices.is_empty() {
-            selected || selection.props.contains(&(layer.id, prop.uid))
-        } else {
-            selection.vertices.iter().any(|v| v.layer == layer.id && v.mask == group.uid && v.index < path.vertices.len())
-        };
+        // Property selection also selects its points; both describe the selected paths.
+        let selected = selected
+            || selection.props.contains(&(layer.id, prop.uid))
+            || selection.vertices.iter().any(|v| v.layer == layer.id && v.mask == group.uid && v.index < path.vertices.len());
         if selected {
             targets.push(Target { layer: layer.id, route: route.clone(), closed: path.closed });
         }
