@@ -927,10 +927,25 @@ pub fn footage_salt(project: &effectcraft_project::Project) -> u64 {
 pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Option<VirtualFileId<'_>>) -> u64 {
     let mut h = Hash128::default();
     h.write(RENDER_VERSION.as_bytes());
+    // Footage another layer reads (Audio Spectrum's Audio Layer); a read precomp can hold any.
+    let mut read = std::collections::BTreeSet::new();
+    let mut read_comp = false;
+    for (_, c) in project.comps() {
+        for l in c.layers.iter() {
+            for r in l.referenced_layers().into_iter().filter(|r| *r != l.id) {
+                match c.layer(r).map(|x| &x.source) {
+                    Some(effectcraft_project::LayerSource::Footage { item }) => _ = read.insert(*item),
+                    Some(effectcraft_project::LayerSource::Comp { .. }) => read_comp = true,
+                    _ => {}
+                }
+            }
+        }
+    }
     for (id, it) in &project.items {
-        // (files without video never make layer buffers: importing music keeps the keys)
+        // (files without video make layer buffers only through a layer that reads them:
+        // importing music keeps the keys)
         if let effectcraft_project::ItemKind::Footage(f) = &it.kind
-            && f.has_video
+            && (f.has_video || read_comp || read.contains(id))
         {
             h.write_u64(id.0);
             hash_debug(&mut h, f);
@@ -1361,6 +1376,32 @@ mod tests {
         for k in 0..5u128 {
             assert_eq!(b.get_layer(k).unwrap().img, buf(k as u32, 16, 16).img);
         }
+    }
+
+    /// An audio file nothing reads stays out of the layer salt; one a layer reads (Audio
+    /// Spectrum) is in it, so overwriting it doesn't reuse that layer's buffers.
+    #[test]
+    fn read_audio_counts_in_the_footage_salt() {
+        use effectcraft_project::build;
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, MatteKind, Project, TrackMatte};
+        use effectcraft_time::{FrameRate, Tick};
+
+        let mut p = Project::default();
+        let f = Footage { path: "/song.wav".into(), kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() };
+        let song = p.add_item("song.wav", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+        let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let music = build::layer(&mut p, &comp, "music", LayerSource::Footage { item: song }, (16, 9), None);
+        let mut reader = build::layer(&mut p, &comp, "reader", LayerSource::Null, (16, 9), None);
+        let music_id = music.id;
+        comp.layers = vec![reader.clone(), music].into();
+        let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+
+        let id = |mark: u64| move |path: &str| (path == "/song.wav").then_some((8, mark));
+        let (one, two) = (id(1), id(2));
+        assert_eq!(footage_salt_with(&p, Some(&one)), footage_salt_with(&p, Some(&two)), "unread music stays out");
+        reader.track_matte = Some(TrackMatte { layer: music_id, kind: MatteKind::Alpha });
+        *p.comp_mut(cid).unwrap().layers.first_mut().unwrap() = reader;
+        assert_ne!(footage_salt_with(&p, Some(&one)), footage_salt_with(&p, Some(&two)), "read audio counts");
     }
 
     /// A path with no native metadata takes its key from the caller's size and content hash (#1253).
