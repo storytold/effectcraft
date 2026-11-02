@@ -208,6 +208,12 @@ impl ProRes {
         let alpha = channels == Channels::Rgba;
         let mut cfg = filmcraft_prores::EncoderConfig::new(profile, w, h);
         cfg.encode_alpha = alpha;
+        // The frame header carries the same H.273 codes as the `colr` atom, so readers that trust
+        // either one agree.
+        if let ColorInfo::Nclc { primaries, transfer, matrix } = colr {
+            let code = |c| u8::try_from(c).unwrap_or(2);
+            cfg.color = filmcraft_prores::ColorInfo { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix) };
+        }
         ProRes { enc: filmcraft_prores::Encoder::with_config(cfg), profile, w, h, alpha, colr }
     }
     fn is_444(&self) -> bool {
