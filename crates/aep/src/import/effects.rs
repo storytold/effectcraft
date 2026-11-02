@@ -36,8 +36,8 @@
 
 use crate::effect_map::{Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, popup_key};
 use crate::{
-    CurvesData, DefinitionSource, Effect as AepEffect, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef, LevelsData, MeshData, ParamKind,
-    ParamValue, Project as AepProject,
+    CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef, LevelsData, MeshData,
+    ParamKind, ParamValue,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
@@ -65,10 +65,10 @@ pub(crate) struct LayerCtx<'c> {
 }
 
 /// Imports the effects of `layer` into `target` (the layer's `effects` group) in stack order and
-/// reports the ones it cannot.
-pub(crate) fn import_effects(
-    view: &AepProject<'_, '_>,
-    layer: &AepLayer<'_, '_>,
+/// reports the ones it cannot. `defs` is the file's effect definition index, built once per import.
+pub(crate) fn import_effects<'f, 'a>(
+    defs: &EffectDefinitions<'f, 'a>,
+    layer: &AepLayer<'f, 'a>,
     cx: &LayerCtx<'_>,
     ids: &mut Ids<'_>,
     target: &mut PropGroup,
@@ -85,7 +85,7 @@ pub(crate) fn import_effects(
             col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
             continue;
         };
-        if view.definition_source(&fx) == DefinitionSource::Missing {
+        if defs.source(&fx) == DefinitionSource::Missing {
             col.lose(
                 LossCategory::Effects,
                 format!("{}: '{}' has the effect '{shown}' ({}) without readable parameter definitions, not imported", cx.comp, cx.layer, fx.match_name()),
@@ -98,7 +98,7 @@ pub(crate) fn import_effects(
             Some(on) => group.enabled = on,
             None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
         }
-        let params = view.effect_params(&fx);
+        let params = defs.params(&fx);
         for p in &params {
             import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
         }

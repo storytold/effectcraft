@@ -192,6 +192,19 @@ pub enum PropNode<'f, 'a> {
     Other(&'f Chunk<'a>),
 }
 
+impl<'f, 'a> PropNode<'f, 'a> {
+    /// The node a `LIST` after a match name is.
+    fn of(c: &'f Chunk<'a>) -> Self {
+        if c.is_list(b"tdgp") {
+            PropNode::Group(PropGroup { chunk: c })
+        } else if c.is_list(b"tdbs") {
+            PropNode::Property(Property { chunk: c })
+        } else {
+            PropNode::Other(c)
+        }
+    }
+}
+
 /// A match name with the node it names.
 #[derive(Debug, Clone)]
 pub struct PropEntry<'f, 'a> {
@@ -238,14 +251,7 @@ impl<'f, 'a> PropGroup<'f, 'a> {
             } else if c.id == crate::container::chunk::LIST
                 && let Some(name) = pending.take()
             {
-                let node = if c.is_list(b"tdgp") {
-                    PropNode::Group(PropGroup { chunk: c })
-                } else if c.is_list(b"tdbs") {
-                    PropNode::Property(Property { chunk: c })
-                } else {
-                    PropNode::Other(c)
-                };
-                out.push(PropEntry { match_name: name, node });
+                out.push(PropEntry { match_name: name, node: PropNode::of(c) });
             }
         }
         out
@@ -256,9 +262,21 @@ impl<'f, 'a> PropGroup<'f, 'a> {
         self.entries().into_iter().map(|e| e.match_name).collect()
     }
 
-    /// The first entry with this match name.
+    /// The first entry with this match name. One pass that stops at it, without collecting the
+    /// group's entries (callers look names up in loops).
     pub fn get(&self, name: &str) -> Option<PropNode<'f, 'a>> {
-        self.entries().into_iter().find(|e| e.match_name == name).map(|e| e.node)
+        let mut pending: Option<&[u8]> = None;
+        for c in self.chunk.children() {
+            if c.is(b"tdmn") {
+                pending = c.bytes();
+            } else if c.id == crate::container::chunk::LIST
+                && let Some(body) = pending.take()
+                && match_name(body) == name
+            {
+                return Some(PropNode::of(c));
+            }
+        }
+        None
     }
 
     /// Follows a path of match names through nested groups.
@@ -412,9 +430,11 @@ impl<'f> KeyList<'f> {
         (ldat.len() == expected).then_some(Self { header, ldat, layout: None })
     }
 
-    /// The number of records.
+    /// The number of records actually present (what [`Self::records`] yields). Not the declared
+    /// count: a list with record size 0 and no data passes [`Self::from_chunk`] whatever count it
+    /// declares, and a caller sizing an allocation by that count would abort.
     pub fn len(&self) -> usize {
-        usize::try_from(self.header.count).unwrap_or(0)
+        self.records().count()
     }
 
     /// True when there are no records.
@@ -458,5 +478,46 @@ impl<'f> Keyframe<'f> {
     /// The keyframe time in time units (layer time).
     pub fn time_units(&self) -> Option<i32> {
         be_u32(self.record, 0).map(|u| i32::from_be_bytes(u.to_be_bytes()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_list(count: u32, record_size: u32, ldat: &[u8]) -> Chunk<'static> {
+        let mut lhd3 = vec![0u8; 52];
+        lhd3[8..12].copy_from_slice(&count.to_be_bytes());
+        lhd3[16..20].copy_from_slice(&record_size.to_be_bytes());
+        Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", lhd3), Chunk::data(*b"ldat", ldat.to_vec())])
+    }
+
+    #[test]
+    fn a_key_list_counts_the_records_it_holds() {
+        let two = key_list(2, 4, &[0; 8]);
+        assert_eq!(KeyList::from_chunk(&two).map(|l| l.len()), Some(2));
+        // Record size 0 with no data passes the size check whatever count is declared; the length
+        // is what is there, so no caller sizes an allocation by 4 billion records.
+        let hostile = key_list(u32::MAX, 0, &[]);
+        let list = KeyList::from_chunk(&hostile).expect("a well-formed empty list");
+        assert_eq!((list.len(), list.is_empty(), list.records().count()), (0, true, 0));
+    }
+
+    #[test]
+    fn get_finds_the_first_entry_of_a_name() {
+        let tdmn = |n: &str| {
+            let mut b = n.as_bytes().to_vec();
+            b.resize(40, 0);
+            Chunk::data(*b"tdmn", b)
+        };
+        let group = Chunk::list(
+            *b"tdgp",
+            vec![tdmn("A"), Chunk::list(*b"tdgp", Vec::new()), tdmn("B"), Chunk::list(*b"tdbs", Vec::new()), tdmn("A"), Chunk::list(*b"tdbs", Vec::new())],
+        );
+        let g = PropGroup::from_chunk(&group).expect("group");
+        assert!(matches!(g.get("A"), Some(PropNode::Group(_))), "the first A is the group");
+        assert!(matches!(g.get("B"), Some(PropNode::Property(_))));
+        assert!(g.get("C").is_none());
+        assert_eq!(g.names(), ["A", "B", "A"]);
     }
 }

@@ -190,9 +190,11 @@ impl Parser<'_> {
                     "false" => TextValue::Bool(false),
                     _ => match w.parse::<i64>() {
                         Ok(i) => TextValue::Int(i),
+                        // `parse` also takes `nan`, `inf` and overflowing exponents; those are not
+                        // numbers a text document holds, so they stay tokens and read as missing.
                         Err(_) => match w.parse::<f64>() {
-                            Ok(f) => TextValue::Float(f),
-                            Err(_) => TextValue::Token(w),
+                            Ok(f) if f.is_finite() => TextValue::Float(f),
+                            _ => TextValue::Token(w),
                         },
                     },
                 })
@@ -346,10 +348,19 @@ pub const NEUTRAL_PARAGRAPH_VALUES: &[(&str, &[i64])] = &[("24", &[0, 1]), ("34"
 /// (S21).
 pub const NEUTRAL_STYLE_VALUES: &[(&str, &[i64])] = &[("68", &[0, 1])];
 
-/// Adds to `out` the slots of `actual` that are not decoded and differ from `sampled`.
+/// The most undecoded slots recorded per text document (style and paragraph each). They are listed
+/// in one report line; a crafted dictionary with many thousands of distinct keys must neither make
+/// the duplicate check quadratic nor the line unbounded.
+pub const MAX_UNDECODED_FIELDS: usize = 64;
+
+/// Adds to `out` the slots of `actual` that are not decoded and differ from `sampled`, each once
+/// and at most [`MAX_UNDECODED_FIELDS`] in all.
 fn undecoded_fields(actual: &TextValue, sampled: Option<&TextValue>, decoded: &[&str], neutral: &[(&str, &[i64])], out: &mut Vec<String>) {
     let TextValue::Dict(pairs) = actual else { return };
     for (key, value) in pairs {
+        if out.len() >= MAX_UNDECODED_FIELDS {
+            return;
+        }
         if decoded.contains(&key.as_str()) || out.contains(key) {
             continue;
         }
@@ -398,7 +409,7 @@ pub struct TextDocument {
     /// run from the sampled defaults).
     pub incomplete_runs: usize,
     /// Style slots that are not decoded and differ from the sampled default (`"68"`, ...), each
-    /// once; empty for every synthetic sample.
+    /// once and at most [`MAX_UNDECODED_FIELDS`]; empty for every synthetic sample.
     pub undecoded_style_fields: Vec<String>,
     /// Paragraph slots that are not decoded and differ from the sampled default.
     pub undecoded_paragraph_fields: Vec<String>,
@@ -988,5 +999,33 @@ impl<'f, 'a> Comp<'f, 'a> {
     /// The composition's markers: they live in the `SecL` list named "Markers".
     pub fn markers(&self) -> Vec<Marker> {
         self.item.child_list(b"SecL").map(markers_in).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_numbers_are_not_numbers() {
+        let TextValue::Dict(pairs) = parse_text_dict(b"/1 inf /2 nan /3 1e999 /4 -inf /5 2.5 /6 7") else { panic!("a dict") };
+        let numbers: Vec<Option<f64>> = pairs.iter().map(|(_, v)| v.as_f64()).collect();
+        assert_eq!(numbers, [None, None, None, None, Some(2.5), Some(7.0)]);
+    }
+
+    #[test]
+    fn undecoded_fields_are_capped_and_linear() {
+        // 300 000 distinct undecoded slots that differ from a sampled default: before, each was
+        // checked against every slot recorded so far (4.5e10 compares) and all were listed.
+        let actual = TextValue::Dict((0..300_000).map(|i| (format!("{}", 9000 + i), TextValue::Int(1))).collect());
+        let mut out = Vec::new();
+        undecoded_fields(&actual, None, &["0"], &[], &mut out);
+        assert_eq!(out.len(), MAX_UNDECODED_FIELDS);
+        assert_eq!(out.first().map(String::as_str), Some("9000"));
+        // A slot listed once is not listed again.
+        let again = TextValue::Dict(vec![("9000".into(), TextValue::Int(1))]);
+        let mut short = vec!["9000".to_string()];
+        undecoded_fields(&again, None, &[], &[], &mut short);
+        assert_eq!(short, ["9000"]);
     }
 }

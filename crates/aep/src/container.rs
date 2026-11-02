@@ -39,7 +39,7 @@ pub use aepx::{is_aepx, parse_any, read_aepx, read_aepx_with_limits};
 pub use arbitrary::{CURVE_IDENTITY, CurvesData, HueSaturationData, LevelsData, MeshData, curve_lut};
 pub use camera::{CameraPosition, DEFAULT_CAMERA_ZOOM};
 pub use chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS, Walk};
-pub use effects::{DefinitionSource, Effect, EffectParam, LayerRef, ParamKind, ParamValue};
+pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, LayerRef, ParamKind, ParamValue};
 pub use error::AepError;
 pub use footage::{Footage, SequenceInfo};
 pub use header::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Quality, Rational, Renderer};
