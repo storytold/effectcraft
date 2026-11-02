@@ -305,7 +305,8 @@ fn masks(im: &Im, ids: &mut Ids, list: &[Json], g: &mut PropGroup) {
                 import_prop(im, j, p, conv);
             }
         };
-        set("pt", "path", &shapes::to_path);
+        let closed = m.get("cl").and_then(Json::as_bool).unwrap_or(false);
+        set("pt", "path", &|v| shapes::to_path(v, closed));
         set("o", "opacity", &anim::to_scalar);
         set("x", "expansion", &anim::to_scalar);
         set("f", "feather", &anim::to_vec2);
