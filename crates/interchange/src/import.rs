@@ -156,7 +156,13 @@ pub fn import(
         }),
         name: Some(opts.name.trim_end_matches(|c| c != '.').trim_end_matches('.').to_string()).filter(|s| !s.is_empty()),
     };
-    let (imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
+    let (mut imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
+    // Each file is probed once, though an EDL's media are probed before the layers are made.
+    let mut probed: HashMap<String, Option<Footage>> = HashMap::new();
+    let mut probe_once = |path: &str| probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone();
+    if format == TimelineFormat::Edl {
+        rebase_to_file_timecode(&mut imported.project, &mut probe_once);
+    }
     let mut res = ImportResult { format: Some(format), ..Default::default() };
     for e in &report.entries {
         if e.count > 1 { res.warnings.push(format!("{} (×{})", e.message, e.count)) } else { res.warnings.push(e.message.clone()) }
@@ -164,8 +170,32 @@ pub fn import(
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
     let mut im = Importer { src: &imported.project, project, res, items: HashMap::new(), solids: HashMap::new(), solids_folder: None, bins: HashMap::new() };
-    im.run(&imported.sequences, probe);
+    im.run(&imported.sequences, &mut probe_once);
     Ok(im.res)
+}
+
+/// An EDL's source times are its source timecodes, which FilmCraft's reader keeps as media time.
+/// Put the clips of each file that has a start timecode on the file's own time, as FilmCraft does
+/// when it links the media of an imported EDL.
+fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str) -> Option<Footage>) {
+    let files: Vec<(fp::ItemId, String)> = project
+        .items
+        .values()
+        .filter_map(|it| match &it.kind {
+            fp::ItemKind::Media(m) if !m.offline => match &m.media {
+                fp::MediaRef::File { path } => Some((it.id, path.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    for (id, path) in files {
+        if let Some(f) = probe(&path)
+            && let Some(tc) = f.file_timecode
+        {
+            filmcraft_interchange::rebase_source_timecode(project, id, tc, crate::rate_out(f.native_rate.unwrap_or(f.frame_rate)));
+        }
+    }
 }
 
 struct Importer<'a> {

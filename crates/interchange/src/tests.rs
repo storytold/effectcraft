@@ -365,6 +365,21 @@ fn edl_imports_one_track() {
     assert!(c.layers.len() >= 2);
 }
 
+/// An EDL's source timecodes are footage time once the file's own start timecode is known:
+/// 01:00:01:00 in a file that starts at 01:00:00:00 is one second in, not 3601 s.
+#[test]
+fn edl_source_timecode_lands_on_the_files_own_time() {
+    let edl = "TITLE: CUT\nFCM: NON-DROP FRAME\n\n001  A001     V     C        01:00:01:00 01:00:02:00 01:00:00:00 01:00:01:00\n* FROM CLIP NAME: a.mov\n* SOURCE FILE: /media/a.mov\n";
+    let mut probe_tc = |path: &str| probe(path).map(|f| Footage { file_timecode: Some(3600 * 25), ..f });
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(25.0), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_tc).unwrap();
+    let c = p.comp(r.comps[0]).unwrap();
+    let l = layer(c, "a.mov");
+    assert!(near(l.layer_time(l.in_point), t(1.0)), "{}", l.layer_time(l.in_point).seconds());
+    assert!(near(l.start_time, t(-1.0)), "{}", l.start_time.seconds());
+}
+
 #[test]
 fn rejects_unknown_documents() {
     let mut p = Project::default();
