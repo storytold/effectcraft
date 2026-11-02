@@ -34,6 +34,7 @@
 use rayon::prelude::*;
 
 use crate::Image;
+use crate::Px;
 use crate::flow::{Flow, block_flow};
 
 /// Fill method.
@@ -671,6 +672,40 @@ impl Frames {
             Frames::Spilled(h) => h.get(k),
         }
     }
+    /// Frame size without decoding a whole image.
+    pub fn size(&self) -> Option<(usize, usize)> {
+        match self {
+            Frames::Memory(v) => v.first().map(|i| (i.width as usize, i.height as usize)),
+            Frames::Spilled(h) => Some((h.w, h.h)),
+        }
+    }
+    /// Bilinear sample of one pixel. Spilled frames decode at most once per cached frame
+    /// and never clone a whole frame just to read a pixel (the trace hot path, #2570).
+    pub fn sample(&self, k: usize, x: f64, y: f64) -> Px {
+        match self {
+            Frames::Memory(v) => v[k].sample_bilinear_clamped(x, y),
+            Frames::Spilled(h) => h.sample(k, x, y),
+        }
+    }
+    /// Directory of the spill file, so a secondary spill can live beside it.
+    pub fn scratch_dir(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Frames::Memory(_) => None,
+            Frames::Spilled(h) => h.path().parent().map(std::path::Path::to_path_buf),
+        }
+    }
+    pub fn has_error(&self) -> bool {
+        match self {
+            Frames::Memory(_) => false,
+            Frames::Spilled(h) => h.has_error(),
+        }
+    }
+    pub fn take_error(&self) -> Option<String> {
+        match self {
+            Frames::Memory(_) => None,
+            Frames::Spilled(h) => h.take_error(),
+        }
+    }
 }
 
 /// A spill file holding `n` frames of `w x h` pixels at `bpc` bits per channel.
@@ -688,6 +723,7 @@ pub struct SpillHandle {
 struct SpillInner {
     path: std::path::PathBuf,
     cache: std::sync::Mutex<Vec<(usize, Image)>>,
+    error: std::sync::Mutex<Option<String>>,
 }
 
 impl Drop for SpillInner {
@@ -701,24 +737,51 @@ impl SpillHandle {
         &self.inner.path
     }
 
-    pub fn get(&self, k: usize) -> Image {
-        if let Ok(cache) = self.inner.cache.lock() {
-            if let Some((_, img)) = cache.iter().find(|(kk, _)| *kk == k) {
-                return img.clone();
-            }
+    fn bytes_per_px(&self) -> usize {
+        if self.bpc <= 8 { 4 } else { 16 }
+    }
+
+    pub fn record_error(&self, message: String) {
+        if let Ok(mut e) = self.inner.error.lock()
+            && e.is_none()
+        {
+            *e = Some(message);
         }
-        let px = self.w * self.h;
-        let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
-        let off = k.saturating_mul(px).saturating_mul(bytes_per_px);
-        let len = px.saturating_mul(bytes_per_px);
-        let mut buf = vec![0u8; len];
-        if let Ok(mut f) = std::fs::File::open(self.path()) {
-            use std::io::{Read, Seek, SeekFrom};
-            if f.seek(SeekFrom::Start(off as u64)).is_ok() {
-                let _ = f.read_exact(&mut buf);
-            }
-        }
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.inner.error.lock().map(|e| e.is_some()).unwrap_or(true)
+    }
+
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.error.lock().ok().and_then(|mut e| e.take())
+    }
+
+    fn load_frame(&self, k: usize) -> Image {
         let mut img = Image::new(self.w as u32, self.h as u32);
+        let Some(px) = self.w.checked_mul(self.h) else {
+            self.record_error("spill: pixel count overflow".into());
+            return img;
+        };
+        let bytes_per_px = self.bytes_per_px();
+        let Some(off) = k.checked_mul(px).and_then(|v| v.checked_mul(bytes_per_px)) else {
+            self.record_error(format!("spill: offset overflow for frame {k}"));
+            return img;
+        };
+        let Some(len) = px.checked_mul(bytes_per_px) else {
+            self.record_error("spill: frame size overflow".into());
+            return img;
+        };
+        let mut buf = vec![0u8; len];
+        let read = std::fs::File::open(self.path()).and_then(|mut f| {
+            use std::io::{Read, Seek, SeekFrom};
+            f.seek(SeekFrom::Start(off as u64))?;
+            f.read_exact(&mut buf)
+        });
+        if let Err(e) = read {
+            self.record_error(format!("spill {}: {e}", self.path().display()));
+            return img;
+        }
         if self.bpc <= 8 {
             for (i, p) in img.data.iter_mut().enumerate() {
                 let j = i * 4;
@@ -737,8 +800,23 @@ impl SpillHandle {
                 }
             }
         }
+        img
+    }
+
+    /// Read a cached frame, decoding it on a miss. The cache keeps the last few frames so
+    /// flow tracing across neighbouring frames does not re-read the file per pixel.
+    fn cached(&self, k: usize) -> Image {
+        if let Ok(mut cache) = self.inner.cache.lock()
+            && let Some(pos) = cache.iter().position(|(kk, _)| *kk == k)
+        {
+            let e = cache.remove(pos);
+            let img = e.1.clone();
+            cache.push(e);
+            return img;
+        }
+        let img = self.load_frame(k);
         if let Ok(mut cache) = self.inner.cache.lock() {
-            if cache.len() >= 4 {
+            if cache.len() >= 6 {
                 cache.remove(0);
             }
             cache.push((k, img.clone()));
@@ -746,11 +824,41 @@ impl SpillHandle {
         img
     }
 
+    pub fn get(&self, k: usize) -> Image {
+        self.cached(k)
+    }
+
+    /// Bilinear sample without cloning the frame on a cache hit.
+    pub fn sample(&self, k: usize, x: f64, y: f64) -> Px {
+        if let Ok(mut cache) = self.inner.cache.lock() {
+            if let Some(pos) = cache.iter().position(|(kk, _)| *kk == k) {
+                let e = cache.remove(pos);
+                let px = e.1.sample_bilinear_clamped(x, y);
+                cache.push(e);
+                return px;
+            }
+            let img = self.load_frame(k);
+            let px = img.sample_bilinear_clamped(x, y);
+            if cache.len() >= 6 {
+                cache.remove(0);
+            }
+            cache.push((k, img));
+            return px;
+        }
+        self.load_frame(k).sample_bilinear_clamped(x, y)
+    }
+
     pub fn write_frame(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
-        let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
-        let px = self.w * self.h;
+        if k >= self.n {
+            return Err(format!("spill: frame {k} out of range (n = {})", self.n));
+        }
+        if img.width as usize != self.w || img.height as usize != self.h {
+            return Err(format!("spill: frame {k} is {}x{}, expected {}x{}", img.width, img.height, self.w, self.h));
+        }
+        let bytes_per_px = self.bytes_per_px();
+        let px = self.w.checked_mul(self.h).ok_or("overflow")?;
         let off = k.checked_mul(px).and_then(|v| v.checked_mul(bytes_per_px)).ok_or("overflow")?;
-        let mut file = std::fs::OpenOptions::new().write(true).open(self.path()).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new().write(true).open(self.path()).map_err(|e| format!("spill {}: {e}", self.path().display()))?;
         use std::io::{Seek, SeekFrom, Write};
         file.seek(SeekFrom::Start(off as u64)).map_err(|e| e.to_string())?;
         if self.bpc <= 8 {
@@ -775,15 +883,31 @@ impl SpillHandle {
         Ok(())
     }
 
-    pub fn create(w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
+    /// Create a spill file. `dir` lets the caller keep scratch next to the output (so a
+    /// RAM-backed `/tmp` does not defeat the point of spilling); `None` uses the temp dir.
+    pub fn create_in(dir: Option<&std::path::Path>, w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
         let bytes_per_px: usize = if bpc <= 8 { 4 } else { 16 };
-        let total = n.checked_mul(w).and_then(|v| v.checked_mul(h)).and_then(|v| v.checked_mul(bytes_per_px)).ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, "overflow"))?;
-        let tmp = tempfile::NamedTempFile::with_prefix("effectcraft-fill-")?;
+        let total = n
+            .checked_mul(w)
+            .and_then(|v| v.checked_mul(h))
+            .and_then(|v| v.checked_mul(bytes_per_px))
+            .ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, "overflow"))?;
+        let tmp = match dir {
+            Some(d) => {
+                std::fs::create_dir_all(d)?;
+                tempfile::Builder::new().prefix("effectcraft-fill-").tempfile_in(d)?
+            }
+            None => tempfile::NamedTempFile::with_prefix("effectcraft-fill-")?,
+        };
         let path = tmp.into_temp_path().keep().map_err(|e| e.error)?;
         let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         file.set_len(total as u64)?;
-        let inner = std::sync::Arc::new(SpillInner { path, cache: std::sync::Mutex::new(Vec::new()) });
+        let inner = std::sync::Arc::new(SpillInner { path, cache: std::sync::Mutex::new(Vec::new()), error: std::sync::Mutex::new(None) });
         Ok(SpillHandle { inner, w, h, n, bpc })
+    }
+
+    pub fn create(w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
+        Self::create_in(None, w, h, n, bpc)
     }
 }
 
@@ -851,7 +975,8 @@ fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usi
             let img = if let Some(r) = &context.ref_images[k as usize] {
                 r.sample_bilinear_clamped(px, py)
             } else {
-                context.frames.get(k as usize).sample_bilinear_clamped(px, py)
+                // Samples a pixel; never clones a whole spilled frame (the trace hot path).
+                context.frames.sample(k as usize, px, py)
             };
             return Some((img, d));
         }
@@ -899,6 +1024,76 @@ pub struct CpuFill;
 
 impl FillBackend for CpuFill {}
 
+/// Holds the propagated frames between the parallel propagation pass and the sequential
+/// synthesis pass. Native builds spill them beside the input, so a whole range is never
+/// resident at once (#2570); wasm keeps them in memory (it has no shared file system).
+enum PropStore {
+    #[cfg(not(target_arch = "wasm32"))]
+    Spilled(SpillHandle),
+    #[cfg(target_arch = "wasm32")]
+    Memory(std::sync::Mutex<Vec<Option<Image>>>),
+}
+
+impl PropStore {
+    fn new(dir: Option<&std::path::Path>, w: usize, h: usize, n: usize) -> std::io::Result<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // 32-bit floats: propagating quantized input would lose quality (#2570).
+            Ok(PropStore::Spilled(SpillHandle::create_in(dir, w, h, n, 32)?))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (dir, w, h);
+            Ok(PropStore::Memory(std::sync::Mutex::new((0..n).map(|_| None).collect())))
+        }
+    }
+
+    fn put(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            PropStore::Spilled(h) => h.write_frame(k, img),
+            #[cfg(target_arch = "wasm32")]
+            PropStore::Memory(v) => {
+                let mut v = v.lock().map_err(|_| "propagation store poisoned".to_string())?;
+                if let Some(slot) = v.get_mut(k) {
+                    *slot = Some(img.clone());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Read a propagated frame once, freeing it where the backing store allows it.
+    fn take(&self, k: usize) -> Image {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            PropStore::Spilled(h) => h.get(k),
+            #[cfg(target_arch = "wasm32")]
+            PropStore::Memory(v) => v.lock().ok().and_then(|mut v| v.get_mut(k).and_then(Option::take)).unwrap_or_default(),
+        }
+    }
+
+    fn record_error(&self, message: String) {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            PropStore::Spilled(h) => h.record_error(message),
+            #[cfg(target_arch = "wasm32")]
+            PropStore::Memory(_) => {
+                let _ = message;
+            }
+        }
+    }
+
+    fn has_error(&self) -> bool {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            PropStore::Spilled(h) => h.has_error(),
+            #[cfg(target_arch = "wasm32")]
+            PropStore::Memory(_) => false,
+        }
+    }
+}
+
 /// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
 /// (→ `None`).
 pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
@@ -906,13 +1101,21 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
 }
 
 /// [`fill_sequence`] with a hardware backend for the stages it can take (see [`FillBackend`]).
-pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool, mut sink: Option<&mut dyn FnMut(usize, &Image) -> Result<(), String>>) -> Option<Vec<Image>> {
+pub fn fill_sequence_with(
+    mut input: FillInput,
+    o: &FillOpts,
+    backend: &dyn FillBackend,
+    progress: &mut dyn FnMut(usize, usize) -> bool,
+    mut sink: Option<&mut dyn FnMut(usize, &Image) -> Result<(), String>>,
+) -> Option<Vec<Image>> {
     let n = input.frames.len();
     if n == 0 {
         return Some(vec![]);
     }
-    let first = input.frames.get(0);
-    let (w, h) = (first.width as usize, first.height as usize);
+    let (w, h) = input.frames.size().unwrap_or((0, 0));
+    if w == 0 || h == 0 {
+        return Some(vec![]);
+    }
     // Steps: flows (1) + propagation (1) + per-frame synthesis (n).
     let total = n + 2;
     let streaming = sink.is_some();
@@ -922,10 +1125,10 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             let f = input.frames.get(i);
             let hl = input.holes[i].to_vec();
             let img = opaque_fill(backend.membrane(&f, &hl), &hl);
-            if let Some(cb) = sink.as_mut() {
-                if cb(i, &img).is_err() {
-                    return None;
-                }
+            if let Some(cb) = sink.as_mut()
+                && cb(i, &img).is_err()
+            {
+                return None;
             }
             if !streaming {
                 out.push(img);
@@ -933,6 +1136,9 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             if !progress(i + 1, n) {
                 return None;
             }
+        }
+        if input.frames.has_error() {
+            return None;
         }
         if streaming {
             return Some(Vec::new());
@@ -952,130 +1158,166 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
         }
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
-    let pre: Vec<Image> = (0..n).into_par_iter().map(|t| {
-        let base = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
-        backend.membrane(&base, &holes[t].to_vec())
-    }).collect();
+    let pre: Vec<Image> = (0..n)
+        .into_par_iter()
+        .map(|t| {
+            let base = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
+            backend.membrane(&base, &holes[t].to_vec())
+        })
+        .collect();
+    if input.frames.has_error() {
+        return None;
+    }
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
         .into_par_iter()
-        .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i].to_vec(), &holes[i + 1].to_vec()), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1].to_vec(), &holes[i].to_vec())))
+        .map(|i| {
+            (
+                backend.flow(&pre[i], &pre[i + 1], &holes[i].to_vec(), &holes[i + 1].to_vec()),
+                backend.flow(&pre[i + 1], &pre[i], &holes[i + 1].to_vec(), &holes[i].to_vec()),
+            )
+        })
         .collect();
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
     drop(pre);
     if !progress(1, total) {
         return None;
     }
-    // 2. Propagation (and the lighting-correction border ring).
+    // 2. Propagation (and the lighting-correction border ring). The filled frames are
+    // spilled as they are produced, so only the leftover masks stay in RAM.
+    let prop_dir = input.frames.scratch_dir();
+    let store = match PropStore::new(prop_dir.as_deref(), w, h, n) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
     let known = |k: usize, x: i64, y: i64| !holes[k].get(y as usize * w + x as usize);
     let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &input.frames, ref_images: &ref_images, w, h, max: n };
     let ring_r = 2usize;
-    let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
+    let propagated_left: Vec<HoleMask> = (0..n)
         .into_par_iter()
         .map(|t| {
             let mut img = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
             let mut left = holes[t].to_vec();
-            if is_ref[t] || !holes[t].any() {
-                return (img, left);
-            }
-            let sample = |i: usize| -> Option<[f32; 4]> {
-                let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
-                let f = trace(&trace_context, TraceStart { frame: t, x, y, step: 1 });
-                let b = trace(&trace_context, TraceStart { frame: t, x, y, step: -1 });
-                match (f, b) {
-                    (Some((a, da)), Some((c, dc))) => {
-                        let (wa, wc) = (1.0 / da as f32, 1.0 / dc as f32);
-                        Some(std::array::from_fn(|k| (a[k] * wa + c[k] * wc) / (wa + wc)))
+            if !is_ref[t] && holes[t].any() {
+                let sample = |i: usize| -> Option<[f32; 4]> {
+                    let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+                    let f = trace(&trace_context, TraceStart { frame: t, x, y, step: 1 });
+                    let b = trace(&trace_context, TraceStart { frame: t, x, y, step: -1 });
+                    match (f, b) {
+                        (Some((a, da)), Some((c, dc))) => {
+                            let (wa, wc) = (1.0 / da as f32, 1.0 / dc as f32);
+                            Some(std::array::from_fn(|k| (a[k] * wa + c[k] * wc) / (wa + wc)))
+                        }
+                        (Some((a, _)), None) | (None, Some((a, _))) => Some(a),
+                        _ => None,
                     }
-                    (Some((a, _)), None) | (None, Some((a, _))) => Some(a),
-                    _ => None,
+                };
+                let filled: Vec<(usize, [f32; 4])> = (0..w * h).filter(|&i| holes[t].get(i)).filter_map(|i| sample(i).map(|v| (i, v))).collect();
+                for (i, v) in &filled {
+                    img.data[*i] = *v;
+                    left[*i] = false;
                 }
-            };
-            let filled: Vec<(usize, [f32; 4])> = (0..w * h).filter(|&i| holes[t].get(i)).filter_map(|i| sample(i).map(|v| (i, v))).collect();
-            for (i, v) in &filled {
-                img.data[*i] = *v;
-                left[*i] = false;
-            }
-            // Lighting correction: membrane of the border mismatch, added to propagated pixels.
-            if o.lighting > 0.0 && !filled.is_empty() {
-                let grown = dilate(&holes[t].to_vec(), w, h, ring_r);
-                let frame_t = input.frames.get(t);
-                let mut diff = vec![[0.0f32; 4]; w * h];
-                let mut dk = vec![true; w * h];
-                for i in 0..w * h {
-                    if holes[t].get(i) {
-                        dk[i] = false;
-                    } else if grown[i]
-                        && let Some(v) = sample(i)
-                    {
-                        let a = frame_t.data[i];
-                        diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
+                // Lighting correction: membrane of the border mismatch, added to propagated pixels.
+                // Non-hole pixels are untouched above, so `img` is still the original there.
+                if o.lighting > 0.0 && !filled.is_empty() {
+                    let grown = dilate(&holes[t].to_vec(), w, h, ring_r);
+                    let mut diff = vec![[0.0f32; 4]; w * h];
+                    let mut dk = vec![true; w * h];
+                    for i in 0..w * h {
+                        if holes[t].get(i) {
+                            dk[i] = false;
+                        } else if grown[i]
+                            && let Some(v) = sample(i)
+                        {
+                            let a = img.data[i];
+                            diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
+                        }
                     }
-                }
-                backend.membrane_known(&mut diff, &dk, w, h);
-                for (i, _) in &filled {
-                    for c in 0..3 {
-                        img.data[*i][c] += o.lighting * diff[*i][c];
+                    backend.membrane_known(&mut diff, &dk, w, h);
+                    for (i, _) in &filled {
+                        for c in 0..3 {
+                            img.data[*i][c] += o.lighting * diff[*i][c];
+                        }
                     }
                 }
             }
-            (img, left)
+            if let Err(e) = store.put(t, &img) {
+                store.record_error(e);
+            }
+            HoleMask::from_vec(&left)
         })
         .collect();
+    if input.frames.has_error() || store.has_error() {
+        return None;
+    }
     drop(input);
     if !progress(2, total) {
         return None;
     }
     // 3. Synthesis of what no frame shows.
     let mut out: Vec<Option<Image>> = vec![None; n];
-    let first = (0..n).find(|&t| propagated[t].1.iter().any(|b| *b));
+    let first = (0..n).find(|&t| propagated_left[t].any());
     let Some(t0) = first else {
-        return Some(propagated.into_iter().enumerate().map(|(i, (img, _))| opaque_fill(img, &holes[i].to_vec())).collect());
+        if streaming {
+            for t in 0..n {
+                let img = opaque_fill(store.take(t), &holes[t].to_vec());
+                if let Some(cb) = sink.as_mut()
+                    && cb(t, &img).is_err()
+                {
+                    return None;
+                }
+            }
+            return Some(Vec::new());
+        }
+        return Some((0..n).map(|t| opaque_fill(store.take(t), &holes[t].to_vec())).collect());
     };
     // Frames before t0 are complete already.
     for t in 0..t0 {
-        let img = std::mem::take(&mut propagated[t].0);
-        let prepared = opaque_fill(img.clone(), &holes[t].to_vec());
-        out[t] = Some(img);
-        if let Some(cb) = sink.as_mut() {
-            if cb(t, &prepared).is_err() {
+        let img = store.take(t);
+        if streaming {
+            let prepared = opaque_fill(img, &holes[t].to_vec());
+            if let Some(cb) = sink.as_mut()
+                && cb(t, &prepared).is_err()
+            {
                 return None;
             }
+        } else {
+            out[t] = Some(img);
         }
-        propagated[t].1 = Vec::new();
     }
     let mut done = 2;
-    out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
+    let left0 = propagated_left[t0].to_vec();
+    out[t0] = Some(backend.patch(&store.take(t0), &left0, None, o.patch, o.seed));
     if let Some(cb) = sink.as_mut()
-        && let Some(img) = &out[t0] {
+        && let Some(img) = &out[t0]
+    {
         let prepared = opaque_fill(img.clone(), &holes[t0].to_vec());
         if cb(t0, &prepared).is_err() {
             return None;
         }
     }
-    propagated[t0] = (Image::default(), Vec::new());
     done += 1;
     if !progress(done, total) {
         return None;
     }
     for t in t0 + 1..n {
-        let complete = !propagated[t].1.iter().any(|b| *b);
+        let complete = !propagated_left[t].any();
         if complete {
-            out[t] = Some(std::mem::take(&mut propagated[t].0));
+            out[t] = Some(store.take(t));
         } else {
-            let (img, left) = &propagated[t];
+            let img = store.take(t);
+            let left = propagated_left[t].to_vec();
             // Warp the previous result here along the backward flow (t → t − 1).
             // Frames after `t0` are filled in order, so the previous one is set.
             let Some(prev) = out[t - 1].as_ref() else {
-                out[t] = Some(backend.patch(img, left, None, o.patch, o.seed));
-                if let Some(cb) = sink.as_mut() {
-                    if let Some(i) = &out[t] {
-                        let prepared = opaque_fill(i.clone(), &holes[t].to_vec());
-                        if cb(t, &prepared).is_err() {
-                            return None;
-                        }
+                out[t] = Some(backend.patch(&img, &left, None, o.patch, o.seed));
+                if let Some(cb) = sink.as_mut()
+                    && let Some(i) = &out[t]
+                {
+                    let prepared = opaque_fill(i.clone(), &holes[t].to_vec());
+                    if cb(t, &prepared).is_err() {
+                        return None;
                     }
                 }
-                propagated[t] = (Image::default(), Vec::new());
                 continue;
             };
             let mut warped = img.clone();
@@ -1088,24 +1330,28 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             }
             out[t] = Some(match o.method {
                 FillMethod::Surface => warped,
-                _ => backend.patch(img, left, Some(&warped), o.patch, o.seed),
+                _ => backend.patch(&img, &left, Some(&warped), o.patch, o.seed),
             });
         }
-        if t >= 2 {
+        // Only the streaming sink has consumed the frame; a non-streaming result returns it.
+        if streaming && t >= 2 {
             out[t - 2] = None;
         }
         if let Some(cb) = sink.as_mut()
-            && let Some(img) = &out[t] {
+            && let Some(img) = &out[t]
+        {
             let prepared = opaque_fill(img.clone(), &holes[t].to_vec());
             if cb(t, &prepared).is_err() {
                 return None;
             }
         }
-        propagated[t] = (Image::default(), Vec::new());
         done += 1;
         if !progress(done, total) {
             return None;
         }
+    }
+    if store.has_error() {
+        return None;
     }
     if streaming {
         for slot in out.iter_mut() {
@@ -1165,7 +1411,9 @@ mod tests {
         let v: Vec<bool> = (0..1000).map(|i| i % 3 == 0).collect();
         let m = HoleMask::from_vec(&v);
         assert_eq!(m.to_vec(), v);
-        for i in 0..v.len() { assert_eq!(m.get(i), v[i]); }
+        for i in 0..v.len() {
+            assert_eq!(m.get(i), v[i]);
+        }
     }
 
     #[test]

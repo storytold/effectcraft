@@ -13,9 +13,9 @@ use std::sync::Arc;
 use effectcraft_color::Label;
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, LayerId, LayerSource, build};
 use effectcraft_raster::Image;
-use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, Frames, HoleMask, dilate};
 #[cfg(not(target_arch = "wasm32"))]
 use effectcraft_raster::inpaint::SpillHandle;
+use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, Frames, HoleMask, dilate};
 use effectcraft_render::{Accelerator, EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -172,13 +172,23 @@ pub struct FillPlan {
     pub dir: String,
 }
 
-/// The fill holds every frame as float RGBA (16 bytes a pixel), its hole mask (1) and the filled
-/// copy (16) until it finishes (#1789): when even that is more than `available`, the error to
-/// report up front, instead of running out of memory partway through.
+/// The frames and the propagated copies are spilled to disk and the holes are packed to one bit
+/// per pixel (#2570), but the flow pass still materialises the membrane-filled neighbours as
+/// float RGBA (~16 bytes a pixel a frame) before dropping them, and the propagation pass holds a
+/// few full frames at once on every rayon thread. wasm has no spill, so it keeps the input frames
+/// and the propagated copies in RAM as well (~32 bytes a pixel a frame). When even that peak is
+/// more than `available`, report it up front instead of running out of memory partway through
+/// (#1789, #2570 review).
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
-    // The fill still allocates a full-range `propagated` buffer (~17 bytes/pixel/frame)
-    // plus the input frames while reading, so guard against that peak.
-    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(17);
+    let px = u64::from(w).saturating_mul(u64::from(h));
+    let per_frame = (frames as u64).saturating_mul(px);
+    // `holes` and the leftover propagation masks, packed to a bit a pixel each.
+    let masks = per_frame / 4;
+    // The membrane-filled frames stay alive for the whole flow pass; wasm also holds the input
+    // frames and the propagation store (twice the input frames at the peak).
+    let resident = per_frame.saturating_mul(if cfg!(target_arch = "wasm32") { 32 } else { 16 });
+    let scratch = px.saturating_mul(128);
+    let need = masks.saturating_add(resident).saturating_add(scratch);
     (need > available).then(|| {
         let gb = |b: u64| b as f64 / 1e9;
         format!(
@@ -228,6 +238,7 @@ pub(crate) async fn run_plan(
     let ctx0 = EvalCtx { expr, ..EvalCtx::new(project, cid, comp, Tick::ZERO) };
     let times = &plan.times;
     let n = times.len() as u64;
+    #[cfg(not(target_arch = "wasm32"))]
     let bpc: u8 = match project.settings.bit_depth {
         effectcraft_project::BitDepth::Bpc8 => 8,
         _ => 32,
@@ -271,6 +282,14 @@ pub(crate) async fn run_plan(
     let cpu = effectcraft_raster::inpaint::CpuFill;
     let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
     let progress = std::rc::Rc::new(std::cell::RefCell::new(progress));
+    // The fill and the sink both advance the bar: a streamed frame reports ahead of the fill's own
+    // progress, so both report a shared high-water mark and the bar never moves backwards.
+    let high = std::cell::Cell::new(0u64);
+    let report = |done: u64| -> bool {
+        let done = done.max(high.get());
+        high.set(done);
+        (progress.borrow_mut())(done, n * 3)
+    };
     let dir = &plan.dir;
     let paths: Vec<String> = (0..n as usize).map(|k| std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
     let mut paths_out = Vec::with_capacity(n as usize);
@@ -279,18 +298,20 @@ pub(crate) async fn run_plan(
         let r = (|| -> std::result::Result<(), String> {
             services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
             paths_out.push(paths[idx].clone());
-            if !(progress.borrow_mut())(2 * n + idx as u64 + 1, n * 3) {
+            if !report(2 * n + idx as u64 + 1) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
             Ok(())
         })();
         if let Err(e) = &r
-            && sink_error.is_none() {
-                sink_error = Some(e.clone());
-            }
+            && sink_error.is_none()
+        {
+            sink_error = Some(e.clone());
+        }
         r
     };
-    let produced = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| (progress.borrow_mut())(n + (d as u64 * n / t.max(1) as u64), n * 3), Some(&mut sink));
+    let produced =
+        effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| report(n + (d as u64 * n / t.max(1) as u64)), Some(&mut sink));
     if produced.is_none() {
         if let Some(e) = sink_error.take() {
             return Err(e);
@@ -306,7 +327,7 @@ pub(crate) async fn run_plan(
             if paths_out.len() <= k {
                 paths_out.push(path);
             }
-            if !(progress.borrow_mut())(2 * n + k as u64 + 1, n * 3) {
+            if !report(2 * n + k as u64 + 1) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
         }
@@ -533,6 +554,9 @@ mod tests {
         let e = memory_shortfall(300, 1920, 1080, 1_000_000).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
         assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a short range fits");
+        // The membrane-filled frames are still resident for the flow pass: a long 1080p range
+        // cannot fit in 1 GB whatever is spilled (#2570 review).
+        assert!(memory_shortfall(1000, 1920, 1080, 1_000_000_000).is_some());
         // Hostile sizes saturate instead of overflowing.
         assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
     }
