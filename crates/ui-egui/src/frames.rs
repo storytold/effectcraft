@@ -524,6 +524,11 @@ pub struct Frames {
     /// queued, so an evicted or refused frame is written again).
     #[cfg(not(target_arch = "wasm32"))]
     persisted: Arc<Mutex<HashSet<u128>>>,
+    /// The disk limit and how often each disk key was written under it: a frame is rewritten
+    /// once after an eviction, not again (a disk cache smaller than the RAM preview, or a frame
+    /// that can't fit, would otherwise be rewritten on every idle pass). A new limit resets it.
+    #[cfg(not(target_arch = "wasm32"))]
+    written: Arc<Mutex<(u64, HashMap<u128, u8>)>>,
 }
 
 impl Default for Frames {
@@ -575,6 +580,8 @@ impl Default for Frames {
             remote_busy: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             persisted: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            written: Arc::default(),
         }
     }
 }
@@ -907,9 +914,13 @@ impl Frames {
             return true;
         };
         let (missing, converting): (Vec<(u128, Arc<egui::ColorImage>)>, bool) = {
-            let (Ok(c), Ok(mut queued)) = (self.cache.lock(), self.persisted.lock()) else { return false };
+            let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
             if queued.len() > 100_000 {
                 queued.clear();
+            }
+            let limit = dc.limit_bytes();
+            if written.0 != limit || written.1.len() > 100_000 {
+                *written = (limit, HashMap::new());
             }
             let missing = c
                 .map
@@ -918,7 +929,8 @@ impl Frames {
                 .filter_map(|(k, img)| {
                     let FrameImage::Cpu(img) = img else { return None };
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ k.opts);
-                    (!dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                    let tries = written.1.get(&dk).copied().unwrap_or(0);
+                    (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
                 })
                 .collect();
             (missing, !queued.is_empty())
@@ -926,12 +938,18 @@ impl Frames {
         if missing.is_empty() {
             return converting;
         }
-        let persisted = self.persisted.clone();
+        let (persisted, written) = (self.persisted.clone(), self.written.clone());
         let work = move || {
             for (dk, img) in missing {
                 let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-                // (accepted: the disk cache tracks it until written; refused: retried)
-                let _ = dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba);
+                // (accepted: the disk cache tracks it until written, and it counts as a try;
+                // refused by a full queue: retried, without counting)
+                if dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    && let Ok(mut w) = written.lock()
+                {
+                    let n = w.1.entry(dk).or_default();
+                    *n = n.saturating_add(1);
+                }
                 if let Ok(mut q) = persisted.lock() {
                     q.remove(&dk);
                 }

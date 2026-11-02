@@ -1423,31 +1423,40 @@ fn ram_frames_missing_on_disk_are_written() {
         for _ in 0..1000 {
             f.persist_missing(&src, &series);
             disk.flush();
-            if (0..10).all(on_disk) {
+            // (`flush` waits for the disk writes, not for the conversion to forget its keys)
+            if (0..10).all(on_disk) && f.persisted.lock().unwrap().is_empty() {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         false
     };
+    let evict = || {
+        disk.set_max_bytes(1);
+        disk.set_max_bytes(1 << 30);
+        assert!(!(0..10).any(on_disk));
+    };
     assert!(persist(), "every RAM frame written");
     assert!(!f.persist_missing(&src, &series), "nothing left to write: no more idle passes");
-    // Evicted from disk: the RAM frames are written again.
-    disk.set_max_bytes(1);
-    disk.set_max_bytes(1 << 30);
-    assert!(!(0..10).any(on_disk));
+    // Evicted from disk: the RAM frames are written again, once.
+    evict();
     assert!(persist(), "evicted frames written again");
     // Reopened: a new preview cache over the same disk shows every frame in blue.
     let reopened = Frames::default();
-    let series = FrameKey { content: reopened.content_of(&src.project, 1, cid), ..series };
+    let reopened_series = FrameKey { content: reopened.content_of(&src.project, 1, cid), ..series };
     let mut blue = vec![];
     for _ in 0..1000 {
-        blue = reopened.disk_frames(&src, &series, 0..10, &RenderOpts::default());
+        blue = reopened.disk_frames(&src, &reopened_series, 0..10, &RenderOpts::default());
         if blue.len() == 10 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(blue, (0..10).collect::<Vec<_>>());
+    // Evicted again (a disk cache too small for them): not rewritten on every idle pass.
+    evict();
+    assert!(!f.persist_missing(&src, &series), "evicted twice: no more idle passes");
+    disk.flush();
+    assert!(!(0..10).any(on_disk));
     let _ = std::fs::remove_dir_all(&dir);
 }
