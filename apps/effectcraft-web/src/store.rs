@@ -153,8 +153,9 @@ pub fn key_path(key: &str) -> Option<&str> {
 }
 
 /// The project file name typed in the web's Save As prompt (#2788): `None` when it was cancelled or
-/// left empty; folders are dropped (the file table is flat) and a name without an extension gets
-/// the default's (`Intro copy` → `Intro copy.ecproj`).
+/// left empty; folders are dropped (the file table is flat) and a name without the default's
+/// extension gets it (`Intro copy` → `Intro copy.ecproj`, `Intro.v2` → `Intro.v2.ecproj`), so the
+/// browser still opens and keeps it as a project.
 pub fn typed_save_name(default: &str, typed: Option<String>) -> Option<String> {
     let typed = typed?;
     let name = typed.trim().rsplit(['/', '\\']).next().unwrap_or("").trim();
@@ -162,7 +163,11 @@ pub fn typed_save_name(default: &str, typed: Option<String>) -> Option<String> {
         return None;
     }
     let ext = Path::new(default).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-    if ext.is_empty() || Path::new(name).extension().is_some() { Some(name.to_string()) } else { Some(format!("{name}.{ext}")) }
+    if ext.is_empty() || Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext)) {
+        Some(name.to_string())
+    } else {
+        Some(format!("{name}.{ext}"))
+    }
 }
 
 /// FNV-1a 64. Computed when a disk-cache key first needs the file, not on every write.
@@ -455,6 +460,9 @@ mod tests {
         assert_eq!(typed_save_name("Intro.ecproj", t("Intro copy")).as_deref(), Some("Intro copy.ecproj"));
         assert_eq!(typed_save_name("Intro.ecproj", t("  Other.ecproj ")).as_deref(), Some("Other.ecproj"));
         assert_eq!(typed_save_name("Intro.ecproj", t("a/b\\Shot.ecproj")).as_deref(), Some("Shot.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("Intro.v2")).as_deref(), Some("Intro.v2.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("Intro.ECPROJ")).as_deref(), Some("Intro.ECPROJ"));
+        assert_eq!(typed_save_name("Intro.ecprojx", t("Intro")).as_deref(), Some("Intro.ecprojx"));
         assert_eq!(typed_save_name("Intro.ecproj", t("   ")), None);
         assert_eq!(typed_save_name("Intro.ecproj", t("folder/")), None);
         assert_eq!(typed_save_name("Intro.ecproj", None), None);
