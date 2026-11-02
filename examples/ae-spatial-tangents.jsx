@@ -1,10 +1,10 @@
 // Original behavior probe: the spatial tangents a host gives auto-Bezier Position keys.
 // Runs unchanged in After Effects (File > Scripts > Run Script File, or AfterFX.exe -r) and in
-// EffectCraft (effectcraft-cli script examples/ae-spatial-tangents.jsx --empty). Builds three
-// original comps with one solid each; run it in a scratch project. EffectCraft prints one JSON line
+// Visualab Effects (effectcraft-cli script examples/ae-spatial-tangents.jsx --empty). Builds three
+// original comps with one solid each; run it in a scratch project. Visualab Effects prints one JSON line
 // per key; After Effects writes them to ae-spatial-tangents.jsonl next to this script.
 // No Adobe assets, presets, application internals or implementation code are read.
-var EC = String(app.version).indexOf("EffectCraft") >= 0;
+var EC = String(app.version).indexOf("Visualab Effects") >= 0;
 var OUT = null;
 if (!EC) {
     OUT = new File(File($.fileName).parent.fsName + "/ae-spatial-tangents.jsonl");

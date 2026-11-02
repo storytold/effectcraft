@@ -1,4 +1,4 @@
-# EffectCraft app icon
+# Visualab Effects app icon
 
 **Creature:** a unicorn, as an engraved head-and-shoulders bust looking out of the tile.
 
@@ -11,12 +11,13 @@ full-bleed colour field, tight head-and-shoulders crop, the body running off the
 
 | Colour | Hex | Used for |
 |---|---|---|
-| App colour (EffectCraft pink) | `#e0368f` | the full-bleed field |
+| App colour (Visualab Effects pink) | `#e0368f` | the full-bleed field |
 | Paper | `#efe9dc` | the figure |
 | Ink | `#0b0b0c` | line work and contour |
 
-**Provenance:** the project owner drew it in ArtCraft (a 2880 px engraving-style image). It was
-vectorised with potrace, which keys out the field and traces the ink.
+**Provenance:** the project owner drew it in Visualab (a 2880 px engraving-style image, kept in
+craftrules at `assets/app-icons/effectcraft/source.png`). It was vectorised with craftrules
+`assets/logo-options/_tools/vectorize_tile.py`, which keys out the field and traces the ink with potrace.
 Licence: see [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0, like the repo).
 
 ## Files
@@ -36,5 +37,6 @@ App ID: `ai.storyteller.effectcraft` (Wayland app ID, `packaging/linux/ai.storyt
 
 ## Regenerate
 
-After replacing `effectcraft.svg` / `effectcraft-small.svg`, run `packaging/icons.sh` (needs `resvg`; `iconutil`
+Copy a new `icon-master.svg` / `icon.svg` from craftrules `assets/app-icons/effectcraft/` over
+`effectcraft.svg` / `effectcraft-small.svg`, then run `packaging/icons.sh` (needs `resvg`; `iconutil`
 on macOS for the `.icns`). Copy `effectcraft-small.svg` to `apps/effectcraft-web/web/favicon.svg` too.
