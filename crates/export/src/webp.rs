@@ -57,6 +57,8 @@ impl Codec {
         }
     }
 }
+/// Largest canvas side: `VP8X` stores width − 1 and height − 1 in 24 bits.
+const MAX_CANVAS_SIDE: u32 = 1 << 24;
 /// Largest frame duration in milliseconds (24 bits).
 const MAX_DURATION: u32 = (1 << 24) - 1;
 /// `ANMF` flags: do not blend (bit 1 set), do not dispose (bit 0 clear).
@@ -419,6 +421,9 @@ pub(crate) fn vp8l_chunk(file: &[u8]) -> Result<Vec<u8>> {
 /// The container being written: its RIFF size is filled in by [`Anim::finish`].
 pub(crate) struct Anim<W: Write + Seek> {
     out: W,
+    /// The canvas size, which every frame must fit in.
+    w: u32,
+    h: u32,
     /// Bytes written so far, the RIFF header included.
     written: u64,
 }
@@ -431,9 +436,13 @@ fn put24(v: u32) -> [u8; 3] {
 
 impl<W: Write + Seek> Anim<W> {
     /// The RIFF, `VP8X` and `ANIM` headers for a `w`×`h` canvas. `background` is blue, green,
-    /// red, alpha; `loops` 0 plays forever.
+    /// red, alpha; `loops` 0 plays forever. A canvas past `VP8X`'s limits (24-bit sides, an area
+    /// of at most 2³² − 1 pixels) is an error.
     pub(crate) fn start(out: W, w: u32, h: u32, alpha: bool, background: [u8; 4], loops: u16) -> Result<Anim<W>> {
-        let mut a = Anim { out, written: 0 };
+        if w == 0 || h == 0 || w > MAX_CANVAS_SIDE || h > MAX_CANVAS_SIDE || u64::from(w) * u64::from(h) > u64::from(u32::MAX) {
+            return Err(ExportError::Unsupported(format!("a WebP canvas of {w}×{h} is past the format's limits")));
+        }
+        let mut a = Anim { out, w, h, written: 0 };
         let flags = ANIMATION_FLAG | if alpha { ALPHA_FLAG } else { 0 };
         a.put(b"RIFF")?;
         a.put(&0u32.to_le_bytes())?;
@@ -450,10 +459,18 @@ impl<W: Write + Seek> Anim<W> {
         Ok(a)
     }
 
-    /// An `ANMF` chunk: the frame's offset (stored halved), size, duration and data, written without blending.
+    /// An `ANMF` chunk: the frame's offset (stored halved), size, duration and data, written
+    /// without blending. An odd offset or a frame outside the canvas is an error.
     pub(crate) fn frame(&mut self, f: &Frame) -> Result<()> {
         let size = u32::try_from(f.data.len().saturating_add(16)).map_err(|_| self.too_large())?;
         let r = f.rect;
+        if r.x % 2 == 1 || r.y % 2 == 1 {
+            return Err(ExportError::Encode(format!("WebP frame offset ({}, {}) is odd: offsets are stored halved", r.x, r.y)));
+        }
+        let fits = |at: u32, len: u32, side: u32| len > 0 && at.checked_add(len).is_some_and(|end| end <= side);
+        if !fits(r.x, r.w, self.w) || !fits(r.y, r.h, self.h) {
+            return Err(ExportError::Encode(format!("WebP frame {}×{} at ({}, {}) is outside the {}×{} canvas", r.w, r.h, r.x, r.y, self.w, self.h)));
+        }
         self.put(b"ANMF")?;
         self.put(&size.to_le_bytes())?;
         self.put(&put24(r.x / 2))?;
@@ -755,5 +772,124 @@ mod tests {
         assert_eq!(&f[52..67], &[3, 0, 0, 2, 0, 0, 1, 0, 0, 1, 0, 0, 40, 0, 0], "x/2, y/2, w−1, h−1, 40 ms");
         assert_eq!(f[67], NO_BLEND);
         assert_eq!(&f[68..], &data[..]);
+    }
+
+    /// Three lossy frames — opaque, then a smaller one with transparency, then one at another
+    /// even offset — written as a file.
+    fn three_frames() -> Vec<u8> {
+        let lossy = Codec::Lossy { quality: 90, alpha_quality: 100 };
+        let mut hole = solid(8, 8, [0, 0, 255, 255]);
+        for y in 2..6 {
+            for x in 2..6 {
+                set(&mut hole, 8, x, y, [0, 0, 0, 0]);
+            }
+        }
+        let frames = [
+            Frame { rect: Rect { x: 0, y: 0, w: 16, h: 16 }, data: encode_frame(&solid(16, 16, [255, 0, 0, 255]), 16, 16, lossy).unwrap(), ms: 100 },
+            Frame { rect: Rect { x: 4, y: 4, w: 8, h: 8 }, data: encode_frame(&hole, 8, 8, lossy).unwrap(), ms: 200 },
+            Frame { rect: Rect { x: 10, y: 0, w: 6, h: 4 }, data: encode_frame(&solid(6, 4, [0, 255, 0, 255]), 6, 4, lossy).unwrap(), ms: 300 },
+        ];
+        assert_eq!(chunks(&frames[1].data).iter().map(|(f, _)| *f).collect::<Vec<_>>(), [*b"ALPH", *b"VP8 "], "the second frame carries alpha");
+        let mut buf = Cursor::new(Vec::new());
+        let mut a = Anim::start(&mut buf, 16, 16, true, [0; 4], 0).unwrap();
+        for f in &frames {
+            a.frame(f).unwrap();
+        }
+        a.finish().unwrap();
+        buf.into_inner()
+    }
+
+    /// What each of the three frames shows at a few points, composited: red, blue around a
+    /// transparent hole, then green in the top-right corner over what was there. Colours are
+    /// lossy (with ringing beside the hole); alpha is exact.
+    fn check_three(frames: &[Vec<u8>], decoder: &str) {
+        assert_eq!(frames.len(), 3, "{decoder}: frame count");
+        let at = |f: &[u8], x: usize, y: usize| -> [u8; 4] { f[(y * 16 + x) * 4..][..4].try_into().unwrap() };
+        let near = |got: [u8; 4], want: [u8; 4], what: &str| {
+            assert!(got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 16), "{decoder}: {what}: {got:?}, want {want:?}");
+        };
+        near(at(&frames[0], 8, 8), [255, 0, 0, 255], "frame 1 centre");
+        near(at(&frames[1], 1, 1), [255, 0, 0, 255], "frame 2 outside its area");
+        near(at(&frames[1], 5, 5), [0, 0, 255, 255], "frame 2 edge");
+        assert_eq!(at(&frames[1], 8, 8)[3], 0, "{decoder}: frame 2 hole is transparent");
+        near(at(&frames[2], 13, 1), [0, 255, 0, 255], "frame 3 area");
+        near(at(&frames[2], 5, 5), [0, 0, 255, 255], "frame 3 keeps frame 2");
+        assert_eq!(at(&frames[2], 8, 8)[3], 0, "{decoder}: frame 3 keeps the hole");
+    }
+
+    /// A three-frame animation with an alpha frame decodes back through the `image` crate's
+    /// WebP decoder, durations included.
+    #[test]
+    fn three_frames_decode_back() {
+        use image::AnimationDecoder;
+        let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(three_frames())).unwrap();
+        let (mut frames, mut ms) = (Vec::new(), Vec::new());
+        for f in dec.into_frames() {
+            let f = f.unwrap();
+            let (n, d) = f.delay().numer_denom_ms();
+            ms.push(n / d);
+            frames.push(f.into_buffer().into_raw());
+        }
+        assert_eq!(ms, [100, 200, 300]);
+        check_three(&frames, "image");
+    }
+
+    /// libwebp, the format's reference decoder and not part of the repository, reads the same file
+    /// through Pillow's `WebPAnimDecoder` binding (skipped when python3 with Pillow's WebP support
+    /// is not installed; ffmpeg 8.0 does not decode animated WebP). It is run, never linked.
+    #[test]
+    fn three_frames_decode_in_libwebp() {
+        use std::process::Command;
+        const SCRIPT: &str = "import sys\nfrom PIL import Image, features\nif not features.check('webp'): sys.exit(3)\nim = Image.open(sys.argv[1])\nfor i in range(im.n_frames):\n    im.seek(i)\n    sys.stdout.buffer.write(im.convert('RGBA').tobytes())\n    sys.stderr.write('%d ' % im.info['duration'])\n";
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/webp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("three_frames.webp");
+        std::fs::write(&path, three_frames()).unwrap();
+        let out = match Command::new("python3").args(["-I", "-c", SCRIPT]).arg(&path).output() {
+            Ok(o) if o.status.code() == Some(3) || String::from_utf8_lossy(&o.stderr).contains("No module named 'PIL'") => None,
+            Ok(o) => Some(o),
+            Err(_) => None,
+        };
+        let Some(out) = out else {
+            eprintln!("python3 with Pillow's WebP support not found: skipping the libwebp decode");
+            return;
+        };
+        assert!(out.status.success(), "libwebp: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "100 200 300", "durations");
+        check_three(&out.stdout.chunks(16 * 16 * 4).map(<[u8]>::to_vec).collect::<Vec<_>>(), "libwebp");
+    }
+
+    /// Offsets are stored halved, so an odd one is an error rather than a frame moved by a pixel.
+    #[test]
+    fn odd_offsets_are_errors() {
+        let data = encode_frame(&solid(2, 2, [255, 0, 0, 255]), 2, 2, Codec::Lossless).unwrap();
+        let mut a = Anim::start(Cursor::new(Vec::new()), 8, 8, false, [0; 4], 0).unwrap();
+        for (x, y) in [(1, 0), (0, 3), (5, 5)] {
+            assert!(a.frame(&Frame { rect: Rect { x, y, w: 2, h: 2 }, data: data.clone(), ms: 10 }).is_err(), "({x}, {y})");
+        }
+        assert!(a.frame(&Frame { rect: Rect { x: 6, y: 6, w: 2, h: 2 }, data, ms: 10 }).is_ok());
+    }
+
+    /// A frame reaching past the canvas, or of no size, is an error.
+    #[test]
+    fn frames_outside_the_canvas_are_errors() {
+        let data = encode_frame(&solid(2, 2, [255, 0, 0, 255]), 2, 2, Codec::Lossless).unwrap();
+        let mut a = Anim::start(Cursor::new(Vec::new()), 8, 6, false, [0; 4], 0).unwrap();
+        for r in [Rect { x: 8, y: 0, w: 2, h: 2 }, Rect { x: 0, y: 6, w: 2, h: 2 }, Rect { x: 0, y: 0, w: 9, h: 1 }, Rect { x: 0, y: 0, w: 0, h: 2 }] {
+            assert!(a.frame(&Frame { rect: r, data: data.clone(), ms: 10 }).is_err(), "{r:?}");
+        }
+    }
+
+    /// A canvas past `VP8X`'s 24-bit sides or 32-bit area is refused; one at the limit is not.
+    #[test]
+    fn canvas_over_the_limit_is_an_error() {
+        let start = |w, h| Anim::start(Cursor::new(Vec::new()), w, h, false, [0; 4], 0).map(|_| ());
+        assert!(start(MAX_CANVAS_SIDE + 1, 1).is_err());
+        assert!(start(1, MAX_CANVAS_SIDE + 1).is_err());
+        assert!(start(0, 1).is_err());
+        assert!(start(1 << 16, 1 << 16).is_err(), "area 2³²");
+        assert!(start(MAX_CANVAS_SIDE, 1).is_ok());
+        // The export itself stops sooner, at the 14-bit frame side, as the first frame covers the canvas.
+        assert!(encode_frame(&[0; 4], MAX_SIDE + 1, 1, Codec::Lossless).is_err());
     }
 }
