@@ -981,6 +981,16 @@ fn the_frames_an_edit_keeps_match_a_fresh_render() {
     assert_eq!(kept(&mut s, comp, solo(true)), Vec::<i64>::new());
     assert_eq!(kept(&mut s, comp, solo(false)), Vec::<i64>::new());
 
+    // The work area is a preview and render range: setting it (B, N) keeps every frame, on
+    // disk too.
+    let n = s.project.comp(comp).map(|c| c.frame_rate.frame_at(c.duration)).unwrap();
+    let disk = |s: &Session| effectcraft_engine::render::disk_cache::comp_content_key_with(&s.project, comp, None);
+    let d0 = disk(&s);
+    let work_area = |start: f64, end: f64| json!({"cmd": "comp.workArea", "params": {"comp": comp.0, "start": start, "end": end}});
+    assert_eq!(kept(&mut s, comp, work_area(1.0, 4.0)), (0..n).collect::<Vec<_>>());
+    assert_eq!(kept(&mut s, comp, work_area(2.0, 3.0)), (0..n).collect::<Vec<_>>());
+    assert_eq!(disk(&s), d0, "the disk cache keeps them");
+
     // A 2–3 s camera over a 4 s motion-blurred 3D layer, shutter 720° at phase 360°: a frame
     // samples 1 to 3 frames ahead, so moving the camera reaches the 3 frames before it.
     let comp = ItemId(id(

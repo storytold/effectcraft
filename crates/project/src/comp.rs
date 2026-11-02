@@ -285,7 +285,7 @@ fn timing_markers(m: &[Marker]) -> impl Iterator<Item = (Tick, Tick)> + '_ {
 
 impl Comp {
     /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
-    /// Shy Layers and the viewer's Resolution.
+    /// Shy Layers, the viewer's Resolution and the work area (a preview and render range only).
     pub fn same_pixels(&self, o: &Comp) -> bool {
         self.same_pixels_with(o, true)
     }
@@ -311,7 +311,7 @@ impl Comp {
             duration,
             display_start,
             background,
-            work_area,
+            work_area: _,
             layers: _,
             markers,
             shutter_angle,
@@ -338,7 +338,6 @@ impl Comp {
             && *duration == o.duration
             && *display_start == o.display_start
             && *background == o.background
-            && *work_area == o.work_area
             && (if with_markers { *markers == o.markers } else { timing_markers(markers).eq(timing_markers(&o.markers)) })
             && *shutter_angle == o.shutter_angle
             && *shutter_phase == o.shutter_phase
@@ -430,8 +429,8 @@ impl Comp {
         self.layers.iter().any(|l| l.switches.solo && l.source.is_av())
     }
 
-    /// The comp with those switches and the Resolution at their defaults (borrowed when they
-    /// already are), for keys that hash the whole comp.
+    /// The comp with those switches, the Resolution and the work area at their defaults (borrowed
+    /// when they already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
         self.pixel_form_with(true)
     }
@@ -441,6 +440,7 @@ impl Comp {
     pub fn pixel_form_with(&self, with_markers: bool) -> std::borrow::Cow<'_, Comp> {
         if !self.hide_shy
             && self.resolution.is_auto()
+            && self.work_area == (Tick::ZERO, Tick::ZERO)
             && self.layers.iter().all(|l| l.switches == l.switches.pixels())
             && (with_markers || (self.markers.iter().all(is_timing_marker) && self.layers.iter().all(|l| l.markers.is_empty())))
         {
@@ -449,6 +449,7 @@ impl Comp {
         let mut c = self.clone();
         c.hide_shy = false;
         c.resolution = Resolution::Auto;
+        c.work_area = (Tick::ZERO, Tick::ZERO);
         if !with_markers {
             c.markers.retain(is_timing_marker);
         }
