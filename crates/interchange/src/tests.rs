@@ -378,6 +378,34 @@ fn edl_source_timecode_lands_on_the_files_own_time() {
     let l = layer(c, "a.mov");
     assert!(near(l.layer_time(l.in_point), t(1.0)), "{}", l.layer_time(l.in_point).seconds());
     assert!(near(l.start_time, t(-1.0)), "{}", l.start_time.seconds());
+    assert!(!r.warnings.iter().any(|w| w.contains("media time")), "the rebase is done: {:?}", r.warnings);
+}
+
+/// The reader's note to rebase after probing is replaced by the media that couldn't be rebased:
+/// a file with no start timecode and a missing file. Media cut from 00:00:00:00 needs no rebase.
+#[test]
+fn edl_media_left_on_timecode_is_named() {
+    let event = |n: u32, reel: &str, ch: &str, src: (&str, &str), rec: (&str, &str), file: &str| {
+        format!("{n:03}  {reel:<8} {ch:<5} C        {} {} {} {}\n* FROM CLIP NAME: {file}\n* SOURCE FILE: /media/{file}\n\n", src.0, src.1, rec.0, rec.1)
+    };
+    let edl = [
+        "TITLE: CUT\nFCM: NON-DROP FRAME\n\n".to_string(),
+        event(1, "A", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:00:00", "01:00:01:00"), "a.mov"),
+        event(2, "B", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:01:00", "01:00:02:00"), "b.mov"),
+        event(3, "C", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:02:00", "01:00:03:00"), "c.mov"),
+        event(4, "D", "A", ("00:00:00:00", "00:00:03:00"), ("01:00:00:00", "01:00:03:00"), "d.wav"),
+    ]
+    .concat();
+    let mut probe_some = |path: &str| match path {
+        "/media/a.mov" => probe(path).map(|f| Footage { file_timecode: Some(3600 * 25), ..f }),
+        "/media/c.mov" => None,
+        _ => probe(path),
+    };
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(25.0), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_some).unwrap();
+    let notes: Vec<&String> = r.warnings.iter().filter(|w| w.contains("media time")).collect();
+    assert_eq!(notes, ["EDL source timecodes stay media time for b.mov, c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
 }
 
 #[test]
