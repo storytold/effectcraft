@@ -679,7 +679,7 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     // A script's dialog: the script waits for the answer, cancelled too.
     if answer.command == crate::panels::scriptui_view::FILE_DIALOG_COMMAND {
-        crate::panels::scriptui_view::file_dialog_answered(app, answer.paths);
+        crate::panels::scriptui_view::file_dialog_answered(app, answer.params["id"].as_u64(), answer.paths);
         return;
     }
     let Some(v) = picked_value(answer.key, answer.paths) else { return };

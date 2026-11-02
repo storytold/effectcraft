@@ -340,9 +340,9 @@ pub struct EffectcraftApp {
     pub(crate) dialog_answers: (Sender<DialogAnswer>, Receiver<DialogAnswer>),
     /// Those dialogs that are up, for blocking floating panels' OS windows meanwhile.
     pub(crate) file_dialogs: FileDialogsUp,
-    /// A script's file dialog ([`effectcraft_engine::scriptui::FileDialogRequest`]) is up without
-    /// blocking; its answer arrives with [`Self::dialog_answers`].
-    pub(crate) script_file_dialog_up: bool,
+    /// A script's file dialog up without blocking; its answer arrives with
+    /// [`Self::dialog_answers`].
+    pub(crate) script_file_dialog: Option<panels::scriptui_view::ScriptDialogUp>,
     /// Commands from the native menu bar.
     pub command_inbox: Option<Receiver<String>>,
     /// Pointer position in comp pixels (Info panel).
@@ -422,6 +422,11 @@ impl FileDialogsUp {
 
     pub(crate) fn answered(&mut self) {
         self.count = self.count.saturating_sub(1);
+    }
+
+    /// Whether a dialog is taken for up (none since [`FileDialogsUp::up`] took them for gone).
+    pub(crate) fn any(&self) -> bool {
+        self.count > 0
     }
 
     /// Whether a dialog is up at `now`, `focused`: whether one of the app's windows has the

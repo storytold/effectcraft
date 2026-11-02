@@ -401,6 +401,9 @@ pub const RESUME_EVENT: &str = "resume";
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FileDialogRequest {
+    /// Tells this request from the next one, even an identical one: a frontend's answer reaches
+    /// only the request it showed the dialog for.
+    pub id: u64,
     /// The script context waiting for the answer.
     pub host: u32,
     /// `open`, `save` or `folder`.

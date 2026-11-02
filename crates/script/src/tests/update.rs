@@ -84,3 +84,35 @@ fn without_an_app_to_show_it_update_does_nothing() {
     assert_eq!(o.result, json!("done 3"));
     assert!(s.script_ui.busy.is_none());
 }
+
+/// A button's handler that opens a file dialog while the script is at work: the script waits in
+/// the dialog, and resuming it waits too until the dialog is answered.
+#[test]
+fn a_file_dialog_opened_while_at_work_waits_for_its_answer() {
+    let mut s = session(true);
+    let code = r#"
+var w = new Window("palette", "Working");
+var picked = "none";
+var b = w.add("button", undefined, "Pick", { name: "pick" });
+b.onClick = function () { var f = File.openDialog("Pick"); picked = f ? f.name : "cancelled"; };
+w.show();
+for (var i = 1; i <= 2; i++) { var t = Date.now(); while (Date.now() - t < 60) {} w.update(); }
+w.close();
+picked
+"#;
+    let o = run_code(&mut s, code, "work.jsx");
+    assert!(o.busy, "{o:?}");
+    let r = s.execute("scriptui.click", json!({"widget": "pick"})).unwrap();
+    assert!(s.script_ui.file_dialog.is_some(), "{r}");
+    assert!(s.execute("scriptui.resume", json!({})).is_err(), "the script waits for its file dialog");
+    assert!(s.script_ui.busy.is_some(), "still at work once the dialog is answered");
+    let mut r = s.execute("scriptui.fileDialog", json!({"paths": ["/picked/export.json"]})).unwrap();
+    for _ in 0..5 {
+        if r.get("busy").is_none() {
+            break;
+        }
+        r = s.execute("scriptui.resume", json!({})).unwrap();
+    }
+    assert_eq!(r["result"], "export.json", "{r}");
+    assert!(s.script_ui.busy.is_none() && s.script_ui.file_dialog.is_none());
+}

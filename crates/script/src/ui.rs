@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
@@ -30,6 +30,7 @@ pub(crate) const CONSOLE_HOST: u32 = u32::MAX;
 
 static NEXT_WINDOW: AtomicU32 = AtomicU32::new(1);
 static NEXT_HOST: AtomicU32 = AtomicU32::new(1);
+static NEXT_FILE_DIALOG: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn new_host_id() -> u32 {
     NEXT_HOST.fetch_add(1, Ordering::Relaxed)
@@ -142,7 +143,8 @@ pub(crate) fn native_file_dialog(_: &JsValue, args: &[JsValue], ctx: &mut Contex
         if a.link.is_none() || !a.session.script_ui.frontend || a.session.script_ui.file_dialog.is_some() {
             return Ok(false);
         }
-        a.session.script_ui.file_dialog = Some(FileDialogRequest { host: a.host, kind, prompt, extensions, multi, name });
+        a.session.script_ui.file_dialog =
+            Some(FileDialogRequest { id: NEXT_FILE_DIALOG.fetch_add(1, Ordering::Relaxed), host: a.host, kind, prompt, extensions, multi, name });
         Ok(true)
     })
     .unwrap_or(false);
@@ -444,6 +446,11 @@ pub fn dispatch_ui(session: &mut Session, ev: &ScriptUiEvent) -> Result<J, Strin
         let d = session.script_ui.file_dialog.take().ok_or("no script is waiting for a file dialog")?;
         (d.host, String::new())
     } else if ev.kind == RESUME_EVENT {
+        // A button's handler opened a file dialog during `Window.update()`: the script waits in it.
+        let ui = &session.script_ui;
+        if ui.file_dialog.as_ref().is_some_and(|d| Some(d.host) == ui.busy) {
+            return Err("the script is waiting for its file dialog".into());
+        }
         (session.script_ui.busy.take().ok_or("no script is in the middle of its work")?, String::new())
     } else {
         let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;

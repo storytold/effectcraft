@@ -93,7 +93,7 @@ impl EffectcraftApp {
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),
-            script_file_dialog_up: false,
+            script_file_dialog: None,
             command_inbox: None,
             pointer_comp: None,
             dialog_state: Default::default(),
