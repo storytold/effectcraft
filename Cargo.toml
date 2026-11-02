@@ -253,11 +253,11 @@ egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev
 eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-# Android input (docs/architecture.md 1.7): eframe pins winit to 0.30, 0.30.13 is the last 0.30
-# release, and its Android backend reports neither a mouse gesture nor the modifier state every key
-# event carries — wheel, right/middle buttons, hover and `ModifiersChanged` are never reported, so
-# a tablet with a mouse has no right-click and no chord key at all. Interim pin: the head of
-# Kaedo17/winit android-pointer-input, which is the pinned rev plus the one Android file change
-# submitted upstream as storytold/winit#25. Repin this line to storytold/winit once that merges;
-# every other target compiles the pinned code byte-for-byte.
+# Android input (docs/architecture.md 1.7): the pinned egui 0.37 workspace pins winit to 0.30, and
+# 0.30.13 is its last 0.30 release. Its Android backend reports neither a mouse gesture nor the
+# modifier state every key event carries — wheel, right/middle buttons, hover and
+# `ModifiersChanged` are never reported, so a tablet with a mouse has no right-click and no chord
+# key at all. Interim pin: the head of Kaedo17/winit android-pointer-input, which is the pinned rev
+# plus the one Android file change submitted upstream as storytold/winit#25. Repin this line to
+# storytold/winit once that merges; every other target compiles the pinned code byte-for-byte.
 winit = { git = "https://github.com/Kaedo17/winit.git", rev = "a23f14988c1965dc1d7ebeb3b26d3e6a69c6a2c4" }
