@@ -136,7 +136,14 @@ fn run_reads_arguments_from_a_file() {
 /// Run with `stdin` piped in; returns (exit code, stdout, stderr).
 fn run_with_stdin(args: &[&str], stdin: &str) -> (i32, String, String) {
     let mut child = bin().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    // The child may exit before it has read all of standard input (the usage-error cases below
+    // exit with code 2 without draining stdin), so a broken pipe while writing is that early
+    // exit, not a failure of this helper; the assertions on the returned output still hold.
+    let mut stdin_pipe = child.stdin.take().unwrap();
+    if let Err(err) = stdin_pipe.write_all(stdin.as_bytes()) {
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe, "writing the child's standard input: {err}");
+    }
+    drop(stdin_pipe);
     let out = child.wait_with_output().unwrap();
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
