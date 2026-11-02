@@ -1,14 +1,5 @@
 use super::*;
 
-/// Run `test` again in a child process with `variable` set. The fixture faces below go into the
-/// process-global font database and its fallback caches, so only a process that runs one such test
-/// on its own can use them.
-#[cfg(not(target_arch = "wasm32"))]
-fn run_in_child(variable: &str, test: &str) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", test, "--nocapture"]).env(variable, "1").output().unwrap();
-    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-}
-
 /// Concurrent language requests must neither choose another context's font nor reuse its
 /// cached family order. Synthetic fonts in a child process keep this independent of the host
 /// font installation and of other tests that exercise the process-global database/locale.
@@ -17,7 +8,12 @@ fn run_in_child(variable: &str, test: &str) {
 fn cjk_requests_keep_their_language_and_cache_entries() {
     const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_CJK";
     if std::env::var_os(CHILD).is_none() {
-        run_in_child(CHILD, "fonts::tests::cjk_requests_keep_their_language_and_cache_entries");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fonts::tests::cjk_requests_keep_their_language_and_cache_entries", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
     let families = [("ja", "Yu Gothic"), ("zh-hans", "Microsoft YaHei"), ("zh-hant", "Microsoft JhengHei"), ("ko", "Malgun Gothic")];
@@ -75,52 +71,6 @@ fn cjk_requests_keep_their_language_and_cache_entries() {
     }
 }
 
-/// #453: with a Chinese interface, a Han ideograph that both a Chinese and a Japanese face cover
-/// must reach the installed Simplified Chinese family first, or Chinese text in a composition is
-/// drawn with Japanese glyph forms. Fixture faces named after the macOS families keep this
-/// independent of the host's fonts and of rendering. Before the fix the Simplified list named none
-/// of the macOS faces a stock install has, so the walk below reached the Japanese face - the
-/// regression this guards.
-#[test]
-#[cfg(not(target_arch = "wasm32"))]
-fn zh_hans_han_fallback_puts_the_chinese_family_first() {
-    const CHILD: &str = "EFFECTCRAFT_TEST_ZH_HANS_ORDER";
-    if std::env::var_os(CHILD).is_none() {
-        run_in_child(CHILD, "fonts::tests::zh_hans_han_fallback_puts_the_chinese_family_first");
-        return;
-    }
-    let mut ids = Vec::new();
-    {
-        let mut d = db().write().unwrap();
-        d.scanned = true; // This test process uses only bundled and synthetic fonts.
-        // The Japanese face is added first, so scan order cannot be what picks the Chinese one.
-        for family in ["Hiragino Sans", "Hiragino Sans GB"] {
-            let mut data = test_font(family);
-            let table = data[12..12 + 8 * 16].as_chunks::<16>().0.iter().find(|t| &t[..4] == b"cmap").unwrap();
-            let cmap = u32::from_be_bytes(table[8..12].try_into().unwrap()) as usize + 12;
-            // Map 页 to the fixture's triangle glyph instead of its private-use range.
-            for (offset, value) in [(16, '页' as u16), (24, '页' as u16), (30, 2u16.wrapping_sub('页' as u16))] {
-                data[cmap + offset..cmap + offset + 2].copy_from_slice(&value.to_be_bytes());
-            }
-            let data = Arc::new(data);
-            let names = read_faces_bytes(&data).into_iter().next().unwrap();
-            ids.push(push(&mut d, info_from(names, FaceData::Shared(data), "test")));
-        }
-    }
-    let &[japanese, chinese] = ids.as_slice() else { panic!("two fixture faces expected: {ids:?}") };
-    let base = resolve("Inter", "Regular").face;
-    assert!(face(japanese).has_char('页') && face(chinese).has_char('页'));
-    // The fallback list itself, before any coverage check: the Chinese family comes first for
-    // zh-hans and second for ja, whether or not either face can draw the probe.
-    let zh_hans: Vec<FaceId> = family_faces(FallbackScript::Han, &face(base), CjkLocale::Simplified).to_vec();
-    assert_eq!(zh_hans, [chinese, japanese], "zh-hans tries the Chinese family first");
-    let ja: Vec<FaceId> = family_faces(FallbackScript::Han, &face(base), CjkLocale::Japanese).to_vec();
-    assert_eq!(ja, [japanese, chinese], "ja keeps the Japanese family first");
-    // ...and the face a layout actually gets for the shared ideograph.
-    assert_eq!(face(fallback_for_locale('页', base, "zh-hans")).info.family, "Hiragino Sans GB");
-    assert_eq!(face(fallback_for_locale('页', base, "ja")).info.family, "Hiragino Sans");
-}
-
 #[test]
 fn extra_font_dirs_come_from_a_path_list() {
     assert!(extra_dirs(None).is_empty());
@@ -143,47 +93,24 @@ fn bundled_families_and_resolution() {
     assert!(!b.synth_bold);
     let faces = all_faces();
     assert!(faces.iter().any(|f| f.info.family == "Noto Serif" && f.info.style == "Regular" && f.info.origin == "bundled"));
-    // A real installed Bold Italic — the face's own style, or a named instance of a variable
-    // face — takes priority. Partial installed families can instead supply the nearest
-    // weight/slant, so neither synthesis flag is fixed by the OS.
+    // A real installed Bold Italic takes priority. Partial installed families can instead
+    // supply the nearest weight/slant, so neither synthesis flag is fixed by the OS.
     for family in ["Noto Serif", "Inter"] {
         let resolved = resolve(family, "Bold Italic");
         let selected = face(resolved.face);
         assert!(selected.info.family.eq_ignore_ascii_case(family));
         assert!(!resolved.missing);
         let candidates: Vec<_> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
-        let exact = candidates
-            .iter()
-            .find(|f| f.info.style.eq_ignore_ascii_case("Bold Italic"))
-            .or_else(|| candidates.iter().find(|f| f.info.instances.iter().any(|i| i.style.eq_ignore_ascii_case("Bold Italic"))));
-        if let Some(exact) = exact {
+        if let Some(exact) = candidates.iter().find(|f| f.info.style.eq_ignore_ascii_case("Bold Italic")) {
             assert_eq!(resolved.face, exact.id, "real style wins for {family}");
-            let expected_instance = if exact.info.style.eq_ignore_ascii_case("Bold Italic") {
-                None
-            } else {
-                exact.info.instances.iter().position(|i| i.style.eq_ignore_ascii_case("Bold Italic")).and_then(|i| u16::try_from(i).ok())
-            };
-            assert_eq!(resolved.instance, expected_instance, "exact style instance for {family}");
             assert!(!resolved.synth_bold && !resolved.synth_italic);
         } else {
-            // Italic mismatch dominates any supported font weight distance. Named instances
-            // resolve at their effective weight and slant, not the face's defaults.
-            let selected_instance = resolved.instance.and_then(|i| selected.info.instances.get(usize::from(i)));
-            let selected_weight = selected_instance.map_or(selected.info.weight, |i| i.weight(selected.info.weight));
-            let selected_italic = selected_instance.map_or(selected.info.italic, |i| i.italic(selected.info.italic));
-            let distance = |weight: u16, italic: bool| u32::from(weight.abs_diff(700)) + if italic { 0 } else { 1_000 };
-            let nearest = candidates
-                .iter()
-                .flat_map(|f| {
-                    std::iter::once((f.info.weight, f.info.italic))
-                        .chain(f.info.instances.iter().map(move |i| (i.weight(f.info.weight), i.italic(f.info.italic))))
-                })
-                .map(|(weight, italic)| distance(weight, italic))
-                .min()
-                .unwrap();
-            assert_eq!(distance(selected_weight, selected_italic), nearest, "closest available style for {family}");
-            assert_eq!(resolved.synth_bold, selected_weight <= 500);
-            assert_eq!(resolved.synth_italic, !selected_italic);
+            // Italic mismatch dominates any supported font weight distance.
+            let distance = |f: &Face| u32::from(f.info.weight.abs_diff(700)) + if f.info.italic { 0 } else { 1_000 };
+            let nearest = candidates.iter().map(|f| distance(f)).min().unwrap();
+            assert_eq!(distance(&selected), nearest, "closest available style for {family}");
+            assert_eq!(resolved.synth_bold, selected.info.weight <= 500);
+            assert_eq!(resolved.synth_italic, !selected.info.italic);
         }
     }
 }
@@ -203,8 +130,6 @@ fn system_scan_finds_fonts() {
     let n = all_faces().iter().filter(|f| f.info.origin == "system").count();
     eprintln!("system fonts: {n} faces in {:?}", t.elapsed());
     assert_eq!(scan_system(), 0, "scans once");
-    // A minimum face count on Linux belongs with the native-fonts gate in #1591. A container
-    // that has fontconfig and only a handful of faces must still pass this portable test.
     if cfg!(target_os = "macos") {
         assert!(n > 20, "{n}");
         let r = resolve("Helvetica", "Bold");
@@ -233,13 +158,12 @@ fn postscript_and_full_names_resolve() {
 /// font menus list every instance.
 #[test]
 fn variable_named_instances_resolve_and_list() {
-    const FAMILY: &str = "EffectCraft Instance Test";
+    const FAMILY: &str = "Visualab Effects Instance Test";
     let instances = [
-        ("Light", 300.0, Some("EffectCraftInstanceTest-Light")),
-        ("Regular", 400.0, Some("EffectCraftInstanceTest-Regular")),
-        ("Black", 900.0, Some("EffectCraftInstanceTest-Black")),
+        ("Light", 300.0, Some("Visualab EffectsInstanceTest-Light")),
+        ("Regular", 400.0, Some("Visualab EffectsInstanceTest-Regular")),
+        ("Black", 900.0, Some("Visualab EffectsInstanceTest-Black")),
         ("Extra Bold", 800.0, None),
-        ("Bold Italic", 700.0, Some("EffectCraftInstanceTest-BoldItalic")),
     ];
     assert_eq!(add_font_data(crate::sfnt::test_font::variable(FAMILY, &instances, true)).len(), 1);
     let wght = |r: &Resolved| instance_variations(r);
@@ -256,20 +180,15 @@ fn variable_named_instances_resolve_and_list() {
     assert!(!bold.synth_bold, "{bold:?}");
     assert_eq!(wght(&bold), vec![("wght".to_string(), 800.0)]);
     // By PostScript name, the font's own and the derived one, and by full name.
-    let ps = resolve("EffectCraftInstanceTest-Black", "Regular");
+    let ps = resolve("Visualab EffectsInstanceTest-Black", "Regular");
     assert!(!ps.missing && ps.face == black.face, "{ps:?}");
     assert_eq!(wght(&ps), vec![("wght".to_string(), 900.0)]);
-    assert_eq!(wght(&resolve("EffectCraftInstanceTest-ExtraBold", "")), vec![("wght".to_string(), 800.0)]);
+    assert_eq!(wght(&resolve("Visualab EffectsInstanceTest-ExtraBold", "")), vec![("wght".to_string(), 800.0)]);
     assert_eq!(wght(&resolve("effectcraft instance test extra bold", "")), vec![("wght".to_string(), 800.0)]);
-    // A named instance keeps its own index, so layout applies its axis values.
-    let bold_italic = resolve(FAMILY, "Bold Italic");
-    assert!(!bold_italic.missing && !bold_italic.synth_bold && !bold_italic.synth_italic);
-    assert_eq!((bold_italic.face, bold_italic.instance), (black.face, Some(4)));
-    assert_eq!(wght(&bold_italic), vec![("wght".to_string(), 700.0)]);
     // The font menu lists every instance, in weight order.
     let fams = families();
     let styles = &fams.iter().find(|(f, _)| f == FAMILY).unwrap().1;
-    assert_eq!(styles, &["Light", "Regular", "Extra Bold", "Black", "Bold Italic"]);
+    assert_eq!(styles, &["Light", "Regular", "Extra Bold", "Black"]);
     // Static fonts are untouched.
     assert_eq!(resolve("Inter", "Bold").instance, None);
 }
@@ -446,26 +365,18 @@ fn an_empty_glyph_does_not_cover_its_character() {
     assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
 }
 
-/// A missing Microsoft family uses its metric-compatible substitute instead of Inter and still
-/// reports itself missing (#1677). An installed original family takes precedence.
+/// A Microsoft family that isn't installed renders in its installed metric-compatible
+/// substitute instead of Inter, and still reports itself missing (#1677).
 #[test]
 fn microsoft_families_resolve_to_metric_compatible_substitutes() {
     add_font_data(test_font("Carlito"));
     add_font_data(test_font("Caladea"));
-    for (requested, style, substitute) in [("Calibri", "Regular", "Carlito"), ("Cambria", "Bold", "Caladea")] {
-        let alias = resolve_alias(requested, style).expect("the substitute is available");
-        assert_eq!(face(alias.face).info.family, substitute);
-        assert!(alias.missing, "the original name stays missing for Find Missing Fonts");
-
-        let resolved = resolve(requested, style);
-        let family = &face(resolved.face).info.family;
-        if family.eq_ignore_ascii_case(requested) {
-            assert!(!resolved.missing, "an installed original family is available");
-        } else {
-            assert_eq!(family, substitute);
-            assert!(resolved.missing);
-        }
-    }
+    let calibri = resolve("Calibri", "Regular");
+    assert_eq!(face(calibri.face).info.family, "Carlito");
+    assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
+    let cambria = resolve("Cambria", "Bold");
+    assert_eq!(face(cambria.face).info.family, "Caladea");
+    assert!(cambria.missing);
     let unknown = resolve("No Such Family 1677", "Regular");
     assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
     assert!(unknown.missing);

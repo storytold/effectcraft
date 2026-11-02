@@ -127,7 +127,7 @@ fn unreadable_native_workspace_is_preserved_after_later_layout_changes() {
 #[test]
 fn legacy_named_workspaces_migrate_once_and_survive_actual_app_restart() {
     let store = Arc::new(MemoryConfig::default());
-    // An unversioned record from an earlier EffectCraft: its Minimal layout saved as "Legacy".
+    // An unversioned record from an earlier Visualab Effects: its Minimal layout saved as "Legacy".
     let legacy = r#"{"floating":{},"workspaces":{"Legacy":{"Split":{"a":{"Tabs":{"active":0,"panels":["Composition"]}},"b":{"Tabs":{"active":0,"panels":["Timeline"]}},"size":{"Ratio":0.6000000238418579},"vertical":true}}}}"#;
     store.write("workspaces.json", legacy).unwrap();
     let saved = effectcraft_ui_egui::dock::Workspace::new(effectcraft_ui_egui::dock::workspace("Minimal"));
@@ -218,7 +218,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     assert_eq!(h.ctx.memory(|m| m.focused()), Some(target));
     println!("Tab presses from no focus to Effect Controls: {tabs}");
     assert_eq!(h.state().ui.dock, before, "traversal alone must not activate a tab");
-    // craft-ui outlines the keyboard-focused tab, inset 2 pt, in the dock's accent (EffectCraft's
+    // craft-ui outlines the keyboard-focused tab, inset 2 pt, in the dock's accent (Visualab Effects's
     // focus colour).
     let response = h.ctx.read_response(target).unwrap();
     assert!(

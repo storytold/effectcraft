@@ -412,7 +412,7 @@ fn keys_from_two_layers_have_no_text() {
     s.state.selected_keys = [a, b].map(|l| KeyRef { layer: l, prop: uid(&s, l, "transform/opacity"), time: Tick::ZERO }).to_vec();
     s.execute("keys.copy", json!({})).unwrap();
     assert_eq!(s.state.keyframe_text, None, "After Effects copies one layer's keys as text");
-    assert_eq!(s.state.key_clipboard.len(), 2, "EffectCraft's own clipboard has both");
+    assert_eq!(s.state.key_clipboard.len(), 2, "Visualab Effects's own clipboard has both");
     // A copied layer leaves no text behind.
     s.state.selected_keys = vec![KeyRef { layer: a, prop: uid(&s, a, "transform/opacity"), time: Tick::ZERO }];
     s.execute("keys.copy", json!({})).unwrap();

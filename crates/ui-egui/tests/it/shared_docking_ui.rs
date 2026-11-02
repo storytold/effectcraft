@@ -1,4 +1,4 @@
-//! EffectCraft's workspaces in craft-ui's shared docking: transactions, the command path, pointer
+//! Visualab Effects's workspaces in craft-ui's shared docking: transactions, the command path, pointer
 //! gestures and persistence.
 use craft_ui::docking::{Action, Node, Placement, StackEntry, Zone};
 use effectcraft_engine::Session;
@@ -252,7 +252,7 @@ fn ui_dock_and_window_panel_commands_parse_craft_ui_commands() {
     assert!(app.ui.dock.is_visible(PanelKind::Layer));
     invoke(&mut app, "ui.dock", json!({"operation": "float", "panel": "Info", "rect": [100, 100, 300, 200]})).unwrap();
     assert_eq!(floating(&app)[0].rect, [100.0, 100.0, 300.0, 200.0]);
-    // `window.panel.*` takes EffectCraft's panel names too.
+    // `window.panel.*` takes Visualab Effects's panel names too.
     invoke(&mut app, "window.panel.dock", json!({"panel": "Info", "anchor": "Project", "zone": "right"})).unwrap();
     assert!(floating(&app).is_empty() && app.ui.dock.is_docked(PanelKind::Info));
     invoke(&mut app, "window.panel.close", json!({"panel": "Info"})).unwrap();
@@ -361,7 +361,7 @@ fn failed_close_preserves_viewer_lifecycle_and_maximize_state() {
     assert_eq!(app.ui.locked_tabs, before.locked_tabs);
 }
 
-/// A panel never laid out opens at EffectCraft's default place for it (History beside the
+/// A panel never laid out opens at Visualab Effects's default place for it (History beside the
 /// Project panel, Render Queue with the Timeline), not where craft-ui's fallback puts it; a panel
 /// the user closed comes back where it was.
 #[test]

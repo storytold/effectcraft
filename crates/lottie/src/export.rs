@@ -1,4 +1,4 @@
-//! EffectCraft composition → Lottie document.
+//! Visualab Effects composition → Lottie document.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +32,7 @@ impl ExportResult {
 }
 
 /// One supported effect: Lottie effect type and its parameter list in Lottie order:
-/// (EffectCraft param id or "" for a Lottie-only param, Lottie value type, scale to Lottie,
+/// (Visualab Effects param id or "" for a Lottie-only param, Lottie value type, scale to Lottie,
 /// constant value for Lottie-only params).
 pub(crate) struct FxMap {
     pub id: &'static str,
@@ -509,7 +509,7 @@ pub fn export_comp(project: &Project, comp: ItemId, opts: &ExportOptions, read: 
 pub fn to_dotlottie(res: &ExportResult, id: &str) -> Vec<u8> {
     let id: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
     let id = if id.is_empty() { "animation".to_string() } else { id };
-    let manifest = json!({"version": "1", "generator": "EffectCraft", "author": "", "animations": [{"id": id, "speed": 1, "loop": true}]});
+    let manifest = json!({"version": "1", "generator": "Visualab Effects", "author": "", "animations": [{"id": id, "speed": 1, "loop": true}]});
     crate::zip::store(&[
         ("manifest.json".into(), serde_json::to_vec(&manifest).unwrap_or_default()),
         (format!("animations/{id}.json"), serde_json::to_vec(&res.json).unwrap_or_default()),

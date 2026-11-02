@@ -11,7 +11,7 @@ use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerSource, Project, PropGroup, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
-pub const MAIN_COMP: &str = "EffectCraft Intro";
+pub const MAIN_COMP: &str = "Visualab Effects Intro";
 pub const SHOWCASE_3D: &str = "3D Showcase";
 
 /// Seconds → the nearest frame of the demo's 29.97 fps comps (AE keeps times frame-aligned).
@@ -116,12 +116,12 @@ fn lower_third(p: &mut Project) -> Comp {
     let mut title = text_layer(
         p,
         &c,
-        "Built with EffectCraft",
-        TextDoc { text: "Built with EffectCraft".into(), size: 40.0, style: "SemiBold".into(), justify: Justify::Center, ..Default::default() },
+        "Built with Visualab Effects",
+        TextDoc { text: "Built with Visualab Effects".into(), size: 40.0, style: "SemiBold".into(), justify: Justify::Center, ..Default::default() },
         [440.0, 914.0],
     );
     anim(&mut title, "transform/opacity", keys(&[(0.4, Value::Scalar(0.0)), (0.9, Value::Scalar(100.0))]));
-    c.layers = vec![title, bar].into();
+    c.layers = vec![title, bar];
     c
 }
 
@@ -270,7 +270,7 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     );
     anim(&mut caption, "transform/opacity", keys(&[(0.3, Value::Scalar(0.0)), (1.2, Value::Scalar(100.0))]));
 
-    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor].into();
+    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor];
     c
 }
 
@@ -463,7 +463,7 @@ pub fn demo_project() -> Project {
     lower.out_point = t(9.5);
 
     // Stack: top first.
-    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg].into();
+    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg];
     for l in &mut comp.layers {
         if l.name == "Controller" {
             l.switches.video = false;

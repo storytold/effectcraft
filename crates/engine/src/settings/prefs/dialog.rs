@@ -87,7 +87,6 @@ pub fn pages() -> Vec<Page> {
                 s("general.recentItems", "Recent Projects Shown", Kind::Int(1, 30, ""), true),
                 Section("Options"),
                 s("general.showToolTips", "Show Tool Tips", B, true),
-                s("general.viewerWheelScrubbing", "Scrub Composition Frames with Mouse Wheel", B, true),
                 s("general.createLayersAtCompStart", "Create Layers at Composition Start Time", B, true),
                 s("general.switchesAffectNestedComps", "Switches Affect Nested Comps", B, true),
                 s("general.defaultSpatialLinear", "Default Spatial Interpolation to Linear", B, true),
@@ -96,7 +95,7 @@ pub fn pages() -> Vec<Page> {
                 s("general.expressionPickWhipCompact", "Expression Pick Whip Writes Compact English", B, true),
                 s("general.createSplitLayersAbove", "Create Split Layers Above Original Layer", B, true),
                 s("general.useSystemColorPicker", "Use System Color Picker", B, false),
-                Note("EffectCraft always uses its own colour picker (the same on every platform and the web)."),
+                Note("Visualab Effects always uses its own colour picker (the same on every platform and the web)."),
             ],
         },
         Page {
@@ -108,7 +107,7 @@ pub fn pages() -> Vec<Page> {
                 s("startup.offerCrashRecovery", "Offer to Open the Latest Auto-Save After a Crash", B, true),
                 s("startup.windowGraphics", "Window Graphics", Kind::Choice(WINDOW_GRAPHICS), true),
                 Note(
-                    "Window Graphics applies from the next launch. When the graphics driver stops EffectCraft as its window opens, the next launch switches to OpenGL.",
+                    "Window Graphics applies from the next launch. When the graphics driver stops Visualab Effects as its window opens, the next launch switches to OpenGL.",
                 ),
                 Section("Repair"),
                 Button { label: "Reset Settings", command: "prefs.reset", params: "{}" },
@@ -123,11 +122,6 @@ pub fn pages() -> Vec<Page> {
                 Section("New Project"),
                 s("project.useTemplate", "New Project Loads Template", B, true),
                 s("project.templatePath", "Template Project", Kind::Path, true),
-                Section("Project Files"),
-                s("project.compactProjectFiles", "Save Compact Project Files", B, true),
-                Note(
-                    "Saves .ecproj files as compact JSON on one line: smaller and faster to save and open, but hard to read or diff in version control. Off, they are indented, one value per line.",
-                ),
                 Section("Auto-Save"),
                 s("autoSave.enabled", "Automatically Save Projects", B, true),
                 s("autoSave.intervalMinutes", "Save Every", Kind::Int(1, 240, "Minutes"), true),
