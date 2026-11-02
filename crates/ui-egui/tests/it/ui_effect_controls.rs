@@ -155,6 +155,41 @@ fn effect_header_arrows_only_disclose_selected_headers_on_the_displayed_layer() 
 }
 
 #[test]
+fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
+    for hidden in ["closed", "maximized", "home"] {
+        let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        match hidden {
+            "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
+            "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
+            _ => h.state_mut().ui.start_screen = true,
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls, "{hidden}: stale focus is preserved");
+        assert!(h.state().auto.find("panel.EffectControls").is_none(), "{hidden}: Effect Controls is hidden");
+        let x = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3()[0];
+        let before = x(&h);
+        header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(h.state().ui.fx_closed.is_empty(), "{hidden}: hidden effects keep their disclosure state");
+        assert!(x(&h) < before, "{hidden}: Left still nudges the layer");
+    }
+}
+
+#[test]
+fn effect_header_arrows_work_in_floating_panel_beside_maximized_panel() {
+    let (mut h, lid, [(fx, prop), _, _]) = header_arrow_harness();
+    h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+    h.state_mut().toggle_maximize(PanelKind::Composition);
+    h.state_mut().session.state.selected_props = vec![(lid, fx)];
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some());
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_none());
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some());
+}
+
+#[test]
 fn effect_header_arrows_preserve_modified_shortcuts_and_keyboard_ownership() {
     let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
     h.state_mut().session.state.selected_props = vec![(lid, fx)];
