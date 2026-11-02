@@ -1662,6 +1662,46 @@ mod tests {
     }
 
     #[test]
+    fn a_correction_before_an_objects_first_stroke_keeps_its_tracked_matte() {
+        for base in [0, 4] {
+            let first = if base == 0 { 3 } else { 1 };
+            let prior = if base == 0 { 1 } else { 3 };
+            let mut data = RotoData::default();
+            data.add(Stroke { kind: StrokeKind::Fg, frame: base, radius: 3.0, points: vec![[40.0, 40.0]], object: 0 }, 4, [0, 4]);
+            data.add(Stroke { kind: StrokeKind::Fg, frame: first, radius: 3.0, points: vec![[15.0, 15.0]], object: 1 }, 4, [0, 4]);
+            data.span = [0, 4];
+            let mut params = params_with(&data);
+            params.values.insert(INPUT_KEY.into(), Value::Str(format!("earlier-object-correction-{base}")));
+            let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+            chain.model = Some(Arc::new(TwoObjects(Default::default())));
+            let seed = seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id);
+            chain.keys = data.chain_keys(seed);
+            assert_eq!(chain.track(&mut |f| Some(Arc::new(frame(f as f64 / 25.0))), &|| false, &mut |_| {}).unwrap().unwrap().frames, 5);
+            let prior_key = chain.keys[&prior];
+            assert!(chain.object_seg(prior, 1).is_some());
+            data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 1.0, points: vec![[19.0, 15.0]], object: 1 }, 4, [0, 4]);
+            chain.data = Arc::new(data.clone());
+            chain.keys = data.chain_keys(seed);
+            assert_eq!(chain.keys[&prior], prior_key, "the nearer tracked frame is still valid");
+            let fake = Arc::new(ClickSquares::default());
+            chain.model = Some(fake.clone());
+            let mut prompt_reads = vec![];
+            let mut get = |f: i64| {
+                if fake.0.lock().unwrap().is_empty() {
+                    prompt_reads.push(f);
+                }
+                Some(Arc::new(frame(f as f64 / 25.0)))
+            };
+            chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+            assert_eq!(prompt_reads, [2, prior, first, 2], "corrections carry from the valid tracked matte in either direction");
+            let boxes = fake.0.lock().unwrap().clone();
+            let correction = boxes[1].iter().find(|(g, _)| *g == 2).and_then(|(_, b)| *b).expect("a correction box");
+            assert!(correction[0] <= 10.0 && correction[2] >= 22.0, "the box keeps the whole tracked square, not only the correction: {correction:?}");
+            assert!(correction[2] < 30.0, "the other object's disk stays outside this box: {correction:?}");
+        }
+    }
+
+    #[test]
     fn corrections_before_the_base_carry_on_from_each_other() {
         let mut data = RotoData::default();
         for (frame, object) in [(3, 0), (3, 1), (2, 0), (1, 0)] {
