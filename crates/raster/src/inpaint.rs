@@ -929,7 +929,7 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
     let pre: Vec<Image> = (0..n).into_par_iter().map(|t| {
-        let base = if is_ref[t] { ref_images[t].clone().unwrap() } else { input.frames.get(t) };
+        let base = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
         backend.membrane(&base, &holes[t].to_vec())
     }).collect();
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
@@ -948,7 +948,7 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
         .map(|t| {
-            let mut img = if is_ref[t] { ref_images[t].clone().unwrap() } else { input.frames.get(t) };
+            let mut img = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
             let mut left = holes[t].to_vec();
             if is_ref[t] || !holes[t].any() {
                 return (img, left);
@@ -996,7 +996,6 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             (img, left)
         })
         .collect();
-    drop(trace_context);
     drop(input);
     if !progress(2, total) {
         return None;
@@ -1013,11 +1012,10 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     }
     let mut done = 2;
     out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
-    if let Some(cb) = sink.as_mut() {
-        if let Some(img) = &out[t0] {
+    if let Some(cb) = sink.as_mut()
+        && let Some(img) = &out[t0] {
             let _ = cb(t0, img);
         }
-    }
     propagated[t0] = (Image::default(), Vec::new());
     done += 1;
     if !progress(done, total) {
@@ -1052,11 +1050,10 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
         if t >= 2 {
             out[t - 2] = None;
         }
-        if let Some(cb) = sink.as_mut() {
-            if let Some(img) = &out[t] {
+        if let Some(cb) = sink.as_mut()
+            && let Some(img) = &out[t] {
                 let _ = cb(t, img);
             }
-        }
         propagated[t] = (Image::default(), Vec::new());
         done += 1;
         if !progress(done, total) {
