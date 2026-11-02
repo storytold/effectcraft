@@ -605,13 +605,174 @@ pub fn complete_flow(mut f: Flow, hole_a: &[bool], hole_b: &[bool], w: usize, h:
     f
 }
 
+/// A hole mask packed into 64-bit words (1 bit per pixel) to keep the per-frame cost
+/// down across a whole range (#2570).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HoleMask {
+    pub words: Vec<u64>,
+    pub len: usize,
+}
+
+impl HoleMask {
+    pub fn from_vec(hole: &[bool]) -> Self {
+        let mut words = vec![0u64; hole.len().div_ceil(64)];
+        for (i, &h) in hole.iter().enumerate() {
+            if h {
+                words[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+        HoleMask { words, len: hole.len() }
+    }
+    pub fn zeros(n: usize) -> Self {
+        HoleMask { words: vec![0u64; n.div_ceil(64)], len: n }
+    }
+    pub fn get(&self, i: usize) -> bool {
+        i < self.len && (self.words[i / 64] >> (i % 64)) & 1 == 1
+    }
+    pub fn set(&mut self, i: usize, v: bool) {
+        if i >= self.len {
+            return;
+        }
+        if v {
+            self.words[i / 64] |= 1u64 << (i % 64);
+        } else {
+            self.words[i / 64] &= !(1u64 << (i % 64));
+        }
+    }
+    pub fn any(&self) -> bool {
+        self.words.iter().any(|&w| w != 0)
+    }
+    pub fn to_vec(&self) -> Vec<bool> {
+        (0..self.len).map(|i| self.get(i)).collect()
+    }
+}
+
+/// Where a fill's input frames live. `Memory` keeps them in RAM (tests, small ranges);
+/// `Spilled` stores them on disk and memory-maps them, so a whole range costs ~0 RAM.
+#[derive(Clone)]
+pub enum Frames {
+    Memory(Vec<Image>),
+    Spilled(SpillHandle),
+}
+
+impl Frames {
+    pub fn len(&self) -> usize {
+        match self {
+            Frames::Memory(v) => v.len(),
+            Frames::Spilled(h) => h.n,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn get(&self, k: usize) -> Image {
+        match self {
+            Frames::Memory(v) => v[k].clone(),
+            Frames::Spilled(h) => h.get(k),
+        }
+    }
+}
+
+/// A spill file holding `n` frames of `w x h` pixels at `bpc` bits per channel.
+/// Frames are read back on demand (no memory mapping, to stay `unsafe`-free).
+#[derive(Clone)]
+pub struct SpillHandle {
+    pub path: std::path::PathBuf,
+    pub w: usize,
+    pub h: usize,
+    pub n: usize,
+    pub bpc: u8,
+}
+
+impl SpillHandle {
+    pub fn get(&self, k: usize) -> Image {
+        let px = self.w * self.h;
+        let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
+        let off = k * px * bytes_per_px;
+        let len = px * bytes_per_px;
+        let mut buf = vec![0u8; len];
+        if let Ok(mut f) = std::fs::File::open(&self.path) {
+            use std::io::{Read, Seek, SeekFrom};
+            let _ = f.seek(SeekFrom::Start(off as u64));
+            let _ = f.read_exact(&mut buf);
+        }
+        let mut img = Image::new(self.w as u32, self.h as u32);
+        if self.bpc <= 8 {
+            for (i, p) in img.data.iter_mut().enumerate() {
+                let j = i * 4;
+                p[0] = buf[j] as f32 / 255.0;
+                p[1] = buf[j + 1] as f32 / 255.0;
+                p[2] = buf[j + 2] as f32 / 255.0;
+                p[3] = buf[j + 3] as f32 / 255.0;
+            }
+        } else {
+            for (i, p) in img.data.iter_mut().enumerate() {
+                let base = i * 16;
+                for c in 0..4 {
+                    let mut b = [0u8; 4];
+                    b.copy_from_slice(&buf[base + c * 4..base + c * 4 + 4]);
+                    p[c] = f32::from_bits(u32::from_le_bytes(b));
+                }
+            }
+        }
+        img
+    }
+
+    pub fn create(path: std::path::PathBuf, w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
+        let bytes_per_px: usize = if bpc <= 8 { 4 } else { 16 };
+        let total = n * w * h * bytes_per_px;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
+        file.set_len(total as u64)?;
+        Ok(SpillHandle { path, w, h, n, bpc })
+    }
+
+    pub fn write_frame(&self, k: usize, img: &Image) {
+        let bytes_per_px: usize = if self.bpc <= 8 { 4 } else { 16 };
+        let px = self.w * self.h;
+        let off = k * px * bytes_per_px;
+        let mut file = match std::fs::OpenOptions::new().write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        use std::io::{Seek, SeekFrom, Write};
+        if file.seek(SeekFrom::Start(off as u64)).is_err() {
+            return;
+        }
+        if self.bpc <= 8 {
+            let mut buf = vec![0u8; px * 4];
+            for (i, p) in img.data.iter().enumerate() {
+                buf[i * 4] = (p[0] * 255.0).round().clamp(0.0, 255.0) as u8;
+                buf[i * 4 + 1] = (p[1] * 255.0).round().clamp(0.0, 255.0) as u8;
+                buf[i * 4 + 2] = (p[2] * 255.0).round().clamp(0.0, 255.0) as u8;
+                buf[i * 4 + 3] = (p[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            let _ = file.write_all(&buf);
+        } else {
+            let mut buf = vec![0u8; px * 16];
+            for (i, p) in img.data.iter().enumerate() {
+                let base = i * 16;
+                for c in 0..4 {
+                    buf[base + c * 4..base + c * 4 + 4].copy_from_slice(&p[c].to_le_bytes());
+                }
+            }
+            let _ = file.write_all(&buf);
+        }
+    }
+}
+
+impl Drop for SpillHandle {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// The input of a sequence fill.
 #[derive(Clone)]
 pub struct FillInput {
-    /// Frames (premultiplied RGBA, all the same size).
-    pub frames: Vec<Image>,
-    /// Per frame, `true` where the pixel is missing.
-    pub holes: Vec<Vec<bool>>,
+    /// Frames (premultiplied RGBA, all the same size), in RAM or spilled to disk.
+    pub frames: Frames,
+    /// Per frame, packed hole mask (`true` where the pixel is missing).
+    pub holes: Vec<HoleMask>,
     /// Complete images for some frames: (frame index, image).
     pub references: Vec<(usize, Image)>,
 }
@@ -621,7 +782,8 @@ struct TraceContext<'a> {
     fwd: &'a [Flow],
     bwd: &'a [Flow],
     known: &'a (dyn Fn(usize, i64, i64) -> bool + Sync),
-    frames: &'a [&'a Image],
+    frames: &'a Frames,
+    ref_images: &'a [Option<Image>],
     max: usize,
 }
 
@@ -636,7 +798,8 @@ struct TraceStart {
 /// Trace a point to the nearest visible frame: (sampled colour, frames travelled).
 fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usize)> {
     let n = context.frames.len();
-    let (w, h) = (context.frames[0].width as f64, context.frames[0].height as f64);
+    let first = context.frames.get(0);
+    let (w, h) = (first.width as f64, first.height as f64);
     let (mut px, mut py) = (start.x, start.y);
     let mut k = start.frame as i64;
     for d in 1..=context.max {
@@ -663,7 +826,12 @@ fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usi
             .iter()
             .all(|&(xx, yy)| (context.known)(k as usize, xx.clamp(0, w as i64 - 1), yy.clamp(0, h as i64 - 1)));
         if ok {
-            return Some((context.frames[k as usize].sample_bilinear_clamped(px, py), d));
+            let img = if let Some(r) = &context.ref_images[k as usize] {
+                r.sample_bilinear_clamped(px, py)
+            } else {
+                context.frames.get(k as usize).sample_bilinear_clamped(px, py)
+            };
+            return Some((img, d));
         }
     }
     None
@@ -712,45 +880,61 @@ impl FillBackend for CpuFill {}
 /// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
 /// (→ `None`).
 pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
-    fill_sequence_with(input.clone(), o, &CpuFill, progress)
+    fill_sequence_with(input.clone(), o, &CpuFill, progress, None)
 }
 
 /// [`fill_sequence`] with a hardware backend for the stages it can take (see [`FillBackend`]).
-pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
+pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool, mut sink: Option<&mut dyn FnMut(usize, &Image) -> Result<(), String>>) -> Option<Vec<Image>> {
     let n = input.frames.len();
     if n == 0 {
         return Some(vec![]);
     }
-    let (w, h) = (input.frames[0].width as usize, input.frames[0].height as usize);
+    let first = input.frames.get(0);
+    let (w, h) = (first.width as usize, first.height as usize);
     // Steps: flows (1) + propagation (1) + per-frame synthesis (n).
     let total = n + 2;
+    let streaming = sink.is_some();
     if o.method == FillMethod::EdgeBlend {
         let mut out = Vec::with_capacity(n);
-        for (i, (f, hl)) in input.frames.iter().zip(&input.holes).enumerate() {
-            out.push(opaque_fill(backend.membrane(f, hl), hl));
+        for i in 0..n {
+            let f = input.frames.get(i);
+            let hl = input.holes[i].to_vec();
+            let img = opaque_fill(backend.membrane(&f, &hl), &hl);
+            if let Some(cb) = sink.as_mut() {
+                let _ = cb(i, &img);
+            }
+            if !streaming {
+                out.push(img);
+            }
             if !progress(i + 1, n) {
                 return None;
             }
         }
+        if streaming {
+            return Some(Vec::new());
+        }
         return Some(out);
     }
     // Reference frames make their frame fully known.
-    let mut frames: Vec<Image> = std::mem::take(&mut input.frames);
-    let mut holes: Vec<Vec<bool>> = std::mem::take(&mut input.holes);
+    let mut holes: Vec<HoleMask> = std::mem::take(&mut input.holes);
     let references = std::mem::take(&mut input.references);
     let mut is_ref = vec![false; n];
+    let mut ref_images: Vec<Option<Image>> = vec![None; n];
     for (k, img) in &references {
         if *k < n && img.width as usize == w && img.height as usize == h {
-            frames[*k] = img.clone();
-            holes[*k] = vec![false; w * h];
+            ref_images[*k] = Some(img.clone());
+            holes[*k] = HoleMask::zeros(w * h);
             is_ref[*k] = true;
         }
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
-    let pre: Vec<Image> = frames.par_iter().zip(&holes).map(|(f, hl)| backend.membrane(f, hl)).collect();
+    let pre: Vec<Image> = (0..n).into_par_iter().map(|t| {
+        let base = if is_ref[t] { ref_images[t].clone().unwrap() } else { input.frames.get(t) };
+        backend.membrane(&base, &holes[t].to_vec())
+    }).collect();
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
         .into_par_iter()
-        .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
+        .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i].to_vec(), &holes[i + 1].to_vec()), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1].to_vec(), &holes[i].to_vec())))
         .collect();
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
     drop(pre);
@@ -758,16 +942,15 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
         return None;
     }
     // 2. Propagation (and the lighting-correction border ring).
-    let refs: Vec<&Image> = frames.iter().collect();
-    let known = |k: usize, x: i64, y: i64| !holes[k][y as usize * w + x as usize];
-    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &refs, max: n };
+    let known = |k: usize, x: i64, y: i64| !holes[k].get(y as usize * w + x as usize);
+    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &input.frames, ref_images: &ref_images, max: n };
     let ring_r = 2usize;
     let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
         .map(|t| {
-            let mut img = frames[t].clone();
-            let mut left = holes[t].clone();
-            if is_ref[t] || !holes[t].iter().any(|b| *b) {
+            let mut img = if is_ref[t] { ref_images[t].clone().unwrap() } else { input.frames.get(t) };
+            let mut left = holes[t].to_vec();
+            if is_ref[t] || !holes[t].any() {
                 return (img, left);
             }
             let sample = |i: usize| -> Option<[f32; 4]> {
@@ -783,23 +966,23 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
                     _ => None,
                 }
             };
-            let filled: Vec<(usize, [f32; 4])> = (0..w * h).filter(|&i| holes[t][i]).filter_map(|i| sample(i).map(|v| (i, v))).collect();
+            let filled: Vec<(usize, [f32; 4])> = (0..w * h).filter(|&i| holes[t].get(i)).filter_map(|i| sample(i).map(|v| (i, v))).collect();
             for (i, v) in &filled {
                 img.data[*i] = *v;
                 left[*i] = false;
             }
             // Lighting correction: membrane of the border mismatch, added to propagated pixels.
             if o.lighting > 0.0 && !filled.is_empty() {
-                let grown = dilate(&holes[t], w, h, ring_r);
+                let grown = dilate(&holes[t].to_vec(), w, h, ring_r);
                 let mut diff = vec![[0.0f32; 4]; w * h];
                 let mut dk = vec![true; w * h];
                 for i in 0..w * h {
-                    if holes[t][i] {
+                    if holes[t].get(i) {
                         dk[i] = false;
                     } else if grown[i]
                         && let Some(v) = sample(i)
                     {
-                        let a = frames[t].data[i];
+                        let a = input.frames.get(t).data[i];
                         diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
                     }
                 }
@@ -813,8 +996,8 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             (img, left)
         })
         .collect();
-    drop(refs);
-    drop(frames);
+    drop(trace_context);
+    drop(input);
     if !progress(2, total) {
         return None;
     }
@@ -822,16 +1005,20 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     let mut out: Vec<Option<Image>> = vec![None; n];
     let first = (0..n).find(|&t| propagated[t].1.iter().any(|b| *b));
     let Some(t0) = first else {
-        return Some(propagated.into_iter().zip(&holes).map(|((img, _), hl)| opaque_fill(img, hl)).collect());
+        return Some(propagated.into_iter().enumerate().map(|(i, (img, _))| opaque_fill(img, &holes[i].to_vec())).collect());
     };
     // Frames before t0 are complete already.
     for (t, slot) in out.iter_mut().enumerate().take(t0) {
         *slot = Some(std::mem::take(&mut propagated[t].0));
     }
     let mut done = 2;
-    let (img0, left0) = std::mem::take(&mut propagated[t0]);
-    out[t0] = Some(backend.patch(&img0, &left0, None, o.patch, o.seed));
-    drop((img0, left0));
+    out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
+    if let Some(cb) = sink.as_mut() {
+        if let Some(img) = &out[t0] {
+            let _ = cb(t0, img);
+        }
+    }
+    propagated[t0] = (Image::default(), Vec::new());
     done += 1;
     if !progress(done, total) {
         return None;
@@ -862,12 +1049,27 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
                 _ => backend.patch(img, left, Some(&warped), o.patch, o.seed),
             });
         }
+        if t >= 2 {
+            out[t - 2] = None;
+        }
+        if let Some(cb) = sink.as_mut() {
+            if let Some(img) = &out[t] {
+                let _ = cb(t, img);
+            }
+        }
+        propagated[t] = (Image::default(), Vec::new());
         done += 1;
         if !progress(done, total) {
             return None;
         }
     }
-    Some(out.into_iter().zip(&holes).map(|(img, hl)| opaque_fill(img.unwrap_or_default(), hl)).collect())
+    if streaming {
+        for slot in out.iter_mut() {
+            *slot = None;
+        }
+        return Some(Vec::new());
+    }
+    Some(out.into_iter().enumerate().map(|(i, img)| opaque_fill(img.unwrap_or_default(), &holes[i].to_vec())).collect())
 }
 
 /// Filled pixels are opaque.
@@ -915,6 +1117,14 @@ mod tests {
     }
 
     #[test]
+    fn holemask_roundtrip() {
+        let v: Vec<bool> = (0..1000).map(|i| i % 3 == 0).collect();
+        let m = HoleMask::from_vec(&v);
+        assert_eq!(m.to_vec(), v);
+        for i in 0..v.len() { assert_eq!(m.get(i), v[i]); }
+    }
+
+    #[test]
     fn membrane_matches_a_linear_ramp() {
         let (w, h) = (40u32, 30u32);
         let mut img = Image::new(w, h);
@@ -957,10 +1167,10 @@ mod tests {
             let gt = background(w, h, t as f32 * pan);
             let hole = rect_hole(w, h, 10 + 8 * t as u32, 22, 18);
             frames.push(cut(&gt, &hole));
-            holes.push(hole);
+            holes.push(HoleMask::from_vec(&hole));
             gts.push(gt);
         }
-        (FillInput { frames, holes, references: vec![] }, gts)
+        (FillInput { frames: Frames::Memory(frames), holes, references: vec![] }, gts)
     }
 
     #[test]
@@ -969,7 +1179,7 @@ mod tests {
             let (input, gts) = sequence(8, pan);
             let out = fill_sequence(&input, &FillOpts::default(), &mut |_, _| true).expect("fill");
             for t in 0..out.len() {
-                let db = psnr(&out[t], &gts[t], Some(&input.holes[t]));
+                let db = psnr(&out[t], &gts[t], Some(&input.holes[t].to_vec()));
                 assert!(db > 26.0, "frame {t} pan {pan}: {db:.1} dB");
                 assert_eq!(out[t].data[0][3], 1.0);
             }
@@ -977,7 +1187,7 @@ mod tests {
                 // Temporal consistency: on a static background the filled pixels agree between
                 // frames.
                 for t in 1..out.len() {
-                    let both: Vec<bool> = input.holes[t].iter().zip(&input.holes[t - 1]).map(|(a, b)| *a || *b).collect();
+                    let both: Vec<bool> = input.holes[t].to_vec().iter().zip(input.holes[t - 1].to_vec().iter()).map(|(a, b)| *a || *b).collect();
                     let db = psnr(&out[t], &out[t - 1], Some(&both));
                     assert!(db > 30.0, "frames {}–{t} differ: {db:.1} dB", t - 1);
                 }
@@ -991,14 +1201,14 @@ mod tests {
         let (w, h) = (80u32, 60u32);
         let gt = background(w, h, 0.0);
         let hole = rect_hole(w, h, 30, 20, 14);
-        let input = FillInput { frames: vec![cut(&gt, &hole); 4], holes: vec![hole.clone(); 4], references: vec![] };
+        let input = FillInput { frames: Frames::Memory(vec![cut(&gt, &hole); 4]), holes: vec![HoleMask::from_vec(&hole); 4], references: vec![] };
         let surf = fill_sequence(&input, &FillOpts { method: FillMethod::Surface, ..Default::default() }, &mut |_, _| true).expect("fill");
         for t in 1..4 {
             // Surface carries one fill through: identical frames.
             assert!(psnr(&surf[t], &surf[0], Some(&hole)) > 40.0);
         }
         let edge = fill_sequence(&input, &FillOpts { method: FillMethod::EdgeBlend, ..Default::default() }, &mut |_, _| true).expect("fill");
-        assert!(psnr(&edge[0], &membrane_fill(&input.frames[0], &hole), Some(&hole)) > 60.0);
+        assert!(psnr(&edge[0], &membrane_fill(&input.frames.get(0), &hole), Some(&hole)) > 60.0);
         // A clean reference frame recovers the background exactly.
         let mut with_ref = FillInput { frames: input.frames.clone(), holes: input.holes.clone(), references: vec![(2, gt.clone())] };
         let out = fill_sequence(&with_ref, &FillOpts::default(), &mut |_, _| true).expect("fill");
@@ -1014,9 +1224,13 @@ mod tests {
     fn lighting_correction_absorbs_a_brightness_change() {
         // The background brightens over time; propagated pixels come from darker frames.
         let (mut input, mut gts) = sequence(6, 0.0);
+        let mut frames = match std::mem::replace(&mut input.frames, Frames::Memory(vec![])) {
+            Frames::Memory(v) => v,
+            _ => vec![],
+        };
         for t in 0..6 {
             let k = 1.0 + 0.06 * t as f32;
-            for img in [&mut input.frames[t], &mut gts[t]] {
+            for img in [&mut frames[t], &mut gts[t]] {
                 for p in &mut img.data {
                     for c in 0..3 {
                         p[c] *= k;
@@ -1024,9 +1238,10 @@ mod tests {
                 }
             }
         }
+        input.frames = Frames::Memory(frames);
         let plain = fill_sequence(&input, &FillOpts::default(), &mut |_, _| true).expect("fill");
         let lit = fill_sequence(&input, &FillOpts { lighting: 1.0, ..Default::default() }, &mut |_, _| true).expect("fill");
-        let score = |o: &[Image]| (0..6).map(|t| psnr(&o[t], &gts[t], Some(&input.holes[t]))).sum::<f64>();
+        let score = |o: &[Image]| (0..6).map(|t| psnr(&o[t], &gts[t], Some(&input.holes[t].to_vec()))).sum::<f64>();
         assert!(score(&lit) > score(&plain), "lit {} vs plain {}", score(&lit), score(&plain));
     }
 }

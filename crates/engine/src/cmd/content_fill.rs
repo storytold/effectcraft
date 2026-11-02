@@ -13,7 +13,7 @@ use std::sync::Arc;
 use effectcraft_color::Label;
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, LayerId, LayerSource, build};
 use effectcraft_raster::Image;
-use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, dilate};
+use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, Frames, HoleMask, SpillHandle, dilate};
 use effectcraft_render::{Accelerator, EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -174,7 +174,9 @@ pub struct FillPlan {
 /// copy (16) until it finishes (#1789): when even that is more than `available`, the error to
 /// report up front, instead of running out of memory partway through.
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
-    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(33);
+    // After phases 2-4 the fill holds only the bit-packed hole masks (1 bit/pixel) plus a
+    // handful of working frames, so the per-pixel cost is ~1/4 of a byte.
+    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)) / 4;
     (need > available).then(|| {
         let gb = |b: u64| b as f64 / 1e9;
         format!(
@@ -224,17 +226,22 @@ pub(crate) async fn run_plan(
     let ctx0 = EvalCtx { expr, ..EvalCtx::new(project, cid, comp, Tick::ZERO) };
     let times = &plan.times;
     let n = times.len() as u64;
-    let mut frames = Vec::with_capacity(times.len());
+    let bpc: u8 = match project.settings.bit_depth {
+        effectcraft_project::BitDepth::Bpc8 => 8,
+        _ => 32,
+    };
+    let spill_path = std::env::temp_dir().join(format!("effectcraft-fill-{}.bin", crate::offload::next_id()));
+    let spill = SpillHandle::create(spill_path, w as usize, h as usize, times.len(), bpc).map_err(|e| e.to_string())?;
     let mut holes = Vec::with_capacity(times.len());
     for (k, t) in times.iter().enumerate() {
         let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(*t), layer, w, h)).await;
-        holes.push(dilate(&hole, w as usize, h as usize, plan.expand));
-        frames.push(img);
+        holes.push(HoleMask::from_vec(&dilate(&hole, w as usize, h as usize, plan.expand)));
+        spill.write_frame(k, &img);
         if !progress(k as u64 + 1, n * 3) {
             return Err(crate::render_queue::CANCELLED.into());
         }
     }
-    if !holes.iter().any(|h| h.iter().any(|b| *b)) {
+    if !holes.iter().any(|h| h.any()) {
         return Err("the layer has no transparent area to fill: draw a mask (Subtract) around what to remove".into());
     }
     let mut references = vec![];
@@ -249,23 +256,37 @@ pub(crate) async fn run_plan(
     }
     let opts = FillOpts { method: FillMethod::from_name(&plan.method).unwrap_or_default(), lighting: plan.lighting, ..Default::default() };
     message(filling_status(fill.is_some(), opts.method));
-    let input = FillInput { frames, holes, references };
+    let input = FillInput { frames: Frames::Spilled(spill), holes, references };
     let cpu = effectcraft_raster::inpaint::CpuFill;
     let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
-    let out = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3))
-        .ok_or(crate::render_queue::CANCELLED)?;
-    message("Writing the fill layer");
+    let progress = std::rc::Rc::new(std::cell::RefCell::new(progress));
     let dir = &plan.dir;
-    let mut paths = vec![];
-    for (k, img) in out.iter().enumerate() {
-        let path = std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string();
-        services.store_file(&path, &png(img)?).map_err(|e| format!("{path}: {e}"))?;
-        paths.push(path);
-        if !progress(2 * n + k as u64 + 1, n * 3) {
-            return Err(crate::render_queue::CANCELLED.into());
+    let paths: Vec<String> = (0..n as usize).map(|k| std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
+    let mut paths_out = Vec::with_capacity(n as usize);
+    let mut sink = |idx: usize, img: &Image| -> std::result::Result<(), String> {
+        services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
+        paths_out.push(paths[idx].clone());
+        if !(progress.borrow_mut())(2 * n + idx as u64 + 1, n * 3) {
+            return Err(crate::render_queue::CANCELLED.to_string());
+        }
+        Ok(())
+    };
+    let produced = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| (progress.borrow_mut())(n + (d as u64 * n / t.max(1) as u64), n * 3), Some(&mut sink))
+        .ok_or(crate::render_queue::CANCELLED)?;
+    // Non-streaming fallback (tests): write any retained images.
+    if !produced.is_empty() {
+        for (k, img) in produced.iter().enumerate() {
+            let path = paths[k].clone();
+            services.store_file(&path, &png(img)?).map_err(|e| format!("{path}: {e}"))?;
+            if paths_out.len() <= k {
+                paths_out.push(path);
+            }
+            if !(progress.borrow_mut())(2 * n + k as u64 + 1, n * 3) {
+                return Err(crate::render_queue::CANCELLED.to_string());
+            }
         }
     }
-    Ok(paths)
+    Ok(paths_out)
 }
 
 /// Add the fill layer of a finished plan (one undo step).
@@ -481,13 +502,13 @@ mod tests {
         assert_eq!(filling_status(false, FillMethod::Object), "Filling");
     }
 
-    /// #1789: 10 s of 1080p30 (300 frames) needs at least 20 GB, which 4 GB free can't hold.
+    /// #1789 / #2570: a range that cannot fit is refused up front instead of OOM-ing.
     #[test]
     fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
-        let e = memory_shortfall(300, 1920, 1080, 4_000_000_000).expect("refused");
+        let e = memory_shortfall(300, 1920, 1080, 1_000_000).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
-        assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a second of it fits");
+        assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a short range fits");
         // Hostile sizes saturate instead of overflowing.
-        assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, u64::MAX - 1).is_some());
+        assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
     }
 }
