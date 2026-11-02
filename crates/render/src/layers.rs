@@ -385,10 +385,16 @@ impl<'a> Renderer<'a> {
             return Region::Empty;
         }
         if layer.switches.adjustment {
-            self.draw_adjustment(ctx, layer, canvas, opacity);
+            let mut timing = self.layer_timing(ctx, layer);
+            let t0 = timing.as_ref().map(|_| web_time::Instant::now());
+            self.draw_adjustment(ctx, layer, canvas, opacity, timing.as_mut());
+            if let (Some(mut timing), Some(t0)) = (timing, t0) {
+                timing.process_ms = t0.elapsed().as_secs_f64() * 1e3;
+                self.record_timing(timing);
+            }
             return Region::Full;
         }
-        let mut timing = self.profile.map(|_| LayerTiming { depth: self.depth, layer: layer.name.clone(), ..Default::default() });
+        let mut timing = self.layer_timing(ctx, layer);
         let t0 = web_time::Instant::now();
         let Some(st) = self.styled(ctx, layer, timing.as_mut()) else { return Region::Empty };
         let st = self.styled_to_blend(st);
@@ -406,12 +412,10 @@ impl<'a> Renderer<'a> {
             self.composite_styled(ctx, layer, &st, canvas, opacity);
             Region::Full
         };
-        if let (Some(prof), Some(mut timing)) = (self.profile, timing) {
+        if let Some(mut timing) = timing {
             timing.process_ms = (t1 - t0).as_secs_f64() * 1e3;
             timing.composite_ms = t1.elapsed().as_secs_f64() * 1e3;
-            if let Ok(mut v) = prof.lock() {
-                v.push(timing);
-            }
+            self.record_timing(timing);
         }
         changed
     }
@@ -523,7 +527,7 @@ impl<'a> Renderer<'a> {
 
     /// Adjustment layer: effects applied to the comp below, limited to the layer's footprint
     /// and its track matte, and blended back in the layer's blend mode.
-    fn draw_adjustment(&self, ctx: &EvalCtx, layer: &Layer, canvas: &mut Image, opacity: f32) {
+    fn draw_adjustment(&self, ctx: &EvalCtx, layer: &Layer, canvas: &mut Image, opacity: f32, timing: Option<&mut LayerTiming>) {
         let Some(mut foot) = self.source(ctx, layer) else { return };
         let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
         let mut matte = Image::new(canvas.width, canvas.height);
@@ -535,7 +539,7 @@ impl<'a> Renderer<'a> {
         if let Some(c) = self.pipe.from_blend() {
             color::convert(&mut below.img, &c);
         }
-        let mut adjusted = self.apply_effects(ctx, layer, below, true);
+        let mut adjusted = self.apply_effects_timed(ctx, layer, below, true, usize::MAX, timing);
         // An effect that changed the frame (Motion Tile's Output size): back onto the canvas.
         if let Some((dx, dy)) =
             effectcraft_effects::adjustment_crop(adjusted.offset, o, (adjusted.img.width, adjusted.img.height), (canvas.width, canvas.height))

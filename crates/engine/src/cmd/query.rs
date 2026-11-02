@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 use super::{CommandSpec, b_p, comp_id, layer_p, str_p};
 use crate::{EngineError, Result, Session, query};
 
+fn profile(s: &mut Session, p: &Value) -> Result<Value> {
+    let report = s.profile_job(p)?()?;
+    serde_json::to_value(report).map_err(|e| EngineError::Other(format!("could not encode composition profile: {e}")))
+}
+
 fn list(s: &mut Session, p: &Value) -> Result<Value> {
     let filter = str_p(p, "filter").map(str::to_ascii_lowercase);
     let only = b_p(p, "enabledOnly").unwrap_or(false);
@@ -208,6 +213,12 @@ fn state(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        query!(
+            "comp.profile",
+            "Capture Composition Profile",
+            "{comp?, time?|frame?, scale?: 0.0625..1 (default 1)} → CPU reference capture, bypassing processed-layer cache; UI invocation captures off-thread, ui.inspect reports completion",
+            profile
+        ),
         query!("command.list", "List Commands", "{filter?, enabledOnly?, schemas? (add each command's params JSON Schema)}", list),
         query!("command.describe", "Describe Command", "{command} → id, label, menu, shortcut, params doc, JSON `schema`, enabled", describe),
         query!("app.capabilities", "App Capabilities", "{} → version, command/effect counts, export formats, parity summary", capabilities),

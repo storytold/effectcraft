@@ -248,3 +248,27 @@ window's outer position to its content's, by the main window's title bar, before
 Panels that were closed stay closed and reopen at their default place. The first save writes version 2 and keeps
 the earlier file as `workspaces.old.json`. A damaged, unknown or newer file loads as the default
 layout and is left unchanged.
+
+### Composition Profiler
+
+Open **Window ▸ Composition Profiler** (`window.panel {"panel":"compositionProfiler"}`),
+choose a resolution, and click **Capture Frame**. This explicitly renders a CPU reference frame
+with the processed-layer cache bypassed. The report shows layer identities, inclusive render
+costs, and effect instances in their original stack positions. Media and operating-system caches
+may still be warm. These times do not measure GPU preview execution.
+
+`engine.execute {"command":"comp.profile","params":{"comp":"Main","frame":12,"scale":0.5}}`
+returns the same structured report synchronously. Omit `comp` for the active composition and
+`frame`/`time` for that composition's current time. `time` is seconds; the report also carries exact
+`time` ticks. `scale` ranges from 0.0625 to 1; captures over 16 million output pixels are refused.
+
+UI invocation of `comp.profile` starts one background capture and returns `pending: true`.
+`ui.inspect` exposes `ui.profiler.busy`, `report`, `error`, and `stale`; a capture becomes older when
+the document, active composition, playhead or relevant render preferences change. Background UI
+capture is unavailable in the web app. `comp.profileOptions {"scale":0.5}` sets the panel resolution.
+
+Nested composition records, repeated effect reads, mattes, and motion samples may overlap; do not
+sum the rows or interpret them as percentages of the frame total. 3D preparation records exclude
+shared composition and lighting work, which remains in the frame total. Visible layers lacking
+individual instrumentation are listed as untimed, rather than zero cost. Reports identify any
+truncation at the diagnostic storage limits (2,048 layer records, 256 effect invocations per record).

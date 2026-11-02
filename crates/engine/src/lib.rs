@@ -96,6 +96,7 @@ pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
 pub use services::{FsServices, Importer, Services};
+pub mod profiler;
 pub use session::upgrade_effects;
 
 pub struct Session {

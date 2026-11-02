@@ -101,6 +101,23 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
 }
 
 impl<'a> Renderer<'a> {
+    pub(crate) fn layer_timing(&self, ctx: &EvalCtx, layer: &Layer) -> Option<LayerTiming> {
+        let profile = self.profile?;
+        if profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() >= crate::MAX_PROFILE_RECORDS {
+            return None;
+        }
+        Some(LayerTiming { depth: self.depth, comp: ctx.comp_id.0, layer_id: layer.id.0, layer: layer.name.clone(), ..Default::default() })
+    }
+
+    pub(crate) fn record_timing(&self, timing: LayerTiming) {
+        if let Some(profile) = self.profile {
+            let mut rows = profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if rows.len() < crate::MAX_PROFILE_RECORDS {
+                rows.push(timing);
+            }
+        }
+    }
+
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
         Renderer {
             project,
@@ -530,7 +547,15 @@ impl<'a> Renderer<'a> {
 
     /// Run the first `limit` effects of the layer's stack (by position; disabled ones count) on
     /// `buf` (layer space, or the comp below for an adjustment layer).
-    fn apply_effects_timed(&self, ctx: &EvalCtx, layer: &Layer, mut buf: Buf, adjustment: bool, limit: usize, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+    pub(crate) fn apply_effects_timed(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        mut buf: Buf,
+        adjustment: bool,
+        limit: usize,
+        timing: Option<&mut LayerTiming>,
+    ) -> Buf {
         // The comp below an adjustment layer is not in its layer space: it stays as it is.
         let origin = if adjustment { [0.0; 2] } else { ctx.effect_bounds(layer).1 };
         buf.rebase(origin);
@@ -541,7 +566,7 @@ impl<'a> Renderer<'a> {
 
     /// [`Renderer::apply_effects_timed`] on a buffer already in effect space (measured from
     /// `origin`, in layer coordinates); the result stays in effect space.
-    fn effect_space_stack(&self, ctx: &EvalCtx, layer: &Layer, buf: Buf, stack: EffectStack, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+    fn effect_space_stack(&self, ctx: &EvalCtx, layer: &Layer, buf: Buf, stack: EffectStack, timing: Option<&mut LayerTiming>) -> Buf {
         let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf) };
         self.run_effect_stack(ctx, layer, stack, timing, &mut t);
         t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale })
@@ -551,14 +576,7 @@ impl<'a> Renderer<'a> {
     /// in layer coordinates): runs of GPU-capable effects go to [`FxTarget::gpu`] (when an
     /// accelerator is active and supports them), the rest to [`FxTarget::cpu`] one by one
     /// (quantised to the bit depth after each).
-    pub(crate) fn run_effect_stack(
-        &self,
-        ctx: &EvalCtx,
-        layer: &Layer,
-        stack: EffectStack,
-        mut timing: Option<&mut Vec<(String, f64)>>,
-        target: &mut dyn FxTarget,
-    ) {
+    pub(crate) fn run_effect_stack(&self, ctx: &EvalCtx, layer: &Layer, stack: EffectStack, mut timing: Option<&mut LayerTiming>, target: &mut dyn FxTarget) {
         let EffectStack { adjustment, limit, origin } = stack;
         if !layer.switches.effects {
             return;
@@ -660,7 +678,7 @@ impl<'a> Renderer<'a> {
                 if target.gpu(&steps) {
                     if let Some(v) = timing.as_deref_mut() {
                         let ms = t0.elapsed().as_secs_f64() * 1e3 / run.len() as f64;
-                        v.extend(run.iter().map(|(_, _, s)| (format!("{} (gpu)", s.id), ms)));
+                        v.effects.extend(run.iter().map(|(_, _, s)| (format!("{} (gpu)", s.id), ms)));
                     }
                     k += run.len();
                     continue;
@@ -679,7 +697,13 @@ impl<'a> Renderer<'a> {
                 buf
             });
             if let Some(v) = timing.as_deref_mut() {
-                v.push((spec.id.to_string(), t0.elapsed().as_secs_f64() * 1e3));
+                if v.effect_instances.len() >= 256 {
+                    v.truncated = true;
+                    continue;
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1e3;
+                v.effects.push((spec.id.to_string(), ms));
+                v.effect_instances.push(crate::EffectTiming { index: i, uid: g.uid, effect: spec.id.into(), name: g.name.clone(), ms });
             }
         }
     }
@@ -929,7 +953,14 @@ impl<'a> Renderer<'a> {
     }
 
     fn layer_buf_keyed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<(Arc<Buf>, Option<u64>)> {
-        let st = self.styled(ctx, layer, None)?;
+        let mut timing = self.layer_timing(ctx, layer);
+        let t0 = timing.as_ref().map(|_| web_time::Instant::now());
+        let st = self.styled(ctx, layer, timing.as_mut())?;
+        if let (Some(mut timing), Some(t0)) = (timing, t0) {
+            timing.process_ms = t0.elapsed().as_secs_f64() * 1e3;
+            timing.processing_only = true;
+            self.record_timing(timing);
+        }
         if st.passes.is_empty() {
             return Some((st.body, st.key));
         }
@@ -996,7 +1027,7 @@ impl<'a> Renderer<'a> {
             return Some((b, key));
         }
         let buf = self.masked_source(ctx, layer)?;
-        let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)));
+        let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing));
         // The buffer the cache keeps (another worker's, if it kept one first).
         let buf = match (self.cache_to_keep(), key) {
             (Some(c), Some(k)) => c.insert(k, buf),

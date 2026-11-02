@@ -600,6 +600,8 @@ pub struct UiState {
     /// Window ▸ Script Console input, output and history.
     #[serde(default)]
     pub script_console: crate::panels::script_console::ScriptConsole,
+    #[serde(default)]
+    pub profiler: crate::panels::profiler::ProfilerState,
     /// Tool shown in each toolbar slot.
     pub slot_tools: Vec<Tool>,
     pub workspace: String,
@@ -730,6 +732,7 @@ impl Default for UiState {
         UiState {
             tool: Tool::Selection,
             script_console: Default::default(),
+            profiler: Default::default(),
             slot_tools: Tool::SLOTS.iter().map(|s| s[0]).collect(),
             workspace: "Default".into(),
             dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),

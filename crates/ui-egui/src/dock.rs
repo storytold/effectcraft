@@ -21,6 +21,7 @@ pub enum PanelKind {
     Layer,
     Timeline,
     Info,
+    CompositionProfiler,
     Audio,
     Preview,
     EffectsPresets,
@@ -58,13 +59,14 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 34] = [
+    pub const ALL: [PanelKind; 35] = [
         PanelKind::Project,
         PanelKind::EffectControls,
         PanelKind::Composition,
         PanelKind::Layer,
         PanelKind::Timeline,
         PanelKind::Info,
+        PanelKind::CompositionProfiler,
         PanelKind::Audio,
         PanelKind::Preview,
         PanelKind::EffectsPresets,
@@ -102,6 +104,7 @@ impl PanelKind {
             PanelKind::Layer => "Layer",
             PanelKind::Timeline => "Timeline",
             PanelKind::Info => "Info",
+            PanelKind::CompositionProfiler => "Composition Profiler",
             PanelKind::Audio => "Audio",
             PanelKind::Preview => "Preview",
             PanelKind::EffectsPresets => "Effects & Presets",
@@ -364,7 +367,7 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
                     FixedSecond(300.0),
                     tabs(&[Composition, Layer, Footage], 0),
                     right(
-                        &[Info, Preview, Audio, Align, Character, Paragraph, LumetriScopes],
+                        &[Info, CompositionProfiler, Preview, Audio, Align, Character, Paragraph, LumetriScopes],
                         &[
                             EffectsPresets,
                             Properties,
