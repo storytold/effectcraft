@@ -5,7 +5,7 @@
 //! MIT OR Apache-2.0), reworked to take and return kurbo paths directly.
 //!
 //! Inputs are closed implicitly (a filled open path is painted as if closed). The sweep splits
-//! curves at intersections and y-extrema; [`tidy_segments`] re-joins pieces that came from one
+//! curves at intersections and y-extrema; `tidy_segments` re-joins pieces that came from one
 //! input curve (exactly) or one smooth run (by least-squares refit), so results carry roughly as
 //! few vertices as the inputs. Output contours are simple and consistently oriented (holes wind
 //! opposite to their outer contour), so they fill the same under either fill rule.

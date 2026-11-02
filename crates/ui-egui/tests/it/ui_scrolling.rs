@@ -314,7 +314,8 @@ fn panels_taller_than_their_space_have_a_scroll_bar_to_drag() {
         click_at(&mut h, pos2(bar.center().x, bar.min.y + 2.0));
         assert_eq!(scrolled(&h, id).0, 0.0, "{id}: at the top");
         drag(&mut h, pos2(bar.center().x, bar.min.y + 6.0), pos2(bar.center().x, bar.max.y + 40.0));
-        assert_eq!(scrolled(&h, id).0, max, "{id}: dragged to the end");
+        let end = scrolled(&h, id).0;
+        assert!((end - max).abs() < 0.01, "{id}: dragged to the end: {end} of {max}");
     }
 }
 
@@ -332,7 +333,7 @@ fn effect_values_stay_clear_of_the_keyframe_navigator() {
     app.session.execute("prop.toggleAnimation", json!({"layer": lid, "path": path})).unwrap();
     app.session.execute("prop.set", json!({"layer": lid, "path": path, "value": [123456.7, 123456.7]})).unwrap();
     let uid = app.session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(lid)).unwrap().props.prop(path).unwrap().uid;
-    assert!(app.edit_layout(|l| l.float(PanelKind::EffectControls, [300.0, 150.0, 330.0, 500.0])));
+    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [300.0, 150.0, 330.0, 500.0] }).unwrap();
     h.run_steps(3);
     let value = rect(&h, &format!("effectControls.prop.{uid}.value.1"));
     let nav = rect(&h, &format!("effectControls.prop.{uid}.prevKey"));

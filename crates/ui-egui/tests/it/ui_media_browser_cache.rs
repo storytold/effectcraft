@@ -1,3 +1,4 @@
+use crate::gpu_test::RenderSerial;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -140,6 +141,6 @@ fn browser_cache_refreshes_filters_navigates_and_recovers_from_errors() {
     assert_eq!(names(&listing(&h, false).1), ["Sub", "Added.csv", "Clip.csv", "From action.csv"]);
     assert!(h.state().auto.find("mediaBrowser.entry.Clip.csv").is_some());
     if let Ok(path) = std::env::var("MEDIA_BROWSER_SNAPSHOT") {
-        h.render().unwrap().save(path).unwrap();
+        h.render_serialized().unwrap().save(path).unwrap();
     }
 }

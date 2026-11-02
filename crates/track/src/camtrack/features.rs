@@ -61,15 +61,24 @@ impl TrackAnalyzer {
 
     /// Analyse the next frame.
     pub fn push(&mut self, frame: &Frame) {
-        let (max_side, want) = self.params();
+        let (max_side, _) = self.params();
         let factor = analysis_factor(frame.img.width, frame.img.height, max_side);
-        self.factor = factor as f64;
         let pyr = GrayPyramid::from_image(frame.img, frame.offset, factor, 4);
+        let prev = self.prev.take();
+        self.push_pyramid(prev.as_ref(), &pyr);
+        self.prev = Some(pyr);
+    }
+
+    /// Track using caller-owned consecutive pyramids. The caller retains the full pyramid
+    /// for the next frame; standalone camera analysis uses the same path through `push`.
+    pub(crate) fn push_pyramid(&mut self, prev: Option<&GrayPyramid>, pyr: &GrayPyramid) {
+        let (_, want) = self.params();
+        self.factor = pyr.factor;
         let k = self.frame;
-        match &self.prev {
+        match prev {
             Some(prev) if prev.width() == pyr.width() && prev.height() == pyr.height() && prev.offset == pyr.offset => {
                 let pts: Vec<[f64; 2]> = self.active.iter().map(|a| a.1).collect();
-                let q = track(prev, &pyr, &pts, None, &LkOpts { radius: 6, iterations: 30, epsilon: 0.005, fb_max: 0.5, ..Default::default() });
+                let q = track(prev, pyr, &pts, None, &LkOpts { radius: 6, iterations: 30, epsilon: 0.005, fb_max: 0.5, ..Default::default() });
                 let mut next = Vec::with_capacity(self.active.len());
                 for ((ti, _), q) in self.active.iter().zip(q) {
                     if let Some(q) = q {
@@ -101,14 +110,13 @@ impl TrackAnalyzer {
                 !occ.get(cy * gw + cx).copied().unwrap_or(true)
             };
             let opts = CornerOpts { max_features: want - self.active.len().min(want), min_distance: md, quality: 0.001, window: 2, border: 8 };
-            for p in good_features(&pyr, &opts, Some(&free)) {
+            for p in good_features(pyr, &opts, Some(&free)) {
                 let l = pyr.to_layer(p);
                 let id = self.tracks.len() as u32;
                 self.tracks.push(Track2D { id, start: k, pts: vec![[l[0] as f32, l[1] as f32]] });
                 self.active.push((id as usize, p));
             }
         }
-        self.prev = Some(pyr);
         self.frame += 1;
     }
 

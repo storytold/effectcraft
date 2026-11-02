@@ -155,7 +155,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
                 } else {
                     eprintln!("bench: {} {kind}", sc.name);
                 }
-                let row = measure(&bin, &dir, sc, kind, frames, &o.format, timer, &ctx)?;
+                let row = measure(&bin, &dir, sc, &Measurement { kind, frames, format: &o.format }, timer, &ctx)?;
                 append_line(&results_path, &row)?;
                 rows.push(row);
             }
@@ -679,8 +679,14 @@ fn utc(t: u64) -> String {
     format!("{y:04}-{}", dt.format("%m-%d %H:%M UTC"))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn measure(bin: &Path, dir: &Path, sc: &Scenario, kind: &str, frames: u32, format: &str, timer: TimeTool, ctx: &RunContext) -> Result<Value, String> {
+struct Measurement<'a> {
+    kind: &'a str,
+    frames: u32,
+    format: &'a str,
+}
+
+fn measure(bin: &Path, dir: &Path, sc: &Scenario, measurement: &Measurement<'_>, timer: TimeTool, ctx: &RunContext) -> Result<Value, String> {
+    let Measurement { kind, frames, format } = *measurement;
     let out_dir = dir.join("out").join(format!("{}-{kind}", sc.name.replace(['/', '\\', ' '], "_")));
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;

@@ -62,14 +62,14 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     p.text(
         pos2(x, y + 26.0),
         Align2::LEFT_CENTER,
-        "Start from a ready-made project. Opening a template makes an untitled copy.",
+        crate::i18n::tr("Start from a ready-made project. Opening a template makes an untitled copy."),
         Tokens::ui(11.5),
         t.text_faint,
     );
     // Save the open project as a user template.
     let can_save = app.session.project.comps().next().is_some();
     let sr = Rect::from_min_size(pos2(area.max.x - 210.0, y - 4.0), vec2(210.0, 28.0));
-    let save = widgets::text_button(ui, sr, "Save Current as Template…", false, &t, egui::Id::unique("home-templates-save")).clicked();
+    let save = widgets::text_button(ui, sr, crate::i18n::tr("Save Current as Template…"), false, &t, egui::Id::unique("home-templates-save")).clicked();
     app.auto.add("home.templates.saveCurrent", sr, "Save Current as Template…");
     if save {
         if can_save {

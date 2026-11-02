@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn cli(dir: &PathBuf, args: &[&str]) -> (i32, Value) {
-    let out = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli")).current_dir(dir).args(args).arg("--json").output().unwrap();
+    let out = Command::new(crate::binary()).current_dir(dir).args(args).arg("--json").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let v = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{args:?}: {e}: {stdout} {}", String::from_utf8_lossy(&out.stderr)));
     (out.status.code().unwrap_or(-1), v)
@@ -152,6 +152,13 @@ fn essential_graphics_template_via_script_and_commands() {
     assert_eq!(image::open(&frames[0]).unwrap().to_rgba8(), edit);
     assert_eq!(std::fs::read(dir.join("lt.ectemplate")).unwrap(), original_template);
 
+    invalid_template_values_fail_cleanly(&dir);
+    template_usage_errors(&dir);
+    rational_template_keeps_exact_rate(&dir, &original_template);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn invalid_template_values_fail_cleanly(dir: &PathBuf) {
     // Invalid values fail before the queue creates an output directory, or frame rendering
     // overwrites an existing output. A JSON object and existing control names are required.
     for (name, values, expected) in [
@@ -164,25 +171,27 @@ fn essential_graphics_template_via_script_and_commands() {
         std::fs::write(dir.join(&values_file), values).unwrap();
         let output_dir = dir.join(format!("failed-{name}"));
         let out = output_dir.join("frame_[#####].png");
-        let (code, error) = cli(&dir, &["render", "--template", "lt.ectemplate", "--values", &values_file, "--out", out.to_str().unwrap()]);
+        let (code, error) = cli(dir, &["render", "--template", "lt.ectemplate", "--values", &values_file, "--out", out.to_str().unwrap()]);
         assert_eq!(code, 1, "{name}: {error}");
         assert!(error["error"].as_str().unwrap().contains(expected), "{name}: {error}");
         assert!(!output_dir.exists(), "{name}: invalid input created render output");
         std::fs::write(dir.join("untouched.png"), b"existing output").unwrap();
-        let (code, error) = cli(&dir, &["render-frame", "--template", "lt.ectemplate", "--values", &values_file, "--out", "untouched.png"]);
+        let (code, error) = cli(dir, &["render-frame", "--template", "lt.ectemplate", "--values", &values_file, "--out", "untouched.png"]);
         assert_eq!(code, 1, "{name}: {error}");
         assert_eq!(std::fs::read(dir.join("untouched.png")).unwrap(), b"existing output");
     }
-    let (code, error) = cli(&dir, &["render-frame", "--template", "lt.ectemplate", "--values", "missing-values.json", "--out", "missing.png"]);
+    let (code, error) = cli(dir, &["render-frame", "--template", "lt.ectemplate", "--values", "missing-values.json", "--out", "missing.png"]);
     assert_eq!(code, 1, "{error}");
     assert!(error["error"].as_str().unwrap().contains("cannot read values"), "{error}");
     assert!(!dir.join("missing.png").exists());
     std::fs::write(dir.join("large-values.json"), vec![b' '; 1024 * 1024 + 1]).unwrap();
-    let (code, error) = cli(&dir, &["render-frame", "--template", "lt.ectemplate", "--values", "large-values.json", "--out", "large.png"]);
+    let (code, error) = cli(dir, &["render-frame", "--template", "lt.ectemplate", "--values", "large-values.json", "--out", "large.png"]);
     assert_eq!(code, 1, "{error}");
     assert!(error["error"].as_str().unwrap().contains("exceeds 1 MiB"), "{error}");
     assert!(!dir.join("large.png").exists());
+}
 
+fn template_usage_errors(dir: &PathBuf) {
     for args in [
         vec!["render-frame", "--values", "values.json"],
         vec!["info", "--template", "lt.ectemplate"],
@@ -191,10 +200,12 @@ fn essential_graphics_template_via_script_and_commands() {
         vec!["render", "--template", "lt.ectemplate", "--queue"],
         vec!["render-frame", "--template", "lt.ectemplate", "--bridge", "1"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli")).current_dir(&dir).args(&args).output().unwrap();
+        let output = Command::new(crate::binary()).current_dir(dir).args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
+}
 
+fn rational_template_keeps_exact_rate(dir: &PathBuf, original_template: &[u8]) {
     // File-loaded templates can use exact rational rates that comp.new's float parser rounds.
     // Preserve that rate, Tick duration, work area, background and locked source layers.
     let mut project = effectcraft_engine::project::Project::from_json(&std::fs::read_to_string(dir.join("t.ecproj")).unwrap()).unwrap();
@@ -207,13 +218,13 @@ fn essential_graphics_template_via_script_and_commands() {
     comp.background = [0.08, 0.16, 0.24];
     comp.layers.first_mut().unwrap().switches.locked = true;
     std::fs::write(dir.join("rational.ecproj"), project.to_json()).unwrap();
-    ok(&dir, &["exec", "essential.exportTemplate", r#"{"comp":"Lower Third","path":"rational.ectemplate"}"#, "rational.ecproj"]);
+    ok(dir, &["exec", "essential.exportTemplate", r#"{"comp":"Lower Third","path":"rational.ectemplate"}"#, "rational.ecproj"]);
     let rational_template = std::fs::read(dir.join("rational.ectemplate")).unwrap();
-    let rational = ok(&dir, &["render-frame", "--template", "rational.ectemplate", "--frame", "5", "--out", "rational.png"]);
+    let rational = ok(dir, &["render-frame", "--template", "rational.ectemplate", "--frame", "5", "--out", "rational.png"]);
     assert!((rational["time"].as_f64().unwrap() - 5.0 / rate.as_f64()).abs() < 1e-9, "{rational}");
     assert_eq!((rational["width"].as_u64().unwrap(), rational["height"].as_u64().unwrap()), (320, 90));
     let output = dir.join("rational-work-area/frame_[#####].png");
-    ok(&dir, &["render", "--template", "rational.ectemplate", "--work-area", "--out", output.to_str().unwrap(), "--format", "png", "--resolution", "0.05"]);
+    ok(dir, &["render", "--template", "rational.ectemplate", "--work-area", "--out", output.to_str().unwrap(), "--format", "png", "--resolution", "0.05"]);
     let count = std::fs::read_dir(dir.join("rational-work-area"))
         .unwrap()
         .filter_map(Result::ok)
@@ -222,8 +233,8 @@ fn essential_graphics_template_via_script_and_commands() {
     assert_eq!(count, 4, "the template's exact work area contains frames 3 through 6");
     assert_eq!(std::fs::read(dir.join("rational.ectemplate")).unwrap(), rational_template);
     assert_eq!(std::fs::read(dir.join("lt.ectemplate")).unwrap(), original_template);
-    let _ = std::fs::remove_dir_all(&dir);
 }
+
 fn template_output_alias_fixture(case: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ec-qa-template-output-{case}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -251,7 +262,7 @@ fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) -> Value {
     let template_before = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_before = std::fs::read(dir.join("values.json")).unwrap();
     // Read the inputs before interpreting the subprocess status or error text.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
+    let result = Command::new(crate::binary())
         .current_dir(dir)
         .args(["render-frame", "--template", "lt.ectemplate", "--values", "values.json", "--time", "1", "--out", out, "--json"])
         .output()
@@ -527,7 +538,7 @@ fn template_unknown_control_does_not_replace_extracted_media() {
     let invalid_values_before = std::fs::read(dir.join("bad-values.json")).unwrap();
 
     // Capture every file before interpreting status/JSON, so a failed command cannot hide a write.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
+    let result = Command::new(crate::binary())
         .current_dir(&dir)
         .args(["render-frame", "--template", "lt.ectemplate", "--values", "bad-values.json", "--time", "1", "--out", "failed.png", "--json"])
         .output()
@@ -623,11 +634,8 @@ fn template_missing_output_does_not_replace_extracted_media() {
     assert_ne!(sentinel_before, source_before);
 
     // Observe writes before interpreting the actual CLI usage exit.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
-        .current_dir(&dir)
-        .args(["render", "--template", "lt.ectemplate", "--values", "values.json", "--json"])
-        .output()
-        .unwrap();
+    let result =
+        Command::new(crate::binary()).current_dir(&dir).args(["render", "--template", "lt.ectemplate", "--values", "values.json", "--json"]).output().unwrap();
     let template_after = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_after = std::fs::read(dir.join("values.json")).unwrap();
     let source_after = std::fs::read(dir.join("source.png")).unwrap();

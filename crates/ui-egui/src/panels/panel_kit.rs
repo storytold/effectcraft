@@ -23,7 +23,7 @@ pub fn dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str
 pub fn checkbox(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(at, vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("kit-cb", auto))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("kit-cb", auto))).changed();
     ui.painter().text(pos2(r.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     let full = Rect::from_min_size(at, vec2(22.0 + text.len() as f32 * 6.5, 16.0));
     app.auto.add(auto, full, text);
@@ -47,7 +47,7 @@ pub fn label(ui: &egui::Ui, at: egui::Pos2, text: &str, t: &Tokens) {
 #[allow(clippy::too_many_arguments)]
 pub fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, v: f64, speed: f64, range: (f64, f64), dec: usize, suffix: &str) -> f64 {
     let t = app.tokens;
-    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("kit-n", auto)), v, speed, range, dec, suffix, &t);
+    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("kit-n", auto)), v, &widgets::HotSpec { speed, range, decimals: dec, suffix }, &t);
     app.auto.add(auto, r, &format!("{v}"));
     nv.unwrap_or(v)
 }

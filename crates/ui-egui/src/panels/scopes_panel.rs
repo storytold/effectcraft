@@ -38,6 +38,10 @@ struct Cached {
     tex: Option<egui::TextureHandle>,
 }
 
+/// The Scopes panel: the scope kind, colour standard, 8-bit/Float scale and Clamp Signal controls,
+/// then the chosen scope for the active comp's frame at the current time, cached per revision,
+/// comp, time, settings and plot size (drawn as a texture, or bars for the histogram) over its
+/// graticule. The controls update `app.ui.scopes`; the scope itself is only computed and drawn.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

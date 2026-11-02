@@ -2,7 +2,6 @@
 //! radii, parameter conversions), with the pixel loops as compute kernels.
 
 use effectcraft_effects::{Buf, EffectCtx};
-use effectcraft_geom::{Mat3, vec2};
 use effectcraft_raster::Sampling;
 use effectcraft_render::FxStep;
 
@@ -23,12 +22,45 @@ pub(crate) struct GBuf {
 }
 
 impl GBuf {
+    /// [`effectcraft_effects::Buf::cover`] on the device; `None` when it can't hold it.
+    pub fn cover(&mut self, e: &mut Enc, size: [f64; 2]) -> Option<()> {
+        let Some((dx, dy, w, h)) = effectcraft_effects::cover_plan(self.offset, self.scale, size, self.img.width, self.img.height) else { return Some(()) };
+        if !e.g.fits(w, h) {
+            return None;
+        }
+        let out = e.image(w, h);
+        e.copy_into(&self.img, &out, dx, dy);
+        self.img = out;
+        self.offset[0] += dx as f64;
+        self.offset[1] += dy as f64;
+        Some(())
+    }
+
     pub fn to_px(&self, p: [f64; 2]) -> (f64, f64) {
         (p[0] * self.scale + self.offset[0], p[1] * self.scale + self.offset[1])
     }
 
+    /// Buf::pad_sides: grow by transparent pixels (left, top, right, bottom).
+    pub fn pad_sides(&mut self, e: &mut Enc, sides: [u32; 4]) -> Option<()> {
+        let [l, t, r, b] = sides;
+        if l == 0 && t == 0 && r == 0 && b == 0 {
+            return Some(());
+        }
+        let (w, h) = (self.img.width.checked_add(l)?.checked_add(r)?, self.img.height.checked_add(t)?.checked_add(b)?);
+        if !e.g.fits(w, h) {
+            return None;
+        }
+        let out = e.image(w, h);
+        e.copy_into(&self.img, &out, l, t);
+        self.img = out;
+        self.offset[0] += l as f64;
+        self.offset[1] += t as f64;
+        Some(())
+    }
+
     /// Buf::pad: grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, e: &mut Enc, pad: u32) -> Option<()> {
+        let pad = effectcraft_effects::pad_within_budget(self.img.width, self.img.height, pad);
         if pad == 0 {
             return Some(());
         }
@@ -149,12 +181,23 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
     /// readback. A region the device can't allocate leaves the buffer as it is.
     fn cover(&mut self, size: [f64; 2]) {
+        let Some(mut b) = self.b.take() else { return };
+        let keep = (b.img.clone(), b.offset);
+        if b.cover(self.e, size).is_none() {
+            (b.img, b.offset) = keep;
+        }
+        self.b = Some(b);
+    }
+
+    /// [`effectcraft_effects::Buf::align`] on the device: a texture grown left/top, the old one
+    /// copied in. A size the device can't allocate leaves the buffer as it is.
+    fn align(&mut self, size: [f64; 2]) {
         let Some(b) = self.b.take() else { return };
-        let out = match effectcraft_effects::cover_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
-            Some((dx, dy, w, h)) if self.e.g.fits(w, h) => {
-                let img = self.e.image(w, h);
-                self.e.copy_into(&b.img, &img, dx, dy);
-                GBuf { img, offset: [b.offset[0] + dx as f64, b.offset[1] + dy as f64], scale: b.scale }
+        let out = match effectcraft_effects::align_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
+            Some((l, t)) if self.e.g.fits(b.img.width + l, b.img.height + t) => {
+                let img = self.e.image(b.img.width + l, b.img.height + t);
+                self.e.copy_into(&b.img, &img, l, t);
+                GBuf { img, offset: [b.offset[0] + l as f64, b.offset[1] + t as f64], scale: b.scale }
             }
             _ => b,
         };
@@ -234,7 +277,13 @@ pub(crate) fn box_passes(e: &mut Enc, img: &GpuImage, rx: &[usize], ry: &[usize]
         let mut p = Params::default();
         p.u[0] = [r as u32, repeat as u32, block, 0];
         let out = e.scratch(cur.width, cur.height);
-        e.dispatch(if vertical { "box_v" } else { "box_h" }, &p, &cur, None, &out, None, (lines.div_ceil(64), n.div_ceil(block)));
+        e.dispatch(
+            if vertical { "box_v" } else { "box_h" },
+            &p,
+            crate::context::KernelImages { src: &cur, aux: None, out: &out },
+            None,
+            (lines.div_ceil(64), n.div_ceil(block)),
+        );
         cur = out;
     }
     cur
@@ -268,6 +317,9 @@ fn gaussian(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad(e, (s * 3.0).ceil() as u32)?;
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(e, ctx.layer_size)?;
     }
     b.img = gaussian_blur(e, &b.img, s * kx, s * ky, repeat || ctx.adjustment);
     Some(b)
@@ -288,6 +340,9 @@ fn box_blur(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad(e, (r * it) as u32 + 1)?;
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(e, ctx.layer_size)?;
     }
     b.img = box_passes(e, &b.img, &vec![r * kx as usize; it], &vec![r * ky as usize; it], repeat || ctx.adjustment);
     Some(b)
@@ -333,10 +388,11 @@ fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     p.f[2] = cb;
     let bright = e.image(b.img.width, b.img.height);
     e.pixels("glow_bright", &p, &b.img, None, &bright, None);
-    let s = (radius / 2.0).max(0.5);
+    let s = effectcraft_effects::glow_sigma(radius);
     let blurred = gaussian_blur(e, &bright, s * kx, s * ky, false);
     let mut p = Params::default();
     p.u[0][0] = ctx.params.e("operation").min(2);
+    p.u[0][1] = (ctx.params.e("based") == 0) as u32;
     p.f[0][0] = intensity;
     let out = e.scratch(b.img.width, b.img.height);
     e.pixels("glow_combine", &p, &b.img, Some(&blurred), &out, None);
@@ -378,19 +434,17 @@ fn transform(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     if ctx.env.host.is_some() && effectcraft_effects::transform_shutter(ctx).is_some() {
         return None;
     }
-    let anchor = b.to_px(ctx.params.v2("anchor"));
-    let pos = b.to_px(ctx.params.v2("position"));
-    let sh = ctx.params.f("scaleHeight");
-    let sw = if ctx.params.b("uniform") { sh } else { ctx.params.f("scaleWidth") };
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
-    let m = Mat3::translate(vec2(pos.0, pos.1))
-        * Mat3::rotate_deg(ctx.params.f("rotation"))
-        * Mat3::skew_deg(ctx.params.f("skew"), ctx.params.f("skewAxis"))
-        * Mat3::scale(vec2(sw / 100.0, sh / 100.0))
-        * Mat3::translate(vec2(-anchor.0, -anchor.1));
+    // As distort::transform: After Effects' matrix, drawn outside the layer's bounds.
+    if !ctx.adjustment {
+        let m = effectcraft_effects::transform_matrix_px(ctx.params, |p| b.to_px(p));
+        let sides = effectcraft_effects::transform_grow(&[m], b.img.width, b.img.height);
+        b.pad_sides(e, sides)?;
+    }
+    let m = effectcraft_effects::transform_matrix_px(ctx.params, |p| b.to_px(p));
     let sampling = if ctx.params.e("sampling") == 1 { Sampling::Bicubic } else { Sampling::Bilinear };
     let empty = e.image(b.img.width, b.img.height);
-    b.img = ops::warp(e, &empty, &b.img, &m, sampling, effectcraft_color::BlendMode::Normal, opacity, 0, None);
+    b.img = ops::warp(e, &empty, &b.img, &m, ops::WarpOptions { sampling, mode: effectcraft_color::BlendMode::Normal, opacity, seed: 0 }, None);
     Some(b)
 }
 
@@ -537,9 +591,19 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             let sub = (f("subSettings/subScaling") / 100.0).clamp(0.1, 1.0);
             p.u[0] = [10, kind, octaves.ceil() as u32, f("evolutionOptions/seed") as u32 ^ 0x51ed];
             p.u[1] = [pr.b("invert") as u32, pr.e("overflow"), mode, 0];
-            p.f[0] = [f("contrast") as f32 / 100.0, f("brightness") as f32 / 100.0, (sw * b.scale).max(1.0) as f32, (octaves - octaves.floor()) as f32];
+            p.f[0] = [
+                f("contrast") as f32 / 100.0,
+                f("brightness") as f32 / 100.0,
+                (sw * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
+                (octaves - octaves.floor()) as f32,
+            ];
             p.f[1] = [ox as f32, oy as f32, sr, cr];
-            p.f[2] = [f("evolution") as f32 / 360.0, f("blend") as f32 / 100.0, (f("opacity") as f32 / 100.0).clamp(0.0, 1.0), (sh * b.scale).max(1.0) as f32];
+            p.f[2] = [
+                f("evolution") as f32 / 360.0,
+                f("blend") as f32 / 100.0,
+                (f("opacity") as f32 / 100.0).clamp(0.0, 1.0),
+                (sh * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
+            ];
             p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, 0.0, 0.0];
         }
         _ => return None,

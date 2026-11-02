@@ -6,6 +6,11 @@ use egui::{Align2, Color32, Rect, pos2, vec2};
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
+/// The Info panel: the colour and alpha under the pointer (sampled from the shown viewer frame,
+/// read back for GPU frames) with its position and a swatch, then the selected layers, the current
+/// time, the duration/In/Out of a single selected layer, the achieved preview frame rate, the
+/// render time and queue state (when the preference asks for it) and the selected keyframe's
+/// property, time and value. Read-only: it draws and scrolls but changes no document state.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

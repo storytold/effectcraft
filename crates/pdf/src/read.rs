@@ -2,6 +2,7 @@
 //! Only reachable objects are retained, references keep their generation, and native parser
 //! panics (including lazy object reads) discard the entire partially populated adapter.
 
+use std::cell::LazyCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -10,12 +11,21 @@ use craft_pdf::syntax::object::{Dict as PdfDict, MaybeRef, Name, ObjRef, Object,
 use craft_pdf::syntax::xref::XRef;
 
 use crate::Error;
-use crate::object::{Dict, File, Lexer, Obj};
+use crate::object::{Dict, File, Lexer, Obj, is_delim, is_white, name_bytes};
 
 const MAX_OBJECTS: usize = 100_000;
 const MAX_VALUES: usize = 1_000_000;
 const MAX_DEPTH: usize = 64;
 const MAX_BYTES: usize = 512 * 1024 * 1024;
+/// How far after each `trailer` marker the encryption pre-scan lexes. A classic trailer
+/// dictionary is a few hundred bytes. If the lexer reaches the window's end before any object
+/// or inside a dictionary, the dictionary may start or continue past it, so the file is refused
+/// when a name token that decodes to `Encrypt`, in any spelling (`/Encrypt`, `/Encr#79pt`), ends
+/// past the window. This fallback is conservative: it refuses on any such name there, which in
+/// practice only encrypted files contain. The pre-scan stays linear in file size, at most
+/// `MAX_OBJECTS` windows (about 400 MB) and one search for the name, even when a marker is
+/// followed by an unterminated string or dictionary the lexer would follow to the end.
+const TRAILER_WINDOW: usize = 4 * 1024;
 
 fn limit(what: &str) -> Error {
     Error::Read(format!("PDF exceeds the {what} import limit"))
@@ -41,6 +51,15 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
     // Preserve the app's refusal of encrypted PDFs, including empty-user-password files.
     // Classic trailer dictionaries use the existing lexer; xref-stream dictionaries below
     // are read by the shared parser. This does not parse document objects a second time.
+    let regular = |c: u8| !is_white(c) && !is_delim(c);
+    // Where the last name token decoding to `Encrypt` (escaped or not) ends, searched at most once.
+    // Each token scan stops at the next `/`, so the search is linear.
+    let last_encrypt = LazyCell::new(|| {
+        bytes.iter().enumerate().rev().filter(|&(_, &c)| c == b'/').find_map(|(at, _)| {
+            let token = bytes.get(at + 1..).unwrap_or_default().split(|&c| !regular(c)).next().unwrap_or_default();
+            name_bytes(token).eq(*b"Encrypt").then_some(at + 1 + token.len())
+        })
+    });
     let mut markers = 0;
     for (offset, word) in bytes.windows(7).enumerate() {
         if word == b"trailer" {
@@ -48,9 +67,28 @@ fn open_inner(bytes: &[u8]) -> Result<File, Error> {
             if markers > MAX_OBJECTS {
                 return Err(limit("trailer count"));
             }
-            if let Some(Obj::Dict(dict)) = Lexer::new(bytes, offset + 7).next()
-                && dict.contains_key("Encrypt")
-            {
+            let start = offset + 7;
+            let mut end = bytes.len().min(start.saturating_add(TRAILER_WINDOW));
+            // If the first object after the marker starts in the window and does not open a dictionary
+            // (`<<`), such as a string running on through a stream, no trailer dictionary follows the
+            // marker, so the fallback below does not apply.
+            let mut first = Lexer::new(bytes.get(..end).unwrap_or_default(), start);
+            first.skip_ws();
+            let maybe_dict = first.pos >= end || bytes.get(first.pos..).is_some_and(|rest| rest.starts_with(b"<<"));
+            // A window ending inside a token (a regular byte on each side of the cut) would read its
+            // first part as all of it, such as `/Encrypt` of `/Encrypted`. It ends before that token
+            // instead, so the fallback below reads the token whole.
+            if bytes.get(end).is_some_and(|&c| regular(c)) {
+                end = end.saturating_sub(bytes.get(start..end).unwrap_or_default().iter().rev().take_while(|&&c| regular(c)).count());
+            }
+            let window = bytes.get(start..end).unwrap_or_default();
+            let mut lexer = Lexer::new(window, 0);
+            let encrypt = matches!(lexer.next(), Some(Obj::Dict(dict)) if dict.contains_key("Encrypt"));
+            // Whatever it returned, a lexer at the window's end (one past it after an unterminated
+            // hex string) may have stopped before the dictionary started or partway through it, so
+            // an `Encrypt` name in any spelling that ends past the window refuses the file.
+            let cut = maybe_dict && lexer.pos >= window.len() && last_encrypt.is_some_and(|name_end| name_end > end);
+            if encrypt || cut {
                 return Err(Error::Encrypted);
             }
         }

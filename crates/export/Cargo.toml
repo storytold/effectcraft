@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-export"
-description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) via FilmCraft, HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1 + Opus) via EffectCraft encoders, PNG/JPEG/TIFF/EXR sequences, animated GIF, WAV/AIFF"
+description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) via FilmCraft, HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1 + Opus) via EffectCraft encoders, PNG/JPEG/TIFF/EXR/Targa sequences, animated GIF, WAV/AIFF"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ effectcraft-opusenc = { workspace = true }
 effectcraft-vp9enc = { workspace = true }
 effectcraft-hevcenc = { workspace = true }
 effectcraft-av1enc = { workspace = true }
-image = { workspace = true, features = ["png", "jpeg", "tiff", "exr"] }
+image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
 gif = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
