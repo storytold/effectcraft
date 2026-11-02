@@ -594,7 +594,7 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         acts.push(Act::Resize(id, dock));
     }
     let content = rect;
-    egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
+    panel_scroll(ui, ("scriptui-panel", id), content.size(), |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
@@ -602,6 +602,18 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();
     perform(app, &ctx, acts);
+}
+
+/// The scroll area a docked ScriptUI panel shows its window in, at most `size` big. Its bars are
+/// floating (egui's default), not the solid bars the menus use (#269): solid bars reserve their
+/// width once shown, so a window that exactly fills its dock counted as too large for the space
+/// left and its bars never went away (#2796).
+fn panel_scroll<R>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, size: egui::Vec2, body: impl FnOnce(&mut egui::Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+    ui.scope(|ui| {
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::floating();
+        egui::ScrollArea::both().id_salt(salt).max_width(size.x).max_height(size.y).show(ui, body)
+    })
+    .inner
 }
 
 /// Tab title of a script panel.
@@ -624,6 +636,31 @@ pub fn sync_panels(app: &mut EffectcraftApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2796: with the app's solid scroll bars (#269), bars that once showed took width from the
+    /// viewport, so a window that exactly fills its dock stayed "too large" and kept them. A panel
+    /// whose content fits keeps the full viewport width after its content has overflowed.
+    #[test]
+    fn a_panel_that_fits_keeps_its_full_width() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let size = egui::vec2(300.0, 200.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut viewport = egui::Rect::NOTHING;
+        for frame in 0..12 {
+            // The first frame overflows the dock, so the bars show; then the content fits.
+            let content = if frame == 0 { size + egui::vec2(40.0, 40.0) } else { size };
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(frame as f64 * 0.1), predicted_dt: 0.1, ..Default::default() };
+            let _ = ctx.run_ui(input, |ui| {
+                let mut dock = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, size)));
+                viewport = panel_scroll(&mut dock, "panel-fit-test", size, |ui| {
+                    ui.allocate_exact_size(content, Sense::hover());
+                })
+                .inner_rect;
+            });
+        }
+        assert_eq!(viewport.width(), size.x, "content that fits keeps the full width");
+    }
 
     /// Script colours are sRGB, not linear: `#2B2B2B` drew as RGB 114 when read as linear light.
     #[test]
