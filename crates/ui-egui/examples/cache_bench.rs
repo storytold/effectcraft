@@ -10,7 +10,8 @@
 //!
 //! Options: `--project P --comp C` (a saved project's comp instead), `--scale S` (render scale,
 //! default 0.5: a viewer at half size), `--frames N` (frames to cache, default the whole comp),
-//! `--slots N` (frames in flight, default half the frame threads as the app does when idle),
+//! `--slots N` (frames in flight, at least 1, default one per frame thread as the app does when
+//! idle),
 //! `--disk` (with a fresh disk cache in `target/cache-bench/disk`), `--no-adjustment`.
 
 use std::sync::Arc;
@@ -73,9 +74,14 @@ fn main() {
     let cid = match arg("--project") {
         Some(p) => {
             run(&mut s, "file.open", json!({"path": p}));
-            let c = arg("--comp").unwrap_or_default();
-            let found = s.project.items.iter().find(|(id, it)| it.name == c || id.0.to_string() == c).map(|(id, _)| *id);
-            found.or_else(|| s.active_comp_id()).expect("a comp")
+            let comp = match arg("--comp") {
+                Some(c) => s.project.comps().find(|(id, _)| s.project.item(**id).is_some_and(|it| it.name == c) || id.0.to_string() == c).map(|(id, _)| *id),
+                None => s.active_comp_id(),
+            };
+            comp.unwrap_or_else(|| {
+                eprintln!("no such composition: {}", arg("--comp").unwrap_or_else(|| "(no active comp; pass --comp)".into()));
+                std::process::exit(2)
+            })
         }
         None => {
             let paths = clips(&dir);
@@ -107,7 +113,8 @@ fn main() {
     let scale: f64 = arg("--scale").and_then(|v| v.parse().ok()).unwrap_or(0.5);
 
     let frames = Frames::default();
-    let slots: usize = arg("--slots").and_then(|v| v.parse().ok()).unwrap_or((frames.parallelism() / 2).max(1));
+    // (as Cache Frames When Idle: one frame per frame thread, see `app/prefetch.rs`)
+    let slots: usize = arg("--slots").and_then(|v| v.parse().ok()).map(|n: usize| n.max(1)).unwrap_or(frames.parallelism().max(1));
     // Room for every frame: this measures speed, not eviction.
     frames.set_budget(64 << 30);
     let opts = RenderOpts { scale, motion_blur: true, ..Default::default() };
@@ -135,7 +142,7 @@ fn main() {
     let mut next = 0;
     loop {
         while next < n && frames.inflight() < slots {
-            frames.request(&src, FrameKey { frame: next, ..series }, cid, comp.frame_rate.tick_of(next), opts);
+            frames.request_background(&src, FrameKey { frame: next, ..series }, cid, comp.frame_rate.tick_of(next), opts);
             next += 1;
         }
         if next >= n && frames.inflight() == 0 {
@@ -158,7 +165,7 @@ fn main() {
     println!("footage cache     {} hits, {} misses, {} frames ({} MB) kept", p.hits, p.misses, p.frames, p.bytes >> 20);
     if let Some(dc) = &s.disk_cache {
         // (writes finish on the disk cache's own thread)
-        std::thread::sleep(Duration::from_secs(2));
+        dc.flush();
         let d = dc.stats();
         println!("disk cache        {} written, {} dropped, {} entries ({} MB)", d.writes, d.dropped, d.entries, d.bytes >> 20);
     }
