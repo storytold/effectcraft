@@ -604,14 +604,22 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     perform(app, &ctx, acts);
 }
 
-/// The scroll area a docked ScriptUI panel shows its window in, at most `size` big. Its bars are
-/// floating (egui's default), not the solid bars the menus use (#269): solid bars reserve their
-/// width once shown, so a window that exactly fills its dock counted as too large for the space
-/// left and its bars never went away (#2796).
+/// The scroll area a docked ScriptUI panel shows its window in, at most `size` big. Its own bars
+/// are floating, not the solid bars the app uses (#269): solid bars reserve their width once
+/// shown, so a window that exactly fills its dock counted as too large for the space left and its
+/// bars never went away (#2796). Floating bars keep the app's dormant opacities, so they stay
+/// visible, and the window's content (a ListBox's own scroll area, say) gets the app's solid bars.
 fn panel_scroll<R>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, size: egui::Vec2, body: impl FnOnce(&mut egui::Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
     ui.scope(|ui| {
-        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::floating();
-        egui::ScrollArea::both().id_salt(salt).max_width(size.x).max_height(size.y).show(ui, body)
+        let app_bars = ui.style().spacing.scroll.clone();
+        let mut bars = egui::style::ScrollStyle::floating();
+        bars.dormant_background_opacity = app_bars.dormant_background_opacity;
+        bars.dormant_handle_opacity = app_bars.dormant_handle_opacity;
+        ui.style_mut().spacing.scroll = bars;
+        egui::ScrollArea::both().id_salt(salt).max_width(size.x).max_height(size.y).show(ui, |ui| {
+            ui.style_mut().spacing.scroll = app_bars;
+            body(ui)
+        })
     })
     .inner
 }
@@ -659,7 +667,7 @@ mod tests {
                 .inner_rect;
             });
         }
-        assert_eq!(viewport.width(), size.x, "content that fits keeps the full width");
+        assert_eq!(viewport.size(), size, "content that fits keeps the full viewport");
     }
 
     /// Script colours are sRGB, not linear: `#2B2B2B` drew as RGB 114 when read as linear light.
