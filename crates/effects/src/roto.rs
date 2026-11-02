@@ -553,7 +553,7 @@ impl Chain {
         })
     }
 
-    /// [`Chain::ensure`]'s walk: the matte carried to `f` from the nearest frame towards the root that `lookup` has,
+    /// [`Chain::ensure`]'s walk: the matte carried to `f` from the nearest frame towards the base that `lookup` has,
     /// else from the root cut afresh from its strokes. `object: None` carries every stroke from the base frame (the shown
     /// matte); `Some(o)` carries only `o`'s, from its foreground-stroked frame nearest the base on the way. `keep`
     /// gets every frame made on the way.
@@ -573,24 +573,26 @@ impl Chain {
         if let Some(s) = lookup(f) {
             return Some(s);
         }
+        let base = self.data.base?;
         let root = match object {
             Some(o) => {
                 // one pass over the strokes, not one per frame on the way
-                let base = self.data.base?;
                 let on_the_way = |g: i64| (g == base || g.cmp(&base) == f.cmp(&base)) && g.abs_diff(base) <= f.abs_diff(base);
                 let fg = self.data.strokes.iter().filter(|s| s.object == o && s.kind == StrokeKind::Fg && on_the_way(s.frame));
                 fg.map(|s| s.frame).min_by_key(|g| g.abs_diff(base)).unwrap_or(f)
             }
-            None => self.data.base?,
+            None => base,
         };
         if !self.data.in_span(f) {
             return None;
         }
-        // Walk towards the root to the nearest available frame.
+        // A new first stroke can still have a valid tracked matte nearer the base. Look for it
+        // without reading those frames; without one, start afresh at the object's first stroke.
         let mut path = vec![f];
+        let mut untracked_len = 1;
         let mut g = f;
         let mut start: Option<Arc<FrameSeg>> = None;
-        while g != root
+        while g != base
             && let Some(src) = self.data.source_of(g)
         {
             if cancel() {
@@ -601,7 +603,13 @@ impl Chain {
                 break;
             }
             path.push(src);
+            if src == root {
+                untracked_len = path.len();
+            }
             g = src;
+        }
+        if start.is_none() {
+            path.truncate(untracked_len);
         }
         path.reverse();
         let mut prev_img: Option<Arc<Image>> = None;
@@ -612,7 +620,7 @@ impl Chain {
             }
             let img = frame(g)?;
             let strokes = strokes(g);
-            let seg = match (&cur, g == root) {
+            let seg = match (&cur, object.is_none() && g == root) {
                 (_, true) | (None, _) => rb::segment_with(&img, &strokes, None, &self.opts, self.refine_radius, self.model.as_deref()),
                 (Some(p), false) => {
                     let src = self.data.source_of(g)?;
@@ -1676,7 +1684,17 @@ mod tests {
             chain.model = Some(Arc::new(TwoObjects(Default::default())));
             let seed = seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id);
             chain.keys = data.chain_keys(seed);
-            assert_eq!(chain.track(&mut |f| Some(Arc::new(frame(f as f64 / 25.0))), &|| false, &mut |_| {}).unwrap().unwrap().frames, 5);
+            let image = |f: i64| {
+                let mut img = frame(f as f64 / 25.0);
+                // Match the second object's tracked square, so the carry has a real image edge.
+                for y in 8..22 {
+                    for x in 8..22 {
+                        img.set(x, y, [0.95, 0.9, 0.1, 1.0]);
+                    }
+                }
+                Arc::new(img)
+            };
+            assert_eq!(chain.track(&mut |f| Some(image(f)), &|| false, &mut |_| {}).unwrap().unwrap().frames, 5);
             let prior_key = chain.keys[&prior];
             assert!(chain.object_seg(prior, 1).is_some());
             data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 1.0, points: vec![[19.0, 15.0]], object: 1 }, 4, [0, 4]);
@@ -1690,7 +1708,7 @@ mod tests {
                 if fake.0.lock().unwrap().is_empty() {
                     prompt_reads.push(f);
                 }
-                Some(Arc::new(frame(f as f64 / 25.0)))
+                Some(image(f))
             };
             chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
             assert_eq!(prompt_reads, [2, prior, first, 2], "corrections carry from the valid tracked matte in either direction");
