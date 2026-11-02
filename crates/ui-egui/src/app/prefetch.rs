@@ -400,8 +400,11 @@ impl EffectcraftApp {
             return;
         }
         // Frames an edit kept in RAM are on disk under the comp's previous content only.
+        // Again soon while frames wait to be written (a refused write is retried then).
         #[cfg(not(target_arch = "wasm32"))]
-        self.frames.persist_missing(&self.render_source(), series);
+        if self.frames.persist_missing(&self.render_source(), series) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
         // An empty work area has nothing to cache.
         let n = wb - wa + 1;
         if n < 1 {

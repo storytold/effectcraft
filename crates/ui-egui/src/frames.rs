@@ -894,22 +894,25 @@ impl Frames {
 
     /// Write the RAM frames of `base`'s series that the disk cache lacks: frames an edit kept
     /// (written under the comp's previous content key) and writes the disk cache dropped. They
-    /// are converted on the frame pool, each queued once.
+    /// are converted on the frame pool, each queued once. `true` while there may be more to
+    /// write (a content key being computed, frames being converted): call again soon, since a
+    /// refused write is only retried by a later call.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey) {
-        let Some(dc) = src.disk.clone() else { return };
+    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey) -> bool {
+        let Some(dc) = src.disk.clone() else { return false };
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
         let Some(content) = known else {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
-            return;
+            return true;
         };
-        let missing: Vec<(u128, Arc<egui::ColorImage>)> = {
-            let (Ok(c), Ok(mut queued)) = (self.cache.lock(), self.persisted.lock()) else { return };
+        let (missing, converting): (Vec<(u128, Arc<egui::ColorImage>)>, bool) = {
+            let (Ok(c), Ok(mut queued)) = (self.cache.lock(), self.persisted.lock()) else { return false };
             if queued.len() > 100_000 {
                 queued.clear();
             }
-            c.map
+            let missing = c
+                .map
                 .iter()
                 .filter(|(k, _)| k.same_series(base))
                 .filter_map(|(k, img)| {
@@ -917,10 +920,11 @@ impl Frames {
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ k.opts);
                     (!dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
                 })
-                .collect()
+                .collect();
+            (missing, !queued.is_empty())
         };
         if missing.is_empty() {
-            return;
+            return converting;
         }
         let persisted = self.persisted.clone();
         let work = move || {
@@ -937,6 +941,7 @@ impl Frames {
             Some(pool) => pool.spawn(work),
             None => rayon::spawn(work),
         }
+        true
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -1431,6 +1431,7 @@ fn ram_frames_missing_on_disk_are_written() {
         false
     };
     assert!(persist(), "every RAM frame written");
+    assert!(!f.persist_missing(&src, &series), "nothing left to write: no more idle passes");
     // Evicted from disk: the RAM frames are written again.
     disk.set_max_bytes(1);
     disk.set_max_bytes(1 << 30);
