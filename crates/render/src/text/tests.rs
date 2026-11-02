@@ -99,6 +99,24 @@ fn range_based_on_words_and_lines() {
     assert_eq!(s, vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0], "{s:?}");
 }
 
+/// With Units = Index a Range Selector's Start, End and Offset are character counts, not
+/// percentages (#1814); the selector's other values, and other selectors, are unaffected.
+#[test]
+fn index_units_mark_start_end_and_offset() {
+    let (mut p, _cid, comp) = setup(400, 200);
+    let mut l = text_layer(&mut p, &comp, doc("ABCDEFG", 30.0));
+    animator(&mut p, &mut l, &["opacity"], &["range", "wiggly"]);
+    let uid = |l: &Layer, path: &str| l.props.prop(path).unwrap_or_else(|| panic!("no {path}")).uid;
+    let base = "text/animators/#1/selectors/#1";
+    let range_values = ["start", "end", "offset"].map(|k| uid(&l, &format!("{base}/{k}")));
+    assert!(range_values.iter().all(|u| !in_index_units(&l, *u)), "Percentage, the default");
+    set(&mut l, &format!("{base}/advanced/units"), Value::Enum(1));
+    assert!(range_values.iter().all(|u| in_index_units(&l, *u)));
+    assert!(!in_index_units(&l, uid(&l, &format!("{base}/advanced/amount"))), "Amount stays a percentage");
+    assert!(!in_index_units(&l, uid(&l, "text/animators/#1/properties/opacity")));
+    assert!(!in_index_units(&l, uid(&l, "transform/opacity")));
+}
+
 #[test]
 fn range_start_end_and_offset_are_capped() {
     let (mut p, cid, comp) = setup(400, 200);
@@ -202,9 +220,9 @@ fn tracking_line_anchor_and_character_offset() {
     animator(&mut p, &mut l, &["tracking", "lineAnchor"], &["range"]);
     p.comp_mut(cid).unwrap().layers.push(l);
     let w0 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(500.0));
+    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(20.0));
     let w1 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    // 4 chars × 500/1000 em × 40 px: the last glyph moves ~ 3.5 × 20 px further (before & after).
+    // Tracking Amount 20 (pixels, as After Effects): the last glyph moves ~ 3.5 × 20 px further (before & after).
     assert!((w1.width() - w0.width() - 3.0 * 20.0).abs() < 1.5, "{} {}", w0.width(), w1.width());
     assert!((w1.x0 - w0.x0 - 10.0).abs() < 1.0, "first char shifts by half its tracking: {} {}", w0.x0, w1.x0);
     // Line Anchor 100%: tracking grows to the left.
@@ -244,10 +262,10 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         p.comp_mut(cid).unwrap().layers.push(l);
         glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])
     };
-    // 4 chars × 500/1000 em × 40 px: 20 px of tracking each, half before and half after.
+    // Tracking Amount 20 (pixels): 20 px of tracking each, half before and half after.
     for (justify, x0, centre, x1) in [(Justify::Left, 10.0, 40.0, 70.0), (Justify::Center, -30.0, 0.0, 30.0), (Justify::Right, -70.0, -40.0, -10.0)] {
         let d = TextDoc { justify, ..doc("ABCD", 40.0) };
-        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 500.0)));
+        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 20.0)));
         let got = [w1.x0 - w0.x0, w1.center().x - w0.center().x, w1.x1 - w0.x1];
         assert!(got.iter().zip([x0, centre, x1]).all(|(g, w)| (g - w).abs() < 1.0), "{justify:?}: moved {got:?}, want {:?}", [x0, centre, x1]);
     }
@@ -259,9 +277,34 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         let (a, b): (Vec<_>, Vec<_>) = paths.into_iter().partition(|g| bounds_of(std::slice::from_ref(g)).center().y < 10.0);
         [bounds_of(&a), bounds_of(&b)]
     };
-    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 500.0)));
+    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 20.0)));
     assert!((a1.x0 - a0.x0 - 10.0).abs() < 1.0, "the left paragraph grows right: {} {}", a0.x0, a1.x0);
     assert!((b1.x1 - b0.x1 + 10.0).abs() < 1.0, "the right paragraph grows left: {} {}", b0.x1, b1.x1);
+}
+
+/// #1798: After Effects adds Tracking Amount in absolute pixels between neighbouring characters,
+/// independent of font size.
+#[test]
+fn text_animator_tracking_amount_uses_pixels_independent_of_font_size() {
+    let width_diff = |font_size: f64, amount: f64| {
+        let (mut p, cid, comp) = setup(2000, 400);
+        let mut l = text_layer(&mut p, &comp, doc("ABCDE", font_size));
+        animator(&mut p, &mut l, &["tracking"], &["range"]);
+        set(&mut l, "text/animators/#1/properties/tracking", Value::Scalar(amount));
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let w = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])).width();
+        let (mut p0, cid0, comp0) = setup(2000, 400);
+        let l0 = text_layer(&mut p0, &comp0, doc("ABCDE", font_size));
+        p0.comp_mut(cid0).unwrap().layers.push(l0);
+        let w0 = bounds_of(&glyph_paths(&ctx(&p0, cid0, 0.0), &p0.comp(cid0).unwrap().layers[0])).width();
+        w - w0
+    };
+    // 5 characters = 4 gaps. In After Effects, Tracking Amount 100 adds 100 px per gap = 400 px total width delta,
+    // regardless of whether font size is 50 px or 200 px.
+    let diff_50 = width_diff(50.0, 100.0);
+    let diff_200 = width_diff(200.0, 100.0);
+    assert!((diff_50 - 400.0).abs() < 1.0, "font_size 50 px width delta: {diff_50}");
+    assert!((diff_200 - 400.0).abs() < 1.0, "font_size 200 px width delta: {diff_200}");
 }
 
 #[test]
@@ -461,6 +504,37 @@ fn per_character_3d_projects_characters() {
     assert!(b[2] - b[0] < flat[2] - flat[0] && b[2] > b[0] + 10, "{b:?} {flat:?}");
 }
 
+/// After Effects 2026 (case 931: "H", 400 px, per-character 3D, X / Y / Z Rotation 40 / 30 /
+/// 20): a character turns like a 3D layer, Rx · Ry · Rz (Z first), so its matrix is the same
+/// product as a layer's X / Y / Z Rotation. The render then matches AE (3 of 5184 grid points
+/// off at edges; with Rz · Ry · Rx 23).
+#[test]
+fn per_character_rotation_turns_z_first_as_a_3d_layer() {
+    let (mut p, cid, comp) = setup(400, 300);
+    let mut l = text_layer(&mut p, &comp, doc("H", 80.0));
+    l.switches.three_d = true;
+    animator(&mut p, &mut l, &["rotation"], &["range"]);
+    let mut next = p.next_id;
+    let mut extra = build::text_anim_props(&mut Ids(&mut next), "rotation", true);
+    p.next_id = next;
+    let props: &mut PropGroup = l.props.group_mut("text/animators/#1/properties").unwrap();
+    props.children.retain(|c| c.match_id() != "rotation");
+    props.children.extend(extra.drain(..).map(Into::into));
+    for (id, v) in [("rotationX", 40.0), ("rotationY", 30.0), ("rotation", 20.0)] {
+        props.get_mut(id).unwrap().value = Value::Scalar(v);
+    }
+    l.props.sub_mut("text").unwrap().get_mut("perChar3d").unwrap().value = Value::Bool(true);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let geom = text_geom(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]).unwrap();
+    let g = &geom.glyphs[0];
+    let want = Mat4::rotate_x(40.0) * Mat4::rotate_y(30.0) * Mat4::rotate_z(20.0);
+    for r in 0..3 {
+        for c in 0..3 {
+            assert!((g.m.0[r][c] - want.0[r][c]).abs() < 1e-9, "row {r} col {c}: {:?} vs {:?}", g.m.0, want.0);
+        }
+    }
+}
+
 #[test]
 fn keyframed_selector_animates() {
     let (mut p, cid, comp) = setup(400, 200);
@@ -524,6 +598,8 @@ fn touching_glyphs_join_without_a_seam() {
             fill,
             stroke: [0.0; 4],
             stroke_width: 0.0,
+            join: effectcraft_path::Join::Miter,
+            bold: 0.0,
             apply_fill: true,
             char_index: 0,
             rest: [0.0; 2],
@@ -549,6 +625,65 @@ fn touching_glyphs_join_without_a_seam() {
     assert!((two[3] - 0.75).abs() < 0.02, "{two:?}");
     let multiply = draw(vec![glyph(4.0, 10.5, white, false), glyph(10.5, 17.0, white, false)], BlendMode::Multiply).get(10, 10);
     assert!(multiply[3] < 0.9, "{multiply:?}");
+}
+
+/// #1676: Faux Bold, and the synthetic bold of a style the family has no face for, are drawn.
+#[test]
+fn faux_bold_and_synthetic_bold_thicken_the_glyphs() {
+    // Total alpha and the alpha bounding box of a rendered word.
+    let ink = |d: TextDoc| {
+        let (mut p, cid, comp) = setup(400, 120);
+        let mut l = text_layer(&mut p, &comp, TextDoc { text: "Hamburg".into(), size: 60.0, ..d });
+        set(&mut l, "transform/position", Value::Vec3([40.0, 85.0, 0.0]));
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let img = crate::render_frame(&p, cid, Tick::ZERO, 1.0);
+        (img.data.iter().map(|px| px[3]).sum::<f32>(), alpha_bbox(&img).unwrap())
+    };
+    let (plain, pb) = ink(TextDoc::default());
+    let (bold, bb) = ink(TextDoc { faux_bold: true, ..Default::default() });
+    assert!(bold > plain * 1.15, "faux bold adds ink: {plain} → {bold}");
+    // 0.03 em = 1.8 px on every side.
+    let grow = (bb[2] - bb[0]) - (pb[2] - pb[0]);
+    assert!((3..=6).contains(&grow), "and widens the word by about 3.6 px: {pb:?} → {bb:?}");
+    // Bundled Inter has no Bold Italic face: the italic face is drawn with synthetic bold.
+    let (italic, _) = ink(TextDoc { style: "Italic".into(), ..Default::default() });
+    let (bold_italic, _) = ink(TextDoc { style: "Bold Italic".into(), ..Default::default() });
+    assert!(bold_italic > italic * 1.15, "Bold Italic is bolder than Italic: {italic} → {bold_italic}");
+    // A stroke follows the bold outline: as wide as before, moved out with it.
+    let stroked = TextDoc { apply_fill: false, apply_stroke: true, stroke: [1.0; 4], stroke_width: 4.0, ..Default::default() };
+    let (ring, rb) = ink(stroked.clone());
+    let (bold_ring, brb) = ink(TextDoc { faux_bold: true, ..stroked });
+    assert!(bold_ring > ring * 0.95 && bold_ring < ring * 1.3, "the stroke keeps its width: {ring} → {bold_ring}");
+    assert!(brb[0] < rb[0] && brb[2] > rb[2], "{rb:?} → {brb:?}");
+}
+
+/// #1676: under a non-uniform character Scale the bold is grown in the character's space, so it
+/// reaches further along the stretched axis; it is neither clipped nor grown evenly in a run.
+#[test]
+fn faux_bold_under_a_non_uniform_scale() {
+    use kurbo::Shape;
+    let glyph = |x0: f64| PlacedGlyph {
+        local: kurbo::Rect::new(x0, 4.0, x0 + 4.0, 16.0).to_path(0.1),
+        m: Mat4::scale(vec3(9.0, 1.0, 1.0)),
+        xf: CharXf::default(),
+        fill: [1.0; 4],
+        stroke: [0.0; 4],
+        stroke_width: 0.0,
+        join: effectcraft_path::Join::Miter,
+        bold: 2.0,
+        apply_fill: true,
+        char_index: 0,
+        rest: [0.0; 2],
+    };
+    let geom = |glyphs| TextGeom { doc: TextDoc::default(), glyphs, fill_stroke: 0, blend: BlendMode::Normal };
+    assert_eq!(runs(&geom(vec![glyph(2.0), glyph(6.0)])).len(), 2, "bold glyphs stretched unevenly are drawn one by one");
+    // x 6..10 → 54..90, grown by 2 × 9 = 18 → 36..108; y 4..16 grown by 2 → 2..18.
+    let mut img = crate::Image::new(120, 24);
+    draw_glyphs(&geom(vec![glyph(6.0)]), &mut img, &Mat3::IDENTITY, 1.0, None);
+    for (x, y) in [(37, 10), (106, 10), (70, 3)] {
+        assert!(img.get(x, y)[3] > 0.99, "bold ink at ({x}, {y}): {:?}", img.get(x, y));
+    }
+    assert!(img.get(34, 10)[3] < 0.01 && img.get(110, 10)[3] < 0.01 && img.get(70, 0)[3] < 0.01);
 }
 
 /// #1011: what dragging a Range Selector bar to fraction `f` of the text writes.

@@ -1,5 +1,5 @@
-//! Blurs: separable box passes (exact running sums) approximating Gaussians, plus directional
-//! and radial (spin/zoom) blurs.
+//! Blurs: separable box passes (exact running sums) approximating Gaussians, a sampled Gaussian
+//! kernel for small sigmas, plus directional and radial (spin/zoom) blurs.
 //!
 //! Box passes run straight on row-major pixels: horizontal passes per row, vertical passes over
 //! blocks of rows with a per-column running sum (no transposes), ping-ponging between two
@@ -157,6 +157,50 @@ pub fn gaussian_blur(img: &Image, sigma_x: f64, sigma_y: f64, repeat: bool) -> I
     box_passes(img, &rx, &ry, repeat)
 }
 
+/// Below this sigma (pixels) three integer-radius box passes are too coarse (sigma under ~0.6 is
+/// a no-op and the result steps between a few shapes), so [`gaussian_blur_exact`] is used instead.
+const EXACT_SIGMA_BELOW: f64 = 3.0;
+
+/// True when a Gaussian of these per-axis sigmas should use [`gaussian_blur_exact`].
+pub fn gaussian_is_exact(sigma_x: f64, sigma_y: f64) -> bool {
+    sigma_x.max(sigma_y) < EXACT_SIGMA_BELOW
+}
+
+/// One separable pass of a sampled Gaussian (radius 3 sigma) along x or y.
+fn gauss_pass(img: &Image, sigma: f64, vertical: bool, repeat: bool) -> Image {
+    // Below 1e-3 the kernel is the identity in f64; tiny sigmas would also make 2σ² underflow to 0 (NaN taps).
+    if sigma.is_nan() || sigma <= 1e-3 || img.is_empty() {
+        return img.clone();
+    }
+    let r = (sigma * 3.0).ceil() as i64;
+    let mut k: Vec<f64> = (-r..=r).map(|i| (-((i * i) as f64) / (2.0 * sigma * sigma)).exp()).collect();
+    let total: f64 = k.iter().sum();
+    k.iter_mut().for_each(|v| *v /= total);
+    let w = img.width as usize;
+    let mut out = Image::new(img.width, img.height);
+    out.rows_mut().for_each(|(y, row)| {
+        for x in 0..w {
+            let mut acc = [0.0f64; 4];
+            for (i, wt) in k.iter().enumerate() {
+                let d = i as i64 - r;
+                let (sx, sy) = if vertical { (x as i64, y as i64 + d) } else { (x as i64 + d, y as i64) };
+                let p = if repeat { img.get_clamped(sx, sy) } else { img.get(sx, sy) };
+                for c in 0..4 {
+                    acc[c] += p[c] as f64 * wt;
+                }
+            }
+            row[x] = acc.map(|v| v as f32);
+        }
+    });
+    out
+}
+
+/// Gaussian blur as a true sampled kernel, continuous in sigma (for small sigmas, see
+/// [`gaussian_is_exact`]).
+pub fn gaussian_blur_exact(img: &Image, sigma_x: f64, sigma_y: f64, repeat: bool) -> Image {
+    gauss_pass(&gauss_pass(img, sigma_x, false, repeat), sigma_y, true, repeat)
+}
+
 /// Motion blur along `angle_deg` (0 = vertical in AE's Directional Blur, measured clockwise from
 /// up) over `length` pixels.
 pub fn directional_blur(img: &Image, angle_deg: f64, length: f64) -> Image {
@@ -203,7 +247,9 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
                     let (s, c) = (t * amount).to_radians().sin_cos();
                     (center.0 + vx * c - vy * s, center.1 + vx * s + vy * c)
                 };
-                let p = img.sample_bilinear(sx, sy);
+                // Samples outside the image repeat its edge: After Effects' Radial Blur keeps a
+                // layer's edges (cases 713, 829) instead of fading them toward transparency.
+                let p = img.sample_bilinear(sx.clamp(0.5, (img.width as f64 - 0.5).max(0.5)), sy.clamp(0.5, (img.height as f64 - 0.5).max(0.5)));
                 for ch in 0..4 {
                     acc[ch] += p[ch];
                 }
@@ -226,6 +272,17 @@ mod tests {
         let sum: f32 = b.data.iter().map(|p| p[3]).sum();
         assert!((sum - 1.0).abs() < 1e-3, "{sum}");
         assert!(b.get(32, 32)[3] < 0.05);
+    }
+
+    #[test]
+    fn vanishing_or_nan_sigma_leaves_the_image_unchanged() {
+        let mut img = Image::new(5, 5);
+        img.set(2, 2, [1.0, 0.5, 0.25, 1.0]);
+        for s in [1e-200, f64::MIN_POSITIVE, f64::NAN] {
+            let b = gaussian_blur_exact(&img, s, s, false);
+            assert!(b.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "sigma {s}");
+            assert_eq!(b, img, "sigma {s}");
+        }
     }
 
     #[test]

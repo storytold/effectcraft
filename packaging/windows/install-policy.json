@@ -1,0 +1,44 @@
+{
+  "id": "effectcraft",
+  "name": "EffectCraft",
+  "upgradeCode": "AACA8593-C6ED-40A8-BA6C-CB325D8529F9",
+  "sources": [
+    "effectcraft.wxs",
+    "installer-ui.wxs"
+  ],
+  "icon": "assets/app-icon/effectcraft.ico",
+  "localization": [],
+  "extensions": [],
+  "payloads": [
+    "NOTICE",
+    "effectcraft-cli.exe",
+    "effectcraft.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\effectcraft.exe",
+      "",
+      "[#EffectcraftExe]"
+    ],
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\effectcraft.exe",
+      "Path",
+      "[INSTALLFOLDER]"
+    ],
+    [
+      "-1",
+      "Software\\EffectCraft",
+      "DesktopShortcut",
+      "[DESKTOPSHORTCUT]"
+    ],
+    [
+      "-1",
+      "Software\\EffectCraft",
+      "DesktopShortcut",
+      "1"
+    ]
+  ],
+  "mode": "dualScope"
+}

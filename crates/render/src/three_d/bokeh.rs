@@ -289,16 +289,24 @@ pub fn progressive_blur(img: &Image, iris: &Iris, radius: &[f32]) -> Image {
         return bokeh_blur(img, iris, levels[0] as f64);
     }
     let (lo, hi, n) = (levels[0], levels[levels.len() - 1], levels.len());
-    let blurred: Vec<Image> = levels.par_iter().map(|&r| bokeh_blur(img, iris, r as f64)).collect();
+    // A pixel blends only the two levels around its radius, so the levels are made in order and
+    // only that pair is held: peak memory stays a few images whatever the level count, rather
+    // than one image per level. Each level's blur is parallel over its rows.
     let mut out = Image::new(img.width, img.height);
-    out.data.par_iter_mut().enumerate().for_each(|(i, o)| {
-        let r = radius[i];
-        let f = ((r - lo) / (hi - lo) * (n - 1) as f32).clamp(0.0, (n - 1) as f32);
-        let k = (f.floor() as usize).min(n - 2);
-        let t = f - k as f32;
-        let (a, b) = (blurred[k].data[i], blurred[k + 1].data[i]);
-        *o = [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * t);
-    });
+    let mut below = bokeh_blur(img, iris, lo as f64);
+    for (k, &r) in levels.iter().enumerate().skip(1) {
+        let above = bokeh_blur(img, iris, r as f64);
+        out.data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            let f = ((radius[i] - lo) / (hi - lo) * (n - 1) as f32).clamp(0.0, (n - 1) as f32);
+            let kk = (f.floor() as usize).min(n - 2);
+            if kk + 1 == k {
+                let t = f - kk as f32;
+                let (a, b) = (below.data[i], above.data[i]);
+                *o = [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * t);
+            }
+        });
+        below = above;
+    }
     out
 }
 

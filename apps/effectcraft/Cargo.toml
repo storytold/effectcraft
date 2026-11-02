@@ -15,7 +15,7 @@ effectcraft-host = { workspace = true }
 effectcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 # `links`: links (Help menu, Discord, Settings) open in the system browser.
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "links", "wayland", "x11"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "links", "wayland", "x11"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The window's monitors, size and position (src/window.rs), and macOS event-loop options (no app
@@ -48,3 +48,6 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # PhotoCraft and PdfCraft) registers the handler (Objective-C interop needs unsafe, which our
 # workspace forbids) behind a safe API. Pinned exactly: review the diff before bumping.
 fmv-macos-events = "=0.1.0"
+
+[target.'cfg(windows)'.dependencies]
+craft-update = { workspace = true }

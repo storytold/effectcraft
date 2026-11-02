@@ -647,7 +647,9 @@ fn fp2_hextile(@builtin(global_invocation_id) gid: vec3<u32>) {
     // stylize3::hex_cell (cube rounding).
     let q = (0.5773502691896257 * u - v / 3.0) / r;
     let rr = (2.0 / 3.0 * v) / r;
-    let ccy = -q - rr;
+    // Evaluate the third cube coordinate symmetrically with q so the centerline
+    // tie is not broken by subtracting separately rounded coordinates.
+    let ccy = (-0.5773502691896257 * u - v / 3.0) / r;
     var rx = round_away(q);
     let ry = round_away(ccy);
     var rz = round_away(rr);

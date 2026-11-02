@@ -93,6 +93,8 @@ const SEEDS: &[&str] = &[
     "linear(time, 0, 1, 0, 100)",
     "ease(time, 0, 2, [0, 0], [100, 50])",
     "easeIn(time, 0, 1, 0, 360) + easeOut(time, 1, 2, 0, 10)",
+    "bezier(time, 0, 1, 0, 100, [0.42, 0, 0.58, 1])",
+    "bezier(time, [0, 0], [100, 50], [0.25, 0.1, 0.25, 1])",
     "clamp(value * 2, 0, 100)",
     "length([0, 0], [3, 4]) + dot([1, 0], [0, 1]) + cross([1, 0, 0], [0, 1, 0])[2]",
     "normalize([3, 4])[0] * degreesToRadians(180)",

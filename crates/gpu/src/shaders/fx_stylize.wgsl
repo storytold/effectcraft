@@ -922,18 +922,28 @@ fn fxs_glow_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = clamp((l - thr) / max(1.0 - thr, 1e-3), 0.0, 1.0);
     let t = glow_ab_t(l);
     let c = vec3<f32>(curve_eval(P.f[1].x, t), curve_eval(P.f[1].y, t), curve_eval(P.f[1].z, t));
-    textureStore(out, p, vec4<f32>(c * k * a, k * a));
+    // Based on the colour channels the glow covers the layer's whole alpha (effects::misc::glow).
+    var ga = a;
+    if (P.u[0].y != 0u) {
+        ga = k * a;
+    }
+    textureStore(out, p, vec4<f32>(c * k * a, ga));
 }
 
 // On Top with another Glow Operation: blend_pixel(mode, original, glow · intensity, 0).
-// aux = the blurred glow; u[0].x = blend mode id; f[0].x = intensity
+// aux = the blurred glow; u[0].x = blend mode id; u[0].y = based on alpha (intensity also
+// scales the glow's alpha); f[0].x = intensity
 @compute @workgroup_size(16, 16)
 fn fxs_glow_op(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(gid.xy);
     if (!fxs_inside(p)) {
         return;
     }
-    let g = textureLoad(aux, p, 0) * P.f[0].x;
+    let gs = textureLoad(aux, p, 0);
+    var g = vec4<f32>(gs.xyz * P.f[0].x, gs.w);
+    if (P.u[0].y != 0u) {
+        g.w = gs.w * P.f[0].x;
+    }
     var o = blend_pixel(P.u[0].x, textureLoad(src, p, 0), g, 0.0);
     o.w = clamp(o.w, 0.0, 1.0);
     textureStore(out, p, o);

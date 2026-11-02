@@ -3,8 +3,8 @@
 
 use effectcraft_color::BlendMode;
 use effectcraft_keyframe::{Gradient, ShapePath, Value};
-use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Node, PropGroup};
+use effectcraft_project::build::{self, EXTRA_DASHES, Ids};
+use effectcraft_project::{Node, ParamUi, PropGroup};
 use serde_json::{Map, Value as Json, json};
 
 use crate::anim::{self, Ex, Im, export_prop, import_prop};
@@ -112,6 +112,9 @@ impl Out<'_, '_> {
     }
     fn f(&self, m: &str) -> f64 {
         self.g.get(m).map(|p| p.value.as_f64()).unwrap_or(0.0)
+    }
+    fn flag(&self, m: &str) -> bool {
+        self.g.get(m).map(|p| p.value.as_bool()).unwrap_or(false)
     }
     fn animated(&self, m: &str) -> bool {
         self.g.get(m).is_some_and(|p| p.is_animated() || p.has_expression())
@@ -232,7 +235,20 @@ pub(crate) fn export_items(ex: &mut Ex, contents: &PropGroup, label: &str) -> Ve
                 dir(&mut o);
                 o.put("s", "size", &anim::arr2);
                 o.put("p", "position", &anim::arr2);
-                o.put("r", "roundness", &anim::num);
+                if o.flag("perCorner") {
+                    let names = ["topLeftRoundness", "topRightRoundness", "bottomRightRoundness", "bottomLeftRoundness"];
+                    let radii = names.map(|m| o.f(m));
+                    // Lottie `rc` has one `r`: four equal static radii export as that value.
+                    // `r` is a property (`{a, k}`) like the uniform branch writes, not a bare number.
+                    if radii.iter().all(|v| (v - radii[0]).abs() < 1e-6) && !names.iter().any(|m| o.animated(m)) && radii[0] >= 0.0 {
+                        o.raw("r", json!({"a": 0, "k": r(radii[0])}));
+                    } else {
+                        o.ex.warn(format!("{}: per-corner roundness has no Lottie rectangle equivalent (roundness 0 exported)", o.label));
+                        o.raw("r", json!({"a": 0, "k": 0}));
+                    }
+                } else {
+                    o.put("r", "roundness", &anim::num);
+                }
             }
             "el" => {
                 dir(&mut o);
@@ -356,7 +372,7 @@ fn import_blend(j: &Json, g: &mut PropGroup) {
     }
 }
 
-fn import_stroke(im: &Im, j: &Json, g: &mut PropGroup) {
+fn import_stroke(im: &Im, ids: &mut Ids, j: &Json, g: &mut PropGroup) {
     set(im, g, "width", j.get("w"), &anim::to_scalar);
     if let Some(lc) = int(j, "lc") {
         set_enum(g, "cap", lc.saturating_sub(1).clamp(0, 2) as u32);
@@ -374,16 +390,31 @@ fn import_stroke(im: &Im, j: &Json, g: &mut PropGroup) {
     if let Some(list) = j.get("d").and_then(Json::as_array)
         && let Some(d) = g.sub_mut("dashes")
     {
-        let mut seen_dash = false;
+        // The n-th `d` and `g` are the n-th Dash/Gap pair; the extra pairs are created as the Dashes "+" does.
+        let (mut dashes, mut gaps) = (0, 0);
         for e in list {
-            let m = match e.get("n").and_then(Json::as_str) {
-                Some("d") if !seen_dash => {
-                    seen_dash = true;
-                    "dash"
+            let (n, pair) = match e.get("n").and_then(Json::as_str) {
+                Some("d") => (&mut dashes, 0),
+                Some("g") => (&mut gaps, 1),
+                Some("o") => {
+                    set(im, d, "offset", e.get("v"), &anim::to_scalar);
+                    continue;
                 }
-                Some("g") => "gap",
-                Some("o") => "offset",
                 _ => continue,
+            };
+            let k = *n;
+            *n += 1;
+            let m = match k {
+                0 => ["dash", "gap"][pair],
+                _ => {
+                    let Some(&(dm, gm)) = EXTRA_DASHES.get(k - 1) else { continue };
+                    if d.get(dm).is_none() {
+                        let at = d.children.iter().position(|c| c.match_id() == "offset").unwrap_or(d.children.len());
+                        d.children.insert(at, ids.prop(gm, &format!("Gap {}", k + 1), Value::Scalar(0.0)).with_ui(ParamUi::Pixels).into());
+                        d.children.insert(at, ids.prop(dm, &format!("Dash {}", k + 1), Value::Scalar(0.0)).with_ui(ParamUi::Pixels).into());
+                    }
+                    [dm, gm][pair]
+                }
             };
             set(im, d, m, e.get("v"), &anim::to_scalar);
         }
@@ -432,6 +463,11 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
                 set(im, &mut g, "size", j.get("s"), &anim::to_vec2);
                 set(im, &mut g, "position", j.get("p"), &anim::to_vec2);
                 set(im, &mut g, "roundness", j.get("r"), &anim::to_scalar);
+                // Lottie has one roundness: keep the per-corner values in step so ticking the box
+                // on an imported rectangle keeps the shape.
+                for m in ["topLeftRoundness", "topRightRoundness", "bottomRightRoundness", "bottomLeftRoundness"] {
+                    set(im, &mut g, m, j.get("r"), &anim::to_scalar);
+                }
                 g
             }
             "el" => {
@@ -474,7 +510,7 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
                 let mut g = build::shape_stroke(ids, [1.0, 1.0, 1.0, 1.0], 2.0);
                 set(im, &mut g, "color", j.get("c"), &anim::to_color);
                 set(im, &mut g, "opacity", j.get("o"), &anim::to_scalar);
-                import_stroke(im, j, &mut g);
+                import_stroke(im, ids, j, &mut g);
                 import_blend(j, &mut g);
                 g
             }
@@ -501,7 +537,7 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
                         set_enum(&mut g, "rule", 1);
                     }
                 } else {
-                    import_stroke(im, j, &mut g);
+                    import_stroke(im, ids, j, &mut g);
                 }
                 import_blend(j, &mut g);
                 g

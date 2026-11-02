@@ -92,7 +92,9 @@ impl Hevc {
 impl VideoEncoder for Hevc {
     fn sample_entry(&self) -> SampleEntry {
         let cfg = HevcConfig::parse(&self.enc.hvcc()).unwrap_or_default();
-        SampleEntry::hevc(cfg, self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::hevc(cfg, self.w as u16, self.h as u16);
+        crate::encode::tag_bt709_limited(&mut entry);
+        entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);
@@ -148,7 +150,9 @@ impl Av1 {
 impl VideoEncoder for Av1 {
     fn sample_entry(&self) -> SampleEntry {
         let cfg = Av1Config::parse(&self.enc.av1c()).unwrap_or_default();
-        SampleEntry::video(FourCc(*b"av01"), CodecConfig::Av1(cfg), self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::video(FourCc(*b"av01"), CodecConfig::Av1(cfg), self.w as u16, self.h as u16);
+        crate::encode::tag_bt709_limited(&mut entry);
+        entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);

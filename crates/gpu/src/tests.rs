@@ -26,6 +26,36 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::Gpu;
 
+mod adjust;
+mod adv3d;
+mod deferred;
+mod deferred_jobs;
+mod fx_color;
+mod fx_depth;
+mod fx_distort;
+mod fx_extra;
+mod fx_gen2;
+mod fx_generate;
+mod fx_key;
+mod fx_light;
+mod fx_lut;
+mod fx_noise;
+mod fx_particles;
+mod fx_pixel2;
+mod fx_sim;
+mod fx_stylize;
+mod fx_text;
+mod fx_time;
+mod fx_tone;
+mod fx_transition;
+mod fx_vr;
+mod fx_warp;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod init;
+mod particles;
+mod three_d;
+mod wgsl_grammar;
+
 /// One GPU test at a time in this process: the calling test thread holds a process-wide lock
 /// until it exits (libtest runs every test on a thread of its own). wgpu's OpenGL backend (Mesa
 /// llvmpipe on FreeBSD, Linux without Vulkan) has one context lock per adapter and panics when a
@@ -52,9 +82,29 @@ pub(crate) fn gpu() -> Option<&'static Gpu> {
     static G: OnceLock<Result<Gpu, String>> = OnceLock::new();
     hold_gpu_lock();
     let g = G.get_or_init(|| {
+        // Readback mapping/allocation errors become None without necessarily retiring the
+        // context. Preserve their original messages alongside the failure's health snapshot.
+        struct GpuTestLog;
+        impl log::Log for GpuTestLog {
+            fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                metadata.level() <= log::Level::Warn && metadata.target().starts_with("effectcraft_gpu")
+            }
+
+            fn log(&self, record: &log::Record<'_>) {
+                if self.enabled(record.metadata()) {
+                    eprintln!("{} {}: {}", record.level(), record.target(), record.args());
+                }
+            }
+
+            fn flush(&self) {}
+        }
+        static LOGGER: GpuTestLog = GpuTestLog;
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Warn);
+        }
         let g = Gpu::try_headless();
         match &g {
-            Ok(g) => eprintln!("effectcraft-gpu tests: adapter {}", g.ctx.name),
+            Ok(g) => eprintln!("effectcraft-gpu tests: adapter {}, median {:?}", g.ctx.name, g.ctx.median_kernel),
             Err(e) => eprintln!("effectcraft-gpu tests: no GPU ({e}), skipping GPU comparisons"),
         }
         g
@@ -77,6 +127,35 @@ pub(crate) fn require_gpu<G>(tests: &str, g: Result<G, &String>) -> Option<G> {
 /// The test device is on wgpu's OpenGL backend (Mesa's llvmpipe on the FreeBSD CI job).
 pub(crate) fn on_gl() -> bool {
     gpu().is_some_and(|g| g.ctx.name.ends_with("(Gl)"))
+}
+
+/// The test device is Mesa's software rasteriser, llvmpipe: on OpenGL, or as lavapipe on Vulkan
+/// (the Linux CI gate).
+pub(crate) fn on_llvmpipe() -> bool {
+    gpu().is_some_and(|g| g.ctx.name.starts_with("llvmpipe"))
+}
+
+thread_local! {
+    static LLVMPIPE_FLIPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Until the guard drops, comparisons on lavapipe get [`GL_BOUNDARY_FLIPS`] too. Only the tests
+/// that measured such flips there opt in (CC HexTile cell edges, CC Threshold RGB thresholds);
+/// every other comparison on the Linux gate stays exact.
+pub(crate) fn allow_llvmpipe_boundary_flips() -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            LLVMPIPE_FLIPS.with(|f| f.set(false));
+        }
+    }
+    LLVMPIPE_FLIPS.with(|f| f.set(true));
+    Reset
+}
+
+/// The boundary-flip allowance applies: OpenGL, or llvmpipe in a test that opted in.
+fn boundary_flips_allowed() -> bool {
+    on_gl() || (LLVMPIPE_FLIPS.with(std::cell::Cell::get) && on_llvmpipe())
 }
 
 /// On GL, the fraction of pixels allowed past the tolerance: pixels on a decision boundary (a
@@ -255,7 +334,7 @@ pub(crate) fn check(label: &str, d: Option<Diff>, allow: f64) {
     let frac = d.over as f64 / d.total as f64;
     // Quantised depths: rounding-boundary flips (see the module docs).
     let (allow, cap) = if d.quantized && allow == 0.0 { (0.003, 4.0 / 255.0 + 1e-6) } else { (allow, f32::INFINITY) };
-    let (allow, cap) = if on_gl() { (allow.max(GL_BOUNDARY_FLIPS), f32::INFINITY) } else { (allow, cap) };
+    let (allow, cap) = if boundary_flips_allowed() { (allow.max(GL_BOUNDARY_FLIPS), f32::INFINITY) } else { (allow, cap) };
     assert!(frac <= allow && d.max <= cap, "{label}: {} of {} pixels over tolerance (max {:.6}); worst {:?}", d.over, d.total, d.max, d.worst);
     if d.over > 0 {
         eprintln!("{label}: {} of {} pixels over tolerance (max {:.6})", d.over, d.total, d.max);
@@ -419,7 +498,7 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
             b.blend_mode = BlendMode::Difference;
             (a, b)
         };
-        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a];
+        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a].into();
         let bg = s.footage(97, 61);
         s.push(bg);
         let mut pre = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (60, 40), None);
@@ -430,6 +509,12 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
         let mut adj = s.solid([1.0, 1.0, 1.0], 50, 61);
         adj.switches.adjustment = true;
         s.effect(&mut adj, "ec.channel.invert", &[]);
+        s.push(adj);
+        // An adjustment layer in another blend mode blends the adjusted comp in that mode (#2618).
+        let mut adj = s.solid([1.0, 1.0, 1.0], 70, 40);
+        adj.switches.adjustment = true;
+        adj.blend_mode = BlendMode::Screen;
+        set(&mut adj, "transform/opacity", Value::Scalar(60.0));
         s.push(adj);
         check(&format!("collapse + adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
     }
@@ -446,15 +531,28 @@ pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) 
     for (k, v) in vals {
         params.values.insert(k.to_string(), v.clone());
     }
+    let expect_empty = id == "ec.distort.ccblobbylize" && vals.iter().any(|(k, v)| *k == "cutAway" && matches!(v, Value::Scalar(x) if *x == 100.0));
     for scale in [1.0, 0.5] {
         let img = pattern(7, (size[0] * scale) as u32, (size[1] * scale) as u32);
         let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale };
         let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment, env: Default::default() };
         let cpu = (spec.render)(&ctx(), buf.clone());
-        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).expect("the GPU runs the effect");
+        let started = std::time::Instant::now();
+        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).unwrap_or_else(|| {
+            panic!(
+                "the GPU runs {id} {vals:?} adj {adjustment} scale {scale}; elapsed={:?}, health={:?}, unavailable={:?}, transfers={:?}",
+                started.elapsed(),
+                g.ctx.check_health(),
+                g.ctx.unavailable_kernels(),
+                g.ctx.transfer_stats()
+            )
+        });
+        if expect_empty {
+            assert!(out.img.data.iter().all(|p| p[3] == 0.0), "{id} {vals:?} adj {adjustment} scale {scale}: Cut Away 100 produced non-zero alpha");
+        }
         assert_eq!((out.offset, out.scale), (cpu.offset, cpu.scale), "{id}: geometry");
         let d = diff(&cpu.img, &out.img, 1e-3);
-        let allow = if on_gl() { (d.total as f64 * GL_BOUNDARY_FLIPS) as usize } else { 0 };
+        let allow = if boundary_flips_allowed() { (d.total as f64 * GL_BOUNDARY_FLIPS) as usize } else { 0 };
         assert!(
             d.over <= allow,
             "{id} {vals:?} adj {adjustment} scale {scale}: {} of {} pixels over 1e-3 (max {}); worst {:?}",
@@ -492,11 +590,26 @@ pub(crate) fn c(r: f64, g: f64, b: f64) -> Value {
 }
 
 #[test]
+fn small_blurs_fall_back_to_the_cpu() {
+    // #1939: small Gaussian sigmas and fractional box radii render on the CPU kernel.
+    for (id, vals) in [("ec.blur.gaussian", [("blurriness", n(0.9))]), ("ec.blur.fastbox", [("radius", n(1.5))])] {
+        let mut s = Scene::new(BitDepth::Bpc32);
+        let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+        s.push(bg);
+        let mut l = s.footage(70, 44);
+        s.effect(&mut l, id, &vals);
+        s.push(l);
+        check(&format!("{id} {vals:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    }
+}
+
+#[test]
 fn gpu_effects_match_cpu() {
-    effect_case("ec.blur.gaussian", &[("blurriness", n(9.0))]);
-    effect_case("ec.blur.gaussian", &[("blurriness", n(4.0)), ("dimensions", Value::Enum(1)), ("repeatEdge", Value::Bool(true))]);
-    effect_case("ec.blur.fastbox", &[("radius", n(5.0)), ("iterations", n(2.0))]);
-    effect_case("ec.blur.fastbox", &[("radius", n(3.0)), ("dimensions", Value::Enum(2)), ("repeatEdge", Value::Bool(true))]);
+    // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
+    effect_case("ec.blur.gaussian", &[("blurriness", n(14.0))]);
+    effect_case("ec.blur.gaussian", &[("blurriness", n(12.0)), ("dimensions", Value::Enum(1)), ("repeatEdge", Value::Bool(true))]);
+    effect_case("ec.blur.fastbox", &[("radius", n(6.0)), ("iterations", n(2.0))]);
+    effect_case("ec.blur.fastbox", &[("radius", n(4.0)), ("dimensions", Value::Enum(2)), ("repeatEdge", Value::Bool(true))]);
     effect_case("ec.blur.directional", &[("direction", n(30.0)), ("length", n(12.0))]);
     effect_case("ec.stylize.glow", &[("threshold", n(40.0)), ("radius", n(14.0)), ("intensity", n(1.5))]);
     effect_case("ec.stylize.glow", &[("colors", Value::Enum(1)), ("operation", Value::Enum(1)), ("colorA", c(1.0, 0.8, 0.1))]);
@@ -757,6 +870,71 @@ fn within_memory_returns_the_work_when_there_is_room() {
     assert_eq!((img.width, img.height), (64, 32));
 }
 
+/// A texture the device rejected (deliberately too wide), made outside any frame under a scope
+/// of its own: the view a frame then makes of it is the reported validation error.
+fn rejected_texture(g: &Gpu) -> wgpu::Texture {
+    let scope = g.ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let too_wide = g.ctx.device.limits().max_texture_dimension_2d.saturating_add(1);
+    let t = g.ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("deliberately too wide"),
+        size: wgpu::Extent3d { width: too_wide, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    assert!(pollster::block_on(scope.pop()).is_some(), "the device rejected the texture");
+    t
+}
+
+/// A frame that makes a view of an invalid texture ("Texture with '' label is invalid", #1319)
+/// fails alone: the validation error doesn't reach the device's handler (which retires the
+/// compositor for the session, and panics in tests), and the next frame composites on the GPU,
+/// read back, like the CPU.
+#[test]
+fn a_view_of_an_invalid_texture_fails_the_frame_not_the_compositor() {
+    hold_gpu_lock();
+    let Some(g) = Gpu::headless() else { return };
+    let rejected = rejected_texture(&g);
+    let err = g.within_memory(|| rejected.create_view(&Default::default())).expect_err("the frame fails");
+    assert!(matches!(&err, crate::FrameError::Validation(e) if e.contains("deliberately too wide")), "{err:?}");
+    assert!(g.ctx.check_health().is_ok(), "the compositor stays on: {:?}", g.ctx.check_health());
+    let s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
+    let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+    let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+    r.accel = Some(&g);
+    let img = g.within_memory(|| g.render(&r, s.cid, Tick::ZERO)).expect("the next frame isn't rejected").expect("the GPU renders it");
+    let mut d = diff(&cpu, &img, tolerance(BitDepth::Bpc32));
+    d.quantized = false;
+    check("after a rejected frame", Some(d), 0.0);
+}
+
+/// No texture of a failed frame is reused: not one released while another encoder is still
+/// open (it waits for that encoder), nor one taken before the failure and handed back after.
+#[test]
+fn a_failed_frame_returns_no_texture_to_the_pool() {
+    hold_gpu_lock();
+    let Some(g) = Gpu::headless() else { return };
+    let rejected = rejected_texture(&g);
+    let earlier = g.within_memory(|| crate::context::Enc::new(&g.ctx).image(48, 16)).expect("an earlier frame");
+    let mut other = crate::context::Enc::new(&g.ctx);
+    other.encoder();
+    g.within_memory(|| (crate::context::Enc::new(&g.ctx).image(64, 32), rejected.create_view(&Default::default()))).expect_err("the frame fails");
+    drop(earlier);
+    drop(other);
+    let (hits, _) = g.ctx.pool_stats();
+    let (a, b) = g
+        .within_memory(|| {
+            let mut e = crate::context::Enc::new(&g.ctx);
+            (e.image(64, 32), e.image(48, 16))
+        })
+        .expect("the next frame");
+    assert_eq!(((a.width, a.height), (b.width, b.height)), ((64, 32), (48, 16)));
+    assert_eq!(g.ctx.pool_stats().0, hits, "no texture of the failed frame was reused");
+}
+
 /// A buffer whose allocation fails (here: over the device's buffer size limit; on Adreno an
 /// internal `ERROR_INITIALIZATION_FAILED`) is reported to the caller's error scope instead of
 /// panicking in `create_buffer_init`'s mapped range on a frame thread (#591).
@@ -849,6 +1027,62 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
         d.quantized = depth != BitDepth::Bpc32;
         check(&format!("missing kernels {depth:?}"), Some(d), 0.0);
     }
+}
+
+/// WGSL cannot read the CPU's constants, so Glow's bright pass repeats them as literals; this
+/// ties them to `effects::GLOW_GAIN` / `GLOW_KNEE` (runs without a GPU).
+#[test]
+fn glow_constants_match_the_cpu() {
+    use effectcraft_effects::{GLOW_GAIN, GLOW_KNEE};
+    let kernels = include_str!("shaders/kernels.wgsl");
+    let want = format!("max({GLOW_GAIN:?} * (px.xyz / a - vec3<f32>(thr - {GLOW_KNEE:?})), vec3<f32>(0.0))");
+    assert!(kernels.contains(&want), "Glow's bright pass in kernels.wgsl is not `{want}`");
+}
+
+/// The GPU Tint gives After Effects 2026's greys for full-frame solids at its defaults (sRGB
+/// working space, not linearised): Rec. 601 weights, as the CPU (`color_fx::luma_601`).
+#[test]
+fn gpu_tint_defaults_match_after_effects_greys() {
+    let Some(g) = gpu() else {
+        // Visible skip (EFFECTCRAFT_REQUIRE_GPU=1 makes a missing adapter fail instead).
+        eprintln!("gpu_tint_defaults_match_after_effects_greys: skipped: no GPU adapter");
+        return;
+    };
+    for (col, want) in [([1.0, 0.0, 0.0], 76.0), ([0.0, 1.0, 0.0], 150.0), ([0.0, 0.0, 1.0], 29.0), ([0.5, 0.5, 0.5], 128.0)] {
+        let mut s = Scene::new(BitDepth::Bpc32);
+        s.p.settings.working_space = Some(ColorSpace::Srgb);
+        let mut l = s.solid(col, 97, 61);
+        s.effect(&mut l, "ec.color.tint", &[]);
+        s.push(l);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(g);
+        let o = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame").get(48, 30);
+        let want = want / 255.0;
+        assert!(o[..3].iter().all(|v| (v - want).abs() <= 1.0 / 255.0), "{col:?}: {o:?} vs {want}");
+    }
+}
+
+/// WGSL has no way to read the CPU's constants, so the kernels repeat them as literals; this
+/// ties each literal to its Rust source (runs without a GPU): Rec. 601 luma for Tint (`pointwise`
+/// op 1), Tritone and Luma Key / Extract, Black & White's tint weights and Exposure's 2.2 power.
+#[test]
+fn shader_constants_match_the_cpu() {
+    use effectcraft_effects::{BW_TINT_LUMA, EXPOSURE_LINEAR_GAMMA, LUMA_601};
+    let kernels = include_str!("shaders/kernels.wgsl");
+    let color = include_str!("shaders/fx_color.wgsl");
+    let key = include_str!("shaders/fx_key.wgsl");
+    let [r, g, b] = LUMA_601;
+    let dot = format!("dot(c, vec3<f32>({r}, {g}, {b}))");
+    assert!(kernels.contains(&format!("clamp({r} * c.x + {g} * c.y + {b} * c.z, 0.0, 1.0)")), "Tint luma in kernels.wgsl is not {LUMA_601:?}");
+    assert!(color.contains(&format!("clamp({dot}, 0.0, 1.0)")), "Tritone luma in fx_color.wgsl is not {LUMA_601:?}");
+    assert!(key.contains(&format!("return {dot};")), "fxk_key_luma in fx_key.wgsl is not {LUMA_601:?}");
+    let [r, g, b] = BW_TINT_LUMA;
+    assert!(color.contains(&format!("let w = vec3<f32>({r}, {g}, {b});")), "fxc_bw_tint weights are not {BW_TINT_LUMA:?}");
+    let gamma = EXPOSURE_LINEAR_GAMMA;
+    assert!(
+        kernels.contains(&format!("powz(abs(c[i]), {gamma})")) && kernels.contains(&format!("1.0 / {gamma})")),
+        "Exposure's power in kernels.wgsl is not {gamma}"
+    );
 }
 
 /// A layer whose bounds change every frame reads back at a new size each time: the staging
@@ -1070,4 +1304,14 @@ fn upload_cache_drops_textures_of_freed_buffers() {
     }
     let kept = g.ctx.upload_entries();
     assert!(kept <= before + 1, "the upload cache kept {kept} textures of freed buffers (had {before})");
+}
+
+/// The device the compositor owns asks for `MemoryUsage` so freed textures give
+/// their allocator blocks back, while its label and limits stay as they were.
+#[test]
+fn owned_devices_favour_memory_usage() {
+    let d = crate::context::device_descriptor(wgpu::Limits::default());
+    assert!(matches!(d.memory_hints, wgpu::MemoryHints::MemoryUsage));
+    assert_eq!(d.label, Some("effectcraft gpu"));
+    assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
 }

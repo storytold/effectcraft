@@ -951,5 +951,4 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
 }
 
 #[cfg(test)]
-#[path = "fbx_tests.rs"]
 mod tests;
