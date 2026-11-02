@@ -120,6 +120,11 @@ Nuke's `beauty`) show the beauty pass: the layer named Combined, Beauty, Image, 
 Color, else the first colour layer that isn't a data pass. Cryptomatte, depth, mist, normals,
 vectors, positions and IDs are never the picture. EXtractoR reads every other layer and channel.
 
+Footage on its own decodes only the channels of its picture. Once an effect reads an item's
+channels (EXtractoR, Cryptomatte, the 3D Channel effects), each later frame is decoded once for
+the picture and the effects together, and kept for a while (up to 1 GB of decoded channels);
+several frames asking for the same file at once wait for one decode.
+
 ## Replacing and reloading
 
 Importing a layered file as a composition refreshes the decoded sources used by its layers,

@@ -245,6 +245,9 @@ struct Inner {
     /// Movies that failed to open or decode (path to a readable reason; see
     /// [`FootageSource::problem`]). The first failure of a file is logged, later ones are not.
     problems: Mutex<HashMap<Arc<str>, String>>,
+    /// OpenEXR footage (by path) whose channels an effect has read (EXtractoR, Cryptomatte, the 3D
+    /// Channel effects): its pictures come from the same cached decode (#474).
+    aux_footage: Mutex<HashSet<String>>,
 }
 
 /// Decodes footage for the renderer: stills, image sequences and movies (FilmCraft codecs), plus
@@ -315,6 +318,7 @@ impl MediaPool {
                 conforming: Mutex::default(),
                 conform_failed: Mutex::default(),
                 problems: Mutex::default(),
+                aux_footage: Mutex::default(),
             }),
         }
     }
@@ -856,13 +860,19 @@ impl Inner {
         {
             return Err(MediaError::Decode(format!("{path}: {why}")));
         }
-        let loaded = crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes));
-        let img = match loaded {
-            Ok(img) => img,
+        // An effect reads this footage's channels: the picture is made of the same decode (#474).
+        let shared = lock(&self.aux_footage).contains(&footage.path);
+        if shared
+            && path.to_ascii_lowercase().ends_with(".exr")
+            && let Some(img) = crate::exr_channels::cached_picture(path, bytes.clone(), op)
+        {
+            return Ok(img);
+        }
+        match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
+            Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
-            Err(e) => crate::exr_channels::cached_layered_image(path, bytes).ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?,
-        };
-        Ok(dynamic_to_image(&img, op))
+            Err(e) => crate::exr_channels::layered_picture(path, bytes, op, shared).ok_or_else(|| MediaError::Decode(format!("{path}: {e}"))),
+        }
     }
 
     fn decode_media(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
@@ -962,6 +972,14 @@ impl FootageSource for MediaPool {
             return None;
         }
         let path = loc.key.path.clone();
+        {
+            let mut wanted = lock(&self.inner.aux_footage);
+            // (a bound: names of footage items, never cleared otherwise)
+            if wanted.len() >= 4096 {
+                wanted.clear();
+            }
+            wanted.insert(footage.path.clone());
+        }
         crate::exr_channels::cached(&path, || self.inner.read(&path).ok())
     }
 
