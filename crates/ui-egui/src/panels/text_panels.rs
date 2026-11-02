@@ -743,8 +743,9 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
     app.auto.add(auto, rect, "Font family");
     if !widgets::popup_is_open(ui, id) || !enabled {
         ui.data_mut(|d| d.remove::<FontSearch>(state_id));
-        if widgets::dropdown(ui, rect, current, &app.tokens, id.with("field")).clicked() && enabled {
-            widgets::open_popup(ui, id);
+        let resp = widgets::dropdown(ui, rect, current, &app.tokens, id.with("field"));
+        if enabled {
+            widgets::open_on_press(ui, &resp, id);
         }
         return None;
     }
@@ -874,7 +875,8 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             was_recent = r.recent;
             let row_width = ui.available_width();
             let label_width = if preview { (row_width - 100.0).max(40.0) } else { row_width };
-            let resp = ui.add_sized([row_width, 24.0], egui::Button::selectable(index == selected, ""));
+            let row = ui.add_sized([row_width, 24.0], egui::Button::selectable(index == selected, ""));
+            let resp = widgets::browse_hover(ui, row);
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), index == selected, &r.display));
             let label_rect = Rect::from_min_size(resp.rect.min + vec2(5.0, 0.0), vec2(label_width - 5.0, resp.rect.height()));
             let name = drawn_font_name(ui.ctx(), r);
@@ -912,7 +914,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
                     }
                 }
             }
-            if resp.clicked() {
+            if resp.clicked() || widgets::browse_pick(ui, &resp) {
                 chosen = Some(r.family.clone());
             }
             resp.on_hover_text(name);

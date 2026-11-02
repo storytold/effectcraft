@@ -108,6 +108,59 @@ fn font_search_preserves_edited_text_and_applies_only_to_selected_characters() {
     assert_eq!(doc.style_at(8).font, "Inter");
 }
 
+/// The font field opens its search list on the press, as After Effects' font menus do, and the
+/// release that comes up over the field still chooses no font (#2686).
+#[test]
+fn the_font_field_opens_on_the_press_and_the_release_chooses_no_font() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Caption", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let e = h.state().auto.find("character.font").expect("the font field").clone();
+    let at = egui::pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(h.state().auto.find("character.font.search").is_some(), "the press opens the search list, while the button is still down");
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "and chooses nothing yet");
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(h.state().auto.find("character.font.search").is_some(), "the list stays up for typing");
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "the release over the field changes no font");
+}
+
+/// The list opened by the press keeps browsing while the button is down: moving onto a font
+/// highlights it and the release there picks it, as After Effects' font menus do (#2686).
+#[test]
+fn the_font_list_picks_the_font_the_press_comes_up_over() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Caption", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let e = h.state().auto.find("character.font").expect("the font field").clone();
+    let at = egui::pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(h.state().auto.find("character.font.search").is_some(), "the press opens the list, while the button is still down");
+    type_text(&mut h, "noto serif");
+    let r = h.state().auto.query("character.font.option.").first().expect("the searched font").rect;
+    let row = egui::pos2(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    h.input_mut().events.push(Event::PointerMoved(row));
+    h.step();
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "moving over a font still picks nothing");
+    h.input_mut().events.push(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Noto Serif", "the release over a font picks it");
+    assert!(h.state().auto.find("character.font.search").is_none(), "and closes the list");
+}
+
 /// A font file of just `name`: the family and Regular in English, and the family again in
 /// Simplified Chinese (language 0x804).
 fn font_with_native_name(family: &str, native: &str) -> Vec<u8> {
