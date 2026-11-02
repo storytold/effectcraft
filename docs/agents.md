@@ -751,6 +751,14 @@ effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
+Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
+parallel scripts don't lose edits. Each holds an OS lock on `.<name>.lock` next to the project from
+before it reads the file until it exits; the next one says so on stderr, waits, and then edits what
+the first one saved. A crash releases the lock, and the empty file left behind is harmless. Only these
+CLI runs take the lock: the desktop app, `mcp`, and a `file.save` step in a run without `--save`
+don't. OS locks can also be unreliable over network shares and synced folders. If the lock can't be
+taken, the run warns on stderr and saves anyway.
+
 A long `run` doesn't fit on a command line (Windows caps it at 32 767 characters, Linux one
 argument at 128 KiB). `run --args-file F` reads the same `<id> <json>` arguments one per line;
 `run --commands FILE` reads steps as a JSON array of `{"command": ID, "params": {…}}` objects, or one
