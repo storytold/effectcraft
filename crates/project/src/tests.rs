@@ -443,4 +443,10 @@ fn silent_layers_are_music_and_unread_hidden_layers() {
     c.layer_mut(first).unwrap().track_matte = Some(TrackMatte { layer: matte, kind: MatteKind::Alpha });
     let c = p.comp(cid).unwrap();
     assert_eq!(p.silent_layers(c).into_iter().collect::<Vec<LayerId>>(), vec![music, hidden]);
+    // Solo hides every other layer, so a soloed music or hidden layer changes the picture.
+    for (soloed, rest) in [(music, hidden), (hidden, music)] {
+        let mut q = p.clone();
+        q.comp_mut(cid).unwrap().layer_mut(soloed).unwrap().switches.solo = true;
+        assert_eq!(q.silent_layers(q.comp(cid).unwrap()).into_iter().collect::<Vec<LayerId>>(), vec![rest]);
+    }
 }
