@@ -9,7 +9,7 @@
 
 
 <p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="EffectCraft icon: an engraved unicorn on a pink tile">
+  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="EffectCraft のアイコン: ピンクのタイルに刻まれたユニコーン">
 </p>
 
 <h1 align="center">EffectCraft</h1>
@@ -46,7 +46,7 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/effectcraft-hero.png" alt="EffectCraft's main window: the animated demo composition in the Composition panel, the Project panel, a Timeline with text, shape and solid layers, and the Properties panel showing the selected text layer's transform, font and paragraph settings" width="100%">
+  <img src="docs/images/effectcraft-hero.png" alt="EffectCraft のメインウィンドウ: コンポジションパネルのアニメーションデモ、プロジェクトパネル、テキスト・シェイプ・ソリッドレイヤーのあるタイムライン、選択中のテキストレイヤーのトランスフォーム・フォント・段落設定を示すプロパティパネル" width="100%">
 </p>
 
 > [!NOTE]
@@ -122,7 +122,7 @@ EffectCraft は、アニメーションタイトル、モーショングラフ�
   ヌルを運ぶ）ピン、髪や布のフォロースルー。
 
 <p align="center">
-  <img src="docs/images/effectcraft-graph-editor.png" alt="The Graph Editor showing an eased value curve for a text animator's Range Start, with the graph editor's button bar for hold, linear, auto Bezier and Easy Ease" width="100%">
+  <img src="docs/images/effectcraft-graph-editor.png" alt="テキストアニメーターの範囲開始のイーズ付き値カーブを表示するグラフエディター。ホールド・リニア・自動ベジェ・イージーイーズのボタンバー付き" width="100%">
 </p>
 
 ## エフェクト
@@ -139,7 +139,7 @@ EffectCraft は、アニメーションタイトル、モーショングラフ�
 プレビューはオーディオを同期再生し、メーターと波形を表示します。
 
 <p align="center">
-  <img src="docs/images/effectcraft-effects.png" alt="A CC Particle World burst with Glow, and the Effect Controls panel listing the particle system's parameters" width="100%">
+  <img src="docs/images/effectcraft-effects.png" alt="グロー付きの CC Particle World のバーストと、パーティクルシステムのパラメーターを並べたエフェクトコントロールパネル" width="100%">
 </p>
 
 ## 3D
@@ -149,7 +149,7 @@ EffectCraft は、アニメーションタイトル、モーショングラフ�
 正しく交差するレイヤー、カメラの周回・パン・ドリーのツール、正面・上面・左側・カスタムのビュー。
 
 <p align="center">
-  <img src="docs/images/effectcraft-3d.png" alt="The 3D Showcase demo in Custom View 1: intersecting cards lit by a spot light with soft shadows on a gridded floor, with the camera frustum and light drawn as wireframes" width="100%">
+  <img src="docs/images/effectcraft-3d.png" alt="カスタムビュー1の3Dショーケースデモ: グリッド床に柔らかい影を落とすスポットライトに照らされた交差するカード。カメラの視錐台とライトがワイヤーフレームで描かれている" width="100%">
 </p>
 
 ## 書き出し
@@ -170,7 +170,7 @@ Lottie で表現できないものは一覧にします。ファイル ▸ 読�
 として開きます。
 
 <p align="center">
-  <img src="docs/images/effectcraft-render-queue.png" alt="The Render Queue panel with two compositions queued" width="100%">
+  <img src="docs/images/effectcraft-render-queue.png" alt="2つのコンポジションが並んだレンダーキューパネル" width="100%">
 </p>
 
 ## エージェント向け
@@ -246,7 +246,7 @@ EffectCraft は若いプロジェクトです。最初のコミットは 2026年
 - **macOS がもっともテストされているプラットフォームです。** Linux と Windows の利用者からは
   基本的な操作の不具合が報告されており、それらを優先的に修正しています。
 - **機械学習モデルは新たに導入されたものです。** ロトブラシは MobileSAM（設定 ▸ ロトブラシにあるオプションの40MB
-  ダウンロード）を、顔トラッキングは Google の MediaPipe Face Landmarker（設定 ▸ 顔トラッキングにある
+  ダウンロード）を、フェイストラッキングは Google の MediaPipe Face Landmarker（設定 ▸ フェイストラッキングにある
   任意の3.8MBのダウンロード）を使えます。どちらも評価と調整の途上です。
 
 EffectCraft は **アルファ版**です。[docs/target-app-parity.md](docs/target-app-parity.md) で追跡している
@@ -407,4 +407,4 @@ Copyright (c) 2026 ArtCraft Team and the EffectCraft contributors. 必要な表�
 
 ## スター履歴
 
-[![Star History Chart](https://api.star-history.com/svg?repos=storytold/effectcraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=storytold%2Feffectcraft&type=date&legend=top-left)
+[![スター履歴のグラフ](https://api.star-history.com/svg?repos=storytold/effectcraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=storytold%2Feffectcraft&type=date&legend=top-left)
