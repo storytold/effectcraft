@@ -106,8 +106,10 @@ pub struct Widget {
     pub enabled: bool,
     pub visible: bool,
     pub help_tip: String,
+    pub placeholder: String,
     pub multiline: bool,
     pub read_only: bool,
+    pub active: bool,
     /// Event handlers the script attached (`onClick`, `onChange`, `onChanging`…).
     pub handlers: Vec<String>,
     /// The mouse events ([`MOUSE_EVENTS`]) a script listener receives when they happen on this
@@ -360,6 +362,10 @@ pub struct ScriptWindow {
     pub modal: bool,
     /// The window and its controls (`root.bounds` is the content size).
     pub root: Widget,
+    /// The control requested to have keyboard focus (widget id within this window).
+    pub focus_widget: Option<u32>,
+    /// Focus request revision token (monotonically increments on each focus request).
+    pub focus_seq: u64,
 }
 
 /// A user (or agent) action on a script window control.
@@ -529,10 +535,11 @@ pub fn preferred(w: &Widget) -> [f64; 2] {
             WidgetKind::Button | WidgetKind::IconButton => [(text_w(&w.text) + 24.0).max(80.0), 25.0],
             WidgetKind::StaticText => [text_w(&w.text) + 4.0, LINE_H * lines(&w.text)],
             WidgetKind::EditText => {
+                let measure = if w.text.is_empty() && !w.placeholder.is_empty() { &w.placeholder } else { &w.text };
                 if w.multiline {
-                    [(text_w(&w.text) + 12.0).max(160.0), (LINE_H * lines(&w.text) + 8.0).max(60.0)]
+                    [(text_w(measure) + 12.0).max(160.0), (LINE_H * lines(measure) + 8.0).max(60.0)]
                 } else {
-                    [(text_w(&w.text) + 12.0).max(40.0), 22.0]
+                    [(text_w(measure) + 12.0).max(40.0), 22.0]
                 }
             }
             WidgetKind::Checkbox | WidgetKind::RadioButton => [text_w(&w.text) + 24.0, 18.0],
@@ -769,6 +776,31 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
     dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
 }
 
+/// `scriptui.key`: a keyboard event on a window or control: the script's `addEventListener`
+/// listeners receive a KeyboardEvent (`key`, `keyName`, modifiers).
+pub(crate) fn key(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.key";
+    let window = window_p(s, p, c)?;
+    let ty = p.get("type").and_then(Value::as_str).unwrap_or("keydown").to_ascii_lowercase();
+    if ty != "keydown" && ty != "keyup" {
+        return Err(crate::commands::bad(c, format!("unknown key event `{ty}` (keydown or keyup)")));
+    }
+    let widget = if p.get("widget").is_some() { widget_p(s, window, p, c)? } else { 0 };
+    let flag = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let key_str = p.get("key").and_then(Value::as_str).unwrap_or("");
+    let key_name = p.get("keyName").and_then(Value::as_str).unwrap_or(key_str);
+    let value = json!({
+        "type": ty,
+        "key": key_str,
+        "keyName": key_name,
+        "altKey": flag("altKey"),
+        "ctrlKey": flag("ctrlKey"),
+        "metaKey": flag("metaKey"),
+        "shiftKey": flag("shiftKey"),
+    });
+    dispatch(s, ScriptUiEvent { window, widget, kind: ty, value })
+}
+
 /// `scriptui.resize`: the host gave the window a new size (a docked panel's dock, #2585): the
 /// script's window takes it, lays itself out again and gets `onResizing` / `onResize`.
 pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
@@ -839,6 +871,23 @@ mod tests {
         assert_eq!(win.root.lookup(&json!("Cancel")).unwrap().id, 3);
         assert_eq!(win.root.lookup(&json!("#4")).unwrap().id, 4);
         assert_eq!(win.root.lookup(&json!(1)).unwrap().id, 1);
+    }
+
+    #[test]
+    fn preferred_edittext_uses_placeholder_when_empty() {
+        let mut widget = w(WidgetKind::EditText, "");
+        widget.placeholder = "Search effects...".into();
+        let pref = preferred(&widget);
+        let widget_with_text = w(WidgetKind::EditText, "Search effects...");
+        // When text is empty and placeholder is set, preferred width should match
+        // the width we'd get from the placeholder text.
+        assert_eq!(pref[0], preferred(&widget_with_text)[0]);
+        // When text is non-empty, it should use the text, not the placeholder.
+        let mut widget2 = w(WidgetKind::EditText, "Hi");
+        widget2.placeholder = "Search effects...".into();
+        let pref2 = preferred(&widget2);
+        let widget_hi = w(WidgetKind::EditText, "Hi");
+        assert_eq!(pref2[0], preferred(&widget_hi)[0]);
     }
 
     #[test]
