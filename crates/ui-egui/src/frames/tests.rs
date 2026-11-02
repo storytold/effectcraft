@@ -1412,20 +1412,30 @@ fn ram_frames_missing_on_disk_are_written() {
     for fr in 0..10 {
         insert(&f, FrameKey { frame: fr, ..series });
     }
-    // The content key is computed on the frame pool first.
-    for _ in 0..1000 {
-        f.persist_missing(&src, &series);
-        disk.flush();
-        if (0..10).all(|fr| {
-            disk.contains(
-                disk_cache::Kind::Frame,
-                frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, series.opts, f.virtual_epoch.load(Ordering::Relaxed), None),
-            )
-        }) {
-            break;
+    let on_disk = |fr: i64| {
+        disk.contains(
+            disk_cache::Kind::Frame,
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, series.opts, f.virtual_epoch.load(Ordering::Relaxed), None),
+        )
+    };
+    let persist = || {
+        // The content key is computed on the frame pool first.
+        for _ in 0..1000 {
+            f.persist_missing(&src, &series);
+            disk.flush();
+            if (0..10).all(on_disk) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+        false
+    };
+    assert!(persist(), "every RAM frame written");
+    // Evicted from disk: the RAM frames are written again.
+    disk.set_max_bytes(1);
+    disk.set_max_bytes(1 << 30);
+    assert!(!(0..10).any(on_disk));
+    assert!(persist(), "evicted frames written again");
     // Reopened: a new preview cache over the same disk shows every frame in blue.
     let reopened = Frames::default();
     let series = FrameKey { content: reopened.content_of(&src.project, 1, cid), ..series };

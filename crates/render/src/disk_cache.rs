@@ -237,6 +237,8 @@ struct Queue {
     /// Layer and matte writes.
     jobs: std::collections::VecDeque<Job>,
     busy: bool,
+    /// Keys of frames queued or being written.
+    pending_frames: std::collections::HashSet<u128>,
 }
 
 impl Queue {
@@ -346,7 +348,13 @@ impl DiskCache {
             failed: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
             queue: Arc::new((
-                Mutex::new(Queue { frames: Default::default(), frame_bytes: 0, jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }),
+                Mutex::new(Queue {
+                    frames: Default::default(),
+                    frame_bytes: 0,
+                    jobs: Default::default(),
+                    busy: cfg!(not(target_arch = "wasm32")),
+                    pending_frames: Default::default(),
+                }),
                 Condvar::new(),
             )),
             min_layer_ms: AtomicU64::new(30),
@@ -456,6 +464,11 @@ impl DiskCache {
         self.index.lock().is_ok_and(|g| g.contains(kind, key))
     }
 
+    /// A frame write is queued or in progress.
+    pub fn frame_pending(&self, key: u128) -> bool {
+        self.queue.0.lock().is_ok_and(|q| q.pending_frames.contains(&key))
+    }
+
     /// Keys of one kind (unordered).
     pub fn keys(&self, kind: Kind) -> Vec<u128> {
         self.index.lock().map(|g| g.keys(kind)).unwrap_or_default()
@@ -496,6 +509,7 @@ impl DiskCache {
         {
             q.jobs.clear();
             q.frames.clear();
+            q.pending_frames.clear();
         }
         while !q.is_empty() || q.busy {
             q = match cv.wait(q) {
@@ -564,6 +578,7 @@ impl DiskCache {
                 return false;
             }
             if kind == Kind::Frame {
+                q.pending_frames.insert(key);
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
                 q.frames.push_back(Job::Write(kind, key, payload));
             } else {
@@ -715,12 +730,14 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
-        match job {
-            Job::Write(kind, key, payload) => cache.write_now(kind, key, &payload),
-        }
+        let Job::Write(kind, key, payload) = job;
+        cache.write_now(kind, key, &payload);
         drop(cache);
         if let Ok(mut g) = m.lock() {
             g.busy = false;
+            if kind == Kind::Frame {
+                g.pending_frames.remove(&key);
+            }
         }
         cv.notify_all();
     }

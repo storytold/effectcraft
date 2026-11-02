@@ -520,7 +520,8 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
-    /// Disk keys [`Frames::persist_missing`] queued (a refused write is removed, to retry).
+    /// Disk keys [`Frames::persist_missing`] is converting (the disk cache tracks them once
+    /// queued, so an evicted or refused frame is written again).
     #[cfg(not(target_arch = "wasm32"))]
     persisted: Arc<Mutex<HashSet<u128>>>,
 }
@@ -914,7 +915,7 @@ impl Frames {
                 .filter_map(|(k, img)| {
                     let FrameImage::Cpu(img) = img else { return None };
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ k.opts);
-                    (!dc.contains(disk_cache::Kind::Frame, dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                    (!dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
                 })
                 .collect()
         };
@@ -925,9 +926,9 @@ impl Frames {
         let work = move || {
             for (dk, img) in missing {
                 let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-                if !dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
-                    && let Ok(mut q) = persisted.lock()
-                {
+                // (accepted: the disk cache tracks it until written; refused: retried)
+                let _ = dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba);
+                if let Ok(mut q) = persisted.lock() {
                     q.remove(&dk);
                 }
             }
