@@ -1,4 +1,4 @@
-// EffectCraft scripting: an After Effects-style object model over the engine.
+// Visualab Effects scripting: an After Effects-style object model over the engine.
 //
 // Written from the behaviour the After Effects Scripting Guide documents (object names,
 // attributes, methods). Reads go through `__query(kind, json)`; every edit runs an engine command
@@ -140,8 +140,8 @@ var $ = {
   level: 0,
   engineName: "boa",
   get fileName() { return __get("app").scriptName; },
-  get os() { return "EffectCraft"; },
-  get version() { return "EffectCraft scripting"; },
+  get os() { return "Visualab Effects"; },
+  get version() { return "Visualab Effects scripting"; },
   get locale() { return "en_US"; },
   // Evaluates the file in the global scope and returns its last value (`timeout` is ignored).
   evalFile: function (file, timeout) { return __evalFile(__str(file)); },
@@ -150,7 +150,7 @@ var $ = {
 // ------------------------------------------------------------------ BridgeTalk
 
 // Which application a script runs in, for scripts and frameworks that ask during initialisation.
-// EffectCraft names itself rather than posing as another application; messages to other
+// Visualab Effects names itself rather than posing as another application; messages to other
 // applications aren't supported.
 function BridgeTalk() {
   if (!(this instanceof BridgeTalk)) return new BridgeTalk();
@@ -166,7 +166,7 @@ function BridgeTalk() {
   this.onTimeout = null;
 }
 BridgeTalk.prototype.send = function () {
-  throw __err("BridgeTalk: sending messages to other applications is not supported in EffectCraft");
+  throw __err("BridgeTalk: sending messages to other applications is not supported in Visualab Effects");
 };
 BridgeTalk.prototype.sendResult = BridgeTalk.prototype.send;
 BridgeTalk.prototype.toString = function () { return "[object BridgeTalk]"; };
@@ -181,7 +181,7 @@ BridgeTalk.__isSelf = function (spec) { return String(spec === undefined || spec
 BridgeTalk.isRunning = function (spec) { return BridgeTalk.__isSelf(spec); };
 BridgeTalk.launch = function (spec) { return BridgeTalk.__isSelf(spec); };
 BridgeTalk.getSpecifier = function (name) { return BridgeTalk.__isSelf(name) ? BridgeTalk.appSpecifier : null; };
-BridgeTalk.getDisplayName = function (spec) { return BridgeTalk.__isSelf(spec) ? "EffectCraft" : null; };
+BridgeTalk.getDisplayName = function (spec) { return BridgeTalk.__isSelf(spec) ? "Visualab Effects" : null; };
 BridgeTalk.getTargets = function () { return [BridgeTalk.appName]; };
 BridgeTalk.getStatus = function (spec) { return spec === undefined || BridgeTalk.__isSelf(spec) ? "IDLE" : "ISNOTINSTALLED"; };
 BridgeTalk.bringToFront = function () {};
@@ -286,7 +286,7 @@ File.openDialog = function () { return null; };
 File.saveDialog = function () { return null; };
 File.decode = function (s) { return decodeURIComponent(s); };
 File.encode = function (s) { return encodeURIComponent(s); };
-File.fs = "EffectCraft";
+File.fs = "Visualab Effects";
 
 function Folder(path) {
   if (!(this instanceof Folder)) return new Folder(path);
@@ -734,8 +734,9 @@ PropertyGroup.prototype.addProperty = function (name) {
   } else if (r.kind === "animator") {
     uid = __call("layer.addTextAnimator", { comp: L.__comp, layer: L.__id, properties: [] }).animator;
   } else if (r.kind === "animatorProperty") {
-    var added = __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
-    return this.property(added.index);
+    var before = this.numProperties;
+    __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
+    return this.property(before + 1);
   } else if (r.kind === "selector") {
     var n0 = this.numProperties;
     __call("layer.addTextSelector", { comp: L.__comp, layer: L.__id, animator: r.animator, kind: r.selector });
@@ -948,7 +949,7 @@ Property.prototype.property = function () { return null; };
     return __call(id, params);
   };
   P.removeKey = function (i) { this.__keyCmd(i, "keys.delete"); };
-  // EffectCraft extension: remove an inclusive range with one engine edit instead of
+  // Visualab Effects extension: remove an inclusive range with one engine edit instead of
   // cloning the project for every removed key. Indices are one-based as in removeKey.
   P.removeKeys = function (first, last) {
     var keys = this.__keys();
@@ -1618,7 +1619,7 @@ CompItem.prototype.constructor = CompItem;
   };
   P.openInViewer = function () { __call("comp.open", { comp: this.__id }); return null; };
   P.duplicate = function () { return __item(__call("project.duplicate", { items: [this.__id] }).items[0]); };
-  // Essential Graphics (templates are EffectCraft's open .ectemplate files).
+  // Essential Graphics (templates are Visualab Effects's open .ectemplate files).
   P.__eg = function () { return __call("essential.list", { comp: this.__id }); };
   P.__controllers = function () {
     var out = [];
@@ -1706,8 +1707,7 @@ Object.defineProperty(FootageItem.prototype, "mainSource", {
     return this.__mainSource;
   },
 });
-// replace() swaps in one file, even a numbered still (replaceWithSequence brings a run), as in After Effects.
-FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: false }); };
+FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
 FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
   __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
 };
@@ -2021,7 +2021,7 @@ var app = {
   endSuppressDialogs: function () {},
   purge: function () { __call("edit.purge", { what: "all" }); },
   findMenuCommandId: function (name) {
-    // Well-known After Effects ids must not shift when EffectCraft registers a command.
+    // Well-known After Effects ids must not shift when Visualab Effects registers a command.
     if (String(name) === "Undo") return 16;
     return __get("menuCommandId", { name: String(name) });
   },
@@ -2041,7 +2041,7 @@ var app = {
   pauseWatchFolder: function () {},
   endWatchFolder: function () {},
   parseSwatchFile: function () { throw __err("parseSwatchFile is not supported"); },
-  // EffectCraft: run any engine command by id with parameters (see `command.list`).
+  // Visualab Effects: run any engine command by id with parameters (see `command.list`).
   run: function (id, params) { return __call(String(id), params || {}); },
   toString: function () { return "[object Application]"; },
 };
