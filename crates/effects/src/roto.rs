@@ -686,8 +686,9 @@ impl Chain {
         let (Some(&need_lo), Some(&need_hi)) = (needed.first(), needed.last()) else {
             return Ok(Some(TrackSummary::default()));
         };
-        // Each object has its own prompts: a few clicks from its strokes and a box around what the classic engine
-        // makes of them on that frame (clicks alone pick a part of the object, not all of it).
+        // Each object has its own prompts: a few clicks from its strokes and a box saying how far it reaches (clicks
+        // alone pick a part of the object). SAM 2 fills the box it is given, so a lone object's box surrounds the matte
+        // shown on that frame (base or correction); with several objects, each gets the model's cut of its own strokes.
         let objects = self.data.objects();
         let several = objects.len() > 1;
         let mut by_object: Vec<Vec<(i64, effectcraft_segment::Prompt)>> = vec![];
@@ -698,10 +699,16 @@ impl Chain {
                 if !strokes.iter().any(|s| s.kind == StrokeKind::Fg) {
                     continue;
                 }
-                let p = match frame(f) {
-                    Some(img) => rb::tracker_prompt_boxed(&strokes, self.opts.scale, &rb::segment(&img, &strokes, None, &self.opts, self.refine_radius)),
-                    None => return Err(format!("cannot read Roto Brush prompt frame {f}")),
+                let shown = if several { None } else { self.ensure(f, &mut *frame, cancel) };
+                let matte = match shown {
+                    Some(shown) => shown,
+                    None if cancel() => return Err("tracking cancelled".into()),
+                    None => match frame(f) {
+                        Some(img) => Arc::new(rb::segment_with(&img, &strokes, None, &self.opts, self.refine_radius, self.model.as_deref())),
+                        None => return Err(format!("cannot read Roto Brush prompt frame {f}")),
+                    },
                 };
+                let p = rb::tracker_prompt_boxed(&strokes, self.opts.scale, &matte);
                 if p.points.iter().any(|(_, fg)| *fg) {
                     prompts.push((f, p));
                 }
@@ -1468,6 +1475,56 @@ mod tests {
             assert_eq!(overlays.len(), 1);
             assert_eq!((overlays[0].0, overlays[0].1.area()), (0, matte.area()));
         }
+    }
+
+    /// A model that sees only the left part of the disk, and records the tracker's box prompts.
+    #[derive(Default)]
+    struct LeftPart(std::sync::Mutex<Vec<(i64, Option<[f32; 4]>)>>);
+    impl effectcraft_segment::MaskModel for LeftPart {
+        fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+            &effectcraft_segment::SAM2_TINY
+        }
+        fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, _: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+            Ok((0..w * h).map(|i| f32::from((26..36).contains(&(i % w)) && (30..50).contains(&(i / w)))).collect())
+        }
+        fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+            Some(self)
+        }
+    }
+    impl effectcraft_segment::ObjectTracker for LeftPart {
+        fn track(
+            &self,
+            req: &effectcraft_segment::TrackRequest,
+            _: &mut dyn FnMut(i64) -> Option<Arc<ClipFrame>>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(usize, i64, effectcraft_segment::TrackedFrame),
+        ) -> effectcraft_segment::Result<()> {
+            *self.0.lock().unwrap() = req.objects.iter().flatten().map(|(f, p)| (*f, p.bbox)).collect();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_tracker_box_surrounds_the_matte_shown_on_each_stroked_frame() {
+        let mut data = RotoData::default();
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[30.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 3.0, points: vec![[50.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.span = [0, 3];
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("tracker-box-from-shown-matte".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        let fake = Arc::new(LeftPart::default());
+        chain.model = Some(fake.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        let mut get = |f: i64| Some(Arc::new(frame(f as f64 / 25.0)));
+        let expected: Vec<(i64, Option<[f32; 4]>)> = [0, 2]
+            .into_iter()
+            .map(|f| (f, rb::tracker_prompt_boxed(&data.strokes_of(f, 0), 1.0, &chain.ensure(f, &mut get, &|| false).expect("a shown matte")).bbox))
+            .collect();
+        assert!(expected.iter().all(|(_, b)| b.is_some()));
+        assert!(expected[0].1.unwrap()[2] < 44.0, "the base frame shows the model's part of the disk: {expected:?}");
+        chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(*fake.0.lock().unwrap(), expected, "the base frame and the correction frame are boxed around what they show");
     }
 
     #[test]
