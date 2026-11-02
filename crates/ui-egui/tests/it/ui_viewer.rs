@@ -2588,13 +2588,14 @@ fn shift_on_an_edge_handle_keeps_the_proportions() {
     h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0, plate.0]})).unwrap();
     set(&mut h, box_id, "transform/scale", json!([100, 100, 100]));
     h.run_steps(2);
-    let undo0 = h.state().session.history.undo.len();
     let edge = rect(&h, &format!("viewer.handle.{}.5", box_id.0)).center();
     let to = screen(&h, [380.0, 180.0]);
     drag_path(&mut h, &[edge, to], egui::Modifiers::SHIFT);
     assert!(close(scale(&h, box_id), [150.0, 150.0]), "{:?}", scale(&h, box_id));
     assert!(close(scale(&h, plate), [75.0, 120.0]), "{:?}", scale(&h, plate));
-    assert_eq!(h.state().session.history.undo.len(), undo0 + 1, "one undo step");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert!(close(scale(&h, box_id), [100.0, 100.0]), "one undo step: {:?}", scale(&h, box_id));
+    assert!(close(scale(&h, plate), [50.0, 80.0]), "one undo step: {:?}", scale(&h, plate));
 }
 
 /// #491: with several layers selected, a handle drag scales all of them by the same ratio, each
