@@ -185,6 +185,13 @@ fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<Str
     })
 }
 
+/// The status line shown while the frames are filled. Edge Blend calls only the membrane, which
+/// the device backend leaves to the CPU reference, so it is not a device fill even when a `fill`
+/// backend is present; Object and Surface run the flow and PatchMatch on the device.
+fn filling_status(on_device: bool, method: FillMethod) -> &'static str {
+    if on_device && method != FillMethod::EdgeBlend { "Filling (GPU)" } else { "Filling" }
+}
+
 /// Run a fill: the layer's frames (rendered in passes with a job worker's GPU), the fill, the
 /// PNG sequence written into `plan.dir` (`Services::store_file`). Returns the files.
 ///
@@ -240,8 +247,8 @@ pub(crate) async fn run_plan(
             references.push((k, img));
         }
     }
-    message(if fill.is_some() { "Filling (GPU)" } else { "Filling" });
     let opts = FillOpts { method: FillMethod::from_name(&plan.method).unwrap_or_default(), lighting: plan.lighting, ..Default::default() };
+    message(filling_status(fill.is_some(), opts.method));
     let input = FillInput { frames, holes, references };
     let cpu = effectcraft_raster::inpaint::CpuFill;
     let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
@@ -461,7 +468,18 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::memory_shortfall;
+    use super::{filling_status, memory_shortfall};
+
+    /// Edge Blend fills with the membrane, which the device backend leaves to the CPU reference:
+    /// it must not claim a GPU fill just because a backend is available.
+    #[test]
+    fn edge_blend_is_not_reported_as_a_device_fill() {
+        use effectcraft_raster::inpaint::FillMethod;
+        assert_eq!(filling_status(true, FillMethod::Object), "Filling (GPU)");
+        assert_eq!(filling_status(true, FillMethod::Surface), "Filling (GPU)");
+        assert_eq!(filling_status(true, FillMethod::EdgeBlend), "Filling");
+        assert_eq!(filling_status(false, FillMethod::Object), "Filling");
+    }
 
     /// #1789: 10 s of 1080p30 (300 frames) needs at least 20 GB, which 4 GB free can't hold.
     #[test]
