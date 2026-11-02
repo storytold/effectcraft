@@ -182,25 +182,89 @@ impl Default for Switches {
     }
 }
 
-// What a frame's pixels depend on. Caches key on it: the Audio, Lock and Shy switches and Hide
-// Shy Layers don't change pixels, so toggling them keeps cached frames (#103).
+// What a frame's pixels depend on. Caches key on it: the Lock and Shy switches and Hide Shy
+// Layers never change pixels, and the Audio switch, the Audio group and audio effects change them
+// only when something draws the layer's audio (a waveform or spectrum picks it, see
+// [`crate::Project::heard_layers`]), so editing those keeps cached frames (#103).
+
+/// Is `id` an audio effect (applied by the audio mix rather than the compositor)?
+pub fn is_audio_effect(id: &str) -> bool {
+    id.starts_with("ec.audio.")
+}
 
 impl Switches {
     /// These switches with Audio, Lock and Shy at their defaults.
     pub fn pixels(&self) -> Switches {
         Switches { audio: true, locked: false, shy: false, ..self.clone() }
     }
+
+    /// The switches that change the pixels of a layer: [`Self::pixels`], keeping Audio when
+    /// something draws the layer's audio (`heard`).
+    pub fn picture(&self, heard: bool) -> Switches {
+        Switches { audio: if heard { self.audio } else { true }, ..self.pixels() }
+    }
+}
+
+/// A node only the audio mix reads: the layer's Audio group, an audio effect.
+fn audio_only(n: &Node, root: bool) -> bool {
+    match n {
+        Node::Group(g) => (root && g.match_id == "audio") || matches!(&g.kind, GroupKind::Effect { effect } if is_audio_effect(effect)),
+        Node::Prop(_) => false,
+    }
+}
+
+/// `a` and `b` are equal but for their audio-only nodes ([`audio_only`]: the root's Audio group,
+/// the effects in its Effects group that are audio effects).
+fn same_picture_props(a: &PropGroup, b: &PropGroup) -> bool {
+    fn head(a: &PropGroup, b: &PropGroup) -> bool {
+        // Every field (no `..`: a new field must be considered here).
+        let PropGroup { uid, match_id, name, kind, enabled, label, children: _ } = a;
+        *uid == b.uid && *match_id == b.match_id && *name == b.name && *kind == b.kind && *enabled == b.enabled && *label == b.label
+    }
+    fn children(a: &PropGroup, b: &PropGroup, root: bool) -> bool {
+        let mut x = a.children.iter().filter(|n| !audio_only(n, root));
+        let mut y = b.children.iter().filter(|n| !audio_only(n, root));
+        loop {
+            match (x.next(), y.next()) {
+                (None, None) => return true,
+                (Some(Node::Group(g)), Some(Node::Group(h))) if root && g.match_id == "effects" && h.match_id == "effects" => {
+                    if !(head(g, h) && children(g, h, false)) {
+                        return false;
+                    }
+                }
+                (Some(m), Some(n)) if m == n => {}
+                _ => return false,
+            }
+        }
+    }
+    head(a, b) && children(a, b, true)
+}
+
+/// `g` (a layer's property tree) without its audio-only nodes ([`same_picture_props`]).
+fn picture_props(g: &PropGroup) -> PropGroup {
+    let mut g = g.clone();
+    g.children.retain(|n| !audio_only(n, true));
+    for n in &mut g.children {
+        if let Node::Group(e) = n
+            && e.match_id == "effects"
+        {
+            e.children.retain(|n| !audio_only(n, false));
+        }
+    }
+    g
 }
 
 impl Layer {
-    /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
+    /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches and what only
+    /// the audio mix reads (nothing draws its audio).
     pub fn same_pixels(&self, o: &Layer) -> bool {
-        self.same_pixels_with(o, true)
+        self.same_pixels_with(o, true, false)
     }
 
     /// [`Self::same_pixels`], with the markers counting only when `with_markers` (they are read by
-    /// expressions alone, so a project without any can edit them freely).
-    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool) -> bool {
+    /// expressions alone, so a project without any can edit them freely) and the audio (the Audio
+    /// switch, the Audio group, audio effects) only when `heard`: something draws it.
+    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool, heard: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
             id,
@@ -233,7 +297,7 @@ impl Layer {
             && *in_point == o.in_point
             && *out_point == o.out_point
             && *stretch == o.stretch
-            && switches.pixels() == o.switches.pixels()
+            && switches.picture(heard) == o.switches.picture(heard)
             && *blend_mode == o.blend_mode
             && *preserve_transparency == o.preserve_transparency
             && *track_matte == o.track_matte
@@ -243,7 +307,28 @@ impl Layer {
             && *auto_orient == o.auto_orient
             && *environment == o.environment
             && *environment_background == o.environment_background
-            && *props == o.props
+            && (if heard { *props == o.props } else { same_picture_props(props, &o.props) })
+    }
+
+    /// This layer with what doesn't change its pixels at its defaults (see
+    /// [`Self::same_pixels_with`]), for keys that hash it; `None` when it already is.
+    pub fn picture_form(&self, heard: bool) -> Option<Layer> {
+        let switches = self.switches.picture(heard);
+        let audio = !heard
+            && (self.props.children.iter().any(|n| audio_only(n, true))
+                || self
+                    .props
+                    .children
+                    .iter()
+                    .any(|n| matches!(n, Node::Group(e) if e.match_id == "effects" && e.children.iter().any(|n| audio_only(n, false)))));
+        if switches == self.switches && !audio {
+            return None;
+        }
+        let mut l = Layer { switches, ..self.clone() };
+        if audio {
+            l.props = picture_props(&self.props);
+        }
+        Some(l)
     }
 }
 
@@ -354,6 +439,14 @@ impl Layer {
         let mut out: Vec<LayerId> = self.parent.iter().copied().chain(self.track_matte.iter().map(|m| m.layer)).collect();
         walk(&self.props, 0, &mut out);
         out
+    }
+
+    /// Layers this one picks in an effect or tracker (an Audio Spectrum's Audio Layer, a
+    /// Displacement Map's map layer…), itself included: [`Self::referenced_layers`] without the
+    /// parent and the track matte.
+    pub fn picked_layers(&self) -> Vec<LayerId> {
+        let skip = usize::from(self.parent.is_some()) + usize::from(self.track_matte.is_some());
+        self.referenced_layers().into_iter().skip(skip).collect()
     }
 
     pub fn is_active_at(&self, t: Tick) -> bool {

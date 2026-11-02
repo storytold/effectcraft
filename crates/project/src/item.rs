@@ -131,11 +131,42 @@ impl Project {
         self.comps().any(|(_, c)| c.layers.iter().any(|l| any_expr(&l.props)))
     }
 
-    /// Layers of `comp` that can't change its pixels: footage layers of files without video
-    /// (music, voice-over) and layers with the Video switch off, unless another layer reads them
-    /// (a hidden track matte, the Audio Spectrum's Audio Layer). Cameras, lights, nulls,
-    /// environment layers and soloed layers (Solo hides every other layer) are never silent. Expressions, which can read any layer, are the caller's concern.
-    pub fn silent_layers(&self, comp: &Comp) -> std::collections::BTreeSet<LayerId> {
+    /// The layers whose audio something draws ([`Heard`]): those a layer picks in an effect (an
+    /// Audio Spectrum or Audio Waveform's Audio Layer, even on itself), and the layers inside a
+    /// picked precomp, whose audio it mixes. With an expression anywhere (it can read any layer's
+    /// Audio Levels) every layer is heard.
+    pub fn heard_layers(&self) -> Heard {
+        if self.reads_markers() {
+            return Heard { all: true, layers: Default::default() };
+        }
+        let mut layers = std::collections::BTreeSet::new();
+        let mut stack: Vec<(ItemId, LayerId)> =
+            self.comps().flat_map(|(id, c)| c.layers.iter().flat_map(move |l| l.picked_layers().into_iter().map(move |r| (*id, r)))).collect();
+        // (bounded: each (comp, layer) is visited once)
+        while let Some((cid, lid)) = stack.pop() {
+            if !layers.insert((cid, lid)) {
+                continue;
+            }
+            let inner = self.comp(cid).and_then(|c| c.layer(lid)).and_then(|l| match l.source {
+                LayerSource::Comp { item } => Some(item),
+                _ => None,
+            });
+            if let Some(inner) = inner
+                && let Some(c) = self.comp(inner)
+            {
+                stack.extend(c.layers.iter().map(|l| (inner, l.id)));
+            }
+        }
+        Heard { all: false, layers }
+    }
+
+    /// Layers of `comp` (item `id`) that can't change its pixels: footage layers of files without
+    /// video (music, voice-over) and layers with the Video switch off, unless another layer reads
+    /// them (a hidden track matte) or something draws their audio ([`Self::heard_layers`]: the
+    /// Audio Spectrum's Audio Layer, also from a comp that nests this one). Cameras, lights,
+    /// nulls, environment layers and soloed layers (Solo hides every other layer) are never
+    /// silent. Expressions, which can read any layer, are the caller's concern.
+    pub fn silent_layers(&self, id: ItemId, comp: &Comp, heard: &Heard) -> std::collections::BTreeSet<LayerId> {
         let read: std::collections::BTreeSet<LayerId> =
             comp.layers.iter().flat_map(|l| l.referenced_layers().into_iter().filter(move |r| *r != l.id)).collect();
         comp.layers
@@ -151,6 +182,7 @@ impl Project {
                     && !l.environment
                     && !l.environment_background
                     && !read.contains(&l.id)
+                    && !heard.contains(id, l.id)
             })
             .map(|l| l.id)
             .collect()
@@ -347,5 +379,27 @@ impl Project {
             limits::repair_item(item, &mut notes);
         }
         Ok((p, notes))
+    }
+}
+
+/// The layers whose audio something draws ([`Project::heard_layers`]): their Audio switch, Audio
+/// group and audio effects change pixels.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    all: bool,
+    layers: std::collections::BTreeSet<(ItemId, LayerId)>,
+}
+
+impl Heard {
+    /// Something draws the audio of layer `layer` of comp `comp`.
+    pub fn contains(&self, comp: ItemId, layer: LayerId) -> bool {
+        self.all || self.layers.contains(&(comp, layer))
+    }
+
+    /// Heard in `self` or in `o` (the states before and after an edit).
+    pub fn union(mut self, o: &Heard) -> Heard {
+        self.all |= o.all;
+        self.layers.extend(o.layers.iter().copied());
+        self
     }
 }

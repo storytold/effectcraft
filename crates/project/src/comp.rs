@@ -284,20 +284,22 @@ fn timing_markers(m: &[Marker]) -> impl Iterator<Item = (Tick, Tick)> + '_ {
 }
 
 impl Comp {
-    /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
-    /// Shy Layers, the viewer's Resolution and the work area (a preview and render range only).
+    /// Draws the same pixels as `o`: equal but for its layers' Lock and Shy switches, Hide Shy
+    /// Layers, the viewer's Resolution, the work area (a preview and render range only) and, as
+    /// nothing draws their audio, its layers' Audio switches, Audio groups and audio effects.
     pub fn same_pixels(&self, o: &Comp) -> bool {
-        self.same_pixels_with(o, true)
+        self.same_pixels_with(o, true, &|_| false)
     }
 
     /// [`Self::same_pixels`], with the comp's and its layers' markers counting only when
     /// `with_markers`: only expressions read them, so while none does, adding or moving a marker
     /// (even during playback) leaves every rendered frame valid. Protected time markers with a
-    /// duration set the timing (Responsive Design), so those always count.
-    pub fn same_pixels_with(&self, o: &Comp, with_markers: bool) -> bool {
+    /// duration set the timing (Responsive Design), so those always count. A layer's audio counts
+    /// when `heard` says something draws it ([`crate::Project::heard_layers`]).
+    pub fn same_pixels_with(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> bool {
         self.same_settings(o, with_markers)
             && self.layers.len() == o.layers.len()
-            && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels_with(b, with_markers))
+            && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels_with(b, with_markers, heard(a.id)))
     }
 
     /// [`Self::same_pixels_with`] but for the layers.
@@ -361,8 +363,8 @@ impl Comp {
     /// cut, a split only the copy's half (#1641). `None` when the edit can reach any frame: a comp
     /// setting, a layer reorder, Solo turning on or off, an environment layer, an expression (it
     /// reads anything), or a changed layer another layer parents to, mattes with or picks in an
-    /// effect or tracker.
-    pub fn changed_spans(&self, o: &Comp, with_markers: bool) -> Option<Vec<(Tick, Tick)>> {
+    /// effect or tracker. A layer's audio counts when `heard` says something draws it.
+    pub fn changed_spans(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> Option<Vec<(Tick, Tick)>> {
         fn has_expression(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
                 Node::Prop(p) => p.expr.is_some(),
@@ -384,7 +386,7 @@ impl Comp {
         let mut respanned = Vec::new();
         let mut cuts = Vec::new();
         for (l, other) in self.layers.iter().map(|l| (l, o.layer(l.id))).chain(o.layers.iter().map(|l| (l, self.layer(l.id)))) {
-            if other.is_some_and(|b| l.same_pixels_with(b, with_markers)) {
+            if other.is_some_and(|b| l.same_pixels_with(b, with_markers, heard(l.id))) {
                 continue;
             }
             if l.environment || l.environment_background {
@@ -392,7 +394,7 @@ impl Comp {
             }
             if let Some(b) = other
                 && (Layer { in_point: b.in_point, out_point: b.out_point, name: b.name.clone(), label: b.label, comment: b.comment.clone(), ..l.clone() })
-                    .same_pixels_with(b, with_markers)
+                    .same_pixels_with(b, with_markers, heard(l.id))
             {
                 respanned.push(l.id);
             }
@@ -432,16 +434,18 @@ impl Comp {
     /// The comp with those switches, the Resolution and the work area at their defaults (borrowed
     /// when they already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
-        self.pixel_form_with(true)
+        self.pixel_form_with(true, &|_| false)
     }
 
     /// [`Self::pixel_form`], also without the comp's plain markers and its layers' markers when not
-    /// `with_markers` (see [`Self::same_pixels_with`] and [`Project::reads_markers`]).
-    pub fn pixel_form_with(&self, with_markers: bool) -> std::borrow::Cow<'_, Comp> {
+    /// `with_markers` (see [`Self::same_pixels_with`] and [`Project::reads_markers`]), and with the
+    /// audio of the layers `heard` doesn't name at its defaults ([`Layer::picture_form`]).
+    pub fn pixel_form_with(&self, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> std::borrow::Cow<'_, Comp> {
+        let pictures: Vec<Option<Layer>> = self.layers.iter().map(|l| l.picture_form(heard(l.id))).collect();
         if !self.hide_shy
             && self.resolution.is_auto()
             && self.work_area == (Tick::ZERO, Tick::ZERO)
-            && self.layers.iter().all(|l| l.switches == l.switches.pixels())
+            && pictures.iter().all(Option::is_none)
             && (with_markers || (self.markers.iter().all(is_timing_marker) && self.layers.iter().all(|l| l.markers.is_empty())))
         {
             return std::borrow::Cow::Borrowed(self);
@@ -453,8 +457,10 @@ impl Comp {
         if !with_markers {
             c.markers.retain(is_timing_marker);
         }
-        for l in &mut c.layers {
-            l.switches = l.switches.pixels();
+        for (l, picture) in c.layers.iter_mut().zip(pictures) {
+            if let Some(p) = picture {
+                *l = p;
+            }
             if !with_markers {
                 l.markers.clear();
             }

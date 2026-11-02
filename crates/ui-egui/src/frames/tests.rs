@@ -1292,7 +1292,7 @@ fn kept_frames_render_the_same() {
         let p1 = s.project.clone();
         let fr = p1.comp(cid).unwrap().frame_rate;
         let frames = fr.frame_at(p1.comp(cid).unwrap().duration);
-        let dirty = dirty_frames(&p0, &p1, cid);
+        let dirty = dirty_frames(&p0, &p1, cid, &p1.heard_layers().union(&p0.heard_layers()));
         let kept: Vec<i64> = match &dirty {
             Some(d) => (0..frames).filter(|f| !d.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))).collect(),
             None => vec![],
@@ -1469,4 +1469,96 @@ fn ram_frames_missing_on_disk_are_written() {
     disk.flush();
     assert!(!(0..10).any(on_disk));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Audio changes pixels only where something draws it: a clip's Audio Levels, audio effects and
+/// Audio switch keep every frame, in RAM and on disk, until a waveform picks the clip (on another
+/// layer, on itself, or through a precomp of it); then the frames of the reader render again.
+#[test]
+fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Footage, GroupKind, LayerId, Value, build};
+    use effectcraft_engine::render::disk_cache::comp_content_key_with;
+    use serde_json::json;
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let mut p = (*s.project).clone();
+    let clip =
+        p.add_item("clip.mov", effectcraft_color::Label::None, None, ItemKind::Footage(Footage { has_video: true, has_audio: true, ..Default::default() }));
+    let comp = p.comp(cid).unwrap().clone();
+    let fr = comp.frame_rate;
+    let t = move |f: i64| fr.tick_of(f);
+    let v = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item: clip }, (8, 8), None);
+    let (clip_layer, solid) = (v.id, comp.layers[0].id);
+    p.comp_mut(cid).unwrap().layers.push(v);
+    for (id, a, b) in [(solid, 0, 30), (clip_layer, 90, 120)] {
+        let l = p.comp_mut(cid).unwrap().layer_mut(id).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (t(a), t(a), t(b));
+    }
+    // The outer comp shows the whole of A.
+    let outer = p.add_item("Outer", effectcraft_color::Label::None, None, ItemKind::Comp(Arc::new(Comp { layers: Default::default(), ..comp.clone() })));
+    let oc = p.comp(outer).unwrap().clone();
+    let mut pre = build::layer(&mut p, &oc, "Pre", LayerSource::Comp { item: cid }, (8, 8), None);
+    (pre.start_time, pre.in_point, pre.out_point) = (t(0), t(0), t(120));
+    let (pre_layer, reader) = (pre.id, oc.layers.first().map(|l| l.id));
+    assert!(reader.is_none());
+    p.comp_mut(outer).unwrap().layers.push(pre);
+    // An effect on `on` (of comp `c`) that picks layer `pick`.
+    let pick = |p: &mut Project, c: ItemId, on: LayerId, pick: LayerId| {
+        let mut n = 1_000_000;
+        let mut ids = build::Ids(&mut n);
+        let mut g = ids.group("waveform", "Audio Waveform");
+        g.kind = GroupKind::Effect { effect: "ec.generate.audiowaveform".into() };
+        g.children.push(ids.prop("audioLayer", "Audio Layer", Value::Layer(Some(pick.0))).into());
+        p.comp_mut(c).unwrap().layer_mut(on).unwrap().props.group_mut("effects").unwrap().children.push(g.into());
+    };
+    let levels = |p: &mut Project| {
+        p.comp_mut(cid).unwrap().layer_mut(clip_layer).unwrap().props.prop_mut("audio/levels").unwrap().set_value_at(t(0), Value::Vec2([-6.0, -6.0]))
+    };
+    let backwards = |p: &mut Project| {
+        let mut n = 2_000_000;
+        let mut g = build::Ids(&mut n).group("backwards", "Backwards");
+        g.kind = GroupKind::Effect { effect: "ec.audio.backwards".into() };
+        p.comp_mut(cid).unwrap().layer_mut(clip_layer).unwrap().props.group_mut("effects").unwrap().children.push(g.into());
+    };
+    let mute = |p: &mut Project| p.comp_mut(cid).unwrap().layer_mut(clip_layer).unwrap().switches.audio = false;
+    // The frames of `view` an edit keeps, and whether its disk key stays.
+    let kept = |p0: &Project, view: ItemId, edit: &dyn Fn(&mut Project)| {
+        let p0 = Arc::new(p0.clone());
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: view.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, view);
+        (0..120).for_each(|n| insert(&f, k(id0, n)));
+        let mut p1 = p0.clone();
+        edit(Arc::make_mut(&mut p1));
+        let id1 = f.content_of(&p1, 2, view);
+        (f.cached_frames(&k(id1, 0)), comp_content_key_with(&p0, view, None) == comp_content_key_with(&p1, view, None))
+    };
+    let all: Vec<i64> = (0..120).collect();
+    let edits: [(&str, &dyn Fn(&mut Project)); 3] = [("levels", &levels), ("audio effect", &backwards), ("audio switch", &mute)];
+    for (name, edit) in edits {
+        assert_eq!(kept(&p, cid, edit), (all.clone(), true), "{name}: nothing draws the clip's audio");
+        assert_eq!(kept(&p, outer, edit), (all.clone(), true), "{name}: nor through the precomp");
+
+        let mut q = p.clone();
+        pick(&mut q, cid, solid, clip_layer);
+        let (frames, disk) = kept(&q, cid, edit);
+        assert!(!disk, "{name}: the solid draws the clip's audio");
+        assert!(!frames.contains(&10) && !frames.contains(&100), "{name}: the reader's and the clip's frames go: {frames:?}");
+
+        let mut q = p.clone();
+        pick(&mut q, cid, clip_layer, clip_layer);
+        let (frames, disk) = kept(&q, cid, edit);
+        assert!(!disk, "{name}: the clip draws its own audio");
+        assert!(frames.contains(&10) && frames.contains(&60) && !frames.contains(&100), "{name}: the clip's frames go: {frames:?}");
+
+        let mut q = p.clone();
+        let r = q.comp(cid).unwrap().layers[0].clone();
+        let reader = LayerId(r.id.0 + 500_000);
+        q.comp_mut(outer).unwrap().layers.insert(0, effectcraft_engine::project::Layer { id: reader, ..r });
+        pick(&mut q, outer, reader, pre_layer);
+        let (frames, disk) = kept(&q, outer, edit);
+        assert!(!disk && frames != all, "{name}: a waveform in the outer comp draws the precomp's audio: {frames:?}");
+    }
 }

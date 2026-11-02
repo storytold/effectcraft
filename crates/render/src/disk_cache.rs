@@ -1004,7 +1004,8 @@ fn comp_content_key_for_renderer(
     // Expressions can read anything (every item counts); without them, layers that can't
     // change the picture (music, hidden layers nothing reads) and their files don't count.
     let expressions = project.reads_markers();
-    let silent = |c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(c) };
+    let heard = project.heard_layers();
+    let silent = |id, c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(id, c, &heard) };
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = vec![comp];
     while let Some(id) = stack.pop() {
@@ -1013,7 +1014,7 @@ fn comp_content_key_for_renderer(
         }
         let Some(it) = project.item(id) else { continue };
         if let ItemKind::Comp(c) = &it.kind {
-            let quiet = silent(c);
+            let quiet = silent(id, c);
             for l in c.layers.iter().filter(|l| !quiet.contains(&l.id)) {
                 if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                     stack.push(item);
@@ -1030,13 +1031,14 @@ fn comp_content_key_for_renderer(
         h.write(it.name.as_bytes());
         match &it.kind {
             ItemKind::Comp(c) => {
-                let quiet = silent(c);
+                let quiet = silent(id, c);
+                let heard = |l| heard.contains(id, l);
                 if quiet.is_empty() {
-                    hash_debug(&mut h, &c.pixel_form_with(markers));
+                    hash_debug(&mut h, &c.pixel_form_with(markers, &heard));
                 } else {
                     let mut pic = (**c).clone();
                     pic.layers.retain(|l| !quiet.contains(&l.id));
-                    hash_debug(&mut h, &pic.pixel_form_with(markers));
+                    hash_debug(&mut h, &pic.pixel_form_with(markers, &heard));
                 }
             }
             k => hash_debug(&mut h, k),

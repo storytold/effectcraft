@@ -28,7 +28,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
+use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
@@ -342,17 +342,23 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
 
 /// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
 /// ([`Comp::changed_spans`]), a frame wider either side for rounding. Layers that can't change the
-/// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count.
-fn dirty_frames(old: &Project, new: &Project, comp: ItemId) -> Option<Vec<(i64, i64)>> {
+/// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count, nor does
+/// the audio of layers nothing draws it from (`heard`, of both states).
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard) -> Option<Vec<(i64, i64)>> {
     let picture = |p: &Project| {
         let mut c = p.comp(comp)?.clone();
-        let quiet = p.silent_layers(&c);
+        let quiet = p.silent_layers(comp, &c, heard);
         c.layers.retain(|l| !quiet.contains(&l.id));
         Some(c)
     };
     let (a, b) = (picture(old)?, picture(new)?);
     let fr = b.frame_rate;
-    Some(b.changed_spans(&a, false)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
+    Some(
+        b.changed_spans(&a, false, &|l| heard.contains(comp, l))?
+            .into_iter()
+            .map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1)))
+            .collect(),
+    )
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
@@ -817,10 +823,12 @@ impl Frames {
         let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
         // Markers are pixels only to the expressions that read them (#1083).
         let markers = project.reads_markers();
+        // Whose audio is drawn, before or after the edit (a waveform added or removed counts).
+        let heard = bases.get(&comp.0).map_or_else(|| project.heard_layers(), |(_, base)| project.heard_layers().union(&base.heard_layers()));
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
             && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
+                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
                 _ => c,
             }) == *base_id
         {
@@ -832,10 +840,10 @@ impl Frames {
         if !markers
             && let Some((base_id, base)) = bases.get(&comp.0)
             && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
+                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
                 _ => c,
             }) == *base_id
-            && let Some(dirty) = dirty_frames(base, project, comp)
+            && let Some(dirty) = dirty_frames(base, project, comp, &heard)
             && let Ok(mut cache) = self.cache.lock()
         {
             cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
