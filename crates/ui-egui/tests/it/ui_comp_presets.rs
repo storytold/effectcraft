@@ -103,3 +103,36 @@ fn composition_settings_buttons_stay_put_between_tabs() {
         }
     }
 }
+
+/// Composition Settings keeps Cancel and OK in view in every interface language: a translation
+/// wider than the English (French, #2841) widens the dialog instead of pushing OK past its right
+/// edge, where it could be reached only by scrolling sideways.
+#[test]
+fn composition_settings_buttons_fit_every_language() {
+    // English, then French (#2841) and the other catalogs whose rows overflowed the 600 points.
+    for language in ["en", "fr", "es", "ka", "cs", "pt-br"] {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
+        s.prefs.general.language = language.into();
+        let mut h =
+            Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
+        h.run_steps(3);
+        open_settings(&mut h);
+        let mut oks = vec![];
+        for tab in ["basic", "advanced", "renderer"] {
+            click(&mut h, &format!("dialog.comp.tab.{tab}"));
+            let rect = |id: &str| h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}")).rect;
+            let (view, ok, cancel) = (rect("dialog.comp.view"), rect("dialog.comp.ok"), rect("dialog.comp.cancel"));
+            for (name, r) in [("OK", ok), ("Cancel", cancel)] {
+                assert!(r[0] >= view[0] && r[0] + r[2] <= view[0] + view[2] + 0.5, "{language} {tab}: {name} {r:?} is outside the dialog {view:?}");
+            }
+            if language == "en" {
+                // English still fits the 600-point dialog (18-point margins).
+                assert_eq!(view[2], 600.0 - 36.0, "{tab}");
+            }
+            oks.push(ok);
+        }
+        // The dialog takes the width of its widest tab, so OK stays put between tabs.
+        assert!(oks.windows(2).all(|w| w[0] == w[1]), "{language}: OK moves between tabs: {oks:?}");
+    }
+}
