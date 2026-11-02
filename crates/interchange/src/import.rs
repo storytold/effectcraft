@@ -189,10 +189,12 @@ const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media t
 /// when it links the media of an imported EDL. Returns the names of the media that stay on
 /// timecode though their clips use an hour or more of it (the file is missing or has none).
 fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str) -> Option<Footage>) -> Vec<String> {
-    let hour = filmcraft_time::Tick(3600 * filmcraft_time::TICKS_PER_SECOND);
     let mut on_timecode: HashSet<fp::ItemId> = HashSet::new();
     for it in project.items.values() {
         if let fp::ItemKind::Sequence(seq) = &it.kind {
+            // 01:00:00:00 as the list counts it: 01:00:00;00 drop-frame at 29.97 fps is 3599.996 s
+            let (rate, df) = (seq.settings.frame_rate, seq.settings.drop_frame);
+            let hour = rate.tick_of(filmcraft_time::fields_to_frames(1, 0, 0, 0, rate, df));
             on_timecode.extend(seq.all_tracks().flat_map(|t| &t.items).filter(|ti| ti.source_in >= hour).map(|ti| ti.item));
         }
     }

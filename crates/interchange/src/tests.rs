@@ -408,6 +408,18 @@ fn edl_media_left_on_timecode_is_named() {
     assert_eq!(notes, ["EDL source timecodes stay media time for b.mov, c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
 }
 
+/// A drop-frame list counts its hour in timecode: a clip cut at 01:00:00;00 (3599.996 s at 29.97
+/// fps) from a missing file is still named.
+#[test]
+fn edl_drop_frame_media_left_on_timecode_is_named() {
+    let edl = "TITLE: CUT\nFCM: DROP FRAME\n\n001  C        V     C        01:00:00;00 01:00:01;00 01:00:00;00 01:00:01;00\n* FROM CLIP NAME: c.mov\n* SOURCE FILE: /media/c.mov\n";
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(29.97), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut |_: &str| None).unwrap();
+    let notes: Vec<&String> = r.warnings.iter().filter(|w| w.contains("media time")).collect();
+    assert_eq!(notes, ["EDL source timecodes stay media time for c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
+}
+
 #[test]
 fn rejects_unknown_documents() {
     let mut p = Project::default();
