@@ -66,8 +66,6 @@ pub struct DialogState {
     pub delete_items: super::delete_items::Pending,
     /// The Gradient Editor's draft and the property it edits.
     pub gradient: super::gradient_editor::Draft,
-    /// Preview of the settings dialog being edited (Solid, Camera, Light, Composition Settings).
-    pub live: super::live_preview::LivePreview,
     /// The user template the Delete Template prompt asks about: its id and name.
     pub delete_template: Option<(String, String)>,
 }
@@ -78,7 +76,6 @@ pub fn open_new_comp(app: &mut EffectcraftApp) {
     app.dialog_state.comp =
         CompDraft { name: format!("Comp {n}"), tab: super::comp_settings::Tab::Basic, start_tc: None, dur_tc: None, preset_name: None, ..last };
     app.dialog_state.editing_existing = false;
-    app.dialog_state.live = Default::default();
     app.dialog = Some(Dialog::NewComp);
 }
 
@@ -112,7 +109,6 @@ pub fn open_comp_settings_for(app: &mut EffectcraftApp, cid: ItemId) -> Result<(
     app.dialog_state.editing_existing = true;
     app.dialog_state.editing_comp = Some(cid);
     app.dialog = Some(Dialog::CompSettings);
-    super::live_preview::begin(app, Dialog::CompSettings);
     Ok(())
 }
 
@@ -127,7 +123,6 @@ pub fn open_new_solid(app: &mut EffectcraftApp) -> Result<(), String> {
     if d.solid_color == [0.0; 3] {
         d.solid_color = [0.2, 0.45, 0.85];
     }
-    d.live = Default::default();
     app.dialog = Some(Dialog::SolidSettings);
     Ok(())
 }
@@ -143,7 +138,6 @@ fn open_solid_settings(app: &mut EffectcraftApp, layer: u64, item: ItemId) -> Re
     (d.solid_name, d.solid_color, d.solid_size, d.solid_pixel_aspect) = (name, so.color, [so.width, so.height], so.pixel_aspect);
     (d.solid_layer, d.solid_shared, d.solid_affect_all) = (Some(layer), users > 1, false);
     app.dialog = Some(Dialog::SolidSettings);
-    super::live_preview::begin(app, Dialog::SolidSettings);
     Ok(())
 }
 
@@ -196,31 +190,6 @@ pub(crate) fn modal_vertical(ctx: &egui::Context, title: &str, size: egui::Vec2,
     modal_with_scroll(ctx, title, size, t, true, body);
 }
 
-/// Where a modal dialog opens and whether it dims the window behind it. The default is the middle
-/// of the window over a dimmed backdrop.
-#[derive(Clone, Copy, Debug)]
-pub struct Placement {
-    /// The opening position as a fraction of the room the dialog can move in, from the middle
-    /// `(0, 0)` to the bottom right `(1, 1)`.
-    pub start: egui::Vec2,
-    /// Dim the window behind the dialog.
-    pub dim: bool,
-}
-
-impl Default for Placement {
-    fn default() -> Self {
-        Placement { start: vec2(0.0, 0.0), dim: true }
-    }
-}
-
-/// [`modal`] at `place`: a dialog that edits what is behind it keeps the canvas in view.
-pub(crate) fn modal_placed(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, place: Placement, body: impl FnOnce(&mut egui::Ui)) {
-    let max_height = (modal_space(ctx).y - 84.0).max(40.0);
-    modal_fit_placed(ctx, title, size, t, place, |ui, _| {
-        egui::ScrollArea::both().max_height(max_height).auto_shrink([false, true]).show(ui, body);
-    });
-}
-
 fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, vertical_only: bool, body: impl FnOnce(&mut egui::Ui)) {
     let max_height = (modal_space(ctx).y - 84.0).max(40.0);
     modal_fit(ctx, title, size, t, |ui, _| {
@@ -233,11 +202,6 @@ fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tok
 /// only its content: `body` gets the height left under the title, with `size` kept within the
 /// window.
 pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui, f32)) {
-    modal_fit_placed(ctx, title, size, t, Placement::default(), body);
-}
-
-/// [`modal_fit`] at `place`.
-pub(crate) fn modal_fit_placed(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, place: Placement, body: impl FnOnce(&mut egui::Ui, f32)) {
     let pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
     ctx.data_mut(|d| d.insert_temp(modal_pass_id(), pass));
     let size = size.min(modal_space(ctx));
@@ -246,10 +210,10 @@ pub(crate) fn modal_fit_placed(ctx: &egui::Context, title: &str, size: egui::Vec
     // window, so dragging back never has to undo a part the dialog could not follow.
     let offset_id = id.with("offset");
     let room = ((ctx.content_rect().size() - size) * 0.5).max(vec2(0.0, 0.0));
-    let offset = ctx.data(|d| d.get_temp::<egui::Vec2>(offset_id)).unwrap_or(room * place.start).clamp(-room, room);
+    let offset = ctx.data(|d| d.get_temp::<egui::Vec2>(offset_id)).unwrap_or_default().clamp(-room, room);
     egui::Modal::new(id)
         .area(egui::Modal::default_area(id).anchor(Align2::CENTER_CENTER, offset))
-        .backdrop_color(Color32::from_black_alpha(if place.dim { 120 } else { 0 }))
+        .backdrop_color(Color32::from_black_alpha(120))
         .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(t.panel_bg).inner_margin(egui::Margin::same(18)))
         .show(ctx, |ui| {
             ui.set_width(size.x - 36.0);
@@ -257,7 +221,7 @@ pub(crate) fn modal_fit_placed(ctx: &egui::Context, title: &str, size: egui::Vec
             // The id stays keyed on the untranslated source, so switching language cannot move it.
             let head = ui.label(egui::RichText::new(tr(title)).font(Tokens::semibold(15.0)).color(t.tab_text_active));
             let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), head.rect.y_range());
-            let grip = ui.interact(row, id.with("grip"), Sense::DRAG).on_hover_cursor(egui::CursorIcon::Grab);
+            let grip = ui.interact(row, id.with("grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
             if grip.dragged() {
                 let moved = (offset + grip.drag_delta()).clamp(-room, room);
                 ui.ctx().data_mut(|d| d.insert_temp(offset_id, moved));
@@ -265,8 +229,6 @@ pub(crate) fn modal_fit_placed(ctx: &egui::Context, title: &str, size: egui::Vec
             ui.add_space(10.0);
             let title_h = ui.cursor().top() - ui.min_rect().top();
             body(ui, (size.y - 36.0 - title_h).max(40.0));
-            // A colour picker's eyedropper samples the viewer under the dialog, but not the dialog itself.
-            crate::color_picker::note_overlay(ui.ctx(), ui.min_rect().expand(18.0));
         });
 }
 
@@ -333,7 +295,7 @@ fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
     let mut cmd: Option<&str> = None;
     let tab_id = egui::Id::unique("about_tab");
-    modal(ctx, "About EffectCraft", vec2(680.0, 520.0), t, |ui| {
+    modal(ctx, "About Visualab Effects", vec2(680.0, 520.0), t, |ui| {
         let mut tab = ui.data_mut(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
         ui.horizontal(|ui| {
             for (i, (label, id)) in ABOUT_TABS.iter().enumerate() {
@@ -386,7 +348,7 @@ fn about_main(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, cmd: &mut
     let p = ui.painter();
     p.rect_filled(r, 10.0, Color32::from_rgb(0x1b, 0x22, 0x3c));
     crate::header::paint_logo(p, Rect::from_min_size(r.min + vec2(18.0, 20.0), vec2(56.0, 56.0)));
-    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "EffectCraft", Tokens::semibold(24.0), Color32::WHITE);
+    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "Visualab Effects", Tokens::semibold(24.0), Color32::WHITE);
     p.text(
         r.min + vec2(90.0, 62.0),
         Align2::LEFT_CENTER,
@@ -395,12 +357,12 @@ fn about_main(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, cmd: &mut
         t.text_dim,
     );
     ui.add_space(12.0);
-    ui.label(tr("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps."));
+    ui.label(tr("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the Visualab family of creative apps."));
     ui.add_space(14.0);
     let links: [(Icon, &str, &str, &'static str); 4] = [
-        (Icon::Chat, "Join the ArtCraft Discord", effectcraft_engine::links::DISCORD, "help.discord"),
-        (Icon::Globe, "ArtCraft website", effectcraft_engine::links::WEBSITE, "help.website"),
-        (Icon::Sparkle, "EffectCraft home page", effectcraft_engine::links::APP_PAGE, "help.appPage"),
+        (Icon::Chat, "Visualab Studios website", effectcraft_engine::links::WEBSITE, "help.discord"),
+        (Icon::Globe, "Visualab website", effectcraft_engine::links::WEBSITE, "help.website"),
+        (Icon::Sparkle, "Visualab Effects home page", effectcraft_engine::links::APP_PAGE, "help.appPage"),
         (Icon::Code, "Source code on GitHub", effectcraft_engine::links::GITHUB, "help.github"),
     ];
     for (icon, label, url, c) in links {
@@ -441,15 +403,9 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     let mut result = None;
     let custom = app.session.prefs.comp_presets.clone();
     let mut cmds = Vec::new();
-    // The title keys the modal id and its drag offset; `modal_fit` translates the heading itself,
-    // so passing the source keeps the dialog in place when the interface language changes.
-    let live = existing && super::live_preview::active(app);
-    let place = super::live_preview::place(app);
-    let mut preview = app.dialog_state.live.on;
-    modal_placed(ctx, "Composition Settings", vec2(600.0, 470.0), t, place, |ui| {
-        result = super::comp_settings::show(ui, &mut d, t, &mut app.auto, &custom, &mut cmds, live.then_some(&mut preview));
+    modal(ctx, "Composition Settings", vec2(600.0, 470.0), t, |ui| {
+        result = super::comp_settings::show(ui, &mut d, t, &mut app.auto, &custom, &mut cmds);
     });
-    app.dialog_state.live.on = preview;
     if d.preset_name.is_some() {
         // Save Preset asks for the name in its own window over the dialog, as After Effects does.
         result = None;
@@ -467,24 +423,10 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     }
     app.dialog_state.comp = d;
     match result {
-        Some(serde_json::Value::Null) => {
-            super::live_preview::cancel(app);
-            app.dialog = None;
-        }
+        Some(serde_json::Value::Null) => app.dialog = None,
         Some(mut params) => {
             if existing && let (Some(cid), Some(m)) = (app.dialog_state.editing_comp, params.as_object_mut()) {
                 m.insert("comp".into(), json!(cid.0));
-            }
-            // A preview already made the edit (one undo step): OK keeps it.
-            if existing && super::live_preview::keep(app, "comp.settings", params.clone()) {
-                // The Resolution is not part of the command, so the preview never applied it.
-                if let Some(cid) = app.dialog_state.editing_comp
-                    && let Err(e) = set_resolution(app, cid.0, app.dialog_state.comp.resolution)
-                {
-                    app.ui.status = e.to_string();
-                }
-                app.dialog = None;
-                return;
             }
             let r = if existing { app.session.execute("comp.settings", params) } else { app.session.execute("comp.new", params) };
             let cid = if existing { app.dialog_state.editing_comp.map(|c| c.0) } else { r.as_ref().ok().and_then(|v| v["comp"].as_u64()) };
@@ -500,15 +442,7 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
             }
             app.dialog = None;
         }
-        None => {
-            if existing && let Some(cid) = app.dialog_state.editing_comp {
-                let mut params = super::comp_settings::params(&app.dialog_state.comp);
-                if let Some(m) = params.as_object_mut() {
-                    m.insert("comp".into(), json!(cid.0));
-                }
-                super::live_preview::sync(app, "comp.settings", params);
-            }
-        }
+        None => {}
     }
 }
 
@@ -565,11 +499,8 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let comp_size = app.session.active_comp().map(|c| (c.width, c.height)).unwrap_or((1920, 1080));
     let lock_id = egui::Id::unique("solid-lock-aspect");
     let mut lock = ctx.data(|m| m.get_temp::<bool>(lock_id)).unwrap_or(true);
-    let live = super::live_preview::active(app);
-    let place = super::live_preview::place(app);
-    let mut preview = app.dialog_state.live.on;
     let auto = &mut app.auto;
-    modal_placed(ctx, "Solid Settings", vec2(480.0, if editing.is_some() { 430.0 } else { 390.0 }), t, place, |ui| {
+    modal(ctx, "Solid Settings", vec2(480.0, if editing.is_some() { 430.0 } else { 390.0 }), t, |ui| {
         ui.horizontal(|ui| {
             ui.label(tr("Name:"));
             let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(320.0));
@@ -584,11 +515,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.horizontal(|ui| {
                 let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut size[0]).range(1..=30000).suffix(" px")));
                 auto.add("dialog.solid.width", r.rect, "Width");
-                let r = crate::widgets::labelled_checkbox(
-                    ui,
-                    &mut lock,
-                    tr_args("Lock Aspect Ratio to {}", &[&(super::comp_settings::aspect_label(ow as f64, oh as f64))]),
-                );
+                let r = ui.checkbox(&mut lock, tr_args("Lock Aspect Ratio to {}", &[&(super::comp_settings::aspect_label(ow as f64, oh as f64))]));
                 auto.add("dialog.solid.lockAspect", r.rect, "Lock Aspect Ratio");
             });
             ui.end_row();
@@ -644,7 +571,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         if editing.is_some() {
             ui.add_space(8.0);
             let r = ui
-                .add_enabled(shared, crate::widgets::DragCheckbox::new(&mut affect_all, tr("Affect all layers that use this solid")))
+                .add_enabled(shared, egui::Checkbox::new(&mut affect_all, tr("Affect all layers that use this solid")))
                 .on_disabled_hover_text(tr("Only this layer uses this solid."));
             auto.add("dialog.solid.affectAll", r.rect, "Affect all layers that use this solid");
             if shared && !affect_all {
@@ -659,28 +586,16 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             let r = ui.button(tr("Cancel"));
             auto.add("dialog.solid.cancel", r.rect, "Cancel");
             close = r.clicked();
-            if live {
-                super::live_preview::checkbox(ui, auto, &mut preview, "dialog.solid.preview");
-            }
         });
     });
     ctx.data_mut(|m| m.insert_temp(lock_id, lock));
     let ds = &mut app.dialog_state;
-    ds.live.on = preview;
     (ds.solid_name, ds.solid_color, ds.solid_size, ds.solid_pixel_aspect, ds.solid_affect_all) = (name, color, size, par, affect_all);
-    let (command, params) = (solid_command(ds), solid_params(ds));
     if ok || ui_enter(ctx) {
-        // A preview already made the edit (one undo step): OK keeps it.
-        if !super::live_preview::keep(app, command, params.clone())
-            && let Err(e) = app.session.execute(command, params)
-        {
+        if let Err(e) = app.session.execute(solid_command(ds), solid_params(ds)) {
             app.ui.status = e.to_string();
         }
         close = true;
-    } else if close {
-        super::live_preview::cancel(app);
-    } else {
-        super::live_preview::sync(app, command, params);
     }
     if close {
         app.dialog = None;

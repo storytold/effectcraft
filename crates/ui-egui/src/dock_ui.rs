@@ -1,7 +1,7 @@
-//! EffectCraft's panels in craft-ui's shared docking. craft-ui draws the frames, tab strips,
+//! Visualab Effects's panels in craft-ui's shared docking. craft-ui draws the frames, tab strips,
 //! stacked panels, floating windows, dividers and drop previews and owns the gestures (drag a tab
 //! onto a group to tab it there or split it off to a side; hold Cmd/Ctrl at the release, or drop
-//! outside every group, to float it). EffectCraft draws the panel bodies, the ≡ panel menu, the
+//! outside every group, to float it). Visualab Effects draws the panel bodies, the ≡ panel menu, the
 //! Timeline's comp tabs and the viewer locks in each group header, and runs every layout change
 //! through its command path (`window.dockAction`), so pointer, menu and control-channel changes
 //! share one route.
@@ -122,7 +122,7 @@ pub(crate) fn route(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, par
             let mut tagged = if params.is_object() { params.clone() } else { json!({}) };
             if let Some(fields) = tagged.as_object_mut() {
                 fields.insert("command".into(), json!(id));
-                // EffectCraft's panel names ("Effect Controls") as well as craft-ui's ids.
+                // Visualab Effects's panel names ("Effect Controls") as well as craft-ui's ids.
                 for key in ["panel", "anchor", "before"] {
                     if let Some(name) = fields.get(key).and_then(Value::as_str) {
                         let panel = PanelKind::from_name(name).ok_or(format!("unknown panel `{name}`"))?;
@@ -156,7 +156,7 @@ impl EffectcraftApp {
     }
 
     /// Run a craft-ui docking command on the current workspace, all or nothing. Named
-    /// workspaces and Reset are EffectCraft's own (`window.workspace`, `window.resetWorkspace`).
+    /// workspaces and Reset are Visualab Effects's own (`window.workspace`, `window.resetWorkspace`).
     pub(crate) fn run_dock_command(&mut self, ctx: &egui::Context, command: DockCommand<PanelKind>) -> Result<(), String> {
         if let DockCommand::Layout { action } | DockCommand::UiDock(UiDock::Action { action }) = &command {
             check_raw_action(action)?;
@@ -169,7 +169,7 @@ impl EffectcraftApp {
             }
             return Err("use the window.workspace commands for named workspaces".into());
         }
-        // A closed panel opens through EffectCraft's own path, which puts it in its usual place
+        // A closed panel opens through Visualab Effects's own path, which puts it in its usual place
         // and runs the viewer and ScriptUI lifecycles.
         let shown = match &command {
             DockCommand::Activate { panel } | DockCommand::UiDock(UiDock::Operation(craft_ui::docking::DockOperation::Open { panel })) => Some(*panel),
@@ -406,7 +406,7 @@ impl EffectcraftApp {
 
     /// A press in a panel (its body, tab or group header) focuses it; another Composition viewer
     /// also becomes the active one.
-    pub(crate) fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
+    fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
         self.ui.focused = p;
         panels::viewer_text::panel_clicked(self, ctx, p);
         if let Some(id) = panels::viewers::id_of(p) {
@@ -514,12 +514,9 @@ impl EffectcraftApp {
                 self.ui.status = error;
             }
         }
-        if let Some(open) = menu {
-            ctx.data_mut(|d| d.insert_temp::<panels::OpenPanelMenu>(egui::Id::unique("panel-menu"), open));
-            // the owner window draws it on its next pass
-            ctx.request_repaint();
+        if let Some((panel, pos)) = menu {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::unique("panel-menu"), (panel, pos)));
         }
-        drop_menu_of_closed_window(&ctx, &self.native_viewports);
         let hits = DockArea::<PanelKind>::hit_rects(&ctx, area_id());
         self.register_dock_hits(&hits);
         panels::panel_menu_popup(self, ui);
@@ -533,9 +530,6 @@ impl EffectcraftApp {
         let typing = ctx.egui_wants_keyboard_input();
         let events = events.into_iter().filter(|event| !typing && !matches!(event, egui::Event::Text(_) | egui::Event::Ime(_)));
         self.forwarded.events.extend(events);
-        if handed_over_to_the_timeline(files.iter().map(|window| (window.panel, !window.dropped.is_empty()))) {
-            self.forwarded.dropped_on_timeline = true;
-        }
         self.forwarded.files.extend(files.into_iter().flat_map(|window| window.dropped));
         if !self.forwarded.events.is_empty() || !self.forwarded.files.is_empty() {
             ctx.request_repaint();
@@ -644,7 +638,7 @@ fn has_lock(panel: PanelKind) -> bool {
     matches!(panel, PanelKind::Composition | PanelKind::Viewer(_) | PanelKind::Timeline)
 }
 
-/// EffectCraft's side of the dock area for one frame.
+/// Visualab Effects's side of the dock area for one frame.
 struct EffectContent<'a> {
     app: &'a mut EffectcraftApp,
     tokens: Tokens,
@@ -657,8 +651,8 @@ struct EffectContent<'a> {
     doc_actions: Vec<DocAction>,
     /// Viewer locks clicked.
     locks: Vec<PanelKind>,
-    /// The ≡ button clicked: its panel, where its menu opens and the viewport it was clicked in.
-    menu: Option<panels::OpenPanelMenu>,
+    /// The ≡ button clicked: its panel and where its menu opens.
+    menu: Option<(PanelKind, egui::Pos2)>,
     /// Where each panel body was drawn, in drawing order (floating windows last).
     bodies: Vec<(PanelKind, Rect)>,
     /// Where each native window's IME descriptor is set up and published.
@@ -678,8 +672,6 @@ pub(crate) struct NativeIme {
     expected: Vec<(egui::ViewportId, usize)>,
     /// The bodies each native window has drawn so far, in the order the windows began.
     drawn: Vec<(egui::ViewportId, usize)>,
-    /// Windows that drew their panel menu this pass.
-    menu_drawn: Vec<egui::ViewportId>,
     /// Windows that published this pass.
     published: Vec<egui::ViewportId>,
 }
@@ -696,7 +688,7 @@ impl NativeIme {
                 Some((viewport, count))
             })
             .collect();
-        Self { expected, drawn: Vec::new(), menu_drawn: Vec::new(), published: Vec::new() }
+        Self { expected, drawn: Vec::new(), published: Vec::new() }
     }
 
     /// Count a body of `viewport` that starts drawing. True for the window's first body: its
@@ -727,18 +719,6 @@ impl NativeIme {
         publishes
     }
 
-    /// Whether the body of `viewport` that just drew is the one that draws the window's panel
-    /// menu: after the window's last body, once per pass.
-    pub(crate) fn menu_turn(&mut self, viewport: egui::ViewportId) -> bool {
-        let drawn = self.drawn.iter().find(|(v, _)| *v == viewport).map_or(0, |(_, n)| *n);
-        let expected = self.expected.iter().find(|(v, _)| *v == viewport).map_or(0, |(_, n)| *n);
-        let turn = drawn >= expected && !self.menu_drawn.contains(&viewport);
-        if turn {
-            self.menu_drawn.push(viewport);
-        }
-        turn
-    }
-
     /// The native windows whose pass began.
     pub(crate) fn begun(&self) -> Vec<egui::ViewportId> {
         self.drawn.iter().map(|(v, _)| *v).collect()
@@ -748,17 +728,6 @@ impl NativeIme {
     pub(crate) fn unpublished(&self) -> Vec<egui::ViewportId> {
         self.drawn.iter().map(|(v, _)| *v).filter(|v| !self.published.contains(v)).collect()
     }
-}
-
-/// A panel menu left open by a panel window that has since closed has nowhere to draw: drop it.
-/// `windows` are the panel windows that drew this pass.
-pub(crate) fn drop_menu_of_closed_window(ctx: &egui::Context, windows: &[egui::ViewportId]) {
-    let id = egui::Id::unique("panel-menu");
-    ctx.data_mut(|d| {
-        if d.get_temp::<panels::OpenPanelMenu>(id).is_some_and(|(_, _, owner)| owner != egui::ViewportId::ROOT && !windows.contains(&owner)) {
-            d.remove::<panels::OpenPanelMenu>(id);
-        }
-    });
 }
 
 /// The OS window craft-ui opens for the floating window `id`.
@@ -821,11 +790,6 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         if native && self.ime.publishes(viewport, panels::viewer_text::ime_recorded(ui.ctx())) {
             panels::viewer_text::finish_ime(self.app, ui);
         }
-        // The ≡ menu of a panel in its own OS window is drawn by that window's pass, after its
-        // last body, at that window's coordinates.
-        if native && self.ime.menu_turn(viewport) {
-            panels::panel_menu_area(self.app, ui);
-        }
         // The body fills its frame; allocating it lets a floated panel keep its full size.
         ui.allocate_rect(rect, Sense::hover());
         // Painted after the body so child backgrounds cannot hide the focus outline.
@@ -835,11 +799,7 @@ impl DockContent<PanelKind> for EffectContent<'_> {
     }
 
     fn logical_label(&self, panel: &PanelKind) -> String {
-        let title = panel.title();
-        // The Window menu names most panels; `Markers` is only in the panel catalog, and the two
-        // panels in neither (`History`, `ScriptUI Panel`) keep their English names.
-        let listed = crate::i18n::command_label("window.panel", title);
-        if listed == title { crate::i18n::tr(title).to_string() } else { listed.to_string() }
+        crate::i18n::command_label("window.panel", panel.title()).to_string()
     }
 
     /// The tab names what the panel shows ("Composition Intro"), after the label swatch of its
@@ -879,15 +839,15 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         crate::widgets::focus_outline(ui, &response, &t);
         if response.clicked() {
             self.app.ui.focused = *active;
-            self.menu = Some((*active, rect.left_bottom(), ui.ctx().viewport_id()));
+            self.menu = Some((*active, rect.left_bottom()));
         }
     }
 
-    fn group_extra_tabs_width(&self, panels: &[PanelKind], _active: &PanelKind, _floating: bool) -> f32 {
+    fn group_extra_tabs_width(&self, panels: &[PanelKind], active: &PanelKind, _floating: bool) -> f32 {
         if !self.has_doc_tabs(panels) {
             return 0.0;
         }
-        dock::doc_widths(&self.ctx, &self.docs, &self.style.font).iter().sum()
+        dock::doc_widths(&self.ctx, &self.docs, *active == PanelKind::Timeline, &self.style.font).iter().sum()
     }
 
     /// The Timeline's comp tabs, after its group's panel tabs whichever panel is shown.
@@ -895,36 +855,6 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         if self.has_doc_tabs(panels) {
             let selected = *active == PanelKind::Timeline;
             self.doc_actions.extend(dock::doc_tabs(ui, ui.max_rect(), &self.docs, selected, &self.style, &mut self.app.auto));
-        }
-    }
-}
-
-/// Whether a handed-over *drop* named the Timeline. A floating window reports its hovered files
-/// too, so a drag that only passes over the Timeline window must not count: its flag would survive
-/// and send the next drop somewhere else. The panel comes from the window, which the main window's
-/// pointer can never reach (#2661).
-fn handed_over_to_the_timeline(drops: impl Iterator<Item = (PanelKind, bool)>) -> bool {
-    drops.into_iter().any(|(panel, has_files)| has_files && matches!(panel, PanelKind::Timeline))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A drop handed over by a floating window says which panel it landed on; only the Timeline
-    /// turns it into a layer instead of a project item. A window that only saw the file hover over
-    /// it carries no files and must not count, or its flag would outlive the drag (#2661).
-    #[test]
-    fn only_a_timeline_drop_is_handed_over_to_the_timeline() {
-        let cases = [
-            (vec![(PanelKind::Timeline, true)], true),
-            (vec![(PanelKind::Project, true)], false),
-            (vec![(PanelKind::Timeline, false)], false),
-            (vec![(PanelKind::Project, true), (PanelKind::Timeline, true)], true),
-            (vec![], false),
-        ];
-        for (windows, want) in cases {
-            assert_eq!(handed_over_to_the_timeline(windows.into_iter()), want, "{want}");
         }
     }
 }
