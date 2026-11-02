@@ -182,6 +182,8 @@ fn slot_flyout(app: &mut EffectcraftApp, ui: &mut egui::Ui, si: usize, slot: &[T
     let command = if resp.secondary_clicked() || long_press {
         if long_press {
             ui.data_mut(|d| d.insert_temp(held_id, id));
+            // The fly-out opened under a held button: its rows browse and pick on that release.
+            widgets::begin_browse(ui, resp);
         }
         Some(egui::SetOpenCommand::Bool(true))
     } else if resp.clicked() && !held {
@@ -193,8 +195,9 @@ fn slot_flyout(app: &mut EffectcraftApp, ui: &mut egui::Ui, si: usize, slot: &[T
     egui::Popup::menu(resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
         for tool in slot.iter() {
             let row = ui.selectable_label(app.ui.tool == *tool, crate::i18n::tr(tool.label()));
+            let row = widgets::browse_hover(ui, row);
             app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
-            if row.clicked() {
+            if row.clicked() || widgets::browse_pick(ui, &row) {
                 app.ui.tool = *tool;
                 if let Some(saved) = app.ui.slot_tools.get_mut(si) {
                     *saved = *tool;
@@ -491,9 +494,8 @@ fn create_on_double_click(app: &EffectcraftApp, tool: Tool) -> Option<(&'static 
 fn snapping_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect) {
     let t = app.tokens;
     let pop = egui::Id::unique("snap-options");
-    if widgets::icon_button(ui, r, Icon::ChevronDown, false, &t, egui::Id::unique("snap-options-button")).on_hover_text(tr("Snapping options")).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let chevron = widgets::icon_button(ui, r, Icon::ChevronDown, false, &t, egui::Id::unique("snap-options-button")).on_hover_text(tr("Snapping options"));
+    widgets::open_on_press(ui, &chevron, pop);
     app.auto.add("header.snappingOptions", r, "Snapping options");
     if !widgets::popup_is_open(ui, pop) {
         return;
@@ -581,9 +583,7 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
         p.galley_with_override_text_color(wr.min, g, col);
         app.auto.add(&format!("header.{key}Options"), wr, &options);
         let opts = egui::Id::unique(("tool-paint-options", key));
-        if wresp.clicked() {
-            widgets::open_popup(ui, opts);
-        }
+        widgets::open_on_press(ui, &wresp, opts);
         // The swatch picks a Solid Color's colour, edits a Linear or Radial Gradient's colours in
         // the Gradient Editor (the selected shape layer's Gradient Fill / Gradient Stroke), and
         // opens the options otherwise; Alt-click steps through the kinds (as in After Effects).
@@ -591,24 +591,33 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
         let sresp = ui.interact(sr, egui::Id::unique(("tool-paint-swatch", key)), Sense::click()).on_hover_text(format!("{title}: {}", tp.kind.label()));
         paint_swatch(p, sr, &tp, sresp.hovered(), &t);
         app.auto.add(&format!("header.{key}"), sr, &format!("{title} Color"));
+        // The picker and the options open on the press too; Alt-click (which cycles the kind) and
+        // the Gradient Editor stay click actions.
+        let gradient = matches!(tp.kind, PaintKind::Linear | PaintKind::Radial)
+            .then(|| gradient_colors(app, shape_layers, if key == "fill" { "gfill" } else { "gstroke" }))
+            .flatten();
+        let pop = if tp.kind == PaintKind::Solid {
+            Some(picker_id(key))
+        } else if gradient.is_none() {
+            Some(opts)
+        } else {
+            None
+        };
+        if let Some(pop) = pop
+            && !ui.input(|i| i.modifiers.alt)
+        {
+            widgets::open_on_press(ui, &sresp, pop);
+        }
         if sresp.clicked() {
             if ui.input(|i| i.modifiers.alt) {
                 let at = PaintKind::ALL.iter().position(|k| *k == tp.kind).unwrap_or(0);
                 let next = PaintKind::ALL.get((at + 1) % PaintKind::ALL.len()).copied().unwrap_or_default();
                 paint_kind(app, shape_layers, key, next);
-            } else if tp.kind == PaintKind::Solid {
-                widgets::open_popup(ui, picker_id(key));
-            } else if let Some((layer, prop)) = matches!(tp.kind, PaintKind::Linear | PaintKind::Radial)
-                .then(|| gradient_colors(app, shape_layers, if key == "fill" { "gfill" } else { "gstroke" }))
-                .flatten()
-            {
+            } else if let Some((layer, prop)) = gradient {
                 let ctx = ui.ctx().clone();
                 if let Err(e) = crate::menus::invoke(app, &ctx, "prop.editGradient", json!({"layer": layer, "prop": prop})) {
                     app.ui.status = e;
                 }
-            } else {
-                // No selected shape layer with that gradient: its options (new shapes' kind).
-                widgets::open_popup(ui, opts);
             }
         }
         let mut c = tp.color;
@@ -659,7 +668,9 @@ fn paint_kind(app: &mut EffectcraftApp, shape_layers: &[u64], key: &str, kind: P
 /// blend mode and opacity new shapes get (After Effects' dialogs, applied as they change).
 fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, shape_layers: &[u64], key: &str, title: &str, pos: egui::Pos2) {
     let id = egui::Id::unique(("tool-paint-options", key));
+    let pass_id = id.with("open-pass");
     if !widgets::popup_is_open(ui, id) {
+        ui.data_mut(|d| d.remove::<u64>(pass_id));
         return;
     }
     let t = app.tokens;
@@ -689,9 +700,8 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, shape_layers
             p.text(row(33.0) + vec2(134.0, 0.0), Align2::LEFT_CENTER, tp.kind.label(), Tokens::ui(11.5), t.text_dim);
             p.text(row(66.0), Align2::LEFT_CENTER, tr("Blend Mode:"), Tokens::ui(12.0), t.text_dim);
             blend_rect = Rect::from_min_size(row(56.0) + vec2(84.0, 0.0), vec2(150.0, 20.0));
-            if widgets::dropdown(ui, blend_rect, tp.blend.label(), &t, id.with("blend-dd")).clicked() {
-                widgets::open_popup(ui, blend_pop);
-            }
+            let dd = widgets::dropdown(ui, blend_rect, tp.blend.label(), &t, id.with("blend-dd"));
+            widgets::open_on_press(ui, &dd, blend_pop);
             app.auto.add(&format!("header.{key}Options.blend"), blend_rect, "Blend Mode");
             p.text(row(98.0), Align2::LEFT_CENTER, tr("Opacity:"), Tokens::ui(12.0), t.text_dim);
             let (or, v, _) = widgets::hot_number_at(
@@ -717,9 +727,23 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, shape_layers
         let k_blend = format!("{key}Blend");
         set = Some(json!({k_blend: m}));
     }
-    // Closes on a press outside or Escape, but stays open while its blend mode menu is.
-    if !widgets::popup_is_open(ui, blend_pop) && (widgets::pressed_outside(ui.ctx(), &area.response) || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
-        ui.data_mut(|d| d.insert_temp(id.with("open"), false));
+    // Closes on a press outside or Escape, but stays open while its blend mode menu is. A press in
+    // the pass that first draws it must not close it: an Area's rect is only at its requested
+    // position from its second pass on, so the press that just opened the options would be read as
+    // a press outside them and they would flash and close in that one frame (#1476).
+    let pass_nr = ui.ctx().cumulative_pass_nr();
+    let drawn_before = ui.data(|d| d.get_temp::<u64>(pass_id)).is_some_and(|p| p < pass_nr);
+    if !drawn_before {
+        ui.data_mut(|d| d.insert_temp(pass_id, pass_nr));
+    }
+    if drawn_before
+        && !widgets::popup_is_open(ui, blend_pop)
+        && (widgets::pressed_outside(ui.ctx(), &area.response) || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+    {
+        ui.data_mut(|d| {
+            d.insert_temp(id.with("open"), false);
+            d.remove::<u64>(pass_id);
+        });
     }
     if let Some(v) = set {
         tool_options(app, v);
@@ -972,6 +996,33 @@ mod tests {
         assert_eq!(app.ui.tool, Tool::TypeVertical);
         assert_eq!(app.ui.slot_tools[10], Tool::TypeVertical);
         frame(&mut app, &ctx, 2.1, vec![]);
+        assert!(!app.auto.elements.iter().any(|w| w.id == "tools.select.TypeVertical"));
+    }
+
+    /// A press-and-hold opens the fly-out while the button is still down, so the button can be
+    /// moved onto a tool and released there: that release takes the tool, as After Effects'
+    /// fly-outs do (#2686).
+    #[test]
+    fn a_held_fly_out_takes_the_tool_the_press_comes_up_over() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let center = |element: &crate::automation::Element| {
+            let [x, y, w, h] = element.rect;
+            egui::pos2(x + w / 2.0, y + h / 2.0)
+        };
+        let at = center(app.auto.elements.iter().find(|w| w.id == "tools.Type").unwrap());
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(&mut app, &ctx, 1.0, vec![egui::Event::PointerMoved(at), pointer(at, true)]);
+        frame(&mut app, &ctx, 1.36, vec![]);
+        let row = center(app.auto.elements.iter().find(|w| w.id == "tools.select.TypeVertical").unwrap());
+        frame(&mut app, &ctx, 1.4, vec![egui::Event::PointerMoved(row)]);
+        frame(&mut app, &ctx, 1.45, vec![pointer(row, false)]);
+        assert_eq!(app.ui.tool, Tool::TypeVertical, "the release over the row takes it");
+        assert_eq!(app.ui.slot_tools[10], Tool::TypeVertical);
+        frame(&mut app, &ctx, 1.5, vec![]);
         assert!(!app.auto.elements.iter().any(|w| w.id == "tools.select.TypeVertical"));
     }
 

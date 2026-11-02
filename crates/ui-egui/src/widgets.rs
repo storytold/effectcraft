@@ -1091,6 +1091,17 @@ pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     }
 }
 
+/// Marks the press that just opened a list as browsing it, for a list that opens on its own (a
+/// tool slot's press-and-hold fly-out) rather than through [`open_on_press`]: its rows then take
+/// the highlight ([`browse_hover`]) and the release over one chooses it ([`browse_pick`]) until
+/// the press ends.
+pub fn begin_browse(ui: &Ui, trigger: &Response) {
+    ui.data_mut(|d| {
+        d.insert_temp(browse_id(), true);
+        d.insert_temp(browse_trigger_id(), trigger.rect);
+    });
+}
+
 /// Whether a control was pressed and its list is still being browsed: the press that opened it
 /// has not come up yet (or is coming up in this pass, so the entry under the pointer can be
 /// chosen). Nothing browses otherwise, so a release that belongs to some other gesture — a
