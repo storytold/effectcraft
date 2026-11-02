@@ -310,6 +310,73 @@ impl Layer {
             && (if heard { *props == o.props } else { same_picture_props(props, &o.props) })
     }
 
+    /// The comp-time spans where `self` draws differently than `o` when the two differ only in
+    /// the keyframes of Transform properties (a key's value, ease or interpolation moved in the
+    /// Timeline or Graph Editor): from two keys before the first changed key to two after the
+    /// last (auto-Bezier and continuous tangents reach the neighbouring segments), to the
+    /// layer's in or out point past the first or last key (values hold there). `None` for any
+    /// other difference, a static value, an expression, roving keys, a time remap or a time
+    /// effect (it reads other times): those reach the layer's whole span.
+    pub fn keyframe_spans(&self, o: &Layer, with_markers: bool, heard: bool) -> Option<Vec<(Tick, Tick)>> {
+        let transform = |l: &Layer| l.props.group("transform").cloned();
+        let (t1, t0) = (transform(self)?, transform(o)?);
+        let reads_time = |l: &Layer| {
+            l.props.get("timeRemap").is_some()
+                || l.props.group("effects").is_some_and(|e| {
+                    e.children.iter().any(|n| matches!(n, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if effect.starts_with("ec.time."))))
+                })
+        };
+        if reads_time(self) || reads_time(o) {
+            return None;
+        }
+        // Everything but the Transform group draws the same.
+        let rest = |l: &Layer| {
+            let mut l = l.clone();
+            l.props.children.retain(|n| !matches!(n, Node::Group(g) if g.match_id == "transform"));
+            l
+        };
+        let head = |g: &PropGroup| PropGroup { children: vec![], ..g.clone() };
+        if !rest(self).same_pixels_with(&rest(o), with_markers, heard) || head(&t1) != head(&t0) || t1.children.len() != t0.children.len() {
+            return None;
+        }
+        let mut spans = Vec::new();
+        for (n1, n0) in t1.children.iter().zip(&t0.children) {
+            if n1 == n0 {
+                continue;
+            }
+            let (Node::Prop(p1), Node::Prop(p0)) = (n1, n0) else { return None };
+            let bare = |p: &Property| Property { keys: vec![], value: Value::Scalar(0.0), ..p.clone() };
+            if p1.expr.is_some()
+                || p0.expr.is_some()
+                || bare(p1) != bare(p0)
+                || p1.keys.is_empty()
+                || p0.keys.is_empty()
+                || p1.keys.iter().chain(&p0.keys).any(|k| k.roving)
+            {
+                return None;
+            }
+            // Keys only one side has as they are (added, removed, edited, moved).
+            let changed: Vec<Tick> =
+                p1.keys.iter().filter(|k| !p0.keys.contains(k)).chain(p0.keys.iter().filter(|k| !p1.keys.contains(k))).map(|k| k.time).collect();
+            let (Some(first), Some(last)) = (changed.iter().min(), changed.iter().max()) else { continue };
+            // Two keys before the first changed one and two after the last, on either side.
+            let mut lo = Some(Tick(i64::MAX));
+            let mut hi = Some(Tick(i64::MIN));
+            for keys in [&p1.keys, &p0.keys] {
+                let before = keys.iter().filter(|k| k.time < *first).count();
+                lo = lo.zip(before.checked_sub(2).and_then(|i| keys.get(i))).map(|(a, k)| a.min(k.time));
+                let upto = keys.iter().filter(|k| k.time <= *last).count();
+                hi = hi.zip(keys.get(upto.saturating_add(1))).map(|(a, k)| a.max(k.time));
+            }
+            let (x, y) = (lo.map_or(self.in_point, |t| self.comp_time(t)), hi.map_or(self.out_point, |t| self.comp_time(t)));
+            let (x, y) = (x.min(y).max(self.in_point), x.max(y).min(self.out_point));
+            if x <= y {
+                spans.push((x, y));
+            }
+        }
+        Some(spans)
+    }
+
     /// This layer with what doesn't change its pixels at its defaults (see
     /// [`Self::same_pixels_with`]), for keys that hash it; `None` when it already is.
     pub fn picture_form(&self, heard: bool) -> Option<Layer> {

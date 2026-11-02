@@ -1769,3 +1769,56 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A keyframe edit re-renders only around the keys it changed: two keys either side (auto-Bezier
+/// and continuous tangents reach the neighbouring segments), and from the layer's in point when
+/// the first key changes. A static value or an expression still reaches the whole layer. Every
+/// frame kept renders as before.
+#[test]
+fn a_keyframe_edit_reaches_only_the_keys_around_it() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{LayerId, Value};
+    use effectcraft_engine::render::render_frame;
+    use effectcraft_keyframe::Interp;
+    use serde_json::json;
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let l = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap();
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    // Keys at frames 0, 20, 40, 60, 80, 100, zig-zagging, all auto-Bezier and continuous.
+    for (i, f) in (0..6).map(|i| (i, i * 20)) {
+        let y = if i % 2 == 0 { 3.0 } else { 13.0 };
+        s.execute("prop.addKey", json!({"layer": l, "path": "transform/position", "time": fr.tick_of(f).seconds(), "value": [2.0 + i as f64 * 2.0, y, 0.0]}))
+            .unwrap();
+    }
+    let mut p0 = (*s.project).clone();
+    for k in &mut p0.comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().props.prop_mut("transform/position").unwrap().keys {
+        (k.in_interp, k.out_interp, k.auto_bezier, k.continuous, k.spatial_continuous) = (Interp::Bezier, Interp::Bezier, true, true, true);
+    }
+    let p0 = Arc::new(p0);
+    let n = 120;
+    type Edit = fn(&mut effectcraft_engine::project::Property);
+    let edits: [(&str, Edit, Vec<i64>, Vec<i64>); 5] = [
+        ("middle value", |p| p.keys[3].value = Value::Vec3([8.0, 8.0, 0.0]), vec![0, 17, 103, 119], vec![22, 60, 98]),
+        ("middle interpolation", |p| p.keys[3].out_interp = Interp::Hold, vec![0, 17, 103, 119], vec![22, 60, 98]),
+        ("first value", |p| p.keys[0].value = Value::Vec3([1.0, 1.0, 0.0]), vec![43, 119], vec![0, 20, 39]),
+        ("static", |p| p.keys.clear(), vec![], vec![0, 60, 119]),
+        ("expression", |p| p.expr = Some(effectcraft_engine::project::Expression { text: "value".into(), enabled: true }), vec![], vec![0, 60, 119]),
+    ];
+    for (name, edit, kept_frames, dirty_frames) in edits {
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..n).for_each(|i| insert(&f, k(id0, i)));
+        let mut p1 = p0.clone();
+        edit(Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().props.prop_mut("transform/position").unwrap());
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        assert!(kept_frames.iter().all(|i| kept.contains(i)) && !dirty_frames.iter().any(|i| kept.contains(i)), "{name}: {kept:?}");
+        let same = |i: i64| render_frame(&p0, cid, fr.tick_of(i), 1.0).data == render_frame(&p1, cid, fr.tick_of(i), 1.0).data;
+        // (the edit shows: the check below compares something)
+        assert!(name == "expression" || !(0..n).all(same), "{name}: the edit changes no pixels");
+        for i in kept {
+            assert!(same(i), "{name}: kept frame {i} renders differently after the edit");
+        }
+    }
+}

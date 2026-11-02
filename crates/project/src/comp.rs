@@ -395,6 +395,7 @@ impl Comp {
         // randomness (noise, text randomisers), so a split's copy may draw differently.
         let mut changed = Vec::new();
         let mut respanned = Vec::new();
+        let mut keyed = Vec::new();
         let mut cuts = Vec::new();
         for (l, other) in self.layers.iter().map(|l| (l, o.layer(l.id))).chain(o.layers.iter().map(|l| (l, self.layer(l.id)))) {
             if other.is_some_and(|b| l.same_pixels_with(b, with_markers, heard(l.id))) {
@@ -408,6 +409,12 @@ impl Comp {
                     .same_pixels_with(b, with_markers, heard(l.id))
             {
                 respanned.push(l.id);
+            } else if let Some(b) = other
+                && let Some(spans) = l.keyframe_spans(b, with_markers, heard(l.id))
+            {
+                // (drawn the same outside the keys it changed)
+                respanned.push(l.id);
+                keyed.extend(spans);
             }
             changed.push(l.id);
             cuts.extend([l.in_point, l.out_point]);
@@ -451,6 +458,7 @@ impl Comp {
                 let same = active(self) == active(o) && self.layers.iter().filter(|l| l.is_active_at(s)).all(draws_same);
                 (!same).then(|| (s - before, e + after))
             })
+            .chain(keyed.into_iter().map(|(s, e)| (s - before, e + after)))
             .collect();
         Some(spans)
     }
