@@ -13,6 +13,8 @@
 //! of one instance's `sspc`), see [`Project::effect_params`]. That copy also carries the values of
 //! the instance it was copied from, so values are only ever read from the instance's own `tdgp`.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::container::Chunk;
 use crate::container::bytes::{array, be_f32, be_f64, be_i32, be_u16, be_u32, cstr, text, until_nul};
 use crate::container::typed::{KeyList, Layer, Project, PropGroup, PropNode, Property};
@@ -224,7 +226,14 @@ impl<'f, 'a> Effect<'f, 'a> {
     /// The parameters described by `part` (a `LIST parT`) with the values of this instance.
     fn params_from(&self, part: &'f Chunk<'a>, borrowed: bool) -> Vec<EffectParam<'f, 'a>> {
         let mut out: Vec<EffectParam<'f, 'a>> = Vec::new();
-        let values = self.chunk.child_list(b"tdgp").and_then(PropGroup::from_chunk);
+        // The stored values by match name: the first entry of a name, as `PropGroup::get` finds it
+        // (a group of that name means no stored value). Indexed once: a lookup per parameter
+        // would scan the whole group for each of them.
+        let mut values: HashMap<String, Option<Property<'f, 'a>>> = HashMap::new();
+        for e in self.chunk.child_list(b"tdgp").and_then(PropGroup::from_chunk).map(|g| g.entries()).unwrap_or_default() {
+            let stored = if let PropNode::Property(p) = e.node { Some(p) } else { None };
+            values.entry(e.match_name).or_insert(stored);
+        }
         let mut pending: Option<String> = None;
         for c in part.children() {
             if c.is(b"tdmn") {
@@ -232,10 +241,7 @@ impl<'f, 'a> Effect<'f, 'a> {
             } else if c.is(b"pard") {
                 let Some(pard) = c.bytes() else { continue };
                 let match_name = pending.take().unwrap_or_default();
-                let stored = values.as_ref().and_then(|g| match g.get(&match_name) {
-                    Some(PropNode::Property(p)) => Some(p),
-                    _ => None,
-                });
+                let stored = values.get(&match_name).copied().flatten();
                 out.push(EffectParam {
                     index: out.len(),
                     match_name,
@@ -273,6 +279,7 @@ impl<'f, 'a> Project<'f, 'a> {
     pub fn effect_definitions(&self) -> Vec<(String, &'f Chunk<'a>)> {
         let mut out: Vec<(String, &'f Chunk<'a>)> = Vec::new();
         let Some(defs) = self.effect_defs else { return out };
+        let mut seen: HashSet<String> = HashSet::new();
         for df in defs.children().iter().filter(|c| c.is_list(b"EfDf")) {
             let mut name: Option<String> = None;
             for c in df.children() {
@@ -281,7 +288,7 @@ impl<'f, 'a> Project<'f, 'a> {
                 } else if c.is_list(b"sspc")
                     && let Some(n) = name.take()
                     && let Some(part) = c.child_list(b"parT").filter(|p| has_pard(p))
-                    && !out.iter().any(|(m, _)| *m == n)
+                    && seen.insert(n.clone())
                 {
                     out.push((n, part));
                 }
@@ -290,11 +297,37 @@ impl<'f, 'a> Project<'f, 'a> {
         out
     }
 
-    /// Where the parameter definitions of `effect` come from.
+    /// [`Self::effect_definitions`] indexed by match name, for looking up many effects: build it
+    /// once per file, not once per effect (a file can hold many definitions and many instances).
+    pub fn effect_definition_index(&self) -> EffectDefinitions<'f, 'a> {
+        EffectDefinitions { by_name: self.effect_definitions().into_iter().collect() }
+    }
+
+    /// Where the parameter definitions of `effect` come from. Builds the index each call: use
+    /// [`Self::effect_definition_index`] for more than one effect.
     pub fn definition_source(&self, effect: &Effect<'f, 'a>) -> DefinitionSource {
+        self.effect_definition_index().source(effect)
+    }
+
+    /// The parameters of `effect` ([`EffectDefinitions::params`]). Builds the index each call:
+    /// use [`Self::effect_definition_index`] for more than one effect.
+    pub fn effect_params(&self, effect: &Effect<'f, 'a>) -> Vec<EffectParam<'f, 'a>> {
+        self.effect_definition_index().params(effect)
+    }
+}
+
+/// The project-level effect definitions by match name ([`Project::effect_definition_index`]).
+#[derive(Debug, Clone, Default)]
+pub struct EffectDefinitions<'f, 'a> {
+    by_name: HashMap<String, &'f Chunk<'a>>,
+}
+
+impl<'f, 'a> EffectDefinitions<'f, 'a> {
+    /// Where the parameter definitions of `effect` come from.
+    pub fn source(&self, effect: &Effect<'f, 'a>) -> DefinitionSource {
         if effect.has_own_definitions() {
             DefinitionSource::Instance
-        } else if self.effect_definitions().iter().any(|(m, _)| m == effect.match_name()) {
+        } else if self.by_name.contains_key(effect.match_name()) {
             DefinitionSource::Project
         } else {
             DefinitionSource::Missing
@@ -305,12 +338,12 @@ impl<'f, 'a> Project<'f, 'a> {
     /// project-level definition of its match name ([`EffectParam::borrowed_definition`]). Values
     /// always come from the instance's own records (absent = the `pard` default); the project
     /// copy's values belong to another instance and are never read.
-    pub fn effect_params(&self, effect: &Effect<'f, 'a>) -> Vec<EffectParam<'f, 'a>> {
+    pub fn params(&self, effect: &Effect<'f, 'a>) -> Vec<EffectParam<'f, 'a>> {
         if effect.has_own_definitions() {
             return effect.params();
         }
-        match self.effect_definitions().into_iter().find(|(m, _)| m == effect.match_name()) {
-            Some((_, part)) => effect.params_from(part, true),
+        match self.by_name.get(effect.match_name()) {
+            Some(part) => effect.params_from(part, true),
             None => Vec::new(),
         }
     }
@@ -534,5 +567,96 @@ impl<'f, 'a> Layer<'f, 'a> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tdmn(name: &str) -> Chunk<'static> {
+        let mut b = name.as_bytes().to_vec();
+        b.resize(40, 0);
+        Chunk::data(*b"tdmn", b)
+    }
+
+    fn pard() -> Chunk<'static> {
+        Chunk::data(*b"pard", vec![0u8; 48])
+    }
+
+    fn tdbs() -> Chunk<'static> {
+        Chunk::list(*b"tdbs", Vec::new())
+    }
+
+    /// An effect instance whose `parT` names `defs` and whose `tdgp` stores `stored` (in order).
+    fn instance(defs: &[String], stored: &[(String, Chunk<'static>)]) -> Chunk<'static> {
+        let part = defs.iter().flat_map(|n| [tdmn(n), pard()]).collect();
+        let values = stored.iter().flat_map(|(n, c)| [tdmn(n), c.clone()]).collect();
+        Chunk::list(*b"sspc", vec![Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)])
+    }
+
+    #[test]
+    fn a_parameter_takes_the_first_stored_entry_of_its_name() {
+        let names: Vec<String> = ["A", "B", "C"].map(String::from).to_vec();
+        // `A` is stored twice (the first wins), `B` names a group (no stored value), `C` is absent.
+        let stored = vec![
+            ("A".to_string(), tdbs()),
+            ("B".to_string(), Chunk::list(*b"tdgp", Vec::new())),
+            ("A".to_string(), Chunk::list(*b"tdbs", vec![Chunk::data(*b"cdat", vec![0u8; 8])])),
+        ];
+        let chunk = instance(&names, &stored);
+        let fx = Effect { match_name: "X".into(), chunk: &chunk };
+        let params = fx.params();
+        assert_eq!(params.iter().map(|p| p.match_name.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
+        let first = params.first().and_then(|p| p.stored).expect("A stored");
+        assert!(first.chunk.children().is_empty(), "the first A (the second has a cdat)");
+        assert!(params.get(1).is_some_and(|p| p.stored.is_none()), "a group of that name is no stored value");
+        assert!(params.get(2).is_some_and(|p| p.stored.is_none()));
+    }
+
+    #[test]
+    fn many_parameters_are_read_in_linear_time() {
+        // 100 000 parameters with 100 000 stored values: a lookup per parameter that scans the
+        // group (as before) is 1e10 entry builds; one index is instant.
+        let n = 100_000;
+        let names: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        let stored: Vec<(String, Chunk<'static>)> = names.iter().map(|m| (m.clone(), tdbs())).collect();
+        let chunk = instance(&names, &stored);
+        let fx = Effect { match_name: "X".into(), chunk: &chunk };
+        let params = fx.params();
+        assert_eq!(params.len(), n);
+        assert!(params.iter().all(|p| p.stored.is_some()));
+    }
+
+    #[test]
+    fn many_project_definitions_are_indexed_once() {
+        // 50 000 definitions, each twice (the first copy wins), then 1000 instances without
+        // their own definitions looked up through one index.
+        let n = 50_000;
+        let mut defs = Vec::new();
+        for round in 0..2 {
+            for i in 0..n {
+                let part = Chunk::list(*b"parT", vec![tdmn(&format!("R{round}")), pard()]);
+                defs.push(Chunk::list(*b"EfDf", vec![tdmn(&format!("FX{i}")), Chunk::list(*b"sspc", vec![part])]));
+            }
+        }
+        let efdg = Chunk::list(*b"EfdG", defs);
+        let fold = Chunk::list(*b"Fold", Vec::new());
+        let project = Project { fold: &fold, effect_defs: Some(&efdg) };
+        let all = project.effect_definitions();
+        assert_eq!(all.len(), n);
+        let index = project.effect_definition_index();
+        let bare = Chunk::list(*b"sspc", vec![Chunk::list(*b"parT", Vec::new())]);
+        for i in (0..n).step_by(50) {
+            let fx = Effect { match_name: format!("FX{i}"), chunk: &bare };
+            assert_eq!(index.source(&fx), DefinitionSource::Project);
+            let params = index.params(&fx);
+            assert_eq!(params.iter().map(|p| p.match_name.as_str()).collect::<Vec<_>>(), ["R0"], "the first copy's definitions");
+            assert!(params.iter().all(|p| p.borrowed_definition));
+        }
+        let unknown = Effect { match_name: "nope".into(), chunk: &bare };
+        assert_eq!(index.source(&unknown), DefinitionSource::Missing);
+        assert!(index.params(&unknown).is_empty());
+        assert_eq!(project.definition_source(&unknown), DefinitionSource::Missing);
     }
 }

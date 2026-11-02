@@ -186,6 +186,10 @@ pub(crate) fn import_transform(
             // No record: the default point of interest of the new layer stays.
             continue;
         }
+        if source_of == ValueSource::Unreadable {
+            // Present in the file but not decodable: the reader gave the default in its place.
+            col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} unreadable, default used"));
+        }
         if sane(&base) {
             prop.value = base;
         } else {

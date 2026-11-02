@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    BlendMode as AepBlend, CompHeader, Item as AepItem, ItemKind as AepKind, Layer as AepLayer, LayerHeader, LayerType, LightType, Project as AepProject,
-    PropNode,
+    BlendMode as AepBlend, CompHeader, EffectDefinitions, Item as AepItem, ItemKind as AepKind, Layer as AepLayer, LayerHeader, LayerType, LightType,
+    Project as AepProject, PropNode,
 };
 use crate::{MatteMode, Quality as AepQuality, Rational, Renderer as AepRenderer, TrackMatte as AepMatte};
 use effectcraft_color::{BlendMode, Label};
@@ -123,9 +123,10 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
         }
     }
 
-    // Pass 2: the layers.
+    // Pass 2: the layers. The effect definitions are indexed once for every layer of every comp.
+    let defs = view.effect_definition_index();
     for p in &pending {
-        build_layers(project, &mut cx, view, p);
+        build_layers(project, &mut cx, &defs, p);
     }
 
     let Ctx { created, col, .. } = cx;
@@ -233,7 +234,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         let shown = if path.is_empty() { format!("{name} (no path stored)") } else { path.clone() };
         cx.col.missing_footage.push(shown);
     }
-    let kind = if sequence.is_empty() { footage_kind(&path) } else { FootageKind::Sequence };
+    let kind = if sequence.is_empty() { footage_kind(&path, f.native_frame_rate, f.audio_sample_rate.is_some()) } else { FootageKind::Sequence };
     let mut footage = Footage {
         path,
         kind,
@@ -298,12 +299,17 @@ fn cx_ticks(num: i64, den: i64) -> Tick {
     Tick(i64::try_from(t).unwrap_or(i64::MAX))
 }
 
-/// The footage kind by file extension (the duration and frame rate are not decoded).
-fn footage_kind(path: &str) -> FootageKind {
+/// The footage kind by file extension. An extension not listed is decided by what the project
+/// file stores for it: a native frame rate means moving footage (stills store 0), a sample rate
+/// without one means a sound file. Otherwise a clip with an unlisted extension (`.mts`, `.3gp`, ...)
+/// would arrive as a still, without its sound.
+fn footage_kind(path: &str, native_frame_rate: u32, has_sample_rate: bool) -> FootageKind {
     let ext = path.rsplit('.').next().map(str::to_ascii_lowercase).unwrap_or_default();
     match ext.as_str() {
         "mov" | "mp4" | "m4v" | "avi" | "mxf" | "mkv" | "webm" | "mpg" | "mpeg" | "wmv" | "flv" | "r3d" => FootageKind::Video,
         "wav" | "mp3" | "aac" | "aif" | "aiff" | "flac" | "ogg" | "opus" | "m4a" => FootageKind::Audio,
+        _ if native_frame_rate > 0 => FootageKind::Video,
+        _ if has_sample_rate => FootageKind::Audio,
         _ => FootageKind::Still,
     }
 }
@@ -399,7 +405,7 @@ fn anchor_unit(camera_or_light: bool, text_or_shape: bool, size: (u32, u32)) -> 
     }
 }
 
-fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, view: &AepProject<'_, '_>, p: &PendingComp<'_, '_>) {
+fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinitions<'_, '_>, p: &PendingComp<'_, '_>) {
     let Some(comp_view) = p.item.comp() else { return };
     let Some(mut comp) = project.comp(p.id).cloned() else { return };
     let comp_name = project.item(p.id).map(|i| i.name.clone()).unwrap_or_default();
@@ -542,7 +548,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, view: &AepProject<'_, '
         }
         if let Some(fx) = l.props.sub_mut("effects") {
             let lcx = LayerCtx { comp: &comp_name, layer: &name, aep_id: h.id, ec_id: l.id, size, tm: &tm };
-            import_effects(view, &layer, &lcx, &mut Ids(&mut project.next_id), fx, &mut layer_refs, &mut cx.col);
+            import_effects(defs, &layer, &lcx, &mut Ids(&mut project.next_id), fx, &mut layer_refs, &mut cx.col);
         }
         if let Some(parent) = h.parent_id {
             parents.push((h.id, l.id, name.clone(), parent));
@@ -736,6 +742,41 @@ fn resolve_mattes(comp: &mut Comp, mattes: &[PendingMatte], ids: &HashMap<u32, L
     }
 }
 
+/// The layers whose parent chain comes back to them (`links`: layer to parent). Each layer is
+/// visited once, so a long chain costs its length, not its length squared.
+fn parent_cycles(links: &HashMap<LayerId, LayerId>) -> HashSet<LayerId> {
+    // Absent: not seen; `false`: on the chain being walked; `true`: finished.
+    let mut done: HashMap<LayerId, bool> = HashMap::with_capacity(links.len());
+    let mut cycles = HashSet::new();
+    for &start in links.keys() {
+        let mut chain = Vec::new();
+        let mut at = start;
+        loop {
+            match done.get(&at) {
+                Some(false) => {
+                    // Back on the chain: the part from `at` on is a loop.
+                    if let Some(i) = chain.iter().position(|l| *l == at) {
+                        cycles.extend(chain.get(i..).unwrap_or_default().iter().copied());
+                    }
+                    break;
+                }
+                Some(true) => break,
+                None => {}
+            }
+            done.insert(at, false);
+            chain.push(at);
+            match links.get(&at) {
+                Some(next) => at = *next,
+                None => break,
+            }
+        }
+        for l in chain {
+            done.insert(l, true);
+        }
+    }
+    cycles
+}
+
 /// Sets the parent links that point at an imported layer, without loops.
 fn resolve_parents(
     comp: &mut Comp,
@@ -757,22 +798,9 @@ fn resolve_parents(
             }
         }
     }
-    // Drop every link that leads into a loop (including a layer parented to itself).
-    let looped: Vec<LayerId> = links
-        .keys()
-        .copied()
-        .filter(|start| {
-            let mut at = *start;
-            for _ in 0..=links.len() {
-                match links.get(&at) {
-                    Some(next) if next == start => return true,
-                    Some(next) => at = *next,
-                    None => return false,
-                }
-            }
-            false
-        })
-        .collect();
+    // Drop every link that is part of a loop (including a layer parented to itself).
+    let on_loop = parent_cycles(&links);
+    let looped: Vec<LayerId> = links.keys().copied().filter(|l| on_loop.contains(l)).collect();
     for l in &looped {
         links.remove(l);
         let name = comp.layer(*l).map(|x| x.name.clone()).unwrap_or_default();
@@ -782,5 +810,43 @@ fn resolve_parents(
         if let Some(l) = comp.layer_mut(layer) {
             l.parent = Some(parent);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unlisted_extensions_follow_what_the_file_stores() {
+        assert_eq!(footage_kind("C:/clips/a.MP4", 0, false), FootageKind::Video);
+        assert_eq!(footage_kind("/s/a.wav", 0, true), FootageKind::Audio);
+        assert_eq!(footage_kind("/s/a.png", 0, false), FootageKind::Still);
+        // A camera clip with an extension the list does not name, with a frame rate and sound.
+        assert_eq!(footage_kind("/cam/0001.mts", 30, true), FootageKind::Video);
+        assert_eq!(footage_kind("/cam/voice.wma", 0, true), FootageKind::Audio);
+        assert_eq!(footage_kind("/s/scan.tif", 0, false), FootageKind::Still);
+    }
+
+    #[test]
+    fn parent_cycles_are_the_layers_on_a_loop() {
+        let l = LayerId;
+        // 1 -> 2 -> 3 -> 1 is a loop; 4 -> 1 only leads into it; 5 -> 5 is parented to itself;
+        // 6 -> 7 ends at a layer without a parent.
+        let links: HashMap<LayerId, LayerId> = [(1, 2), (2, 3), (3, 1), (4, 1), (5, 5), (6, 7)].into_iter().map(|(a, b)| (l(a), l(b))).collect();
+        let mut found: Vec<u64> = parent_cycles(&links).into_iter().map(|x| x.0).collect();
+        found.sort_unstable();
+        assert_eq!(found, [1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn a_long_parent_chain_is_checked_in_linear_time() {
+        // 200 000 layers each parented to the next, the last to the first: walking the chain from
+        // every layer (as before) is 4e10 steps; once per layer it is instant.
+        let n = 200_000u64;
+        let links: HashMap<LayerId, LayerId> = (0..n).map(|i| (LayerId(i), LayerId((i + 1) % n))).collect();
+        assert_eq!(parent_cycles(&links).len(), 200_000);
+        let open: HashMap<LayerId, LayerId> = (0..n - 1).map(|i| (LayerId(i), LayerId(i + 1))).collect();
+        assert!(parent_cycles(&open).is_empty());
     }
 }

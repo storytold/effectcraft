@@ -1144,6 +1144,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fil..."),
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
+    ("file.importAep", "After Effects Project...", "After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -6903,6 +6904,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Plik..."),
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -9161,6 +9163,28 @@ mod tests {
         assert!(!traditional(&app));
         assert!(!simplified(&app));
         assert!(!japanese(&app));
+    }
+
+    /// File ▸ Import ▸ After Effects Project… has its row in every menu catalog.
+    #[test]
+    fn the_aep_import_entry_is_in_every_menu_catalog() {
+        for (code, catalog) in [
+            ("zh-hans", SIMPLIFIED_CHINESE),
+            ("zh-hant", TRADITIONAL_CHINESE),
+            ("ja", JAPANESE),
+            ("uk", UKRAINIAN),
+            ("es", SPANISH),
+            ("pt-br", PORTUGUESE),
+            ("ru", RUSSIAN),
+            ("fr", FRENCH),
+            ("de", GERMAN),
+            ("cs", CZECH),
+            ("pl", POLISH),
+            ("ka", GEORGIAN),
+            ("sv", SWEDISH),
+        ] {
+            assert!(catalog.iter().any(|(command, _, _)| *command == "file.importAep"), "{code} has no file.importAep row");
+        }
     }
 
     #[test]
