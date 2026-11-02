@@ -582,7 +582,8 @@ effectcraft-cli run clip.ecproj objectMatte.apply '{"layer":"#1","point":[320,20
 Source Text holds character style runs and per-paragraph settings. CR (`\r`), LF (`\n`) and
 CRLF (`\r\n`) each make a paragraph break; the original string and character indices are
 preserved. This also applies to scripted `TextDocument` values and `sourceRectAtTime()` bounds.
-`layer.setText` changes the whole layer, or only characters `range: [start, end]` (character
+`layer.setText` changes the whole layer (`layers: [...]` or `selected: true`, which skips locked and
+non-text layers, reach several in one undo step), or only characters `range: [start, end]` (character
 indices): character attributes
 (`font`, `size`, `fill`, `tracking`, `kerning: metrics|optical|<1/1000 em>`, `tsume`,
 `baseline: superscript|subscript`, `allCaps`…) split the text into runs; paragraph attributes
