@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
 use effectcraft_engine::menus::{MenuNode, menu_bar};
+use effectcraft_engine::shortcuts::binding_key;
 
 /// What macOS performs itself (no command dispatch).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -473,9 +474,17 @@ pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu
         send_to_text_field(app, ctx, window, events);
         return Ok(Value::Null);
     }
-    let params = if params.is_null() { json!({}) } else { params };
-    let (command, params) = crate::menus::menu_choice(app, command, params);
-    let r = crate::menus::invoke(app, ctx, &command, params);
+    // A key equivalent runs what its chord gives the focused panel or context, which can be
+    // another command than this item's (Cmd+Shift+D is Duplicate Render Item in the Render Queue).
+    let chord = item.shortcut.as_deref().filter(|_| item.accelerator.is_some() && ctx.input(|i| i.modifiers.command));
+    let scoped = chord.and_then(|c| crate::menus::key_equivalent_binding(app, c)).filter(|(id, p)| binding_key(id, p) != binding_key(&command, &params));
+    let r = if let Some((id, p)) = scoped {
+        crate::menus::invoke(app, ctx, &id, p)
+    } else {
+        let params = if params.is_null() { json!({}) } else { params };
+        let (command, params) = crate::menus::menu_choice(app, command, params);
+        crate::menus::invoke(app, ctx, &command, params)
+    };
     if let Err(e) = &r {
         app.ui.status = e.clone();
     }

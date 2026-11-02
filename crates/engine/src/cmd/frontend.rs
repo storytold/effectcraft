@@ -75,18 +75,14 @@ pub fn specs() -> Vec<CommandSpec> {
         // macOS uses Control+Command+F for native full screen. On Windows and Linux,
         // Cmd maps to Ctrl; the After Effects-style Ctrl+\ is window.maximizeApp.
         fe!("view.fullScreen", "Enter Full Screen", ["View"], cfg!(target_os = "macos").then_some("Ctrl+Cmd+F"), "{}", always),
-        // In a viewer, New Folder's chord splits the viewer's frame with a new viewer.
-        CommandSpec {
-            alt_shortcuts: &["Cmd+Alt+Shift+N"],
-            ..fe!(
-                "view.newViewer",
-                "New Viewer",
-                ["View"],
-                Some("Alt+Shift+N"),
-                "{} — another Composition viewer of the active comp; the one in use is locked",
-                has_comp
-            )
-        },
+        fe!(
+            "view.newViewer",
+            "New Viewer",
+            ["View"],
+            Some("Alt+Shift+N"),
+            "{} — another Composition viewer of the active comp; the one in use is locked",
+            has_comp
+        ),
         // Panels and workspaces.
         fe!(
             "window.panel",

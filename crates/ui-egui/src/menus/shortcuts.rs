@@ -182,7 +182,7 @@ pub(super) fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers>
 
 /// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
 /// being edited in the viewer, a paint tool or a camera tool active, a mask selected, a viewer
-/// panel focused.
+/// panel focused where New Viewer can run (without a comp, New Folder keeps its chord).
 pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
     let mut out = vec![];
     if app.session.state.text_edit.is_some() {
@@ -196,10 +196,46 @@ pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
     if app.session.selected_mask().is_some() {
         out.push("Mask");
     }
-    if matches!(app.ui.focused, PanelKind::Composition | PanelKind::Layer | PanelKind::Footage | PanelKind::Viewer(_)) {
+    if matches!(app.ui.focused, PanelKind::Composition | PanelKind::Layer | PanelKind::Footage | PanelKind::Viewer(_))
+        && app.session.is_enabled("view.newViewer")
+    {
         out.push("Viewer");
     }
     out
+}
+
+/// The binding a key press runs now. The narrowest active scope wins a chord: an active context,
+/// the focused panel, the application. A context's shortcut doesn't run outside it. Explicit
+/// physical bindings distinguish keys that a layout reports with the same logical name (for
+/// example AZERTY's minus and right parenthesis); they win over logical ones of the same scope
+/// rank. `Err`: the scopes tied for the chord ([`effectcraft_engine::shortcuts::pick`]).
+fn pick_binding(
+    app: &EffectcraftApp,
+    binds: &[Binding],
+    key: egui::Key,
+    mods: egui::Modifiers,
+    physical_key: Option<egui::Key>,
+) -> Result<Option<(String, Value)>, Vec<String>> {
+    let (focused, contexts) = (app.ui.focused.shortcut_scope(), active_contexts(app));
+    let table = app.session.shortcuts();
+    let scope_of = |id: &str, params: &Value| {
+        let key = effectcraft_engine::shortcuts::binding_key(id, params);
+        table.find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str())
+    };
+    let physical = table.bindings().into_iter().filter_map(|(sc, b)| {
+        let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
+        (Some(k) == physical_key && mods_match(m, mods)).then_some((b.scope.as_str(), true, (&b.command, &b.params)))
+    });
+    let logical = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).map(|(_, _, id, params)| (scope_of(id, params), false, (id, params)));
+    let chosen = effectcraft_engine::shortcuts::pick(physical.chain(logical), &focused, &contexts)?;
+    Ok(chosen.map(|(id, params)| (id.clone(), if params.is_null() { json!({}) } else { params.clone() })))
+}
+
+/// What a menu item's key equivalent runs now: the binding that `shortcut` gives the focused
+/// panel or context, as if the window had seen the key.
+pub(crate) fn key_equivalent_binding(app: &EffectcraftApp, shortcut: &str) -> Option<(String, Value)> {
+    let (mods, key) = parse_shortcut(shortcut)?;
+    pick_binding(app, &bindings(&app.session), key, mods, None).ok().flatten()
 }
 
 /// Only Shift held (Shift+Delete, not Ctrl/Alt+Shift+Delete).
@@ -384,8 +420,6 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     let binds = bindings(&app.session);
     for (key, mods, pressed, physical_key) in events {
-        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
-        let (focused, contexts) = (app.ui.focused.shortcut_scope(), active_contexts(app));
         // Plain Spacebar runs its shortcut (Play Current Preview) on the release: held, it is
         // the Hand tool (After Effects), and a drag with it must not start or stop playback.
         if key == egui::Key::Space && (!pressed || !mods.any()) {
@@ -430,22 +464,9 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             let _ = invoke(app, ctx, "edit.clear", json!({}));
             continue;
         }
-        // The narrowest active scope wins a chord: an active context, the focused panel, the
-        // application. A context's shortcut doesn't run outside it. Explicit physical bindings
-        // distinguish keys that a layout reports with the same logical name (for example AZERTY's
-        // minus and right parenthesis); they win over logical ones of the same scope rank.
-        let table = app.session.shortcuts();
-        let scope_of = |id: &str, params: &Value| {
-            let key = effectcraft_engine::shortcuts::binding_key(id, params);
-            table.find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str())
-        };
-        let physical = table.bindings().into_iter().filter_map(|(sc, b)| {
-            let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-            (Some(k) == physical_key && mods_match(m, mods)).then_some((b.scope.as_str(), true, (&b.command, &b.params)))
-        });
-        let logical = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).map(|(_, _, id, params)| (scope_of(id, params), false, (id, params)));
-        let chosen = match effectcraft_engine::shortcuts::pick(physical.chain(logical), &focused, &contexts) {
-            Ok(c) => c.map(|(id, params)| (id.clone(), if params.is_null() { json!({}) } else { params.clone() })),
+        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
+        let chosen = match pick_binding(app, &binds, key, mods, physical_key) {
+            Ok(c) => c,
             Err(scopes) => {
                 let panels: Vec<String> = scopes.iter().map(|s| effectcraft_engine::shortcuts::scope_label(s)).collect();
                 app.ui.status = format!("This shortcut belongs to {}: focus one of them", panels.join(" and "));

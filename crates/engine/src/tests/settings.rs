@@ -1269,10 +1269,12 @@ fn default_keys_shared_between_a_panel_and_the_application() {
     for (panel, app, chord) in [
         ("file.rememberInterpretation", "edit.copyWithPropertyLinks", "Cmd+Alt+C"),
         ("renderQueue.duplicate", "edit.splitLayer", "Cmd+Shift+D"),
-        ("view.newViewer", "project.newFolder", "Cmd+Alt+Shift+N"),
+        (r#"view.newViewer {"inViewer":true}"#, "project.newFolder", "Cmd+Alt+Shift+N"),
     ] {
         assert!(has(panel, chord) && has(app, chord), "{chord}");
         assert_ne!(t.find(panel).unwrap().scope, t.find(app).unwrap().scope, "{chord}");
     }
+    // Only the shared chord is the viewer's: New Viewer's own keys stay application-wide.
+    assert_eq!(t.find("view.newViewer").unwrap().scope, crate::shortcuts::APP_SCOPE);
     assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
 }
