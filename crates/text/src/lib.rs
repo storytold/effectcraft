@@ -276,7 +276,12 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out.chars_no_space = nospace;
     out.words = words;
     let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    // Paragraph text is clipped by its box: lines that end below it are not drawn (the first stays).
+    let depth = doc.box_size.map(|b| if doc.vertical { b[0] } else { b[1] } as f32);
     for (li, line) in lay.lines.iter().enumerate() {
+        if li > 0 && depth.is_some_and(|d| line.baseline + line.descent > d + 0.5) {
+            break;
+        }
         let o = to_layer * Point::new(line.x as f64, line.baseline as f64);
         out.line_boxes.push([o.x, o.y, line.width as f64, (line.ascent + line.descent) as f64]);
         // Vertical type: Tate-Chu-Yoko groups (consecutive glyphs of tcy runs) take one em of
@@ -662,6 +667,30 @@ mod tests {
         let l = layout_doc(&doc);
         assert!(l.line_boxes.len() > 1, "{} lines", l.line_boxes.len());
         assert!(l.line_boxes.iter().all(|b| b[2] <= 100.5), "{:?}", l.line_boxes);
+    }
+
+    /// Review of #2840: lines that end below the box are not drawn.
+    #[test]
+    fn lines_below_the_box_are_clipped() {
+        let text = "one two three four five six seven eight nine ten".to_string();
+        let tall = layout_doc(&TextDoc { text: text.clone(), size: 20.0, box_size: Some([80.0, 400.0]), ..Default::default() });
+        let short = layout_doc(&TextDoc { text, size: 20.0, box_size: Some([80.0, 50.0]), ..Default::default() });
+        assert!(short.glyphs.len() < tall.glyphs.len() && !short.glyphs.is_empty(), "{} vs {}", short.glyphs.len(), tall.glyphs.len());
+        assert!(short.line_boxes.iter().all(|b| b[1] < 50.0 + 20.0), "{:?}", short.line_boxes);
+    }
+
+    /// Review of #2840: a wide word never splits a combining sequence across lines.
+    #[test]
+    fn overlong_word_keeps_combining_marks_with_base() {
+        let doc = TextDoc {
+            text: "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}".into(),
+            size: 20.0,
+            box_size: Some([30.0, 400.0]),
+            ..Default::default()
+        };
+        let l = layout_doc(&doc);
+        assert!(l.glyphs.iter().all(|g| g.line_index == l.glyphs.iter().find(|h| h.char_index == g.char_index).map_or(0, |h| h.line_index)));
+        assert!(l.line_boxes.len() > 1);
     }
 
     #[test]

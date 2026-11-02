@@ -780,16 +780,19 @@ impl<'a> Para<'a> {
 
     /// A word wider than a whole line has no break opportunity, so it would run past the box:
     /// adds a break before every character of such a word (After Effects breaks it at the edge).
-    /// ponytail: breaks between chars, not grapheme clusters; use clusters if combining marks split.
+    /// Only at cluster starts (a character with an advance): a ligature or a combining mark stays with its base.
     fn split_overlong_words(&self, opps: Vec<usize>) -> Vec<usize> {
         let max = self.line_avail(0).min(self.line_avail(1));
         let mut out = Vec::with_capacity(opps.len());
         let mut prev = 0usize;
         for p in opps {
             if p > prev && self.fits_w(&(prev..p)) > max {
-                out.extend(
-                    self.text.get(prev..p).into_iter().flat_map(|w| w.char_indices().skip(1).filter(|(_, c)| !c.is_whitespace()).map(move |(i, _)| prev + i)),
-                );
+                out.extend(self.text.get(prev..p).into_iter().flat_map(|w| {
+                    w.char_indices()
+                        .skip(1)
+                        .filter(|(i, c)| !c.is_whitespace() && self.char_adv.get(prev + i).is_some_and(|a| *a > 0.0))
+                        .map(move |(i, _)| prev + i)
+                }));
             }
             out.push(p);
             prev = p;

@@ -99,6 +99,30 @@ fn mask_cuts_layer() {
     assert!(img.get(150, 50)[3] < 0.01);
 }
 
+/// Review of #2840: the layer named by `unmasked_layer` shows whole, the others stay masked.
+#[test]
+fn unmasked_layer_skips_only_its_masks() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children.push(m.into());
+    let id = l.id.0;
+    p.comp_mut(cid).unwrap().layers.push(l);
+    // One cache for all three renders: the masked buffers it keeps must not serve the others.
+    let cache = crate::LayerCache::default();
+    let at = |unmasked| {
+        let opts = crate::RenderOpts { unmasked_layer: unmasked, ..Default::default() };
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, opts);
+        r.cache = Some(&cache);
+        r.comp_frame(cid, Tick::ZERO).get(150, 50)[3]
+    };
+    assert!(at(None) < 0.01);
+    assert!(at(Some(id)) > 0.99);
+    assert!(at(Some(id + 1000)) < 0.01);
+}
+
 #[test]
 fn first_intersect_and_darken_keep_their_rectangle() {
     let render = |modes: &[MaskMode], centers: &[[f64; 2]]| {

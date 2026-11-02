@@ -188,15 +188,7 @@ impl EffectcraftApp {
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        let mut src = self.render_source();
-        if let Some(id) = opts.unmasked_layer {
-            // ponytail: clones the project per request while a masked text is edited; cache it if big projects lag.
-            let mut p = (*src.project).clone();
-            if let Some(m) = p.comp_mut(comp).and_then(|c| c.layer_mut(effectcraft_engine::project::LayerId(id))).and_then(|l| l.props.sub_mut("masks")) {
-                m.children.clear();
-            }
-            src.project = Arc::new(p);
-        }
+        let src = self.render_source();
         request(&self.frames, &src, key, comp, t, opts);
     }
 }

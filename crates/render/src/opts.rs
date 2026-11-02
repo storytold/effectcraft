@@ -28,9 +28,8 @@ pub struct RenderOpts {
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,
-    /// Viewer only: the id of a text layer being edited whose masks the caller removed from the
-    /// project it renders (the text shows whole while typing). The renderer ignores it; it is in
-    /// the options so cached frames of the masked render are not reused.
+    /// Viewer only: the id of a text layer being edited whose mask compositing is skipped (the text
+    /// shows whole while typing; its mask paths stay, a text path may use them).
     pub unmasked_layer: Option<u64>,
 }
 
