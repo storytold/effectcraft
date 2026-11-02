@@ -117,6 +117,7 @@ fn shape_contents_add_menu_merges_two_tool_shapes() {
     let cid = s.active_comp_id().unwrap();
     let frame = |s: &Session| s.render(cid, Tick::ZERO, RenderOpts::default());
     // Mode Add: the new fill alone paints the union.
+    s.execute("prop.set", json!({"layer": l, "path": "contents/fill/color", "value": [0.0, 0.0, 1.0, 1.0]})).unwrap();
     let added = frame(s).get(160, 90);
     assert!(added[2] > added[0] && added[3] > 0.99, "the merged path takes the new blue fill, not the groups' red: {added:?}");
     s.execute("prop.set", json!({"layer": l, "path": "contents/merge/mode", "value": 2})).unwrap();
