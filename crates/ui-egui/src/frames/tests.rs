@@ -1702,3 +1702,70 @@ fn an_edit_in_a_precomp_reaches_only_where_it_shows() {
         }
     }
 }
+
+/// Frames only on disk (the blue bar) outlive an edit that can't change them: a rename keeps them
+/// all, a trim all but the frames it cut, and undo finds the earlier ones again.
+#[test]
+fn disk_frames_outlive_an_edit_that_cant_change_them() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::LayerId;
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-disk-carry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let a = LayerId(s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+    let b = LayerId(s.execute("layer.newSolid", json!({"color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap());
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    let mut p0 = (*s.project).clone();
+    for (l, i, o) in [(a, 0, 15), (b, 15, 30)] {
+        let l = p0.comp_mut(cid).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(o));
+    }
+    let p0 = Arc::new(p0);
+    let opts = RenderOpts::default();
+    let oh = opts_hash(&opts);
+    let src = |p: &Arc<Project>| RenderSource {
+        project: p.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    // Every frame of `p0` on disk, none in RAM.
+    let content0 = disk_cache::comp_content_key_with(&p0, cid, None);
+    for f in 0..30 {
+        disk.put_frame_now(disk_cache::frame_key(content0, f, 1000, oh), 1, 1, &[1, 2, 3, 255]);
+    }
+    let rename: fn(&mut Project, ItemId, LayerId) = |p, c, l| p.comp_mut(c).unwrap().layer_mut(l).unwrap().name = "Renamed".into();
+    let trim: fn(&mut Project, ItemId, LayerId) = |p, c, l| {
+        let fr = p.comp(c).unwrap().frame_rate;
+        p.comp_mut(c).unwrap().layer_mut(l).unwrap().out_point = fr.tick_of(22);
+    };
+    for (name, edit, layer, kept) in [("rename", rename, a, (0..30).collect::<Vec<i64>>()), ("trim", trim, b, (0..20).collect())] {
+        let f = Frames::default();
+        let series = |p: &Arc<Project>, rev: u64| FrameKey { revision: rev, content: f.content_of(p, rev, cid), comp: cid.0, opts: oh, ..key(0, 0, 0) };
+        // Blue frames of `p` once the disk carries and the content key are done.
+        let blue = |p: &Arc<Project>, rev: u64, want: &[i64]| {
+            let base = series(p, rev);
+            let mut got = vec![];
+            for _ in 0..1000 {
+                got = f.disk_frames(&src(p), &base, 0..30, &opts);
+                if got == want {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got
+        };
+        assert_eq!(blue(&p0, 1, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: before");
+        let mut p1 = p0.clone();
+        edit(Arc::make_mut(&mut p1), cid, layer);
+        assert_eq!(blue(&p1, 2, &kept), kept, "{name}: after");
+        assert_eq!(blue(&p0, 3, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: undo");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

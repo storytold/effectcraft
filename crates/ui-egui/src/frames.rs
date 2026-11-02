@@ -528,7 +528,31 @@ pub struct Frames {
     /// that can't fit, would otherwise be rewritten on every idle pass). A new limit resets it.
     #[cfg(not(target_arch = "wasm32"))]
     written: Arc<Mutex<(u64, HashMap<u128, u8>)>>,
+    /// Edits whose kept frames are still to be found on disk under the new content key
+    /// ([`Frames::carry_disk`]), oldest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_carries: Arc<Mutex<VecDeque<DiskCarry>>>,
+    /// Held while carrying, so chained edits carry in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    carrying: Arc<Mutex<()>>,
+    /// The disk series (scale, view and options hash) each comp's frames are cached in.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_series: Arc<Mutex<HashMap<u64, Vec<(u32, u64)>>>>,
 }
+
+/// An edit's kept frames, to find on disk under the comp's new content key: those of `comp` in
+/// `from` outside `dirty` (inclusive frame ranges) also draw `to`'s.
+#[cfg(not(target_arch = "wasm32"))]
+struct DiskCarry {
+    comp: u64,
+    from: Arc<Project>,
+    to: Arc<Project>,
+    dirty: Vec<(i64, i64)>,
+}
+
+/// Disk series remembered per comp (see [`Frames::disk_series`]).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DISK_SERIES: usize = 8;
 
 impl Default for Frames {
     fn default() -> Self {
@@ -581,6 +605,12 @@ impl Default for Frames {
             persisted: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             written: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_carries: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            carrying: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_series: Arc::default(),
         }
     }
 }
@@ -854,6 +884,13 @@ impl Frames {
             && let Ok(mut cache) = self.cache.lock()
         {
             cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Ok(mut q) = self.disk_carries.lock() {
+                if q.len() >= MAX_KEEPERS {
+                    q.pop_front();
+                }
+                q.push_back(DiskCarry { comp: comp.0, from: base.clone(), to: project.clone(), dirty });
+            }
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
@@ -899,6 +936,11 @@ impl Frames {
         }
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.note_disk_series(base.comp, base.scale, base.view ^ opts_hash(opts));
+            self.carry_disk(src);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let content = {
             let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
             let Some(content) = known else {
@@ -922,6 +964,8 @@ impl Frames {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey) -> bool {
         let Some(dc) = src.disk.clone() else { return false };
+        self.note_disk_series(base.comp, base.scale, base.view ^ base.opts);
+        self.carry_disk(src);
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
         let Some(content) = known else {
@@ -975,6 +1019,61 @@ impl Frames {
             None => rayon::spawn(work),
         }
         true
+    }
+
+    /// Remember that `comp`'s frames are cached on disk at `scale` with view and options hash
+    /// `view` (the most recent [`MAX_DISK_SERIES`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_disk_series(&self, comp: u64, scale: u32, view: u64) {
+        if let Ok(mut m) = self.disk_series.lock() {
+            let v = m.entry(comp).or_default();
+            if v.first() != Some(&(scale, view)) {
+                v.retain(|s| *s != (scale, view));
+                v.insert(0, (scale, view));
+                v.truncate(MAX_DISK_SERIES);
+            }
+        }
+    }
+
+    /// Find the frames edits kept ([`Frames::identity`]) on disk under their comps' new content
+    /// keys: link each kept frame of every disk series of the comp to its new key, on the frame
+    /// pool, oldest edit first.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn carry_disk(&self, src: &RenderSource) {
+        let Some(dc) = src.disk.clone() else { return };
+        if self.disk_carries.lock().map_or(true, |q| q.is_empty()) {
+            return;
+        }
+        let (carries, carrying, series, ctx) = (self.disk_carries.clone(), self.carrying.clone(), self.disk_series.clone(), self.ctx.clone());
+        let virtual_id = self.virtual_id.clone();
+        let work = move || {
+            // (taken under the lock, so a later edit's carry waits for this one's)
+            let _order = carrying.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let todo: Vec<DiskCarry> = carries.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+            let mut linked = false;
+            for c in todo {
+                let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { continue };
+                let comp = ItemId(c.comp);
+                let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
+                let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
+                let (a, b) = (key(&c.from), key(&c.to));
+                if a == b {
+                    continue;
+                }
+                for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
+                    for (scale, view) in &series {
+                        linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                    }
+                }
+            }
+            if linked && let Some(ctx) = &ctx {
+                ctx.request_repaint();
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

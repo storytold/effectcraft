@@ -694,6 +694,38 @@ impl DiskCache {
         let _ = self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
     }
 
+    /// Make the frame at key `from` the frame at key `to` too (an edit that can't change it gave
+    /// its comp a new content key): a hard link to the same file, or a copy where the file system
+    /// has no links. `false` when `from` isn't cached, `to` already is, or the file system
+    /// refused. (Entries don't contain their key, so the same file serves both.)
+    pub fn link_frame(&self, from: u128, to: u128) -> bool {
+        if !self.contains(Kind::Frame, from) || self.contains(Kind::Frame, to) {
+            return false;
+        }
+        let (src, dst) = (self.path(Kind::Frame, from), self.path(Kind::Frame, to));
+        let Some(parent) = dst.parent() else { return false };
+        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!("{to:032x}.tmp.{}.{n}", std::process::id()));
+        let linked = std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::hard_link(&src, &tmp).or_else(|_| std::fs::copy(&src, &tmp).map(|_| ())))
+            .and_then(|()| std::fs::metadata(&tmp))
+            .and_then(|m| std::fs::rename(&tmp, &dst).map(|()| m.len()));
+        let bytes = match linked {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // (gone meanwhile: another process evicted it)
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+        };
+        // (a link shares its file, but counts in full: the cache only ever errs small)
+        self.evict_to(self.limit_bytes().saturating_sub(bytes));
+        if let Ok(mut g) = self.index.lock() {
+            g.insert(Kind::Frame, to, bytes);
+        }
+        true
+    }
+
     /// Write a frame synchronously (tests).
     pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
         self.write_now(Kind::Frame, key, &encode_frame(width, height, rgba));
@@ -1073,6 +1105,26 @@ mod tests {
         let d = std::env::temp_dir().join(format!("effectcraft-disk-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// A linked frame reads back as the original under its new key, survives the original's
+    /// eviction, and is never linked over an existing entry or from a missing one.
+    #[test]
+    fn link_frame_serves_a_frame_under_a_new_key() {
+        let dc = DiskCache::open(tmpdir("link"), 1 << 30).unwrap();
+        let rgba: Vec<u8> = (0..16).collect();
+        dc.put_frame_now(1, 2, 2, &rgba);
+        assert!(dc.link_frame(1, 2));
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        assert!(!dc.link_frame(1, 2), "already there");
+        assert!(!dc.link_frame(3, 4), "nothing to link");
+        assert!(!dc.contains(Kind::Frame, 4));
+        dc.put_frame_now(5, 2, 2, &[7; 16]);
+        assert!(!dc.link_frame(5, 2), "an existing entry stays");
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        let _ = std::fs::remove_file(dc.path(Kind::Frame, 1));
+        dc.forget(Kind::Frame, 1);
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba), "the link outlives the original");
     }
 
     fn buf(seed: u32, w: u32, h: u32) -> Buf {
