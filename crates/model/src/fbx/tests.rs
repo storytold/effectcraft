@@ -8,7 +8,7 @@ pub(crate) const ASCII: &str = r#"; FBX 7.4.0 project file
 FBXHeaderExtension:  {
 	FBXHeaderVersion: 1003
 	FBXVersion: 7400
-	Creator: "EffectCraft test"
+	Creator: "Visualab Effects test"
 }
 GlobalSettings:  {
 	Version: 1000

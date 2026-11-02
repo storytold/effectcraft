@@ -111,7 +111,7 @@ fn huge_and_broken_feathers_stay_bounded() {
     }
 }
 
-/// Case 398 of the .aep corpus, built in EffectCraft's own model: a 1920×1080 comp at 8 bpc, a
+/// Case 398 of the .aep corpus, built in Visualab Effects's own model: a 1920×1080 comp at 8 bpc, a
 /// red solid, above it an adjustment layer of comp size with a Gradient Ramp at its defaults and
 /// one Add mask entirely below the layer (1920×200 centred at [960, 1250]) with feather 1000.
 fn case_398(with_mask: bool) -> (Project, ItemId) {
@@ -176,7 +176,7 @@ fn case_398_a_feathered_mask_below_an_adjustment_layer_reaches_into_it() {
         }
         // 2. After Effects: within 2 levels per channel.
         for k in 0..3 {
-            assert!((got[k] - want_ae[k]).abs() <= 2, "({x}, {y}): EffectCraft {got:?}, After Effects {want_ae:?}");
+            assert!((got[k] - want_ae[k]).abs() <= 2, "({x}, {y}): Visualab Effects {got:?}, After Effects {want_ae:?}");
         }
         report.push(format!("({x},{y}) ec {got:?} ae {want_ae:?}"));
     }

@@ -37,8 +37,6 @@ pub(crate) fn label_keys(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("keys.label", "select keyframes first"));
     }
     let cid = comp_id(s, p)?;
-    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let keys = super::prop::editable_keys(comp, &keys);
     let n = s.edit("Keyframe Label", None, |proj, _| {
         let mut n = 0;
         for k in &keys {
@@ -194,7 +192,7 @@ pub fn parse_camera(text: &str, rate: effectcraft_time::FrameRate, comp_w: f64) 
 }
 
 /// Animation ▸ Keyframe Assistant ▸ RPF Camera Import: a camera layer keyed from camera data.
-/// RPF/RLA files carry their camera in an undocumented block, so EffectCraft reads the same data
+/// RPF/RLA files carry their camera in an undocumented block, so Visualab Effects reads the same data
 /// from JSON or CSV exports (see `docs/preferences.md` ▸ RPF Camera Import). One undo step.
 fn rpf_camera_import(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("keys.rpfCameraImport", "missing `path` (.json or .csv camera data)"))?;

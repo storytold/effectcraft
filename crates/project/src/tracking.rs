@@ -114,7 +114,7 @@ pub struct TrackerOptions {
     /// Confidence threshold, percent.
     pub threshold: f64,
     pub action: LowConfidence,
-    /// Follow each feature's rotation and scale while matching (EffectCraft extension).
+    /// Follow each feature's rotation and scale while matching (Visualab Effects extension).
     pub track_shape: bool,
 }
 

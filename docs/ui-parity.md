@@ -1,8 +1,8 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-18 · **Change:** minor (accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; earlier changes: shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-18 · **Change:** minor (shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
-How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
+How closely Visualab Effects's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
 is the code at `origin/main` 1446e27, the 42 scripted UI test files in `crates/ui-egui/tests`
 (real pointer and keyboard events, run headless), [fidelity/workflow-checks.md](fidelity/workflow-checks.md)
@@ -30,7 +30,7 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Preview feel | Spacebar / Numpad 0 previews, RAM preview, cache bars, adaptive resolution | 55% | `ui_ram_preview`, `ui_live_preview`; stutter (#595, #304); scrubbing lag (#329, closed by #784) |
 | Home screen, Learn, templates | Home with recent projects, template gallery, interactive Learn tutorials | 70% | Layout nitpicks (#581); Home literals untranslated (#574) |
 | Quick Apply (26.2) | Search to apply effects, presets or commands | partial | A command palette exists; not After Effects' Quick Apply |
-| Accessibility | AccessKit enabled; `ui_accessibility_audit` counts unnamed or roleless controls per panel: Project (#776), Effects & Presets, Settings (all pages) and Render Queue with Templates are at zero, with names, roles, selected / open / checked state and arrow-key, Home / End, Enter, Space operation (#1335); `ui_contrast` checks theme tokens against WCAG 2 | 20% | No screen reader has been run on anything; the other panels are counted, not fixed (Timeline ≈ 55 unnamed controls); 13 of 48 token pairs are below WCAG 2 (primary button text, error text, control borders, Light theme warning colour); focus order across panels, colour-blindness and reduced motion are unchecked; app shortcuts pause while a widget has keyboard focus |
+| Accessibility | AccessKit enabled; focus labels tested; Project panel keyboard navigation and accessible names (#776) | 20% | No screen-reader pass or keyboard-navigation audit of the other panels; no contrast check |
 | UI scale | Settings ▸ Appearance ▸ UI Scale 75–200% | beyond | After Effects follows the system's scaling (#284) |
 
 Path editing (#1220): the Composition viewer suppresses a selected layer’s transform box while
@@ -42,7 +42,7 @@ cover shape paths and masks, corner-vertex dragging and undo, and layers without
 ## Estimate
 
 **≈ 60–110 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
-test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 12–25 h (the first slice, three panels and the audit, is done). Checking feel against After Effects needs the owner's Mac with After
+test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 15–30 h. Checking feel against After Effects needs the owner's Mac with After
 Effects running; most of the rest parallelises.
 
 ## Revision history
@@ -50,7 +50,6 @@ Effects running; most of the rest parallelises.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-18 | minor | A shape group's inner Contents (After Effects' elided Vectors group) draws no row: the group's path, fill/stroke and Transform list directly under the group |
-| 2026-10-13 | minor | Accessibility row: AccessKit audit and contrast tests, Effects & Presets, Settings and Render Queue named and keyboard-operable (#1335); no screen reader tested |
 | 2026-10-13 | patch | Layer bounds are suppressed during path-point editing (#1220); shape/mask interaction regressions |
 | 2026-10-12 | minor | Closed issues (#302, #320, #491, #511, #553 and others) marked as closed instead of open; panels in their own windows (#486) |
 | 2026-10-12 | minor | Percentage guides and effect colour labels (26.5) added; rows updated |

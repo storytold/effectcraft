@@ -1,4 +1,4 @@
-//! File ▸ Import ▸ EffectCraft Project: another project merges into the open one with fresh ids,
+//! File ▸ Import ▸ Visualab Effects Project: another project merges into the open one with fresh ids,
 //! its references intact, in one undo step.
 
 use std::collections::HashSet;

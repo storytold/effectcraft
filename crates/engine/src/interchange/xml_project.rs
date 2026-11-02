@@ -4,19 +4,19 @@
 //!
 //! ```xml
 //! <?xml version="1.0" encoding="UTF-8"?>
-//! <EffectCraftProject encoding="json" version="1">
+//! <Visualab EffectsProject encoding="json" version="1">
 //!   <obj>
 //!     <m n="version"><num>3</num></m>
 //!     <m n="items"><arr>…</arr></m>
 //!   </obj>
-//! </EffectCraftProject>
+//! </Visualab EffectsProject>
 //! ```
 //!
 //! `obj`/`m n="key"` (object members), `arr`, `str`, `num`, `bool`, `null`.
 
 use serde_json::{Map, Value};
 
-const ROOT: &str = "EffectCraftProject";
+const ROOT: &str = "Visualab EffectsProject";
 
 /// How deep `arr`/`obj` elements may nest: the JSON reader's own limit (`serde_json` stops at
 /// 128), so every project the JSON form can hold reads from XML too. Without a limit a deeply
@@ -249,7 +249,7 @@ pub fn from_xml(text: &str) -> Result<String, String> {
     let mut p = P { s: text.trim_start_matches('\u{feff}'), i: 0 };
     let (root, _, _) = p.open()?;
     if root != ROOT {
-        return Err(format!("not an EffectCraft XML project (root <{root}>)"));
+        return Err(format!("not an Visualab Effects XML project (root <{root}>)"));
     }
     let v = p.value(0)?;
     p.close(ROOT)?;

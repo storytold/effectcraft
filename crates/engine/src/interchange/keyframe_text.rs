@@ -2,7 +2,7 @@
 //! applications read this tab-separated format (AE2Blend brings it into Blender). Like After
 //! Effects it covers one layer: its copied properties, keyframed ones as one row per key (frame
 //! number in comp time, then the value) and static ones as a single row with no frame. Easing
-//! and tangents aren't part of the format; EffectCraft's own paste keeps them.
+//! and tangents aren't part of the format; Visualab Effects's own paste keeps them.
 
 use effectcraft_project::{AutoOrient, Comp, GroupKind, ItemKind, Layer, LayerId, LayerSource, Node, ParamUi, Project, PropGroup, Property, Uid};
 
@@ -204,7 +204,7 @@ fn effect(chain: &[&Node], pr: &Property) -> Option<Channel> {
 
 /// After Effects' index of an effect property: the effect's hidden input layer is #1, and a
 /// twirl-down group takes an index where it opens and another where it closes. The hidden
-/// source choice EffectCraft keeps beside a layer parameter has none. Where After Effects
+/// source choice Visualab Effects keeps beside a layer parameter has none. Where After Effects
 /// numbers a parameter otherwise ([`keyframe_text_effects::INDICES`]), counting goes on from it.
 fn effect_index(effect: &str, fx: &PropGroup, uid: Uid) -> Option<usize> {
     fn count(effect: &str, g: &PropGroup, prefix: &str, uid: Uid, n: &mut usize) -> bool {

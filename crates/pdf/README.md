@@ -139,7 +139,7 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 
 The workspace pins `craft-pdf` to `craft-libs` Git revision
 `92d392cff132eaf53e13afff77f38b5c11b73aa0`, with `default-features = false` and only the explicit `read`
-feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
+feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves Visualab Effects's
 font and asset policies. The shared parser does not change the supported drawing operators,
 image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.
 This revision removes an unchecked lazy-array read and preserves later values and pages after
@@ -160,9 +160,9 @@ partial state. These limits are not an overall process-memory or execution-time 
 WASM aborts and process-wide allocation failures cannot be caught. Missing or repaired objects
 are reported rather than silently presented as a complete import.
 
-The shared parser receives EffectCraft's existing ordinary object/xref stream limit at open:
+The shared parser receives Visualab Effects's existing ordinary object/xref stream limit at open:
 256 MiB on 64-bit targets and 64 MiB on 32-bit targets, including WASM. Immutable document
 limits apply during normal parsing, initial xrefs, fallback and repair. Malformed object-stream
 compatibility recovery also obeys that limit and the adapter's remaining retained-data budget.
-Content/image filter decoding still uses EffectCraft's existing bounded filter chain; the
+Content/image filter decoding still uses Visualab Effects's existing bounded filter chain; the
 retained-data cap is not a bound on every parser cache or temporary allocation.

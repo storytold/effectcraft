@@ -177,7 +177,7 @@
       </Dialog>
       <Dialog Id="FatalErrorDlg" Width="370" Height="270" Title="[ProductName] Setup">
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Setup did not finish" />
-        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="48" NoPrefix="yes" Text="Something went wrong, and setup put back what was there before. Run setup again, or report it at https://github.com/storytold/effectcraft/issues." />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="48" NoPrefix="yes" Text="Something went wrong, and setup put back what was there before. Run setup again, or report it at https://github.com/wasigonzi/visualab-effects/issues." />
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
         <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="&amp;Finish">
           <Publish Event="EndDialog" Value="Exit" />

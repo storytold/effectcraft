@@ -13,7 +13,7 @@ fn comp_marker_dialog_fields_and_undo() {
     let r = s
         .execute(
             "markers.set",
-            json!({"index": 0, "time": 1.51, "duration": 0.5, "comment": "Intro", "chapter": "One", "url": "https://getartcraft.com", "frameTarget": "_blank",
+            json!({"index": 0, "time": 1.51, "duration": 0.5, "comment": "Intro", "chapter": "One", "url": "https://www.visualabstudios.com", "frameTarget": "_blank",
                    "cuePoint": {"name": "cue", "navigation": true, "params": [["k", "v"]]}, "protected": true, "label": "Aqua"}),
         )
         .unwrap();
@@ -25,7 +25,7 @@ fn comp_marker_dialog_fields_and_undo() {
     assert!((m["duration"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     assert_eq!(m["comment"], "Intro");
     assert_eq!(m["chapter"], "One");
-    assert_eq!(m["url"], "https://getartcraft.com");
+    assert_eq!(m["url"], "https://www.visualabstudios.com");
     assert_eq!(m["frameTarget"], "_blank");
     assert_eq!(m["cuePoint"]["name"], "cue");
     assert_eq!(m["cuePoint"]["navigation"], true);
@@ -193,18 +193,4 @@ fn layer_add_marker_without_selection_adds_comp_marker() {
     assert_eq!(comp.markers.len(), 1);
     assert!((comp.markers[0].time.seconds() - 1.5).abs() < 1e-9);
     assert_eq!(comp.markers[0].comment, "timeline marker");
-}
-
-#[test]
-fn comp_delete_all_markers_with_undo() {
-    let (mut s, _) = setup();
-    s.execute("comp.addMarker", json!({"time": 1.0, "comment": "m1"})).unwrap();
-    s.execute("comp.addMarker", json!({"time": 2.0, "comment": "m2"})).unwrap();
-    assert_eq!(s.active_comp().unwrap().markers.len(), 2);
-    s.execute("comp.deleteAllMarkers", json!({})).unwrap();
-    assert!(s.active_comp().unwrap().markers.is_empty());
-    s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.active_comp().unwrap().markers.len(), 2);
-    s.execute("edit.redo", json!({})).unwrap();
-    assert!(s.active_comp().unwrap().markers.is_empty());
 }

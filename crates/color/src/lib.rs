@@ -1,4 +1,4 @@
-//! Colour for EffectCraft: RGBA values, sRGB transfer, HSL/HSV, luminance, the label palette and
+//! Colour for Visualab Effects: RGBA values, sRGB transfer, HSL/HSV, luminance, the label palette and
 //! the 38 After-Effects-compatible blend modes.
 //!
 //! Blend-mode formulas come from the W3C *Compositing and Blending Level 1* specification and the

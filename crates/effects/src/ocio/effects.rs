@@ -13,7 +13,7 @@ pub const VIEWS: &[&str] = &["Standard", "Tone Mapped", "Raw"];
 
 /// Configuration popup: the built-in config, or a custom `.ocio` file (Config File: a path or
 /// the config's text; spaces chosen by name, see [`crate::ocio_config`]).
-pub const CONFIGS: &[&str] = &["Built-in (EffectCraft minimal)", "Custom (.ocio file)"];
+pub const CONFIGS: &[&str] = &["Built-in (Visualab Effects minimal)", "Custom (.ocio file)"];
 
 /// Built-in looks: CDLs applied in ACEScct.
 pub fn looks() -> Vec<(&'static str, Cdl)> {
@@ -142,7 +142,7 @@ fn display_view_names(pr: &crate::Params) -> (&str, &str) {
 }
 
 /// Effect Controls' warning for effect `id`: a custom OCIO configuration that can't be read, has
-/// no such colour space, display or view, or uses transforms EffectCraft can't apply (colours
+/// no such colour space, display or view, or uses transforms Visualab Effects can't apply (colours
 /// pass through those steps, #410). `None` when the effect renders as asked.
 pub fn warning(id: &str, pr: &crate::Params) -> Option<String> {
     let xf = match custom_xf(id, pr) {

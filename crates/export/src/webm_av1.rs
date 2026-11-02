@@ -69,8 +69,8 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     let mut info = vec![];
     el_uint(&mut info, 0x2AD7B1, 1_000_000);
     el_float(&mut info, 0x4489, duration_ms);
-    el_str(&mut info, 0x4D80, "EffectCraft");
-    el_str(&mut info, 0x5741, "EffectCraft");
+    el_str(&mut info, 0x4D80, "Visualab Effects");
+    el_str(&mut info, 0x5741, "Visualab Effects");
     el(&mut head, INFO, &info);
     let mut tracks = vec![];
     let mut v = vec![];

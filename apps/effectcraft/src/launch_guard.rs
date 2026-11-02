@@ -1,6 +1,6 @@
 //! Settings ▸ Startup & Repair ▸ Window Graphics, and the launch guard behind it.
 //!
-//! Some graphics drivers crash EffectCraft as its window's device is created (an access
+//! Some graphics drivers crash Visualab Effects as its window's device is created (an access
 //! violation in an older Intel UHD driver with DirectX 12 / Vulkan, #243), or a moment after
 //! its first frame, as the window is shown and its surface re-created (AMD's Vulkan driver for
 //! a Radeon RX 6800M, Adrenalin 26.9.2: an access violation in amdvlk64.dll on every launch).
@@ -62,7 +62,7 @@ impl Launch {
                 Err(e) => log::warn!("the last launch stopped as its window opened; saving Window Graphics failed: {e}"),
             }
             notice = Some(
-                "EffectCraft's last launch stopped as its window opened, so it now draws with OpenGL \
+                "Visualab Effects's last launch stopped as its window opened, so it now draws with OpenGL \
                  (Settings ▸ Startup & Repair ▸ Window Graphics). Updating the graphics driver may let it use \
                  Automatic again."
                     .to_string(),
