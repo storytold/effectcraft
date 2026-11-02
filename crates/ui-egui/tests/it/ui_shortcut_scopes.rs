@@ -151,15 +151,15 @@ fn duplicate_render_items_chord_duplicates_the_selected_item() {
     assert_eq!(queue[1].output, queue[0].output, "the copy of the selected item follows it");
 }
 
-/// Choose the native menu item that runs `command`, with Cmd held when it is the key equivalent.
+/// Choose the native menu item that runs `command`, with Cmd held: by its key equivalent or with
+/// the mouse.
 fn menu_item(app: &mut EffectcraftApp, command: &str, key_equivalent: bool) {
     let spec = native_menu::build(app);
     let id = spec.items().into_iter().find(|i| i.command == command).unwrap().id.clone();
     let ctx = egui::Context::default();
-    let raw =
-        egui::RawInput { events: vec![egui::Event::ModifiersChanged(if key_equivalent { Modifiers::COMMAND } else { Modifiers::NONE })], ..Default::default() };
+    let raw = egui::RawInput { events: vec![egui::Event::ModifiersChanged(Modifiers::COMMAND)], ..Default::default() };
     let mut output = ctx.run_ui(raw, |ui| {
-        let _ = native_menu::activate(app, ui.ctx(), &spec, &id);
+        let _ = native_menu::activate(app, ui.ctx(), &spec, &id, key_equivalent);
     });
     output.textures_delta.clear();
 }
@@ -196,10 +196,15 @@ fn the_menu_bars_key_equivalents_follow_the_focused_scope() {
 }
 
 #[test]
-fn choosing_a_menu_item_with_the_mouse_runs_that_item() {
+fn choosing_a_menu_item_with_the_mouse_runs_that_item_even_with_cmd_held() {
     let mut app = app();
     let before = folders(&app);
     app.ui.focused = PanelKind::Composition;
     menu_item(&mut app, "project.newFolder", false);
     assert_eq!(folders(&app), before + 1);
+
+    let mut app = self::app();
+    app.ui.focused = PanelKind::RenderQueue;
+    menu_item(&mut app, "edit.splitLayer", false);
+    assert_eq!((layers(&app), render_items(&app)), (2, 1));
 }
