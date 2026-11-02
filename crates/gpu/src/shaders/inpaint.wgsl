@@ -14,6 +14,8 @@
 //   down kernels:      u[0] = (srcW, srcH, dstW, dstH)
 //   PatchMatch kernels: u[0] = (w, h, r, parity), u[1] = (x0, y0, 0, 0) (dispatch origin),
 //                       u[2] = (seed, iteration, 0, EM round), f[0] = (sigma², 0, 0, 0)
+//   histogram:          u[0] = (w, h, 0, 0), u[1] = (x0, y0, w, h) (target bounds),
+//                       f[0].x = the distance range (0: the SDR range 0…4)
 // The nearest-neighbour field texture holds one entry per pixel: r, g = source centre ("px"),
 // b = SSD distance (inf where unset), a = 1 where the entry is set.
 
@@ -486,10 +488,20 @@ fn imp_pm_vote(@builtin(global_invocation_id) gid: vec3<u32>) {
 // The workgroup's 1024 distance bins (`imp_hist`); the name is unique across the concatenated
 // shader sources because `var<workgroup>` is module scope.
 var<workgroup> imp_hist_bins: array<atomic<u32>, 1024>;
+// The largest finite distance this dispatch saw (as its f32 bit pattern: positive floats are
+// ordered by their bits). `sigma2` uses it to learn whether the frame needs a wider range.
+var<workgroup> imp_hist_max: atomic<u32>;
 
 // One workgroup's histogram of the targets' match distances, for the vote's sigma² (the CPU takes
 // the 75th percentile of the finite distances). The single workgroup accumulates the whole
 // population through the shared atomic bins above.
+//
+// `P.f[0].x` is the range the bins cover; 0 selects the SDR range 0…4, where an image whose
+// channels are all ≤ 1 lives: each channel's squared difference is ≤ 4, so the mean SSD is too.
+// Frames with values above 1 (32-bpc HDR) have larger distances, so `sigma2` re-dispatches with
+// the observed maximum as the range instead of clamping them to bin 1023, which would report a
+// sigma² of ≈ 4 for a distance of 1600 and round the vote's weights to zero. The observed maximum
+// rides in bin 0's unused `.g` channel on every dispatch (its `.x` stays the count).
 @compute @workgroup_size(256, 1, 1)
 fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = i32(P.u[0].x);
@@ -499,6 +511,11 @@ fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bw = i32(P.u[1].z);
     let bh = i32(P.u[1].w);
     let t = gid.x;
+    let range = select(4.0, P.f[0].x, P.f[0].x > 0.0);
+    let scale = 1024.0 / range;
+    if (t == 0u) {
+        atomicStore(&imp_hist_max, 0u);
+    }
     // One workgroup, so the whole population is counted through shared atomics: a per-thread
     // strided pass would keep only the pixels whose bin selected that thread (a biased ~1/256
     // subsample, correlated with the pixel index).
@@ -518,7 +535,10 @@ fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (f.a <= 0.5 || f.b >= IMP_INF) {
             continue;
         }
-        let b = u32(clamp(i32(f.b * 256.0), 0, 1023));
+        atomicMax(&imp_hist_max, bitcast<u32>(f.b));
+        // Clamp in f32 before the conversion: a distance far outside the range (a mismatched patch
+        // in an HDR frame) would overflow the i32 conversion, which is indeterminate in WGSL.
+        let b = u32(clamp(f.b * scale, 0.0, 1023.0));
         atomicAdd(&imp_hist_bins[b], 1u);
     }
     workgroupBarrier();
@@ -526,6 +546,11 @@ fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var j = 0u; j < 4u; j = j + 1u) {
         let bin = t * 4u + j;
         textureStore(out, vec2<i32>(i32(bin), 0), vec4<f32>(f32(atomicLoad(&imp_hist_bins[bin])), 0.0, 0.0, 0.0));
+    }
+    // Thread 0 is bin 0's only writer, so this store follows the one above. `.g` carries the
+    // observed maximum: host readbacks keep the row 1024 texels wide (a 16 KB, 256-aligned copy).
+    if (t == 0u) {
+        textureStore(out, vec2<i32>(0, 0), vec4<f32>(f32(atomicLoad(&imp_hist_bins[0])), bitcast<f32>(atomicLoad(&imp_hist_max)), 0.0, 0.0));
     }
 }
 

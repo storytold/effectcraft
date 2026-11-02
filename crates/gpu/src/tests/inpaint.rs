@@ -229,14 +229,44 @@ fn flow_agrees_with_the_cpu() {
 fn the_distance_histogram_counts_every_target() {
     let Some(g) = gpu() else { return };
     let (w, h) = (48u32, 32u32);
-    let (mut field, near) = (Image::new(w, h), vec![true; (w * h) as usize]);
-    for px in field.data.iter_mut() {
-        // Every target has the same distance (0.5 → bin 128): the histogram is one spike.
-        *px = [0.0, 0.0, 0.5, 1.0];
+    // Every target has the same distance, so the histogram is one spike. 0.5 is the SDR range
+    // (bin 128); 1600 is above it, which is reachable from a 32-bpc frame (the reviewer's example:
+    // clamping it to bin 1023 reported σ² ≈ 4, and the vote's weights then rounded to zero).
+    for (d, want) in [(0.5f32, 128.5f32 / 256.0), (1600.0, 1600.0)] {
+        let (mut field, near) = (Image::new(w, h), vec![true; (w * h) as usize]);
+        for px in field.data.iter_mut() {
+            *px = [0.0, 0.0, d, 1.0];
+        }
+        let (sigma2, total) = crate::inpaint::distance_histogram(&g.ctx, &field, &near, w, h).expect("histogram");
+        assert_eq!(total as usize, (w * h) as usize, "distance {d}: the histogram kept {total} of {} samples", w * h);
+        let tol = (want * 1e-3).max(1e-3);
+        assert!((sigma2 - want).abs() <= tol, "distance {d}: sigma2 {sigma2}, want {want}");
     }
-    let (sigma2, total) = crate::inpaint::distance_histogram(&g.ctx, &field, &near, w, h).expect("histogram");
-    assert_eq!(total as usize, (w * h) as usize, "the histogram kept {total} of {} samples", w * h);
-    assert!((sigma2 - 128.5 / 256.0).abs() < 1e-3, "sigma2 {sigma2}");
+}
+
+/// HDR frames (channels above 1, as a 32-bpc image has) must still fill like the CPU. Their patch
+/// distances are far past the SDR 0…4 range the histogram used to clamp at, so this covers the
+/// rescaled binning end to end; `the_distance_histogram_counts_every_target` pins the estimator
+/// itself (the old clamp read σ² ≈ 4 for a distance of 1600).
+#[test]
+fn hdr_frames_fill_like_the_cpu() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (96u32, 72u32);
+    let mut gt = background(w, h, 0.0);
+    for px in &mut gt.data {
+        // A 32-bpc frame's values are unbounded: at 24× the patch distances run into the thousands.
+        // The old fixed 0…4 histogram reported σ² ≈ 4 for those, `exp(-d/(2σ²))` rounded to zero,
+        // and the vote kept the prior image instead of synthesising.
+        for c in 0..3 {
+            px[c] *= 24.0;
+        }
+    }
+    let hole = rect_hole(w, h, 40, 28, 16);
+    let src = cut(&gt, &hole);
+    let (cpu, gpu_pm) = (patch_fill(&src, &hole, None, 7, 1), g.patch(&src, &hole, None, 7, 1));
+    let gpu_db = psnr(&gpu_pm, &gt, Some(&hole));
+    assert!(gpu_db > 25.0, "GPU {gpu_db:.1} dB");
+    assert!(psnr(&gpu_pm, &cpu, Some(&hole)) > 30.0, "the two syntheses disagree");
 }
 
 /// A frame too small for one block is the CPU's zero field, on the device path too.

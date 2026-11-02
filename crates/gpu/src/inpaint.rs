@@ -43,8 +43,13 @@ pub(crate) const KERNELS: &[&str] = &[
     "imp_fl_median",
 ];
 
-/// Distance histogram bins (`imp_hist`), over distances in 0…4.
+/// Distance histogram bins (`imp_hist`); bin 0's `.g` holds the largest finite distance the
+/// dispatch saw, for the HDR re-bin.
 const BINS: usize = 1024;
+
+/// The distance range `imp_hist`'s bins cover for SDR input. An image whose channels are all ≤ 1
+/// has `Σ_c (a − b)² ≤ 4`, so no patch distance exceeds it and the bins need no rescaling.
+const SDR_DISTANCE: f32 = 4.0;
 
 /// `u`/`f` blocks of a kernel's parameter buffer (see `inpaint.wgsl`'s header).
 fn params(u0: [u32; 4], u1: [u32; 4], u2: [u32; 4], f0: [f32; 4]) -> Params {
@@ -111,15 +116,26 @@ fn unknown_bbox(known: &[f32], w: usize, h: usize) -> Option<[u32; 4]> {
     if x0 == usize::MAX { None } else { Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32]) }
 }
 
-/// Dispatch a kernel over `bb`. The box's origin is written into `P.u[1].xy` (the kernels place
-/// their other `u[1]` fields in `.zw`): deriving it from the box the dispatch is sized from keeps
-/// a dispatch's covered region and the origin its shader reads from drifting apart, which is the
-/// subtle way an edge of the region goes unwritten.
-#[allow(clippy::too_many_arguments)]
-fn over(e: &mut Enc, entry: &str, p: &Params, src: &GpuImage, aux: Option<&GpuImage>, out: &GpuImage, data: Option<&wgpu::Buffer>, bb: [u32; 4]) {
+/// One dispatch's images, its per-pixel `data` table and the region it covers. Grouped into a
+/// struct because a kernel's bindings plus its bounds exceed clippy's argument limit, and the
+/// workspace denies `too_many_arguments`.
+struct Pass<'a> {
+    src: &'a GpuImage,
+    aux: Option<&'a GpuImage>,
+    out: &'a GpuImage,
+    data: Option<&'a wgpu::Buffer>,
+    bb: [u32; 4],
+}
+
+/// Dispatch a kernel over `pass.bb`. The box's origin is written into `P.u[1].xy` (the kernels
+/// place their other `u[1]` fields in `.zw`): deriving it from the box the dispatch is sized from
+/// keeps a dispatch's covered region and the origin its shader reads from drifting apart, which
+/// is the subtle way an edge of the region goes unwritten.
+fn over(e: &mut Enc, entry: &str, p: &Params, pass: Pass<'_>) {
+    let bb = pass.bb;
     let p = Params { u: [p.u[0], [bb[0], bb[1], p.u[1][2], p.u[1][3]], p.u[2], p.u[3]], f: p.f };
     let groups = ((bb[2] - bb[0]).div_ceil(16), (bb[3] - bb[1]).div_ceil(16));
-    e.dispatch(entry, &p, KernelImages { src, aux, out }, data, groups);
+    e.dispatch(entry, &p, KernelImages { src: pass.src, aux: pass.aux, out: pass.out }, pass.data, groups);
 }
 
 // ------------------------------------------------------------------ membrane
@@ -200,7 +216,7 @@ fn membrane_tex(e: &mut Enc, fine: &GpuImage, spare: &GpuImage, hole: &[bool], w
         let (a, b) = (lv.get(2 * (top - 1))?, lv.get(2 * (top - 1) + 1)?);
         // Both textures must hold the level before the sweeps: they now write only the hole.
         e.copy_into(a, b, 0, 0);
-        first[top] = sweeps(e, &datas, moff(top), a, b, dims[top].0 as u32, dims[top].1 as u32, uns.get(top).copied().flatten());
+        first[top] = sweeps(e, &datas, moff(top), a, b, Region { w: dims[top].0 as u32, h: dims[top].1 as u32, bb: uns.get(top).copied().flatten() });
     }
     for k in (1..top).rev() {
         let (cw, ch) = dims[k];
@@ -209,51 +225,41 @@ fn membrane_tex(e: &mut Enc, fine: &GpuImage, spare: &GpuImage, hole: &[bool], w
         let (fa, fb) = (lv.get(2 * (k - 1))?, lv.get(2 * (k - 1) + 1)?);
         e.copy_into(fa, fb, 0, 0);
         if let Some(bb) = uns.get(k).copied().flatten() {
-            over(
-                e,
-                "imp_up",
-                &with_off(params([cw as u32, ch as u32, pw as u32, ph as u32], [0; 4], [0; 4], [0.0; 4]), moff(k)),
-                coarse,
-                None,
-                fb,
-                Some(&datas),
-                bb,
-            );
+            let p = with_off(params([cw as u32, ch as u32, pw as u32, ph as u32], [0; 4], [0; 4], [0.0; 4]), moff(k));
+            over(e, "imp_up", &p, Pass { src: coarse, aux: None, out: fb, data: Some(&datas), bb });
         }
         // `imp_up` wrote into `fb`, the pair's second.
-        first[k] = !sweeps(e, &datas, moff(k), fb, fa, cw as u32, ch as u32, uns.get(k).copied().flatten());
+        first[k] = !sweeps(e, &datas, moff(k), fb, fa, Region { w: cw as u32, h: ch as u32, bb: uns.get(k).copied().flatten() });
     }
     if top >= 1 {
         let coarse = lv.get(usize::from(!first[1]))?;
         e.copy_into(fine, spare, 0, 0);
         let bb = uns.first().copied().flatten()?;
-        over(
-            e,
-            "imp_up",
-            &with_off(params([w, h, dims[1].0 as u32, dims[1].1 as u32], [0; 4], [0; 4], [0.0; 4]), moff(0)),
-            coarse,
-            None,
-            spare,
-            Some(&datas),
-            bb,
-        );
-        return Some(if sweeps(e, &datas, moff(0), spare, fine, w, h, Some(bb)) { spare.clone() } else { fine.clone() });
+        let p = with_off(params([w, h, dims[1].0 as u32, dims[1].1 as u32], [0; 4], [0; 4], [0.0; 4]), moff(0));
+        over(e, "imp_up", &p, Pass { src: coarse, aux: None, out: spare, data: Some(&datas), bb });
+        return Some(if sweeps(e, &datas, moff(0), spare, fine, Region { w, h, bb: Some(bb) }) { spare.clone() } else { fine.clone() });
     }
     let bb = uns.first().copied().flatten()?;
     e.copy_into(fine, spare, 0, 0);
-    Some(if sweeps(e, &datas, moff(0), fine, spare, w, h, Some(bb)) { fine.clone() } else { spare.clone() })
+    Some(if sweeps(e, &datas, moff(0), fine, spare, Region { w, h, bb: Some(bb) }) { fine.clone() } else { spare.clone() })
 }
 
-/// Jacobi relaxation sweeps of a texture pair, over the unknown pixels' bounds `bb` (the state
-/// starts in `a`); returns whether the result is in `a`.
-#[allow(clippy::too_many_arguments)]
-fn sweeps(e: &mut Enc, data: &wgpu::Buffer, off: u32, a: &GpuImage, b: &GpuImage, w: u32, h: u32, bb: Option<[u32; 4]>) -> bool {
-    let Some(bb) = bb else { return true };
-    let p = with_off(params([w, h, 0, 0], [0; 4], [0; 4], [0.0; 4]), off);
+/// A texture's dimensions and the region a dispatch covers (`None`: nothing to do).
+struct Region {
+    w: u32,
+    h: u32,
+    bb: Option<[u32; 4]>,
+}
+
+/// Jacobi relaxation sweeps of a texture pair, over the unknown pixels' bounds `region.bb` (the
+/// state starts in `a`); returns whether the result is in `a`.
+fn sweeps(e: &mut Enc, data: &wgpu::Buffer, off: u32, a: &GpuImage, b: &GpuImage, region: Region) -> bool {
+    let Some(bb) = region.bb else { return true };
+    let p = with_off(params([region.w, region.h, 0, 0], [0; 4], [0; 4], [0.0; 4]), off);
     let mut in_a = true;
-    for _ in 0..sweep_count(w as usize, h as usize) {
+    for _ in 0..sweep_count(region.w as usize, region.h as usize) {
         let (src, out) = if in_a { (a, b) } else { (b, a) };
-        over(e, "imp_jacobi", &p, src, None, out, Some(data), bb);
+        over(e, "imp_jacobi", &p, Pass { src, aux: None, out, data: Some(data), bb });
         in_a = !in_a;
     }
     in_a
@@ -469,7 +475,7 @@ pub(crate) fn patch_image(g: &GpuContext, img: &Image, hole: &[bool], init: Opti
         let image = g.upload_image(&start)?;
         let spare = e.scratch(w, h);
         let nnf = e.image(w, h);
-        let (out, _) = pm_level(&mut e, &lv, seed, 2, 4, &image, &spare, &nnf)?;
+        let (out, _) = pm_level(&mut e, &lv, PmRun { seed, em: 2, iters: 4 }, &image, &spare, &nnf)?;
         if e.take_missing() {
             return None;
         }
@@ -553,7 +559,8 @@ pub(crate) fn patch_image(g: &GpuContext, img: &Image, hole: &[bool], init: Opti
         }
         let (em, iters) = if k == top { (8, 5) } else { (4, 5) };
         let spare = e.scratch(lv.w, lv.h);
-        let (out, out_nnf) = pm_level(&mut e, lv, seed.wrapping_add(k as u32 * 101), em, iters, &ima[k], &spare, nnf.as_ref()?)?;
+        let run = PmRun { seed: seed.wrapping_add(k as u32 * 101), em, iters };
+        let (out, out_nnf) = pm_level(&mut e, lv, run, &ima[k], &spare, nnf.as_ref()?)?;
         ima[k] = out;
         nnf = Some(out_nnf);
     }
@@ -577,11 +584,19 @@ fn plan_level(e: &mut Enc, hole: &[bool], w: u32, h: u32, patch: usize) -> Optio
     Some(Lv { w, h, r, near: near_bb, holes: bbox(hole, iw, ih)?, field: grow(near_bb, r + 1, w, h), flags: e.data(&flags) })
 }
 
-/// `pm_level`: `em` EM rounds of propagation and voting at one level. `img` holds the level's
+/// The PatchMatch run at one level: the random stream's seed and the EM round and iteration
+/// counts.
+struct PmRun {
+    seed: u32,
+    em: usize,
+    iters: usize,
+}
+
+/// `pm_level`: `run.em` EM rounds of propagation and voting at one level. `img` holds the level's
 /// image and `img_spare` is a free texture of the same size; the nearest-neighbour field starts
 /// at `nnf`. Returns the level's filled image and its field.
-#[allow(clippy::too_many_arguments)]
-fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuImage, img_spare: &GpuImage, nnf: &GpuImage) -> Option<(GpuImage, GpuImage)> {
+fn pm_level(e: &mut Enc, lv: &Lv, run: PmRun, img: &GpuImage, img_spare: &GpuImage, nnf: &GpuImage) -> Option<(GpuImage, GpuImage)> {
+    let (seed, em, iters) = (run.seed, run.em, run.iters);
     let (r, w, h) = (lv.r, lv.w, lv.h);
     let field_a = e.scratch(w, h);
     let field_b = e.scratch(w, h);
@@ -597,25 +612,19 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
         // The round's initial field: the inherited source where it is still valid, else random.
         // Every pixel of the field's bounds is written, so the previous round's field is free.
         let img = if in_a { &img_a } else { &img_b };
-        over(e, "imp_pm_init", &params([w, h, r, 0], [0; 4], [seed, 0, 0, round as u32], [0.0; 4]), &field_nnf, Some(img), &field_a, Some(&lv.flags), lv.field);
+        let p = params([w, h, r, 0], [0; 4], [seed, 0, 0, round as u32], [0.0; 4]);
+        over(e, "imp_pm_init", &p, Pass { src: &field_nnf, aux: Some(img), out: &field_a, data: Some(&lv.flags), bb: lv.field });
         let mut f_in_a = true;
         for it in 0..iters {
             for parity in 0..2u32 {
                 let (s, o) = if f_in_a { (&field_a, &field_b) } else { (&field_b, &field_a) };
-                over(
-                    e,
-                    "imp_pm_prop",
-                    &params([w, h, r, parity], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]),
-                    s,
-                    Some(img),
-                    o,
-                    Some(&lv.flags),
-                    ring,
-                );
+                let p = params([w, h, r, parity], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]);
+                over(e, "imp_pm_prop", &p, Pass { src: s, aux: Some(img), out: o, data: Some(&lv.flags), bb: ring });
                 f_in_a = !f_in_a;
             }
             let (s, o) = if f_in_a { (&field_a, &field_b) } else { (&field_b, &field_a) };
-            over(e, "imp_pm_rand", &params([w, h, r, 0], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]), s, Some(img), o, Some(&lv.flags), ring);
+            let p = params([w, h, r, 0], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]);
+            over(e, "imp_pm_rand", &p, Pass { src: s, aux: Some(img), out: o, data: Some(&lv.flags), bb: ring });
             f_in_a = !f_in_a;
         }
         let field = if f_in_a { &field_a } else { &field_b };
@@ -623,7 +632,8 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
         let sigma2 = sigma2(e, field, lv, &hist)?;
         let next_img = if in_a { &img_b } else { &img_a };
         e.copy_into(img, next_img, 0, 0);
-        over(e, "imp_pm_vote", &params([w, h, r, 0], [0; 4], [0; 4], [sigma2, 0.0, 0.0, 0.0]), field, Some(img), next_img, Some(&lv.flags), lv.holes);
+        let p = params([w, h, r, 0], [0; 4], [0; 4], [sigma2, 0.0, 0.0, 0.0]);
+        over(e, "imp_pm_vote", &p, Pass { src: field, aux: Some(img), out: next_img, data: Some(&lv.flags), bb: lv.holes });
         // Carry the round's sources into the nearest-neighbour field (targets only).
         e.pixels("imp_nnf_store", &params([w, h, 0, 0], [0; 4], [0; 4], [0.0; 4]), field, Some(&field_nnf), &nnf_spare, Some(&lv.flags));
         std::mem::swap(&mut field_nnf, &mut nnf_spare);
@@ -632,10 +642,10 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
     Some((if in_a { img_a } else { img_b }, field_nnf))
 }
 
-/// The 75th percentile of a 1024-bin distance histogram (`imp_hist`'s readback), and the
-/// histogram's total. The bin's centre is the estimate: within half a bin (4/1024) of the CPU's
-/// exact percentile.
-fn percentile(bytes: &[u8]) -> (f32, f64) {
+/// The 75th percentile of a 1024-bin distance histogram (`imp_hist`'s readback) covering
+/// `0..range`, and the histogram's total. The bin's centre is the estimate: within half a bin
+/// (`range/2048`) of the CPU's exact percentile.
+fn percentile(bytes: &[u8], range: f32) -> (f32, f64) {
     let bin = |i: usize| -> f64 {
         match bytes.get(i * 16..i * 16 + 4) {
             Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
@@ -656,19 +666,48 @@ fn percentile(bytes: &[u8]) -> (f32, f64) {
             break;
         }
     }
-    ((((at as f32) + 0.5) / (BINS as f32 / 4.0)).max(1e-5), total)
+    let centre = ((at as f32) + 0.5) * range / BINS as f32;
+    (centre.max(1e-5), total)
 }
 
-/// The vote's sigma² at a level (`pm_level`): the 75th percentile of the targets' distances. One
-/// 16 KB readback per EM round (≈ 28 per 1080p patch): a few percent of the stage, and the
-/// obvious next thing to remove if the patch has to be faster (a device-side percentile would
-/// need a reduction instead).
-fn sigma2(e: &mut Enc, field: &GpuImage, lv: &Lv, hist: &GpuImage) -> Option<f32> {
-    let (bw, bh) = (lv.near[2] - lv.near[0], lv.near[3] - lv.near[1]);
-    let p = params([lv.w, lv.h, 0, 0], [lv.near[0], lv.near[1], bw, bh], [0; 4], [0.0; 4]);
-    e.dispatch("imp_hist", &p, KernelImages { src: field, aux: None, out: hist }, Some(&lv.flags), (1, 1));
+/// The largest finite distance `imp_hist` saw, from bin 0's `.g` channel.
+fn max_distance(bytes: &[u8]) -> f32 {
+    match bytes.get(4..8) {
+        Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        None => 0.0,
+    }
+}
+
+/// `imp_hist` over `bb`, the targets' bounds: the 75th percentile of the finite distances and the
+/// sample count. SDR input is binned over the fixed [`SDR_DISTANCE`] range; a frame with values
+/// above 1 (32-bpc HDR) has larger distances, so the second dispatch bins over the observed
+/// maximum instead. Clamping those to the SDR range would report a sigma² of ≈ 4 for a distance
+/// of 1600, and `imp_pm_vote`'s weights would round to zero and keep the prior image.
+///
+/// One 16 KB readback per EM round (≈ 28 per 1080p patch) on the SDR path: a few percent of the
+/// stage, and the obvious next thing to remove if the patch has to be faster (a device-side
+/// percentile would need a reduction instead). HDR frames pay one more dispatch and readback.
+fn histogram(e: &mut Enc, field: &GpuImage, flags: &wgpu::Buffer, w: u32, h: u32, bb: [u32; 4], hist: &GpuImage) -> Option<(f32, f64)> {
+    let (bw, bh) = (bb[2] - bb[0], bb[3] - bb[1]);
+    let mut p = params([w, h, 0, 0], [bb[0], bb[1], bw, bh], [0; 4], [0.0; 4]);
+    e.dispatch("imp_hist", &p, KernelImages { src: field, aux: None, out: hist }, Some(flags), (1, 1));
     let bytes = e.read_texture(&hist.texture, BINS as u32, 1, 16)?;
-    Some(percentile(&bytes).0)
+    let max = max_distance(&bytes);
+    if max <= SDR_DISTANCE {
+        return Some(percentile(&bytes, SDR_DISTANCE));
+    }
+    // The observed maximum itself has to be in the last bin, so widen the range by a hair rather
+    // than binning it to 1024.
+    let range = max * (1.0 + 1e-6);
+    p.f[0] = [range, 0.0, 0.0, 0.0];
+    e.dispatch("imp_hist", &p, KernelImages { src: field, aux: None, out: hist }, Some(flags), (1, 1));
+    let bytes = e.read_texture(&hist.texture, BINS as u32, 1, 16)?;
+    Some(percentile(&bytes, range))
+}
+
+/// The vote's sigma² at a level (`pm_level`): the 75th percentile of the targets' distances.
+fn sigma2(e: &mut Enc, field: &GpuImage, lv: &Lv, hist: &GpuImage) -> Option<f32> {
+    Some(histogram(e, field, &lv.flags, lv.w, lv.h, lv.near, hist)?.0)
 }
 
 /// [`imp_hist`] on its own: `field`'s match distance (`.b`, `.a` > 0.5 where set) over the
@@ -681,11 +720,9 @@ pub(crate) fn distance_histogram(g: &GpuContext, field: &Image, near: &[bool], w
     let data = e.data(&flags);
     let img = g.upload_image(field)?;
     let hist = e.scratch(BINS as u32, 1);
-    let p = params([w, h, 0, 0], [0, 0, w, h], [0; 4], [0.0; 4]);
-    e.dispatch("imp_hist", &p, KernelImages { src: &img, aux: None, out: &hist }, Some(&data), (1, 1));
+    let out = histogram(&mut e, &img, &data, w, h, [0, 0, w, h], &hist);
     if e.take_missing() {
         return None;
     }
-    let bytes = e.read_texture(&hist.texture, BINS as u32, 1, 16)?;
-    Some(percentile(&bytes))
+    out
 }
