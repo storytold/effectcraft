@@ -360,11 +360,14 @@ impl Comp {
     /// The comp-time spans where `self` may draw other pixels than `o` after an edit of some of
     /// its layers (moved, trimmed, split, edited, added, removed): where the active layers differ
     /// or a changed one draws differently, widened by the shutter. A trim reaches only the part it
-    /// cut, a split only the copy's half (#1641). `None` when the edit can reach any frame: a comp
-    /// setting, a layer reorder, Solo turning on or off, an environment layer, an expression (it
-    /// reads anything), or a changed layer another layer parents to, mattes with or picks in an
-    /// effect or tracker. A layer's audio counts when `heard` says something draws it.
-    pub fn changed_spans(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> Option<Vec<(Tick, Tick)>> {
+    /// cut, a split only the copy's half (#1641). A layer that reads a changed one (its parent,
+    /// track matte, a layer it picks in an effect or tracker) draws differently wherever it is
+    /// active, and so does a layer with an expression (it can read anything) when anything
+    /// changed: here or, `elsewhere`, outside these layers (markers, layers that draw nothing,
+    /// other comps and items). `None` when the edit can reach any frame: a comp setting, a layer
+    /// reorder, Solo turning on or off, an environment layer. A layer's audio counts when `heard`
+    /// says something draws it.
+    pub fn changed_spans(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool, elsewhere: bool) -> Option<Vec<(Tick, Tick)>> {
         fn has_expression(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
                 Node::Prop(p) => p.expr.is_some(),
@@ -401,9 +404,29 @@ impl Comp {
             changed.push(l.id);
             cuts.extend([l.in_point, l.out_point]);
         }
-        let reaches = |l: &Layer| has_expression(&l.props) || l.referenced_layers().iter().any(|r| *r != l.id && changed.contains(r));
-        if self.layers.iter().chain(&o.layers).any(reaches) {
-            return None;
+        // The layers the change reaches besides: expressions, then whatever reads a reached layer.
+        let both = || self.layers.iter().chain(&o.layers);
+        let mut reached: Vec<LayerId> = Vec::new();
+        if !changed.is_empty() || elsewhere {
+            reached.extend(both().filter(|l| has_expression(&l.props)).map(|l| l.id));
+        }
+        // (each pass adds a layer or stops: at most one pass per layer)
+        loop {
+            let read =
+                |l: &&Layer| !reached.contains(&l.id) && l.referenced_layers().iter().any(|r| *r != l.id && (changed.contains(r) || reached.contains(r)));
+            let more: Vec<LayerId> = both().filter(read).map(|l| l.id).collect();
+            if more.is_empty() {
+                break;
+            }
+            reached.extend(more);
+        }
+        reached.sort_unstable();
+        reached.dedup();
+        for l in both().filter(|l| reached.contains(&l.id)) {
+            if l.environment || l.environment_background {
+                return None;
+            }
+            cuts.extend([l.in_point, l.out_point]);
         }
         // A frame at `t` samples cameras, lights and transforms over its shutter,
         // `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
@@ -413,7 +436,7 @@ impl Comp {
         // Between two cuts the same layers are active; outside them no changed layer is.
         cuts.sort_unstable();
         cuts.dedup();
-        let draws_same = |l: &Layer| !changed.contains(&l.id) || respanned.contains(&l.id);
+        let draws_same = |l: &Layer| (!changed.contains(&l.id) || respanned.contains(&l.id)) && !reached.contains(&l.id);
         let spans = cuts
             .windows(2)
             .filter_map(|w| {

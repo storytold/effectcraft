@@ -337,14 +337,15 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64, 
 /// hands out), and by value the project settings and the footage, solids and proxies it uses.
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
-    comp_content_with(project, comp, project, |_, c| c)
+    comp_content_with(project, comp, project, |_, c| c, true)
 }
 
 /// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
 /// ([`Comp::changed_spans`]), a frame wider either side for rounding. Layers that can't change the
 /// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count, nor does
-/// the audio of layers nothing draws it from (`heard`, of both states).
-fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard) -> Option<Vec<(i64, i64)>> {
+/// the audio of layers no effect draws it from (`heard`, of both states). Expressions can read
+/// anything, so whatever changed (`outside` this comp too) reaches the layers that have one.
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard, outside: bool) -> Option<Vec<(i64, i64)>> {
     let picture = |p: &Project| {
         let mut c = p.comp(comp)?.clone();
         let quiet = p.silent_layers(comp, &c, heard);
@@ -353,8 +354,9 @@ fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard) -> Op
     };
     let (a, b) = (picture(old)?, picture(new)?);
     let fr = b.frame_rate;
+    let elsewhere = heard.expressions && (outside || old.comp(comp) != new.comp(comp));
     Some(
-        b.changed_spans(&a, false, &|l| heard.contains(comp, l))?
+        b.changed_spans(&a, false, &|l| heard.picked(comp, l), elsewhere)?
             .into_iter()
             .map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1)))
             .collect(),
@@ -362,8 +364,15 @@ fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard) -> Op
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
-/// Sources removed by undo are read from `base`.
-fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
+/// Sources removed by undo are read from `base`. Only the comps and items it draws count unless
+/// `everything` and an expression (which can read any item) is among them.
+fn comp_content_with<'a>(
+    project: &'a Project,
+    comp: ItemId,
+    base: &'a Project,
+    version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>,
+    everything: bool,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     fn has_expression(g: &PropGroup) -> bool {
         g.children.iter().any(|c| match c {
@@ -387,7 +396,7 @@ fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, 
             if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                 stack.push(item);
             }
-            expressions = expressions || has_expression(&l.props);
+            expressions = expressions || (everything && has_expression(&l.props));
         }
     }
     let ids: Vec<ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
@@ -827,23 +836,31 @@ impl Frames {
         let heard = bases.get(&comp.0).map_or_else(|| project.heard_layers(), |(_, base)| project.heard_layers().union(&base.heard_layers()));
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
-            && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
-                _ => c,
-            }) == *base_id
+            && comp_content_with(
+                project,
+                comp,
+                project,
+                |id, c| match base.item(id).map(|i| &i.kind) {
+                    Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+                    _ => c,
+                },
+                true,
+            ) == *base_id
         {
             return (*base_id, Some(base.clone()));
         }
         // Only layers of this comp changed: its frames outside the spans they reach (and a frame
         // either side for rounding) keep drawing the same pixels, so a nudge, cut or trim recaches
-        // only the frames it touched (#1641). An expression anywhere can read any layer at any time.
-        if !markers
-            && let Some((base_id, base)) = bases.get(&comp.0)
-            && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
-                _ => c,
-            }) == *base_id
-            && let Some(dirty) = dirty_frames(base, project, comp, &heard)
+        // only the frames it touched (#1641). Expressions can read anything at any time, so with
+        // them a change elsewhere in the project (another comp, an item's name) reaches the
+        // frames of the layers that have one.
+        let base_tree = |id, c| match bases.get(&comp.0).and_then(|(_, base)| base.item(id)).map(|i| &i.kind) {
+            Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+            _ => c,
+        };
+        if let Some((base_id, base)) = bases.get(&comp.0)
+            && comp_content_with(project, comp, base, base_tree, false) == comp_content_with(base, comp, base, |_, c| c, false)
+            && let Some(dirty) = dirty_frames(base, project, comp, &heard, comp_content_with(project, comp, base, base_tree, true) != *base_id)
             && let Ok(mut cache) = self.cache.lock()
         {
             cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));

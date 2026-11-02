@@ -134,11 +134,8 @@ impl Project {
     /// The layers whose audio something draws ([`Heard`]): those a layer picks in an effect (an
     /// Audio Spectrum or Audio Waveform's Audio Layer, even on itself), and the layers inside a
     /// picked precomp, whose audio it mixes. With an expression anywhere (it can read any layer's
-    /// Audio Levels) every layer is heard.
+    /// Audio Levels) every layer may be heard ([`Heard::contains`]).
     pub fn heard_layers(&self) -> Heard {
-        if self.reads_markers() {
-            return Heard { all: true, layers: Default::default() };
-        }
         let mut layers = std::collections::BTreeSet::new();
         let mut stack: Vec<(ItemId, LayerId)> =
             self.comps().flat_map(|(id, c)| c.layers.iter().flat_map(move |l| l.picked_layers().into_iter().map(move |r| (*id, r)))).collect();
@@ -157,7 +154,7 @@ impl Project {
                 stack.extend(c.layers.iter().map(|l| (inner, l.id)));
             }
         }
-        Heard { all: false, layers }
+        Heard { expressions: self.reads_markers(), layers }
     }
 
     /// Layers of `comp` (item `id`) that can't change its pixels: footage layers of files without
@@ -182,7 +179,7 @@ impl Project {
                     && !l.environment
                     && !l.environment_background
                     && !read.contains(&l.id)
-                    && !heard.contains(id, l.id)
+                    && !heard.picked(id, l.id)
             })
             .map(|l| l.id)
             .collect()
@@ -386,19 +383,27 @@ impl Project {
 /// group and audio effects change pixels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Heard {
-    all: bool,
+    /// Some layer has an expression (it can read any layer's Audio Levels).
+    pub expressions: bool,
     layers: std::collections::BTreeSet<(ItemId, LayerId)>,
 }
 
 impl Heard {
-    /// Something draws the audio of layer `layer` of comp `comp`.
+    /// Something may draw the audio of layer `layer` of comp `comp`: a layer picks it
+    /// ([`Self::picked`]) or an expression may read it.
     pub fn contains(&self, comp: ItemId, layer: LayerId) -> bool {
-        self.all || self.layers.contains(&(comp, layer))
+        self.expressions || self.picked(comp, layer)
+    }
+
+    /// A layer picks layer `layer` of comp `comp` in an effect (or a precomp of it), so draws its
+    /// audio. Expressions aside: they draw in their own layers.
+    pub fn picked(&self, comp: ItemId, layer: LayerId) -> bool {
+        self.layers.contains(&(comp, layer))
     }
 
     /// Heard in `self` or in `o` (the states before and after an edit).
     pub fn union(mut self, o: &Heard) -> Heard {
-        self.all |= o.all;
+        self.expressions |= o.expressions;
         self.layers.extend(o.layers.iter().copied());
         self
     }

@@ -908,8 +908,8 @@ fn audio_lock_and_shy_switches_keep_the_frames() {
     assert_ne!(at(&s), o1);
 }
 
-/// A cut or trim recaches only the frames of the layers it touched (#1641), and none are
-/// kept when the change reaches other layers (here a child of the trimmed layer).
+/// A cut or trim recaches only the frames of the layers it touched (#1641), and those of the
+/// layers the change reaches (here a child of the trimmed layer).
 #[test]
 fn an_edit_keeps_the_frames_outside_the_layers_it_changed() {
     use effectcraft_engine::Session;
@@ -941,8 +941,12 @@ fn an_edit_keeps_the_frames_outside_the_layers_it_changed() {
     s.execute("layer.setParent", json!({"layers": [b], "parent": a})).unwrap();
     let parented = cache_all(&s);
     s.execute("layer.timing", json!({"layers": [a], "out": 1})).unwrap();
-    assert_eq!(cached(f.content_of(&s.project, s.revision, comp)), Vec::<i64>::new(), "the trimmed layer's child moves everywhere");
-    assert_eq!(cached(parented).len(), frames.len(), "the earlier frames stay for undo");
+    // The cut (1–2 s) and the trimmed layer's child (4–10 s) render again, a frame either side;
+    // the split's copy (2–4 s) stays.
+    assert_eq!(cached(f.content_of(&s.project, s.revision, comp)), (0..=27).chain(62..=117).collect::<Vec<_>>(), "the trimmed layer's child moves where it is");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(f.content_of(&s.project, s.revision, comp), parented);
+    assert_eq!(cached(parented).len(), frames.len(), "undo finds every earlier frame");
 }
 
 /// Every frame an edit keeps renders as a fresh render of the edited project does: Solo
@@ -1248,7 +1252,8 @@ fn kept_frames_render_the_same() {
             "parent move",
             |s, _, l| _ = run(s, "layer.setParent", json!({"layers": [l[0]], "parent": l[1]})),
             |s, c, l| timing(s, c, l[1], 21, 21, 41),
-            Keep::Nothing,
+            // (the child re-renders where it is active, the rest stays)
+            Keep::Part,
         ),
         ("echo trim in", |s, _, l| long_echo(s, l[1]), |s, c, l| timing(s, c, l[1], 20, 28, 40), Keep::Part),
         ("echo trim out", |s, _, l| long_echo(s, l[1]), |s, c, l| timing(s, c, l[1], 20, 20, 32), Keep::Part),
@@ -1292,7 +1297,7 @@ fn kept_frames_render_the_same() {
         let p1 = s.project.clone();
         let fr = p1.comp(cid).unwrap().frame_rate;
         let frames = fr.frame_at(p1.comp(cid).unwrap().duration);
-        let dirty = dirty_frames(&p0, &p1, cid, &p1.heard_layers().union(&p0.heard_layers()));
+        let dirty = dirty_frames(&p0, &p1, cid, &p1.heard_layers().union(&p0.heard_layers()), false);
         let kept: Vec<i64> = match &dirty {
             Some(d) => (0..frames).filter(|f| !d.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))).collect(),
             None => vec![],
@@ -1312,8 +1317,8 @@ fn kept_frames_render_the_same() {
 
 /// An edit keeps the cached frames it can't reach: nudging a clip re-renders only where it
 /// was and is, a trim only the part it cut, a split only the copy's half (its new ids seed
-/// randomness). Undo finds them all again; a clip another layer reads (its parent here) drops
-/// them all.
+/// randomness). Undo finds them all again; a clip another layer reads (its parent here) also
+/// drops the frames of that layer.
 #[test]
 fn an_edit_keeps_the_frames_it_cant_reach() {
     use effectcraft_engine::Session;
@@ -1365,7 +1370,8 @@ fn an_edit_keeps_the_frames_it_cant_reach() {
             let id1 = f.content_of(&p1, 2, cid);
             assert_ne!(id0, id1);
             let got = f.cached_frames(&k(id1, 0));
-            assert_eq!(got, if parented { vec![] } else { kept.clone() });
+            // (the child, 0–30, renders again too)
+            assert_eq!(got, if parented { kept.iter().copied().filter(|f| *f > 31).collect() } else { kept.clone() });
             assert_eq!(f.content_of(&p0, 3, cid), id0, "undo");
             assert_eq!(f.cached_frames(&k(id0, 0)), (0..=95).collect::<Vec<_>>());
         }
@@ -1545,7 +1551,7 @@ fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
         pick(&mut q, cid, solid, clip_layer);
         let (frames, disk) = kept(&q, cid, edit);
         assert!(!disk, "{name}: the solid draws the clip's audio");
-        assert!(!frames.contains(&10) && !frames.contains(&100), "{name}: the reader's and the clip's frames go: {frames:?}");
+        assert!(frames.contains(&60) && !frames.contains(&10) && !frames.contains(&100), "{name}: the reader's and the clip's frames go: {frames:?}");
 
         let mut q = p.clone();
         pick(&mut q, cid, clip_layer, clip_layer);
@@ -1560,5 +1566,70 @@ fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
         pick(&mut q, outer, reader, pre_layer);
         let (frames, disk) = kept(&q, outer, edit);
         assert!(!disk && frames != all, "{name}: a waveform in the outer comp draws the precomp's audio: {frames:?}");
+    }
+}
+
+/// An expression reaches only the frames of its own layer: with one in the comp, an edit (here
+/// or elsewhere in the project: a trim, a rename, a marker, another comp) re-renders that layer's
+/// frames besides the edit's own, and every frame kept renders as before, expressions evaluated,
+/// also when the expression reads the edited layer.
+#[test]
+fn an_expression_reaches_only_the_frames_of_its_layer() {
+    use effectcraft_engine::project::{LayerId, Marker};
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 1.5})).unwrap()["comp"].as_u64().unwrap());
+    let other = ItemId(s.execute("comp.new", json!({"name": "Other", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("comp.open", json!({"comp": cid.0})).ok();
+    let mut solid = |name: &str| {
+        let l = s.execute("layer.newSolid", json!({"comp": cid.0, "color": "#ff0000", "width": 10, "height": 10})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.rename", json!({"comp": cid.0, "layer": l, "name": name})).unwrap();
+        for (t, x) in [(0.0, 0.0), (1.5, 16.0)] {
+            s.execute("prop.addKey", json!({"comp": cid.0, "layer": l, "path": "transform/position", "time": t, "value": [x, 8.0, 0.0]})).unwrap();
+        }
+        LayerId(l)
+    };
+    let (a, b, c) = (solid("A"), solid("B"), solid("C"));
+    s.execute(
+        "prop.setExpression",
+        json!({"comp": cid.0, "layer": c.0, "path": "transform/position", "expression": "thisComp.layer(\"B\").transform.position + [0, time * 4]"}),
+    )
+    .unwrap();
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    let n = fr.frame_at(s.project.comp(cid).unwrap().duration);
+    let mut p0 = (*s.project).clone();
+    for (id, i, o) in [(a, 0, 20), (b, 20, 40), (c, 40, 45)] {
+        let l = p0.comp_mut(cid).unwrap().layer_mut(id).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(o));
+    }
+    let p0 = Arc::new(p0);
+    let host = s.expr.clone().unwrap();
+    let render = |p: &Project, i: i64| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&*host);
+        r.comp_frame(cid, fr.tick_of(i))
+    };
+    type Edit = fn(&mut Project, ItemId, ItemId, [LayerId; 3]);
+    let edits: [(&str, Edit, i64); 4] = [
+        ("trim B", |p, c, _, l| p.comp_mut(c).unwrap().layer_mut(l[1]).unwrap().out_point = p.comp(c).unwrap().frame_rate.tick_of(32), 30),
+        ("rename A", |p, c, _, l| p.comp_mut(c).unwrap().layer_mut(l[0]).unwrap().name = "Renamed".into(), 38),
+        ("comp marker", |p, c, _, _| p.comp_mut(c).unwrap().markers.push(Marker { time: Tick::ZERO, ..Default::default() }), 38),
+        ("another comp", |p, _, o, _| p.comp_mut(o).unwrap().width = 9, 38),
+    ];
+    for (name, edit, kept_from) in edits {
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..n).for_each(|i| insert(&f, k(id0, i)));
+        let mut p1 = p0.clone();
+        edit(Arc::make_mut(&mut p1), cid, other, [a, b, c]);
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        // C (frames 40–45) reads anything: it renders again, the frames before it (and before a
+        // trim of B) stay.
+        assert!((0..kept_from).all(|i| kept.contains(&i)) && !kept.contains(&42), "{name}: {kept:?}");
+        for i in kept {
+            assert_eq!(render(&p0, i), render(&p1, i), "{name}: kept frame {i} draws other pixels now");
+        }
     }
 }
