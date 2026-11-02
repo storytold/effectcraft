@@ -1269,9 +1269,11 @@ mod tests {
             let v = t as f32;
             Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
         }
+        /// Timewarp's (effect 2) Speed follows `speed`; every other parameter is unknown.
         fn param_at(&self, effect_index: usize, id: &str, lt: f64) -> Option<Value> {
             (effect_index == 2 && id == "speed").then(|| num((self.speed)(lt)))
         }
+        /// Only Timewarp's (effect 2) Speed is animated.
         fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
             !(effect_index == 2 && id == "speed")
         }
@@ -1282,6 +1284,8 @@ mod tests {
         run_fx("ec.time.timewarp", vals, Image::filled(6, 4, [0.9, 0.0, 0.0, 1.0]), t, env)
     }
 
+    /// #2803: an animated Speed is a rate integrated from layer time 0, so a speed ramp plays on
+    /// from where the footage is instead of jumping to another segment.
     #[test]
     fn timewarp_integrates_animated_speed() {
         // Speed 100 % for the first second, then 50 %: at t = 2 s the source is 1 + 0.5 = 1.5 s
@@ -1311,6 +1315,8 @@ mod tests {
         assert!((out.img.data[0][0] - 0.3).abs() < 1e-5);
     }
 
+    /// Never crash: non-finite or huge Speeds, times and frame rates give finite source times
+    /// and pixels.
     #[test]
     fn timewarp_animated_speed_survives_bad_values() {
         // Non-finite samples count as the current Speed (or 0); the result is always finite.
