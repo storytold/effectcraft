@@ -1256,7 +1256,8 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
 
 /// The final matte of the effect at layer frame `f` on the full-resolution layer grid of
 /// `input` (the effect's input buffer at scale 1), computing what is missing. For Freeze and
-/// the Layer panel overlays.
+/// the Layer panel overlays. A frame that is frozen already keeps its frozen matte, so freezing
+/// again in a session without the model that froze it does not replace that model's matte.
 pub fn frame_matte(
     params: &Params,
     layer_size: [f64; 2],
@@ -1267,6 +1268,9 @@ pub fn frame_matte(
 ) -> Option<(Vec<f32>, Vec<u8>)> {
     let chain = Chain::new(params, layer_size, fps, 1.0);
     let img = frame(f)?;
+    if let Some(kept) = frozen_frame_matte(params, layer_size, fps, f, img.width as usize, img.height as usize) {
+        return Some(kept);
+    }
     let seg = chain.ensure(f, frame, cancel)?;
     let mp = matte_params(params);
     let (mut prev, mut next) = (None, None);
@@ -1280,6 +1284,20 @@ pub fn frame_matte(
     }
     let alpha = final_alpha(&img, &seg, prev.as_deref(), next.as_deref(), &mp, chain.refine_radius, 1.0);
     Some((alpha, seg.refine.clone()))
+}
+
+/// Frame `f`'s frozen alpha and band on a `w`×`h` grid, while the frozen mattes apply ([`frozen_applies`]) and were
+/// frozen at that size.
+fn frozen_frame_matte(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: usize, h: usize) -> Option<(Vec<f32>, Vec<u8>)> {
+    let fc = frozen(params)?;
+    let fr = fc.frames.get(&f)?;
+    if fc.size != [w, h] || !frozen_applies(&fc, params, layer_size, fps) {
+        return None;
+    }
+    let n = w.checked_mul(h).filter(|n| *n > 0 && *n <= rle::MAX_PLANE_BYTES)?;
+    let alpha = rle::decode_bounded(&fr.a, n).filter(|a| a.len() == n)?;
+    let band = rle::decode_bounded(&fr.b, n).filter(|b| b.len() == n)?;
+    Some((alpha.iter().map(|v| f32::from(*v) / 255.0).collect(), band))
 }
 
 #[cfg(test)]
@@ -1400,6 +1418,11 @@ mod tests {
         let out = crate::apply(&specs()[0], &ctx, Buf { img: frame(0.0), offset: [0.0; 2], scale: 1.0 }).img;
         let a = |x: usize, y: usize| out.data[y * 100 + x][3];
         assert!(a(10, 70) > 0.99 && a(90, 10) < 0.01, "the frozen matte is used: {} at (10, 70), {} at (90, 10)", a(10, 70), a(90, 10));
+        // freezing again in this session keeps the frozen matte instead of segmenting with the classic engine
+        let mut get = |g: i64| Some(Arc::new(frame(g as f64 / 25.0)));
+        let (kept, band) = frame_matte(&params, size, 25.0, 0, &mut get, &|| false).expect("frame 0's matte");
+        assert_eq!((kept, band.len()), (alpha.clone(), 100 * 80), "a second Freeze keeps the frozen frame");
+        assert!(frame_matte(&params, size, 25.0, 1, &mut get, &|| false).is_some_and(|(a, _)| a[40 * 100 + 10] < 0.01), "a frame with none is segmented");
         // a stroke edited after the freeze still makes it stale, whatever the model
         let mut moved = d.clone();
         moved.strokes[0].points[0] = [36.0, 40.0];
