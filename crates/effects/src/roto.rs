@@ -1256,19 +1256,21 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
 
 /// The final matte of the effect at layer frame `f` on the full-resolution layer grid of
 /// `input` (the effect's input buffer at scale 1), computing what is missing. For Freeze and
-/// the Layer panel overlays. A frame that is frozen already keeps its frozen matte, so freezing
-/// again in a session without the model that froze it does not replace that model's matte.
+/// the Layer panel overlays. A frame of `frozen` (the instance's frozen mattes, from
+/// [`applying_frozen`]) keeps its frozen matte, so freezing again in a session without the model
+/// that froze it does not replace that model's matte.
 pub fn frame_matte(
     params: &Params,
     layer_size: [f64; 2],
     fps: f64,
     f: i64,
+    frozen: Option<&FrozenCache>,
     frame: &mut dyn FnMut(i64) -> Option<Arc<Image>>,
     cancel: &dyn Fn() -> bool,
 ) -> Option<(Vec<f32>, Vec<u8>)> {
     let chain = Chain::new(params, layer_size, fps, 1.0);
     let img = frame(f)?;
-    if let Some(kept) = frozen_frame_matte(params, layer_size, fps, f, img.width as usize, img.height as usize) {
+    if let Some(kept) = frozen.and_then(|fc| frozen_frame_matte(fc, f, img.width as usize, img.height as usize)) {
         return Some(kept);
     }
     let seg = chain.ensure(f, frame, cancel)?;
@@ -1286,12 +1288,17 @@ pub fn frame_matte(
     Some((alpha, seg.refine.clone()))
 }
 
-/// Frame `f`'s frozen alpha and band on a `w`×`h` grid, while the frozen mattes apply ([`frozen_applies`]) and were
-/// frozen at that size.
-fn frozen_frame_matte(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: usize, h: usize) -> Option<(Vec<f32>, Vec<u8>)> {
+/// The instance's frozen mattes while they apply ([`frozen_applies`]): the frames a second Freeze keeps. A Freeze job
+/// resolves them once, since this hashes the whole frozen cache.
+pub fn applying_frozen(params: &Params, layer_size: [f64; 2], fps: f64) -> Option<Arc<FrozenCache>> {
     let fc = frozen(params)?;
+    frozen_applies(&fc, params, layer_size, fps).then_some(fc)
+}
+
+/// Frame `f`'s alpha and band in `fc` on a `w`×`h` grid, when it was frozen at that size.
+fn frozen_frame_matte(fc: &FrozenCache, f: i64, w: usize, h: usize) -> Option<(Vec<f32>, Vec<u8>)> {
     let fr = fc.frames.get(&f)?;
-    if fc.size != [w, h] || !frozen_applies(&fc, params, layer_size, fps) {
+    if fc.size != [w, h] {
         return None;
     }
     let n = w.checked_mul(h).filter(|n| *n > 0 && *n <= rle::MAX_PLANE_BYTES)?;
@@ -1420,15 +1427,18 @@ mod tests {
         assert!(a(10, 70) > 0.99 && a(90, 10) < 0.01, "the frozen matte is used: {} at (10, 70), {} at (90, 10)", a(10, 70), a(90, 10));
         // freezing again in this session keeps the frozen matte instead of segmenting with the classic engine
         let mut get = |g: i64| Some(Arc::new(frame(g as f64 / 25.0)));
-        let (kept, band) = frame_matte(&params, size, 25.0, 0, &mut get, &|| false).expect("frame 0's matte");
-        assert_eq!((kept, band.len()), (alpha.clone(), 100 * 80), "a second Freeze keeps the frozen frame");
-        assert!(frame_matte(&params, size, 25.0, 1, &mut get, &|| false).is_some_and(|(a, _)| a[40 * 100 + 10] < 0.01), "a frame with none is segmented");
+        let kept = applying_frozen(&params, size, 25.0).expect("the frozen mattes apply");
+        let (matte, band) = frame_matte(&params, size, 25.0, 0, Some(&kept), &mut get, &|| false).expect("frame 0's matte");
+        assert_eq!((matte, band.len()), (alpha.clone(), 100 * 80), "a second Freeze keeps the frozen frame");
+        let segmented = frame_matte(&params, size, 25.0, 1, Some(&kept), &mut get, &|| false);
+        assert!(segmented.is_some_and(|(a, _)| a[40 * 100 + 10] < 0.01), "a frame with none is segmented");
         // a stroke edited after the freeze still makes it stale, whatever the model
         let mut moved = d.clone();
         moved.strokes[0].points[0] = [36.0, 40.0];
         let mut edited = params.clone();
         edited.values.insert(STROKES.into(), Value::Str(moved.to_json()));
         assert!(!frozen_applies(&fc, &edited, size, 25.0));
+        assert!(applying_frozen(&edited, size, 25.0).is_none(), "a second Freeze then segments every frame");
     }
 
     /// A stand-in tracker for two objects: object 0 is the moving disk, object 1 a fixed square. It records how many
