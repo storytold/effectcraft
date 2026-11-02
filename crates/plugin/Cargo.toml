@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-plugin"
-description = "EffectCraft effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1) into the effect registry"
+description = "Visualab Effects effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1) into the effect registry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

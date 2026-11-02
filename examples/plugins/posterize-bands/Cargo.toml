@@ -1,6 +1,6 @@
 [package]
 name = "posterize-bands"
-description = "Example EffectCraft effect plug-in (WebAssembly, plug-in API v1): posterizes luminance into tinted bands"
+description = "Example Visualab Effects effect plug-in (WebAssembly, plug-in API v1): posterizes luminance into tinted bands"
 version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

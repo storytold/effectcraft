@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-project"
-description = "The EffectCraft document: project items, compositions, layers and the After-Effects-style property tree"
+description = "The Visualab Effects document: project items, compositions, layers and the After-Effects-style property tree"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

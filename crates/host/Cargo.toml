@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-host"
-description = "Builds a fully wired EffectCraft session: media decoding (FilmCraft codecs), importer, the expression engine and scripting"
+description = "Builds a fully wired Visualab Effects session: media decoding (FilmCraft codecs), importer, the expression engine and scripting"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
