@@ -1652,7 +1652,7 @@ CompItem.prototype.constructor = CompItem;
   P.saveFrameToPng = function (time, file) {
     var f = __str(file);
     if (!f) throw __err("saveFrameToPng: missing file");
-    __file("write", f, "");
+    __file("checkWrite", f);
     __call("comp.saveFrameAs", { comp: this.__id, path: f, time: __num(time, "time") });
   };
   P.openInEssentialGraphics = function () { __call("comp.openInEssentialGraphics", { comp: this.__id }); };
@@ -1662,8 +1662,8 @@ CompItem.prototype.constructor = CompItem;
     if (!/\.[A-Za-z0-9]+$/.test(f)) f += ".ectemplate";
     if (!overwrite && JSON.parse(__file("exists", f)) === true) return false;
     if (this.__controllers().length === 0) return false;
-    // The file gate applies to templates too.
-    __file("write", f, "");
+    // The file gate applies to templates too (checked without touching the file).
+    __file("checkWrite", f);
     __call("essential.exportTemplate", { comp: this.__id, path: f });
     return true;
   };
