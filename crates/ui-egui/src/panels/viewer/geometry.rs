@@ -1,3 +1,4 @@
+use super::ov::parent_to_comp;
 use super::{CameraState, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, VIEW_CAM, gv2, three_d, vec2};
 
 /// The camera the viewer shows (view camera or the comp's active camera).
@@ -120,12 +121,6 @@ pub(crate) fn layer_outline(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
     project_clipped(&l2c(ctx, layer).0, &box_corners(b))
 }
 
-/// Parent space → comp matrix of a 2D layer at the context time.
-pub(crate) fn parent_to_comp(ctx: &EvalCtx, layer: &Layer) -> Mat3 {
-    let w = ctx.parent_matrix(layer).0;
-    Mat3([[w[0][0], w[0][1], w[0][3]], [w[1][0], w[1][1], w[1][3]], [0.0, 0.0, 1.0]])
-}
-
 /// Where a layer's anchor point shows in the viewer (comp pixels), through the current 3D view for
 /// a 3D layer. None without a transform, or when it is at or behind the camera.
 pub(super) fn anchor_in_comp(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 2]> {
@@ -138,40 +133,10 @@ pub(super) fn anchor_in_comp(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 2]> {
     Some([p.x, p.y])
 }
 
-/// −1 when a layer's Rotation turns it counter-clockwise on screen: its parent is flipped or, for
-/// a 3D layer, the view sees its parent's XY plane from behind. Otherwise 1.
+/// −1 when a layer's Rotation turns it counter-clockwise on screen, its parent being flipped.
+/// Otherwise 1.
 pub(super) fn rotation_sign(ctx: &EvalCtx, layer: &Layer) -> f64 {
-    let plane = match layer.transform() {
-        Some(tr) if layer.is_3d() => {
-            let at = effectcraft_engine::geom::Mat4::translate(ctx.position(layer, tr).into());
-            (cam_state(ctx).projection(ctx.comp.width as f64, ctx.comp.height as f64) * ctx.parent_matrix(layer) * at).plane_to_mat3()
-        }
-        _ => parent_to_comp(ctx, layer),
-    };
-    if plane.determinant() < 0.0 { -1.0 } else { 1.0 }
-}
-
-/// The space the Rotation tool measures the pointer's angle in: comp → that space, and the layer's
-/// pivot there. A 2D layer turns in parent space about its Position, so it follows the pointer
-/// through any parent (a flip or skew needs no special case). A 3D layer, or a parent that collapses
-/// the plane, measures on screen about the anchor, mirrored when the turn is reversed.
-pub(super) fn rotate_frame(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [f64; 2])> {
-    if !layer.is_3d()
-        && let Some(c2p) = parent_to_comp(ctx, layer).inverse()
-    {
-        let p = ctx.position(layer, layer.transform()?);
-        return Some((c2p, [p[0], p[1]]));
-    }
-    let a = anchor_in_comp(ctx, layer)?;
-    let c2p = Mat3::scale(gv2(rotation_sign(ctx, layer), 1.0));
-    let p = c2p.apply(gv2(a[0], a[1]));
-    Some((c2p, [p.x, p.y]))
-}
-
-/// The pointer's angle (degrees, as atan2 gives it) about `pivot`, in the space of [`rotate_frame`].
-pub(super) fn pointer_angle(c2p: &Mat3, pivot: [f64; 2], cpt: [f64; 2]) -> f64 {
-    let p = c2p.apply(gv2(cpt[0], cpt[1]));
-    (p.y - pivot[1]).atan2(p.x - pivot[0]).to_degrees()
+    if parent_to_comp(ctx, layer).determinant() < 0.0 { -1.0 } else { 1.0 }
 }
 
 /// Which axes a bounding-box handle scales: corners (0–3) both; the top and bottom edges (4, 6)

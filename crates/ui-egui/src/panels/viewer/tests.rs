@@ -160,21 +160,7 @@ fn with_ctx<T>(s: &effectcraft_engine::Session, f: impl FnOnce(&EvalCtx) -> T) -
     f(&EvalCtx::new(&s.project, comp.id, comp, Tick::ZERO))
 }
 
-/// #2870: a parent scaled to nothing has no inverse: the Rotation tool measures on screen about
-/// where the anchor collapsed to, with no panic and no NaN.
-#[test]
-fn rotate_frame_falls_back_on_screen_when_the_parent_collapses() {
-    let (s, c) = parented_session(json!({"position": [400.0, 200.0], "scale": [0.0, 100.0]}));
-    with_ctx(&s, |ctx| {
-        let l = ctx.comp.layer(LayerId(c)).unwrap();
-        let (c2p, pivot) = rotate_frame(ctx, l).unwrap();
-        assert_eq!(c2p, Mat3::IDENTITY);
-        assert_eq!(pivot, [400.0, 210.0]);
-        assert_eq!(pointer_angle(&c2p, pivot, [400.0, 310.0]), 90.0);
-    });
-}
-
-/// #2870: the marker and pivot of a child follow its parent, through the camera for a 3D layer
+/// #2870: the pivot of a child follows its parent, through the camera for a 3D layer
 /// and none behind it.
 #[test]
 fn anchor_in_comp_follows_the_parent_and_the_camera() {

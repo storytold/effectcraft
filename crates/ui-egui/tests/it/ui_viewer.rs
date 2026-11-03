@@ -2962,28 +2962,6 @@ fn rotate_tool_turns_a_child_of_a_rotated_parent_smoothly() {
     assert_turns_by(&rotate_round(&mut h, [380.0, 60.0], &[child]), 0, 10.0);
 }
 
-/// #2870: under a parent scaled unevenly the angle is the one in parent space, so the layer's edge
-/// stays under the pointer, which covers uneven degrees per frame.
-#[test]
-fn rotate_tool_measures_in_parent_space_under_a_stretched_parent() {
-    let (mut h, _, child) = rotate_child_harness(json!({"scale": [200.0, 100.0]}));
-    let seen = rotate_round(&mut h, [80.0, 120.0], &[child]);
-    let mut turned = 0.0_f64;
-    let mut last = 0.0_f64;
-    let want: Vec<f64> = (0..=40)
-        .map(|i| {
-            let a = (i as f64 * 10.0).to_radians();
-            let ang = a.sin().atan2(a.cos() / 2.0).to_degrees();
-            turned += (ang - last + 180.0).rem_euclid(360.0) - 180.0;
-            last = ang;
-            turned
-        })
-        .collect();
-    let end = seen.last().unwrap()[0];
-    assert!((end - want[40]).abs() < 1.0, "the layer follows the pointer in parent space: {end}, want {}", want[40]);
-    assert!(seen.windows(2).all(|w| (w[1][0] - w[0][0]).abs() < 30.0), "no jump: {seen:?}");
-}
-
 /// #2870: a parent's pixel aspect isn't inherited by its child, so it doesn't move the pivot either.
 #[test]
 fn rotate_tool_ignores_a_parents_pixel_aspect() {

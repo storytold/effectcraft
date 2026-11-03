@@ -369,6 +369,17 @@ pub(crate) fn motion_frame_at(frames: &[PathFrame], hits: &[KeyHit], pos: Pos2) 
     (!hits.iter().any(|h| h.tangent.is_none() && h.layer == near.layer && h.prop == near.prop && h.time == near.time)).then_some(*near)
 }
 
+/// Parent space → comp matrix of a 2D layer at the context time.
+pub(crate) fn parent_to_comp(ectx: &EvalCtx, l: &Layer) -> Mat3 {
+    match l.parent.and_then(|p| ectx.comp.layer(p)) {
+        Some(p) => {
+            let w = ectx.world_matrix(p).0;
+            Mat3([[w[0][0], w[0][1], w[0][3]], [w[1][0], w[1][1], w[1][3]], [0.0, 0.0, 1.0]])
+        }
+        None => Mat3::IDENTITY,
+    }
+}
+
 /// Draw the position motion path of a selected 2D layer: frame dots along the path, keyframe
 /// squares (filled when selected) and spatial Bezier tangent handles. Works through parents.
 #[allow(clippy::too_many_arguments)]
@@ -399,7 +410,7 @@ pub(crate) fn motion_path(
         Some((x, y)) => separated_value(x, y, t),
         None => pos.value_at(t).as_vec3(),
     };
-    let p2c = super::viewer::parent_to_comp(ectx, l);
+    let p2c = parent_to_comp(ectx, l);
     let to_scr = |v: [f64; 3]| {
         let c = p2c.apply(gv2(v[0], v[1]));
         map.to_screen([c.x, c.y])
