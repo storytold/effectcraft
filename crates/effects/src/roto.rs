@@ -1203,15 +1203,16 @@ pub fn freeze_frame(alpha: &[f32], band: &[u8]) -> FrozenFrame {
 fn matte_for(ctx: &EffectCtx, f: i64, img: &Arc<Image>, scale: f64) -> Option<(Vec<f32>, Vec<u8>, f64)> {
     let (w, h) = (img.width as usize, img.height as usize);
     // Frozen mattes.
+    // Only the layer's own full-resolution grid: a project cannot make a tiny layer decode (and
+    // convert to floats) planes as large as the RLE allows. Any other size falls through to a computed matte.
     if let Some(fc) = frozen(ctx.params)
         && fc.key == frozen_key(ctx.params, ctx.layer_size, ctx.fps())
+        && fc.size == frozen_grid(ctx.layer_size)
         && let Some(fr) = fc.frames.get(&f)
     {
         let [fw, fh] = fc.size;
         let expected = fw.checked_mul(fh)?;
-        // Only the layer's own full-resolution grid: a project cannot make a tiny layer decode
-        // (and convert to floats) planes as large as the RLE allows.
-        if fc.size != frozen_grid(ctx.layer_size) || fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
+        if fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
             return None;
         }
         let a = rle::decode_bounded(&fr.a, expected)?;
@@ -1375,6 +1376,27 @@ mod tests {
         let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
         params.values.insert(STROKES.into(), Value::Str(d.to_json()));
         params
+    }
+
+    #[test]
+    fn mismatched_frozen_size_falls_back_to_a_computed_matte() {
+        let mut d = RotoData::default();
+        d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[35.0, 40.0], [45.0, 40.0]], object: 0 }, 20, [0, 24]);
+        let mut params = params_with(&d);
+        let fc =
+            FrozenCache { key: frozen_key(&params, [100.0, 80.0], 25.0), size: [10, 8], frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]) };
+        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        let host = Seq;
+        let ctx = EffectCtx {
+            params: &params,
+            time: 5.0 / 25.0 + 0.001,
+            layer_size: [100.0, 80.0],
+            seed: 1,
+            adjustment: false,
+            env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+        };
+        let out = crate::apply(&specs()[0], &ctx, Buf { img: frame(5.0 / 25.0 + 0.001), offset: [0.0; 2], scale: 1.0 }).img;
+        assert!(out.data[(40 * 100 + 50) as usize][3] > 0.5, "the disk is missing from the output");
     }
 
     #[test]
