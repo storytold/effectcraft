@@ -215,19 +215,26 @@ pub enum PsOp {
     Proc(Vec<PsOp>),
 }
 
-fn ps_parse(lx: &mut crate::object::Lexer, depth: usize) -> Vec<PsOp> {
+/// Parse a procedure. `ops` counts the tokens as [`ps_len`] does; past [`MAX_CALC_OPS`] the rest
+/// is not read, so an oversized program is never fully built (the caller rejects it by size).
+fn ps_parse(lx: &mut crate::object::Lexer, depth: usize, ops: &mut usize) -> Vec<PsOp> {
     let mut out = vec![];
     while let Some(o) = lx.next() {
-        match o {
-            Obj::Num(n) => out.push(PsOp::Num(n)),
-            Obj::Bool(b) => out.push(PsOp::Num(if b { 1.0 } else { 0.0 })),
-            Obj::Op(op) if op == "{" && depth < 32 => out.push(PsOp::Proc(ps_parse(lx, depth + 1))),
-            // Nested too deep: skip the procedure's opening brace (never push it as an operator).
-            Obj::Op(op) if op == "{" => {}
-            Obj::Op(op) if op == "}" => return out,
-            Obj::Op(op) => out.push(PsOp::Op(op)),
-            _ => {}
+        if *ops > MAX_CALC_OPS {
+            break;
         }
+        let op = match o {
+            Obj::Num(n) => PsOp::Num(n),
+            Obj::Bool(b) => PsOp::Num(if b { 1.0 } else { 0.0 }),
+            Obj::Op(op) if op == "{" && depth < 32 => PsOp::Proc(ps_parse(lx, depth + 1, ops)),
+            // Nested too deep: skip the procedure's opening brace (never push it as an operator).
+            Obj::Op(op) if op == "{" => continue,
+            Obj::Op(op) if op == "}" => return out,
+            Obj::Op(op) => PsOp::Op(op),
+            _ => continue,
+        };
+        *ops += 1;
+        out.push(op);
     }
     out
 }
@@ -589,7 +596,7 @@ impl Func {
                 let Some(data) = decode_stream(file, sd, raw) else { return Func::Unsupported };
                 let mut lx = crate::object::Lexer::new(&data, 0);
                 // The program is one procedure: `{ … }`.
-                let code = match ps_parse(&mut lx, 0).into_iter().next() {
+                let code = match ps_parse(&mut lx, 0, &mut 0).into_iter().next() {
                     Some(PsOp::Proc(p)) => p,
                     _ => return Func::Unsupported,
                 };
@@ -783,11 +790,19 @@ mod tests {
     }
 
     #[test]
+    fn oversized_calculator_program_is_cut_short() {
+        let src = format!("{{ {}}}", "1 ".repeat(MAX_CALC_OPS + 10));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(ps_len(&code), MAX_CALC_OPS + 1);
+    }
+
+    #[test]
     fn calculator_functions() {
         // Two inputs → three outputs: { 2 copy mul 3 1 roll add 2 div  dup 0.5 gt { pop 1 } if  0 }
         let code = b"{ 2 copy mul 3 1 roll add 2 div dup 0.5 gt { pop 1 } { 0.25 mul } ifelse 0 }";
         let mut lx = crate::object::Lexer::new(code, 0);
-        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0).into_iter().next() else { panic!() };
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         let f = Func::Calc { domain: vec![0.0, 1.0, 0.0, 1.0], range: vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0], code };
         assert_eq!(f.eval(&[0.5, 0.4]), vec![0.2, 0.1125, 0.0]);
         assert_eq!(f.eval(&[1.0, 0.8]), vec![0.8, 1.0, 0.0]);
@@ -797,7 +812,7 @@ mod tests {
     fn run(src: &str, mut st: Vec<f64>) -> Vec<f64> {
         let src = format!("{{ {src} }}");
         let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
-        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0).into_iter().next() else { panic!() };
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         ps_run(&code, &mut st, 0);
         st
     }
