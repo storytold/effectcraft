@@ -631,17 +631,19 @@ impl<S: Clone> SimCache<S> {
         let steps: std::collections::HashSet<u64> = fresh.iter().map(|(s, _)| *s).collect();
         e.checkpoints.retain(|(c, _)| !steps.contains(c));
         e.checkpoints.extend(fresh);
-        // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
+        // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin. The
+        // state just asked for keeps its slot, so asking for it again is answered from the cache.
         if e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
-            e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0);
+            e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0 && *s != target);
             e.checkpoints.sort_by_key(|(s, _)| *s);
-            while e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
+            while e.checkpoints.len() + 1 > MAX_SIM_CHECKPOINTS {
                 let mut k = 0;
                 e.checkpoints.retain(|_| {
                     k += 1;
                     k % 2 == 1
                 });
             }
+            e.checkpoints.push((target, out.clone()));
         }
         out
     }
@@ -835,6 +837,24 @@ mod tests {
         let again: SimCache<u64> = SimCache::new(2);
         assert_eq!(*again.run(1, 54_321, || 7, step), mid);
         assert_eq!(*again.run(1, 100_000, || 7, step), far);
+    }
+
+    /// A request that leaves the cache over its checkpoint cap still finds its own state there.
+    #[test]
+    fn sim_cache_keeps_the_requested_state_when_trimming() {
+        let c: SimCache<u64> = SimCache::new(2);
+        let steps = std::cell::Cell::new(0u64);
+        let count = |s: &mut u64, _: u64| {
+            steps.set(steps.get() + 1);
+            *s += 1;
+        };
+        let target = SIM_CHECKPOINT * (MAX_SIM_CHECKPOINTS as u64 - 1) + SIM_CHECKPOINT - 1;
+        assert_eq!(*c.run(1, target, || 0, count), target);
+        let n = c.inner.lock().map(|g| g.iter().map(|e| e.checkpoints.len()).max().unwrap_or(0)).unwrap_or(0);
+        assert!(n <= MAX_SIM_CHECKPOINTS, "{n} checkpoints");
+        steps.set(0);
+        assert_eq!(*c.run(1, target, || 0, count), target);
+        assert_eq!(steps.get(), 0, "the second request is answered from the cache");
     }
 
     #[test]
