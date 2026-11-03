@@ -4,6 +4,19 @@ use super::layer::LayerSource;
 use super::settings::{APP_VERSION, ProjectError, ProjectSettings, SCHEMA_VERSION, SavedView};
 use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Tick, file_check, limits};
 
+/// `base` numbered with the lowest counter from 2 for which `taken` is false: a copy of an item or
+/// another layer of the same name. A number set off by a space is a counter and is replaced
+/// (`Red Solid 1` → `Red Solid 2`, `shot 2` → `shot 3`); digits that end a word belong to the
+/// name and stay (`v-b1.mp4` → `v-b1.mp4 2`, `clip2.mov` → `clip2.mov 2`).
+pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let head = base.trim_end_matches(|c: char| c.is_ascii_digit());
+    let stem = match head.strip_suffix(' ') {
+        Some(stem) if head.len() < base.len() && !stem.trim_end().is_empty() => stem.trim_end(),
+        _ => base.trim_end(),
+    };
+    (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemId(pub u64);
 
@@ -162,13 +175,11 @@ impl Project {
     pub fn find_by_name(&self, name: &str) -> Option<&Item> {
         self.items.values().find(|i| i.name == name)
     }
-    /// A numbered name for a copy of `base` that no project item has (Edit ▸ Duplicate): its
-    /// trailing number is dropped and the lowest free one from 2 is added (`Comp 1` → `Comp 2`,
-    /// `Name` → `Name 2`, then `Name 3`). Items for which `ignore` holds don't count.
+    /// A numbered name for a copy of `base` that no project item has (Edit ▸ Duplicate), as
+    /// `numbered_name` gives it (`Comp 1` → `Comp 2`, `Name` → `Name 2`, then `Name 3`,
+    /// `v-b1.mp4` → `v-b1.mp4 2`). Items for which `ignore` holds don't count.
     pub fn numbered_item_name(&self, base: &str, ignore: impl Fn(&Item) -> bool) -> String {
-        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
-        let taken = |n: &str| self.items.values().any(|i| i.name == n && !ignore(i));
-        (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
+        numbered_name(base, |n| self.items.values().any(|i| i.name == n && !ignore(i)))
     }
     /// `base` when no project item has that name, else the next free numbered name as
     /// [`Project::numbered_item_name`] gives it. Items for which `ignore` holds don't count.

@@ -1,14 +1,16 @@
 //! ProRes `colr` atom (#2801): it describes the frames the render path made, read back with
-//! FilmCraft's demuxer and, when installed, ffprobe as an external oracle.
+//! FilmCraft's demuxer and, when installed, ffprobe as an external oracle. A PQ or HLG render
+//! read back into a managed project has the colours it was rendered from (#2849).
 
 use std::path::Path;
 use std::process::Command;
 
 use effectcraft_color::Label;
-use effectcraft_export::render_queue::{Channels, OutputFormat, OutputModule, RenderSettings, TimeSpan};
+use effectcraft_export::render_queue::{Channels, OutputFormat, OutputModule, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, export};
+use effectcraft_media::MediaPool;
 use effectcraft_project::{ColorSpace, Comp, ItemKind, LayerSource, Project, Solid, build};
-use effectcraft_render::NoFootage;
+use effectcraft_render::{FootageSource, NoFootage};
 use effectcraft_time::{FrameRate, Tick};
 use filmcraft_isobmff::{ColorInfo, TrackKind};
 
@@ -55,25 +57,32 @@ const ROWS: &[Row] = &[
     Row { name: "alpha_matte", working: SRGB, output: PQ, channels: Channels::Alpha, codes: [1, 1, 1], names: BT709 },
 ];
 
+/// The solid every row renders; with the default output it comes out as these values.
+const SOLID: [f32; 3] = [0.75, 0.25, 0.5];
+
 fn render(row: &Row, path: &Path) {
     let mut p = Project::default();
     p.settings.working_space = row.working;
     p.settings.output_space = row.output;
     let mut comp = Comp::new(64, 48, FrameRate::new(10, 1), Tick::from_seconds_f64(0.2));
-    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [0.75, 0.25, 0.5], width: 64, height: 48, pixel_aspect: 1.0 }));
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: SOLID, width: 64, height: 48, pixel_aspect: 1.0 }));
     comp.layers.push(build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: sid }, (64, 48), None));
     let comp = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
-    let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
     let output = OutputModule { channels: row.channels, ..OutputModule::for_format(OutputFormat::ProRes) };
+    run(&p, comp, &NoFootage, &output, path);
+}
+
+fn run(p: &Project, comp: effectcraft_project::ItemId, footage: &dyn FootageSource, output: &OutputModule, path: &Path) {
+    let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
     let out = path.to_string_lossy().to_string();
     let job = Job {
-        project: &p,
-        footage: &NoFootage,
+        project: p,
+        footage,
         expr: None,
         accel: None,
         comp,
         settings: &settings,
-        output: &output,
+        output,
         path: &out,
         sink: None,
         options: Default::default(),
@@ -114,5 +123,36 @@ fn prores_colr_describes_the_frames() {
         if let Some(stream) = ffprobe_tags(&path) {
             assert_eq!(stream, row.names, "{}: ffprobe stream tags", row.name);
         }
+    }
+}
+
+/// #2849: a PQ or HLG render, imported into a project with an sRGB working space, gets the
+/// Rec. 2100 profile its `colr` atom names and shows the solid it was rendered from.
+#[test]
+fn hdr_renders_reimport_with_their_colours() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/export/prores_hdr_reimport");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let want = SOLID.map(|v| (v * 255.0 + 0.5) as i32);
+    for (name, space) in [("pq", ColorSpace::Rec2100Pq), ("hlg", ColorSpace::Rec2100Hlg)] {
+        let row = ROWS.iter().find(|r| r.name == name).expect("row");
+        let movie = dir.join(format!("{name}.mov"));
+        render(row, &movie);
+
+        let footage = effectcraft_media::probe(&movie).expect("probe");
+        let profile = footage.color_profile;
+        let mut p = Project::default();
+        p.settings.working_space = SRGB;
+        let mut comp = Comp::new(64, 48, FrameRate::new(10, 1), Tick::from_seconds_f64(0.1));
+        let fid = p.add_item(name, Label::SeaFoam, None, ItemKind::Footage(footage));
+        comp.layers.push(build::layer(&mut p, &comp, name, LayerSource::Footage { item: fid }, (64, 48), None));
+        let comp = p.add_item("Reimport", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let pattern = dir.join(format!("{name}_[#####].png")).to_string_lossy().to_string();
+        run(&p, comp, &MediaPool::new(), &OutputModule::for_format(OutputFormat::PngSequence), Path::new(&pattern));
+
+        let png = image::open(sequence_path(&pattern, 0)).expect("png").to_rgb8();
+        let got = png.get_pixel(32, 24).0.map(i32::from);
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 2), "{name}: centre {got:?}, want {want:?} (profile {profile:?})");
+        assert_eq!(profile, Some(space), "{name}: profile");
     }
 }
