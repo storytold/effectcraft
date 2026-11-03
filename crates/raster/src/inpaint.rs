@@ -706,6 +706,14 @@ impl Frames {
             Frames::Spilled(h) => h.take_error(),
         }
     }
+    /// The error slot shared by every spill in this fill, so a caller holding a clone of the
+    /// input handle also sees failures in the propagated-frame spill.
+    pub fn error_cell(&self) -> Option<std::sync::Arc<std::sync::Mutex<Option<String>>>> {
+        match self {
+            Frames::Memory(_) => None,
+            Frames::Spilled(h) => Some(h.error_cell()),
+        }
+    }
 }
 
 /// A spill file holding `n` frames of `w x h` pixels at `bpc` bits per channel.
@@ -724,12 +732,15 @@ struct SpillInner {
     path: std::path::PathBuf,
     /// Kept open so sampling can use positioned reads: several trace threads read the same
     /// file at once, and a shared file offset would need a lock around every read (#2570).
-    file: std::fs::File,
-    error: std::sync::Mutex<Option<String>>,
+    /// `Option` so `Drop` can close it before deleting (Windows refuses to delete an open file).
+    file: Option<std::fs::File>,
+    /// Shared with any secondary spill so one probe reports every scratch failure.
+    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Drop for SpillInner {
     fn drop(&mut self) {
+        self.file = None;
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -749,6 +760,10 @@ impl SpillHandle {
         {
             *e = Some(message);
         }
+    }
+
+    pub fn error_cell(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+        std::sync::Arc::clone(&self.inner.error)
     }
 
     pub fn has_error(&self) -> bool {
@@ -813,17 +828,19 @@ impl SpillHandle {
     /// A positioned read: `pread`/`seek_read` use the shared handle without touching a shared
     /// file offset, so tracing threads do not serialise on the file.
     fn read_at(&self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        #[cfg(any(unix, windows))]
+        let file = self.inner.file.as_ref().ok_or_else(|| std::io::Error::other("spill file closed"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
-            self.inner.file.read_exact_at(buf, off)
+            file.read_exact_at(buf, off)
         }
         #[cfg(windows)]
         {
             use std::os::windows::fs::FileExt;
             let mut done = 0usize;
             while done < buf.len() {
-                match self.inner.file.seek_read(&mut buf[done..], off.saturating_add(done as u64)) {
+                match file.seek_read(&mut buf[done..], off.saturating_add(done as u64)) {
                     Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
                     Ok(n) => done += n,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -960,6 +977,19 @@ impl SpillHandle {
     /// Create a spill file. `dir` lets the caller keep scratch next to the output (so a
     /// RAM-backed `/tmp` does not defeat the point of spilling); `None` uses the temp dir.
     pub fn create_in(dir: Option<&std::path::Path>, w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
+        Self::create_in_with_error(dir, w, h, n, bpc, None)
+    }
+
+    /// `error`: share an existing error slot, so a secondary spill reports through the same
+    /// handle the caller already watches (#2570 review).
+    pub fn create_in_with_error(
+        dir: Option<&std::path::Path>,
+        w: usize,
+        h: usize,
+        n: usize,
+        bpc: u8,
+        error: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    ) -> std::io::Result<Self> {
         let bytes_per_px: usize = if bpc <= 8 { 4 } else { 16 };
         let total = n
             .checked_mul(w)
@@ -976,7 +1006,8 @@ impl SpillHandle {
         let path = tmp.into_temp_path().keep().map_err(|e| e.error)?;
         let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         file.set_len(total as u64)?;
-        let inner = std::sync::Arc::new(SpillInner { path, file, error: std::sync::Mutex::new(None) });
+        let error = error.unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(None)));
+        let inner = std::sync::Arc::new(SpillInner { path, file: Some(file), error });
         Ok(SpillHandle { inner, w, h, n, bpc })
     }
 
@@ -1109,31 +1140,47 @@ enum PropStore {
 }
 
 impl PropStore {
-    fn new(dir: Option<&std::path::Path>, w: usize, h: usize, n: usize) -> std::io::Result<Self> {
+    fn new(
+        dir: Option<&std::path::Path>,
+        w: usize,
+        h: usize,
+        n: usize,
+        error: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    ) -> std::io::Result<Self> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             // 32-bit floats: propagating quantized input would lose quality (#2570).
-            Ok(PropStore::Spilled(SpillHandle::create_in(dir, w, h, n, 32)?))
+            Ok(PropStore::Spilled(SpillHandle::create_in_with_error(dir, w, h, n, 32, error)?))
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (dir, w, h);
+            let _ = (dir, w, h, error);
             Ok(PropStore::Memory(std::sync::Mutex::new((0..n).map(|_| None).collect())))
         }
     }
 
-    fn put(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
+    fn put(&self, k: usize, img: Image) -> std::result::Result<(), String> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            PropStore::Spilled(h) => h.write_frame(k, img),
+            PropStore::Spilled(h) => h.write_frame(k, &img),
             #[cfg(target_arch = "wasm32")]
             PropStore::Memory(v) => {
                 let mut v = v.lock().map_err(|_| "propagation store poisoned".to_string())?;
                 if let Some(slot) = v.get_mut(k) {
-                    *slot = Some(img.clone());
+                    *slot = Some(img);
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// Read a stored frame without consuming it (a frame can be shared by two flows).
+    fn get(&self, k: usize) -> Image {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            PropStore::Spilled(h) => h.get(k),
+            #[cfg(target_arch = "wasm32")]
+            PropStore::Memory(v) => v.lock().ok().and_then(|v| v.get(k).cloned()).unwrap_or_default(),
         }
     }
 
@@ -1166,6 +1213,62 @@ impl PropStore {
             PropStore::Memory(_) => false,
         }
     }
+}
+
+/// Publish a scratch failure through the input spill's shared error slot, so the caller reports
+/// the disk error instead of a bare cancellation.
+fn record_spill_error(cell: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>, message: String) {
+    if let Some(cell) = cell
+        && let Ok(mut e) = cell.lock()
+        && e.is_none()
+    {
+        *e = Some(message);
+    }
+}
+
+/// Membrane-fill every frame and return the forward/backward flow for each neighbouring pair.
+/// The filled frames are written to a scratch spill, so the flow pass never holds the range in
+/// RAM (#2570).
+#[allow(clippy::too_many_arguments)]
+fn flow_pairs(
+    n: usize,
+    w: usize,
+    h: usize,
+    holes: &[HoleMask],
+    is_ref: &[bool],
+    ref_images: &[Option<Image>],
+    frames: &Frames,
+    prop_dir: Option<&std::path::Path>,
+    error_cell: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    backend: &dyn FillBackend,
+) -> Option<Vec<(Flow, Flow)>> {
+    let store = match PropStore::new(prop_dir, w, h, n, error_cell.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            record_spill_error(&error_cell, format!("spill: {e}"));
+            return None;
+        }
+    };
+    let pre = (0..n).into_par_iter().try_for_each(|t| {
+        let base = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { frames.get(t) };
+        let img = backend.membrane(&base, &holes[t].to_vec());
+        store.put(t, img)
+    });
+    if pre.is_err() || frames.has_error() {
+        return None;
+    }
+    let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
+        .into_par_iter()
+        .map(|i| {
+            let a = store.get(i);
+            let b = store.get(i + 1);
+            let ha = holes[i].to_vec();
+            let hb = holes[i + 1].to_vec();
+            (backend.flow(&a, &b, &ha, &hb), backend.flow(&b, &a, &hb, &ha))
+        })
+        .collect();
+    drop(store);
+    if frames.has_error() { None } else { Some(pairs) }
 }
 
 /// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
@@ -1231,37 +1334,23 @@ pub fn fill_sequence_with(
             is_ref[k] = true;
         }
     }
-    // 1. Flows between membrane-filled neighbours, completed inside the holes.
-    let pre: Vec<Image> = (0..n)
-        .into_par_iter()
-        .map(|t| {
-            let base = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
-            backend.membrane(&base, &holes[t].to_vec())
-        })
-        .collect();
-    if input.frames.has_error() {
-        return None;
-    }
-    let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
-        .into_par_iter()
-        .map(|i| {
-            (
-                backend.flow(&pre[i], &pre[i + 1], &holes[i].to_vec(), &holes[i + 1].to_vec()),
-                backend.flow(&pre[i + 1], &pre[i], &holes[i + 1].to_vec(), &holes[i].to_vec()),
-            )
-        })
-        .collect();
+    let prop_dir = input.frames.scratch_dir();
+    let error_cell = input.frames.error_cell();
+    // 1. Flows between membrane-filled neighbours, completed inside the holes. The
+    // membrane-filled frames are spilled too, so the flow pass does not hold the range.
+    let pairs = flow_pairs(n, w, h, &holes, &is_ref, &ref_images, &input.frames, prop_dir.as_deref(), error_cell.clone(), backend)?;
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
-    drop(pre);
     if !progress(1, total) {
         return None;
     }
     // 2. Propagation (and the lighting-correction border ring). The filled frames are
     // spilled as they are produced, so only the leftover masks stay in RAM.
-    let prop_dir = input.frames.scratch_dir();
-    let store = match PropStore::new(prop_dir.as_deref(), w, h, n) {
+    let store = match PropStore::new(prop_dir.as_deref(), w, h, n, error_cell.clone()) {
         Ok(s) => s,
-        Err(_) => return None,
+        Err(e) => {
+            record_spill_error(&error_cell, format!("spill: {e}"));
+            return None;
+        }
     };
     let known = |k: usize, x: i64, y: i64| !holes[k].get(y as usize * w + x as usize);
     let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &input.frames, ref_images: &ref_images, w, h, max: n };
@@ -1314,7 +1403,7 @@ pub fn fill_sequence_with(
                     }
                 }
             }
-            if let Err(e) = store.put(t, &img) {
+            if let Err(e) = store.put(t, img) {
                 store.record_error(e);
             }
             HoleMask::from_vec(&left)

@@ -172,21 +172,20 @@ pub struct FillPlan {
     pub dir: String,
 }
 
-/// The frames and the propagated copies are spilled to disk and the holes are packed to one bit
-/// per pixel (#2570), but the flow pass still materialises the membrane-filled neighbours as
-/// float RGBA (~16 bytes a pixel a frame) before dropping them, and the propagation pass holds a
-/// few full frames at once on every rayon thread. wasm has no spill, so it keeps the input frames
-/// and the propagated copies in RAM as well (~32 bytes a pixel a frame). When even that peak is
-/// more than `available`, report it up front instead of running out of memory partway through
+/// Native builds spill the input, the membrane-filled neighbours and the propagated copies, and
+/// pack the holes to one bit per pixel, so only the two packed masks (~1/4 byte a pixel a frame)
+/// plus a small per-thread working set stay resident (#2570). wasm has no spill and keeps the
+/// input and the working copies in RAM (~32 bytes a pixel a frame). When even that peak is more
+/// than `available`, report it up front instead of running out of memory partway through
 /// (#1789, #2570 review).
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
     let px = u64::from(w).saturating_mul(u64::from(h));
     let per_frame = (frames as u64).saturating_mul(px);
     // `holes` and the leftover propagation masks, packed to a bit a pixel each.
     let masks = per_frame / 4;
-    // The membrane-filled frames stay alive for the whole flow pass; wasm also holds the input
-    // frames and the propagation store (twice the input frames at the peak).
-    let resident = per_frame.saturating_mul(if cfg!(target_arch = "wasm32") { 32 } else { 16 });
+    // wasm keeps the input and one working copy in RAM at every stage.
+    let resident = if cfg!(target_arch = "wasm32") { per_frame.saturating_mul(32) } else { 0 };
+    // A few full frames per rayon thread (membrane, flow, lighting scratch).
     let scratch = px.saturating_mul(128);
     let need = masks.saturating_add(resident).saturating_add(scratch);
     (need > available).then(|| {
@@ -238,16 +237,16 @@ pub(crate) async fn run_plan(
     let ctx0 = EvalCtx { expr, ..EvalCtx::new(project, cid, comp, Tick::ZERO) };
     let times = &plan.times;
     let n = times.len() as u64;
-    #[cfg(not(target_arch = "wasm32"))]
-    let bpc: u8 = match project.settings.bit_depth {
-        effectcraft_project::BitDepth::Bpc8 => 8,
-        _ => 32,
-    };
     let mut holes = Vec::with_capacity(times.len());
     #[cfg(target_arch = "wasm32")]
     let mut frames = Vec::with_capacity(times.len());
+    // Spill 32-bit floats whatever the project depth: the old in-memory path kept f32 all the
+    // way through, so quantising here would change the fill (#2570, "no quality loss"). Scratch
+    // lives beside the output, so a RAM-backed `/tmp` cannot defeat the memory saving.
     #[cfg(not(target_arch = "wasm32"))]
-    let spill = SpillHandle::create(w as usize, h as usize, times.len(), bpc).map_err(|e| e.to_string())?;
+    let spill = SpillHandle::create_in(Some(std::path::Path::new(&plan.dir)), w as usize, h as usize, times.len(), 32).map_err(|e| e.to_string())?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let spill_probe = spill.clone();
     for (k, t) in times.iter().enumerate() {
         let (img, hole) = crate::offload::in_passes(accel, |a| masked_frame(&r.with_accel(a), &ctx0.at(*t), layer, w, h)).await;
         holes.push(HoleMask::from_vec(&dilate(&hole, w as usize, h as usize, plan.expand)));
@@ -312,6 +311,10 @@ pub(crate) async fn run_plan(
     };
     let produced =
         effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| report(n + (d as u64 * n / t.max(1) as u64)), Some(&mut sink));
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(e) = spill_probe.take_error() {
+        return Err(e);
+    }
     if produced.is_none() {
         if let Some(e) = sink_error.take() {
             return Err(e);
@@ -554,9 +557,10 @@ mod tests {
         let e = memory_shortfall(300, 1920, 1080, 1_000_000).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
         assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a short range fits");
-        // The membrane-filled frames are still resident for the flow pass: a long 1080p range
-        // cannot fit in 1 GB whatever is spilled (#2570 review).
-        assert!(memory_shortfall(1000, 1920, 1080, 1_000_000_000).is_some());
+        // The two packed masks still grow with the range: a very long 1080p range cannot fit in
+        // half a gigabyte, while spilling lets a moderate one fit in a gigabyte (#2570 review).
+        assert!(memory_shortfall(1000, 1920, 1080, 500_000_000).is_some());
+        assert_eq!(memory_shortfall(300, 1920, 1080, 1_000_000_000), None);
         // Hostile sizes saturate instead of overflowing.
         assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
     }
