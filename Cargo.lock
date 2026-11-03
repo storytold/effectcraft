@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "cpal",
  "craft-update",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-automation"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-host",
@@ -1451,14 +1451,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-av1enc"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "filmcraft-av1",
 ]
 
 [[package]]
 name = "effectcraft-cli"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "cpu-time",
  "effectcraft-automation",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-color"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-effects"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "effectcraft-color",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-engine"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "craft-docpath",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-export"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-av1enc",
  "effectcraft-color",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-expr"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "boa_engine",
  "effectcraft-color",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-geom"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-gpu"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "bytemuck",
  "effectcraft-color",
@@ -1618,14 +1618,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-hevcenc"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "filmcraft-hevc",
 ]
 
 [[package]]
 name = "effectcraft-host"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-export",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-interchange"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-keyframe",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-keyframe"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-lottie"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "craft-docpath",
  "effectcraft-color",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-media"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "craft-docpath",
  "effectcraft-color",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-model"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-geom",
  "image",
@@ -1744,14 +1744,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-opusenc"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "filmcraft-opus",
 ]
 
 [[package]]
 name = "effectcraft-path"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-geom",
  "effectcraft-keyframe",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-pdf"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "craft-pdf",
  "effectcraft-raster",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-plugin"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-effects",
  "effectcraft-keyframe",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-project"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "craft-ecproj-format",
  "effectcraft-color",
@@ -1805,14 +1805,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-psd"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]
 
 [[package]]
 name = "effectcraft-raster"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-render"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-effects",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-sam2"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "bytemuck",
  "candle-core",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-script"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "boa_engine",
  "effectcraft-engine",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-segment"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "miniz_oxide 0.9.1",
  "ndarray",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-svg"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-geom",
  "effectcraft-path",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-text"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-keyframe",
  "harfrust",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-time"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-track"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-raster",
  "effectcraft-segment",
@@ -1929,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-ui-egui"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "craft-quit",
@@ -1965,11 +1965,11 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-vp9enc"
-version = "0.20.0"
+version = "0.21.0"
 
 [[package]]
 name = "effectcraft-web"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-export",
@@ -7623,7 +7623,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "pkg-config",
