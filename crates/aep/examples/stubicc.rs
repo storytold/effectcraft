@@ -5,12 +5,18 @@
 //!
 //! `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`
 //!
-//! It handles the JSON `"colorProfileData":"<base64>"` in `Utf8` chunks (or anywhere in the text of an
-//! .aepx) and a raw ICC profile stored as a chunk of its own (the profile of an imported image).
+//! It handles:
+//! - the JSON value `"colorProfileData": "<base64>"` in any chunk of an .aep and anywhere in the text
+//!   of an .aepx (white space around the colon, `\/` escapes and quotes written as `&quot;` allowed);
+//! - a raw ICC profile stored as a chunk of its own (the profile of an imported image), in an .aep
+//!   as the chunk's bytes and in an .aepx as its `bdata="<hex>"` attribute.
+//!
+//! A profile it cannot replace (no readable description, data that does not decode) stops the tool
+//! before anything is written. Check the result independently (the corpus has
+//! `tools/aep/inspect-embedded.py`), not by this tool's own count.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{Body, Chunk};
 
-const KEY: &[u8] = b"\"colorProfileData\":\"";
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Ends this developer tool with a message instead of a panic.
@@ -121,50 +127,148 @@ fn stub(desc: &str) -> Option<Vec<u8>> {
     Some(p)
 }
 
-/// Replaces every profile value in `text`; returns the new text and how many were replaced.
-fn stub_text(text: &[u8]) -> (Vec<u8>, usize) {
-    let (mut out, mut n, mut i) = (Vec::with_capacity(text.len()), 0, 0);
-    while let Some(&b) = text.get(i) {
-        let value = text.get(i..).filter(|t| t.starts_with(KEY)).and_then(|t| {
-            let rest = t.get(KEY.len()..)?;
-            let len = rest.iter().position(|b| *b == b'"')?;
-            let stubbed = description(&b64_decode(rest.get(..len)?)?).and_then(|d| stub(&d))?;
-            Some((len, b64_encode(&stubbed)))
-        });
-        match value {
-            Some((len, enc)) => {
-                out.extend_from_slice(KEY);
-                out.extend_from_slice(&enc);
-                i += KEY.len() + len;
-                n += 1;
-            }
-            None => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    (out, n)
+/// The JSON key, without its quotes.
+const KEY: &[u8] = b"colorProfileData";
+/// How a JSON quote is written: as is (a `Utf8` chunk, the `<string>` text of an .aepx) and as an
+/// XML entity (JSON inside an attribute of an .aepx).
+const QUOTES: [&[u8]; 2] = [b"\"", b"&quot;"];
+
+/// What the tool did, counted.
+#[derive(Default)]
+struct Tally {
+    stubbed: usize,
+    /// Values too short to be a profile (no ICC header), kept as they are.
+    kept_short: usize,
+    /// Profiles that could not be replaced (no readable description, undecodable data): the tool
+    /// fails, so no profile is ever left behind silently.
+    failed: Vec<String>,
 }
 
-fn walk(chunks: &mut [Chunk<'_>], n: &mut usize) {
-    for c in chunks.iter_mut() {
-        let data = c.bytes().map(<[u8]>::to_vec);
-        match data {
-            Some(d) if c.id == *b"Utf8" && d.windows(KEY.len()).any(|w| w == KEY) => {
-                let (new, k) = stub_text(&d);
-                *c = Chunk::data(*b"Utf8", new);
-                *n += k;
+fn is_profile(d: &[u8]) -> bool {
+    d.len() > 132 && d.get(36..40) == Some(b"acsp")
+}
+
+/// The stub for the bytes `d` of a value, or `None` (counted) when it holds no profile or the
+/// profile has no readable description.
+fn stub_of(d: &[u8], at: usize, tally: &mut Tally) -> Option<Vec<u8>> {
+    if !is_profile(d) {
+        tally.kept_short += 1;
+        return None;
+    }
+    let s = description(d).and_then(|t| stub(&t));
+    if s.is_none() {
+        tally.failed.push(format!("profile at byte {at}: no readable description"));
+    }
+    s
+}
+
+/// At the start of `t`: the key in quotes, optional white space, a colon, optional white space and
+/// the opening quote of the value. Returns the length up to and including that quote, and the quote.
+fn value_start(t: &[u8]) -> Option<(usize, &'static [u8])> {
+    let ws = |mut i: usize| {
+        while t.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    QUOTES.into_iter().find_map(|q| {
+        let key_end = q.len().checked_mul(2)?.checked_add(KEY.len())?;
+        let quoted = t.get(..key_end)?;
+        if !(quoted.starts_with(q) && quoted.get(q.len()..q.len() + KEY.len())? == KEY && quoted.ends_with(q)) {
+            return None;
+        }
+        let colon = ws(key_end);
+        if t.get(colon) != Some(&b':') {
+            return None;
+        }
+        let open = ws(colon + 1);
+        t.get(open..)?.starts_with(q).then_some((open + q.len(), q))
+    })
+}
+
+fn hex_decode(h: &[u8]) -> Option<Vec<u8>> {
+    if !h.len().is_multiple_of(2) {
+        return None;
+    }
+    h.chunks(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok()).collect()
+}
+
+fn hex_encode(d: &[u8], upper: bool) -> Vec<u8> {
+    d.iter().flat_map(|b| if upper { format!("{b:02X}") } else { format!("{b:02x}") }.into_bytes()).collect()
+}
+
+/// Replaces, in `text`, every `colorProfileData` JSON value (base64; `\/` escapes, white space
+/// around the colon and quotes written as `&quot;` allowed) and every .aepx `bdata="<hex>"`
+/// attribute that holds a raw profile.
+fn stub_text(text: &[u8], tally: &mut Tally) -> Vec<u8> {
+    const BDATA: &[u8] = b"bdata=\"";
+    let (mut out, mut i) = (Vec::with_capacity(text.len()), 0);
+    while let Some(&b) = text.get(i) {
+        let rest = text.get(i..).unwrap_or_default();
+        if let Some((open, q)) = value_start(rest)
+            && let Some(len) = rest.get(open..).and_then(|v| v.windows(q.len()).position(|w| w == q))
+        {
+            let raw = rest.get(open..open + len).unwrap_or_default();
+            let unescaped: Vec<u8> = raw.iter().copied().filter(|c| *c != b'\\').collect();
+            let replaced = match b64_decode(&unescaped) {
+                Some(d) => stub_of(&d, i, tally).map(|s| b64_encode(&s)),
+                None => {
+                    tally.failed.push(format!("colorProfileData at byte {i}: not base64"));
+                    None
+                }
+            };
+            out.extend_from_slice(rest.get(..open).unwrap_or_default());
+            match replaced {
+                Some(enc) => {
+                    out.extend_from_slice(&enc);
+                    tally.stubbed += 1;
+                }
+                None => out.extend_from_slice(raw),
             }
-            Some(d) if d.len() > 132 && d.get(36..40) == Some(b"acsp") => {
-                if let Some(s) = description(&d).and_then(|t| stub(&t)) {
+            i += open + len;
+            continue;
+        }
+        if rest.starts_with(BDATA)
+            && let Some(len) = rest.get(BDATA.len()..).and_then(|v| v.iter().position(|c| *c == b'"'))
+        {
+            let hex = rest.get(BDATA.len()..BDATA.len() + len).unwrap_or_default();
+            let replaced = hex_decode(hex).filter(|d| is_profile(d)).and_then(|d| stub_of(&d, i, tally));
+            out.extend_from_slice(BDATA);
+            match replaced {
+                Some(s) => {
+                    out.extend_from_slice(&hex_encode(&s, hex.iter().any(u8::is_ascii_uppercase)));
+                    tally.stubbed += 1;
+                }
+                None => out.extend_from_slice(hex),
+            }
+            i += BDATA.len() + len;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    out
+}
+
+fn walk(chunks: &mut [Chunk<'_>], tally: &mut Tally) {
+    for c in chunks.iter_mut() {
+        // Only a data chunk is rewritten as one: an opaque `LIST` also has bytes, but replacing it by
+        // a data chunk would drop its list type.
+        let data = if let Body::Data(d) = &c.body { Some(d.to_vec()) } else { None };
+        match data {
+            Some(d) if d.windows(KEY.len()).any(|w| w == KEY) => {
+                let new = stub_text(&d, tally);
+                *c = Chunk::data(c.id, new);
+            }
+            Some(d) if is_profile(&d) => {
+                if let Some(s) = stub_of(&d, 0, tally) {
                     *c = Chunk::data(c.id, s);
-                    *n += 1;
+                    tally.stubbed += 1;
                 }
             }
             _ => {
                 if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
-                    walk(children, n);
+                    walk(children, tally);
                 }
             }
         }
@@ -175,14 +279,81 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (Some(input), Some(output)) = (args.get(1), args.get(2)) else { exit("usage: stubicc <in.aep|in.aepx> <out>") };
     let bytes = std::fs::read(input).or_exit("read the input");
-    let (out, n) = if input.ends_with(".aepx") {
-        stub_text(&bytes)
+    let mut tally = Tally::default();
+    let out = if input.ends_with(".aepx") {
+        stub_text(&bytes, &mut tally)
     } else {
         let mut file = effectcraft_aep::parse(&bytes).or_exit("parse the input");
-        let mut n = 0;
-        walk(&mut file.chunks, &mut n);
-        (effectcraft_aep::write(&file).or_exit("write the output"), n)
+        walk(&mut file.chunks, &mut tally);
+        effectcraft_aep::write(&file).or_exit("write the output")
     };
+    if !tally.failed.is_empty() {
+        exit(&format!("nothing written: {} profile(s) could not be replaced:\n{}", tally.failed.len(), tally.failed.join("\n")));
+    }
     std::fs::write(output, out).or_exit("write the output");
-    println!("stubbed {n} profile(s)");
+    println!("stubbed {} profile(s); kept {} short value(s) that hold no profile", tally.stubbed, tally.kept_short);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn profile(desc: &str) -> Vec<u8> {
+        // A profile with colour data after the description (like a real one): the stub of `desc`
+        // plus 3000 bytes, its size field updated.
+        let mut p = stub(desc).unwrap();
+        p.extend(std::iter::repeat_n(0x5a, 3000));
+        let size = u32::try_from(p.len()).unwrap().to_be_bytes();
+        p[..4].copy_from_slice(&size);
+        p
+    }
+
+    fn stubbed(text: &[u8]) -> (Vec<u8>, Tally) {
+        let mut tally = Tally::default();
+        (stub_text(text, &mut tally), tally)
+    }
+
+    #[test]
+    fn json_values_in_every_spelling_are_replaced() {
+        let b64 = String::from_utf8(b64_encode(&profile("sRGB IEC61966-2.1"))).unwrap();
+        let want = String::from_utf8(b64_encode(&stub("sRGB IEC61966-2.1").unwrap())).unwrap();
+        for (before, after) in [
+            (format!("{{\"colorProfileData\":\"{b64}\"}}"), format!("{{\"colorProfileData\":\"{want}\"}}")),
+            (format!("{{\"colorProfileData\" : \n\t\"{b64}\"}}"), format!("{{\"colorProfileData\" : \n\t\"{want}\"}}")),
+            (format!("{{\"colorProfileData\":\"{}\"}}", b64.replace('/', "\\/")), format!("{{\"colorProfileData\":\"{want}\"}}")),
+            (format!("{{&quot;colorProfileData&quot;: &quot;{b64}&quot;}}"), format!("{{&quot;colorProfileData&quot;: &quot;{want}&quot;}}")),
+        ] {
+            let (out, tally) = stubbed(before.as_bytes());
+            assert_eq!(String::from_utf8(out).unwrap(), after);
+            assert_eq!((tally.stubbed, tally.failed.len()), (1, 0));
+        }
+    }
+
+    #[test]
+    fn a_raw_profile_in_aepx_hex_is_replaced_and_other_hex_kept() {
+        let hex = String::from_utf8(hex_encode(&profile("Rec.709 Gamma 2.4"), false)).unwrap();
+        let want = String::from_utf8(hex_encode(&stub("Rec.709 Gamma 2.4").unwrap(), false)).unwrap();
+        let text = format!("<icc bdata=\"{hex}\"/><PwCs bdata=\"01\"/><cdta bdata=\"{}\"/>", "ab".repeat(200));
+        let (out, tally) = stubbed(text.as_bytes());
+        assert_eq!(String::from_utf8(out).unwrap(), format!("<icc bdata=\"{want}\"/><PwCs bdata=\"01\"/><cdta bdata=\"{}\"/>", "ab".repeat(200)));
+        assert_eq!((tally.stubbed, tally.failed.len()), (1, 0));
+        // Upper-case hex stays upper case.
+        let (out, _) = stubbed(format!("bdata=\"{}\"", hex.to_uppercase()).as_bytes());
+        assert_eq!(String::from_utf8(out).unwrap(), format!("bdata=\"{}\"", want.to_uppercase()));
+    }
+
+    #[test]
+    fn a_profile_that_cannot_be_replaced_is_a_failure_not_a_silent_copy() {
+        // An ICC header whose tag table has no `desc`.
+        let mut p = profile("x");
+        p[132..136].copy_from_slice(b"wtpt");
+        let (_, tally) = stubbed(format!("\"colorProfileData\":\"{}\"", String::from_utf8(b64_encode(&p)).unwrap()).as_bytes());
+        assert_eq!((tally.stubbed, tally.failed.len()), (0, 1));
+        let (_, tally) = stubbed(b"\"colorProfileData\":\"not*base64\"");
+        assert_eq!(tally.failed.len(), 1);
+        // A short value holds no profile: kept and counted, not a failure.
+        let (out, tally) = stubbed(b"\"colorProfileData\":\"AAAA\"");
+        assert_eq!((out.as_slice(), tally.kept_short, tally.failed.len()), (&b"\"colorProfileData\":\"AAAA\""[..], 1, 0));
+    }
 }

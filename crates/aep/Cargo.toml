@@ -20,3 +20,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+# The tool's own tests run with the crate's (examples are only built by default).
+[[example]]
+name = "stubicc"
+test = true

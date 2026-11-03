@@ -74,8 +74,11 @@ changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and nee
 - `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
   `cargo run -p effectcraft-aep --example aepdump -- file.aep`.
 - `examples/stubicc.rs`: replaces every embedded ICC profile of a saved project by a stub that keeps
-  only the profile's description (the JSON `colorProfileData` of the working space, the `.aepx` text,
-  a raw profile chunk of an imported image):
-  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. The importer reads the working
-  space's name from the description only, so the project imports the same; no vendor colour data
-  stays in the test project.
+  only the profile's description: the JSON `colorProfileData` of the working space (any white space
+  around the colon, `\/` escapes, quotes as `&quot;`) in an `.aep` chunk or the `.aepx` text, and a raw
+  profile of an imported image (an `.aep` chunk, or the `bdata` hex of an `.aepx`):
+  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. A profile it cannot replace
+  stops it before anything is written. The importer reads the working space's name from the
+  description only, so the project imports the same; no vendor colour data stays in the test
+  project. Check the result independently, not by the tool's count (the corpus repository has
+  `tools/aep/inspect-embedded.py`, which scans the raw bytes, base64 and hex).
