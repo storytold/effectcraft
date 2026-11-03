@@ -152,11 +152,13 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
 /// with the paint items below it alone, so with none below where it goes, the Tools bar's Stroke
 /// and Fill (gradients run across what the merge takes in).
 fn merge_paints(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: Option<u64>, time: Tick, ids: &mut Ids, tool: &ShapeTool) -> Result<Vec<PropGroup>> {
-    let target = shape_item_target(proj, cid, lid, group_uid)?.clone();
+    let mut target = shape_item_target(proj, cid, lid, group_uid)?.clone();
     let at = crate::cmd::prop_groups::after_last_path(&target);
     if target.children.get(at..).is_some_and(|below| below.iter().any(crate::cmd::prop_groups::is_paint)) {
         return Ok(vec![]);
     }
+    // (bounds cover painted paths only: a stand-in Fill below them counts those with no paint yet)
+    target.children.insert(at, build::shape_fill(ids, [1.0; 4]).into());
     let comp = proj.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let ctx = effectcraft_render::EvalCtx::new(proj, cid, comp, time);

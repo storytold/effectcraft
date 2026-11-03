@@ -1852,6 +1852,35 @@ fn add_merge_paths_goes_below_the_paths_and_paints_the_result() {
     assert_eq!(contents.groups().find(|g| g.match_id == "merge").unwrap().get("mode").unwrap().value, KV::Enum(0), "Mode Merge");
 }
 
+/// The gradient Add ▸ Merge Paths brings runs across what the merge takes in, in the space of the
+/// group it goes into, painted or not (#2175).
+#[test]
+fn add_merge_paths_gradient_runs_across_its_inputs() {
+    let mut s = comp();
+    s.execute("shape.toolOptions", json!({"fillType": "linear"})).unwrap();
+    let ends = |s: &Session, l: u64, group: Option<u64>| {
+        let l = layer(s, l);
+        let contents = l.props.sub("contents").unwrap();
+        let contents = group.map_or(contents, |g| contents.find_group(g).unwrap().sub("contents").unwrap());
+        let fill = contents.groups().filter(|g| g.match_id == "gfill").last().unwrap();
+        (fill.get("start").unwrap().value.components(), fill.get("end").unwrap().value.components())
+    };
+    // Into a moved, scaled group: its own space, not the layer's.
+    let l = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    let group = s.execute("layer.addShapeItem", json!({"layer": l, "kind": "group"})).unwrap();
+    let (uid, path) = (group["uid"].as_u64().unwrap(), group["path"].as_str().unwrap().to_string());
+    s.execute("prop.set", json!({"layer": l, "path": format!("{path}/transform/position"), "value": [500, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": l, "path": format!("{path}/transform/scale"), "value": [50, 50]})).unwrap();
+    for kind in ["rect", "fill", "rect"] {
+        s.execute("layer.addShapeItem", json!({"layer": l, "kind": kind, "group": uid})).unwrap();
+    }
+    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge", "paint": true, "group": uid})).unwrap();
+    assert_eq!(ends(&s, l, Some(uid)), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+    // Paths with no paint yet.
+    let (l, _) = with_added_merge(&mut s, &["rect"]);
+    assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+}
+
 /// Pasted with nothing selected, Merge Paths goes below the groups too, not above them where it
 /// would take in nothing (#2175).
 #[test]
