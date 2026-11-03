@@ -231,9 +231,15 @@ impl Vp9Encoder {
         self.rc.debt += bits - per_frame;
     }
 
-    /// Encode one frame; `force_key` starts a new key frame.
+    /// Encode one frame; `force_key` starts a new key frame. Planes shorter than the configured
+    /// size encode nothing (an empty frame): the coding planes are not sized and filled from
+    /// samples that are not there.
     pub fn encode_frame(&mut self, y: &[u8], u: &[u8], v: &[u8], force_key: bool) -> EncodedFrame {
         let (w, h) = (self.cfg.width.max(1) as usize, self.cfg.height.max(1) as usize);
+        let chroma = w.div_ceil(2) * h.div_ceil(2);
+        if y.len() < w * h || u.len() < chroma || v.len() < chroma {
+            return EncodedFrame { data: vec![], key: false, q_idx: 0, filter_level: 0 };
+        }
         let key = self.is_key_due(force_key);
         let qidx = self.pick_qidx(key);
         let lossless = qidx == 0;
@@ -479,5 +485,15 @@ mod tests {
         assert_eq!((enc.cfg.width, enc.cfg.height), (65_536, 65_536));
         let enc = Vp9Encoder::new(EncoderConfig { width: 65_536, height: 1, ..Default::default() });
         assert_eq!((enc.cfg.width, enc.cfg.height), (65_536, 1));
+    }
+
+    #[test]
+    fn planes_shorter_than_the_frame_encode_nothing() {
+        // 65536×65536 declared, a few bytes given: no 4 GiB coding planes are made.
+        let mut enc = Vp9Encoder::new(EncoderConfig { width: 65_536, height: 65_536, ..Default::default() });
+        let f = enc.encode_frame(&[1, 2, 3], &[], &[], true);
+        assert!(f.data.is_empty());
+        let mut enc = Vp9Encoder::new(EncoderConfig { width: 16, height: 16, ..Default::default() });
+        assert!(!enc.encode_frame(&[128; 256], &[128; 64], &[128; 64], true).data.is_empty());
     }
 }
