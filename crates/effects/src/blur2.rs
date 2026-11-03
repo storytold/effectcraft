@@ -305,7 +305,8 @@ pub fn camera_lens_spans(ctx: &EffectCtx, r: f64) -> (Vec<(i64, i64, i64)>, f64)
             s.2 = (s.2 as f64 * aspect).round() as i64;
         }
     }
-    (spans, r * aspect.max(1.0))
+    // Same cap as iris_spans, so the reach matches the spans for unbounded radii.
+    (spans, r.clamp(0.0, CAMERA_LENS_MAX_RADIUS) * aspect.max(1.0))
 }
 
 /// Whether Camera Lens Blur needs more than plain iris spans (Diffraction Fringe or a Blur
