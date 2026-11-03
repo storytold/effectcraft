@@ -321,17 +321,16 @@ impl Prober {
         let importer = self.importer.as_ref().ok_or_else(|| fail("media import is not available in this build".into()))?;
         let mut f = crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?;
         let mut warning = None;
-        if f.codec == "PhotoCraft" {
-            let bytes = self.services.read_file(path).map_err(|e| fail(e.to_string()))?;
-            let outline = craft_doc::outline(&bytes, &craft_doc::Limits::default()).map_err(|e| fail(e.to_string()))?;
-            if let Some(canvas) = outline.canvas
-                && (canvas.width, canvas.height) != (f.width, f.height)
-            {
-                warning = Some(format!(
-                    "{name}: imported the saved {} × {} composite of a {} × {} PhotoCraft canvas",
-                    f.width, f.height, canvas.width, canvas.height
-                ));
-            }
+        // The composite has already probed successfully. Optional canvas metadata must
+        // not prevent Footage import when its read or outline exceeds another limit.
+        if f.codec == "PhotoCraft"
+            && let Ok(bytes) = self.services.read_file(path)
+            && let Ok(outline) = craft_doc::outline(&bytes, &craft_doc::Limits::default())
+            && let Some(canvas) = outline.canvas
+            && (canvas.width, canvas.height) != (f.width, f.height)
+        {
+            warning =
+                Some(format!("{name}: imported the saved {} × {} composite of a {} × {} PhotoCraft canvas", f.width, f.height, canvas.width, canvas.height));
         }
         // Settings ▸ Import ▸ Report Missing Frames (numbered sequences).
         if f.kind == FootageKind::Sequence

@@ -120,6 +120,38 @@ fn photocraft_composition_keeps_layer_names_visibility_opacity_and_blend() {
 }
 
 #[test]
+fn photocraft_optional_canvas_metadata_does_not_block_probed_footage() {
+    struct Metadata(bool);
+    impl crate::Services for Metadata {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            if self.0 {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "metadata unavailable"))
+            } else {
+                Ok(b"invalid optional metadata".to_vec())
+            }
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "read only"))
+        }
+    }
+    for unreadable in [true, false] {
+        let path = fixture(&format!("optional-metadata-{unreadable}.pcraft"), json!([]));
+        let mut s = Session { services: std::sync::Arc::new(Metadata(unreadable)), importer: Some(std::sync::Arc::new(Import)), ..Default::default() };
+        let result = s.execute("file.import", json!({"paths":[path]})).unwrap();
+        assert!(result["errors"].as_array().unwrap().is_empty(), "{result}");
+        assert_eq!(result["items"].as_array().unwrap().len(), 1, "a successful media probe must survive an optional warning failure");
+        let id = ItemId(result["items"][0].as_u64().unwrap());
+        let ItemKind::Footage(f) = &s.project.item(id).unwrap().kind else { panic!("not footage") };
+        assert_eq!((f.width, f.height), (4, 3));
+        assert_eq!(
+            effectcraft_media::MediaPool::new().frame_at(f, effectcraft_time::Tick::ZERO).unwrap().data[0],
+            [20.0 / 255.0, 30.0 / 255.0, 40.0 / 255.0, 1.0]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn photocraft_masks_and_sample_depths_decode_through_the_media_pool() {
     use effectcraft_project::{AlphaMode, Footage, SourceLayer};
     for (sample, color, expected) in [
