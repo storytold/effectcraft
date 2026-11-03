@@ -6,14 +6,13 @@
 //! viewer's chip and highlight, and the eyedropper's armed state are checked. Undo while the IDs
 //! are being read and with clicks waiting, across Open / Revert / New, and after Esc.
 
-use crate::ui_crypto_pick::{Held, ReadLog};
+use crate::ui_crypto_pick::{Held, ReadLog, at, chip, crypto_exr, settle, wait_held_id_read, wait_probe};
 use effectcraft_engine::Session;
 use effectcraft_engine::project::{LayerId, Resolution};
-use effectcraft_engine::raster::channels3d::{crypto_float, crypto_hash};
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::{self, PanelKind, SplitSize};
 use effectcraft_ui_egui::panels::viewer::comp_to_screen;
-use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2, vec2};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
@@ -30,32 +29,7 @@ const CTRL: Modifiers = Modifiers { alt: false, ctrl: !MAC, shift: false, mac_cm
 const CTRL_SHIFT: Modifiers = Modifiers { alt: false, ctrl: !MAC, shift: true, mac_cmd: MAC, command: true };
 
 // ---------------------------------------------------------------------------------------------
-// Fixture (as in ui_crypto_pick.rs): an EXR whose CryptoObject has an ID per 37 × 29 px cell.
-
-fn cell(x: usize, y: usize) -> String {
-    format!("c{}_{}", x / 37, y / 29)
-}
-
-fn crypto_exr(dir: &std::path::Path, name: &str, w: usize, h: usize) -> String {
-    use exr::prelude::*;
-    let ids: Vec<f32> = (0..w * h).map(|i| crypto_float(crypto_hash(&cell(i % w, i / w)))).collect();
-    let ch = |n: &str, v: Vec<f32>| AnyChannel::new(n, FlatSamples::F32(v));
-    let one = || vec![1.0f32; w * h];
-    let channels = AnyChannels::sort(
-        vec![ch("R", one()), ch("G", one()), ch("B", one()), ch("A", one()), ch("CryptoObject00.R", ids), ch("CryptoObject00.G", one())].into(),
-    );
-    let mut layer = Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels);
-    let names: serde_json::Map<String, Value> = (0..w.div_ceil(37))
-        .flat_map(|x| (0..h.div_ceil(29)).map(move |y| cell(x * 37, y * 29)))
-        .map(|n| (n.clone(), json!(format!("{:08x}", crypto_hash(&n)))))
-        .collect();
-    for (key, v) in [("name", "CryptoObject".to_string()), ("manifest", Value::Object(names).to_string())] {
-        layer.attributes.other.insert(Text::from(format!("cryptomatte/f834d0a/{key}").as_str()), AttributeValue::Text(Text::from(v.as_str())));
-    }
-    let path = dir.join(name);
-    Image::from_layer(layer).write().to_file(&path).unwrap();
-    path.to_string_lossy().to_string()
-}
+// Fixture: session / populate / harness (shared EXR helpers from ui_crypto_pick.rs).
 
 struct Fix {
     comp: u64,
@@ -74,7 +48,7 @@ struct Fix {
 fn session(tag: &str, w: usize, h: usize, blur: bool, precomp: bool) -> (Session, Fix) {
     let dir = std::env::temp_dir().join(format!("ec-ui-crypick-undo-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = crypto_exr(&dir, "plate.exr", w, h);
+    let path = crypto_exr(&dir, "plate.exr", w, h, 1);
     let mut s = effectcraft_host::session();
     let f = populate(&mut s, &path, w, h, blur, precomp, dir);
     (s, f)
@@ -125,36 +99,11 @@ fn harness(s: Session, size: egui::Vec2) -> Harness<'static, EffectcraftApp> {
     h
 }
 
-fn settle(h: &mut Harness<'_, EffectcraftApp>) {
-    for _ in 0..1500 {
-        h.step();
-        if h.state().frames.inflight() == 0 && h.state().frames.last_ms.lock().is_ok_and(|v| *v > 0.0) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    h.run_steps(4);
-}
-
-fn chip(h: &Harness<'_, EffectcraftApp>) -> Option<String> {
-    h.state().auto.find("viewer.cryptoPick").map(|e| e.label.clone())
-}
-
 fn highlight(h: &Harness<'_, EffectcraftApp>) -> bool {
     h.state().auto.find("viewer.cryptoPick.highlight").is_some()
 }
 
-fn wait_probe(h: &mut Harness<'_, EffectcraftApp>) {
-    for _ in 0..3000 {
-        h.step();
-        if chip(h).as_deref() != Some(READING) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("the probe never finished");
-}
-
+/// Like `ui_crypto_pick::hover`, plus an extra step so the chip label is current after the probe.
 fn hover(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) -> String {
     h.event(Event::PointerMoved(pos));
     h.step();
@@ -188,11 +137,6 @@ fn key(h: &mut Harness<'_, EffectcraftApp>, key: Key, modifiers: Modifiers) {
     h.event(Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
     h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.run_steps(2);
-}
-
-fn at(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
-    let e = h.state().auto.find(id).unwrap_or_else(|| panic!("missing {id}")).clone();
-    pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5)
 }
 
 /// The Selection property uid of the layer's (first) Cryptomatte effect.
@@ -873,16 +817,7 @@ fn clicks_queued_while_reading_are_one_step_each_and_undo_in_order() {
     }
     assert_eq!(chip(&h).as_deref(), Some(READING), "all four made while reading");
     assert_eq!(h.state().session.history.undo.len(), before, "none made yet");
-    for _ in 0..3000 {
-        h.step();
-        if log.lock().unwrap().iter().any(|(_, frame)| !*frame) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    if !log.lock().unwrap().iter().any(|(_, frame)| !*frame) {
-        panic!("the held build never reached the ID read");
-    }
+    wait_held_id_read(&mut h, &log);
     for _ in 0..10 {
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -934,8 +869,11 @@ fn blur_value(h: &Harness<'_, EffectcraftApp>, f: &Fix) -> Value {
 
 #[test]
 fn undo_and_redo_while_reading_and_with_clicks_waiting() {
-    let (s, f) = session("reading", 3840, 2160, true, false);
+    let (mut s, f) = session("reading", 3840, 2160, true, false);
     let dims = [3840.0, 2160.0];
+    let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log = ReadLog::default();
+    s.footage = std::sync::Arc::new(Held(s.footage.clone(), hold.clone(), log.clone()));
     let mut h = harness(s, vec2(1280.0, 860.0));
     let mut m = Model::new(&h, f.comp);
     let pl = f.plate;
@@ -970,26 +908,38 @@ fn undo_and_redo_while_reading_and_with_clicks_waiting() {
 
     // (b) Ctrl+Z while the IDs are being read (a build in flight for the state undone).
     blur(&mut h, &mut m, 41.0);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.event(Event::PointerMoved(pa));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
     assert_eq!(chip(&h).as_deref(), Some(READING));
     undo_now(&mut h, &mut m, false);
+    hold.store(false, Ordering::Release);
     assert_eq!(blur_value(&h, &f), json!(40.0));
     verify(&mut h, &f, &mut m, dims, "(b) undo while reading");
     assert_eq!(hover(&mut h, pb), "c50_40", "the probe answers for the state undone to");
     // ... and Ctrl+Shift+Z while reading.
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.state_mut().session.drop_crypto_probe();
     h.event(Event::PointerMoved(pa));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
+    assert_eq!(chip(&h).as_deref(), Some(READING));
     undo_now(&mut h, &mut m, true);
+    hold.store(false, Ordering::Release);
     assert_eq!(blur_value(&h, &f), json!(41.0));
     verify(&mut h, &f, &mut m, dims, "(b) redo while reading");
 
     // (c) A click waiting for the probe, then Ctrl+Z: the undo goes first and the waiting click
     // is not made on the state undone to (it was aimed at the state before the undo).
     blur(&mut h, &mut m, 42.0);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.event(Event::PointerMoved(pb));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
     assert_eq!(chip(&h).as_deref(), Some(READING));
     press(&mut h, pb, Modifiers::SHIFT);
     assert_eq!(chip(&h).as_deref(), Some(READING), "the click waits");
@@ -997,6 +947,7 @@ fn undo_and_redo_while_reading_and_with_clicks_waiting() {
     undo_now(&mut h, &mut m, false);
     // (Asked at once: a status message goes after 5 s, which is 20 steps here.)
     assert!(h.state().ui.status.starts_with("Pick not made"), "the dropped click says so: {:?}", h.state().ui.status);
+    hold.store(false, Ordering::Release);
     wait_probe(&mut h);
     h.run_steps(3);
     verify(&mut h, &f, &mut m, dims, "(c) waiting click, then Ctrl+Z: the click is not made");
@@ -1023,26 +974,36 @@ fn undo_and_redo_while_reading_and_with_clicks_waiting() {
     blur(&mut h, &mut m, 43.0);
     verify(&mut h, &f, &mut m, dims, "(e) blur 43");
     // (Undo goes back to a render the layer cache keeps: forget it, so the probe takes a while.)
+    // Hold before undo_now: it steps the UI and would otherwise start (and finish) a rebuild.
     h.state().session.layer_cache.clear();
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     undo_now(&mut h, &mut m, false);
     let pa = sp(&h, &m, a);
     h.event(Event::PointerMoved(pa));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
     assert_eq!(chip(&h).as_deref(), Some(READING));
     press(&mut h, pa, Modifiers::SHIFT);
     undo_now(&mut h, &mut m, true);
+    hold.store(false, Ordering::Release);
     wait_probe(&mut h);
     h.run_steps(3);
     verify(&mut h, &f, &mut m, dims, "(e) waiting click, then Ctrl+Shift+Z: the click is not made");
 
     // (f) A click waiting, Ctrl+Z, another click: only the second is made, on the undone state.
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     blur(&mut h, &mut m, 44.0);
     h.event(Event::PointerMoved(pa));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
     assert_eq!(chip(&h).as_deref(), Some(READING));
     press(&mut h, pa, Modifiers::ALT);
     undo_now(&mut h, &mut m, false);
     press(&mut h, pa, Modifiers::SHIFT);
+    assert_eq!(chip(&h).as_deref(), Some(READING), "both clicks made while the build is held");
+    hold.store(false, Ordering::Release);
     wait_probe(&mut h);
     h.run_steps(3);
     let mut o = m.state().clone();

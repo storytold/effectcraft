@@ -23,13 +23,13 @@ const MAC_HINT: &str = "Click: replace · Shift: add · Option or Cmd: remove";
 const PAUSED: &str = "Stop playback to pick";
 
 /// The ID of the 37 × 29 px cell at pixel (x, y) of a full-size frame.
-fn cell(x: usize, y: usize) -> String {
+pub(crate) fn cell(x: usize, y: usize) -> String {
     format!("c{}_{}", x / 37, y / 29)
 }
 
 /// A `w` × `h` EXR (white RGBA) whose CryptoObject has an ID per cell of a `k`-times larger frame
 /// (`k` = 2: a half-size proxy), all named in its manifest.
-fn crypto_exr(dir: &std::path::Path, name: &str, w: usize, h: usize, k: usize) -> String {
+pub(crate) fn crypto_exr(dir: &std::path::Path, name: &str, w: usize, h: usize, k: usize) -> String {
     use exr::prelude::*;
     let ids: Vec<f32> = (0..w * h).map(|i| crypto_float(crypto_hash(&cell(i % w * k, i / w * k)))).collect();
     let ch = |n: &str, v: Vec<f32>| AnyChannel::new(n, FlatSamples::F32(v));
@@ -105,7 +105,7 @@ fn app(s: Session, ec: f32) -> EffectcraftApp {
     app
 }
 
-fn settle(h: &mut Harness<'_, EffectcraftApp>) {
+pub(crate) fn settle(h: &mut Harness<'_, EffectcraftApp>) {
     for _ in 0..1500 {
         h.step();
         if h.state().frames.inflight() == 0 && h.state().frames.last_ms.lock().is_ok_and(|v| *v > 0.0) {
@@ -116,12 +116,12 @@ fn settle(h: &mut Harness<'_, EffectcraftApp>) {
     h.run_steps(4);
 }
 
-fn chip(h: &Harness<'_, EffectcraftApp>) -> Option<String> {
+pub(crate) fn chip(h: &Harness<'_, EffectcraftApp>) -> Option<String> {
     h.state().auto.find("viewer.cryptoPick").map(|e| e.label.clone())
 }
 
 /// Step until the chip stops saying the probe is being built (the job runs on its own thread).
-fn wait_probe(h: &mut Harness<'_, EffectcraftApp>) {
+pub(crate) fn wait_probe(h: &mut Harness<'_, EffectcraftApp>) {
     for _ in 0..3000 {
         h.step();
         if chip(h).as_deref() != Some(READING) {
@@ -153,7 +153,7 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2, modifiers: Modifiers) {
     h.run_steps(2);
 }
 
-fn at(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
+pub(crate) fn at(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
     let e = h.state().auto.find(id).unwrap_or_else(|| panic!("missing {id}")).clone();
     pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5)
 }
@@ -443,43 +443,74 @@ fn drain(h: &mut Harness<'_, EffectcraftApp>) {
 
 /// Waiting clicks: the first hover starts the probe; a click made meanwhile waits then picks;
 /// an edit, Esc, disarming, or hiding the viewer while it waits drops it.
-fn waiting_clicks_are_dropped_by_edits_esc_disarm_and_hiding_the_viewer(h: &mut Harness<'_, EffectcraftApp>, ids: &Ids, a: Pos2, b: Pos2) {
+/// Each section's probe build is held (`hold` / `log`) across its "while reading" / "waits"
+/// asserts and the action that drops the click, then released before `wait_probe` / `drain` /
+/// `hover` so a held build can finish.
+fn waiting_clicks_are_dropped_by_edits_esc_disarm_and_hiding_the_viewer(
+    h: &mut Harness<'_, EffectcraftApp>,
+    ids: &Ids,
+    a: Pos2,
+    b: Pos2,
+    hold: &std::sync::atomic::AtomicBool,
+    log: &ReadLog,
+) {
+    use std::sync::atomic::Ordering;
     // A click before the probe is built waits for it.
     // (egui reports the hover a pass after the pointer moves.)
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.event(Event::PointerMoved(a));
     h.run_steps(2);
+    wait_held_id_read(h, log);
     assert_eq!(chip(h).as_deref(), Some(READING), "the first hover starts the probe off the UI thread");
     press(h, a);
     assert_eq!(selection(h, ids), "", "the click waits");
+    hold.store(false, Ordering::Release);
     wait_probe(h);
     h.run_steps(2);
     assert_eq!(selection(h, ids), "c27_20", "then picks");
     assert_eq!(hover(h, b), "c50_40");
     let steps = h.state().session.history.undo.len();
     // An edit while a click waits drops the click.
+    // edit(41) drops the probe; press starts a new build (held). edit(42) cancels that build and
+    // drops the click — release so the cancelled build can leave the hold, then wait_probe.
     edit(h, 41.0);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     press(h, b);
+    wait_held_id_read(h, log);
     assert_eq!(chip(h).as_deref(), Some(READING));
     edit(h, 42.0);
+    hold.store(false, Ordering::Release);
     wait_probe(h);
     h.run_steps(2);
     assert_eq!(selection(h, ids), "c27_20", "not picked after the edit");
     assert_eq!(h.state().session.history.undo.len(), steps + 2, "only the two edits");
-    // Esc while a click waits: no pick, disarmed.
+    // Esc while a click waits: no pick, disarmed. Hold the build started by press; Esc cancels it.
     edit(h, 43.0);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     press(h, b);
+    wait_held_id_read(h, log);
+    assert_eq!(chip(h).as_deref(), Some(READING));
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     assert!(h.state().ui.fx_pick.is_none() && chip(h).is_none());
+    hold.store(false, Ordering::Release);
     drain(h);
     assert_eq!(selection(h, ids), "c27_20");
     // Disarmed while a click waits, then armed again: the old click is not made.
+    // arm() waits the probe — hold only after arming, across the READING assert and disarm.
     edit(h, 44.0);
     arm(h, ids);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     press(h, b);
+    wait_held_id_read(h, log);
     assert_eq!(chip(h).as_deref(), Some(READING));
     h.state_mut().ui.fx_pick = None;
     h.run_steps(2);
+    hold.store(false, Ordering::Release);
     arm(h, ids);
     drain(h);
     assert_eq!(selection(h, ids), "c27_20", "the old click stays unmade");
@@ -487,11 +518,15 @@ fn waiting_clicks_are_dropped_by_edits_esc_disarm_and_hiding_the_viewer(h: &mut 
     // The viewer hidden while a click waits (Effect Controls maximised), then shown again: the
     // pick still on, the old click is not made either.
     edit(h, 45.0);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     press(h, b);
+    wait_held_id_read(h, log);
     assert_eq!(chip(h).as_deref(), Some(READING));
     h.state_mut().ui.maximized = Some(PanelKind::EffectControls);
     h.run_steps(2);
     assert!(h.state().auto.find("viewer.fxPick").is_none(), "the viewer is hidden");
+    hold.store(false, Ordering::Release);
     drain(h);
     h.state_mut().ui.maximized = None;
     h.run_steps(2);
@@ -555,17 +590,20 @@ fn popups_dialogs_and_comp_switches_end_or_block_them(h: &mut Harness<'_, Effect
     assert!(h.state().ui.fx_pick.is_none() && chip(h).is_none(), "ended with the comp switch");
 }
 
-/// The asynchronous probe (a 4K plate, so it takes a while): the first hover says it is reading,
-/// a click made meanwhile waits and then picks; an edit, Esc or disarming while it waits drops
-/// it. Popups and dialogs over the viewer take the pointer. Another selected layer keeps the
-/// pick; deleting the layer or switching comps ends it.
+/// The asynchronous probe (a 4K plate behind a blur; each "while reading" section holds the
+/// build): the first hover says it is reading, a click made meanwhile waits and then picks; an
+/// edit, Esc or disarming while it waits drops it. Popups and dialogs over the viewer take the
+/// pointer. Another selected layer keeps the pick; deleting the layer or switching comps ends it.
 #[test]
 fn clicks_wait_for_the_probe_and_edits_popups_dialogs_and_comp_switches_end_or_block_them() {
-    let (s, ids) = crypto_session("async", 3840, 2160, true);
+    let (mut s, ids) = crypto_session("async", 3840, 2160, true);
+    let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log = ReadLog::default();
+    s.footage = std::sync::Arc::new(Held(s.footage.clone(), hold.clone(), log.clone()));
     let mut h = harness(s, vec2(1280.0, 800.0), 1.0, 420.0);
     arm(&mut h, &ids);
     let (a, b) = (comp_to_screen(&h.ctx, [1017.5, 594.5]).unwrap(), comp_to_screen(&h.ctx, [1868.5, 1174.5]).unwrap());
-    waiting_clicks_are_dropped_by_edits_esc_disarm_and_hiding_the_viewer(&mut h, &ids, a, b);
+    waiting_clicks_are_dropped_by_edits_esc_disarm_and_hiding_the_viewer(&mut h, &ids, a, b, &hold, &log);
     popups_dialogs_and_comp_switches_end_or_block_them(&mut h, &ids, b);
     let _ = std::fs::remove_dir_all(&ids.dir);
 }
@@ -654,15 +692,23 @@ fn builds(h: &Harness<'_, EffectcraftApp>) -> u64 {
     h.state().session.crypto_probe_stats().1
 }
 
-/// Clicks made while the IDs are being read are all made, in order, once they are.
+/// Clicks made while the IDs are being read (a 4K plate behind a blur; the build is held until
+/// the clicks are checked) are all made, in order, once they are.
 #[test]
 fn every_click_made_while_reading_is_made_in_order() {
-    let (s, ids) = crypto_session("multi", 3840, 2160, true);
+    use std::sync::atomic::Ordering;
+    let (mut s, ids) = crypto_session("multi", 3840, 2160, true);
+    let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log = ReadLog::default();
+    s.footage = std::sync::Arc::new(Held(s.footage.clone(), hold.clone(), log.clone()));
     let mut h = harness(s, vec2(1280.0, 800.0), 1.0, 420.0);
     arm(&mut h, &ids);
     let (a, b) = (comp_to_screen(&h.ctx, [1017.5, 594.5]).unwrap(), comp_to_screen(&h.ctx, [1868.5, 1174.5]).unwrap());
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.event(Event::PointerMoved(a));
     h.run_steps(2);
+    wait_held_id_read(&mut h, &log);
     assert_eq!(chip(&h).as_deref(), Some(READING));
     let steps = h.state().session.history.undo.len();
     for (p, m) in [(a, Modifiers::NONE), (b, Modifiers::SHIFT), (a, Modifiers::ALT), (a, Modifiers::SHIFT)] {
@@ -678,6 +724,7 @@ fn every_click_made_while_reading_is_made_in_order() {
     }
     assert_eq!(chip(&h).as_deref(), Some(READING), "all four made while reading");
     assert_eq!(selection(&h, &ids), "");
+    hold.store(false, Ordering::Release);
     wait_probe(&mut h);
     h.run_steps(3);
     assert_eq!(selection(&h, &ids), "c50_40, c27_20", "replace, add, remove, add, in order");
@@ -1157,6 +1204,19 @@ impl effectcraft_engine::render::FootageSource for Held {
         }
         self.0.aux(i, f, t)
     }
+}
+
+/// Step until a held probe build has reached the ID (`aux`) read, so READING asserts are about a
+/// build that is really running.
+pub(crate) fn wait_held_id_read(h: &mut Harness<'_, EffectcraftApp>, log: &ReadLog) {
+    for _ in 0..3000 {
+        h.step();
+        if log.lock().unwrap().iter().any(|(_, frame)| !*frame) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the held build never reached the ID read");
 }
 
 /// Disarmed and armed again while a probe is built: the new hover waits for that build to end
