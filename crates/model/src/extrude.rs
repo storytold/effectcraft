@@ -96,12 +96,12 @@ fn point_in(p: P, c: &[P]) -> bool {
     inside
 }
 
-/// Most contours grouped into outlines; containment is tested pairwise, so the rest are dropped.
+/// Most contours grouped into outlines; containment is tested pairwise, so the smallest are dropped.
 pub const MAX_CONTOURS: usize = 10_000;
 
 /// Group closed contours into outlines by nesting depth (even depth = outer, odd = hole of the
-/// innermost containing outer contour). Degenerate contours are dropped, as are those past
-/// [`MAX_CONTOURS`].
+/// innermost containing outer contour). Degenerate contours are dropped, as are the smallest
+/// past [`MAX_CONTOURS`] (a kept hole always keeps its larger container).
 pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
     let mut cs: Vec<Vec<P>> = contours
         .into_iter()
@@ -115,8 +115,14 @@ pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
         .filter(|c| c.len() >= 3 && signed_area(c).abs() > 1e-9)
         .collect();
     if cs.len() > MAX_CONTOURS {
-        log::warn!("model: {} contours, grouping the first {MAX_CONTOURS}", cs.len());
-        cs.truncate(MAX_CONTOURS);
+        log::warn!("model: {} contours, grouping the {MAX_CONTOURS} largest", cs.len());
+        // Keep the largest, in their original order.
+        let area: Vec<f64> = cs.iter().map(|c| signed_area(c).abs()).collect();
+        let mut keep: Vec<usize> = (0..cs.len()).collect();
+        keep.sort_by(|&a, &b| area[b].total_cmp(&area[a]));
+        keep.truncate(MAX_CONTOURS);
+        keep.sort_unstable();
+        cs = keep.into_iter().map(|i| std::mem::take(&mut cs[i])).collect();
     }
     let n = cs.len();
     let area: Vec<f64> = cs.iter().map(|c| signed_area(c).abs()).collect();

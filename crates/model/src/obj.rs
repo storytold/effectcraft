@@ -9,7 +9,7 @@
 //! Phong exponent `Ns` (`sqrt(2 / (Ns + 2))`) and metallic 0; `map_Kd`, `map_Ke`,
 //! `map_Bump`/`bump`/`norm` load base colour, emissive and normal textures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{AlphaMode, MAX_IMPORT_TEXTURE_PIXELS, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
@@ -167,7 +167,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
     let mut material_of: HashMap<String, usize> = HashMap::new();
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut cache = TextureCache::default();
-    let mut libraries: Vec<String> = vec![];
+    let mut libraries: HashSet<String> = HashSet::new();
     // One primitive per material, in order of first use.
     let mut prims: Vec<(Option<usize>, Primitive, HashMap<Key, u32>, Vec<bool>)> = vec![];
     let mut prim_of: HashMap<Option<usize>, usize> = HashMap::new();
@@ -199,10 +199,9 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             "mtllib" => {
                 let name = line["mtllib".len()..].trim();
                 // A library named again is already loaded.
-                if libraries.iter().any(|l| l == name) {
+                if !libraries.insert(name.to_string()) {
                     continue;
                 }
-                libraries.push(name.to_string());
                 let mut found = false;
                 for file in std::iter::once(name).chain(name.split_whitespace()).chain(sibling_name(name)) {
                     if let Some(b) = resolve(file) {
