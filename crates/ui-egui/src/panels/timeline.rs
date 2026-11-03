@@ -1488,6 +1488,25 @@ struct SwitchSpec {
     others: bool,
 }
 
+/// The tooltip of a layer switch, named like After Effects (#2897).
+fn switch_tip(name: &str) -> &'static str {
+    match name {
+        "video" => "Video",
+        "audio" => "Audio",
+        "solo" => "Solo",
+        "lock" => "Lock",
+        "shy" => "Shy",
+        "collapse" => "Collapse Transformations / Continuously Rasterize",
+        "quality" => "Quality and Sampling",
+        "fx" => "Effect",
+        "frameBlend" => "Frame Blending",
+        "motionBlur" => "Motion Blur",
+        "adjustment" => "Adjustment Layer",
+        "threeD" => "3D Layer",
+        _ => "",
+    }
+}
+
 /// A layer's switch (A/V Features and Switches columns) in `row`, with the
 /// [`switch_gesture`].
 fn layer_switch(
@@ -1500,7 +1519,7 @@ fn layer_switch(
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
     let SwitchSpec { row, br, icon, on, id, layer, name, others } = *spec;
-    let resp = widgets::icon_toggle(ui, br, icon, on, t, id, Sense::click_and_drag());
+    let resp = widgets::icon_toggle(ui, br, icon, on, t, id, Sense::click_and_drag()).on_hover_text(crate::i18n::tr(switch_tip(name)));
     // Alt-click on an A/V feature sets the layer apart: the other layers go off (or locked),
     // and come back on the next Alt-click. With several layers selected, the whole selection is
     // set apart.

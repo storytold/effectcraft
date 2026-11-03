@@ -684,3 +684,15 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
         assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
     }
 }
+
+/// #2897: every switch of the A/V Features and Switches columns has its own tooltip.
+#[test]
+fn every_layer_switch_has_a_tooltip() {
+    let names = ["video", "audio", "solo", "lock", "shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"];
+    let tips: Vec<&str> = names.iter().map(|n| switch_tip(n)).collect();
+    assert!(tips.iter().all(|t| !t.is_empty()), "{tips:?}");
+    let mut sorted = tips.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), names.len(), "each switch has its own tip: {tips:?}");
+}
