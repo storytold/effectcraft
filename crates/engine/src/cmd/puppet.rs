@@ -8,7 +8,7 @@
 //! Pin positions are in effect space. A new pin is attached to the mesh under it: the click is
 //! mapped back through the current deformation to the rest mesh (its hidden rest position), and
 //! Position / Advanced pins get a Position keyframe at the current time, as in After Effects. Off
-//! every mesh a pin starts a new mesh only on art no mesh has yet; elsewhere nothing happens (#2865).
+//! every mesh a pin starts a new mesh, unless its art already has one (#2865).
 
 use effectcraft_effects::puppet::{self, MeshOpts, PinKind};
 use effectcraft_effects::{Buf, Params};
@@ -68,12 +68,25 @@ fn on_mesh(mesh: &puppet::Mesh, def: &[[f64; 2]], at: [f64; 2]) -> bool {
     !mesh.tris.is_empty() && (puppet::contains(mesh, def, at) || def.iter().map(|v| (v[0] - at[0]).hypot(v[1] - at[1])).fold(f64::MAX, f64::min) < 12.0)
 }
 
-/// Whether `puppet.addPin` at `at` (effect space) places a pin on a layer with a Puppet effect: on
-/// a mesh, on art no mesh has, or anywhere when there is no mesh yet (the first pin).
+/// Whether a new mesh at `at` (effect space) would repeat a mesh of `params`: the art it would
+/// outline is that mesh's own, even if a deformation has carried the mesh off it (#2865).
+fn repeats_mesh(buf: &Buf, params: &Params, at: [f64; 2]) -> bool {
+    let (w, h) = (buf.img.width as usize, buf.img.height as usize);
+    let alpha: Vec<f32> = buf.img.data.iter().map(|p| p[3]).collect();
+    puppet::parse(params).iter().any(|m| {
+        let mut outline = puppet::mesh::outline(&alpha, w, h, buf.scale.max(1e-9), buf.offset, at, m.opts.expansion);
+        // As `triangulate` winds it.
+        if puppet::mesh::signed_area(&outline) < 0.0 {
+            outline.reverse();
+        }
+        puppet::mesh_for(buf, m).outline == outline
+    })
+}
+
+/// Whether `puppet.addPin` at `at` (effect space) places a pin on a layer with a Puppet effect.
 pub fn places_pin(s: &Session, cid: ItemId, lid: LayerId, at: [f64; 2], t: Tick) -> bool {
     let Some((buf, params)) = find_puppet(s, cid, lid).and_then(|fu| puppet_eval(s, cid, lid, fu, t)) else { return true };
-    let meshes = puppet::overlay(&buf, &params);
-    meshes.is_empty() || meshes.iter().any(|(_, mesh, def, _)| on_mesh(mesh, def, at)) || puppet::unmeshed_art_at(&buf, &params, at, s.state.puppet.expansion)
+    !repeats_mesh(&buf, &params, at) || puppet::overlay(&buf, &params).iter().any(|(_, mesh, def, _)| on_mesh(mesh, def, at))
 }
 
 fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
@@ -92,17 +105,14 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, "the Puppet tools work on footage, solid, text, shape and precomp layers"));
         }
     }
-    let opts = MeshOpts {
-        density: f_p(p, "density").unwrap_or(s.state.puppet.density),
-        expansion: f_p(p, "expansion").unwrap_or(s.state.puppet.expansion),
-        triangles: f_p(p, "triangles").unwrap_or(s.state.puppet.triangles),
-    };
     // Which mesh: the one under the click (through the current deformation), else a new one.
     let fx_uid = find_puppet(s, cid, lid);
     let want_mesh = p.get("mesh").and_then(Value::as_u64);
+    let new_mesh = p.get("newMesh").and_then(Value::as_bool).unwrap_or(false);
     // (mesh, the pin's rest point, where it is now)
     let mut target: Option<(Uid, [f64; 2], [f64; 2])> = None;
     if let Some(fu) = fx_uid
+        && !new_mesh
         && let Some((buf, params)) = puppet_eval(s, cid, lid, fu, t)
     {
         let meshes = puppet::overlay(&buf, &params);
@@ -135,11 +145,15 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
         {
             return Err(bad(cmd, format!("no mesh {w}")));
         }
-        // Nothing to pin here: empty space, or art a mesh has already carried away (#2865).
-        if target.is_none() && !meshes.is_empty() && !puppet::unmeshed_art_at(&buf, &params, at, opts.expansion) {
+        if target.is_none() && repeats_mesh(&buf, &params, at) {
             return Ok(json!({"pin": null, "changed": false}));
         }
     }
+    let opts = MeshOpts {
+        density: f_p(p, "density").unwrap_or(s.state.puppet.density),
+        expansion: f_p(p, "expansion").unwrap_or(s.state.puppet.expansion),
+        triangles: f_p(p, "triangles").unwrap_or(s.state.puppet.triangles),
+    };
     let size = {
         let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
         let l = comp.layer(lid).ok_or(EngineError::NoComp)?;
@@ -666,7 +680,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Puppet Pin",
             [],
             None,
-            "{layer?, kind?: position|advanced|bend|starch|overlap, position: [x,y] (effect space), time? (s) | frame?, mesh?: uid, density?, expansion?, triangles?}",
+            "{layer?, kind?: position|advanced|bend|starch|overlap, position: [x,y] (effect space), time? (s) | frame?, mesh?: uid, newMesh?, density?, expansion?, triangles?}",
             has_comp,
             add_pin
         ),

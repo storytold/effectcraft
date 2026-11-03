@@ -252,31 +252,42 @@ fn a_pin_where_the_deformed_layer_is_empty_creates_nothing() {
     }
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 2));
     assert_eq!(s.render(cid, t, RenderOpts::default()), before);
+    // Whatever Expansion new meshes would now get, the art is the mesh's own.
+    s.state.puppet.expansion = 9.0;
+    assert_eq!(s.execute("puppet.addPin", json!({"layer": id, "position": [50, 10]})).unwrap()["pin"], Value::Null);
     // On the deformed shape a pin still goes on the mesh.
     assert!(crate::commands::puppet::places_pin(&s, cid, lid, [50.0, 70.0], t));
     assert!(s.execute("puppet.addPin", json!({"layer": id, "position": [50, 70]})).unwrap()["pin"].is_u64());
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 3));
 }
 
-/// #2865: art no mesh has still takes its own mesh; the gap beside it takes none. The first pin of
-/// a layer is as ever: it finds the art nearest the click.
+/// #2865: separate art still gets its own mesh, also from a near miss in the gap beside it (a click
+/// off the art finds the art nearest it): only a repeat of a mesh is refused.
 #[test]
-fn only_unmeshed_art_takes_a_new_mesh() {
+fn separate_art_still_gets_its_own_mesh() {
     let (mut s, id) = setup();
     for x in [[0, 30], [60, 100]] {
         s.execute("mask.new", json!({"layer": id, "vertices": [[x[0], 0], [x[1], 0], [x[1], 60], [x[0], 60]], "closed": true})).unwrap();
     }
-    s.execute("puppet.addPin", json!({"layer": id, "position": [46, 30]})).unwrap();
-    assert_eq!(mesh_count(&mut s, id), 1, "the first pin");
-    s.undo();
     s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
-    // In the gap, past reach of the left piece's mesh (Expansion takes it to x 33).
-    assert_eq!(s.execute("puppet.addPin", json!({"layer": id, "position": [46, 30]})).unwrap()["pin"], Value::Null);
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (1, 1));
+    // In the gap, nearer the right piece and past reach of the left piece's mesh.
+    s.execute("puppet.addPin", json!({"layer": id, "position": [46, 30]})).unwrap();
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 2), "the near miss meshes the right piece");
+    s.undo();
     s.execute("puppet.addPin", json!({"layer": id, "position": [80, 30]})).unwrap();
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 2), "the right piece gets its own mesh");
     s.execute("puppet.addPin", json!({"layer": id, "position": [80, 50]})).unwrap();
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 3), "and the next pin goes on it");
+}
+
+/// `newMesh` asks for a new mesh wherever the click is, the art's own mesh or not.
+#[test]
+fn new_mesh_option_starts_a_mesh_on_meshed_art() {
+    let (mut s, id) = setup();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [50, 30], "newMesh": true})).unwrap();
+    assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 2));
 }
 
 #[test]

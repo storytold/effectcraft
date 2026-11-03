@@ -194,11 +194,6 @@ pub fn region(g: &Grid, seed: [f64; 2]) -> Option<Grid> {
     Some(Grid { w, h, on: outside.iter().map(|o| !o).collect() })
 }
 
-/// The region under `seed` only when `seed` is on a cell: `region` without its nearest fallback.
-pub fn region_under(g: &Grid, seed: [f64; 2]) -> Option<Grid> {
-    if g.at(seed[0].floor() as i64, seed[1].floor() as i64) { region(g, seed) } else { None }
-}
-
 /// Trace the outer boundary of a hole-free region along pixel cracks: a closed polygon through
 /// pixel corners, region on the left when walking (counter-clockwise in y-down coordinates).
 pub fn trace(g: &Grid) -> Vec<[f64; 2]> {
@@ -622,25 +617,6 @@ pub fn triangulate(outline: &[[f64; 2]], opts: &MeshOpts) -> Mesh {
 /// The outline of the alpha region under `seed` (buffer pixels → layer space via `scale` and
 /// `offset`), expanded by `expansion` layer pixels.
 pub fn outline(alpha: &[f32], w: usize, h: usize, scale: f64, offset: [f64; 2], seed: [f64; 2], expansion: f64) -> Vec<[f64; 2]> {
-    outline_of(alpha, w, h, scale, offset, seed, expansion, region)
-}
-
-/// As `outline`, but empty unless `seed` is on the expanded alpha itself.
-pub fn outline_under(alpha: &[f32], w: usize, h: usize, scale: f64, offset: [f64; 2], seed: [f64; 2], expansion: f64) -> Vec<[f64; 2]> {
-    outline_of(alpha, w, h, scale, offset, seed, expansion, region_under)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn outline_of(
-    alpha: &[f32],
-    w: usize,
-    h: usize,
-    scale: f64,
-    offset: [f64; 2],
-    seed: [f64; 2],
-    expansion: f64,
-    pick: fn(&Grid, [f64; 2]) -> Option<Grid>,
-) -> Vec<[f64; 2]> {
     // Pad so expansion can grow past the buffer edge.
     let pad = (expansion.max(0.0) * scale).ceil() as usize + 2;
     let (pw, ph) = (w + 2 * pad, h + 2 * pad);
@@ -652,7 +628,7 @@ fn outline_of(
     }
     let g = expand(&Grid { w: pw, h: ph, on }, expansion * scale);
     let sp = [seed[0] * scale + offset[0] + pad as f64, seed[1] * scale + offset[1] + pad as f64];
-    let Some(r) = pick(&g, sp) else { return vec![] };
+    let Some(r) = region(&g, sp) else { return vec![] };
     let c = trace(&r);
     let c = simplify(&c, 0.75);
     c.iter().map(|p| [(p[0] - pad as f64 - offset[0]) / scale, (p[1] - pad as f64 - offset[1]) / scale]).collect()

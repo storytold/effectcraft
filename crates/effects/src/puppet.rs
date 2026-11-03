@@ -395,27 +395,6 @@ pub fn contains(mesh: &Mesh, deformed: &[[f64; 2]], p: [f64; 2]) -> bool {
     })
 }
 
-/// Whether `at` (effect space) is art a new mesh with this `expansion` could take: on the expanded
-/// alpha itself, and not what a mesh of `params` already covers at rest, even if its deformation
-/// has carried that art away. A mesh there would only rebuild the same outline: a full copy (#2865).
-pub fn unmeshed_art_at(buf: &Buf, params: &Params, at: [f64; 2], expansion: f64) -> bool {
-    let (w, h) = (buf.img.width as usize, buf.img.height as usize);
-    let alpha: Vec<f32> = buf.img.data.iter().map(|p| p[3]).collect();
-    let mut outline = mesh::outline_under(&alpha, w, h, buf.scale.max(1e-9), buf.offset, at, expansion);
-    if outline.is_empty() {
-        return false;
-    }
-    // As `triangulate` winds it. The simplified outline can cut a corner past `at`, so a mesh can
-    // miss the very art it was built from: the same outline is the same art.
-    if mesh::signed_area(&outline) < 0.0 {
-        outline.reverse();
-    }
-    !parse(params).iter().any(|m| {
-        let mesh = mesh_for(buf, m);
-        mesh.outline == outline || contains(&mesh, &mesh.verts, at)
-    })
-}
-
 #[inline]
 fn bary(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> Option<[f64; 3]> {
     let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
