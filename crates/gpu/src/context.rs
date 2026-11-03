@@ -117,6 +117,9 @@ impl Drop for Lease {
         if let Some(pool) = self.pool.upgrade()
             && let Ok(mut p) = pool.lock()
         {
+            // Always undo `pooled`'s leased count first: `Pool::discard` does not reset
+            // `leased`, and a stale-generation lease must still clear its contribution.
+            p.leased = p.leased.saturating_sub(tex_bytes(&self.texture));
             if !self.escaped.load(std::sync::atomic::Ordering::Relaxed) {
                 p.release_owned(self.texture.clone(), self.owner, self.generation);
             } else if self.generation == p.generation {
@@ -148,6 +151,8 @@ pub(crate) struct Pool {
     open: BTreeSet<u64>,
     next: u64,
     bytes: usize,
+    /// Bytes currently held by live [`Lease`]s.
+    leased: usize,
     /// Working textures reused / newly allocated (diagnostics, tests).
     hits: u64,
     misses: u64,
@@ -462,6 +467,44 @@ impl Pool {
         }
     }
 
+    /// Moves `owner`'s returned working textures onto the shared free list (dropping any over
+    /// budget) right after `owner`'s encoder has been submitted, while keeping `owner` registered.
+    fn flush_owned(&mut self, owner: u64) {
+        let Some(m) = self.owned.get_mut(&owner).map(std::mem::take) else { return };
+        for t in m.into_values().flatten() {
+            self.make_free(t);
+        }
+    }
+
+    /// Bytes the pool will still keep alive (live `Lease`s, other owners' in-flight working sets,
+    /// released textures still guarded by other open encoders, and up to `budget` on the shared
+    /// free list) once `owner` flushes its returned textures and `closing_enc` submits.
+    fn kept_after_flush(&self, owner: u64, closing_enc: Option<u64>) -> usize {
+        let oldest = self.open.iter().copied().find(|&o| Some(o) != closing_enc).unwrap_or(u64::MAX);
+        let mut ready = 0usize;
+        let mut still_released = 0usize;
+        for (t, w) in &self.released {
+            let b = tex_bytes(t);
+            if *w < oldest {
+                ready += b;
+            } else {
+                still_released += b;
+            }
+        }
+        let mut self_owned = 0usize;
+        let mut other_owned = 0usize;
+        for (&k, m) in &self.owned {
+            let b: usize = m.values().flatten().map(tex_bytes).sum();
+            if k == owner {
+                self_owned += b;
+            } else {
+                other_owned += b;
+            }
+        }
+        let free_after = self.bytes.max((self.bytes + ready + self_owned).min(self.budget()));
+        self.leased + other_owned + still_released + free_after
+    }
+
     /// Bytes of working textures kept for reuse: the free list, those waiting for open
     /// encoders and those kept by live `Enc`s.
     fn retained(&self) -> usize {
@@ -595,6 +638,11 @@ pub struct GpuContext {
     /// Export frame → YUV 4:2:0 kernel (built on first use).
     pub(crate) yuv: std::sync::OnceLock<Result<crate::yuv::YuvPipe, String>>,
     readbacks: Arc<crate::readback::Readbacks>,
+    /// Serializes `device.poll` across threads (`wgpu-core 30.0.1` can panic on concurrent
+    /// `Device::maintain` when two callers poll the same device at once). Shared by every
+    /// context on the same device.
+    poll_lock: Arc<Mutex<()>>,
+    memcap: crate::memcap::MemCap,
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -923,7 +971,9 @@ impl GpuContext {
             init_resource(&device, "dummy storage buffer", || buffer_init(&device, &queue, Some("dummy"), &[0u8; 16], wgpu::BufferUsages::STORAGE))?;
         let dummy_tex = init_resource(&device, "dummy texture view", || dummy.create_view(&Default::default()))?;
         let max_dim = device.limits().max_texture_dimension_2d;
-        let pool = Arc::new(Mutex::new(Pool { queue: Some(queue.clone()), ..Default::default() }));
+        let memcap = crate::memcap::MemCap::new(&info);
+        let pool_budget = if memcap.cap() > 0 { POOL_BUDGET.min((memcap.cap() / 4) as usize) } else { 0 };
+        let pool = Arc::new(Mutex::new(Pool { queue: Some(queue.clone()), budget: pool_budget, ..Default::default() }));
         Ok(GpuContext {
             device,
             queue,
@@ -955,6 +1005,8 @@ impl GpuContext {
             particle_states: Default::default(),
             deferred: None,
             readbacks,
+            poll_lock: Default::default(),
+            memcap,
         })
     }
 
@@ -988,10 +1040,25 @@ impl GpuContext {
         crate::readback::failure_notifier(&self.readbacks)
     }
 
+    /// Maximum time a blocking poll holds `poll_lock` in one slice so concurrent readbacks are not
+    /// starved behind a long `mem_gate` or readback wait.
+    const POLL_SLICE: std::time::Duration = std::time::Duration::from_millis(20);
+
     /// All device polling routes through this failure bridge.
     pub(crate) fn poll_readbacks(&self, kind: wgpu::PollType) -> Result<wgpu::PollStatus, String> {
         self.readbacks.check()?;
-        self.device.poll(kind).map_err(|e| {
+        let res = {
+            let _guard = match kind {
+                wgpu::PollType::Poll => match self.poll_lock.try_lock() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return Ok(wgpu::PollStatus::Poll),
+                },
+                _ => self.poll_lock.lock().unwrap_or_else(|e| e.into_inner()),
+            };
+            self.device.poll(kind)
+        };
+        res.map_err(|e| {
             let error = format!("GPU readback poll: {e}");
             self.readbacks.retire(error.clone());
             log::error!("{error}");
@@ -999,21 +1066,71 @@ impl GpuContext {
         })
     }
 
-    /// Waits on `submission_index` up to `timeout` so wgpu frees resources dropped before that
-    /// submission. A timeout simply moves on without retiring the context or its readbacks; any
-    /// other poll error retires the readbacks through the failure path.
+    /// Waits on `submission_index` up to `timeout` in [`Self::POLL_SLICE`] increments so wgpu
+    /// frees resources dropped before that submission without holding `poll_lock` for seconds at a
+    /// time. A timeout simply moves on without retiring the context or its readbacks; any other
+    /// poll error retires the readbacks through the failure path.
     fn poll_wait(&self, submission_index: wgpu::SubmissionIndex, timeout: std::time::Duration) {
         if self.readbacks.check().is_err() {
             return;
         }
-        match self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index), timeout: Some(timeout) }) {
-            Ok(_) | Err(wgpu::PollError::Timeout) => {}
-            Err(e) => {
-                let error = format!("GPU poll wait: {e}");
-                self.readbacks.retire(error.clone());
-                log::error!("{error}");
+        let deadline = web_time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(web_time::Instant::now());
+            let slice = remaining.min(Self::POLL_SLICE);
+            let res = {
+                let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
+                self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) })
+            };
+            let done = match res {
+                Ok(_) => true,
+                Err(wgpu::PollError::Timeout) => false,
+                Err(e) => {
+                    let error = format!("GPU poll wait: {e}");
+                    self.readbacks.retire(error.clone());
+                    log::error!("{error}");
+                    true
+                }
+            };
+            if done || remaining <= slice {
+                break;
             }
         }
+    }
+
+    /// Bytes held by wgpu's device allocator (`0` on backends that do not report).
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+    }
+
+    /// Bytes held in long-lived or still-referenced GPU caches/leases that submitting and waiting
+    /// on `owner` (`closing_enc`) cannot free.
+    fn kept_bytes(&self, owner: u64, closing_enc: Option<u64>) -> u64 {
+        let uploads = self.uploads.lock().map(|u| u.bytes as u64).unwrap_or(0);
+        let pool = self.pool.lock().map(|p| p.kept_after_flush(owner, closing_enc) as u64).unwrap_or(0);
+        let staging: u64 = self.staging.lock().map(|s| s.iter().map(|(k, v)| k * v.len() as u64).sum()).unwrap_or(0);
+        let zeros: u64 = self.zeros.lock().map(|z| z.keys().map(|&(w, h)| w as u64 * h as u64 * 16).sum()).unwrap_or(0);
+        uploads + pool + staging + zeros
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memcap_waits(&self) -> u64 {
+        self.memcap.waits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memcap_warned(&self) -> bool {
+        self.memcap.warned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_memcap_wait_timeout(&self, timeout: std::time::Duration) {
+        self.memcap.set_wait_timeout(timeout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_poll_for_test(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.poll_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Start a bounded buffer mapping. Retired contexts reject new requests immediately.
@@ -1050,25 +1167,52 @@ impl GpuContext {
         });
     }
 
-    /// A bounded native readback: polling and receiving share one deadline.
+    /// A bounded native readback: polling and receiving share one deadline, started once
+    /// `poll_lock` is first acquired and polled in [`Self::POLL_SLICE`] slices so lock contention
+    /// never consumes the readback deadline or holds the mutex across the whole timeout.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_buffer(&self, buffer: &wgpu::Buffer, row: usize, stride: usize, height: usize) -> Result<Vec<u8>, String> {
-        let deadline = std::time::Instant::now() + crate::readback::TIMEOUT;
         let (tx, rx) = std::sync::mpsc::channel();
         self.map_readback(buffer, row, stride, height, move |r| {
             let _ = tx.send(r);
         });
+        let mut deadline = None;
         loop {
             self.readbacks.check()?;
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Ok(result) = rx.try_recv() {
+                return result;
+            }
+            let (remaining, slice, poll_res) = {
+                let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
+                self.readbacks.check()?;
+                let d = *deadline.get_or_insert_with(|| std::time::Instant::now() + crate::readback::TIMEOUT);
+                let remaining = d.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    (remaining, std::time::Duration::ZERO, Ok(wgpu::PollStatus::Poll))
+                } else {
+                    let slice = remaining.min(Self::POLL_SLICE);
+                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(slice) });
+                    (remaining, slice, res)
+                }
+            };
+            if let Ok(result) = rx.try_recv() {
+                return result;
+            }
             if remaining.is_zero() {
                 let error = "GPU readback receive timed out; context retired".to_string();
                 self.readbacks.retire(error.clone());
                 return Err(error);
             }
-            // Block until the GPU is done (bounded by the deadline: a timeout retires the
-            // context) rather than polling and sleeping, which adds latency to every readback.
-            self.poll_readbacks(wgpu::PollType::Wait { submission_index: None, timeout: Some(remaining) })?;
+            match poll_res {
+                Ok(_) => {}
+                Err(wgpu::PollError::Timeout) if remaining > slice => {}
+                Err(e) => {
+                    let error = format!("GPU readback poll: {e}");
+                    self.readbacks.retire(error.clone());
+                    log::error!("{error}");
+                    return Err(error);
+                }
+            }
             // The callback may be running on another thread that polled the same device.
             match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(1))) {
                 Ok(result) => return result,
@@ -1207,6 +1351,8 @@ impl GpuContext {
             readbacks: self.readbacks.clone(),
             software: self.software,
             yuv: std::sync::OnceLock::new(),
+            poll_lock: self.poll_lock.clone(),
+            memcap: self.memcap.fresh(),
         }
     }
 
@@ -1253,7 +1399,16 @@ impl GpuContext {
     /// one is zeroed.
     fn pooled(&self, w: u32, h: u32, owner: u64) -> (GpuImage, bool) {
         let (w, h) = (w.max(1), h.max(1));
-        let (reused, generation) = self.pool.lock().map(|mut p| (p.take_owned(owner, w, h).or_else(|| p.take(w, h)), p.generation)).unwrap_or((None, u64::MAX));
+        let bytes = w as usize * h as usize * 16;
+        let (reused, generation) = self
+            .pool
+            .lock()
+            .map(|mut p| {
+                let t = p.take_owned(owner, w, h).or_else(|| p.take(w, h));
+                p.leased += bytes;
+                (t, p.generation)
+            })
+            .unwrap_or((None, u64::MAX));
         let was_reused = reused.is_some();
         let texture = reused.unwrap_or_else(|| self.texture(w, h));
         let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, escaped: Default::default(), generation });
@@ -1461,6 +1616,7 @@ pub(crate) struct Enc<'g> {
     pub g: &'g GpuContext,
     /// The open command encoder and its id in the texture pool.
     enc: Option<(wgpu::CommandEncoder, u64)>,
+    last_submit: Option<wgpu::SubmissionIndex>,
     pending: usize,
     /// A dispatch named a kernel the device doesn't have (see [`Enc::take_missing`]).
     missing: bool,
@@ -1496,7 +1652,7 @@ impl Drop for Enc<'_> {
 impl<'g> Enc<'g> {
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
-        Enc { g, enc: None, pending: 0, missing: false, owner, lent: false }
+        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: false }
     }
 
     /// An `Enc` for self-contained work (an effect chain): once it is dropped, its working
@@ -1508,7 +1664,7 @@ impl<'g> Enc<'g> {
     /// effect's intermediates stayed allocated until the frame ended.
     pub(crate) fn lent(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.lend()).unwrap_or(0);
-        Enc { g, enc: None, pending: 0, missing: false, owner, lent: true }
+        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: true }
     }
 
     /// `img` is used by this `Enc`: if another `Enc` made it, that one must not reuse it at once
@@ -1693,12 +1849,37 @@ impl<'g> Enc<'g> {
     /// Submit recorded work.
     pub fn submit(&mut self) {
         if let Some((enc, id)) = self.enc.take() {
-            self.g.queue.submit([enc.finish()]);
+            self.last_submit = Some(self.g.queue.submit([enc.finish()]));
             if let Ok(mut p) = self.g.pool.lock() {
                 p.close(id);
             }
         }
         self.pending = 0;
+    }
+
+    /// Submits and waits on this encoder's own submission when the device allocator is over the
+    /// memory cap and enough of that memory is reclaimable, so wgpu frees textures dropped so far.
+    pub fn mem_gate(&mut self) {
+        if !self.g.memcap.due() {
+            return;
+        }
+        let allocated = self.g.allocated_bytes();
+        if allocated <= self.g.memcap.cap() {
+            let _ = self.g.memcap.should_wait(allocated, 0);
+            return;
+        }
+        let closing = self.enc.as_ref().map(|(_, id)| *id);
+        let kept = self.g.kept_bytes(self.owner, closing);
+        if !self.g.memcap.should_wait(allocated, kept) {
+            return;
+        }
+        self.submit();
+        if let Ok(mut p) = self.g.pool.lock() {
+            p.flush_owned(self.owner);
+        }
+        let idx = self.last_submit.take().unwrap_or_else(|| self.g.queue.submit([]));
+        self.g.poll_wait(idx, self.g.memcap.wait_timeout());
+        self.g.memcap.record_wait(self.g.allocated_bytes(), self.g.kept_bytes(self.owner, None));
     }
 
     /// Read an image back to the CPU (submits and waits). `None` where readback is impossible.

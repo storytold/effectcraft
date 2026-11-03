@@ -79,6 +79,7 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod memcap;
 mod ops;
 mod particles;
 mod readback;
