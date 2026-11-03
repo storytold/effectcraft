@@ -463,6 +463,21 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
     }
 }
 
+#[test]
+fn importing_without_a_form_shows_immediate_file_errors() {
+    let folder = std::env::temp_dir().join(format!("effectcraft-drop-import-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    let mut app = EffectcraftApp::new(effectcraft_host::session());
+    let ctx = egui::Context::default();
+    let r = invoke(&mut app, &ctx, "file.import", json!({"paths": [path], "importAs": "composition", "background": true, "drag": true})).unwrap();
+    assert!(app.dialog.is_none());
+    assert!(r["errors"][0].as_str().unwrap().contains("Create PDF-Compatible File"));
+    assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
 /// Cmd+W with the Render Queue focused closes the queue; the composition next to it stays
 /// open (it used to be closed, and the queue stayed).
 #[test]

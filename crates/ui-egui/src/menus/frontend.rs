@@ -39,6 +39,9 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
     }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
+    }
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
         match ev {
@@ -706,6 +709,9 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
+    }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
     }
     r
 }

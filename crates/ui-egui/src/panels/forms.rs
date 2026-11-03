@@ -990,8 +990,9 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if ok || enter {
         app.dialog = None;
         let params = f.params();
-        if let Err(e) = app.session.execute(&f.command, params) {
-            app.ui.status = e.to_string();
+        match app.session.execute(&f.command, params) {
+            Ok(r) => app.report_import_errors(&f.command, &r),
+            Err(e) => app.ui.status = e.to_string(),
         }
         return;
     }
@@ -1064,6 +1065,37 @@ mod tests {
             ],
         };
         assert_eq!(f.params(), json!({"prop": "position", "value": [10.0, 20.0], "mode": "b"}));
+    }
+
+    #[test]
+    fn import_form_shows_errors_returned_in_a_successful_result() {
+        let folder = std::env::temp_dir().join(format!("effectcraft-form-import-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("no-pdf.vectorcraft");
+        std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+        for (import_as, background) in [("footage", false), ("composition", true), ("compositionLayerSizes", true)] {
+            let mut app = EffectcraftApp::new(effectcraft_host::session());
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+            app.dialog_state.form = Form {
+                title: "Import".into(),
+                command: "file.import".into(),
+                base: json!({"paths": [path, path], "importAs": import_as, "background": background}),
+                fields: vec![],
+            };
+            app.dialog = Some(Dialog::Form);
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+                ..Default::default()
+            };
+            let tokens = app.tokens;
+            ctx.run_ui(raw, |ui| show_form(&mut app, ui.ctx(), &tokens)).textures_delta.clear();
+            assert!(app.dialog.is_none());
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{import_as}: {}", app.ui.status);
+            assert!(app.ui.status.ends_with("(and 1 more)"), "{}", app.ui.status);
+            assert!(!app.ui.status.contains('\n'));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     /// A numeric form (Layer ▸ Transform ▸ Position…) opens with its first number being edited
