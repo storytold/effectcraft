@@ -636,7 +636,8 @@ impl<'a> Interp<'a> {
                 let bc = f.get(&sm, "BC").map(|b| f.nums(b)).unwrap_or_default();
                 let gcs = f.get_dict(&gd, "Group").and_then(|gr| f.get(gr, "CS")).map(|c| color_space(f, c, Some(res))).unwrap_or(Cs::Rgb);
                 let backdrop = if bc.is_empty() { [0.0; 3] } else { gcs.to_rgb(&bc) };
-                let saved_b = std::mem::replace(&mut self.b, Builder::new());
+                let inner = self.b.nested(2);
+                let saved_b = std::mem::replace(&mut self.b, inner);
                 let ctm = self.gs.ctm;
                 let saved_gs = std::mem::replace(&mut self.gs, GState { ctm, ..GState::default() });
                 let saved_stack = std::mem::take(&mut self.saved);
@@ -752,7 +753,9 @@ impl<'a> Interp<'a> {
             return;
         }
         // The cell, drawn once in pattern space.
-        let saved_b = std::mem::replace(&mut self.b, Builder::new());
+        // The cell ends up under the open groups and this pattern's `Pattern` and `Tile`.
+        let inner = self.b.nested(2);
+        let saved_b = std::mem::replace(&mut self.b, inner);
         let saved_gs = std::mem::take(&mut self.gs);
         let saved_stack = std::mem::take(&mut self.saved);
         let saved_path = std::mem::take(&mut self.path);

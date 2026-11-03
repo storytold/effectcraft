@@ -668,6 +668,25 @@ fn tiling_patterns_coloured_and_uncoloured() {
     assert_eq!(at(115, 15)[3], 0.0);
 }
 
+/// A pattern cell nests under the page's open clipping groups and the pattern's own groups, and
+/// the render tree stays within the group depth limit that counts all of them.
+#[test]
+fn a_pattern_cell_counts_the_groups_it_is_nested_in() {
+    fn depth(g: &effectcraft_svg::Group) -> usize {
+        1 + g.children.iter().filter_map(|c| if let effectcraft_svg::Node::Group(g) = c { Some(depth(g)) } else { None }).max().unwrap_or(0)
+    }
+    let clips = "0 0 200 100 re W n ".repeat(250);
+    let cell = format!("{} 1 0 0 rg 0 0 10 10 re f", "0 0 20 20 re W n ".repeat(250)).into_bytes();
+    let bytes = page_pdf(
+        &format!("{clips} /Pattern cs /P1 scn 0 0 100 100 re f"),
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >>".into(), Some(cell))],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(depth(&doc.root) <= 260, "{}", depth(&doc.root));
+    assert!(doc.skipped.iter().any(|s| s == "group nesting limit"), "{:?}", doc.skipped);
+}
+
 /// Build isolated interpreter objects without presenting a function or colour space as a
 /// document catalog. Complete-document parsing is covered by the page and reader fixtures.
 fn object_file(objs: Objs) -> object::File {

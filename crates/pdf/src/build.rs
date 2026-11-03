@@ -23,6 +23,9 @@ pub(crate) struct Builder {
     pub top_layers: Vec<bool>,
     pub skipped: Vec<String>,
     pub shapes: usize,
+    /// Groups the finished nodes will sit under once placed (an enclosing builder's open groups
+    /// and the pattern or mask groups around them), counted against [`MAX_DEPTH`].
+    base: usize,
 }
 
 pub(crate) fn group(name: &str) -> Group {
@@ -31,7 +34,14 @@ pub(crate) fn group(name: &str) -> Group {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0 }
+        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
+    }
+
+    /// A builder for content that will be placed inside this one's open groups and `wrap` more
+    /// groups (a pattern's `Pattern` and `Tile`, a soft mask's two), so its nesting limit counts
+    /// them.
+    pub fn nested(&self, wrap: usize) -> Builder {
+        Builder { base: self.base.saturating_add(self.stack.len()).saturating_add(wrap), ..Builder::new() }
     }
 
     pub fn depth(&self) -> usize {
@@ -68,7 +78,7 @@ impl Builder {
     /// Open `g` as the group drawn into from now on; past [`MAX_DEPTH`] the group is dropped
     /// (what would have been drawn inside it goes to the open group) and noted as skipped.
     fn push_group(&mut self, g: Group, kind: Kind) {
-        if self.stack.len() >= MAX_DEPTH {
+        if self.base.saturating_add(self.stack.len()) >= MAX_DEPTH {
             self.skip("group nesting limit");
             return;
         }
