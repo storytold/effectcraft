@@ -195,10 +195,11 @@ mod tests {
         }
     }
 
-    /// The default (ZIP, 32-bit float) writes exactly what the Render Queue wrote before the
-    /// setting existed (#2812), so re-rendering an existing project changes no file.
+    /// The default (ZIP, 32-bit float) writes the `exr` crate's `SMALL_LOSSLESS` preset (scan
+    /// lines, ZIP), the layout the Render Queue has written since #2812. The reference is that
+    /// preset, not files from before #2812, which were tiled RLE.
     #[test]
-    fn the_default_matches_the_earlier_output_byte_for_byte() {
+    fn the_default_matches_the_small_lossless_preset_byte_for_byte() {
         let (w, h) = (64, 48);
         let src = frame(w, h);
         let pixels = SpecificChannels::rgba(|p: Vec2<usize>| {
