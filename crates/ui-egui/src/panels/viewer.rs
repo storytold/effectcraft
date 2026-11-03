@@ -63,6 +63,10 @@ fn map_id() -> egui::Id {
     egui::Id::unique("viewer-map")
 }
 
+/// The egui data key (an `egui::Pos2`) of a right-click on the viewer that an overlay sensed:
+/// the viewer opens its context menu there on the next pass.
+pub(crate) const FORWARDED_SECONDARY: &str = "viewer-forwarded-secondary";
+
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
     let m: ViewerMap = ctx.data(|d| d.get_temp(map_id()))?;
     Some(m.to_screen([p[0] as f64, p[1] as f64]))
