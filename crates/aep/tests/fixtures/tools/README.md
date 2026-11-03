@@ -55,7 +55,9 @@ single-case files some cases are merged from, and the contributor's own animatio
    machine names that must not remain; the script fails if one does.
 6. Strip the colour profiles: `cargo run -p effectcraft-aep --example stubicc -- <fixture>.aep <fixture>.aep.new`
    (and the `.aepx`) replaces the working-space profile (and the profile of imported images) by a
-   stub with the same description and no colour data. Do not save the projects with working space
+   stub with the same description and no colour data. It stops without writing if a profile cannot
+   be replaced. Then scan the final files independently (the corpus repository's
+   `tools/aep/inspect-embedded.py`). Do not save the projects with working space
    None instead: the importer reads the working space's name from the profile, and the settings
    cases (sRGB, Rec.709 Gamma 2.4, gamma) test exactly that.
 7. Check: every case composition must import like the earlier single-case file (the tests in

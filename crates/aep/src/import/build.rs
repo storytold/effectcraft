@@ -83,6 +83,9 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
     let mut pending: Vec<PendingComp<'_, '_>> = Vec::new();
     let mut order: Vec<ItemId> = Vec::new();
 
+    if view.items_unreadable() {
+        cx.col.lose(LossCategory::DamagedData, "the project's item list is damaged, none of its items is imported".to_string());
+    }
     // Pass 1: the item tree, depth-first in file order, without recursion.
     let mut stack: Vec<(AepItem<'_, '_>, ItemId)> = view.items().map(|i| (i, root)).collect();
     stack.reverse();
@@ -99,6 +102,8 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                 // items in it); without one the contents are lost.
                 if !item.has_folder_contents() {
                     cx.col.lose(LossCategory::DamagedData, format!("folder '{name}': its contents list is missing, imported empty"));
+                } else if item.folder_contents_unreadable() {
+                    cx.col.lose(LossCategory::DamagedData, format!("folder '{name}': its contents list is damaged, imported empty"));
                 }
                 let mut kids: Vec<_> = item.children().map(|k| (k, id)).collect();
                 kids.reverse();
@@ -677,11 +682,23 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
         Rational { num: 1, den: 1 }
     });
     l.stretch = stretch.to_f64().map_or(100.0, |r| r * 100.0);
+    // A stored time with a zero denominator (or a sum that overflows) has no value; it is read as 0
+    // and reported, so the layer's timing never changes silently.
+    let unreadable: Vec<&str> = [("start", h.start), ("in point", h.in_relative), ("out point", h.out_relative)]
+        .into_iter()
+        .filter(|(_, t)| t.den == 0)
+        .map(|(what, _)| what)
+        .collect();
     l.start_time = tm.ticks(h.start.num, h.start.den);
-    let abs = |offset: Rational, reduced: Option<Rational>| absolute(h.start, offset, stretch, reduced).map_or(Tick::ZERO, |(n, d)| tm.ticks(n, d));
+    let points = [(h.in_relative, h.in_point()), (h.out_relative, h.out_point())].map(|(offset, reduced)| absolute(h.start, offset, stretch, reduced));
+    if !unreadable.is_empty() {
+        col.lose(LossCategory::DamagedData, format!("layer '{name}': the stored {} time is unreadable (zero denominator), 0 is used", unreadable.join(", ")));
+    } else if points.iter().any(Option::is_none) {
+        col.lose(LossCategory::DamagedData, format!("layer '{name}': the in or out point is out of range, 0 is used"));
+    }
+    let [a, b] = points.map(|p| p.map_or(Tick::ZERO, |(n, d)| tm.ticks(n, d)));
     // A negative stretch reverses the layer (981-983): the stored in point is then the later
     // end (`start + in * stretch`, 5 s for 0 s of source at -100 %), the out point the earlier.
-    let (a, b) = (abs(h.in_relative, h.in_point()), abs(h.out_relative, h.out_point()));
     l.in_point = a.min(b);
     l.out_point = a.max(b);
 }

@@ -24,6 +24,7 @@ pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
 /// reported.
 pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Collector) -> ProjectSettings {
     let s = crate::ProjectSettings::read(file);
+    let nhed = file.chunk(b"nhed").and_then(|c| c.bytes());
     let mut out = current.clone();
     match s.bits_per_channel {
         Some(8) => out.bit_depth = BitDepth::Bpc8,
@@ -31,7 +32,7 @@ pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Colle
         Some(32) => out.bit_depth = BitDepth::Bpc32,
         _ => {
             // The stored code (`nhed` byte 15) is 0, 1 or 2; another one is not guessed at.
-            if let Some(code) = file.chunk(b"nhed").and_then(|c| c.bytes()).and_then(|b| b.get(15).copied()) {
+            if let Some(code) = nhed.and_then(|b| b.get(15).copied()) {
                 col.lose(LossCategory::ProjectSettings, format!("colour depth code {code} (not known; the current depth is kept)"));
             }
         }
@@ -61,10 +62,26 @@ pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Colle
         Some(TimeDisplay::Frames) => out.time_display = TimeDisplayStyle::Frames,
         Some(TimeDisplay::FeetFrames { frames_per_foot: 16 }) => out.time_display = TimeDisplayStyle::Feet35,
         Some(TimeDisplay::FeetFrames { frames_per_foot: 40 }) => out.time_display = TimeDisplayStyle::Feet16,
-        _ => {}
+        Some(TimeDisplay::FeetFrames { frames_per_foot }) => {
+            col.lose(
+                LossCategory::ProjectSettings,
+                format!("feet + frames with {frames_per_foot} frames per foot (only 16 and 40 are known; the current time display is kept)"),
+            );
+        }
+        None => {
+            // `nhed` bytes 8, 11 and 13; a header too short to hold them is not a setting.
+            if let Some(&[mode, _, _, feet, ..]) = nhed.and_then(|b| b.get(8..14)) {
+                col.lose(LossCategory::ProjectSettings, format!("time display code {mode}/{feet} (not known; the current time display is kept)"));
+            }
+        }
     }
-    if let Some(start) = s.frame_start {
-        out.frame_start = i64::from(start);
+    match s.frame_start {
+        Some(start) => out.frame_start = i64::from(start),
+        None => {
+            if let Some(code) = nhed.and_then(|b| b.get(14).copied()) {
+                col.lose(LossCategory::ProjectSettings, format!("frame count start code {code} (not known; the current start is kept)"));
+            }
+        }
     }
     out
 }

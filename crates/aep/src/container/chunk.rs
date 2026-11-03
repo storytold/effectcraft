@@ -89,6 +89,12 @@ impl<'a> Chunk<'a> {
         self.id == LIST && self.list_type().is_some_and(|t| &t == list_type)
     }
 
+    /// True when this is a `LIST` whose content could not be read as chunks (see
+    /// [`Body::OpaqueList`]): damaged, or nested deeper than the limit.
+    pub fn is_opaque_list(&self) -> bool {
+        matches!(self.body, Body::OpaqueList { .. })
+    }
+
     /// True when this is a chunk (not a `LIST`) with the given id.
     pub fn is(&self, id: &[u8; 4]) -> bool {
         &self.id == id
