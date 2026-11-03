@@ -36,6 +36,9 @@ pub struct MediaOverride {
     pub(crate) item: ItemId,
 }
 
+/// The most pixels a solid layer's buffer holds (as the other layer buffers are held to).
+const MAX_SOLID_PIXELS: f64 = 16.0e6;
+
 impl MediaOverride {
     /// A Media Replacement of `layer`'s footage by `item`.
     pub fn new(layer: LayerId, item: ItemId) -> Self {
@@ -690,6 +693,10 @@ impl<'a> Renderer<'a> {
         match &layer.source {
             LayerSource::Solid { item } => {
                 let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
+                // One colour: a solid larger than MAX_SOLID_PIXELS is made at a lower scale (the
+                // buffer carries it) instead of allocating gigabytes for a uniform plane.
+                let area = (sol.width as f64 * s) * (sol.height as f64 * s);
+                let s = if area > MAX_SOLID_PIXELS { s * (MAX_SOLID_PIXELS / area).sqrt() } else { s };
                 let w = ((sol.width as f64 * s).ceil() as u32).max(1);
                 let h = ((sol.height as f64 * s).ceil() as u32).max(1);
                 if layer.switches.adjustment {

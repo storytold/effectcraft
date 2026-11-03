@@ -244,12 +244,21 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
             "expressionSelector" => {
                 let Some(prop) = sel.get("amount") else { continue };
                 let stat = ctx.v3(layer, sel, "amount", [100.0; 3]);
+                // One allowance for the whole layer: the expression runs per character, each run
+                // with its own time limit, so a slow expression on a long text is stopped once it
+                // has failed or the layer's evaluations pass MAX_SELECTOR_TIME.
+                let start = web_time::Instant::now();
+                let stopped = std::cell::Cell::new(false);
                 Box::new(move |i, n, prev| {
                     let pv = prev.map(|x| x * 100.0);
                     // Without an expression engine: the static amount scales the selection.
                     let fallback = [0, 1, 2].map(|d| stat[d] * prev[d]);
-                    let r = match ctx.expr.filter(|_| prop.has_expression()) {
-                        Some(h) => h.eval_text_selector(ctx, layer, prop, i, n, pv).unwrap_or(fallback),
+                    let live = !stopped.get() && start.elapsed() < MAX_SELECTOR_TIME;
+                    let r = match ctx.expr.filter(|_| live && prop.has_expression()) {
+                        Some(h) => h.eval_text_selector(ctx, layer, prop, i, n, pv).unwrap_or_else(|_| {
+                            stopped.set(true);
+                            fallback
+                        }),
                         None => fallback,
                     };
                     r.map(|x| (x / 100.0).clamp(-1.0, 1.0))
@@ -275,6 +284,8 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
     acc
 }
 
+/// The most time one layer's Expression Selectors may take across all its characters.
+const MAX_SELECTOR_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 /// Evaluate animators for every glyph.
 pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &TextLayout) -> Vec<CharXf> {
     let mut out = vec![CharXf::default(); lay.glyphs.len()];
