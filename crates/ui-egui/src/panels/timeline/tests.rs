@@ -638,3 +638,143 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
         assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
     }
 }
+
+#[test]
+fn layer_bar_snapping_uses_pointer_intent_and_stationary_targets() {
+    let mut app = app();
+    app.session.execute("comp.settings", json!({"frameRate":30})).unwrap();
+    let ids: Vec<_> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    let moving = ids[0];
+    let fixed = ids[1];
+    app.session.execute("layer.timing", json!({"layers":[moving],"in":1.0,"out":2.0})).unwrap();
+    app.session.execute("layer.timing", json!({"layers":[fixed],"in":3.0,"out":4.0})).unwrap();
+    let comp = app.session.active_comp().unwrap();
+    let sec = Tick::from_seconds_f64;
+    let mut drag = BarDrag { in_point: sec(1.0), out_point: sec(2.0), pixels: 94.0, limits: (Tick(i64::MIN), Tick(i64::MAX)) };
+    assert_eq!(drag.delta(comp, &[moving], BarEdit::Move, 100.0, true, sec(0.0)), sec(1.0));
+    assert_ne!(drag.delta(comp, &[moving], BarEdit::Move, 100.0, false, sec(0.0)), sec(1.0));
+    assert_ne!(drag.delta(comp, &[moving, fixed], BarEdit::Move, 100.0, true, sec(0.0)), sec(1.0));
+    drag.pixels = 121.0;
+    assert_eq!(drag.delta(comp, &[moving], BarEdit::Move, 100.0, true, sec(0.0)), sec(1.2));
+    drag.pixels = 194.0;
+    assert_eq!(drag.delta(comp, &[moving], BarEdit::In, 100.0, true, sec(0.0)), sec(2.0));
+    drag.pixels = 94.0;
+    assert_eq!(drag.delta(comp, &[moving], BarEdit::Out, 100.0, true, sec(0.0)), sec(1.0));
+    assert_eq!(drag.delta(comp, &[moving, fixed], BarEdit::Out, 100.0, true, sec(3.0)), sec(1.0));
+    // The same 6-pixel distance at a different zoom still snaps.
+    drag.pixels = 194.0;
+    assert_eq!(drag.delta(comp, &[moving], BarEdit::Out, 200.0, true, sec(0.0)), sec(1.0));
+}
+
+#[test]
+fn timeline_pointer_drag_snaps_releases_and_undoes_as_one_edit() {
+    use crate::{bench::Driver, dock::PanelKind};
+    let mut app = app();
+    app.session.execute("comp.settings", json!({"frameRate":30})).unwrap();
+    let ids: Vec<_> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    let moving = ids[0];
+    let fixed = ids[1];
+    app.session.execute("layer.timing", json!({"layers":[moving],"in":0.5,"out":1.5})).unwrap();
+    app.session.execute("layer.timing", json!({"layers":[fixed],"in":2.5,"out":3.5})).unwrap();
+    app.session.execute("layer.select", json!({"layers":[moving]})).unwrap();
+    if !app.session.state.snapping {
+        app.session.execute("view.snapping", json!({})).unwrap();
+    }
+    app.ui.maximized = Some(PanelKind::Timeline);
+    let mut d = Driver::new(app, vec2(1680.0, 1020.0));
+    for _ in 0..3 {
+        d.step();
+    }
+    let bar = d.app.auto.find(&format!("timeline.layer.{moving}.bar")).unwrap().rect;
+    let pps = bar[2]; // The moving layer is exactly one second long.
+    let from = pos2(bar[0] + bar[2] * 0.5, bar[1] + bar[3] * 0.5);
+    d.step_with(vec![
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+    ]);
+    // A missed stop from a previous off-screen gesture must not supply the next drag's origin.
+    d.ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::unique(("bar-drag", moving, "move")),
+            BarDrag { in_point: Tick::ZERO, out_point: Tick::from_seconds_f64(1.0), pixels: 500.0, limits: (Tick(i64::MIN), Tick(i64::MAX)) },
+        )
+    });
+    let near = from + vec2(pps - 5.0, 0.0);
+    d.step_with(vec![egui::Event::PointerMoved(near)]);
+    let timing = |d: &Driver| {
+        let layer = d.app.session.active_comp().unwrap().layer(LayerId(moving)).unwrap();
+        (layer.in_point, layer.out_point)
+    };
+    assert_eq!(timing(&d), (Tick::from_seconds_f64(1.5), Tick::from_seconds_f64(2.5)));
+    let away = from + vec2(pps * 1.3, 0.0);
+    d.step_with(vec![egui::Event::PointerMoved(away)]);
+    assert!(timing(&d).1 > Tick::from_seconds_f64(2.7));
+    d.step_with(vec![egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+    let after = timing(&d);
+    d.app.session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(timing(&d), (Tick::from_seconds_f64(0.5), Tick::from_seconds_f64(1.5)));
+    d.app.session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(timing(&d), after);
+}
+
+#[test]
+fn layer_bar_snapping_preserves_fractional_frame_boundaries() {
+    let mut app = app(); // The default comp rate is 30000/1001.
+    let ids: Vec<_> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    app.session.execute("layer.timing", json!({"layers":[ids[0]],"in":1.0,"out":2.0})).unwrap();
+    app.session.execute("layer.timing", json!({"layers":[ids[1]],"in":3.0,"out":4.0})).unwrap();
+    let comp = app.session.active_comp().unwrap();
+    let layer = comp.layer(LayerId(ids[0])).unwrap();
+    let mut drag = BarDrag::new(comp, layer, &[ids[0]], BarEdit::Move);
+    drag.pixels = 94.0;
+    let delta = drag.delta(comp, &[ids[0]], BarEdit::Move, 100.0, true, Tick::ZERO);
+    assert_eq!(delta, Tick(254_270_016_000)); // Thirty frames at 30000/1001 fps.
+    assert_eq!(layer.out_point + delta, comp.layer(LayerId(ids[1])).unwrap().in_point);
+    for pps in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert_eq!(drag.delta(comp, &[ids[0]], BarEdit::Move, pps, true, Tick::ZERO), Tick::ZERO);
+    }
+}
+
+#[test]
+fn timeline_selected_trims_stop_together_and_reverse_without_amplification() {
+    use crate::{bench::Driver, dock::PanelKind};
+    let mut app = app();
+    app.session.execute("comp.settings", json!({"frameRate":30})).unwrap();
+    let ids: Vec<_> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    app.session.execute("layer.timing", json!({"layers":[ids[0]],"in":0.5,"out":1.5})).unwrap();
+    app.session.execute("layer.timing", json!({"layers":[ids[1]],"in":1.0,"out":3.0})).unwrap();
+    app.session.execute("layer.select", json!({"layers":ids})).unwrap();
+    if app.session.state.snapping {
+        app.session.execute("view.snapping", json!({})).unwrap();
+    }
+    app.ui.maximized = Some(PanelKind::Timeline);
+    let mut d = Driver::new(app, vec2(1680.0, 1020.0));
+    for _ in 0..3 {
+        d.step();
+    }
+    let bar = d.app.auto.find(&format!("timeline.layer.{}.bar", ids[0])).unwrap().rect;
+    let edge = d.app.auto.find(&format!("timeline.layer.{}.bar.out", ids[0])).unwrap().rect;
+    let from = pos2(edge[0] + edge[2] * 0.5, edge[1] + edge[3] * 0.5);
+    let sec = Tick::from_seconds_f64;
+    let outs = |d: &Driver| -> Vec<Tick> {
+        let comp = d.app.session.active_comp().unwrap();
+        ids.iter().map(|id| comp.layer(LayerId(*id)).unwrap().out_point).collect()
+    };
+    d.step_with(vec![
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+    ]);
+    d.step_with(vec![egui::Event::PointerMoved(from - vec2(bar[2] * 1.2, 0.0))]);
+    assert_eq!(outs(&d), vec![sec(0.5) + Tick(8_467_200_000), sec(2.0) + Tick(8_467_200_000)]);
+    let stopped = outs(&d);
+    d.step_with(vec![egui::Event::PointerMoved(from - vec2(bar[2] * 1.4, 0.0))]);
+    assert_eq!(outs(&d), stopped);
+    let reversed = from - vec2(bar[2] * 0.21, 0.0);
+    d.step_with(vec![egui::Event::PointerMoved(reversed)]);
+    assert_eq!(outs(&d), vec![sec(1.3), sec(2.8)]);
+    d.step_with(vec![egui::Event::PointerButton { pos: reversed, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+    d.app.session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(outs(&d), vec![sec(1.5), sec(3.0)]);
+    d.app.session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(outs(&d), vec![sec(1.3), sec(2.8)]);
+}

@@ -2062,7 +2062,7 @@ fn layer_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCt
     layer_source_extent(app, ui, g, rc, bar, lc);
     let bars = layer_bar_hits(app, ui, g, rc, bar);
     let quick = layer_quick_offset_begin(ui, g, rc, &bars.body);
-    layer_bar_drag(g, rc, &bars, quick);
+    layer_bar_drag(app.session.state.snapping, g, rc, &bars, quick);
     layer_bar_markers(app, ui, g, rc);
 }
 
@@ -3336,44 +3336,102 @@ fn layer_quick_offset_begin(ui: &mut egui::Ui, g: &Rw, rc: &RowCtx<'_>, body: &e
     ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id)
 }
 
-/// Moving and trimming a layer bar by whole frames.
-fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
+#[derive(Clone, Copy, Debug)]
+enum BarEdit {
+    Move,
+    In,
+    Out,
+}
+
+#[derive(Clone)]
+struct BarDrag {
+    in_point: Tick,
+    out_point: Tick,
+    pixels: f64,
+    limits: (Tick, Tick),
+}
+
+impl BarDrag {
+    fn new(comp: &Comp, layer: &Layer, targets: &[u64], kind: BarEdit) -> Self {
+        let selected: std::collections::HashSet<_> = targets.iter().copied().collect();
+        let mut limits = (Tick(i64::MIN), Tick(i64::MAX));
+        for l in comp.layers.iter().filter(|l| selected.contains(&l.id.0)) {
+            let bounds = match kind {
+                BarEdit::Move => continue,
+                BarEdit::In => (Tick::ZERO.min(l.in_point) - l.in_point, (l.out_point - comp.frame_duration() - l.in_point).max(Tick::ZERO)),
+                BarEdit::Out => ((l.in_point + comp.frame_duration() - l.out_point).min(Tick::ZERO), comp.duration.max(l.out_point) - l.out_point),
+            };
+            limits = (limits.0.max(bounds.0), limits.1.min(bounds.1));
+        }
+        Self { in_point: layer.in_point, out_point: layer.out_point, pixels: 0.0, limits }
+    }
+
+    fn delta(&self, comp: &Comp, targets: &[u64], kind: BarEdit, pps: f64, snapping: bool, playhead: Tick) -> Tick {
+        if !pps.is_finite() || pps <= 0.0 || !self.pixels.is_finite() {
+            return Tick::ZERO;
+        }
+        let seconds = self.pixels / pps;
+        let frame_duration = comp.frame_duration().seconds();
+        if !seconds.is_finite() || !frame_duration.is_finite() || frame_duration <= 0.0 {
+            return Tick::ZERO;
+        }
+        let frames = (seconds / frame_duration).trunc() as i64;
+        let raw = comp.frame_rate.tick_of(frames);
+        if !snapping {
+            return raw;
+        }
+        let edges: &[Tick] = match kind {
+            BarEdit::Move => &[self.in_point, self.out_point],
+            BarEdit::In => &[self.in_point],
+            BarEdit::Out => &[self.out_point],
+        };
+        let selected: std::collections::HashSet<_> = targets.iter().copied().collect();
+        let candidates = std::iter::once(playhead).chain(comp.layers.iter().filter(|l| !selected.contains(&l.id.0)).flat_map(|l| [l.in_point, l.out_point]));
+        // Compare against pointer intent, never the last snapped output, so the magnet releases.
+        candidates
+            .flat_map(|target| edges.iter().map(move |edge| comp.frame_rate.snap_nearest(target - *edge)))
+            .filter(|delta| ((delta.seconds() - seconds) * pps).abs() <= 8.0)
+            .min_by(|a, b| (a.seconds() - seconds).abs().total_cmp(&(b.seconds() - seconds).abs()))
+            .unwrap_or(raw)
+    }
+}
+
+/// Moving and trimming a layer bar by whole frames, with optional magnetic targets.
+fn layer_bar_drag(snapping: bool, g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
     let BarResps { body, lin, lout } = bars;
-    let pps = g.tl.pps;
-    let fd = g.tl.fd;
     let ctx = g.tl.ctx.clone();
-    let actions = &mut g.tl.actions;
-    let selected = &g.selected;
-    let ui_actions = &mut g.ui_actions;
     let layer = rc.layer;
     let drag_key = format!("bar-{}", layer.id.0);
-    for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
-        if kind == "move" && quick {
+    for (resp, kind, name) in [(body, BarEdit::Move, "move"), (lin, BarEdit::In, "in"), (lout, BarEdit::Out, "out")] {
+        if matches!(kind, BarEdit::Move) && quick {
             continue;
         }
+        let acc_id = egui::Id::unique(("bar-drag", layer.id.0, name));
         if resp.dragged() {
-            let acc_id = egui::Id::unique(("bar-acc", layer.id.0, kind));
-            let mut acc: f32 = ctx.data(|d| d.get_temp(acc_id).unwrap_or(0.0));
-            acc += resp.drag_delta().x;
-            let frames = ((acc as f64 / pps) / fd).trunc() as i64;
-            if frames != 0 {
-                acc -= (frames as f64 * fd * pps) as f32;
-                let d = frames as f64 * fd;
-                // Moving or trimming a selected layer acts on the whole
-                // selection; each layer trims from its own in/out point.
-                let targets = json!(edited_layers(layer.id, selected));
+            let targets = edited_layers(layer.id, &g.selected);
+            let previous = if resp.drag_started() { None } else { ctx.data(|d| d.get_temp::<BarDrag>(acc_id)) };
+            let mut drag = previous.unwrap_or_else(|| BarDrag::new(&g.tl.comp, layer, &targets, kind));
+            drag.pixels += f64::from(resp.drag_delta().x);
+            // A shared limit prevents the engine's per-layer clamps from separating the selection.
+            let desired = drag.delta(&g.tl.comp, &targets, kind, g.tl.pps, snapping, g.tl.time).clamp(drag.limits.0, drag.limits.1);
+            let applied = match kind {
+                BarEdit::Move | BarEdit::In => layer.in_point - drag.in_point,
+                BarEdit::Out => layer.out_point - drag.out_point,
+            };
+            let delta = desired - applied;
+            if delta != Tick::ZERO {
                 let params = match kind {
-                    "move" => json!({"layers": targets, "delta": d, "merge": drag_key}),
-                    "in" => json!({"layers": targets, "inDelta": d, "merge": drag_key}),
-                    _ => json!({"layers": targets, "outDelta": d, "merge": drag_key}),
+                    BarEdit::Move => json!({"layers": targets, "delta": delta.seconds(), "merge": drag_key}),
+                    BarEdit::In => json!({"layers": targets, "inDelta": delta.seconds(), "merge": drag_key}),
+                    BarEdit::Out => json!({"layers": targets, "outDelta": delta.seconds(), "merge": drag_key}),
                 };
-                actions.push(("layer.timing".into(), params));
+                g.tl.actions.push(("layer.timing".into(), params));
             }
-            ctx.data_mut(|d| d.insert_temp(acc_id, acc));
+            ctx.data_mut(|d| d.insert_temp(acc_id, drag));
         }
         if resp.drag_stopped() {
-            ctx.data_mut(|d| d.remove::<f32>(egui::Id::unique(("bar-acc", layer.id.0, kind))));
-            ui_actions.push(UiAct::EndMerge);
+            ctx.data_mut(|d| d.remove::<BarDrag>(acc_id));
+            g.ui_actions.push(UiAct::EndMerge);
         }
     }
 }
