@@ -173,8 +173,9 @@ pub struct FillPlan {
 }
 
 /// Native builds spill the input, the membrane-filled neighbours and the propagated copies, and
-/// pack the holes to one bit per pixel, so only the two packed masks (~1/4 byte a pixel a frame)
-/// plus a small per-thread working set stay resident (#2570). wasm has no spill and keeps the
+/// pack the holes to one bit per pixel, so only the two packed masks and the two flow fields
+/// (~1/2 byte a pixel a frame) plus a small per-thread working set stay resident (#2570). wasm
+/// has no spill and keeps the
 /// input and the working copies in RAM (~32 bytes a pixel a frame). When even that peak is more
 /// than `available`, report it up front instead of running out of memory partway through
 /// (#1789, #2570 review).
@@ -183,11 +184,13 @@ fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<Str
     let per_frame = (frames as u64).saturating_mul(px);
     // `holes` and the leftover propagation masks, packed to a bit a pixel each.
     let masks = per_frame / 4;
+    // The forward and backward flow fields, ~0.125 byte a pixel each.
+    let flows = per_frame / 4;
     // wasm keeps the input and one working copy in RAM at every stage.
     let resident = if cfg!(target_arch = "wasm32") { per_frame.saturating_mul(32) } else { 0 };
     // A few full frames per rayon thread (membrane, flow, lighting scratch).
     let scratch = px.saturating_mul(128);
-    let need = masks.saturating_add(resident).saturating_add(scratch);
+    let need = masks.saturating_add(flows).saturating_add(resident).saturating_add(scratch);
     (need > available).then(|| {
         let gb = |b: u64| b as f64 / 1e9;
         format!(
