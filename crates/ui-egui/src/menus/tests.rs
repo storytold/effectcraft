@@ -504,12 +504,12 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
         assert!(app.ui.status.contains("without a local path"), "{}", app.ui.status);
         if bad_import {
             assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
-            let details = &app.error_toast.as_ref().expect("all import errors remain available").message;
+            let details = &app.error_toasts.back().expect("all import errors remain available").message;
             assert!(details.contains("also-no-pdf.vectorcraft"), "{details}");
             if background {
                 app.session.execute("jobs.wait", json!({})).unwrap();
                 app.handle_events(&ctx);
-                let details = &app.error_toast.as_ref().unwrap().message;
+                let details = &app.error_toasts.back().unwrap().message;
                 for name in ["no-pdf.vectorcraft", "also-no-pdf.vectorcraft", "pending.png"] {
                     assert!(details.contains(name), "{details}");
                 }
