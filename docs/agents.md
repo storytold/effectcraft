@@ -325,7 +325,7 @@ build real projects through these interfaces; they are worked examples of everyt
   pipelines default to) and `exrBitDepth: half|float` (default `float`); `renderQueue.formats`
   lists them.
   PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
-  stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float.
+  stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both

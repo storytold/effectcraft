@@ -314,6 +314,17 @@ fn apply_resize(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+/// OpenEXR `exrCompression` and `exrBitDepth`.
+fn apply_exr(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
+    if let Some(c) = enum_p(p, "exrCompression", cmd, ExrCompression::from_name, EXR_COMPRESSIONS)? {
+        om.exr_compression = c;
+    }
+    if let Some(d) = enum_p(p, "exrBitDepth", cmd, ExrBitDepth::from_name, "half|float")? {
+        om.exr_bit_depth = d;
+    }
+    Ok(())
+}
+
 /// Apply Output Module parameters (`template` first). `roi`: the viewer's region of interest
 /// (captured by `crop.useRoi`).
 fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
@@ -347,12 +358,7 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
     if let Some(pp) = str_p(p, "proresProfile") {
         om.prores_profile = ProResProfile::from_name(pp).ok_or_else(|| bad(cmd, "proresProfile: proxy|lt|standard|hq|4444|4444xq"))?;
     }
-    if let Some(c) = enum_p(p, "exrCompression", cmd, ExrCompression::from_name, EXR_COMPRESSIONS)? {
-        om.exr_compression = c;
-    }
-    if let Some(d) = enum_p(p, "exrBitDepth", cmd, ExrBitDepth::from_name, "half|float")? {
-        om.exr_bit_depth = d;
-    }
+    apply_exr(om, p, cmd)?;
     apply_crop(om, roi, p, cmd)?;
     apply_resize(om, p, cmd)?;
     if let Some(a) = p.get("audio") {

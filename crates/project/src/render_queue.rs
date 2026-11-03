@@ -972,6 +972,11 @@ impl ExrCompression {
             ExrCompression::Dwaa | ExrCompression::Dwab => true,
         }
     }
+    /// Whether the method leaves the samples uncompressed at `depth` (B44 and B44A pack only half
+    /// floats).
+    pub fn stores_uncompressed(self, depth: ExrBitDepth) -> bool {
+        self == ExrCompression::None || (matches!(self, ExrCompression::B44 | ExrCompression::B44a) && depth == ExrBitDepth::Float)
+    }
     /// Parse a compression name: `none`/`uncompressed`, `rle`, `zips`/`zip1` (Nuke's "Zip (1
     /// scanline)"), `zip`/`zip16`,
     /// `piz`, `pxr24`, `b44`, `b44a`, `dwaa`, `dwab` (any case).
@@ -1355,10 +1360,17 @@ impl OutputModule {
         }
         self.output = format!("{stem}.{}", format.extension());
     }
-    /// The OpenEXR compression's label, marked when it is lossy at the module's bit depth.
+    /// The OpenEXR compression's label, marked when it is lossy at the module's bit depth or, for
+    /// B44 / B44A at 32-bit float, stores the samples uncompressed.
     pub fn exr_compression_label(&self) -> String {
-        let c = self.exr_compression;
-        if c.is_lossy(self.exr_bit_depth) { format!("{} (lossy)", c.label()) } else { c.label().into() }
+        let (c, d) = (self.exr_compression, self.exr_bit_depth);
+        if c.is_lossy(d) {
+            format!("{} (lossy)", c.label())
+        } else if c != ExrCompression::None && c.stores_uncompressed(d) {
+            format!("{} (uncompressed at float)", c.label())
+        } else {
+            c.label().into()
+        }
     }
     /// Whether this module can write alpha (the format can, and WebM uses VP9).
     pub fn supports_alpha(&self) -> bool {
@@ -2074,6 +2086,11 @@ mod tests {
         assert!(m.describe().contains(&("Bit Depth", "16-bit Half Float".to_string())));
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap(), m);
+        m.exr_compression = ExrCompression::B44a;
+        m.exr_bit_depth = ExrBitDepth::Float;
+        assert_eq!(m.exr_compression_label(), "B44A (uncompressed at float)");
+        m.exr_bit_depth = ExrBitDepth::Half;
+        assert_eq!(m.exr_compression_label(), "B44A (lossy)");
         let old: OutputModule = serde_json::from_str(r#"{"format":"ExrSequence","channels":"Rgba"}"#).unwrap();
         assert_eq!((old.exr_compression, old.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
     }

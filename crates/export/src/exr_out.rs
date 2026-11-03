@@ -7,15 +7,25 @@
 //! `exr` crate's default levels for ZIP and DWA. Half-float samples are rounded from the 32-bit
 //! render to the nearest half, ties to even. The lossy methods (PXR24 on float, B44 / B44A on half,
 //! DWAA / DWAB at either depth) keep every linear sample within 0.03 + 6 % of its value in the
-//! tests below. DWAA / DWAB files come out about the same size at either depth.
+//! tests below. Half float holds at most ±65 504: larger samples are written as that limit, not
+//! as infinity.
 
 use std::io::{Seek, Write};
 
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
 use exr::prelude::{Blocks, Compression, Encoding, Image, Layer, LayerAttributes, LineOrder, SpecificChannels, Vec2, WritableImage, f16};
 
+/// The largest finite half float.
+const HALF_MAX: f32 = 65_504.0;
+
+/// A sample as half float: rounded to the nearest half (ties to even), held to ±65 504 so an
+/// over-range render doesn't turn into infinity. NaN stays NaN.
+fn to_half(v: f32) -> f16 {
+    f16::from_f32(v.clamp(-HALF_MAX, HALF_MAX))
+}
+
 /// The `exr` crate's compression for an Output Module setting.
-pub(crate) fn compression(c: ExrCompression) -> Compression {
+pub fn compression(c: ExrCompression) -> Compression {
     match c {
         ExrCompression::None => Compression::Uncompressed,
         ExrCompression::Rle => Compression::RLE,
@@ -35,15 +45,10 @@ fn encoding(c: ExrCompression) -> Encoding {
     Encoding { compression: compression(c), blocks: Blocks::ScanLines, line_order: LineOrder::Increasing }
 }
 
-/// Write `w`×`h` RGBA pixels (`data`: four linear, premultiplied samples per pixel, rows top to
-/// bottom) as one OpenEXR frame, its blocks compressed in parallel as before. A pixel `data`
+/// Write `w`×`h` RGBA pixels (`data`: four samples per pixel as they are to be written,
+/// premultiplied, rows top to bottom) as one OpenEXR frame, its blocks compressed in parallel as before. A pixel `data`
 /// doesn't cover is written as transparent black.
-pub(crate) fn write_rgba<W: Write + Seek>(
-    file: &mut W,
-    data: &[f32],
-    (w, h): (usize, usize),
-    (c, depth): (ExrCompression, ExrBitDepth),
-) -> exr::error::UnitResult {
+pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, usize), (c, depth): (ExrCompression, ExrBitDepth)) -> exr::error::UnitResult {
     let row = w.saturating_mul(4);
     let px = move |p: Vec2<usize>| -> [f32; 4] {
         let o = p.y().saturating_mul(row).saturating_add(p.x().saturating_mul(4));
@@ -71,7 +76,7 @@ pub(crate) fn write_rgba<W: Write + Seek>(
                 LayerAttributes::default(),
                 encoding(c),
                 SpecificChannels::rgba(move |p: Vec2<usize>| {
-                    let [r, g, b, a] = px(p).map(f16::from_f32);
+                    let [r, g, b, a] = px(p).map(to_half);
                     (r, g, b, a)
                 }),
             ));
@@ -152,7 +157,11 @@ mod tests {
             let ty = if depth == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
             for c in ExrCompression::ALL {
                 assert_eq!(c.is_lossy(depth), !compression(c).is_lossless_for(ty), "{c:?} {depth:?}");
-                let (got, stored) = read_back(&write(&src, (w, h), c, depth));
+                let bytes = write(&src, (w, h), c, depth);
+                if c.is_lossy(depth) {
+                    assert!(bytes.len() < write(&src, (w, h), ExrCompression::None, depth).len(), "{c:?} {depth:?}: smaller than None");
+                }
+                let (got, stored) = read_back(&bytes);
                 assert_eq!(stored, ty, "{c:?} {depth:?}");
                 assert_eq!(got.len(), want.len());
                 if c.is_lossy(depth) {
@@ -202,6 +211,18 @@ mod tests {
         let default = (ExrCompression::default(), ExrBitDepth::default());
         assert_eq!(default, (ExrCompression::Zip, ExrBitDepth::Float));
         assert_eq!(write(&src, (w, h), default.0, default.1), before.into_inner());
+    }
+
+    /// Half-float files hold samples above the half range at its largest finite value, not as
+    /// infinity; the 32-bit file keeps them.
+    #[test]
+    fn half_clamps_over_range_samples_to_the_largest_half() {
+        let data = [1.0e6, 70_000.0, 65_504.0, 1.0, -1.0e6, 0.5, f32::NAN, 1.0];
+        let (half, _) = read_back(&write(&data, (2, 1), ExrCompression::Zip, ExrBitDepth::Half));
+        assert_eq!(&half[..6], &[65_504.0, 65_504.0, 65_504.0, 1.0, -65_504.0, 0.5]);
+        assert!(half[6].is_nan() && half.iter().all(|v| !v.is_infinite()));
+        let (float, _) = read_back(&write(&data, (2, 1), ExrCompression::Zip, ExrBitDepth::Float));
+        assert_eq!(&float[..2], &[1.0e6, 70_000.0]);
     }
 
     /// Data shorter than the frame (never produced by the Render Queue) writes transparent black

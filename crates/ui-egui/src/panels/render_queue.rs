@@ -278,7 +278,14 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
 fn exr_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut Vec<(String, Value)>) {
     v.push(("-".into(), Value::Null));
     for c in ExrCompression::ALL {
-        let label = if c.is_lossy(o.exr_bit_depth) { "EXR Compression: {} (lossy)" } else { "EXR Compression: {}" };
+        let d = o.exr_bit_depth;
+        let label = if c.is_lossy(d) {
+            "EXR Compression: {} (lossy)"
+        } else if c != ExrCompression::None && c.stores_uncompressed(d) {
+            "EXR Compression: {} (uncompressed at float)"
+        } else {
+            "EXR Compression: {}"
+        };
         v.push((mark(o.exr_compression == c, &tr_args(label, &[&(c.label())])), json!({"exrCompression": c.name()})));
     }
     v.push(("-".into(), Value::Null));
@@ -1109,7 +1116,7 @@ mod tests {
         let m = menu(&it);
         assert_eq!(find(&m, "EXR Compression: ZIP (16 scan lines)").unwrap().0, "✓ EXR Compression: ZIP (16 scan lines)");
         assert_eq!(find(&m, "EXR Compression: PIZ").unwrap().1, serde_json::json!({"exrCompression": "piz"}));
-        assert!(find(&m, "EXR Compression: PXR24 (lossy)").is_some() && find(&m, "EXR Compression: B44").is_some());
+        assert!(find(&m, "EXR Compression: PXR24 (lossy)").is_some() && find(&m, "EXR Compression: B44 (uncompressed at float)").is_some());
         assert_eq!(find(&m, "EXR Compression: ZIPS (1 scan line)").unwrap().1, serde_json::json!({"exrCompression": "zips"}));
         assert_eq!(find(&m, "EXR Bit Depth: 32-bit Float").unwrap().0, "✓ EXR Bit Depth: 32-bit Float");
         assert_eq!(find(&m, "EXR Bit Depth: 16-bit Half Float").unwrap().1, serde_json::json!({"exrBitDepth": "half"}));

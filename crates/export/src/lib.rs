@@ -34,7 +34,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod encode;
-mod exr_out;
+pub mod exr_out;
 mod hevc_av1;
 mod out;
 mod pipeline;

@@ -221,3 +221,20 @@ fn exr_compression_and_bit_depth_options() {
     assert_eq!((q[1].output.exr_compression, q[1].output.exr_bit_depth), (ExrCompression::Rle, ExrBitDepth::Half));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Settings ▸ Export ▸ Append Bit Depth to File Name names a half-float OpenEXR module's frames
+/// `_16bpc` and a 32-bit one's `_32bpc` (#2911).
+#[test]
+fn append_bit_depth_follows_the_exr_bit_depth() {
+    use effectcraft_project::render_queue::{ExrBitDepth, RenderQueueItem};
+    let mut s = session();
+    s.execute("prefs.set", json!({"values": {"export.appendBitsToName": true}})).unwrap();
+    let mut item = RenderQueueItem::new(1, s.active_comp_id().unwrap());
+    item.output = effectcraft_project::render_queue::OutputModule::for_format(OutputFormat::ExrSequence);
+    item.output.output = "/out/Main_[#####].exr".into();
+    for (depth, tag) in [(ExrBitDepth::Half, "_16bpc"), (ExrBitDepth::Float, "_32bpc")] {
+        item.output.exr_bit_depth = depth;
+        let outs = s.outputs_of(&item, None).unwrap();
+        assert!(outs.iter().all(|(_, p)| p.contains(tag)), "{depth:?}: {outs:?}");
+    }
+}
