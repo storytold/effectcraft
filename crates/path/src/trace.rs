@@ -85,6 +85,10 @@ pub fn trace(field: &[f32], w: usize, h: usize, o: &TraceOpts) -> Vec<Traced> {
 /// Grid cell (pixels) of the index [`nesting_depths`] finds candidate containers with.
 const DEPTH_CELL: f64 = 32.0;
 
+/// Most grid cells one loop's box is entered into; a box covering more is kept in a short list
+/// every point is tested against, so nested full-image contours can't fill the grid.
+const MAX_BOX_CELLS: usize = 64;
+
 /// Per loop (simplified points, |area|): how many other, larger loops contain its first point.
 /// Only loops whose bounding box holds that point can contain it, so each loop's box is entered
 /// into a coarse grid over the `w × h` field and a point is tested against the loops of its
@@ -102,9 +106,15 @@ fn nesting_depths(polys: &[(&[[f64; 2]], f64)], w: usize, h: usize) -> Vec<usize
         })
         .collect();
     let mut grid: Vec<Vec<usize>> = vec![Vec::new(); gw * gh];
+    let mut wide: Vec<usize> = Vec::new();
     for (j, b) in boxes.iter().enumerate() {
-        for cy in cell(b[1], gh)..=cell(b[3], gh) {
-            for cx in cell(b[0], gw)..=cell(b[2], gw) {
+        let (x0, x1, y0, y1) = (cell(b[0], gw), cell(b[2], gw), cell(b[1], gh), cell(b[3], gh));
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > MAX_BOX_CELLS {
+            wide.push(j);
+            continue;
+        }
+        for cy in y0..=y1 {
+            for cx in x0..=x1 {
                 grid[cy * gw + cx].push(j);
             }
         }
@@ -114,6 +124,7 @@ fn nesting_depths(polys: &[(&[[f64; 2]], f64)], w: usize, h: usize) -> Vec<usize
             let p = polys[i].0[0];
             grid[cell(p[1], gh) * gw + cell(p[0], gw)]
                 .iter()
+                .chain(&wide)
                 .filter(|&&j| {
                     let b = boxes[j];
                     j != i && polys[j].1 > polys[i].1 && p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3] && point_in_poly(p, polys[j].0)
@@ -422,6 +433,20 @@ mod tests {
         assert_eq!(fast, pairs);
         assert_eq!(fast, t.iter().map(|t| t.depth).collect::<Vec<_>>());
         assert!(fast.iter().max() >= Some(&5));
+    }
+
+    #[test]
+    fn nesting_depths_count_wide_boxes_kept_out_of_the_grid() {
+        // Concentric squares whose boxes each cover far more than MAX_BOX_CELLS cells.
+        let (w, h) = (4000, 4000);
+        let squares: Vec<Vec<[f64; 2]>> = (0..40)
+            .map(|k| {
+                let (a, b) = (10.0 + 40.0 * k as f64, 3990.0 - 40.0 * k as f64);
+                vec![[a, a], [b, a], [b, b], [a, b]]
+            })
+            .collect();
+        let refs: Vec<(&[[f64; 2]], f64)> = squares.iter().map(|p| (p.as_slice(), (p[1][0] - p[0][0]).powi(2))).collect();
+        assert_eq!(nesting_depths(&refs, w, h), (0..40).collect::<Vec<_>>());
     }
 
     #[test]
