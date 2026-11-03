@@ -1091,9 +1091,10 @@ impl<'a> Interp<'a> {
                     self.b.skip("image (page pixel limit)");
                     return;
                 };
+                // Charged even when the decode fails: the declared size is what costs.
+                self.image_pixels = left;
                 match crate::image::decode(self.file, d, raw, Some(res), fill) {
                     Ok(img) => {
-                        self.image_pixels = left;
                         let decoded = (img.width, img.height, std::sync::Arc::new(img.rgba));
                         if let Some(k) = cache_key {
                             self.images.insert(k, decoded.clone());
