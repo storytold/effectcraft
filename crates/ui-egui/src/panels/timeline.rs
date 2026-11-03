@@ -13,7 +13,7 @@ use effectcraft_engine::project::{
 };
 use effectcraft_engine::render::EvalCtx;
 use effectcraft_engine::time::Tick;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -4232,6 +4232,20 @@ fn key_drag_begin(app: &mut EffectcraftApp, g: &Rw, kh: &KeyHit<'_>) {
     }
 }
 
+/// The size of a keyframe glyph and the radius of a roving key's dot.
+const KEY_GLYPH_SIZE: f32 = 11.0;
+const ROVING_KEY_RADIUS: f32 = 2.5;
+
+/// The rect a key's marker covers on screen (its hit rect is larger).
+fn key_glyph_rect(k: &effectcraft_engine::keyframe::Keyframe, center: Pos2) -> Rect {
+    if k.roving {
+        Rect::from_center_size(center, Vec2::splat(ROVING_KEY_RADIUS * 2.0))
+    } else {
+        let icon = k.icon();
+        icons::keyframe_bounds(center, KEY_GLYPH_SIZE, icon.left, icon.right)
+    }
+}
+
 /// Paints one keyframe marker; returns its hit rect.
 fn key_paint(g: &Rw, rc: &RowCtx<'_>, k: &effectcraft_engine::keyframe::Keyframe, x: f32, ks: bool) -> Rect {
     let t = g.tl.t;
@@ -4252,9 +4266,9 @@ fn key_paint(g: &Rw, rc: &RowCtx<'_>, k: &effectcraft_engine::keyframe::Keyframe
     let kcol = if k.muted { kcol.gamma_multiply(0.35) } else { kcol };
     if k.roving {
         // Roving keys: a small dot (their time follows their neighbours).
-        gp.circle_filled(c, 2.5, kcol);
+        gp.circle_filled(c, ROVING_KEY_RADIUS, kcol);
     } else {
-        icons::keyframe(&gp, c, 11.0, icon.left, icon.right, kcol);
+        icons::keyframe(&gp, c, KEY_GLYPH_SIZE, icon.left, icon.right, kcol);
     }
     Rect::from_center_size(c, vec2(12.0, 14.0))
 }
@@ -4678,7 +4692,33 @@ fn key_drag_follow(app: &mut EffectcraftApp, g: &mut Rw) {
     }
 }
 
-/// Releasing the key marquee selects the keys inside it.
+/// The keys whose markers touch box `br`, in row order (the comp's). `top` is the y of the first
+/// row, scrolled.
+fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect) -> Vec<effectcraft_engine::KeyRef> {
+    let mut keys = vec![];
+    let mut yy = top;
+    for row in rows {
+        let cy = yy + rh / 2.0;
+        yy += row_height(row, rh);
+        // No marker reaches a whole glyph from its row's center.
+        if let RowKind::Prop { uid } = row.kind
+            && cy >= br.min.y - KEY_GLYPH_SIZE
+            && cy <= br.max.y + KEY_GLYPH_SIZE
+            && let Some(l) = comp.layer(row.layer)
+            && let Some(pr) = l.props.find(uid)
+        {
+            for k in &pr.keys {
+                let x = tm.x(l.comp_time(k.time).seconds());
+                if key_glyph_rect(k, pos2(x, cy)).intersects(br) {
+                    keys.push(effectcraft_engine::KeyRef { layer: l.id, prop: uid, time: k.time });
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Releasing the key marquee selects the keys it touches.
 fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     let tm = g.tl.tm;
     let rows_rect = g.tl.rows_rect;
@@ -4692,25 +4732,8 @@ fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
         && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(egui::Id::unique("tl-box")))
     {
         ctx.data_mut(|d| d.remove::<Rect>(egui::Id::unique("tl-box")));
-        let mut keys = vec![];
-        let mut yy = rows_rect.min.y - app.ui.timeline.scroll_y;
-        for row in rows.iter() {
-            let cy = yy + rh / 2.0;
-            yy += row_height(row, rh);
-            if let RowKind::Prop { uid } = row.kind
-                && cy >= br.min.y
-                && cy <= br.max.y
-                && let Some(l) = comp.layer(row.layer)
-                && let Some(pr) = l.props.find(uid)
-            {
-                for k in &pr.keys {
-                    let x = tm.x(l.comp_time(k.time).seconds());
-                    if x >= br.min.x && x <= br.max.x {
-                        keys.push(json!({"layer": l.id.0, "prop": uid, "time": k.time.seconds()}));
-                    }
-                }
-            }
-        }
+        let touched = keys_in_box(&comp, rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, br);
+        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
         let mods = ui.input(|i| i.modifiers);
         if keys.is_empty() && !(mods.shift || mods.command) {
             // A marquee that catches nothing leaves nothing selected (layers included).
