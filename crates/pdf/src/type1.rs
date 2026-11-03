@@ -148,8 +148,9 @@ impl Type1 {
         };
         if let Some(p) = find(&priv_, b"/Subrs", 0) {
             let mut q = p + 6;
+            // The section ends at `/CharStrings`, found once rather than for every entry.
+            let lim = find(&priv_, b"/CharStrings", q).unwrap_or(priv_.len());
             while let Some(d) = find(&priv_, b"dup", q) {
-                let lim = find(&priv_, b"/CharStrings", q).unwrap_or(priv_.len());
                 if d > lim {
                     break;
                 }
@@ -223,6 +224,7 @@ impl Type1 {
             flex: None,
             done: false,
             depth: 0,
+            ops: crate::cff::MAX_GLYPH_OPS,
             seac: None,
         };
         st.run(cs);
@@ -270,6 +272,8 @@ struct T1<'a> {
     flex: Option<Vec<(f64, f64)>>,
     done: bool,
     depth: usize,
+    /// Instructions this glyph may still run, across its subroutine calls.
+    ops: usize,
     seac: Option<(f64, f64, f64, u8, u8)>,
 }
 
@@ -314,6 +318,12 @@ impl T1<'_> {
         }
         let mut i = 0;
         while i < cs.len() && !self.done {
+            // Subroutines that branch would multiply the work: the budget is shared.
+            let Some(left) = self.ops.checked_sub(1) else {
+                self.done = true;
+                return;
+            };
+            self.ops = left;
             let b0 = cs[i];
             i += 1;
             let s = |st: &Self, k: usize| st.stack.get(k).copied().unwrap_or(0.0);
@@ -531,6 +541,25 @@ mod tests {
         assert_eq!(w, 600.0);
         assert!((p.area().abs() - 250_000.0).abs() < 1e-6);
         assert_eq!(p.bounding_box(), kurbo::Rect::new(50.0, 0.0, 550.0, 500.0));
+    }
+
+    /// A subroutine that calls itself ten times: 10^10 calls within the depth limit of ten. The
+    /// glyph stops at its instruction budget instead.
+    #[test]
+    fn branching_subroutines_stop_at_the_instruction_budget() {
+        let mut out = b"%!PS-AdobeFont-1.0: Test 001\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\ncurrentfile eexec\n".to_vec();
+        // `0 callsubr` is `139 10`; `return` is 11, `endchar` 14 (lenIV -1: charstrings in clear).
+        let mut subr = [139u8, 10].repeat(10);
+        subr.push(11);
+        let mut priv_ = b"dup /Private 8 dict dup begin /lenIV -1 def\n/Subrs 1 array\n".to_vec();
+        priv_.extend_from_slice(format!("dup 0 {} RD ", subr.len()).as_bytes());
+        priv_.extend_from_slice(&subr);
+        priv_.extend_from_slice(b" NP\nend\n/CharStrings 1 dict dup begin\n/A 3 RD \x8b\x0a\x0e ND\nend\nend\nmark currentfile closefile\n");
+        out.extend(encrypt(&priv_, EEXEC_R, 4));
+        out.extend_from_slice(b"\n0000000000000000\ncleartomark\n");
+        let t = Type1::parse(&out).unwrap();
+        let (p, _) = t.outline("A").unwrap();
+        assert!(p.elements().is_empty());
     }
 
     /// A `/Subrs` entry whose `RD` length is `usize::MAX`: the bytes are not in the file, and
