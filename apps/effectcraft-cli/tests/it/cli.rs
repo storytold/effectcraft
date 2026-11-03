@@ -57,7 +57,7 @@ fn info_and_commands() {
 fn headless_memory_preferences_are_opt_in_and_report_effective_budgets() {
     let dir = tmp("memory-prefs-applied");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("prefs.json"), r#"{"memory":{"layerCacheMb":80,"mediaCacheMb":96,"previewCacheMb":128},"disk":{"diskCacheEnabled":true}}"#).unwrap();
+    std::fs::write(dir.join("prefs.json"), r#"{"memory":{"layerCacheMb":80,"mediaCacheMb":96,"previewCacheMb":128}}"#).unwrap();
     let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(["info", "--empty", "--memory-prefs", "--json"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -78,7 +78,12 @@ fn headless_memory_preferences_fail_explicitly_and_reject_bridge_mode() {
     let missing = bin().env("EFFECTCRAFT_CONFIG_DIR", dir.join("missing")).args(args).output().unwrap();
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--memory-prefs"));
-    for text in ["not json".to_string(), "{}".to_string(), r#"{"memory":{"layerCacheMb":"invalid"}}"#.to_string(), "x".repeat((1 << 20) + 1)] {
+    for text in [
+        "not json".to_string(),
+        "{}".to_string(),
+        r#"{"memory":{"layerCacheMb":"invalid"}}"#.to_string(),
+        "x".repeat((1 << 20) + 1),
+    ] {
         std::fs::write(dir.join("prefs.json"), text).unwrap();
         let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(args).output().unwrap();
         assert!(!out.status.success());
