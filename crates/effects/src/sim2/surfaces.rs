@@ -324,6 +324,11 @@ pub(super) fn wave_grid(res: usize, lw: f64, lh: f64) -> (usize, usize) {
     let mut res = res.max(2);
     if nodes(res) > MAX_WAVE_CELLS as f64 {
         res = ((res as f64 * (MAX_WAVE_CELLS as f64 / nodes(res)).sqrt()).floor() as usize).max(2);
+        // The estimate can land just over the cap; step down until the full grid fits, so the
+        // vertical cap below does not clip the layer's last rows.
+        while res > 2 && nodes(res) > MAX_WAVE_CELLS as f64 {
+            res -= 1;
+        }
     }
     let nx = res + 1;
     let ny = ((res as f64 * aspect).round().min((MAX_WAVE_CELLS / nx - 1) as f64) as usize).max(2) + 1;
