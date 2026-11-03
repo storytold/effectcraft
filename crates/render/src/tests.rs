@@ -1956,3 +1956,25 @@ fn comp_sampling_space_of_a_zero_scale_layer_is_transparent() {
     let img = render_frame(&p, cid, Tick::ZERO, 1.0);
     assert!(img.data.iter().all(|px| px[3] < 0.01), "no matte anywhere");
 }
+
+/// A layer smaller than a pixel at the render scale still reads Comp space on its own grid:
+/// one pixel of its size, not the referenced layer's pixels and size.
+#[test]
+fn comp_sampling_space_keeps_a_subpixel_layers_grid() {
+    use crate::{EffectHost, FxHost, NoFootage, RenderOpts, Renderer};
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 1, 1);
+    let matte = solid(&mut p, &comp, [0.0, 1.0, 0.0], 40, 40);
+    let (lid, mid) = (l.id, matte.id.0);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(l);
+    c.layers.push(matte);
+    let c = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
+    let renderer = Renderer::new(&p, &NoFootage, RenderOpts { scale: 0.5, ..RenderOpts::default() });
+    let l = c.layer(lid).unwrap();
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
+    let px = host.to_comp_space(mid, host.layer(mid, false).unwrap());
+    assert_eq!(px.size, [1.0, 1.0]);
+    assert_eq!((px.buf.img.width, px.buf.img.height, px.buf.offset, px.buf.scale), (1, 1, [0.0; 2], 0.5));
+}

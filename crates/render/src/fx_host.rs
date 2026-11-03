@@ -108,11 +108,12 @@ impl EffectHost for FxHost<'_, '_, '_> {
         // A 3D model or primitive is read as the comp's pixels already (`Renderer::solo_3d`).
         let other_to_comp = if other.source.is_model() { Mat3::default() } else { self.ctx.effect_to_comp(other) };
         // The result is the size of the running layer's own buffer, which the renderer already
-        // holds: past the largest side a comp can have, keep the layer-space read.
+        // holds (a layer under a pixel at this scale still gets one): past the largest side a
+        // comp can have, keep the layer-space read.
         let scale = px.buf.scale;
         let (w, h) = (size[0] * scale, size[1] * scale);
         let max = f64::from(effectcraft_raster::MAX_PADDED_SIDE);
-        if !(scale.is_finite() && scale > 0.0 && w.is_finite() && h.is_finite()) || w < 1.0 || h < 1.0 || w > max || h > max {
+        if !(scale.is_finite() && scale > 0.0 && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 || w > max || h > max {
             return px;
         }
         let mut img = Image::new(w.ceil() as u32, h.ceil() as u32);
