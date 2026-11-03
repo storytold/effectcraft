@@ -159,7 +159,9 @@ pub fn import(
     let (mut imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
     // Each file is probed once, though an EDL's media are probed before the layers are made.
     let mut probed: HashMap<String, Option<Footage>> = HashMap::new();
-    let mut probe_once = |path: &str| probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone();
+    // An EDL's guessed paths that leave the list's folder are not probed (see `guessed_outside`).
+    let outside = if format == TimelineFormat::Edl { guessed_outside(&imported.project, opts.base_dir.as_deref()) } else { HashSet::new() };
+    let mut probe_once = |path: &str| if outside.contains(path) { None } else { probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone() };
     let left_on_timecode = if format == TimelineFormat::Edl { rebase_to_file_timecode(&mut imported.project, &mut probe_once) } else { Vec::new() };
     let mut res = ImportResult { format: Some(format), ..Default::default() };
     for e in &report.entries {
@@ -196,6 +198,35 @@ const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media t
 /// An EDL's source times are its source timecodes, which FilmCraft's reader keeps as media time.
 /// The largest start timecode, in frames, a file may have: a day at 1000 fps.
 const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
+
+/// The paths an EDL reader guessed (media it flags offline: a line without `SOURCE FILE` names
+/// only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
+/// one would link a file elsewhere on the disk. They stay placeholders. A `SOURCE FILE` path is
+/// the list's own choice and is kept, also when another clip guesses the same path.
+fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<String> {
+    let inside = |path: &str| {
+        let p = std::path::Path::new(path);
+        let rest = match base_dir.filter(|b| !b.is_empty()) {
+            Some(b) => p.strip_prefix(b).ok(),
+            None => Some(p),
+        };
+        rest.is_some_and(|r| r.components().all(|c| matches!(c, std::path::Component::Normal(_))))
+    };
+    let (mut guessed, mut named) = (HashSet::new(), HashSet::new());
+    for it in project.items.values() {
+        if let fp::ItemKind::Media(m) = &it.kind
+            && let fp::MediaRef::File { path } = &m.media
+        {
+            if m.offline && !inside(path) {
+                guessed.insert(path.clone());
+            } else {
+                named.insert(path.clone());
+            }
+        }
+    }
+    guessed.retain(|p| !named.contains(p));
+    guessed
+}
 
 /// Put the clips of each file that has a start timecode on the file's own time, as FilmCraft does
 /// when it links the media of an imported EDL. Returns the names of the media that stay on

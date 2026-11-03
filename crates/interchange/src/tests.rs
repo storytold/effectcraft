@@ -433,6 +433,43 @@ FCM: NON-DROP FRAME
     assert_eq!(linked, Some(false));
 }
 
+/// A clip name that leaves the list's folder (`../x.mov`, an absolute path) is a guess too far:
+/// the file there is neither probed nor linked, and its timecode does not rebase the clip. A
+/// `SOURCE FILE` path outside the folder is the list's own choice and still links.
+#[test]
+fn edl_guessed_paths_outside_the_list_folder_are_not_probed() {
+    let edl = "TITLE: CUT
+FCM: NON-DROP FRAME
+
+001  A001 V     C        10:00:31:00 10:00:33:00 02:00:00:00 02:00:02:00
+* FROM CLIP NAME: ../up.mov
+
+002  A002 V     C        10:00:24:00 10:00:26:00 02:00:02:00 02:00:04:00
+* FROM CLIP NAME: /elsewhere/abs.mov
+
+003  A003 V     C        10:00:24:00 10:00:26:00 02:00:04:00 02:00:06:00
+* FROM CLIP NAME: inside.mov
+
+004  A004 V     C        10:00:24:00 10:00:26:00 02:00:06:00 02:00:08:00
+* FROM CLIP NAME: named.mov
+* SOURCE FILE: /elsewhere/named.mov
+";
+    let mut asked = Vec::new();
+    let mut probe_all = |path: &str| {
+        asked.push(path.to_string());
+        probe(path)
+    };
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "hand.edl".into(), edl_frame_rate: Some(25.0), base_dir: Some("/work".into()) };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_all).unwrap();
+    asked.sort();
+    assert_eq!(asked, ["/elsewhere/named.mov", "/work/inside.mov"], "only the file inside the folder and the named one");
+    let mut missing = r.missing.clone();
+    missing.sort();
+    assert_eq!(missing.len(), 2, "{missing:?}");
+    assert!(missing.iter().all(|m| m.ends_with("up.mov") || m.ends_with("abs.mov")), "{missing:?}");
+}
+
 /// Only an EDL's guessed paths are probed: an OTIO missing reference also gets a path built from
 /// the clip name, and a same-named file beside the document is not the intended clip.
 #[test]
