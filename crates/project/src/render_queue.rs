@@ -1713,7 +1713,11 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+    // At most a file name's worth (255 characters): a template repeating a long name token
+    // must not expand to gigabytes.
+    let s: String = name.chars().take(255).map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // `.` and `..` would name the folder itself or its parent when the token is a path component.
+    if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
 
 #[cfg(test)]
@@ -1741,6 +1745,14 @@ mod tests {
     fn templates_and_sequences() {
         let v = TemplateVars { comp_name: "Main/Title", project_name: "P", width: 1920, height: 1080, frame_rate: 29.97, start_frame: 0, end_frame: 9 };
         assert_eq!(expand_template(DEFAULT_TEMPLATE, OutputFormat::H264, &v), "Main_Title.mp4");
+        // A dot-only name is not a parent-folder component; a long one is cut to a file name.
+        for name in ["..", "."] {
+            let v = TemplateVars { comp_name: name, ..v };
+            assert_eq!(expand_template("out/[compName]/x.[fileExtension]", OutputFormat::Gif, &v), format!("out/{}/x.gif", "_".repeat(name.len())));
+        }
+        let long = "n".repeat(100_000);
+        let v2 = TemplateVars { comp_name: &long, ..v };
+        assert_eq!(expand_template(&"[compName]".repeat(100), OutputFormat::Gif, &v2).len(), 255 * 100);
         assert_eq!(expand_template("[compName]_[width]x[height]@[frameRate].[fileExtension]", OutputFormat::Gif, &v), "Main_Title_1920x1080@29.97.gif");
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
