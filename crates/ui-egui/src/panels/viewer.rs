@@ -1148,22 +1148,16 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
             }
             Tool::MaskFeather => ov::begin_feather(app, ectx, &paths, &map, press).map(Gesture::Overlay),
             Tool::Rotate => pick(app, ectx, cpt, mods.shift).map(|l| {
-                let others = selected_others(app, comp, l).into_iter().filter_map(|o| Some((o.id, ectx.f(o, o.transform()?, "rotation", 0.0)))).collect();
                 let layer = comp.layer(l).cloned();
-                let center = layer
-                    .as_ref()
-                    .and_then(|l| l.transform().map(|tr| ectx.v3(l, tr, "position", [0.0; 3])))
-                    .map(|p| map.to_screen([p[0], p[1]]))
-                    .unwrap_or(pos);
+                let sign = layer.as_ref().map_or(1.0, |l| rotation_sign(ectx, l));
+                let others = selected_others(app, comp, l)
+                    .into_iter()
+                    .filter_map(|o| Some((o.id, ectx.f(o, o.transform()?, "rotation", 0.0), rotation_sign(ectx, o) * sign)))
+                    .collect();
+                let pivot = layer.as_ref().and_then(|l| anchor_in_comp(ectx, l)).unwrap_or(cpt);
                 let rot = layer.as_ref().and_then(|l| l.transform().map(|tr| ectx.f(l, tr, "rotation", 0.0))).unwrap_or(0.0);
-                Gesture::Rotate {
-                    layer: l,
-                    center,
-                    last_angle: ((pos.y - center.y) as f64).atan2((pos.x - center.x) as f64).to_degrees(),
-                    turned: 0.0,
-                    start_rot: rot,
-                    others,
-                }
+                let last_angle = (cpt[1] - pivot[1]).atan2(cpt[0] - pivot[0]).to_degrees();
+                Gesture::Rotate { layer: l, pivot, sign, last_angle, turned: 0.0, start_rot: rot, others }
             }),
             Tool::PanBehind => pick(app, ectx, cpt, false).and_then(|l| {
                 let layer = comp.layer(l)?;
@@ -1422,18 +1416,18 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                     let _ = app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/scale", "value": v, "merge": merge}));
                 }
             }
-            Gesture::Rotate { layer, center, last_angle, turned, start_rot, others } => {
+            Gesture::Rotate { layer, pivot, sign, last_angle, turned, start_rot, others } => {
                 // Count the turn incrementally: the absolute angle wraps at ±180°, so writing it
                 // straight would jump a revolution back each time the pointer went round.
-                let ang = ((pos.y - center.y) as f64).atan2((pos.x - center.x) as f64).to_degrees();
-                let turned = turned + turn_delta(last_angle, ang);
-                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Rotate { layer, center, last_angle: ang, turned, start_rot, others: others.clone() }));
+                let ang = (cpt[1] - pivot[1]).atan2(cpt[0] - pivot[0]).to_degrees();
+                let turned = turned + sign * turn_delta(last_angle, ang);
+                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Rotate { layer, pivot, sign, last_angle: ang, turned, start_rot, others: others.clone() }));
                 // Shift snaps the accumulated value (so 405° snaps to 1x +45°, not to 45°).
                 let r = rotate_value(start_rot, turned, mods.shift);
                 let _ = app.session.execute("prop.set", json!({"layer": layer.0, "path": "transform/rotation", "value": r, "merge": merge}));
-                for (lid, r0) in others {
-                    let _ =
-                        app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/rotation", "value": r0 + (r - start_rot), "merge": merge}));
+                for (lid, r0, other) in others {
+                    let v = r0 + other * (r - start_rot);
+                    let _ = app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/rotation", "value": v, "merge": merge}));
                 }
             }
             Gesture::Anchor { layer, start_anchor, start_pos, start, inv, l2p, own, anchor_only } => {
@@ -1926,12 +1920,12 @@ mod view;
 
 use frame::{empty_state, rect_of, show_frame};
 pub(crate) use frame::{extended_region, minify_factor, snap_to_pixels, styled_line, zoom_sampler, zoom_texture_options};
+use geometry::{
+    anchor_in_comp, cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
+    rotation_sign, selected_others, snap_handle, turn_delta,
+};
 #[cfg(test)]
 use geometry::{box_corners, project_clipped};
-use geometry::{
-    cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value, selected_others,
-    snap_handle, turn_delta,
-};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
 use shapes::{create_shape, draw_shape_ghost, shape_drag};
