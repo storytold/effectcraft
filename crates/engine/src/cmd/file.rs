@@ -143,7 +143,8 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             _ => format!("Importing {total} files"),
         };
         let p = p.clone();
-        return s.spawn_task("import", label, false, move |ctl| {
+        let immediate_errors = pending.errors.clone();
+        let mut result = s.spawn_task("import", label, false, move |ctl| {
             let mut probed = Vec::with_capacity(total);
             for (k, src) in sources.iter().enumerate() {
                 ctl.message(format!("{} ({} of {total})", src.name(), k + 1));
@@ -162,13 +163,19 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                 match errors.as_slice() {
                     [] => {}
                     [one] => toast = format!("{toast}. {one}"),
-                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)", rest.len()),
+                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)\n{}", rest.len(), errors.join("\n")),
                 }
                 r["toast"] = json!(toast);
                 Ok(r)
             });
             Ok(apply)
-        });
+        })?;
+        // Preparation can reject layered files before the remaining footage needs probing.
+        // Report those failures now as well as in the eventual job result.
+        if result["started"] == true {
+            result["errors"] = json!(immediate_errors);
+        }
+        return Ok(result);
     }
     let probed = pending.sources.iter().map(|src| pending.prober.probe(src)).collect();
     let mut r = add_footage(s, pending, probed)?;

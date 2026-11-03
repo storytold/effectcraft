@@ -73,6 +73,7 @@ impl EffectcraftApp {
             last_activity: (0.0, 0),
             last_edit: (0.0, 0),
             toast: None,
+            error_toast: None,
             viewer_tex: None,
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,

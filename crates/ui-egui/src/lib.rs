@@ -245,6 +245,29 @@ impl Playback {
     }
 }
 
+/// An error awaiting its first standalone display.
+pub(crate) struct ErrorToast {
+    message: String,
+    shown_at: Option<f64>,
+    /// The foreground status itself reports this error, so dismissing it acknowledges both.
+    in_status: bool,
+}
+
+impl ErrorToast {
+    fn new(message: String, in_status: bool) -> Self {
+        Self { message, shown_at: None, in_status }
+    }
+
+    fn message_at(&mut self, foreground_status: bool, now: f64) -> Option<&str> {
+        if self.shown_at.is_none() && !foreground_status {
+            // Only the first standalone display starts the timer. Later statuses cannot
+            // extend it, and an unseen error cannot expire behind a foreground status.
+            self.shown_at = Some(now);
+        }
+        self.shown_at.is_none_or(|at| now - at < 4.0).then_some(self.message.as_str())
+    }
+}
+
 pub struct EffectcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -303,6 +326,8 @@ pub struct EffectcraftApp {
     /// When the project last changed, and its revision then (see [`Self::editing`]).
     last_edit: (f64, u64),
     pub(crate) toast: Option<(String, f64)>,
+    /// Error details survive routine notifications and wait for a foreground status to clear.
+    pub(crate) error_toast: Option<ErrorToast>,
     /// Texture of the last CPU frame shown in the viewer, the key it came from and the factor it
     /// was averaged down by for the magnification (`panels::viewer::minify_factor`).
     pub(crate) viewer_tex: Option<(egui::TextureHandle, FrameKey, usize)>,

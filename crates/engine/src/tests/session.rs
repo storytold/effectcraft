@@ -154,6 +154,7 @@ fn background_imports_report_progress_and_select_what_arrived() {
     s.execute("jobs.wait", json!({})).unwrap();
     assert_eq!(s.active_comp().unwrap().layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["c.png"]);
     assert_eq!(s.job_log.last().unwrap().message, "Imported 1 item. /drop/d.xyz: unsupported file");
+    assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::Toast { message, error: true } if message.contains("/drop/d.xyz"))));
     // Agents and scripts import at once by default.
     let r = s.execute("file.import", json!({"paths": ["/drop/e.png"]})).unwrap();
     assert_eq!(r["items"].as_array().map(Vec::len), Some(1));

@@ -97,7 +97,13 @@ impl EffectcraftApp {
                     panels::viewers::on_open_comp(self, c);
                     self.ui.timeline.pps = None;
                 }
-                effectcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, self.now)),
+                effectcraft_engine::Event::Toast { message, error } => {
+                    if error {
+                        self.error_toast = Some(crate::ErrorToast::new(message, false));
+                    } else {
+                        self.toast = Some((message, self.now));
+                    }
+                }
                 effectcraft_engine::Event::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
                 // Frames are keyed by content: an edit keeps those of comps it doesn't touch.
                 effectcraft_engine::Event::ProjectChanged { .. } => {}
@@ -458,23 +464,37 @@ impl EffectcraftApp {
     /// Importing card is there).
     fn draw_toast(&mut self, ui: &mut egui::Ui, full: egui::Rect, lift: f32) {
         let now = self.now;
-        let msg = if !self.ui.status.is_empty() {
-            Some(self.ui.status.clone())
+        let error = self.error_toast.as_mut().and_then(|toast| toast.message_at(!self.ui.status.is_empty(), now)).map(str::to_owned);
+        let mut msg = if !self.ui.status.is_empty() {
+            // A background result must get its display time after the foreground status.
+            // Keep its details available on hover while the status takes precedence.
+            if let Some(details) = error { Some(format!("{}\n{details}", self.ui.status)) } else { Some(self.ui.status.clone()) }
         } else {
-            self.toast.as_ref().filter(|(_, at)| now - at < 4.0).map(|(m, _)| m.clone())
+            error.or_else(|| self.toast.as_ref().filter(|(_, at)| now - at < 4.0).map(|(m, _)| m.clone()))
         };
+        if let Some(m) = &mut msg
+            && let Some((notice, _)) = self.toast.as_ref().filter(|(_, at)| now - at < 4.0)
+            && m != notice
+        {
+            m.push('\n');
+            m.push_str(notice);
+        }
         if let Some(m) = msg {
             let t = &self.tokens;
-            let galley = ui.painter().layout_no_wrap(m.clone(), Tokens::ui(12.0), t.text);
+            let summary = m.lines().next().unwrap_or_default().to_owned();
+            let galley = ui.painter().layout_no_wrap(summary, Tokens::ui(12.0), t.text);
             let r = egui::Rect::from_min_size(egui::pos2(full.min.x + 16.0, full.max.y - 44.0 - lift), galley.size() + egui::vec2(24.0, 14.0));
             ui.painter().rect_filled(r, 6.0, t.panel_bg);
             ui.painter().rect_stroke(r, 6.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
             ui.painter().galley(r.min + egui::vec2(12.0, 7.0), galley, t.text);
             self.auto.add("toast", r, &m);
-            let resp = ui.interact(r, egui::Id::unique("toast"), egui::Sense::click());
+            let resp = ui.interact(r, egui::Id::unique("toast"), egui::Sense::click()).on_hover_text(&m);
             if resp.clicked() {
                 self.ui.status.clear();
                 self.toast = None;
+                if self.error_toast.as_ref().is_some_and(|toast| toast.shown_at.is_some() || toast.in_status) {
+                    self.error_toast = None;
+                }
             }
             // "Preparing the GPU compositor…" stays until the compositor is attached (tens of
             // seconds on a cold shader cache), not 5 s: `finish_gpu_build` clears it, and the
@@ -581,5 +601,138 @@ impl EffectcraftApp {
             self.footage_watch_key = Some(key);
             watcher.set_watched(footage_reload::watched(&self.session));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unshown_error_survives_a_replacement_foreground_status() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.ui.status = "First foreground status".into();
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "An unseen import error".into(), error: true });
+        let ctx = egui::Context::default();
+        app.handle_events(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        app.ui.status = "Another foreground status".into();
+        for now in [1.0, 3.0, 6.0, 6.1] {
+            app.now = now;
+            app.auto.elements.clear();
+            ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        }
+        assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("unseen import error")));
+    }
+
+    #[test]
+    fn dismissing_a_status_keeps_an_unshown_background_error() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.ui.status = "A local drop failed".into();
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "A later background import failed".into(), error: true });
+        let ctx = egui::Context::default();
+        app.handle_events(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        let click = |app: &mut EffectcraftApp| {
+            let r = app.auto.elements.iter().find(|e| e.id == "toast").unwrap().rect;
+            let pos = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+            for pressed in [true, false] {
+                app.auto.elements.clear();
+                let events = vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+                ];
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+            }
+        };
+        click(&mut app);
+        assert!(app.ui.status.is_empty());
+        app.auto.elements.clear();
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("later background import failed")));
+        click(&mut app);
+        assert!(app.error_toast.is_none(), "the displayed error can be dismissed too");
+        app.report_import_errors("file.import", &json!({"errors": ["An immediate import error", "Another import error"]}));
+        app.auto.elements.clear();
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        click(&mut app);
+        assert!(app.ui.status.is_empty());
+        assert!(app.error_toast.is_none(), "dismissing an error status acknowledges its own details");
+    }
+
+    #[test]
+    fn a_later_status_does_not_extend_an_error_already_shown() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "An earlier error".into(), error: true });
+        let ctx = egui::Context::default();
+        app.handle_events(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        app.ui.status = "An unrelated later status".into();
+        for now in [1.0, 4.0, 7.0, 7.1] {
+            app.now = now;
+            app.auto.elements.clear();
+            ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        }
+        assert!(!app.auto.elements.iter().any(|e| e.id == "toast"));
+    }
+
+    #[test]
+    fn import_error_details_survive_a_warning_event() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.report_import_errors("file.import", &json!({"errors": ["first failed file", "second failed file"]}));
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "Sequence has missing frames".into(), error: false });
+        let ctx = egui::Context::default();
+        app.handle_events(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("second failed file")));
+        assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("missing frames")));
+    }
+
+    #[test]
+    fn a_foreground_status_does_not_extend_a_confirmation_toast() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.ui.status = "A foreground status".into();
+        app.toast = Some(("Saved".into(), 0.0));
+        let ctx = egui::Context::default();
+        for now in [0.0, 3.0, 6.0, 6.1] {
+            app.now = now;
+            app.auto.elements.clear();
+            ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        }
+        assert!(!app.auto.elements.iter().any(|e| e.id == "toast"));
+    }
+
+    #[test]
+    fn a_new_status_does_not_revive_an_expired_toast() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.ui.status = "A new status".into();
+        app.toast = Some(("An old toast".into(), 0.0));
+        app.now = 8.0;
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        assert!(app.auto.elements.iter().all(|e| !e.label.contains("old toast")));
+        app.ui.status.clear();
+        app.auto.elements.clear();
+        app.now = 8.1;
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        assert!(!app.auto.elements.iter().any(|e| e.id == "toast"));
+    }
+
+    #[test]
+    fn a_status_message_does_not_expire_a_background_import_error() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.ui.status = "A local drop failed".into();
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "Imported 1 item. Failed first file\nFailed second file".into(), error: true });
+        let ctx = egui::Context::default();
+        app.handle_events(&ctx);
+        for now in [0.0, 3.0, 6.0] {
+            app.now = now;
+            ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        }
+        assert!(app.ui.status.is_empty());
+        app.auto.elements.clear();
+        app.now = 6.1;
+        ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
+        assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("Failed second file")), "{:?}", app.auto.elements);
     }
 }

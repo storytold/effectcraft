@@ -480,13 +480,21 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
     std::fs::create_dir_all(&folder).unwrap();
     let path = folder.join("no-pdf.vectorcraft");
     std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
-    for bad_import in [false, true] {
+    let second = folder.join("also-no-pdf.vectorcraft");
+    std::fs::copy(&path, &second).unwrap();
+    let footage = folder.join("pending.png");
+    std::fs::write(&footage, b"not a PNG").unwrap();
+    for (bad_import, background) in [(false, false), (true, false), (true, true)] {
         let mut app = EffectcraftApp::new(effectcraft_host::session());
         app.session.prefs.import.drag_import_as = "comp".into();
         let ctx = egui::Context::default();
         let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
         if bad_import {
             dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
+            dropped_files.push(std::sync::Arc::new(Drop(second.clone())));
+        }
+        if background {
+            dropped_files.push(std::sync::Arc::new(Drop(footage.clone())));
         }
         ctx.run_ui(egui::RawInput { dropped_files, ..Default::default() }, |ui| {
             crate::prefs_live::dropped_files(&mut app, ui, ui.max_rect());
@@ -496,6 +504,17 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
         assert!(app.ui.status.contains("without a local path"), "{}", app.ui.status);
         if bad_import {
             assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+            let details = &app.error_toast.as_ref().expect("all import errors remain available").message;
+            assert!(details.contains("also-no-pdf.vectorcraft"), "{details}");
+            if background {
+                app.session.execute("jobs.wait", json!({})).unwrap();
+                app.handle_events(&ctx);
+                let details = &app.error_toast.as_ref().unwrap().message;
+                for name in ["no-pdf.vectorcraft", "also-no-pdf.vectorcraft", "pending.png"] {
+                    assert!(details.contains(name), "{details}");
+                }
+                assert!(app.ui.status.contains("without a local path"));
+            }
         } else {
             assert!(!app.ui.status.contains(";"), "{}", app.ui.status);
         }

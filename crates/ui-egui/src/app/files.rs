@@ -12,6 +12,9 @@ impl EffectcraftApp {
             [one] => self.ui.status = (*one).into(),
             [first, rest @ ..] => self.ui.status = format!("{first} (and {} more)", rest.len()),
         }
+        if !errors.is_empty() {
+            self.error_toast = Some(crate::ErrorToast::new(errors.join("\n"), true));
+        }
     }
 
     /// Show the crash-recovery dialog for a previous run that didn't exit cleanly.
