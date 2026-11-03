@@ -327,9 +327,9 @@ impl Exporter<'_> {
             chain.push(id);
             at = it.parent;
         }
-        if chain.first() != Some(&f) {
-            // `f` itself is not an item.
-            return None;
+        if chain.is_empty() {
+            // `f` is cached already (`parent` is its bin), or is not an item (`None`).
+            return parent;
         }
         for id in chain.into_iter().rev() {
             let name = self.p.item(id).map(|it| it.name.clone()).unwrap_or_default();
@@ -749,4 +749,38 @@ fn media_info(name: &str, kind: MediaKind, duration: Tick, video: Option<VideoSp
 
 fn media_clip(media: fp::MediaRef, info: MediaInfo) -> fp::MediaClip {
     fp::MediaClip { media, info, interpret: Default::default(), mark_in: None, mark_out: None, markers: vec![], offline: false, proxy: None, identity: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder's bin is the same one each time it is asked for (a cached folder once answered
+    /// `None`, so a folder's second item went to the project root); a non-item has no bin.
+    #[test]
+    fn folder_bins_are_reused_once_cached() {
+        let mut p = Project::default();
+        let a = p.add_item("A", effectcraft_color::Label::None, None, ItemKind::Folder);
+        let b = p.add_item("B", effectcraft_color::Label::None, Some(a), ItemKind::Folder);
+        let (opts, pre) = (ExportOptions::default(), HashMap::new());
+        let mut ex = Exporter {
+            p: &p,
+            opts: &opts,
+            pre: &pre,
+            fp: fp::Project::new("x"),
+            out: ExportOutput::default(),
+            seqs: HashMap::new(),
+            media: HashMap::new(),
+            bins: HashMap::new(),
+            stack: vec![],
+        };
+        let bb = ex.bin(Some(b));
+        assert!(bb.is_some());
+        assert_eq!(ex.bin(Some(b)), bb);
+        let ba = ex.bin(Some(a));
+        assert!(ba.is_some() && ba != bb);
+        assert_eq!(ex.bin(Some(a)), ba);
+        assert_eq!(ex.bin(Some(ItemId(u64::MAX))), None);
+        assert_eq!(ex.bin(None), None);
+    }
 }
