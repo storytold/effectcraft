@@ -1034,7 +1034,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Feet + Frames (35mm)", "フィート + フレーム (35mm)"),
     ("Feet + Frames (16mm)", "フィート + フレーム (16mm)"),
     ("Current Frame", "現在のフレーム"),
-    ("Work Area", "作業領域"),
+    ("Work Area", "ワークエリア"),
     ("Create Markers", "マーカーを作成"),
     ("Split Layers", "レイヤーを分割"),
     ("Split and Precompose", "分割してプリコンポーズ"),
