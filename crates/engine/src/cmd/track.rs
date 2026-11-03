@@ -479,7 +479,7 @@ pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, di
         Direction::Forward | Direction::FrameForward => {
             let mut t = start.unwrap_or(now).clamp(lo, hi);
             let stop = if dir == Direction::FrameForward { t + fd } else { end.unwrap_or(hi).min(hi) };
-            while t <= stop && t <= hi {
+            while t <= stop && t <= hi && times.len() < crate::warp::MAX_ANALYSIS_FRAMES {
                 times.push(t);
                 t += fd;
             }
@@ -487,7 +487,7 @@ pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, di
         Direction::Backward | Direction::FrameBackward => {
             let mut t = end.unwrap_or(now).clamp(lo, hi);
             let stop = if dir == Direction::FrameBackward { t - fd } else { start.unwrap_or(lo).max(lo) };
-            while t >= stop && t >= lo {
+            while t >= stop && t >= lo && times.len() < crate::warp::MAX_ANALYSIS_FRAMES {
                 times.push(t);
                 t -= fd;
             }

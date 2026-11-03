@@ -328,3 +328,14 @@ fn featureless_regions_stay_put() {
         }
     }
 }
+
+#[test]
+fn saved_regions_larger_than_any_feature_are_bounded() {
+    let img = Image::new(8, 8);
+    // A search region of 10⁹ pixels a side (and a non-finite one) on an 8×8 frame: the crop
+    // would hold 10¹⁸ samples.
+    for size in [1e9, f64::INFINITY, f64::NAN] {
+        let mut tr = Tracker::new(TrackOptions::default(), &[spec([4.0, 4.0], size, size)], &Frame::new(&img));
+        let _ = tr.step(&Frame::new(&img));
+    }
+}
