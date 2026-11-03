@@ -164,6 +164,7 @@ impl EffectcraftApp {
             backend: effectcraft_engine::render::Backend::Auto,
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
+            scene_output: false,
             proxy: Default::default(),
         }
     }

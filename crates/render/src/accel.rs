@@ -174,6 +174,12 @@ impl<'a> Renderer<'a> {
         self.pipe
     }
 
+    /// The colour pipeline of the top-level output steps: the project's, without the HDR step
+    /// for a float output ([`crate::RenderOpts::scene_output`]).
+    pub fn output_pipe(&self) -> color::Pipe {
+        if self.opts.scene_output { self.pipe.scene_output() } else { self.pipe }
+    }
+
     /// Nesting depth (0 = the top-level comp).
     pub fn depth(&self) -> usize {
         self.depth

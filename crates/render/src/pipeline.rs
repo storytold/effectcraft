@@ -473,14 +473,15 @@ impl<'a> Renderer<'a> {
             self.pipe.quantize(&mut canvas);
         }
         // The top-level comp leaves the working space for the (sRGB) display / output.
+        let out = self.output_pipe();
         if self.depth == 0
-            && let Some(c) = self.pipe.output()
+            && let Some(c) = out.output()
         {
             color::convert(&mut canvas, &c);
             self.pipe.quantize(&mut canvas);
         }
         if self.depth == 0
-            && let Some((lin, mode, enc)) = self.pipe.output_hdr()
+            && let Some((lin, mode, enc)) = out.output_hdr()
         {
             color::output_hdr(&mut canvas, lin, mode, enc);
             self.pipe.quantize(&mut canvas);

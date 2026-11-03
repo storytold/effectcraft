@@ -1315,3 +1315,31 @@ fn owned_devices_favour_memory_usage() {
     assert_eq!(d.label, Some("effectcraft gpu"));
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
 }
+
+/// A float output (`RenderOpts::scene_output`) skips Project Settings ▸ HDR on the GPU as on the
+/// CPU: both compositors agree, and the frame is the Clip frame with its over-range values.
+#[test]
+fn scene_output_skips_the_hdr_step_on_the_gpu() {
+    use effectcraft_project::HdrMode;
+    for mode in [HdrMode::Compand, HdrMode::ToneMap] {
+        let mut s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
+        let mut bright = s.solid([3.0, 1.5, 0.5], 30, 20);
+        bright.blend_mode = BlendMode::Add;
+        s.push(bright);
+        s.p.settings.working_space = Some(ColorSpace::Srgb);
+        s.p.settings.linearize = true;
+        s.p.settings.hdr = mode;
+        let scene = RenderOpts { scene_output: true, ..opts() };
+        check(&format!("scene output {mode:?}"), compare_at(&s, scene, Tick::ZERO), 0.0);
+        let Some(g) = gpu() else { continue };
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..scene });
+        r.accel = Some(g);
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let mut clip = s.p.clone();
+        clip.settings.hdr = HdrMode::Clip;
+        let want = Renderer::new(&clip, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        let d = diff(&want, &img, tolerance(BitDepth::Bpc32));
+        assert_eq!(d.over, 0, "{mode:?}: max {} at {:?}", d.max, d.worst);
+        assert!(img.data.iter().any(|p| p[3] > 0.0 && p[0] / p[3] > 1.0), "{mode:?}: over-range values survive");
+    }
+}
