@@ -1580,5 +1580,13 @@ impl Queue {
     }
 }
 
+/// The render scale a viewer frame's key stands for: it keeps thousandths, but the viewer
+/// renders every n-th pixel, and 0.333 is not 1/3 (2 pixels off by row 1000 at Third). The
+/// comp's own factor decides when two factors share the thousandths (from 1/34).
+pub(crate) fn render_scale(thousandths: u32, factor: Option<u8>) -> f64 {
+    let n = factor.map(f64::from).filter(|n| (1000.0 / n).round() == f64::from(thousandths));
+    1.0 / n.unwrap_or_else(|| (1000.0 / f64::from(thousandths.max(1))).round()).max(1.0)
+}
+
 #[cfg(test)]
 mod tests;

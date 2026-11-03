@@ -113,6 +113,33 @@ fn resolution_factors_and_scales() {
     assert_eq!(Resolution::Third.scale(0.1, 1.0), 1.0 / 3.0);
 }
 
+/// Another layer of the same source, and a duplicated item, get a numbered name. Only a number set
+/// off by a space is a counter; digits that end a word stay (`v-b1.mp4` gave `v-b1.mp 2`).
+#[test]
+fn numbered_names_keep_digits_that_end_a_word() {
+    // (the name in use, the next layer's and the item copy's name)
+    let rows = [
+        ("v-b1.mp4", "v-b1.mp4 2"),
+        ("clip2.mov", "clip2.mov 2"),
+        ("shot 2", "shot 3"),
+        ("a.b.c", "a.b.c 2"),
+        ("Background", "Background 2"),
+        ("Red Solid 1", "Red Solid 2"),
+    ];
+    for (name, next) in rows {
+        let mut p = Project::default();
+        let mut comp = Comp::new(64, 36, FrameRate::FPS_29_97, Tick::from_seconds_f64(1.0));
+        let solid = Solid { color: [0.5; 3], width: 64, height: 36, pixel_aspect: 1.0 };
+        let item = p.add_item(name, effectcraft_color::Label::Red, None, ItemKind::Solid(solid));
+        let first = build::layer(&mut p, &comp, name, LayerSource::Solid { item }, (64, 36), None);
+        assert_eq!(first.name, name, "the first layer of {name}");
+        comp.layers.push(first);
+        let second = build::layer(&mut p, &comp, name, LayerSource::Solid { item }, (64, 36), None);
+        assert_eq!(second.name, next, "the second layer of {name}");
+        assert_eq!(p.numbered_item_name(name, |_| false), next, "a copy of the item {name}");
+    }
+}
+
 #[test]
 fn unique_names_and_cycles() {
     let (p, cid) = project_with_layer();
