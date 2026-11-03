@@ -18,3 +18,4 @@ mod roundtrip;
 mod targa_sequence;
 mod uncompressed_mov;
 mod vp9_roundtrip;
+mod webm_color;
