@@ -40,6 +40,22 @@ fn prefs_round_trip_through_json() {
     assert_eq!(Prefs::from_json(&Prefs::default().to_json()), Prefs::default());
 }
 
+/// A document with one bad page and many unknown keys recovers its good pages in one pass per
+/// page, not one full parse per key.
+#[test]
+fn prefs_recovery_tries_only_the_settings_pages() {
+    let mut doc = serde_json::Map::new();
+    doc.insert("general".into(), json!({"undoLevels": "not a number"}));
+    doc.insert("labels".into(), serde_json::to_value(Prefs::default()).unwrap()["labels"].clone());
+    for i in 0..20_000 {
+        doc.insert(format!("unknown{i}"), json!({"x": i}));
+    }
+    let t = std::time::Instant::now();
+    let p = Prefs::from_json(&serde_json::Value::Object(doc).to_string());
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert_eq!(p.general, Prefs::default().general);
+}
+
 #[test]
 fn prefs_migrate_old_layout_and_keep_unknown_keys() {
     let old = r#"{
