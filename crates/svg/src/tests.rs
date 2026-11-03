@@ -629,6 +629,7 @@ fn basic_shapes_with_overflowing_derived_bounds_are_skipped() {
         br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
             <rect x="1e308" y="0" width="1e308" height="1" fill="red"/>
             <circle cx="1e308" cy="0" r="1e308" fill="blue"/>
+            <circle cx="0" cy="0" r="1e300" fill="green"/>
         </svg>"#,
     )
     .unwrap();

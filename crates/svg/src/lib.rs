@@ -1491,7 +1491,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
             "circle" => {
                 let r = l("r", 'o');
-                if r <= 0.0 {
+                if !(r > 0.0 && r <= MAX_ELLIPSE_RADIUS) {
                     return None;
                 }
                 let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
@@ -1502,7 +1502,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
             "ellipse" => {
                 let (rx, ry) = (l("rx", 'x'), l("ry", 'y'));
-                if rx <= 0.0 || ry <= 0.0 {
+                if !(rx > 0.0 && rx <= MAX_ELLIPSE_RADIUS && ry > 0.0 && ry <= MAX_ELLIPSE_RADIUS) {
                     return None;
                 }
                 let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
@@ -1647,6 +1647,8 @@ const MAX_PATH_ELEMENTS_PER_IMPORT: usize = 1_000_000;
 const MAX_GRADIENT_WORK: usize = 64 * 1024 * 1024;
 /// Bound viewport-specific resolved gradients; stop data is shared between clones.
 const MAX_GRADIENT_CACHE_ENTRIES: usize = 256;
+/// Bound ellipse expansion before kurbo approximates it with tolerance-dependent path segments.
+const MAX_ELLIPSE_RADIUS: f64 = 1.0e9;
 const PATH_DATA_WORK_FACTOR: usize = 8;
 /// Aggregate work that pattern references may revisit, including attributes and scanned children,
 /// even when many shapes share one large pattern definition.
