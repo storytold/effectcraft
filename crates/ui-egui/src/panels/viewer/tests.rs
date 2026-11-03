@@ -177,21 +177,45 @@ fn uniform_edge_handle_snaps_along_its_line_from_the_anchor() {
     let x = [true, false];
     let m = Mat3::IDENTITY;
     // The right edge, on the anchor's line: x snaps, a y correction has nothing to move along.
-    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, |_| [3.0, 0.0]);
+    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, 8.0, |_| [3.0, 0.0]);
     assert!(near(f, [1.575, 1.575]), "{f:?}");
-    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, |_| [0.0, 2.0]);
+    let f = snap_handle([1.5, 1.5], [40.0, 0.0], [0.0, 0.0], &m, x, true, 8.0, |_| [0.0, 2.0]);
     assert!(near(f, [1.5, 1.5]), "{f:?}");
     // Off the anchor's line the handle moves along both: y snaps as well, the nearer one wins.
-    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 1.0]);
+    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, 8.0, |_| [0.0, 1.0]);
     assert!(near(f, [1.9, 1.9]), "{f:?}");
-    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, |_| [1.0, 3.0]);
+    let f = snap_handle([2.0, 2.0], [20.0, -10.0], [0.0, 0.0], &m, x, true, 8.0, |_| [1.0, 3.0]);
     assert!(near(f, [2.05, 2.05]), "{f:?}");
     // The edge sits on the anchor point: the pointer can't scale it, so neither does a snap.
-    let f = snap_handle([1.0, 1.0], [0.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 1.0]);
+    let f = snap_handle([1.0, 1.0], [0.0, -10.0], [0.0, 0.0], &m, x, true, 8.0, |_| [0.0, 1.0]);
     assert!(near(f, [1.0, 1.0]), "{f:?}");
     // Nor does a press a little off the handle's centre, which `drag_ratio` reads as a tiny start.
-    let f = snap_handle(drag_ratio([2.0, -10.0], [22.0, -10.0], x, true), [0.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 0.0]);
+    let f = snap_handle(drag_ratio([2.0, -10.0], [22.0, -10.0], x, true), [0.0, -10.0], [0.0, 0.0], &m, x, true, 8.0, |_| [0.0, 0.0]);
     assert!(near(f, [1.0, 1.0]), "{f:?}");
+}
+
+/// #2860: a Shift drag with an off-centre anchor near a snap line doesn't jump: a correction whose
+/// lever from the anchor is short would throw the handle along the other axis, so it isn't taken.
+/// The same 1 px on the long lever snaps, and so does a line the short lever can reach.
+#[test]
+fn uniform_snap_keeps_the_handle_within_the_snap_distance() {
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+    let (x, y, corner) = ([true, false], [false, true], [true, true]);
+    let m = Mat3::IDENTITY;
+    let a = [30.0, 40.0];
+    for axes in [x, y, corner] {
+        // 1 px on the 5 px lever would make the scale 6/5, 40 px on the 200 px one.
+        let f = snap_handle([1.0, 1.0], [5.0, 200.0], a, &m, axes, true, 8.0, |_| [1.0, 0.0]);
+        assert!(near(f, [1.0, 1.0]), "{axes:?}: {f:?}");
+        let f = snap_handle([1.0, 1.0], [5.0, 200.0], a, &m, axes, true, 8.0, |_| [0.0, 1.0]);
+        assert!(near(f, [1.005, 1.005]), "{axes:?}: {f:?}");
+        // Both near: the nearer can't be reached, the farther is taken.
+        let f = snap_handle([1.0, 1.0], [5.0, 200.0], a, &m, axes, true, 8.0, |_| [1.0, 2.0]);
+        assert!(near(f, [1.01, 1.01]), "{axes:?}: {f:?}");
+        // 0.1 px on the short lever is 4 px on the long one: within the snap distance.
+        let f = snap_handle([1.0, 1.0], [5.0, 200.0], a, &m, axes, true, 8.0, |_| [0.1, 0.0]);
+        assert!(near(f, [1.02, 1.02]), "{axes:?}: {f:?}");
+    }
 }
 
 /// Every 3D view names its own `view.3d.*` command: a typo in that mapping would fall back to the
