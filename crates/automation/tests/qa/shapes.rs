@@ -29,7 +29,7 @@ fn shape_logo_with_lottie_round_trip() {
     let base = ell["path"].as_str().unwrap().trim_end_matches("/ellipse").to_string();
     qa.tool("set_property", json!({"layer": "Mark", "path": format!("{base}/ellipse/position"), "value": [15, 15]}));
     qa.tool("set_property", json!({"layer": "Mark", "path": format!("{base}/ellipse/size"), "value": [24, 24]}));
-    qa.exec("layer.addShapeItem", json!({"layer": "Mark", "kind": "merge", "group": "contents/group", "append": true}));
+    qa.exec("layer.addShapeItem", json!({"layer": "Mark", "kind": "merge", "group": "contents/group"}));
     let off = qa.exec("layer.addShapeItem", json!({"layer": "Mark", "kind": "offset", "group": "contents/group"}));
     qa.tool("set_property", json!({"layer": "Mark", "path": format!("{}/amount", off["path"].as_str().unwrap()), "value": 3}));
     let gf = qa.exec("layer.addShapeItem", json!({"layer": "Mark", "kind": "gfill", "group": "contents/group"}))["path"].as_str().unwrap().to_string();

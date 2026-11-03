@@ -719,7 +719,7 @@ PropertyGroup.prototype.addProperty = function (name) {
   if (r.kind === "effect") uid = __call("effect.apply", { comp: L.__comp, layers: [L.__id], effect: r.effect }).effects[0];
   else if (r.kind === "mask") uid = __call("layer.addMask", { comp: L.__comp, layer: L.__id }).mask;
   else if (r.kind === "shape") {
-    var p = { comp: L.__comp, layer: L.__id, kind: r.shape, append: true };
+    var p = { comp: L.__comp, layer: L.__id, kind: r.shape };
     if (r.group !== null && r.group !== undefined) p.group = r.group;
     uid = __call("layer.addShapeItem", p).uid;
   } else if (r.kind === "existing") {

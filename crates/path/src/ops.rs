@@ -668,10 +668,6 @@ pub fn merge(paths: &[BezPath], mode: MergeMode) -> BezPath {
         }
         return out;
     }
-    // Nothing on top leaves nothing to subtract from: the next path does not become the top.
-    if mode == MergeMode::Subtract && paths.first().is_some_and(|p| p.elements().is_empty()) {
-        return BezPath::new();
-    }
     let inputs: Vec<(BezPath, FillRule)> = paths.iter().filter(|p| !p.elements().is_empty()).map(|p| (p.clone(), FillRule::NonZero)).collect();
     if inputs.is_empty() {
         return BezPath::new();

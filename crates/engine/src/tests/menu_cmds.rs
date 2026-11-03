@@ -1811,7 +1811,7 @@ fn with_added_merge(s: &mut Session, items: &[&str]) -> (u64, Vec<String>) {
     for kind in items {
         s.execute("layer.addShapeItem", json!({"layer": l, "kind": kind})).unwrap();
     }
-    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge", "paint": true})).unwrap();
     (l, contents_names(s, l))
 }
 
@@ -1842,12 +1842,14 @@ fn add_merge_paths_goes_below_the_paths_and_paints_the_result() {
     s.execute("shape.toolOptions", json!({"strokeWidth": 3, "stroke": "#00ff00"})).unwrap();
     let (_, names) = with_added_merge(&mut s, &["rect"]);
     assert_eq!(names, ["Rectangle Path 1", "Merge Paths 1", "Stroke 1", "Fill 1"]);
-    // Scripts build the list themselves.
+    // Scripts build the list themselves, and keep Merge.
     let a = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.addShapeItem", json!({"layer": a, "kind": "rect"})).unwrap();
     s.execute("layer.addShapeItem", json!({"layer": a, "kind": "fill"})).unwrap();
-    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge", "append": true})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge"})).unwrap();
     assert_eq!(contents_names(&s, a), ["Rectangle Path 1", "Fill 1", "Merge Paths 1"]);
+    let contents = layer(&s, a).props.sub("contents").unwrap().clone();
+    assert_eq!(contents.groups().find(|g| g.match_id == "merge").unwrap().get("mode").unwrap().value, KV::Enum(0), "Mode Merge");
 }
 
 /// Pasted with nothing selected, Merge Paths goes below the groups too, not above them where it

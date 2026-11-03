@@ -85,8 +85,8 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
         ),
         v => v.and_then(Value::as_u64),
     };
-    // Scripts build the list themselves: `addProperty` appends and adds nothing else.
-    let append = b_p(p, "append") == Some(true);
+    // The Add menu's Merge Paths. Scripts and importers build the list themselves and keep Merge.
+    let paint = kind == "merge" && b_p(p, "paint") == Some(true);
     let time = s.time_of(cid);
     let uid = s.edit("Add Shape Item", None, |proj, st| {
         let mut next = proj.next_id;
@@ -111,7 +111,7 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
             proj.next_id = next;
             return Ok(uid);
         }
-        let g = match kind.as_str() {
+        let mut g = match kind.as_str() {
             "group" => build::shape_group(&mut ids, "Group 1", vec![]),
             "rect" | "rectangle" => build::shape_rect(&mut ids, [200.0, 200.0], [0.0, 0.0], 0.0),
             "ellipse" => build::shape_ellipse(&mut ids, [200.0, 200.0], [0.0, 0.0]),
@@ -124,19 +124,14 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
             "gstroke" | "gradientStroke" => build::shape_gradient_stroke(&mut ids, false, [-100.0, 0.0], [100.0, 0.0], Default::default(), 2.0),
             "trim" | "trimPaths" => build::shape_trim(&mut ids, 0.0, 100.0, 0.0),
             "repeater" => build::shape_repeater(&mut ids, 3.0, [100.0, 0.0]),
-            // Mode Add, as a new Merge Paths has in After Effects. The builder keeps Merge for the
-            // importers and tests that state their mode.
-            "merge" => {
-                let mut g = build::shape_simple_op(&mut ids, "merge").ok_or_else(|| bad("layer.addShapeItem", "unknown kind `merge`"))?;
-                if let Some(mode) = g.get_mut("mode") {
-                    mode.value = KV::Enum(1);
-                }
-                g
-            }
             k => build::shape_simple_op(&mut ids, k).ok_or_else(|| bad("layer.addShapeItem", format!("unknown kind `{k}`")))?,
         };
         let uid = g.uid;
-        if kind == "merge" && !append {
+        if paint {
+            // Mode Add, as a new Merge Paths has in After Effects.
+            if let Some(mode) = g.get_mut("mode") {
+                mode.value = KV::Enum(1);
+            }
             let paints = merge_paints(proj, cid, lid, group_uid, time, &mut ids, &st.shape_tool)?;
             proj.next_id = next;
             let target = shape_item_target(proj, cid, lid, group_uid)?;

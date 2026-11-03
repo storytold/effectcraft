@@ -5193,6 +5193,9 @@ fn shape_add_popup(
         && let Some((kind, _)) = SHAPE_ADD_ITEMS.get(i).filter(|(k, _)| *k != "-")
     {
         let mut params = json!({"layer": layer.id.0, "kind": kind});
+        if *kind == "merge" {
+            params["paint"] = json!(true);
+        }
         // Into the selected shape group, as After Effects does.
         let group = app.session.state.selected_props.iter().filter(|(l, _)| *l == layer.id).find_map(|(_, u)| {
             let g = layer.props.find_group(*u)?;

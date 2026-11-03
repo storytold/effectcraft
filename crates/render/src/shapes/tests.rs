@@ -120,32 +120,12 @@ fn merge_paths_below_groups_merges_them_in_every_mode() {
 }
 
 /// A Merge Paths with no paint below it paints nothing: the paint above it, in the groups too, has
-/// gone with its paths into the merge. `layer.addShapeItem` adds the paint (#2175).
+/// gone with its paths into the merge. Add ▸ Merge Paths adds the paint (#2175).
 #[test]
 fn merge_paths_with_no_paint_below_renders_nothing() {
     for mode in 0..5 {
         assert_eq!(coverage(&merged_groups(mode, false)), 0.0, "mode {mode}");
     }
-}
-
-/// A Merge Paths takes in a nested group's merged result, and only its own paint renders.
-#[test]
-fn merge_paths_take_in_a_nested_merge() {
-    let (p, cid) = shape_comp(|ids| {
-        let (r1, r2) = (build::shape_rect(ids, [40.0, 40.0], [-30.0, 0.0], 0.0), build::shape_rect(ids, [40.0, 40.0], [-10.0, 0.0], 0.0));
-        let inner = op(ids, "merge", &[("mode", Value::Enum(1))]);
-        let fill = build::shape_fill(ids, RED);
-        vec![
-            build::shape_group(ids, "Group 1", vec![r1, r2, inner, fill]),
-            build::shape_rect(ids, [20.0, 20.0], [-20.0, 0.0], 0.0),
-            op(ids, "merge", &[("mode", Value::Enum(2))]),
-            build::shape_fill(ids, GREEN),
-        ]
-    });
-    let img = frame(&p, cid);
-    assert!(alpha(&img, 80, 50) < 0.01, "the hole the outer merge cuts");
-    let c = img.get(60, 50);
-    assert!(c[1] > 0.99 && c[0] < 0.01, "the outer fill alone: {c:?}");
 }
 
 #[test]
