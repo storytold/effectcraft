@@ -652,7 +652,7 @@ fn a_keys_glyph_rect_is_what_it_draws() {
 #[test]
 fn keys_in_box_walks_the_rows_and_tests_each_glyph() {
     let mut s = effectcraft_engine::Session::default();
-    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4})).unwrap();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4, "frameRate": 30})).unwrap();
     let mut layers = vec![];
     for name in ["A", "B"] {
         let id = s.execute("layer.newSolid", json!({"name": name, "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
