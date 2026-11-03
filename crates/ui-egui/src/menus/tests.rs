@@ -464,6 +464,46 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
+    #[derive(Debug)]
+    struct Drop(std::path::PathBuf);
+    impl egui::DroppedFile for Drop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    let folder = std::env::temp_dir().join(format!("effectcraft-mixed-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    for bad_import in [false, true] {
+        let mut app = EffectcraftApp::new(effectcraft_host::session());
+        app.session.prefs.import.drag_import_as = "comp".into();
+        let ctx = egui::Context::default();
+        let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
+        if bad_import {
+            dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
+        }
+        ctx.run_ui(egui::RawInput { dropped_files, ..Default::default() }, |ui| {
+            crate::prefs_live::dropped_files(&mut app, ui, ui.max_rect());
+        })
+        .textures_delta
+        .clear();
+        assert!(app.ui.status.contains("without a local path"), "{}", app.ui.status);
+        if bad_import {
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+        } else {
+            assert!(!app.ui.status.contains(";"), "{}", app.ui.status);
+        }
+    }
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
 fn importing_without_a_form_shows_immediate_file_errors() {
     let folder = std::env::temp_dir().join(format!("effectcraft-drop-import-{}", std::process::id()));
     std::fs::create_dir_all(&folder).unwrap();
