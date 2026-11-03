@@ -3,7 +3,7 @@
 //! is 0 in the frames this encoder writes.
 
 use crate::pred::Plane;
-use crate::tables::*;
+use crate::tables::{MAX_LOOP_FILTER, NUM_4X4_BLOCKS_HIGH, NUM_4X4_BLOCKS_WIDE, SUBSAMPLED_SIZE, TX_HEIGHT, TX_WIDTH};
 
 /// Mode info the loop filter reads (per 4x4 luma unit, row stride `mi_cols`), and the
 /// transform size per 4x4 unit of each plane (`LoopfilterTxSizes`, row stride `mi_cols + 32`).
@@ -39,7 +39,7 @@ pub(crate) fn loop_filter(planes: &mut [Plane; 3], info: &LfInfo, level: [u32; 4
                 }
                 let mut col = 0;
                 while col < info.mi_cols {
-                    edge(pl, info, level, bit_depth, plane, pass, row, col);
+                    edge(pl, info, level, bit_depth, plane, pass, (row, col));
                     col += step;
                 }
                 row += step;
@@ -48,7 +48,8 @@ pub(crate) fn loop_filter(planes: &mut [Plane; 3], info: &LfInfo, level: [u32; 4
     }
 }
 
-fn edge(pl: &mut Plane, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, pass: usize, row: usize, col: usize) {
+fn edge(pl: &mut Plane, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, pass: usize, position: (usize, usize)) {
+    let (row, col) = position;
     let s = (plane > 0) as usize;
     let (dx, dy) = if pass == 0 { (1usize, 0usize) } else { (0, 1) };
     let x = col * 4;
@@ -88,13 +89,24 @@ fn edge(pl: &mut Plane, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, p
     let limit = lvl.max(1);
     let blimit = 2 * (lvl + 2) + limit;
     let thresh = lvl >> 4;
+    let strength = FilterStrength { limit, blimit, thresh };
     for k in 0..4 {
-        sample_filter(pl, xp + dy * k, yp + dx * k, plane, limit, blimit, thresh, dx as isize, dy as isize, filter_size, bd);
+        sample_filter(pl, (xp + dy * k, yp + dx * k), plane, &strength, (dx as isize, dy as isize), filter_size, bd);
     }
 }
 
+/// Thresholds derived from the loop-filter level (spec 7.14.4).
+struct FilterStrength {
+    limit: i32,
+    blimit: i32,
+    thresh: i32,
+}
+
 #[inline]
-fn sample_filter(pl: &mut Plane, x: usize, y: usize, plane: usize, limit: i32, blimit: i32, thresh: i32, dx: isize, dy: isize, filter_size: usize, bd: u32) {
+fn sample_filter(pl: &mut Plane, position: (usize, usize), plane: usize, strength: &FilterStrength, direction: (isize, isize), filter_size: usize, bd: u32) {
+    let (x, y) = position;
+    let (dx, dy) = direction;
+    let FilterStrength { limit, blimit, thresh } = *strength;
     let stride = pl.stride as isize;
     let step = dy * stride + dx;
     let base = y as isize * stride + x as isize;

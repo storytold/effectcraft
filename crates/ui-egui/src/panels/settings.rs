@@ -13,6 +13,7 @@ use effectcraft_engine::segment::Task;
 use egui::{Color32, RichText, vec2};
 use serde_json::{Value, json};
 
+use crate::a11y;
 use crate::theme::{ThemeKind, Tokens};
 use crate::{Dialog, EffectcraftApp};
 
@@ -78,7 +79,8 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 ui.horizontal(|ui| {
                     ui.add_sized(vec2(label_w, 18.0), egui::Label::new(tr("Default Output:")));
                     let shown = if sel.is_empty() { tr("System Default").to_string() } else { sel.clone() };
-                    let r = egui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                    let shown_name = shown.clone();
+                    let r = craft_ui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
                         if ui.selectable_label(sel.is_empty(), tr("System Default")).clicked() {
                             acts.push(Act::Set(key.into(), json!("")));
                         }
@@ -88,6 +90,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                             }
                         }
                     });
+                    a11y::combo_box(&r.response, tr("Default Output:").trim_end_matches(':'), &shown_name, true);
                     reg(app, &format!("settings.{key}"), &r.response, "Default Output");
                 });
                 if devices.is_empty() {
@@ -103,10 +106,12 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 let id = format!("settings.{key}");
                 let tip = (!live).then(|| tr("Stored, but not used by EffectCraft yet"));
                 let mut resp: Option<egui::Response> = None;
+                // What the control is set to, for assistive technology.
+                let mut value_text = String::new();
                 match kind {
                     Kind::Bool => {
                         let mut b = v.as_bool().unwrap_or(false);
-                        let r = ui.checkbox(&mut b, tr(label));
+                        let r = crate::widgets::labelled_checkbox(ui, &mut b, tr(label));
                         if r.changed() {
                             acts.push(Act::Set(key.into(), json!(b)));
                         }
@@ -117,15 +122,20 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                             ui.add_sized(vec2(label_w, 18.0), egui::Label::new(format!("{}:", tr(label))).truncate());
                             let r = match kind {
                                 Kind::Int(lo, hi, unit) => {
-                                    let mut x = v.as_i64().unwrap_or(0);
-                                    // A typed number applies once entered: typing 85 into UI Scale
-                                    // doesn't resize the interface to 75 % at its first digit.
+                                    // A dragged value applies on release, and a typed one once
+                                    // entered: UI Scale doesn't resize the interface under the
+                                    // pointer mid-drag (#2582) or at a typed number's first digit.
+                                    let held = egui::Id::unique(("settings-drag", key));
+                                    let mut x = ui.data(|d| d.get_temp::<i64>(held)).unwrap_or_else(|| v.as_i64().unwrap_or(0));
                                     let drag = egui::DragValue::new(&mut x).range(lo..=hi).speed(0.25).update_while_editing(false);
                                     let r = ui.add(crate::widgets::drag_value(drag));
                                     if !unit.is_empty() {
                                         ui.label(RichText::new(tr(unit)).color(t.text_dim));
                                     }
-                                    if r.changed() {
+                                    if r.dragged() {
+                                        ui.data_mut(|d| d.insert_temp(held, x));
+                                    } else if r.changed() || r.drag_stopped() {
+                                        ui.data_mut(|d| d.remove::<i64>(held));
                                         acts.push(Act::Set(key.into(), json!(x)));
                                     }
                                     r
@@ -157,7 +167,8 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Choice(opts) => {
                                     let curv = v.as_str().map_or_else(|| v.to_string(), str::to_string);
                                     let shown = opts.iter().find(|o| o.1 == curv).map(|o| o.0).unwrap_or(curv.as_str()).to_string();
-                                    egui::ComboBox::from_id_salt(("settings", key))
+                                    value_text = tr(&shown).to_string();
+                                    craft_ui::ComboBox::from_id_salt(("settings", key))
                                         .selected_text(tr(&shown))
                                         .width(220.0)
                                         .show_ui(ui, |ui| {
@@ -172,6 +183,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Text | Kind::Path => {
                                     let mut s = v.as_str().unwrap_or("").to_string();
                                     let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(if kind == Kind::Path { 230.0 } else { 260.0 }));
+                                    value_text = s.clone();
                                     if r.changed() {
                                         acts.push(Act::Set(key.into(), json!(s)));
                                     }
@@ -189,6 +201,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                     let mut f = c.map(|v| v as f32 / 255.0);
                                     let r = crate::widgets::srgb_color_button(ui, &mut f);
                                     let rgb = if r.changed() { srgb_bytes(f) } else { c };
+                                    value_text = hex(rgb);
                                     ui.label(RichText::new(hex(rgb)).monospace().color(t.text_dim));
                                     if rgb != c {
                                         acts.push(Act::Set(key.into(), json!(hex(rgb))));
@@ -200,6 +213,17 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                             };
                             resp = Some(r);
                         });
+                    }
+                }
+                if let Some(r) = &resp {
+                    // The field's label is drawn beside it, not on it: give the control its name.
+                    let name = tr(label);
+                    match kind {
+                        Kind::Bool => {}
+                        Kind::Choice(_) => a11y::combo_box(r, name, &value_text, true),
+                        Kind::Text | Kind::Path => a11y::text_input(r, name, &value_text),
+                        Kind::Color => a11y::name_value(r, name, &value_text),
+                        _ => a11y::name(r, name),
                     }
                 }
                 if let Some(r) = resp {
@@ -302,19 +326,20 @@ fn theme_preview(ui: &mut egui::Ui, kind: ThemeKind, width: f32) {
     painter.line_segment([pos2(cti, graph.top()), pos2(cti, graph.bottom())], egui::Stroke::new(1.0, p.cti));
 }
 
+/// What [`theme_card`] shows: the setting `key`, the translated `title`, whether the family is
+/// `active`, the `cur`rent theme and the `options` (value, label) to pick from.
+struct ThemeFamily<'a> {
+    key: &'a str,
+    title: &'a str,
+    active: bool,
+    cur: &'a str,
+    options: &'a [(&'a str, &'a str)],
+}
+
 /// One theme family's card: its (translated) name, Active when the appearance shows it now, a preview of the
 /// chosen theme and a radio button per theme.
-fn theme_card(
-    app: &mut EffectcraftApp,
-    ui: &mut egui::Ui,
-    t: &Tokens,
-    key: &str,
-    title: &str,
-    active: bool,
-    cur: &str,
-    options: &[(&str, &str)],
-    acts: &mut Vec<Act>,
-) {
+fn theme_card(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, fam: ThemeFamily, acts: &mut Vec<Act>) {
+    let ThemeFamily { key, title, active, cur, options } = fam;
     egui::Frame::new()
         .fill(t.field_bg)
         .stroke(egui::Stroke::new(1.0, if active { t.accent } else { t.field_border }))
@@ -346,7 +371,7 @@ fn theme_card(
                         let favorite = favorites.iter().any(|id| id == value);
                         let tip = tr(if favorite { "Remove from favorites" } else { "Add to favorites" });
                         let r = ui.add_visible(favorite || hovered, egui::Button::new("").min_size(vec2(24.0, 24.0)).frame(false)).on_hover_text(tip);
-                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{}: {}", tip, tr(label))));
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {}", tip, tr(label))));
                         reg(app, &format!("settings.appearance.favoriteThemes.{value}"), &r, tip);
                         if favorite || hovered {
                             crate::icons::paint(
@@ -378,7 +403,7 @@ fn appearance_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, t: &T
     ui.horizontal(|ui| {
         ui.add_sized(vec2(250.0, 18.0), egui::Label::new(format!("{}:", tr("Appearance Mode"))).truncate());
         let shown = APPEARANCE_MODES.iter().find(|(_, v)| *v == mode).map_or(mode.as_str(), |(l, _)| *l);
-        let r = egui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
+        let r = craft_ui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
             .selected_text(tr(shown))
             .width(220.0)
             .show_ui(ui, |ui| {
@@ -389,6 +414,7 @@ fn appearance_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, t: &T
                 }
             })
             .response;
+        a11y::combo_box(&r, tr("Appearance Mode"), tr(shown), true);
         reg(app, "settings.appearance.appearanceMode", &r, "Appearance Mode");
     });
     ui.add_space(6.0);
@@ -396,8 +422,20 @@ fn appearance_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, t: &T
     let light_active = mode == "light" || (mode == "auto" && system_light == Some(true));
     ui.columns(2, |cols| {
         let [l, d] = cols else { return };
-        theme_card(app, l, t, "appearance.lightTheme", tr("Light Theme"), light_active, &light, LIGHT_THEMES, acts);
-        theme_card(app, d, t, "appearance.darkTheme", tr("Dark Theme"), !light_active, &dark, DARK_THEMES, acts);
+        theme_card(
+            app,
+            l,
+            t,
+            ThemeFamily { key: "appearance.lightTheme", title: tr("Light Theme"), active: light_active, cur: &light, options: LIGHT_THEMES },
+            acts,
+        );
+        theme_card(
+            app,
+            d,
+            t,
+            ThemeFamily { key: "appearance.darkTheme", title: tr("Dark Theme"), active: !light_active, cur: &dark, options: DARK_THEMES },
+            acts,
+        );
     });
     ui.add_space(6.0);
 }
@@ -451,6 +489,9 @@ fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut
                 ui.label(RichText::new(state).color(if active { t.accent } else { t.text_dim }));
             });
             ui.label(RichText::new(m["description"].as_str().unwrap_or_default()).color(t.text_dim));
+            if let Some(hint) = m["hint"].as_str() {
+                ui.label(RichText::new(hint).color(if m["recommended"].as_bool().unwrap_or(false) { t.accent } else { t.text_dim }));
+            }
             if let Some(by) = m["authors"].as_str() {
                 ui.label(RichText::new(format!("By {by}")).color(t.text_dim));
             }
@@ -467,12 +508,19 @@ fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut
                         }
                     }
                 }
+                if let (Some(source), Some(file)) = (m["source"].as_str(), m["sourceFile"].as_str()) {
+                    let response = ui.link(file).on_hover_text(crate::i18n::tr("Source"));
+                    reg(app, &format!("settings.{prefix}.source.{id}"), &response, file);
+                    if response.clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(source));
+                    }
+                }
             });
             if classic {
                 return;
             }
             ui.horizontal(|ui| {
-                if !installed && !web {
+                if !installed && !web && m["url"].as_str().is_some_and(|url| !url.is_empty()) {
                     let r = ui.add_enabled(busy.is_none(), egui::Button::new(tr("Download")));
                     reg(app, &format!("settings.{prefix}.download.{id}"), &r, "Download");
                     if r.clicked() {
@@ -589,6 +637,7 @@ fn browser_storage_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, a
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
 }
 
+/// Draw the editable label colors and names in Settings.
 fn labels_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, acts: &mut Vec<Act>) {
     ui.label(tr("Label Colors and Names:"));
     ui.add_space(4.0);
@@ -599,12 +648,14 @@ fn labels_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, acts: &mu
             let mut f = c.map(|v| v as f32 / 255.0);
             let r = crate::widgets::srgb_color_button(ui, &mut f);
             let rgb = if r.changed() { srgb_bytes(f) } else { c };
+            a11y::name_value(&r, &tr_args("Label {} color", &[&(i + 1)]), &hex(rgb));
             app.auto.add(&format!("settings.labels.{i}.color"), r.rect, "label colour");
             if rgb != c {
                 acts.push(Act::Set(format!("labels.{i}.color"), json!(hex(rgb))));
             }
             let mut name = l["name"].as_str().unwrap_or("").to_string();
             let r = ui.add_sized(vec2(160.0, 20.0), egui::TextEdit::singleline(&mut name));
+            a11y::text_input(&r, &tr_args("Label {} name", &[&(i + 1)]), &name);
             app.auto.add(&format!("settings.labels.{i}.name"), r.rect, "label name");
             if r.changed() {
                 acts.push(Act::Set(format!("labels.{i}.name"), json!(name)));
@@ -622,6 +673,7 @@ fn labels_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, acts: &mu
     }
 }
 
+/// Draw the Settings dialog, including its translated page list and the selected page's controls.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let all = pages();
     let mut page = app.dialog_state.settings_page.clone();
@@ -661,30 +713,80 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         {
             let ui = &mut body;
             // Page list (left, like After Effects).
+            let widest_page = all
+                .iter()
+                .map(|p| ui.painter().layout_no_wrap(crate::i18n::settings_page_title(p.title).to_owned(), Tokens::ui(12.5), t.text).size().x)
+                .fold(0.0_f32, f32::max);
+            let page_width = (widest_page + 20.0).max(176.0).min((ui.available_width() * 0.42).min(300.0));
             ui.vertical(|ui| {
-                ui.set_width(180.0);
+                ui.set_width(page_width + 4.0);
                 egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                    // One Tab stop for the list (the open page); Up / Down / Home / End move
+                    // between the pages and the focus goes with them.
                     // The rows touch, so the pointer never falls between two of them.
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    for p in &all {
-                        let (r, resp) = ui.allocate_exact_size(vec2(176.0, 24.0), egui::Sense::click());
+                    let ctx = ui.ctx().clone();
+                    let page_item = |id: &str| egui::Id::unique(("settings-page", id.to_string()));
+                    let on_list = all.iter().any(|q| ctx.memory(|m| m.has_focus(page_item(q.id))));
+                    for (n, p) in all.iter().enumerate() {
                         let sel = page == p.id;
+                        let r = ui.allocate_space(vec2(page_width, 24.0)).1;
+                        let resp = ui.interact(r, page_item(p.id), if sel { egui::Sense::click() } else { egui::Sense::CLICK });
+                        a11y::list_item(&resp, crate::i18n::settings_page_title(p.title), sel, n + 1, all.len());
+                        if a11y::take_pending_focus(&ctx, "settings", resp.id) {
+                            resp.request_focus();
+                        }
                         if sel {
                             ui.painter().rect_filled(r, 3.0, t.accent);
                         } else if resp.hovered() {
                             ui.painter().rect_filled(r, 3.0, t.hover);
                         }
-                        ui.painter().text(
+                        crate::widgets::text_fit(
+                            ui.painter(),
                             r.left_center() + vec2(10.0, 0.0),
                             egui::Align2::LEFT_CENTER,
-                            tr(p.title),
+                            crate::i18n::settings_page_title(p.title),
                             Tokens::ui(12.5),
+                            (page_width - 20.0).max(0.0),
                             if sel { Color32::WHITE } else { t.text },
                         );
+                        if resp.has_focus() {
+                            ui.painter().rect_stroke(r.shrink(1.0), 3.0, egui::Stroke::new(2.0, t.text), egui::StrokeKind::Inside);
+                        }
                         app.auto.add(&format!("settings.page.{}", p.id), r, p.title);
-                        if resp.clicked() {
+                        if resp.on_hover_text(crate::i18n::settings_page_title(p.title)).clicked() {
                             page = p.id.to_string();
                         }
+                    }
+                    if on_list {
+                        let at = all.iter().position(|q| q.id == page).unwrap_or(0);
+                        let last = all.len().saturating_sub(1);
+                        let mut to = at;
+                        for key in ctx.input(|i| {
+                            i.events
+                                .iter()
+                                .filter_map(|e| match e {
+                                    egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                        }) {
+                            to = match key {
+                                egui::Key::ArrowDown => to.saturating_add(1).min(last),
+                                egui::Key::ArrowUp => to.saturating_sub(1),
+                                egui::Key::Home => 0,
+                                egui::Key::End => last,
+                                _ => to,
+                            };
+                        }
+                        if to != at
+                            && let Some(q) = all.get(to)
+                        {
+                            page = q.id.to_string();
+                            a11y::focus_next_pass(&ctx, "settings", page_item(q.id));
+                        }
+                        // The arrows are the list's, not egui's spatial focus moves.
+                        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
                     }
                 });
             });
@@ -694,7 +796,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 // dialog scrolled sideways a little (#284).
                 ui.set_width(ui.available_width());
                 let p = &all[idx];
-                ui.label(RichText::new(tr(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
+                ui.label(RichText::new(crate::i18n::settings_page_title(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height((body_h - 30.0).max(0.0)).auto_shrink([false, false]).show(ui, |ui| {
                     page_ui(app, ui, p, &cur, t, &mut acts);
@@ -781,9 +883,9 @@ pub fn recovery(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 if m < 1 {
                     "less than a minute ago".to_string()
                 } else if m < 120 {
-                    format!("{m} minutes ago")
+                    tr_args("{} minutes ago", &[&m])
                 } else {
-                    format!("{} hours ago", m / 60)
+                    tr_args("{} hours ago", &[&(m / 60)])
                 }
             });
             ui.label(tr_args("Latest auto-save: {}", &[&a]));
@@ -827,5 +929,30 @@ pub fn recovery(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         && let Err(e) = crate::menus::invoke(app, ctx, "file.open", json!({"path": p}))
     {
         app.ui.status = e;
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// Install-only models must not offer a download that the command will reject.
+    #[test]
+    fn sam2_settings_offer_file_installation_without_downloads() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let tokens = app.tokens;
+        let mut actions = vec![];
+        let mut output = ctx
+            .run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 2200.0))), ..Default::default() }, |ui| {
+                models_ui(&mut app, ui, &tokens, &mut actions, Task::Mask)
+            });
+        output.textures_delta.clear();
+        for id in ["sam2.1-hiera-tiny", "sam2.1-hiera-small", "sam2.1-hiera-base-plus", "sam2.1-hiera-large"] {
+            assert!(app.auto.find(&format!("settings.roto.download.{id}")).is_none());
+            assert!(app.auto.find(&format!("settings.roto.install.{id}")).is_some());
+            assert_eq!(app.auto.find(&format!("settings.roto.source.{id}")).unwrap().label, "model.safetensors");
+        }
+        assert!(actions.is_empty());
     }
 }

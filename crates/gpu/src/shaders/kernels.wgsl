@@ -380,19 +380,31 @@ fn glow_bright(@builtin(global_invocation_id) gid: vec3<u32>) {
         l = a;
     }
     let k = clamp((l - thr) / max(1.0 - thr, 1e-3), 0.0, 1.0);
+    // Based on the colour channels the glow covers the layer's whole alpha (effects::misc::glow).
+    var ga = a;
+    if (P.u[0].y != 0u) {
+        ga = k * a;
+    }
     if (P.u[0].x != 0u) {
         let t = glow_ab_t(l);
         let ca = P.f[1].xyz;
         let cb = P.f[2].xyz;
         let c = ca + (cb - ca) * t;
-        textureStore(out, p, vec4<f32>(c * k * a, k * a));
+        textureStore(out, p, vec4<f32>(c * k * a, ga));
+    } else if (P.u[0].y != 0u) {
+        textureStore(out, p, vec4<f32>(px.xyz * k, ga));
     } else {
-        textureStore(out, p, px * k);
+        // Original colours, per channel (effects::misc::glow_bright_channel): gain 8.0 is
+        // effects::GLOW_GAIN, 0.0611 is effects::GLOW_KNEE (checked by the test
+        // glow_constants_match_the_cpu).
+        let c = max(8.0 * (px.xyz / a - vec3<f32>(thr - 0.0611)), vec3<f32>(0.0));
+        textureStore(out, p, vec4<f32>(c * a, ga));
     }
 }
 
 // Glow composite: original `src` with the blurred glow `aux`. u[0].x = 0 on top, 1 behind,
-// 2 none (glow only); f[0].x = intensity.
+// 2 none (glow only); u[0].y = based on alpha (intensity also scales the glow's alpha);
+// f[0].x = intensity.
 @compute @workgroup_size(16, 16)
 fn glow_combine(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -401,7 +413,11 @@ fn glow_combine(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var o = textureLoad(src, p, 0);
-    let g = textureLoad(aux, p, 0) * P.f[0].x;
+    let gs = textureLoad(aux, p, 0);
+    var g = vec4<f32>(gs.xyz * P.f[0].x, gs.w);
+    if (P.u[0].y != 0u) {
+        g.w = gs.w * P.f[0].x;
+    }
     if (P.u[0].x == 2u) {
         o = g;
     } else if (P.u[0].x == 1u) {
@@ -509,12 +525,25 @@ fn fade(t: f32) -> f32 {
 }
 
 fn value_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    return value_noise_z(x, y, z, seed, true);
+}
+
+// effects::generate::value_noise_linear_z: z (evolution) interpolates linearly, x and y keep the
+// quintic fade (Turbulent Displace, #943).
+fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    return value_noise_z(x, y, z, seed, false);
+}
+
+fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let x0 = floor(x);
     let y0 = floor(y);
     let z0 = floor(z);
     let fx = fade(x - x0);
     let fy = fade(y - y0);
-    let fz = fade(z - z0);
+    var fz = z - z0;
+    if (ease_z) {
+        fz = fade(fz);
+    }
     let ix = i32(x0);
     let iy = i32(y0);
     let iz = i32(z0);
@@ -561,7 +590,7 @@ fn soft_linear_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
     let wy = bspline(y + 0.5 - y0);
     let a = soft_linear_slice(i32(x0), i32(y0), i32(z0), wx, wy, seed);
     let b = soft_linear_slice(i32(x0), i32(y0), i32(z0) + 1, wx, wy, seed);
-    let n = a + (b - a) * fade(z - z0);
+    let n = a + (b - a) * (z - z0);
     return 0.5 + (n - 0.5) * SOFT_LINEAR_GAIN;
 }
 
@@ -605,7 +634,9 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 1u: {
             if (a > 0.0) {
                 let c = straight(px);
-                let l = clamp(luminance(c), 0.0, 1.0);
+                // Rec. 601 weights, as After Effects: effects::LUMA_601 (checked by the test
+                // shader_constants_match_the_cpu).
+                let l = clamp(0.299 * c.x + 0.587 * c.y + 0.114 * c.z, 0.0, 1.0);
                 let blk = P.f[0].xyz;
                 let wht = P.f[1].xyz;
                 let t = blk + (wht - blk) * l;
@@ -623,14 +654,20 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 } else if (P.u[0].y == 2u) {
                     // Brightness & Contrast tone curves (effects crate bc_modern, AE-fitted #681).
                     var o = c;
-                    let g = max(1.0 + 0.53 * ct, 0.05);
+                    // Negative settings invert the positive curves (reciprocal exponents).
+                    var g = max(1.0 + 0.53 * abs(ct), 0.05);
+                    if (ct < 0.0) {
+                        g = 1.0 / g;
+                    }
+                    var e = exp2(1.24 * abs(br));
+                    if (br < 0.0) {
+                        e = 1.0 / e;
+                    }
                     for (var i = 0; i < 3; i++) {
                         if (c[i] < 1.0) {
                             var v = max(c[i], 0.0);
-                            if (br > 0.0) {
-                                v = 1.0 - powz(1.0 - v, exp2(1.24 * br));
-                            } else if (br < 0.0) {
-                                v = powz(v, exp2(-1.32 * br));
+                            if (br != 0.0) {
+                                v = 1.0 - powz(1.0 - v, e);
                             }
                             if (ct != 0.0) {
                                 if (v < 0.5) {
@@ -702,7 +739,12 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (P.u[0].z != 0u) {
                         t = min(t, 1.0);
                     }
-                    t = powz(max(t, 0.0), 1.0 / g);
+                    // color_fx::levels_gamma: unclipped values below 0 mirror the curve.
+                    if (t >= 0.0) {
+                        t = powz(t, 1.0 / g);
+                    } else {
+                        t = -powz(-t, 1.0 / g);
+                    }
                     o[i] = ob + (ow - ob) * t;
                 }
                 px = vec4<f32>(o * a, a);
@@ -713,14 +755,16 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let c = straight(px);
                 var o = vec3<f32>(0.0);
                 for (var i = 0; i < 3; i++) {
-                    // Per-channel gain, offset, gamma; negative values are mirrored.
+                    // Per-channel gain, offset, gamma; negative values are mirrored. The
+                    // linear-light conversion is a pure 2.2 power: effects::EXPOSURE_LINEAR_GAMMA
+                    // (checked by the test shader_constants_match_the_cpu).
                     if (P.u[0].y != 0u) {
                         let x = c[i] * P.f[0][i] + P.f[1][i];
                         o[i] = sign(x) * powz(abs(x), 1.0 / P.f[2][i]);
                     } else {
-                        let lin = srgb_to_linear(max(c[i], 0.0));
+                        let lin = sign(c[i]) * powz(abs(c[i]), 2.2);
                         let x = lin * P.f[0][i] + P.f[1][i];
-                        o[i] = sign(x) * linear_to_srgb(powz(abs(x), 1.0 / P.f[2][i]));
+                        o[i] = sign(x) * powz(powz(abs(x), 1.0 / P.f[2][i]), 1.0 / 2.2);
                     }
                 }
                 px = vec4<f32>(o * a, a);
@@ -753,17 +797,13 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
             let c = P.f[0];
             let invert = P.u[0].y != 0u;
             let opacity = P.f[1].x;
+            // The fill colour at the layer's (or inverted) alpha times Opacity (color_fx::fill).
             var fa = px.w;
             if (invert) {
                 fa = 1.0 - px.w;
             }
-            let f = c.xyz * fa;
-            let rgb = px.xyz + (f - px.xyz) * opacity;
-            var alpha = px.w;
-            if (invert) {
-                alpha = px.w + (fa - px.w) * opacity;
-            }
-            px = vec4<f32>(rgb, alpha);
+            fa = fa * opacity;
+            px = vec4<f32>(c.xyz * fa, fa);
         }
         case 8u: {
             // effects::color2::map_ca: transparent pixels only change through the alpha curve.

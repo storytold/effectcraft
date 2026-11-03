@@ -90,6 +90,44 @@ pub fn stroke_dash(name: &str) -> Option<&'static str> {
 
 const TEXT_ANIMATOR: &[(&str, &str)] = &[("selectors", "ADBE Text Selectors"), ("properties", "ADBE Text Animator Properties")];
 
+/// Animator property ids and their stable After Effects scripting names. Shared by lookup,
+/// `.matchName`, and `addProperty` so the same property has one name in every direction.
+pub const TEXT_ANIMATOR_PROPERTIES: &[(&str, &str)] = &[
+    ("anchor", "ADBE Text Anchor Point 3D"),
+    ("position", "ADBE Text Position 3D"),
+    ("scale", "ADBE Text Scale 3D"),
+    ("skew", "ADBE Text Skew"),
+    ("rotation", "ADBE Text Rotation"),
+    ("opacity", "ADBE Text Opacity"),
+    ("fillColor", "ADBE Text Fill Color"),
+    ("fillHue", "ADBE Text Fill Hue"),
+    ("fillSaturation", "ADBE Text Fill Saturation"),
+    ("fillBrightness", "ADBE Text Fill Brightness"),
+    ("fillOpacity", "ADBE Text Fill Opacity"),
+    ("strokeColor", "ADBE Text Stroke Color"),
+    ("strokeHue", "ADBE Text Stroke Hue"),
+    ("strokeSaturation", "ADBE Text Stroke Saturation"),
+    ("strokeBrightness", "ADBE Text Stroke Brightness"),
+    ("strokeOpacity", "ADBE Text Stroke Opacity"),
+    ("strokeWidth", "ADBE Text Stroke Width"),
+    ("tracking", "ADBE Text Tracking Amount"),
+    ("lineAnchor", "ADBE Text Line Anchor"),
+    ("lineSpacing", "ADBE Text Line Spacing"),
+    ("characterOffset", "ADBE Text Character Offset"),
+    ("characterValue", "ADBE Text Character Replace"),
+    ("blur", "ADBE Text Blur"),
+];
+
+/// Companion properties that exist below an animator but are not kinds `addProperty` accepts:
+/// they come with Tracking (Track Type), Skew (Skew Axis) and per-character 3D Rotation
+/// (X and Y Rotation). Lookup and `.matchName` know them; `addProperty` does not.
+pub const TEXT_ANIMATOR_COMPANIONS: &[(&str, &str)] = &[
+    ("trackingType", "ADBE Text Track Type"),
+    ("skewAxis", "ADBE Text Skew Axis"),
+    ("rotationX", "ADBE Text Rotation X"),
+    ("rotationY", "ADBE Text Rotation Y"),
+];
+
 const TEXT_SELECTORS: &[(&str, &str)] =
     &[("rangeSelector", "ADBE Text Selector"), ("wigglySelector", "ADBE Text Wiggly Selector"), ("expressionSelector", "ADBE Text Expressible Selector")];
 
@@ -147,6 +185,7 @@ pub const SHAPE_ITEMS: &[(&str, &str)] = &[
     ("trim", "ADBE Vector Filter - Trim"),
     ("twist", "ADBE Vector Filter - Twist"),
     ("wiggle", "ADBE Vector Filter - Roughen"),
+    ("wiggler", "ADBE Vector Filter - Wiggler"),
     ("zigzag", "ADBE Vector Filter - Zigzag"),
 ];
 
@@ -208,7 +247,29 @@ const SHAPE_PROPS: &[(&str, &str, &str)] = &[
     ("pucker", "amount", "ADBE Vector PuckerBloat Amount"),
     ("twist", "angle", "ADBE Vector Twist Angle"),
     ("twist", "center", "ADBE Vector Twist Center"),
+    ("wiggler", "speed", "ADBE Vector Xform Temporal Freq"),
+    ("wiggler", "correlation", "ADBE Vector Correlation"),
+    ("wiggler", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggler", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggler", "seed", "ADBE Vector Random Seed"),
+    ("wiggler", "transform", "ADBE Vector Wiggler Transform"),
     ("merge", "mode", "ADBE Vector Merge Type"),
+    ("offset", "amount", "ADBE Vector Offset Amount"),
+    ("offset", "join", "ADBE Vector Offset Line Join"),
+    ("offset", "miter", "ADBE Vector Offset Miter Limit"),
+    ("offset", "copies", "ADBE Vector Offset Copies"),
+    ("offset", "copyOffset", "ADBE Vector Offset Copy Offset"),
+    ("zigzag", "size", "ADBE Vector Zigzag Size"),
+    ("zigzag", "ridges", "ADBE Vector Zigzag Detail"),
+    ("zigzag", "points", "ADBE Vector Zigzag Points"),
+    ("wiggle", "size", "ADBE Vector Roughen Size"),
+    ("wiggle", "detail", "ADBE Vector Roughen Detail"),
+    ("wiggle", "points", "ADBE Vector Roughen Points"),
+    ("wiggle", "speed", "ADBE Vector Temporal Freq"),
+    ("wiggle", "correlation", "ADBE Vector Correlation"),
+    ("wiggle", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggle", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggle", "seed", "ADBE Vector Random Seed"),
 ];
 
 /// Effects: our effect id → AE match name (the documented ones; the rest keep our id).
@@ -393,13 +454,15 @@ pub fn shape_kind(name: &str) -> Option<&'static str> {
         "twist" => "twist",
         "zigzag" => "zigzag",
         "wigglepaths" => "wiggle",
+        "wiggletransform" => "wiggler",
         "mergepaths" => "merge",
         _ => return None,
     })
 }
 
 /// Effects whose documented parameter match names are not numbered in display order:
-/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`.
+/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`. Params of
+/// these effects that After Effects doesn't have are numbered after the listed ones (#1405).
 const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "fillMask", 1),
     ("ec.generate.fill", "color", 2),
@@ -408,7 +471,41 @@ const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "opacity", 5),
     ("ec.generate.fill", "invert", 6),
     ("ec.generate.fill", "allMasks", 7),
+    ("ec.generate.stroke", "path", 1),
+    ("ec.generate.stroke", "color", 2),
+    ("ec.generate.stroke", "brushSize", 3),
+    ("ec.generate.stroke", "brushHardness", 4),
+    ("ec.generate.stroke", "opacity", 5),
+    ("ec.generate.stroke", "spacing", 6),
+    ("ec.generate.stroke", "paintStyle", 7),
+    ("ec.generate.stroke", "start", 8),
+    ("ec.generate.stroke", "end", 9),
+    ("ec.generate.stroke", "allMasks", 10),
+    ("ec.generate.stroke", "strokeSequentially", 11),
+    // -0001 is a hidden parameter and -0003 Channel Range, which we don't have; the per-channel
+    // controls are ours (After Effects edits the selected channel with the Master ones).
+    ("ec.color.huesaturation", "channelControl", 2),
+    ("ec.color.huesaturation", "hue", 4),
+    ("ec.color.huesaturation", "saturation", 5),
+    ("ec.color.huesaturation", "lightness", 6),
+    ("ec.color.huesaturation", "colorize", 7),
+    ("ec.color.huesaturation", "colorizeHue", 8),
+    ("ec.color.huesaturation", "colorizeSaturation", 9),
+    ("ec.color.huesaturation", "colorizeLightness", 10),
 ];
+
+/// The `-NNNN` number of the param `id` at 0-based `pos` among `fx`'s `params`.
+fn param_number(fx: &str, params: &[Node], id: &str, pos: usize) -> usize {
+    let listed = |p: &str| PARAM_NUMBERS.iter().find(|(f, q, _)| *f == fx && *q == p).map(|(_, _, n)| *n);
+    if let Some(n) = listed(id) {
+        return n;
+    }
+    let Some(last) = PARAM_NUMBERS.iter().filter(|(f, _, _)| *f == fx).map(|(_, _, n)| *n).max() else {
+        return pos + 1;
+    };
+    let unlisted_before = params.iter().take(pos).filter(|c| listed(c.match_id()).is_none()).count();
+    last + unlisted_before + 1
+}
 
 /// Match name of the node at the end of `chain` (layer root's children → … → node). `effect`
 /// params are numbered `<effect match name>-0001…` in parameter order, like After Effects.
@@ -432,11 +529,8 @@ pub fn node(chain: &[&Node]) -> String {
             let fx = parent.and_then(Node::as_group);
             match fx {
                 Some(g) => {
-                    let i = PARAM_NUMBERS
-                        .iter()
-                        .find(|(fx, p, _)| *fx == g.match_id && *p == id)
-                        .map(|(_, _, n)| *n)
-                        .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0) + 1);
+                    let pos = g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0);
+                    let i = param_number(&g.match_id, &g.children, id, pos);
                     format!("{}-{i:04}", effect(&g.match_id))
                 }
                 None => own(),
@@ -447,6 +541,9 @@ pub fn node(chain: &[&Node]) -> String {
         "text" if pid == "animators" => "ADBE Text Animator".into(),
         "text" if pid == "selectors" => find(TEXT_SELECTORS, id).map(str::to_string).unwrap_or_else(own),
         "text" if pid == "rangeSelector" => find(TEXT_RANGE_SELECTOR, id).map(str::to_string).unwrap_or_else(own),
+        "text" if pid == "properties" && chain.len() == 5 && chain.get(1).is_some_and(|n| n.match_id() == "animators") => {
+            find(TEXT_ANIMATOR_PROPERTIES, id).or_else(|| find(TEXT_ANIMATOR_COMPANIONS, id)).map(str::to_string).unwrap_or_else(own)
+        }
         "text" if grand.map(|g| g.match_id()) == Some("animators") => find(TEXT_ANIMATOR, id).map(str::to_string).unwrap_or_else(own),
         "cameraOptions" => find(CAMERA, id).map(str::to_string).unwrap_or_else(own),
         "lightOptions" => find(LIGHT, id).map(str::to_string).unwrap_or_else(own),
@@ -495,6 +592,30 @@ mod tests {
         assert_eq!(shape_kind("Trim Paths"), Some("trim"));
         assert_eq!(shape_kind("ADBE Vector Graphic - Fill"), Some("fill"));
         assert_eq!(shape_kind("nope"), None);
+    }
+
+    #[test]
+    fn text_animator_property_names_are_canonical_and_scoped() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (text, animators, animator, properties) = (n("text"), n("animators"), n("animator"), n("properties"));
+        for (id, name) in TEXT_ANIMATOR_PROPERTIES {
+            let prop = n(id);
+            assert_eq!(node(&[&text, &animators, &animator, &properties, &prop]), *name);
+            assert_eq!(node(&[&properties, &prop]), *id, "an unrelated Properties group keeps its own ids");
+        }
+    }
+
+    /// #1063: the companions an animator property brings (Track Type, Skew Axis, X / Y Rotation)
+    /// have their After Effects names too, though `addProperty` does not accept them.
+    #[test]
+    fn text_animator_companions_have_after_effects_names() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (text, animators, animator, properties) = (n("text"), n("animators"), n("animator"), n("properties"));
+        for (id, name) in TEXT_ANIMATOR_COMPANIONS {
+            let prop = n(id);
+            assert_eq!(node(&[&text, &animators, &animator, &properties, &prop]), *name);
+            assert!(!TEXT_ANIMATOR_PROPERTIES.iter().any(|(k, m)| k == id || m == name), "{id} is not an addProperty kind");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Timeline documents → compositions (File ▸ Import ▸ Adobe Premiere Pro Project / Timeline
 //! Interchange…).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::{Keyframe, Value};
@@ -143,6 +143,11 @@ pub fn import(
     if depth > MAX_DEPTH {
         return Err(Error::TooDeep(MAX_DEPTH));
     }
+    // FilmCraft's parser expands internal entities without a node limit (#2129); Final Cut Pro
+    // and FCPXML exports never declare any.
+    if matches!(format, TimelineFormat::Fcp7Xml | TimelineFormat::Fcpxml) && bytes.windows(8).any(|w| w == b"<!ENTITY") {
+        return Err(Error::XmlEntities);
+    }
     let fc_opts = filmcraft_interchange::ImportOptions {
         base_dir: opts.base_dir.clone(),
         edl_frame_rate: opts.edl_frame_rate.map(|f| {
@@ -151,16 +156,77 @@ pub fn import(
         }),
         name: Some(opts.name.trim_end_matches(|c| c != '.').trim_end_matches('.').to_string()).filter(|s| !s.is_empty()),
     };
-    let (imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
+    let (mut imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
+    // Each file is probed once, though an EDL's media are probed before the layers are made.
+    let mut probed: HashMap<String, Option<Footage>> = HashMap::new();
+    let mut probe_once = |path: &str| probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone();
+    let left_on_timecode = if format == TimelineFormat::Edl { rebase_to_file_timecode(&mut imported.project, &mut probe_once) } else { Vec::new() };
     let mut res = ImportResult { format: Some(format), ..Default::default() };
     for e in &report.entries {
+        // The reader's "rebase after probing" note is done above: name only the media it wasn't.
+        if format == TimelineFormat::Edl && e.message.starts_with(EDL_MEDIA_TIME_NOTE) {
+            if !left_on_timecode.is_empty() {
+                res.warnings
+                    .push(format!("EDL source timecodes stay media time for {}: the file is missing or has no start timecode", left_on_timecode.join(", ")));
+            }
+            continue;
+        }
         if e.count > 1 { res.warnings.push(format!("{} (×{})", e.message, e.count)) } else { res.warnings.push(e.message.clone()) }
     }
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
     let mut im = Importer { src: &imported.project, project, res, items: HashMap::new(), solids: HashMap::new(), solids_folder: None, bins: HashMap::new() };
-    im.run(&imported.sequences, probe);
+    im.run(&imported.sequences, &mut probe_once);
     Ok(im.res)
+}
+
+/// The start of the note FilmCraft's EDL reader adds when source timecodes look like real
+/// timecode (an hour or more) and it has kept them as media time.
+const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media time";
+
+/// An EDL's source times are its source timecodes, which FilmCraft's reader keeps as media time.
+/// The largest start timecode, in frames, a file may have: a day at 1000 fps.
+const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
+
+/// Put the clips of each file that has a start timecode on the file's own time, as FilmCraft does
+/// when it links the media of an imported EDL. Returns the names of the media that stay on
+/// timecode though their clips use an hour or more of it (the file is missing or has none).
+fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str) -> Option<Footage>) -> Vec<String> {
+    let mut on_timecode: HashSet<fp::ItemId> = HashSet::new();
+    for it in project.items.values() {
+        if let fp::ItemKind::Sequence(seq) = &it.kind {
+            // 01:00:00:00 as the list counts it: 01:00:00;00 drop-frame at 29.97 fps is 3599.996 s
+            let (rate, df) = (seq.settings.frame_rate, seq.settings.drop_frame);
+            let hour = rate.tick_of(filmcraft_time::fields_to_frames(1, 0, 0, 0, rate, df));
+            on_timecode.extend(seq.all_tracks().flat_map(|t| &t.items).filter(|ti| ti.source_in >= hour).map(|ti| ti.item));
+        }
+    }
+    let files: Vec<(fp::ItemId, String, String, bool)> = project
+        .items
+        .values()
+        .filter_map(|it| match &it.kind {
+            fp::ItemKind::Media(m) => match &m.media {
+                fp::MediaRef::File { path } => Some((it.id, it.name.clone(), path.clone(), m.offline)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let mut left = Vec::new();
+    for (id, name, path, offline) in files {
+        match if offline { None } else { probe(&path) } {
+            // A corrupt timecode past a day of frames (at up to 1000 fps) would overflow the tick
+            // arithmetic; such a file stays on timecode.
+            Some(Footage { file_timecode: Some(tc), native_rate, frame_rate, .. }) if (0..=MAX_FILE_TIMECODE).contains(&tc) => {
+                filmcraft_interchange::rebase_source_timecode(project, id, tc, crate::rate_out(native_rate.unwrap_or(frame_rate)));
+            }
+            _ if on_timecode.contains(&id) => left.push(name),
+            _ => {}
+        }
+    }
+    left.sort();
+    left.dedup();
+    left
 }
 
 struct Importer<'a> {
@@ -271,7 +337,7 @@ impl Importer<'_> {
             MediaKind::AudioOnly => FootageKind::Audio,
             MediaKind::Still => FootageKind::Still,
             MediaKind::ImageSequence => FootageKind::Sequence,
-            _ if v.is_none() && info.audio.is_some() => FootageKind::Audio,
+            _ if v.is_none() && info.has_audio() => FootageKind::Audio,
             _ => FootageKind::Video,
         };
         let _ = name;
@@ -284,7 +350,7 @@ impl Importer<'_> {
             frame_rate: rate_in(info.frame_rate()),
             duration: tick_in(info.duration),
             has_video: kind != FootageKind::Audio,
-            has_audio: info.audio.is_some() || kind == FootageKind::Audio,
+            has_audio: info.has_audio() || kind == FootageKind::Audio,
             alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
             codec: v.map(|v| v.codec.clone()).unwrap_or_default(),
             missing: true,

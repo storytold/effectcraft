@@ -19,16 +19,28 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
         let mut f = footage_from_info(&path.to_string_lossy(), src?.info());
-        let turn = crate::stream::movie_header(path).map_or(Orientation::NoTransforms, |h| video_turn(&h));
+        let header = crate::stream::movie_header(path);
+        let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
+        correct_rate(&mut f, header.as_deref().and_then(video_rate));
+        trim_to_edits(&mut f, header.as_deref().and_then(video_shown));
         return Ok(f);
     }
-    let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
+    let bytes = crate::read_regular_file(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        return probe_model(&path.to_string_lossy(), &bytes, &|uri| std::fs::read(dir.join(uri)).ok());
+        return probe_model(&path.to_string_lossy(), &bytes, &side_file_reader(path));
     }
     probe_bytes(&path.to_string_lossy(), bytes.into())
+}
+
+/// Reads the files a model file names (buffers, textures, MTL files). Like the pool, it follows only
+/// local files and files on the model's own network share: a URI is a path stored in the model.
+fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
+    let model = std::path::absolute(model).unwrap_or_else(|_| model.to_path_buf());
+    move |uri| {
+        let p = craft_docpath::resolve_absolute(uri, Some(&model)).ok()?;
+        crate::read_regular_file(&p).ok()
+    }
 }
 
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its
@@ -95,10 +107,54 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     }
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let turn = video_turn(&bytes);
+    let rate = video_rate(&bytes);
+    let shown = video_shown(&bytes);
+    // A WAV's cue points and XMP markers become the footage's markers.
+    let markers = crate::wav_markers::read(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
     let mut f = footage_from_info(path, src.info());
+    f.markers = markers;
     turn_footage(&mut f, turn);
+    correct_rate(&mut f, rate);
+    trim_to_edits(&mut f, shown);
     Ok(f)
+}
+
+/// A movie lasts as long as its video edit list shows (#2592): the reader reports the media
+/// duration (`mdhd`), which for H.264 with B-frames runs past the last shown frame by the
+/// encoder delay the edit list trims (75 frames at 25 fps read as 3.04 s). Never lengthens.
+fn trim_to_edits(f: &mut Footage, shown: Option<Tick>) {
+    if f.kind == FootageKind::Video
+        && let Some(shown) = shown.filter(|s| *s > Tick::ZERO && *s < f.duration)
+    {
+        f.duration = shown;
+    }
+}
+
+/// How long the video track's edit list shows its media (`elst` segments, movie timescale):
+/// `None` without edits, or with an empty edit (a delayed start keeps the reader's duration).
+fn video_shown(bytes: &[u8]) -> Option<Tick> {
+    let file = filmcraft_isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    edits_shown(&t.edits, file.timescale)
+}
+
+fn edits_shown(edits: &[filmcraft_isobmff::Edit], timescale: u32) -> Option<Tick> {
+    if edits.is_empty() || timescale == 0 || edits.iter().any(|e| e.media_time < 0) {
+        return None;
+    }
+    let units = edits.iter().try_fold(0u64, |acc, e| acc.checked_add(e.segment_duration))?;
+    Some(Tick::from_units(i64::try_from(units).ok()?, i64::from(timescale)))
+}
+
+/// A movie's frame rate as its frame durations average to ([`video_rate`]), where the reader's
+/// own estimate misreads it.
+fn correct_rate(f: &mut Footage, rate: Option<FrameRate>) {
+    if f.kind == FootageKind::Video
+        && let Some(rate) = rate
+    {
+        f.frame_rate = rate;
+    }
 }
 
 /// The size as displayed: a movie shot with the camera on its side trades width and height.
@@ -119,7 +175,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         (_, None) => FootageKind::Audio,
     };
     let rate = v.map_or(FrameRate::FPS_30, |v| rate_from_fc(v.frame_rate));
-    let codec = match (v, info.audio.as_ref()) {
+    let codec = match (v, info.audio()) {
         (Some(v), _) => v.codec.clone(),
         (None, Some(a)) => a.codec.clone(),
         _ => String::new(),
@@ -134,7 +190,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         native_rate: None,
         duration: if kind == FootageKind::Still { Tick::ZERO } else { Tick(info.duration.0) },
         has_video: v.is_some(),
-        has_audio: info.audio.is_some(),
+        has_audio: info.has_audio(),
         alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
         premul_color: [0.0; 3],
         loop_count: 1,
@@ -142,16 +198,21 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         missing: false,
         sequence: Vec::new(),
         color_profile: v.and_then(|v| profile_of(&v.color)),
+        // counted in video frames, so only with a video stream
+        file_timecode: v.and(info.start_timecode),
         ..Default::default()
     }
 }
 
 /// The colour profile a video stream declares (H.273 primaries / transfer from the bitstream or
-/// container). `None` (interpreted as sRGB) for Rec. 709 primaries with an sRGB curve.
+/// container). `None` (interpreted as sRGB) for Rec. 709 primaries with an sRGB curve. BT.2020
+/// with a PQ or HLG curve is Rec. 2100 (HDR10, HLG), not Rec. 2020's 2.4 gamma (#2849).
 fn profile_of(c: &filmcraft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
     use effectcraft_project::ColorSpace;
     use filmcraft_color::{Primaries, Transfer};
     match (c.primaries, c.transfer) {
+        (Primaries::Bt2020, Transfer::Pq) => Some(ColorSpace::Rec2100Pq),
+        (Primaries::Bt2020, Transfer::Hlg) => Some(ColorSpace::Rec2100Hlg),
         (Primaries::Bt2020, _) => Some(ColorSpace::Rec2020),
         (Primaries::P3D65, _) => Some(ColorSpace::DisplayP3),
         (_, Transfer::Bt709) => Some(ColorSpace::Rec709),
@@ -239,12 +300,19 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
 /// The rotation an MP4/MOV movie is shown with (a phone held upright records sideways frames and
 /// says so in its video track's header): the quarter turn nearest the track's rotation. Only the
 /// rotation counts; any mirroring, scaling or offset in the header is ignored, and other
-/// containers have none.
+/// containers have none. FilmCraft turns the frames of a pure 0/90/180/270° header itself, so this
+/// is only the quarter turn nearest to a header it does not turn.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
     let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
-    let Some(m) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video).map(|t| t.matrix) else {
+    let Some(track) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video) else {
         return Orientation::NoTransforms;
     };
+    // A pure rotation is already applied by FilmCraft's decoder (frames and size come out
+    // upright); only the headers it leaves as stored (mirrored, scaled, sheared) are turned here.
+    if track.display_rotation().is_some() {
+        return Orientation::NoTransforms;
+    }
+    let m = track.matrix;
     // [a b u; c d v; x y w]: (a, b) is where the picture's x axis points.
     let (a, b) = (m[0] as i64, m[1] as i64);
     match (a.abs() >= b.abs(), a >= 0, b >= 0) {
@@ -252,5 +320,139 @@ pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
         (true, false, _) => Orientation::Rotate180,
         (false, _, true) => Orientation::Rotate90,
         (false, _, false) => Orientation::Rotate270,
+    }
+}
+
+/// The frame rate of an MP4/MOV movie's video track when the reader's own estimate, the median
+/// frame duration, misreads it. Phones and messaging apps store frame times rounded to whole
+/// milliseconds: a 30 fps clip's frames last 33 or 34 ms and a 60 fps clip's 16 or 17 ms, whose
+/// median reads as 30.303 or 58.824 fps. `None` for other containers and for movies the median
+/// reads right.
+fn video_rate(bytes: &[u8]) -> Option<FrameRate> {
+    let file = filmcraft_isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    averaged_rate(t.timescale, t.samples.iter().take(240).map(|s| s.duration))
+}
+
+/// The standard rate ([`FrameRate::COMMON`]) within 0.5 % of what the frame durations near their
+/// median average to (`durations` in `1 / timescale` s); `None` when the median duration is a
+/// standard rate already, or when the average is no standard rate (variable or unusual rates keep
+/// the reader's estimate).
+fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option<FrameRate> {
+    let ts = i128::from(timescale);
+    let mut durs: Vec<u64> = durations.filter(|&d| d > 0).map(u64::from).collect();
+    durs.sort_unstable();
+    let median = *durs.get(durs.len() / 2)?;
+    if FrameRate::COMMON.iter().any(|r| ts * i128::from(r.den) == i128::from(median) * i128::from(r.num)) {
+        return None;
+    }
+    // Durations within a quarter of the median (widened, so extreme durations can't overflow).
+    let (n, sum) = durs.iter().filter(|&&d| d.abs_diff(median).saturating_mul(4) <= median).fold((0u64, 0u64), |(n, s), &d| (n + 1, s.saturating_add(d)));
+    if sum == 0 {
+        return None;
+    }
+    let fps = timescale as f64 * n as f64 / sum as f64;
+    FrameRate::COMMON
+        .into_iter()
+        .map(|r| (r, (fps / r.as_f64() - 1.0).abs()))
+        .filter(|&(_, off)| off <= 0.005)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(r, _)| r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #2592: an encoder-delayed H.264 track's edit list shows 75 frames at 25 fps (3 s at a
+    /// 1000 timescale), though its media runs a frame longer; empty edits and no edits leave it.
+    #[test]
+    fn the_edit_list_trims_a_movie_to_the_frames_it_shows() {
+        let edit = |segment_duration, media_time| filmcraft_isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
+        let shown = edits_shown(&[edit(3000, 1024)], 1000);
+        assert_eq!(shown, Some(Tick::from_units(3, 1)));
+        let mut f = Footage { kind: FootageKind::Video, duration: Tick::from_units(76, 25), ..Footage::default() };
+        trim_to_edits(&mut f, shown);
+        assert_eq!(f.duration, Tick::from_units(75, 25));
+        // Never longer than the reader's duration, and only for video.
+        trim_to_edits(&mut f, Some(Tick::from_units(4, 1)));
+        assert_eq!(f.duration, Tick::from_units(75, 25));
+        assert_eq!(edits_shown(&[edit(1000, -1), edit(3000, 0)], 1000), None);
+        assert_eq!(edits_shown(&[], 1000), None);
+        assert_eq!(edits_shown(&[edit(3000, 0)], 0), None);
+    }
+
+    /// Durations (in 1/`timescale` s) of `n` frames at `rate` whose times are rounded to the timescale.
+    fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {
+        let at = |k: i64| (2 * k * timescale * rate.den + rate.num) / (2 * rate.num);
+        (0..n).map(|k| (at(k + 1) - at(k)) as u32).collect()
+    }
+
+    /// #2849: a stream's primaries and curve pick its profile; BT.2020 with PQ or HLG is Rec. 2100.
+    #[test]
+    fn stream_colour_picks_the_profile() {
+        use effectcraft_project::ColorSpace;
+        use filmcraft_color::{Primaries, Transfer};
+        let rows = [
+            (Primaries::Bt2020, Transfer::Pq, Some(ColorSpace::Rec2100Pq)),
+            (Primaries::Bt2020, Transfer::Hlg, Some(ColorSpace::Rec2100Hlg)),
+            (Primaries::Bt2020, Transfer::Bt709, Some(ColorSpace::Rec2020)),
+            (Primaries::P3D65, Transfer::Srgb, Some(ColorSpace::DisplayP3)),
+            (Primaries::Bt709, Transfer::Bt709, Some(ColorSpace::Rec709)),
+            (Primaries::Bt709, Transfer::Srgb, None),
+        ];
+        for (primaries, transfer, want) in rows {
+            let c = filmcraft_color::ColorInfo { primaries, transfer, ..filmcraft_color::ColorInfo::REC709 };
+            assert_eq!(profile_of(&c), want, "{primaries:?} + {transfer:?}");
+        }
+    }
+
+    /// A model's side files are read from beside it; a URI to another computer is not followed.
+    #[test]
+    fn model_side_files_are_not_read_from_other_computers() {
+        let dir = std::env::temp_dir().join(format!("ec-probe-side-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("buf.bin"), b"abc").unwrap();
+        let read = side_file_reader(&dir.join("model.gltf"));
+        assert_eq!(read("buf.bin"), Some(b"abc".to_vec()));
+        assert_eq!(read(r"\\192.0.2.1\share\buf.bin"), None);
+        assert_eq!(read("file://192.0.2.1/share/buf.bin"), None);
+        assert_eq!(read(r"C:\buf.bin"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn millisecond_rounded_frame_times_average_to_their_rate() {
+        assert_eq!(rounded(FrameRate::FPS_30, 1000, 6), [33, 34, 33, 33, 34, 33]);
+        assert_eq!(averaged_rate(1000, rounded(FrameRate::FPS_30, 1000, 120).into_iter()), Some(FrameRate::FPS_30));
+        assert_eq!(averaged_rate(1000, rounded(FrameRate::FPS_60, 1000, 240).into_iter()), Some(FrameRate::FPS_60));
+        // NTSC rates stay NTSC, not the round rate next to them.
+        for r in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94] {
+            assert_eq!(averaged_rate(1000, rounded(r, 1000, 240).into_iter()), Some(r), "{r:?}");
+        }
+        // A short clip: its few frames average to the rate as well.
+        assert_eq!(averaged_rate(1000, [33, 34, 33].into_iter()), Some(FrameRate::FPS_30));
+    }
+
+    #[test]
+    fn exact_and_variable_rates_keep_the_readers_estimate() {
+        // A median that is a standard rate already reads right.
+        assert_eq!(averaged_rate(30000, rounded(FrameRate::FPS_29_97, 30000, 240).into_iter()), None);
+        assert_eq!(averaged_rate(90000, [3000; 10].into_iter()), None);
+        assert_eq!(averaged_rate(600, [20, 20, 19, 21, 20].into_iter()), None);
+        // Durations averaging to no standard rate (22.2 fps).
+        assert_eq!(averaged_rate(1000, [40, 45, 50].repeat(20).into_iter()), None);
+        // A truly 30.3 fps clip is not pulled to 30 (1 % off).
+        assert_eq!(averaged_rate(1000, [33; 30].into_iter()), None);
+    }
+
+    #[test]
+    fn degenerate_durations_have_no_rate() {
+        assert_eq!(averaged_rate(1000, std::iter::empty()), None);
+        assert_eq!(averaged_rate(1000, [0, 0, 0].into_iter()), None);
+        assert_eq!(averaged_rate(0, [33, 34, 33].into_iter()), None);
+        assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
+        assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
+        assert_eq!(video_rate(b"not a movie"), None);
     }
 }

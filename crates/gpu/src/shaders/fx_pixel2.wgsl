@@ -633,50 +633,9 @@ fn fp2_hextile(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!fp2_inside(p)) {
         return;
     }
-    let cx = P.f[0].x;
-    let cy = P.f[0].y;
-    let r = P.f[0].z;
-    let smear = P.f[0].w;
-    let sn = P.f[1].x;
-    let cs = P.f[1].y;
-    let mode = P.u[0].x;
-    let dx = f32(p.x) + 0.5 - cx;
-    let dy = f32(p.y) + 0.5 - cy;
-    let u = dx * cs + dy * sn;
-    let v = -dx * sn + dy * cs;
-    // stylize3::hex_cell (cube rounding).
-    let q = (0.5773502691896257 * u - v / 3.0) / r;
-    let rr = (2.0 / 3.0 * v) / r;
-    let ccy = -q - rr;
-    var rx = round_away(q);
-    let ry = round_away(ccy);
-    var rz = round_away(rr);
-    let ddx = abs(rx - q);
-    let ddy = abs(ry - ccy);
-    let ddz = abs(rz - rr);
-    if (ddx > ddy && ddx > ddz) {
-        rx = -ry - rz;
-    } else if (ddy <= ddz) {
-        rz = -rx - ry;
-    }
-    let hx = r * 1.7320508075688772 * (rx + rz / 2.0);
-    let hy = r * 1.5 * rz;
-    var lu = u - hx;
-    var lv = v - hy;
-    let odd = imod(i32(rx) + i32(rz), 2) == 1;
-    if ((mode == 1u || mode == 2u) && odd) {
-        lu = -lu;
-    }
-    if (mode == 2u && odd) {
-        lv = -lv;
-    }
-    let ox = lu * cs - lv * sn;
-    let oy = lu * sn + lv * cs;
-    let tx = cx + ox;
-    let ty = cy + oy;
-    let sx = tx + (f32(p.x) + 0.5 - tx) * smear;
-    let sy = ty + (f32(p.y) + 0.5 - ty) * smear;
-    textureStore(out, p, sample_bilinear_clamped(src, sx, sy));
+    // Cell membership and reflection were decided in the CPU effect's f64 geometry.
+    let i = (gid.y * u32(out_dims().x) + gid.x) * 2u;
+    textureStore(out, p, sample_bilinear_clamped(src, data[i], data[i + 1u]));
 }
 
 // ---------------------------------------------------------------- CC Mr. Smoothie (stylize3::smoothie)
@@ -828,7 +787,7 @@ fn fp2_io_final(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------- CC Simple Wire Removal (keying2::wire_removal)
-// u[0].x = style; f[0] = (ax, ay, nx, ny); f[1] = (hw thickness, soft width, mirror).
+// u[0].x = style; f[0] = (ax, ay, nx, ny); f[1] = (hw thickness, soft width, mirror, segment length).
 
 fn fp2_wire_pos(base: vec2<f32>, nrm: vec2<f32>, s: f32) -> vec4<f32> {
     return sample_bilinear_clamped(src, base.x + nrm.x * s, base.y + nrm.y * s);
@@ -851,7 +810,9 @@ fn fp2_wire(@builtin(global_invocation_id) gid: vec3<u32>) {
     let q = vec2<f32>(fx - a.x, fy - a.y);
     let d = q.x * nrm.x + q.y * nrm.y;
     let ad = abs(d);
-    if (ad > hw + soft_w) {
+    // The wire is the segment A to B: the tangent is the normal turned back by 90 degrees.
+    let along = q.x * nrm.y - q.y * nrm.x;
+    if (along < 0.0 || along > P.f[1].w || ad > hw + soft_w) {
         textureStore(out, p, px);
         return;
     }

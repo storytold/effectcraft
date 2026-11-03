@@ -146,6 +146,33 @@ pub fn slerp(a: &M3, b: &M3, t: f64) -> M3 {
 /// is `n × n` (columns are the right singular vectors).
 pub fn svd(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let rows = m.max(n);
+    let (mut u, mut s, v) = jacobi_factors(a, m, n);
+    for (j, sj) in s.iter().enumerate() {
+        if *sj > 1e-300 {
+            for r in 0..rows {
+                u[r * n + j] /= sj;
+            }
+        }
+    }
+    // Sort descending.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
+    let (mut u2, mut v2) = (vec![0.0; rows * n], vec![0.0; n * n]);
+    for (k, &j) in order.iter().enumerate() {
+        for r in 0..rows {
+            u2[r * n + k] = u[r * n + j];
+        }
+        for r in 0..n {
+            v2[r * n + k] = v[r * n + j];
+        }
+    }
+    s = order.iter().map(|&j| s[j]).collect();
+    (u2, s, v2)
+}
+
+// Unnormalised and unsorted factors; full SVD and null-space queries share every sweep.
+fn jacobi_factors(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let rows = m.max(n);
     let mut u = vec![0.0; rows * n];
     u[..m * n].copy_from_slice(&a[..m * n]);
     let mut v = vec![0.0; n * n];
@@ -192,28 +219,8 @@ pub fn svd(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             break;
         }
     }
-    let mut s: Vec<f64> = (0..n).map(|j| (0..rows).map(|r| u[r * n + j] * u[r * n + j]).sum::<f64>().sqrt()).collect();
-    for (j, sj) in s.iter().enumerate() {
-        if *sj > 1e-300 {
-            for r in 0..rows {
-                u[r * n + j] /= sj;
-            }
-        }
-    }
-    // Sort descending.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
-    let (mut u2, mut v2) = (vec![0.0; rows * n], vec![0.0; n * n]);
-    for (k, &j) in order.iter().enumerate() {
-        for r in 0..rows {
-            u2[r * n + k] = u[r * n + j];
-        }
-        for r in 0..n {
-            v2[r * n + k] = v[r * n + j];
-        }
-    }
-    s = order.iter().map(|&j| s[j]).collect();
-    (u2, s, v2)
+    let s: Vec<f64> = (0..n).map(|j| (0..rows).map(|r| u[r * n + j] * u[r * n + j]).sum::<f64>().sqrt()).collect();
+    (u, s, v)
 }
 
 /// SVD of a 3 × 3 matrix: (U, singular values descending, V) with `m = U diag(s) Vᵀ`.
@@ -235,8 +242,10 @@ pub fn svd3(m: &M3) -> (M3, V3, M3) {
 /// The unit vector `x` minimising `|A x|` (`m × n` row-major): the right singular vector of
 /// the smallest singular value.
 pub fn null_vector(a: &[f64], m: usize, n: usize) -> Vec<f64> {
-    let (_, _, v) = svd(a, m, n);
-    (0..n).map(|r| v[r * n + n - 1]).collect()
+    let (_, s, v) = jacobi_factors(a, m, n);
+    // The full SVD uses a stable descending sort: the last of equal minima wins.
+    let smallest = (0..n).min_by(|&i, &j| s[i].total_cmp(&s[j]).then_with(|| j.cmp(&i))).unwrap_or(0);
+    (0..n).map(|r| v[r * n + smallest]).collect()
 }
 
 /// Eigen-decomposition of a symmetric `n × n` matrix (cyclic Jacobi): eigenvalues ascending
@@ -317,9 +326,29 @@ fn dot_n(a: &[f64], b: &[f64]) -> f64 {
 /// Solve `A x = b` for a symmetric positive definite `A` (`n × n`, row-major) in place by
 /// Cholesky factorisation. Returns false when `A` is not positive definite.
 pub fn cholesky_solve(a: &mut [f64], n: usize, b: &mut [f64]) -> bool {
+    if n.checked_mul(n) != Some(a.len()) || b.len() != n {
+        return false;
+    }
+    let mut band = n.saturating_sub(1);
+    if b.iter().all(|v| v.is_finite()) {
+        band = 0;
+        'bandwidth: for i in (0..n).rev() {
+            for j in 0..i.saturating_sub(band) {
+                if a[i * n + j] != 0.0 {
+                    band = i - j;
+                    // Wide systems (including shared global parameters) use the dense path.
+                    if band >= n / 2 {
+                        band = n.saturating_sub(1);
+                        break 'bandwidth;
+                    }
+                    break;
+                }
+            }
+        }
+    }
     for j in 0..n {
         let mut d = a[j * n + j];
-        for k in 0..j {
+        for k in j.saturating_sub(band)..j {
             d -= a[j * n + k] * a[j * n + k];
         }
         if d <= 0.0 || !d.is_finite() {
@@ -330,14 +359,24 @@ pub fn cholesky_solve(a: &mut [f64], n: usize, b: &mut [f64]) -> bool {
         let (head, tail) = a.split_at_mut((j + 1) * n);
         let rowj = &head[j * n..j * n + j];
         // Rows below j (sequential: per-column parallel dispatch costs more than it saves).
-        for row in tail.chunks_mut(n) {
-            row[j] = (row[j] - dot_n(&row[..j], rowj)) / d;
+        for (off, row) in tail.chunks_mut(n).take(band).enumerate() {
+            // Removing full groups of four zero products preserves dot_n's lane order.
+            let start = (j + 1 + off).saturating_sub(band) / 4 * 4;
+            row[j] = (row[j] - dot_n(&row[start..j], &rowj[start..])) / d;
         }
     }
     // Forward: L y = b.
     for i in 0..n {
         let mut s = b[i];
-        for k in 0..i {
+        let start = i.saturating_sub(band);
+        // Subtracting signed-zero products can change -0.0 to +0.0. Preserve those
+        // operations when the accumulator is zero; nonzero values are unaffected.
+        if s == 0.0 {
+            for k in 0..start {
+                s -= a[i * n + k] * b[k];
+            }
+        }
+        for k in start..i {
             s -= a[i * n + k] * b[k];
         }
         b[i] = s / a[i * n + i];
@@ -345,12 +384,72 @@ pub fn cholesky_solve(a: &mut [f64], n: usize, b: &mut [f64]) -> bool {
     // Back: Lᵀ x = y.
     for i in (0..n).rev() {
         let mut s = b[i];
-        for k in i + 1..n {
+        let end = i.saturating_add(band).saturating_add(1).min(n);
+        for k in i + 1..end {
             s -= a[k * n + i] * b[k];
+        }
+        if s == 0.0 {
+            for k in end..n {
+                s -= a[k * n + i] * b[k];
+            }
         }
         b[i] = s / a[i * n + i];
     }
     b.iter().all(|v| v.is_finite())
+}
+
+/// Preconditioned conjugate gradients with an independently recomputed residual check.
+/// Failure to converge (or non-finite/non-positive curvature) requests the direct fallback.
+pub(crate) fn conjugate_gradient(rhs: &[f64], apply: impl Fn(&[f64], &mut [f64]), precondition: impl Fn(&[f64], &mut [f64])) -> Option<Vec<f64>> {
+    let n = rhs.len();
+    let norm2 = dot_n(rhs, rhs);
+    if !norm2.is_finite() {
+        return None;
+    }
+    if rhs.iter().all(|v| *v == 0.0) {
+        return Some(vec![0.0; n]);
+    }
+    let tolerance2 = norm2 * 1e-22;
+    if tolerance2 == 0.0 {
+        return None;
+    }
+    let mut x = vec![0.0; n];
+    let mut r = rhs.to_vec();
+    let mut z = vec![0.0; n];
+    let mut ap = vec![0.0; n];
+    precondition(&r, &mut z);
+    let mut p = z.clone();
+    let mut rz = dot_n(&r, &z);
+    for _ in 0..n.saturating_mul(2).min(512) {
+        if !rz.is_finite() || rz <= 0.0 {
+            return None;
+        }
+        apply(&p, &mut ap);
+        let curvature = dot_n(&p, &ap);
+        if !curvature.is_finite() || curvature <= 0.0 {
+            return None;
+        }
+        let alpha = rz / curvature;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        if dot_n(&r, &r) <= tolerance2 {
+            apply(&x, &mut ap);
+            for i in 0..n {
+                ap[i] = rhs[i] - ap[i];
+            }
+            return (x.iter().all(|v| v.is_finite()) && dot_n(&ap, &ap) <= 100.0 * tolerance2).then_some(x);
+        }
+        precondition(&r, &mut z);
+        let next_rz = dot_n(&r, &z);
+        let beta = next_rz / rz;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+        rz = next_rz;
+    }
+    None
 }
 
 /// A similarity transform `x ↦ s R x + t`.
@@ -428,6 +527,143 @@ pub fn from_euler_xyz(e: V3) -> M3 {
 mod tests {
     use super::*;
 
+    fn dense_cholesky_reference(a: &mut [f64], n: usize, b: &mut [f64]) -> bool {
+        for j in 0..n {
+            let mut d = a[j * n + j];
+            for k in 0..j {
+                d -= a[j * n + k] * a[j * n + k];
+            }
+            if d <= 0.0 || !d.is_finite() {
+                return false;
+            }
+            let d = d.sqrt();
+            a[j * n + j] = d;
+            let (head, tail) = a.split_at_mut((j + 1) * n);
+            let rowj = &head[j * n..j * n + j];
+            // Rows below j (sequential: per-column parallel dispatch costs more than it saves).
+            for row in tail.chunks_mut(n) {
+                row[j] = (row[j] - dot_n(&row[..j], rowj)) / d;
+            }
+        }
+        // Forward: L y = b.
+        for i in 0..n {
+            let mut s = b[i];
+            for k in 0..i {
+                s -= a[i * n + k] * b[k];
+            }
+            b[i] = s / a[i * n + i];
+        }
+        // Back: Lᵀ x = y.
+        for i in (0..n).rev() {
+            let mut s = b[i];
+            for k in i + 1..n {
+                s -= a[k * n + i] * b[k];
+            }
+            b[i] = s / a[i * n + i];
+        }
+        b.iter().all(|v| v.is_finite())
+    }
+
+    #[test]
+    fn banded_cholesky_is_bit_identical_to_dense() {
+        for n in [1usize, 2, 3, 4, 5, 6, 7, 8, 13, 31, 65, 127] {
+            for width in [0usize, 1, 2, 5, 11, n - 1] {
+                for seed in 0..3 {
+                    for scale in [1.0, 1e-100, 1e100] {
+                        let mut a = vec![0.0; n * n];
+                        for i in 0..n {
+                            for j in 0..i {
+                                let value = if i - j <= width {
+                                    (((i * 13 + j * 17 + seed) % 23) as f64 - 11.0) / 128.0
+                                } else if (i + j) % 2 == 0 {
+                                    -0.0
+                                } else {
+                                    0.0
+                                };
+                                a[i * n + j] = value;
+                                a[j * n + i] = value;
+                            }
+                        }
+                        for i in 0..n {
+                            a[i * n + i] = a[i * n..(i + 1) * n].iter().map(|v| v.abs()).sum::<f64>() + 1.0;
+                        }
+                        for value in &mut a {
+                            *value *= scale;
+                        }
+                        let mut rhs: Vec<f64> = (0..n).map(|i| if i % 7 == 0 { -0.0 } else { ((i * 5 + seed) % 17) as f64 - 8.0 }).collect();
+                        let (mut reference_a, mut reference_rhs) = (a.clone(), rhs.clone());
+                        assert!(dense_cholesky_reference(&mut reference_a, n, &mut reference_rhs));
+                        assert!(cholesky_solve(&mut a, n, &mut rhs));
+                        assert_eq!(
+                            rhs.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            reference_rhs.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "n={n} width={width} seed={seed} scale={scale}"
+                        );
+                        assert_eq!(
+                            a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            reference_a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "factor n={n} width={width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn banded_cholesky_preserves_underflow_and_signed_zero() {
+        let n = 8;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    1e300
+                } else if (i + j) % 2 == 0 {
+                    -0.0
+                } else {
+                    0.0
+                };
+            }
+        }
+        let mut rhs = vec![-1e-300, 1e-300, -0.0, 0.0, -1e-300, 1e-300, 0.0, -0.0];
+        let (mut original, mut expected) = (a.clone(), rhs.clone());
+        assert!(dense_cholesky_reference(&mut original, n, &mut expected));
+        assert!(cholesky_solve(&mut a, n, &mut rhs));
+        assert_eq!(rhs.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cholesky_rejects_invalid_dimensions_without_indexing() {
+        assert!(!cholesky_solve(&mut [], usize::MAX, &mut []));
+        assert!(!cholesky_solve(&mut [1.0], 2, &mut [1.0, 1.0]));
+        assert!(!cholesky_solve(&mut [1.0], 1, &mut []));
+        assert!(cholesky_solve(&mut [], 0, &mut []));
+    }
+
+    #[test]
+    fn conjugate_gradient_checks_residual_and_bad_curvature() {
+        let n = 64;
+        let rhs: Vec<f64> = (0..n).map(|i| (i % 11) as f64 - 5.0).collect();
+        let apply = |x: &[f64], y: &mut [f64]| {
+            for i in 0..n {
+                y[i] = 4.0 * x[i] + if i > 0 { x[i - 1] } else { 0.0 } + if i + 1 < n { x[i + 1] } else { 0.0 };
+            }
+        };
+        let x = conjugate_gradient(&rhs, apply, |r, z| {
+            for (r, z) in r.iter().zip(z) {
+                *z = *r / 4.0;
+            }
+        })
+        .unwrap();
+        let mut product = vec![0.0; n];
+        apply(&x, &mut product);
+        let residual: f64 = rhs.iter().zip(product).map(|(b, ax)| (b - ax).powi(2)).sum();
+        assert!(residual < 1e-18 * dot_n(&rhs, &rhs));
+        assert!(conjugate_gradient(&[1.0], |x, y| y[0] = -x[0], |r, z| z.copy_from_slice(r)).is_none());
+        assert!(conjugate_gradient(&[f64::NAN], |_, _| {}, |_, _| {}).is_none());
+        assert_eq!(conjugate_gradient(&[0.0], |_, _| {}, |_, _| {}).unwrap(), vec![0.0]);
+    }
+
     #[test]
     fn svd_reconstructs() {
         let a = [3.0, 1.0, 2.0, -1.0, 4.0, 0.5, 2.0, 2.0, 7.0, 0.1, -3.0, 1.0];
@@ -439,6 +675,20 @@ mod tests {
             }
         }
         assert!(s[0] >= s[1] && s[1] >= s[2]);
+    }
+
+    #[test]
+    fn null_vector_matches_full_svd_bits_including_ties() {
+        for (m, n) in [(0, 0), (1, 1), (3, 3), (8, 9), (9, 9), (20, 3), (100, 9)] {
+            for scale in [0.0, 1e-100, 1.0, 1e100] {
+                let a: Vec<f64> = (0..m * n).map(|i| (((i * 37) % 31) as f64 - 15.0) * scale).collect();
+                let (_, _, v) = svd(&a, m, n);
+                let expected: Vec<_> = (0..n).map(|r| v[r * n + n - 1].to_bits()).collect();
+                assert_eq!(null_vector(&a, m, n).iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected);
+            }
+        }
+        let a = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(null_vector(&a, 3, 3), vec![0.0, 0.0, 1.0]);
     }
 
     #[test]
