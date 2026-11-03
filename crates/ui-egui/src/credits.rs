@@ -322,34 +322,42 @@ fn natural(ui: &egui::Ui, header: RichText, cells: impl Iterator<Item = String>)
     widest + 2.0 * ui.spacing().button_padding.x
 }
 
-/// A striped table whose columns open at their natural widths, with the room left over shared out
-/// by `grow`, so the table fills the width and nothing scrolls sideways. A table too narrow for
-/// that shrinks the growing columns first. Each column can be dragged wider or narrower at its
-/// edge. The last column fills whatever width is left but never shrinks below its own opening
-/// width, so widening a column grows the table, as in a spreadsheet, instead of crushing the last
-/// one: only a table dragged wider than the window scrolls sideways. Text too long for its column
-/// is clipped.
+/// Opening column widths: each column's natural width, with the spare room shared out by `grow`,
+/// so the columns fill `room` exactly. When there is too little room, only the growing columns
+/// give way, down to [`MIN_COLUMN`].
+fn fit_widths(natural: &[f32], grow: &[f32], room: f32) -> Vec<f32> {
+    let spare = room - natural.iter().sum::<f32>();
+    let weight = grow.iter().sum::<f32>();
+    let flexible: f32 = natural.iter().zip(grow).filter(|(_, g)| **g > 0.0).map(|(w, _)| *w).sum();
+    natural
+        .iter()
+        .zip(grow)
+        .map(|(w, g)| {
+            if spare >= 0.0 && weight > 0.0 {
+                w + spare * g / weight
+            } else if *g > 0.0 && flexible > 0.0 {
+                (w + spare * w / flexible).max(MIN_COLUMN)
+            } else {
+                *w
+            }
+        })
+        .collect()
+}
+
+/// A striped table whose columns open at [`fit_widths`], so it fills the width and nothing scrolls
+/// sideways. Each column can be dragged wider or narrower at its edge. The last column fills
+/// whatever width is left but never shrinks below its opening width, so widening a column grows
+/// the table, as in a spreadsheet, instead of crushing the last one: only a table dragged wider
+/// than the window scrolls sideways. Text too long for its column is clipped.
 fn fitted_table<'a>(ui: &'a mut egui::Ui, id: &str, natural: &[f32], grow: &[f32]) -> egui_extras::TableBuilder<'a> {
     // Every cell is followed by the item gap, and the vertical scrollbar keeps its margins.
     let s = ui.spacing();
     let gaps = s.item_spacing.x * natural.len() as f32;
     let bar = s.scroll.bar_width + s.scroll.bar_inner_margin + s.scroll.bar_outer_margin;
-    let width = (ui.available_width() - gaps - bar).max(0.0);
-    let spare = width - natural.iter().sum::<f32>();
-    let weight = grow.iter().sum::<f32>();
-    let flexible: f32 = natural.iter().zip(grow).filter(|(_, g)| **g > 0.0).map(|(w, _)| *w).sum();
-    let widths = natural.iter().zip(grow).map(|(w, g)| {
-        if spare >= 0.0 && weight > 0.0 {
-            w + spare * g / weight
-        } else if *g > 0.0 && flexible > 0.0 {
-            (w + spare * w / flexible).max(MIN_COLUMN)
-        } else {
-            *w
-        }
-    });
+    let widths = fit_widths(natural, grow, (ui.available_width() - gaps - bar).max(0.0));
     let mut t = egui_extras::TableBuilder::new(ui).id_salt(id).striped(true).resizable(true).auto_shrink([false, false]).max_scroll_height(f32::INFINITY);
-    let last = natural.len().saturating_sub(1);
-    for (i, w) in widths.enumerate() {
+    let last = widths.len().saturating_sub(1);
+    for (i, w) in widths.into_iter().enumerate() {
         let c = if i == last { egui_extras::Column::remainder().at_least(w.max(MIN_COLUMN)) } else { egui_extras::Column::initial(w).at_least(MIN_COLUMN) };
         t = t.column(c.clip(true));
     }
@@ -362,14 +370,14 @@ fn aligned<R>(ui: &mut egui::Ui, right: bool, add: impl FnOnce(&mut egui::Ui) ->
     ui.with_layout(layout, add).inner
 }
 
+fn row_height(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 6.0
+}
+
 /// A contributor-table header. The sorted column is highlighted; its direction shows on the
 /// toolbar's ▲/▼ button, so no arrow widens the column.
 fn header_text(k: SortKey) -> RichText {
     RichText::new(k.label().1).strong()
-}
-
-fn row_height(ui: &egui::Ui) -> f32 {
-    ui.text_style_height(&egui::TextStyle::Body) + 6.0
 }
 
 /// One contributor's table cells after the name, in `SortKey::ALL` order.
@@ -550,5 +558,20 @@ mod tests {
         assert_eq!(signed(-1000), "−1,000");
         assert_eq!(day("2026-10-07T18:45:23Z"), "2026-10-07");
         assert_eq!(day(""), "—");
+    }
+
+    #[test]
+    fn columns_fill_the_room_and_spare_width_goes_to_growing_columns() {
+        assert_eq!(fit_widths(&[100.0, 40.0, 60.0], &[1.0, 0.0, 0.0], 300.0), [200.0, 40.0, 60.0]);
+        assert_eq!(fit_widths(&[100.0, 40.0, 60.0], &[1.0, 2.0, 0.0], 230.0), [110.0, 60.0, 60.0]);
+        let w = fit_widths(&[123.0, 45.5, 67.25], &[1.0, 0.0, 2.0], 512.0);
+        assert!((w.iter().sum::<f32>() - 512.0).abs() < 0.01, "a fitted table neither scrolls nor leaves a gap: {w:?}");
+    }
+
+    #[test]
+    fn too_little_room_shrinks_only_growing_columns() {
+        assert_eq!(fit_widths(&[100.0, 40.0, 60.0], &[1.0, 0.0, 0.0], 150.0), [50.0, 40.0, 60.0]);
+        assert_eq!(fit_widths(&[100.0, 40.0, 60.0], &[1.0, 0.0, 0.0], 0.0), [MIN_COLUMN, 40.0, 60.0]);
+        assert_eq!(fit_widths(&[100.0, 40.0], &[0.0, 0.0], 50.0), [100.0, 40.0]);
     }
 }
