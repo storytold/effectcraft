@@ -42,7 +42,17 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const UPLOAD_BUDGET: usize = 1536 << 20;
 
 /// Working textures kept for reuse once their last image is dropped (bytes).
-const POOL_BUDGET: usize = 768 << 20;
+const POOL_BUDGET: usize = 256 << 20;
+
+/// Frames after which a size the pool was not asked for is stale: only stale sizes are
+/// evicted to make room (see [`Pool::make_free`]).
+///
+/// The clock is coarse: it advances on every finished frame ([`GpuContext::pool_frame_end`])
+/// from any thread, so with many frames in flight (an export renders up to 16 at once) this
+/// means "not asked for during the last 2 completions", not "during 2 frames' rendering". A
+/// size a slower in-flight frame still needs can go stale and be evicted. That costs a pool
+/// miss (a new allocation), never a wrong pixel.
+const STALE_FRAMES: u64 = 2;
 
 /// Readback staging buffers kept for reuse across sizes (bytes).
 const STAGING_BUDGET: u64 = 256 << 20;
@@ -66,6 +76,20 @@ impl GpuImage {
     pub fn new(texture: wgpu::Texture, width: u32, height: u32) -> GpuImage {
         GpuImage { texture, width, height, _lease: None, levels: None }
     }
+
+    /// This image leaves the [`Enc`] that made it (read by an encoder that may stay open, see
+    /// [`Enc::uses`]): when its last clone drops, its texture waits for every open encoder
+    /// ([`Pool::release`]) instead of going back to that `Enc` for immediate reuse.
+    pub(crate) fn escape(&self) {
+        if let Some(l) = &self._lease {
+            l.escaped.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A pooled image of another `Enc` than `owner` (see [`GpuImage::escape`]).
+    fn foreign_to(&self, owner: u64) -> bool {
+        self._lease.as_ref().is_some_and(|l| l.owner != owner)
+    }
 }
 
 /// Hands a pooled texture back to its [`Pool`] when the last [`GpuImage`] holding it drops.
@@ -74,6 +98,10 @@ struct Lease {
     pool: Weak<Mutex<Pool>>,
     /// The [`Enc`] that took it (see [`Pool::owned`]).
     owner: u64,
+    /// Another [`Enc`] recorded work on it ([`Enc::uses`], [`GpuImage::escape`]):
+    /// its owner can no longer reuse it at once, since that other encoder may still be open, so
+    /// it is released through the guarded [`Pool::release`].
+    escaped: std::sync::atomic::AtomicBool,
     /// The pool's [`Pool::generation`] when it was taken.
     generation: u64,
 }
@@ -89,7 +117,12 @@ impl Drop for Lease {
         if let Some(pool) = self.pool.upgrade()
             && let Ok(mut p) = pool.lock()
         {
-            p.release_owned(self.texture.clone(), self.owner, self.generation);
+            if !self.escaped.load(std::sync::atomic::Ordering::Relaxed) {
+                p.release_owned(self.texture.clone(), self.owner, self.generation);
+            } else if self.generation == p.generation {
+                // Like `release_owned`, nothing taken before a failed frame comes back (#1319).
+                p.release(self.texture.clone());
+            }
         }
     }
 }
@@ -103,7 +136,12 @@ impl Drop for Lease {
 /// it was released has been submitted (or dropped).
 #[derive(Default)]
 pub(crate) struct Pool {
-    free: HashMap<(u32, u32), Vec<wgpu::Texture>>,
+    /// Free textures by size, each with the [`Pool::stamp`] at which it was freed (oldest first).
+    free: HashMap<(u32, u32), std::collections::VecDeque<(wgpu::Texture, u64)>>,
+    /// Counts frees, so the free list evicts the oldest texture first.
+    stamp: u64,
+    /// Bytes the free list may hold (0 = [`POOL_BUDGET`]); tests lower it per context.
+    budget: usize,
     /// (texture, newest encoder open at its release).
     released: Vec<(wgpu::Texture, u64)>,
     /// Encoders with recorded, unsubmitted work.
@@ -113,6 +151,25 @@ pub(crate) struct Pool {
     /// Working textures reused / newly allocated (diagnostics, tests).
     hits: u64,
     misses: u64,
+    /// Free textures dropped to make room for newer ones (diagnostics, tests).
+    evicted: u64,
+    /// Output frames done so far ([`GpuContext::pool_frame_end`]).
+    frame: u64,
+    /// Per size, the [`Pool::frame`] in which it was last asked for (hit or miss).
+    asked: HashMap<(u32, u32), u64>,
+    /// Bytes of evicted textures whose GPU memory may not be freed yet: wgpu frees a dropped
+    /// texture only once the submissions that used it are done. Counted against the budget
+    /// for evicting, so evicting and reallocating cannot stack up freed-but-held memory.
+    dying: Arc<std::sync::atomic::AtomicUsize>,
+    /// The [`Pool::dying`] bytes left after a [`GpuContext::pool_frame_end`] wait that cleared
+    /// none of them (`0` = not stalled). While `dying` does not drop below it, later frames only
+    /// poll instead of waiting again (each wait could take up to [`crate::readback::TIMEOUT`]
+    /// when the queue stopped completing work).
+    stalled: usize,
+    /// Number of empty-submission waits from [`GpuContext::pool_frame_end`] (diagnostics, tests).
+    waits: u64,
+    /// Reports when the submissions that may use an evicted texture are done.
+    queue: Option<wgpu::Queue>,
     /// Textures released while the [`Enc`] that took them is alive, kept for that `Enc` only.
     /// Its later commands run after everything it recorded or submitted before (one queue,
     /// recording order), so it can overwrite them at once instead of allocating a new texture
@@ -234,13 +291,100 @@ impl Pool {
         }
     }
 
+    fn budget(&self) -> usize {
+        if self.budget == 0 { POOL_BUDGET } else { self.budget }
+    }
+
+    /// Keep `t` on the free list if it fits. Otherwise make room by evicting stale sizes, least
+    /// recently freed first: sizes not asked for in the last [`STALE_FRAMES`] output frames (a
+    /// blur bound or padded layer size that no longer occurs), so they age out instead of
+    /// filling the budget for good. Sizes still in use are never evicted for a newcomer: a
+    /// frame that frees more than the budget in a repeating order would otherwise evict, on
+    /// every free, the texture the next call takes first (LRU on a cycle), and miss on every
+    /// take. If nothing stale makes room, `t` is dropped (the kept set keeps hitting).
+    ///
+    /// Evicted textures count against the budget ([`Pool::dying`]) until the GPU work
+    /// submitted so far is done. That throttles eviction to roughly one budget ahead of the
+    /// GPU; it is not a hard bound (wgpu frees a dropped texture only when the device is
+    /// maintained, which can be later than the work-done callback).
     fn make_free(&mut self, t: wgpu::Texture) {
+        use std::sync::atomic::Ordering::Relaxed;
         let b = tex_bytes(&t);
-        if self.bytes + b > POOL_BUDGET {
+        let budget = self.budget();
+        if b > budget {
+            return;
+        }
+        let mut evicted = 0;
+        while self.bytes + b > budget {
+            let frame = self.frame;
+            let asked = &self.asked;
+            let stale = |k: &(u32, u32)| asked.get(k).is_none_or(|f| frame.saturating_sub(*f) >= STALE_FRAMES);
+            let Some(oldest) = self.free.iter().filter(|(k, _)| stale(k)).filter_map(|(k, q)| q.front().map(|(_, s)| (*s, *k))).min().map(|(_, k)| k) else {
+                break;
+            };
+            let ob = oldest.0 as usize * oldest.1 as usize * 16;
+            if self.dying.load(Relaxed) + evicted + ob > budget {
+                break;
+            }
+            let Some(q) = self.free.get_mut(&oldest) else { break };
+            if let Some((old, _)) = q.pop_front() {
+                self.bytes -= tex_bytes(&old);
+                evicted += ob;
+                self.evicted += 1;
+            }
+            if q.is_empty() {
+                self.free.remove(&oldest);
+            }
+        }
+        if evicted > 0 {
+            self.dying.fetch_add(evicted, Relaxed);
+            let dying = self.dying.clone();
+            match &self.queue {
+                Some(q) => q.on_submitted_work_done(move || {
+                    let _ = dying.try_update(Relaxed, Relaxed, |d| Some(d.saturating_sub(evicted)));
+                }),
+                None => {
+                    let _ = dying.try_update(Relaxed, Relaxed, |d| Some(d.saturating_sub(evicted)));
+                }
+            }
+        }
+        if self.bytes + b > budget {
             return;
         }
         self.bytes += b;
-        self.free.entry((t.width(), t.height())).or_default().push(t);
+        self.stamp += 1;
+        self.free.entry((t.width(), t.height())).or_default().push_back((t, self.stamp));
+    }
+
+    /// An output frame is done: sizes not asked for since age towards [`STALE_FRAMES`].
+    /// Returns the evicted bytes the caller should wait for: 0 when none still count, or when a
+    /// previous wait cleared none and none has been freed since.
+    fn frame_end(&mut self) -> usize {
+        self.frame += 1;
+        let (frame, free) = (self.frame, &self.free);
+        self.asked.retain(|k, f| frame - *f < STALE_FRAMES || free.contains_key(k));
+        let d = self.dying.load(std::sync::atomic::Ordering::Relaxed);
+        if d == 0 {
+            self.stalled = 0;
+            return 0;
+        }
+        if self.stalled != 0 && d >= self.stalled {
+            // No progress since the stalled wait: do not wait again.
+            return 0;
+        }
+        self.stalled = 0;
+        d
+    }
+
+    /// A [`GpuContext::pool_frame_end`] wait finished with `before` dying bytes still counted
+    /// beforehand. A wait that freed nothing (timed out, or callbacks not run synchronously,
+    /// e.g. on WebGPU where poll does not block) marks the pool stalled.
+    fn waited(&mut self, before: usize) {
+        self.waits += 1;
+        let d = self.dying.load(std::sync::atomic::Ordering::Relaxed);
+        if d >= before {
+            self.stalled = d;
+        }
     }
 
     fn open(&mut self) -> u64 {
@@ -291,14 +435,54 @@ impl Pool {
         self.release(t);
     }
 
+    /// An owner for [`Enc::lent`]. It is a fresh id each time, so a lease of an earlier lent
+    /// `Enc` that drops later (an image that outlived its call) finds no owner and goes
+    /// through [`Pool::release`], which waits for every open encoder.
+    fn lend(&mut self) -> u64 {
+        self.register()
+    }
+
+    /// [`Enc::lent`] is done with `owner` (its work submitted or discarded): its kept textures
+    /// go to the shared free list at once. The free list has one [`POOL_BUDGET`] (only stale
+    /// sizes are evicted), so finished calls no longer keep a budget each (16 frame threads
+    /// kept up to 16 × `POOL_BUDGET`). The budget caps the free list only: textures waiting
+    /// for open encoders ([`Pool::released`]) and those held by live `Enc`s are outside it.
+    ///
+    /// They skip [`Pool::release`]'s wait for open encoders: a kept texture's lease has
+    /// dropped and only this `Enc` recorded work on it, which is already submitted or
+    /// discarded, so later work cannot overtake it on the queue. That is enforced, not assumed:
+    /// a lease read by another `Enc` is marked escaped
+    /// ([`GpuImage::escape`]) and released through [`Pool::release`] whenever it drops, and a
+    /// lease that drops after this call finds no owner and goes the same way.
+    fn give_back(&mut self, owner: u64) {
+        if let Some(m) = self.owned.remove(&owner) {
+            for t in m.into_values().flatten() {
+                self.make_free(t);
+            }
+        }
+    }
+
+    /// Bytes of working textures kept for reuse: the free list, those waiting for open
+    /// encoders and those kept by live `Enc`s.
+    fn retained(&self) -> usize {
+        let owned = self.owned.values().flat_map(|m| m.values().flatten());
+        self.released.iter().map(|(t, _)| t).chain(owned).map(tex_bytes).fold(self.bytes, usize::saturating_add)
+    }
+
     fn take_owned(&mut self, owner: u64, w: u32, h: u32) -> Option<wgpu::Texture> {
         let t = self.owned.get_mut(&owner)?.get_mut(&(w, h))?.pop()?;
+        self.asked.insert((w, h), self.frame);
         self.hits += 1;
         Some(t)
     }
 
     fn take(&mut self, w: u32, h: u32) -> Option<wgpu::Texture> {
-        let t = self.free.get_mut(&(w, h)).and_then(Vec::pop);
+        self.asked.insert((w, h), self.frame);
+        let q = self.free.get_mut(&(w, h));
+        let t = q.and_then(|q| q.pop_back()).map(|(t, _)| t);
+        if self.free.get(&(w, h)).is_some_and(|q| q.is_empty()) {
+            self.free.remove(&(w, h));
+        }
         match &t {
             Some(t) => {
                 self.bytes -= tex_bytes(t);
@@ -739,6 +923,7 @@ impl GpuContext {
             init_resource(&device, "dummy storage buffer", || buffer_init(&device, &queue, Some("dummy"), &[0u8; 16], wgpu::BufferUsages::STORAGE))?;
         let dummy_tex = init_resource(&device, "dummy texture view", || dummy.create_view(&Default::default()))?;
         let max_dim = device.limits().max_texture_dimension_2d;
+        let pool = Arc::new(Mutex::new(Pool { queue: Some(queue.clone()), ..Default::default() }));
         Ok(GpuContext {
             device,
             queue,
@@ -758,7 +943,7 @@ impl GpuContext {
             uploads: Mutex::new(Uploads::default()),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
-            pool: Default::default(),
+            pool,
             staging: Default::default(),
             transfers: Default::default(),
             zeros: Default::default(),
@@ -812,6 +997,23 @@ impl GpuContext {
             log::error!("{error}");
             error
         })
+    }
+
+    /// Waits on `submission_index` up to `timeout` so wgpu frees resources dropped before that
+    /// submission. A timeout simply moves on without retiring the context or its readbacks; any
+    /// other poll error retires the readbacks through the failure path.
+    fn poll_wait(&self, submission_index: wgpu::SubmissionIndex, timeout: std::time::Duration) {
+        if self.readbacks.check().is_err() {
+            return;
+        }
+        match self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index), timeout: Some(timeout) }) {
+            Ok(_) | Err(wgpu::PollError::Timeout) => {}
+            Err(e) => {
+                let error = format!("GPU poll wait: {e}");
+                self.readbacks.retire(error.clone());
+                log::error!("{error}");
+            }
+        }
     }
 
     /// Start a bounded buffer mapping. Retired contexts reject new requests immediately.
@@ -1054,7 +1256,7 @@ impl GpuContext {
         let (reused, generation) = self.pool.lock().map(|mut p| (p.take_owned(owner, w, h).or_else(|| p.take(w, h)), p.generation)).unwrap_or((None, u64::MAX));
         let was_reused = reused.is_some();
         let texture = reused.unwrap_or_else(|| self.texture(w, h));
-        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, generation });
+        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, escaped: Default::default(), generation });
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
@@ -1078,6 +1280,73 @@ impl GpuContext {
             upload_bytes: t.up_bytes.load(Relaxed),
             readbacks: t.downs.load(Relaxed),
             readback_bytes: t.down_bytes.load(Relaxed),
+        }
+    }
+
+    /// Bytes of working textures the pool keeps for reuse (see [`GpuContext::trim_pool`]).
+    pub fn pool_retained_bytes(&self) -> usize {
+        self.pool.lock().map(|p| p.retained()).unwrap_or_default()
+    }
+
+    /// Drop the working textures kept for reuse (a render is done). Textures still waiting for
+    /// an open encoder and those of live `Enc`s are unaffected.
+    pub fn trim_pool(&self) {
+        if let Ok(mut p) = self.pool.lock() {
+            p.clear();
+        }
+    }
+
+    /// An output frame is done: the pool ages the sizes not asked for since (only sizes unused
+    /// for [`STALE_FRAMES`] frames are evicted to make room for others). When evicted textures
+    /// still count ([`Pool::dying`]), waits once so their work-done callbacks can clear that
+    /// count; if the wait frees none of them, later frames only poll until `dying` drops (a
+    /// stopped queue must not re-wait [`crate::readback::TIMEOUT`] on every frame).
+    pub fn pool_frame_end(&self) {
+        let before = self.pool.lock().map(|mut p| p.frame_end()).unwrap_or_default();
+        if before > 0 {
+            // A work-done callback waits for a submission; an empty one closes the wait.
+            let index = self.queue.submit([]);
+            self.poll_wait(index, crate::readback::TIMEOUT);
+            if let Ok(mut p) = self.pool.lock() {
+                p.waited(before);
+            }
+        } else {
+            let _ = self.poll_readbacks(wgpu::PollType::Poll);
+        }
+    }
+
+    /// Bytes the pool's free list may keep (tests lower it on a context of their own).
+    #[cfg(test)]
+    pub(crate) fn set_pool_budget(&self, bytes: usize) {
+        if let Ok(mut p) = self.pool.lock() {
+            p.budget = bytes;
+        }
+    }
+
+    /// Free textures evicted to make room for newer ones.
+    #[cfg(test)]
+    pub(crate) fn pool_evictions(&self) -> u64 {
+        self.pool.lock().map(|p| p.evicted).unwrap_or_default()
+    }
+
+    /// Empty-submission waits from [`GpuContext::pool_frame_end`].
+    #[cfg(test)]
+    pub(crate) fn pool_waits(&self) -> u64 {
+        self.pool.lock().map(|p| p.waits).unwrap_or_default()
+    }
+
+    /// Add or subtract phantom [`Pool::dying`] bytes without a work-done callback (tests that
+    /// simulate a queue which stopped completing work).
+    #[cfg(test)]
+    pub(crate) fn pool_charge_dying(&self, bytes: isize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if let Ok(p) = self.pool.lock() {
+            if bytes >= 0 {
+                p.dying.fetch_add(bytes as usize, Relaxed);
+            } else {
+                let sub = (-bytes) as usize;
+                let _ = p.dying.try_update(Relaxed, Relaxed, |d| Some(d.saturating_sub(sub)));
+            }
         }
     }
 
@@ -1197,6 +1466,8 @@ pub(crate) struct Enc<'g> {
     missing: bool,
     /// This `Enc`'s id in the texture pool (textures it may reuse at once).
     owner: u64,
+    /// `owner` is lent ([`Enc::lent`]) and outlives this `Enc`.
+    lent: bool,
 }
 
 /// Images bound to a compute kernel's source, optional auxiliary and output slots.
@@ -1213,7 +1484,11 @@ impl Drop for Enc<'_> {
             if let Some((_, id)) = self.enc.take() {
                 p.close(id);
             }
-            p.unregister(self.owner);
+            if self.lent {
+                p.give_back(self.owner);
+            } else {
+                p.unregister(self.owner);
+            }
         }
     }
 }
@@ -1221,7 +1496,27 @@ impl Drop for Enc<'_> {
 impl<'g> Enc<'g> {
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
-        Enc { g, enc: None, pending: 0, missing: false, owner }
+        Enc { g, enc: None, pending: 0, missing: false, owner, lent: false }
+    }
+
+    /// An `Enc` for self-contained work (an effect chain): once it is dropped, its working
+    /// textures can be reused at once ([`Pool::give_back`]). Its images stay with it, except a
+    /// result another `Enc` records work on ([`Enc::uses`]), whose lease then releases through
+    /// the guarded [`Pool::release`]. A plain [`Enc::new`] hands its
+    /// textures back through the shared pool, where they wait for every open encoder, and a
+    /// GPU frame keeps its encoder open while the CPU renders layers with GPU effects, so every
+    /// effect's intermediates stayed allocated until the frame ended.
+    pub(crate) fn lent(g: &'g GpuContext) -> Enc<'g> {
+        let owner = g.pool.lock().map(|mut p| p.lend()).unwrap_or(0);
+        Enc { g, enc: None, pending: 0, missing: false, owner, lent: true }
+    }
+
+    /// `img` is used by this `Enc`: if another `Enc` made it, that one must not reuse it at once
+    /// (this encoder may still be open when its lease drops), so mark it escaped.
+    pub(crate) fn uses(&self, img: &GpuImage) {
+        if img.foreign_to(self.owner) {
+            img.escape();
+        }
     }
 
     /// Whether a dispatch since the last call named a kernel the device doesn't have (one
@@ -1230,7 +1525,21 @@ impl<'g> Enc<'g> {
         std::mem::take(&mut self.missing)
     }
 
-    pub(crate) fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
+    /// The command encoder, to record work that touches `imgs` (every pooled image the commands
+    /// read or write; buffers and textures of the caller's own need not be named). The only
+    /// way to record outside this module: naming the images marks foreign leases escaped
+    /// ([`Enc::uses`]). Callers must name every pooled image the encoder's work uses, here or
+    /// with separate [`Enc::uses`] calls (`record(&[])` plus `uses()` is allowed); this is a
+    /// convention, not enforced, and skipping it reintroduces the reuse race it guards (#1441).
+    pub(crate) fn record(&mut self, imgs: &[&GpuImage]) -> &mut wgpu::CommandEncoder {
+        for img in imgs {
+            self.uses(img);
+        }
+        self.encoder()
+    }
+
+    /// The raw encoder: within this module only, after [`Enc::uses`] on every pooled image.
+    fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
         let g = self.g;
         &mut self
             .enc
@@ -1329,7 +1638,8 @@ impl<'g> Enc<'g> {
                 ],
             })
         });
-        let enc = self.encoder();
+        let imgs: Vec<&GpuImage> = [Some(src), aux, Some(out)].into_iter().flatten().collect();
+        let enc = self.record(&imgs);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(entry), timestamp_writes: None });
             pass.set_pipeline(pipe);
@@ -1354,7 +1664,7 @@ impl<'g> Enc<'g> {
 
     /// Copy `src` into a larger zeroed image at (`x`, `y`) (Buf::pad).
     pub fn copy_into(&mut self, src: &GpuImage, dst: &GpuImage, x: u32, y: u32) {
-        let enc = self.encoder();
+        let enc = self.record(&[src, dst]);
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo { texture: &src.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyTextureInfo { texture: &dst.texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
@@ -1371,7 +1681,7 @@ impl<'g> Enc<'g> {
             (b > a).then(|| (a as u32, (a - o) as u32, (b - a) as u32))
         };
         let (Some((sx, dx, cw)), Some((sy, dy, ch))) = (span(x, w, src.width), span(y, h, src.height)) else { return dst };
-        let enc = self.encoder();
+        let enc = self.record(&[src, &dst]);
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo { texture: &src.texture, mip_level: 0, origin: wgpu::Origin3d { x: sx, y: sy, z: 0 }, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyTextureInfo { texture: &dst.texture, mip_level: 0, origin: wgpu::Origin3d { x: dx, y: dy, z: 0 }, aspect: wgpu::TextureAspect::All },
@@ -1393,6 +1703,7 @@ impl<'g> Enc<'g> {
 
     /// Read an image back to the CPU (submits and waits). `None` where readback is impossible.
     pub fn download(&mut self, img: &GpuImage) -> Option<Image> {
+        self.uses(img);
         let layout = crate::readback::Layout::new(img.width, img.height, 16, self.g.device.limits().max_buffer_size)
             .map_err(|e| log::error!("gpu image readback: {e}"))
             .ok()?;
@@ -1509,6 +1820,7 @@ impl<'g> Enc<'g> {
     /// once they arrived (`Some(None)`: the readback failed), else `None` after starting the
     /// copy if needed and marking the pass missed.
     pub(crate) fn read_keyed(&mut self, img: &GpuImage, key: u128, offset: [f64; 2], scale: f64) -> Option<Option<crate::deferred::Readback>> {
+        self.uses(img);
         use crate::deferred::Lookup;
         let d = self.g.deferred.clone()?;
         match d.lookup(key) {
@@ -1536,6 +1848,7 @@ impl<'g> Enc<'g> {
     /// Copy an image into a storage buffer (RGBA f32 rows) for kernels that read a third image
     /// through `data`: (buffer, row length in pixels).
     pub fn image_rows(&mut self, img: &GpuImage) -> (wgpu::Buffer, u32) {
+        self.uses(img);
         let row = (img.width * 16).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buf = self.g.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("image rows"),
@@ -1565,6 +1878,7 @@ impl<'g> Enc<'g> {
     /// Convert to the viewer's premultiplied RGBA8 texture (egui-wgpu's native texture format),
     /// with a full mip chain so the viewer minifies it without aliasing (#417).
     pub fn display(&mut self, img: &GpuImage) -> wgpu::Texture {
+        self.uses(img);
         let g = self.g;
         let levels = mip_levels(img.width, img.height);
         let tex = g.device.create_texture(&wgpu::TextureDescriptor {
@@ -1605,6 +1919,30 @@ impl<'g> Enc<'g> {
 /// Mip levels of a full chain for a `w × h` texture (down to 1 × 1).
 pub(crate) fn mip_levels(w: u32, h: u32) -> u32 {
     u32::BITS - w.max(h).max(1).leading_zeros()
+}
+
+#[cfg(test)]
+mod pool_stall_tests {
+    use super::Pool;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    #[test]
+    fn frame_end_skips_wait_while_stalled_until_dying_drops() {
+        let mut p = Pool::default();
+        p.dying.store(100, Relaxed);
+        assert_eq!(p.frame_end(), 100);
+        p.waited(100);
+        assert_eq!(p.stalled, 100);
+        assert_eq!(p.waits, 1);
+        assert_eq!(p.frame_end(), 0);
+        p.dying.store(150, Relaxed);
+        assert_eq!(p.frame_end(), 0);
+        p.dying.store(50, Relaxed);
+        assert_eq!(p.frame_end(), 50);
+        assert_eq!(p.stalled, 0);
+        p.dying.store(0, Relaxed);
+        assert_eq!(p.frame_end(), 0);
+    }
 }
 
 #[cfg(test)]
