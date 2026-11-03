@@ -80,6 +80,10 @@ impl StrokeKind {
     }
 }
 
+/// The most frames a propagation chain reaches on either side of its base frame (about two
+/// hours at 24 fps).
+const MAX_CHAIN: i64 = 200_000;
+
 /// One stroke: a polyline swept by a disc of `radius` layer pixels, on layer frame `frame`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,10 +185,15 @@ impl RotoData {
     pub fn chain_keys(&self, seed: u64) -> BTreeMap<i64, u64> {
         let mut out = BTreeMap::new();
         let Some(base) = self.base else { return out };
+        // The strokes by frame, grouped once (each frame looked through every stroke before).
+        let mut by_frame: BTreeMap<i64, Vec<&Stroke>> = BTreeMap::new();
+        for s in &self.strokes {
+            by_frame.entry(s.frame).or_default().push(s);
+        }
         let key = |prev: u64, f: i64| {
             let mut h = prev ^ 0x9e37_79b9_7f4a_7c15;
             fnv(&mut h, &f.to_le_bytes());
-            for s in self.strokes.iter().filter(|s| s.frame == f) {
+            for s in by_frame.get(&f).into_iter().flatten() {
                 fnv(&mut h, serde_json::to_string(s).unwrap_or_default().as_bytes());
             }
             h
@@ -192,12 +201,15 @@ impl RotoData {
         let k0 = key(seed, base);
         out.insert(base, k0);
         let mut k = k0;
-        for f in base + 1..=self.span[1] {
+        // A stored span reaches at most MAX_CHAIN frames either side of the base: a project's
+        // numbers must not make one render build billions of keys.
+        let span = [self.span[0].max(base.saturating_sub(MAX_CHAIN)), self.span[1].min(base.saturating_add(MAX_CHAIN))];
+        for f in base + 1..=span[1] {
             k = key(k, f);
             out.insert(f, k);
         }
         k = k0;
-        for f in (self.span[0]..base).rev() {
+        for f in (span[0]..base).rev() {
             k = key(k, f);
             out.insert(f, k);
         }

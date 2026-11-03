@@ -722,3 +722,12 @@ fn the_union_of_objects_is_their_largest_extent() {
     let odd = FrameSeg::empty(2, 2);
     assert_eq!(FrameSeg::union(vec![seg(&[1]), odd]).matte, vec![0, 255, 0, 0]);
 }
+
+#[test]
+fn a_stored_span_reaches_a_bounded_number_of_frames() {
+    // A project can store any span: the chain stops MAX_CHAIN frames either side of the base.
+    let d = RotoData { base: Some(0), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    let k = d.chain_keys(1);
+    assert_eq!(k.len() as i64, 2 * super::MAX_CHAIN + 1);
+    assert_eq!(k.keys().next(), Some(&-super::MAX_CHAIN));
+}
