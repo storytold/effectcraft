@@ -126,6 +126,9 @@ fn utc_parts(secs: u64, nanos: u32) -> (i64, chrono::NaiveDateTime) {
 /// One log line (without the newline): `<timestamp> <LEVEL> [<thread>] <target>: <message>`.
 fn format_line(ts: &str, level: log::Level, thread: &str, target: &str, message: &str) -> String {
     let message = message.strip_suffix('\n').unwrap_or(message);
+    // A message's own line breaks (a path or name from a project or a script) continue it on
+    // indented lines, so they can't pass for records of their own.
+    let message = message.replace("\r\n", "\n").replace('\r', "\\r").replace('\n', "\n\t");
     format!("{ts} {level:<5} [{thread}] {target}: {message}")
 }
 
@@ -471,5 +474,14 @@ mod tests {
             format_line("2026-10-08T07:59:17.728Z", log::Level::Warn, "main", "effectcraft_engine::autosave", "disk full\n"),
             "2026-10-08T07:59:17.728Z WARN  [main] effectcraft_engine::autosave: disk full"
         );
+    }
+
+    #[test]
+    fn line_breaks_in_a_message_continue_it_on_indented_lines() {
+        let forged = "cache at /tmp/x\n2026-10-08T07:59:18.000Z ERROR [main] effectcraft_engine: forged\rend";
+        let line = format_line("2026-10-08T07:59:17.728Z", log::Level::Info, "main", "t", forged);
+        assert_eq!(line.lines().count(), 2);
+        assert!(line.lines().nth(1).unwrap().starts_with('\t'), "{line}");
+        assert!(!line.contains('\r'), "{line}");
     }
 }
