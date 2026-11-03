@@ -476,7 +476,9 @@ undistort?, wait?}`) apply
 Effect ▸ Perspective ▸ 3D Camera Tracker (or reuse the layer's) and analyse it in the background:
 "Analyzing in background (step 1 of 2)" tracks features, "Solving camera" solves.
 `camera.analyze {layer?, effect?, wait?}` re-runs it, `camera.cancel` stops it without writing
-anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved`, `methodUsed`,
+anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved` (every frame
+solved), `partial` with `solvedFrames` of `frames` (the camera is interpolated on the other frames,
+and `camera.exportBlender` refuses such a solve), `methodUsed`,
 `averageError` (pixels), `focalLength`, `horizontalAngleOfView`, the current frame's `camera`
 (position, orientation, zoom), `groundPlane` and the solved `lensDistortion` (`k1`, `k2`, normalised by
 half the frame diagonal) when Solve Lens Distortion (`effects/#1/advanced/lensDistortion`, also on
