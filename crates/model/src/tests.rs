@@ -433,6 +433,16 @@ fn contours_group_into_outlines_by_nesting() {
 }
 
 #[test]
+fn overlapping_contours_keep_every_container_in_their_depth() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // C's first vertex lies inside both A and B, which overlap without nesting: C is two deep,
+    // an outer contour, not a hole cut out of B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(9.0, 1.0, 12.0, 2.0)]);
+    assert_eq!(g.len(), 3);
+    assert_eq!(g.iter().map(|o| o.holes.len()).sum::<usize>(), 0);
+}
+
+#[test]
 fn gltf_cameras_and_punctual_lights() {
     let doc = r#"{
         "asset": {"version": "2.0"},

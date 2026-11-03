@@ -400,10 +400,27 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
         let ws = samp.and_then(|s| s.get("wrapS")).and_then(Value::as_u64).unwrap_or(10497);
         let wt = samp.and_then(|s| s.get("wrapT")).and_then(Value::as_u64).unwrap_or(10497);
         let w = [wrap(ws), wrap(wt)];
-        let i = *texture_of.entry((src, w)).or_insert_with(|| {
-            textures.push(if img.wrap == w { img } else { Arc::new(Texture { wrap: w, ..(*img).clone() }) });
-            textures.len() - 1
-        });
+        let i = match texture_of.get(&(src, w)) {
+            Some(&i) => i,
+            None => {
+                let tex = if img.wrap == w {
+                    img
+                } else {
+                    // A wrap variant copies the pixels, so it is charged to the import budget too;
+                    // one that does not fit is left out like an undecodable image.
+                    let cost = u64::from(img.width) * u64::from(img.height);
+                    if cost > pixels_left {
+                        tex_map.push(None);
+                        continue;
+                    }
+                    pixels_left -= cost;
+                    Arc::new(Texture { wrap: w, ..(*img).clone() })
+                };
+                textures.push(tex);
+                texture_of.insert((src, w), textures.len() - 1);
+                textures.len() - 1
+            }
+        };
         tex_map.push(Some(i));
     }
     let tref = |v: Option<&Value>| -> Option<TexRef> {

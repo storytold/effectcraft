@@ -130,24 +130,21 @@ pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
         .iter()
         .map(|c| c.iter().fold([[f64::MAX; 2], [f64::MIN; 2]], |[lo, hi], p| [[lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]]))
         .collect();
-    // The innermost container of each contour: the smallest larger contour holding a vertex of
-    // it (nested contours do not cross); its bounding box must hold the vertex first.
-    let parent: Vec<Option<usize>> = (0..n)
-        .map(|i| {
-            let p = cs[i][0];
-            (0..n)
-                .filter(|&j| j != i && area[j] > area[i])
-                .filter(|&j| (bounds[j][0][0]..=bounds[j][1][0]).contains(&p[0]) && (bounds[j][0][1]..=bounds[j][1][1]).contains(&p[1]))
-                .filter(|&j| point_in(p, &cs[j]))
-                .min_by(|&a, &b| area[a].total_cmp(&area[b]))
-        })
-        .collect();
-    // Nesting depth, containers (the larger contours) first.
-    let mut by_area: Vec<usize> = (0..n).collect();
-    by_area.sort_by(|&a, &b| area[b].total_cmp(&area[a]));
+    // The containers of each contour: the larger contours holding a vertex of it (nested contours
+    // do not cross); the bounding box must hold the vertex first. Depth is their count, so
+    // overlapping (non-nested) paths keep every container they sit inside; the innermost
+    // container (smallest area) takes a hole.
+    let mut parent: Vec<Option<usize>> = vec![None; n];
     let mut depth = vec![0usize; n];
-    for &i in &by_area {
-        depth[i] = parent[i].map_or(0, |p| depth[p] + 1);
+    for i in 0..n {
+        let p = cs[i][0];
+        let containers: Vec<usize> = (0..n)
+            .filter(|&j| j != i && area[j] > area[i])
+            .filter(|&j| (bounds[j][0][0]..=bounds[j][1][0]).contains(&p[0]) && (bounds[j][0][1]..=bounds[j][1][1]).contains(&p[1]))
+            .filter(|&j| point_in(p, &cs[j]))
+            .collect();
+        depth[i] = containers.len();
+        parent[i] = containers.into_iter().min_by(|&a, &b| area[a].total_cmp(&area[b]));
     }
     let mut outlines: Vec<Outline> = vec![];
     let mut slot = vec![usize::MAX; n];
