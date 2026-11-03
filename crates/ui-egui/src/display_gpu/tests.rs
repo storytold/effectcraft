@@ -16,8 +16,13 @@ use crate::frames::F16Frame;
 static DEVICE: Mutex<()> = Mutex::new(());
 
 struct Dev {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// A software rasterizer (lavapipe / llvmpipe, as CI has): its pow / exp / division round
+    /// differently again, so exact comparisons allow 1 LSB on a few bytes there.
+    cpu: bool,
 }
 
 fn device() -> Option<Dev> {
@@ -25,8 +30,35 @@ fn device() -> Option<Dev> {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("display pass tests"), ..Default::default() })).ok()?;
-    eprintln!("display pass tests on {:?}", adapter.get_info().name);
-    Some(Dev { device, queue })
+    let info = adapter.get_info();
+    eprintln!("display pass tests on {:?} ({:?})", info.name, info.device_type);
+    Some(Dev { cpu: info.device_type == wgpu::DeviceType::Cpu, instance, adapter, device, queue })
+}
+
+/// `compare`'s result is exact, or (software rasterizers) at most 1 LSB on at most 1 % of bytes.
+fn exact_enough(d: &Dev, (n, max): (usize, i32), bytes: usize) -> bool {
+    (n, max) == (0, 0) || d.cpu && max <= 1 && n * 100 <= bytes
+}
+
+/// egui-wgpu's render state on the test device, as eframe hands it to the app.
+fn render_state(d: &Dev) -> egui_wgpu::RenderState {
+    let renderer = egui_wgpu::Renderer::new(&d.device, wgpu::TextureFormat::Rgba8Unorm, egui_wgpu::RendererOptions::default());
+    egui_wgpu::RenderState {
+        adapter: d.adapter.clone(),
+        available_adapters: vec![d.adapter.clone()],
+        instance: d.instance.clone(),
+        device: d.device.clone(),
+        queue: d.queue.clone(),
+        target_format: wgpu::TextureFormat::Rgba8Unorm,
+        renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
+    }
+}
+
+/// A 17³ LUT that mixes channels and bends the curve (as an ICC profile's device does).
+fn test_lut(k: f64) -> Arc<effectcraft_engine::color::icc::Lut3d> {
+    Arc::new(effectcraft_engine::color::icc::Lut3d::bake(17, |c| {
+        [c[0].powf(1.3) * 0.9 + c[1] * 0.1, c[1] * 0.8 + c[2] * 0.2, (c[2] * 0.7 + c[0] * 0.3).sqrt() * k]
+    }))
 }
 
 fn read(d: &Dev, tex: &wgpu::Texture, level: u32) -> (Vec<[u8; 4]>, [u32; 2]) {
@@ -118,8 +150,10 @@ fn hdr_values_on_the_gpu() {
     for (stops, w) in [0.0f32, -1.0, -2.0, -4.0, 1.0].into_iter().zip(want) {
         let pass = DisplayPass::new(Channel::Rgb, false, stops, SRGB, None);
         let (got, _) = bake(&d, &gpu, &Source::F16(f.clone()), &pass);
-        assert_eq!(got.iter().map(|p| p[0]).collect::<Vec<_>>(), w, "{stops} EV");
-        assert_eq!(compare(&got, &f, &pass), (0, 0), "{stops} EV");
+        let r: Vec<u8> = got.iter().map(|p| p[0]).collect();
+        assert!(r.iter().zip(w).all(|(g, w)| *g == w || d.cpu && g.abs_diff(w) <= 1), "{stops} EV: {r:?} vs {w:?}");
+        let c = compare(&got, &f, &pass);
+        assert!(c == (0, 0) || d.cpu && c.1 <= 1, "{stops} EV: {c:?}");
     }
 }
 
@@ -135,7 +169,8 @@ fn exposure_zero_parity_on_the_gpu() {
         let img = crate::frames::tests::parity_frame(alpha);
         let f = Arc::new(F16Frame::from_image(&img, SRGB));
         let (got, _) = bake(&d, &gpu, &Source::F16(f.clone()), &pass);
-        assert_eq!(compare(&got, &f, &pass), (0, 0), "alpha {alpha}");
+        let c = compare(&got, &f, &pass);
+        assert!(exact_enough(&d, c, got.len() * 4), "alpha {alpha}: {c:?}");
         let old = crate::frames::to_color_image(&img);
         let (mut same, mut max) = (0, 0);
         for (g, o) in got.iter().zip(&old.pixels) {
@@ -154,7 +189,8 @@ fn exposure_zero_parity_on_the_gpu() {
     let f = frame(&[grey(4.0), grey(0.5)], 2, SRGB);
     let (m2, _) = bake(&d, &gpu, &Source::F16(f.clone()), &DisplayPass::new(Channel::Rgb, false, -2.0, SRGB, None));
     let (p1, _) = bake(&d, &gpu, &Source::F16(f), &DisplayPass::new(Channel::Rgb, false, 1.0, SRGB, None));
-    assert_eq!((m2[0], p1[1]), ([255; 4], [255; 4]));
+    let white = |p: [u8; 4]| p.iter().all(|c| *c == 255 || d.cpu && *c >= 254);
+    assert!(white(m2[0]) && white(p1[1]), "{:?} {:?}", m2[0], p1[1]);
 }
 
 /// Every pass setting the viewer has, against the reference on the same half-float input:
@@ -169,7 +205,9 @@ fn the_shader_is_the_reference() {
         .map(|i| {
             let (x, y) = (i % 64, i / 64);
             let a = [1.0, 0.5, 0.25, 0.8, 1.0, 1.0, 0.0, 1.0][y % 8];
-            let v = |k: usize| ((x * 7 + y * k) % 64) as f32 / 32.0;
+            // Row 5: negative values too (32 bpc frames can hold them).
+            let lo = if y % 8 == 5 { 0.75 } else { 0.0 };
+            let v = |k: usize| ((x * 7 + y * k) % 64) as f32 / 32.0 - lo;
             [v(3) * a, v(5) * a, v(11) * a, a]
         })
         .collect();
@@ -202,6 +240,8 @@ fn the_shader_is_the_reference() {
             Simulation { profile: SimProfile::Mac18, preserve_rgb: true },
             &Default::default(),
         ),
+        // A LUT-based My Custom RGB profile.
+        Some(DisplayColor::from_lut(test_lut(1.0))),
     ];
     let (mut report, mut off, mut total) = (vec![], 0usize, 0usize);
     for curve in [PassCurve::Srgb, PassCurve::Gamma(2.4), PassCurve::Linear, PassCurve::Pq, PassCurve::Hlg] {
@@ -222,7 +262,8 @@ fn the_shader_is_the_reference() {
                         // The device's pow / exp / ln / division are not the CPU's to the last
                         // bit: a value on a rounding tie can land either side of it.
                         // PQ's exponent of 78.8 magnifies those last bits most.
-                        let share = if matches!(curve, PassCurve::Pq | PassCurve::Hlg) { 5 } else { 1 };
+                        // Software rasterizers (CI's lavapipe) differ more.
+                        let share = if matches!(curve, PassCurve::Pq | PassCurve::Hlg) { 5 } else { 1 } * if d.cpu { 5 } else { 1 };
                         assert!(max <= 1 && n * 100 <= got.len() * 4 * share, "{curve:?} {hdr:?} {stops} EV {channel:?} dc {ci}: {n} bytes off, max {max}");
                         off += n;
                         total += got.len() * 4;
@@ -278,7 +319,8 @@ fn rgba8_frames_match_the_cpu_pass() {
     }
 }
 
-/// The mips: each texel the rounded mean of the 2 × 2 texels above it (edges repeated).
+/// The mips: each texel the rounded mean of the 2 × 2 texels above it, and at the edge of an
+/// odd-sized level above also of its last column / row, so no frame pixel is dropped.
 #[test]
 fn mips_average_the_level_above() {
     let _g = DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -293,10 +335,14 @@ fn mips_average_the_level_above() {
         let (got, [w, h]) = read(&d, &tex, l);
         for y in 0..h {
             for x in 0..w {
-                let at = |dx: u32, dy: u32| above[((y * 2 + dy).min(ah - 1) * aw + (x * 2 + dx).min(aw - 1)) as usize];
+                let (x0, y0) = ((x * 2).min(aw - 1), (y * 2).min(ah - 1));
+                let x1 = if x == w - 1 { aw } else { (x * 2 + 2).min(aw) };
+                let y1 = if y == h - 1 { ah } else { (y * 2 + 2).min(ah) };
+                let n = ((x1 - x0) * (y1 - y0)) as f32;
                 let want: [u8; 4] = std::array::from_fn(|c| {
-                    let s: f32 = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)].iter().map(|p| p[c] as f32 / 255.0).sum();
-                    (s * 0.25 * 255.0 + 0.5).floor() as u8
+                    let s: f32 =
+                        (y0..y1).flat_map(|yy| (x0..x1).map(move |xx| (xx, yy))).map(|(xx, yy)| above[(yy * aw + xx) as usize][c] as f32 / 255.0).sum();
+                    (s / n * 255.0 + 0.5).floor() as u8
                 });
                 let g = got[(y * w + x) as usize];
                 assert!((0..4).all(|c| (g[c] as i32 - want[c] as i32).abs() <= 1), "level {l} ({x}, {y}): {g:?} vs {want:?}");
@@ -499,4 +545,38 @@ fn display_pass_timings() {
     let cpu = time(&mut || drop(f.to_color_image(&DisplayPass::new(Channel::Rgb, false, -1.0, SRGB, None))));
     eprintln!("4K: half-float upload into the kept texture {upload:.2} ms; the pass on the CPU (no device) {cpu:.2} ms");
     eprintln!("4K: display pass with mips, submit to idle {pass:.2} ms");
+}
+
+/// `Bake::show` on egui-wgpu's render state: it runs the pass again when the frame, the pass's
+/// settings or the LUT change (a new LUT of the same size included: another ICC profile,
+/// Preserve RGB, another display), and only then; the texture id stays.
+#[test]
+fn bakes_run_again_when_frame_pass_or_lut_change() {
+    let _g = DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(d) = device() else { return eprintln!("no wgpu adapter: skipping") };
+    let gpu = DisplayGpu::new(&d.device);
+    let rs = render_state(&d);
+    let px: Vec<[f32; 4]> = (0..16).map(|i| [i as f32 / 15.0, 0.4, 0.7, 1.0]).collect();
+    let f = frame(&px, 4, SRGB);
+    let lut = |k: f64| DisplayColor::from_lut(test_lut(k));
+    let (l1, l2) = (lut(1.0), lut(0.5));
+    let pass = |stops: f32, dc: &DisplayColor| DisplayPass::new(Channel::Rgb, false, stops, SRGB, Some(dc));
+    let mut b = super::Bake::default();
+    let id = b.show(&rs, &gpu, &Source::F16(f.clone()), &pass(0.0, &l1), true).unwrap();
+    let first = read(&d, b.texture().unwrap(), 0).0;
+    assert_eq!(b.runs(), 1);
+    b.show(&rs, &gpu, &Source::F16(f.clone()), &pass(0.0, &l1), true);
+    assert_eq!(b.runs(), 1, "nothing changed");
+    assert_eq!(b.show(&rs, &gpu, &Source::F16(f.clone()), &pass(0.0, &l2), true), Some(id));
+    assert_eq!(b.runs(), 2, "a new LUT of the same size");
+    let second = read(&d, b.texture().unwrap(), 0).0;
+    assert_ne!(first, second);
+    let want: Vec<[u8; 4]> = (0..16).map(|i| pass(0.0, &l2).pixel(f.pixel(i).unwrap())).collect();
+    assert!(second.iter().zip(&want).all(|(g, w)| (0..4).all(|c| g[c].abs_diff(w[c]) <= 1)), "{second:?} vs {want:?}");
+    b.show(&rs, &gpu, &Source::F16(f.clone()), &pass(-1.0, &l2), true);
+    assert_eq!(b.runs(), 3, "another exposure");
+    b.show(&rs, &gpu, &Source::F16(frame(&px, 4, SRGB)), &pass(-1.0, &l2), true);
+    assert_eq!(b.runs(), 4, "another frame");
+    b.free(Some(&rs));
+    assert!(b.id().is_none());
 }

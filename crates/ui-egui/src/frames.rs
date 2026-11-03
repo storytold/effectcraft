@@ -25,8 +25,8 @@
 //! them (Info panel, eyedroppers, histograms).
 //!
 //! 32 bpc projects keep half-float frames on the desktop ([`F16Frame`], rendered without the HDR
-//! step): twice the bytes of an 8-bit frame, so the RAM preview holds half as many. They have no
-//! disk cache format yet, so they are not written to or read from the disk cache.
+//! step): twice the bytes of an 8-bit frame, so the RAM preview holds half as many. The disk
+//! cache keeps them as half-float entries.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -864,8 +864,7 @@ impl Frames {
             (None, Some(r)) => r.disk_contains(k),
             (None, None) => false,
         };
-        // Half-float frames are not kept on disk (see the module docs).
-        if src.disk.is_none() && remote.is_none() || opts.skip_hdr_step {
+        if src.disk.is_none() && remote.is_none() {
             return vec![];
         }
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
@@ -1345,17 +1344,25 @@ impl Worker {
         };
         let t0 = web_time::Instant::now();
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
-        // Half-float frames have no disk format yet (see the module docs).
         let disk = job
             .src
             .disk
             .as_ref()
-            .filter(|_| !job.opts.skip_hdr_step)
             .map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts), epoch, self.virtual_id.as_deref())));
-        let from_disk = disk.as_ref().and_then(|(dc, k)| dc.get_frame(*k));
+        // Half-float frames (32 bpc) have entries of their own (their key has the options).
+        let from_disk = disk.as_ref().and_then(|(dc, k)| {
+            if job.opts.skip_hdr_step {
+                let f = dc.get_frame_f16(*k)?;
+                let encoding = effectcraft_engine::viewer::FrameEncoding::of(&job.src.project.settings, true);
+                Some(FrameImage::CpuF16(Arc::new(F16Frame::from_bits(f.width, f.height, f.rgba, encoding))))
+            } else {
+                let f = dc.get_frame(*k)?;
+                Some(FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))))
+            }
+        });
         let disk_hit = from_disk.is_some();
         let ci = match from_disk {
-            Some(f) => FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))),
+            Some(f) => f,
             None => match self.render_guarded(&job).filter(|_| !job.cancel.load(Ordering::Relaxed)) {
                 Some(ci) => ci,
                 // Called off (frames it read may be missing) or failed: not cached, and not
@@ -1369,10 +1376,20 @@ impl Worker {
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
         self.finish(&job, ci.clone(), t0);
-        if !disk_hit && let (Some((dc, k)), FrameImage::Cpu(img)) = (&disk, &ci) {
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
-            if let Some(ctx) = &self.ctx {
+        if !disk_hit && let Some((dc, k)) = &disk {
+            let written = match &ci {
+                FrameImage::Cpu(img) => {
+                    let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                    dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
+                    true
+                }
+                FrameImage::CpuF16(f) => {
+                    dc.put_frame_f16(*k, f.width, f.height, f.bits());
+                    true
+                }
+                FrameImage::Gpu(_) => false,
+            };
+            if written && let Some(ctx) = &self.ctx {
                 ctx.request_repaint();
             }
         }

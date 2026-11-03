@@ -132,6 +132,27 @@ pub struct DisplayGpu {
 }
 
 impl DisplayGpu {
+    /// The pipelines, or why the device would not make them (a shader a backend rejects): the
+    /// viewer then runs the pass on the CPU instead of showing nothing.
+    pub fn try_new(device: &wgpu::Device) -> Result<DisplayGpu, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| DisplayGpu::new(device)));
+            let validation = pollster::block_on(validation.pop());
+            let internal = pollster::block_on(internal.pop());
+            if let Some(e) = validation.or(internal) {
+                return Err(format!("the display pass's pipelines: {e}"));
+            }
+            made.map_err(|_| "the display pass's pipelines: the backend panicked".to_string())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(DisplayGpu::new(device))
+        }
+    }
+
     pub fn new(device: &wgpu::Device) -> DisplayGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewer display pass"),
@@ -222,7 +243,7 @@ impl DisplayGpu {
                 })
             });
             let px = if format == wgpu::TextureFormat::Rgba16Float { 8 } else { 4 };
-            if bytes.len() >= (w * h * px) as usize {
+            if bytes.len() as u64 >= w as u64 * h as u64 * px as u64 {
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                     bytes,
@@ -237,9 +258,9 @@ impl DisplayGpu {
         match src {
             Source::F16(f) if k > 1 => {
                 let f = f.averaged_down(k);
-                write(f.width, f.height, f16, bytemuck::cast_slice(&f.data))
+                write(f.width, f.height, f16, bytemuck::cast_slice(f.bits()))
             }
-            Source::F16(f) => write(f.width, f.height, f16, bytemuck::cast_slice(&f.data)),
+            Source::F16(f) => write(f.width, f.height, f16, bytemuck::cast_slice(f.bits())),
             Source::Rgba8(c) if k > 1 => {
                 let c = crate::frames::fit_texture_by((**c).clone(), usize::MAX, k);
                 write(c.size[0] as u32, c.size[1] as u32, rgba8, c.as_raw())
@@ -360,6 +381,8 @@ pub struct Bake {
     params: Option<[u8; UNIFORM_BYTES]>,
     lut: Option<(Arc<effectcraft_engine::color::icc::Lut3d>, wgpu::Texture)>,
     smooth: Option<bool>,
+    /// How often the pass ran (tests).
+    runs: u64,
 }
 
 impl Bake {
@@ -378,11 +401,20 @@ impl Bake {
             Some(PassColor::Lut(l)) => Some(l.clone()),
             _ => None,
         };
-        match (&lut, &self.lut) {
-            (Some(l), Some((have, _))) if Arc::ptr_eq(l, have) => {}
-            (Some(l), _) => self.lut = Some((l.clone(), gpu.lut(device, queue, l))),
-            (None, _) => self.lut = None,
-        }
+        // A new LUT (another profile, Preserve RGB, another display) has the same size, so the
+        // uniform alone doesn't tell: it reruns the pass itself.
+        let new_lut = match (&lut, &self.lut) {
+            (Some(l), Some((have, _))) if Arc::ptr_eq(l, have) => false,
+            (Some(l), _) => {
+                self.lut = Some((l.clone(), gpu.lut(device, queue, l)));
+                true
+            }
+            (None, had) => {
+                let changed = had.is_some();
+                self.lut = None;
+                changed
+            }
+        };
         let input = self.input.as_ref()?;
         let (w, h) = (input.width(), input.height());
         let resized = self.output.as_ref().is_none_or(|o| o.width() != w || o.height() != h);
@@ -390,9 +422,10 @@ impl Bake {
             self.output = Some(DisplayGpu::output(device, w, h));
         }
         let output = self.output.as_ref()?;
-        if new_source || resized || self.params != Some(params) {
+        if new_source || resized || new_lut || self.params != Some(params) {
             gpu.run(device, queue, input, output, &params, self.lut.as_ref().map(|(_, t)| t));
             self.params = Some(params);
+            self.runs += 1;
         }
         let view = output.create_view(&Default::default());
         let sampler = || crate::panels::viewer::zoom_sampler(smooth);
@@ -432,6 +465,11 @@ impl Bake {
             rs.renderer.write().free_texture(&id);
         }
         *self = Bake::default();
+    }
+
+    /// How often the pass ran for this slot.
+    pub fn runs(&self) -> u64 {
+        self.runs
     }
 
     /// The displayed texture (tests read it back).

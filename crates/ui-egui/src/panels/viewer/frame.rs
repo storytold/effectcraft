@@ -159,7 +159,7 @@ pub(super) fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: cra
                 }
                 _ => app.viewer_tex = Some((ctx.load_texture("viewer-frame", fitted, opts), key, minify)),
             }
-            app.viewer_shown = app.viewer_tex.as_ref().map(|(t, k, _)| (t.id(), *k));
+            app.viewer_shown = app.viewer_tex.as_ref().map(|(t, k, _)| (Some(t.id()), *k));
             app.viewer_image = Some(img);
             app.viewer_f16 = None;
             vt::set_texture_roi(ctx, app.session.state.region_of_interest.or(app.ui.viewer.extended));
@@ -167,8 +167,8 @@ pub(super) fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: cra
         FrameImage::CpuF16(f) => {
             // Drawn through the display pass; the 8-bit texture of an earlier frame goes.
             app.viewer_tex = None;
-            // No texture of its own until the display pass draws it.
-            app.viewer_shown = Some((egui::TextureId::default(), key));
+            // No texture of its own: the display pass draws it.
+            app.viewer_shown = Some((None, key));
             app.viewer_image = None;
             app.viewer_f16 = Some(f);
             vt::set_texture_roi(ctx, app.session.state.region_of_interest.or(app.ui.viewer.extended));
@@ -186,7 +186,7 @@ pub(super) fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: cra
             };
             drop(ren);
             app.viewer_native = Some((id, key, f));
-            app.viewer_shown = Some((id, key));
+            app.viewer_shown = Some((Some(id), key));
             // Pixels are read back on demand (viewer_pixels).
             app.viewer_image = None;
             app.viewer_f16 = None;

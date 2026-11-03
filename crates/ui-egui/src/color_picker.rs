@@ -817,6 +817,12 @@ mod tests {
         crate::panels::viewers::set_texture(harness.state_mut(), &ctx, 7, key, crate::frames::FrameImage::CpuF16(f), None, 0);
         let Some((_, crate::panels::viewers::PassiveTexture::Cpu(tex))) = harness.state().passive_tex.get(&7) else { panic!("no passive texture") };
         assert_eq!(tex.size(), [320, 180]);
+        let f = harness.state().viewer_f16.clone().unwrap();
+        let crate::frames::FrameImage::Cpu(shown) = crate::panels::viewers::cpu_passive_image(harness.state(), crate::frames::FrameImage::CpuF16(f), None)
+        else {
+            panic!("an 8-bit image")
+        };
+        assert!((shown.pixels[0].r() as f32 / 255.0 - want).abs() < 0.01, "the passive viewer shows the companded frame: {:?}", shown.pixels[0]);
     }
 
     #[test]

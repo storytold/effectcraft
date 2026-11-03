@@ -105,6 +105,8 @@ fn pass_colour_matches_display_color() {
         }
         cases.extend(DisplayColor::new(Some(ColorSpace::Rec2020), true, ColorSpace::Srgb, false, display, Simulation::default(), &custom));
     }
+    // A LUT-based profile (an uneven, channel-mixing grid).
+    cases.push(DisplayColor::from_lut(std::sync::Arc::new(test_lut())));
     assert!(cases.len() > 40);
     for dc in &cases {
         let pass = dc.pass();
@@ -118,6 +120,11 @@ fn pass_colour_matches_display_color() {
             }
         }
     }
+}
+
+/// A 17³ LUT that mixes channels and bends the curve (as an ICC profile's device does).
+pub(crate) fn test_lut() -> effectcraft_color::icc::Lut3d {
+    effectcraft_color::icc::Lut3d::bake(17, |c| [c[0].powf(1.3) * 0.9 + c[1] * 0.1, c[1] * 0.8 + c[2] * 0.2, (c[2] * 0.7 + c[0] * 0.3).sqrt()])
 }
 
 /// Frames keep their encoding: the output space's curve (the Working Gamma's when unmanaged) and

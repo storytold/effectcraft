@@ -27,11 +27,12 @@ pub enum PassiveTexture {
 }
 
 impl PassiveTexture {
-    fn id(&self) -> egui::TextureId {
+    /// The texture to draw (`None`: the display pass has not made one).
+    fn id(&self) -> Option<egui::TextureId> {
         match self {
-            PassiveTexture::Cpu(h) => h.id(),
-            PassiveTexture::Gpu(id, _) => *id,
-            PassiveTexture::Baked(b) => b.id().unwrap_or_default(),
+            PassiveTexture::Cpu(h) => Some(h.id()),
+            PassiveTexture::Gpu(id, _) => Some(*id),
+            PassiveTexture::Baked(b) => b.id(),
         }
     }
 
@@ -117,9 +118,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
                 let dkey = display_hash(&super::viewer_tools::display_key(app, dc.is_some()));
                 set_texture(app, &ctx, id, key, img, dc, dkey);
             }
-            match app.passive_tex.get(&id).filter(|(k, _)| k.comp == cid.0) {
-                Some((_, tex)) => {
-                    p.image(tex.id(), r, tex.uv(), Color32::WHITE);
+            match app.passive_tex.get(&id).filter(|(k, _)| k.comp == cid.0).and_then(|(_, tex)| Some((tex.id()?, tex.uv()))) {
+                Some((tex, uv)) => {
+                    p.image(tex, r, uv, Color32::WHITE);
                 }
                 None => {
                     let bg = c.background;
@@ -162,24 +163,11 @@ pub(crate) fn set_texture(
     ctx.data_mut(|d| d.insert_temp(dc_id, dkey));
     let smooth = app.session.prefs.viewer_zoom_smooth();
     let opts = super::viewer::zoom_texture_options(smooth);
-    // The monitor conversion the active viewer applies (Use Display Color Management), with no
-    // channel or exposure of its own; for half-float frames also the HDR step.
-    let pass = |encoding| effectcraft_engine::viewer::DisplayPass::new(effectcraft_engine::viewer::Channel::Rgb, false, 0.0, encoding, dc.as_ref());
+    let pass = |encoding| passive_pass(encoding, dc.as_ref());
     let gpu = app.display_gpu();
     let img = match img {
-        FrameImage::Cpu(img) => {
-            let pass = pass(super::viewer_tools::rgba8_encoding(app));
-            if pass.is_identity() {
-                FrameImage::Cpu(img)
-            } else {
-                let mut px: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
-                pass.apply_rgba8(&mut px);
-                let pixels = px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect();
-                FrameImage::Cpu(Arc::new(egui::ColorImage::new(img.size, pixels)))
-            }
-        }
-        FrameImage::CpuF16(f) if gpu.is_none() || app.wgpu.is_none() => FrameImage::Cpu(Arc::new(f.to_color_image(&pass(f.encoding)))),
-        img => img,
+        FrameImage::CpuF16(f) if gpu.is_some() && app.window_wgpu.is_some() => FrameImage::CpuF16(f),
+        img => cpu_passive_image(app, img, dc.as_ref()),
     };
     let tex = match (img, app.passive_tex.remove(&id)) {
         (FrameImage::Cpu(img), Some((_, PassiveTexture::Cpu(mut h))))
@@ -201,7 +189,7 @@ pub(crate) fn set_texture(
                     Box::default()
                 }
             };
-            let Some(rs) = &app.wgpu else { return };
+            let Some(rs) = &app.window_wgpu else { return };
             bake.show(rs, &gpu, &crate::display_gpu::Source::F16(f.clone()), &pass(f.encoding), smooth);
             PassiveTexture::Baked(bake)
         }
@@ -223,6 +211,35 @@ pub(crate) fn set_texture(
     app.passive_tex.insert(id, (key, tex));
 }
 
+/// A passive viewer's display pass: the monitor conversion the active viewer applies (Use
+/// Display Color Management), with no channel or exposure of its own; for half-float frames
+/// also the HDR step.
+fn passive_pass(
+    encoding: effectcraft_engine::viewer::FrameEncoding,
+    dc: Option<&effectcraft_engine::viewer::DisplayColor>,
+) -> effectcraft_engine::viewer::DisplayPass {
+    effectcraft_engine::viewer::DisplayPass::new(effectcraft_engine::viewer::Channel::Rgb, false, 0.0, encoding, dc)
+}
+
+/// A frame as a passive viewer shows it without the display pass on the GPU: CPU frames through
+/// [`passive_pass`] (GPU frames unchanged).
+pub(crate) fn cpu_passive_image(app: &EffectcraftApp, img: FrameImage, dc: Option<&effectcraft_engine::viewer::DisplayColor>) -> FrameImage {
+    match img {
+        FrameImage::Cpu(img) => {
+            let pass = passive_pass(super::viewer_tools::rgba8_encoding(app), dc);
+            if pass.is_identity() {
+                return FrameImage::Cpu(img);
+            }
+            let mut px: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
+            pass.apply_rgba8(&mut px);
+            let pixels = px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect();
+            FrameImage::Cpu(Arc::new(egui::ColorImage::new(img.size, pixels)))
+        }
+        FrameImage::CpuF16(f) => FrameImage::Cpu(Arc::new(f.to_color_image(&passive_pass(f.encoding, dc)))),
+        img => img,
+    }
+}
+
 /// A hash of the display conversion's inputs (see `viewer_tools::display_key`).
 fn display_hash(key: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -235,7 +252,7 @@ fn display_hash(key: &str) -> u64 {
 fn free(app: &EffectcraftApp, tex: Option<PassiveTexture>) {
     match (tex, &app.wgpu) {
         (Some(PassiveTexture::Gpu(id, _)), Some(rs)) => rs.renderer.write().free_texture(&id),
-        (Some(PassiveTexture::Baked(mut b)), rs) => b.free(rs.as_ref()),
+        (Some(PassiveTexture::Baked(mut b)), _) => b.free(app.window_wgpu.as_ref()),
         _ => {}
     }
 }

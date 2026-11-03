@@ -226,6 +226,10 @@ fn q(v: f32) -> f32 {
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let s = textureLoad(frame, vec2<i32>(floor(pos.xy)), 0);
+    // Frames are never NaN here: `frames::F16Frame` and 8-bit frames hold finite values only
+    // (the NaN test is the reference's, kept for safety; WGSL may drop it). Alpha is clamped to
+    // 0..1 first, as `display_pixel` and `DisplayPass::pixel` do (the compositor's alpha never
+    // exceeds 1).
     var a = s.w;
     if (!(a == a)) {
         a = 0.0;
@@ -283,13 +287,28 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 
 // The next mip level of the displayed texture (`frame` = the level above): each texel the mean
-// of the 2 × 2 premultiplied texels it covers, as the GPU compositor's display textures and the
-// fitted CPU textures average (#417). A level one texel wide or high repeats its edge.
+// of the premultiplied texels it covers, 2 × 2, and at the right / bottom edge of a level above
+// of odd size also its last column / row (3 wide or high), so no texel of the frame is dropped
+// (the level sizes are the GPU's, rounded down). Rounded as the pass rounds.
 @fragment
 fn mip(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let last = vec2<i32>(textureDimensions(frame)) - vec2<i32>(1);
-    let p = vec2<i32>(floor(pos.xy)) * 2;
-    let s = textureLoad(frame, min(p, last), 0) + textureLoad(frame, min(p + vec2<i32>(1, 0), last), 0)
-        + textureLoad(frame, min(p + vec2<i32>(0, 1), last), 0) + textureLoad(frame, min(p + vec2<i32>(1, 1), last), 0);
-    return floor(s * 0.25 * 255.0 + 0.5) / 255.0;
+    let above = vec2<i32>(textureDimensions(frame));
+    let size = max(above / 2, vec2<i32>(1));
+    let p = vec2<i32>(floor(pos.xy));
+    let lo = min(p * 2, above - vec2<i32>(1));
+    var hi = min(p * 2 + vec2<i32>(2), above);
+    if (p.x == size.x - 1) {
+        hi.x = above.x;
+    }
+    if (p.y == size.y - 1) {
+        hi.y = above.y;
+    }
+    var s = vec4<f32>(0.0);
+    for (var y = lo.y; y < hi.y; y++) {
+        for (var x = lo.x; x < hi.x; x++) {
+            s = s + textureLoad(frame, vec2<i32>(x, y), 0);
+        }
+    }
+    let n = f32((hi.x - lo.x) * (hi.y - lo.y));
+    return floor(s / n * 255.0 + 0.5) / 255.0;
 }

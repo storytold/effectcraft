@@ -65,11 +65,20 @@ impl EffectcraftApp {
     /// The display pass's pipelines on egui-wgpu's device, made the first time (desktop; the
     /// browser's viewer converts on the CPU for now). `None` without a device.
     pub(crate) fn display_gpu(&mut self) -> Option<Arc<crate::display_gpu::DisplayGpu>> {
-        if cfg!(target_arch = "wasm32") {
+        if cfg!(target_arch = "wasm32") || self.display_gpu_failed {
             return None;
         }
-        let rs = self.wgpu.as_ref()?;
-        Some(self.display_gpu.get_or_insert_with(|| Arc::new(crate::display_gpu::DisplayGpu::new(&rs.device))).clone())
+        if self.display_gpu.is_none() {
+            let rs = self.window_wgpu.as_ref()?;
+            match crate::display_gpu::DisplayGpu::try_new(&rs.device) {
+                Ok(g) => self.display_gpu = Some(Arc::new(g)),
+                Err(e) => {
+                    log::warn!("the viewer's display pass runs on the CPU: {e}");
+                    self.display_gpu_failed = true;
+                }
+            }
+        }
+        self.display_gpu.clone()
     }
 
     /// The viewer's Resolution: the active composition's (saved with the project).

@@ -395,7 +395,7 @@ fn draw_through_pass(
 ) {
     let smooth = app.session.prefs.viewer_zoom_smooth();
     if let Some(gpu) = app.display_gpu()
-        && let Some(rs) = &app.wgpu
+        && let Some(rs) = &app.window_wgpu
     {
         let bake = if snapshot { &mut app.snapshot_bake } else { &mut app.viewer_bake };
         if let Some(id) = bake.show(rs, &gpu, &src, pass, smooth) {
@@ -462,6 +462,15 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         }
         return;
     }
+    // The snapshot went (Purge, a new one): its half floats and texture go too.
+    if app
+        .snapshot_f16
+        .as_ref()
+        .is_some_and(|(img, _)| app.session.snapshot.as_ref().is_none_or(|s| !std::ptr::eq(img.as_ptr(), std::sync::Arc::as_ptr(&s.image))))
+    {
+        app.snapshot_f16 = None;
+        app.snapshot_bake.free(app.window_wgpu.as_ref());
+    }
     let dc = vw::DisplayColor::of(&app.session);
     let region = shown_region(ctx, [ectx.comp.width as f32, ectx.comp.height as f32]);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -470,10 +479,10 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         let pass = display_pass(app, s.encoding, dc.as_ref());
         // The snapshot in half floats, made once (it holds the render's full range).
         let f = match &app.snapshot_f16 {
-            Some((img, f)) if std::sync::Arc::ptr_eq(img, &s.image) => f.clone(),
-            _ => {
+            Some((_, f)) => f.clone(),
+            None => {
                 let f = std::sync::Arc::new(crate::frames::F16Frame::from_image(&s.image, s.encoding));
-                app.snapshot_f16 = Some((s.image.clone(), f.clone()));
+                app.snapshot_f16 = Some((std::sync::Arc::downgrade(&s.image), f.clone()));
                 f
             }
         };
@@ -502,9 +511,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
     let plain = pass.is_identity();
     // A GPU frame (the web viewer): drawn straight from its texture; Show Channel / exposure
     // read it back first (asynchronously in the browser: from the next frame on).
-    let gpu = matches!((&app.viewer_shown, &app.viewer_native), (Some(s), Some(n)) if s.0 == n.0 && s.1 == n.1 && n.1.comp == cid.0);
+    let gpu = matches!((&app.viewer_shown, &app.viewer_native), (Some(s), Some(n)) if s.0 == Some(n.0) && s.1 == n.1 && n.1.comp == cid.0);
     let rect = if gpu {
-        let Some(id) = app.viewer_shown.map(|s| s.0) else { return };
+        let Some(id) = app.viewer_shown.and_then(|s| s.0) else { return };
         if plain || app.viewer_pixels().is_none() {
             if !plain {
                 ctx.request_repaint();

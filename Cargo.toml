@@ -110,6 +110,7 @@ filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "09aaf9
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
 bytemuck = "1"
 pollster = "1"
+half = "2.7"
 
 # ui
 # Shared frontend components; keep this dependency above the engine boundary.

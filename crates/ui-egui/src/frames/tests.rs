@@ -1173,3 +1173,68 @@ fn half_float_frames_count_twice_the_bytes() {
     assert!(c.bytes <= 48, "{}", c.bytes);
     assert_eq!(c.map.len(), 2, "the half-float frame took two 8-bit frames' room");
 }
+
+/// 32 bpc viewer frames go to the disk cache as half floats and come back from it bit for bit
+/// in a new session (over-range values kept); the timeline's disk bar sees them.
+#[test]
+fn half_float_frames_survive_in_the_disk_cache() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-f16-disk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"width": 16, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb", "hdr": "compand"})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layers": [lid], "effect": "Exposure"})).unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
+    let src = |disk: &Arc<DiskCache>| RenderSource {
+        project: s.project.clone(),
+        footage: s.footage.clone(),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let opts = RenderOpts { skip_hdr_step: true, ..Default::default() };
+    let shown = |f: &Frames, disk: &Arc<DiskCache>| {
+        let key = FrameKey {
+            revision: s.revision,
+            content: f.content_of(&s.project, s.revision, cid),
+            comp: cid.0,
+            frame: 0,
+            scale: 1000,
+            view: 0,
+            opts: opts_hash(&opts),
+        };
+        f.request_urgent(&src(disk), key, cid, Tick::ZERO, opts);
+        wait_for_renders(f);
+        match f.get(&key) {
+            Some(FrameImage::CpuF16(img)) => (key, img),
+            _ => panic!("a half-float frame"),
+        }
+    };
+    let first = Frames::default();
+    let (key, rendered) = shown(&first, &disk);
+    assert!(rendered.pixel(0).unwrap()[0] > 1.0, "over range, without the HDR step");
+    disk.flush();
+    assert_eq!(disk.stats().entries, 1, "written as a frame entry");
+    // The timeline's blue bar: on disk, not in this (new) RAM cache.
+    let again = Frames::default();
+    let key2 = FrameKey { content: again.content_of(&s.project, s.revision, cid), ..key };
+    for _ in 0..200 {
+        if !again.disk_frames(&src(&disk), &key2, 0..1, &opts).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(again.disk_frames(&src(&disk), &key2, 0..1, &opts), vec![0]);
+    let hits = disk.stats().hits;
+    let (_, read) = shown(&again, &disk);
+    assert_eq!(disk.stats().hits, hits + 1, "read from the disk cache");
+    assert_eq!(read.bits(), rendered.bits());
+    assert_eq!(read.encoding, rendered.encoding);
+    let _ = std::fs::remove_dir_all(&dir);
+}
