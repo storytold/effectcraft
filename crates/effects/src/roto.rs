@@ -372,10 +372,22 @@ pub fn purge() {
     c.bytes = 0;
 }
 
+/// The pixel size of the layer-space grid at `scale` (`round(size · scale)`, at least 1).
+fn grid_size(layer_size: [f64; 2], scale: f64) -> (u32, u32) {
+    (((layer_size[0] * scale).round() as u32).max(1), ((layer_size[1] * scale).round() as u32).max(1))
+}
+
+/// The full-resolution layer grid frozen mattes are stored at. A frozen cache claiming any
+/// other size did not come from freezing this layer and is not decoded.
+pub fn frozen_grid(layer_size: [f64; 2]) -> [usize; 2] {
+    let (w, h) = grid_size(layer_size, 1.0);
+    [w as usize, h as usize]
+}
+
 /// The layer-space grid (`round(size · scale)` pixels) of a buffer.
 pub fn layer_grid(buf: &Buf, layer_size: [f64; 2]) -> Image {
     let s = if buf.scale > 0.0 { buf.scale } else { 1.0 };
-    let (w, h) = (((layer_size[0] * s).round() as u32).max(1), ((layer_size[1] * s).round() as u32).max(1));
+    let (w, h) = grid_size(layer_size, s);
     let (ox, oy) = (buf.offset[0].round() as i64, buf.offset[1].round() as i64);
     let mut img = Image::new(w, h);
     img.rows_mut().for_each(|(y, row)| {
@@ -1197,7 +1209,9 @@ fn matte_for(ctx: &EffectCtx, f: i64, img: &Arc<Image>, scale: f64) -> Option<(V
     {
         let [fw, fh] = fc.size;
         let expected = fw.checked_mul(fh)?;
-        if fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
+        // Only the layer's own full-resolution grid: a project cannot make a tiny layer decode
+        // (and convert to floats) planes as large as the RLE allows.
+        if fc.size != frozen_grid(ctx.layer_size) || fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
             return None;
         }
         let a = rle::decode_bounded(&fr.a, expected)?;
@@ -1888,6 +1902,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Frozen mattes are only decoded at the size the freeze pass stores: the layer grid at
+    /// full resolution.
+    #[test]
+    fn frozen_grid_is_the_full_resolution_layer_grid() {
+        for size in [[100.0, 80.0], [99.6, 0.2], [1.0, 1.0]] {
+            let buf = Buf { img: Image::new(3, 3), offset: [0.0; 2], scale: 1.0 };
+            let g = layer_grid(&buf, size);
+            assert_eq!(frozen_grid(size), [g.width as usize, g.height as usize]);
+        }
+        assert_eq!(frozen_grid([100.0, 80.0]), [100, 80]);
     }
 
     #[test]
