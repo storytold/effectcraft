@@ -538,10 +538,11 @@ impl Cff {
 
     /// A glyph's outline in glyph space (`font_matrix` maps it to text space) and its advance.
     pub fn outline(&self, gid: u16) -> Option<(BezPath, f64)> {
-        self.outline_depth(gid, 0)
+        self.outline_depth(gid, 0, &mut { MAX_GLYPH_OPS })
     }
 
-    fn outline_depth(&self, gid: u16, depth: usize) -> Option<(BezPath, f64)> {
+    /// `ops` is the glyph's instruction budget, shared by the base glyph and its seac components.
+    fn outline_depth(&self, gid: u16, depth: usize, ops: &mut usize) -> Option<(BezPath, f64)> {
         let r = self.charstrings.get(gid as usize)?.clone();
         let fd = self.fdselect.get(gid as usize).copied().unwrap_or(0) as usize;
         let fd = fd.min(self.lsubrs.len() - 1);
@@ -557,10 +558,11 @@ impl Cff {
             open: false,
             done: false,
             depth: 0,
-            ops: MAX_GLYPH_OPS,
+            ops: *ops,
             seac: None,
         };
         st.run(&self.data[r]);
+        *ops = st.ops;
         if st.open {
             st.path.close_path();
         }
@@ -576,10 +578,10 @@ impl Cff {
             && depth < 2
         {
             let find = |code: u8| crate::encoding::Base::Standard.name(code).and_then(|n| self.gid_by_name(&n));
-            if let Some((bp, _)) = find(b).and_then(|g| self.outline_depth(g, depth + 1)) {
+            if let Some((bp, _)) = find(b).and_then(|g| self.outline_depth(g, depth + 1, ops)) {
                 path.extend(bp);
             }
-            if let Some((ap, _)) = find(a).and_then(|g| self.outline_depth(g, depth + 1)) {
+            if let Some((ap, _)) = find(a).and_then(|g| self.outline_depth(g, depth + 1, ops)) {
                 path.extend(kurbo::Affine::translate((adx, ady)) * ap);
             }
         }
@@ -1135,6 +1137,27 @@ mod tests {
         let cff = Cff::parse(&font).unwrap();
         let (p, _) = cff.outline(cff.gid_by_name("A").unwrap()).unwrap();
         assert!(p.elements().is_empty());
+    }
+
+    /// The instruction budget is one per glyph: a seac whose base glyph spends all of it leaves
+    /// nothing for the accent, instead of each component getting a fresh budget.
+    #[test]
+    fn seac_components_share_the_instruction_budget() {
+        let call = [32u8, 29];
+        let mut subr = call.repeat(10);
+        subr.push(11);
+        // A square, then the branching subroutine that exhausts the budget.
+        let mut a = vec![139 + 100, 139 + 100, 139 - 100, 6];
+        a.extend(call);
+        a.push(14);
+        // `adx ady bchar achar endchar` with both components 'A' (standard code 65).
+        let seac = vec![139 + 10, 139 + 20, 139 + 65, 139 + 65, 14];
+        let font = write_test_cff_with_gsubrs(&[(".notdef", vec![14]), ("A", a), ("Aacute", seac)], &[subr]);
+        let cff = Cff::parse(&font).unwrap();
+        let (alone, _) = cff.outline(cff.gid_by_name("A").unwrap()).unwrap();
+        let (both, _) = cff.outline(cff.gid_by_name("Aacute").unwrap()).unwrap();
+        assert!(!alone.elements().is_empty());
+        assert_eq!(both.elements().len(), alone.elements().len(), "the accent gets no budget after the base spent it");
     }
 
     /// A CFF whose top DICT points its Private DICT at offsets near `usize::MAX`: `size` and `off`

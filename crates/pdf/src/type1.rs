@@ -206,10 +206,11 @@ impl Type1 {
 
     /// A glyph's outline in glyph space and its advance width.
     pub fn outline(&self, name: &str) -> Option<(BezPath, f64)> {
-        self.outline_depth(name, 0)
+        self.outline_depth(name, 0, &mut { crate::cff::MAX_GLYPH_OPS })
     }
 
-    fn outline_depth(&self, name: &str, depth: usize) -> Option<(BezPath, f64)> {
+    /// `ops` is the glyph's instruction budget, shared by the base glyph and its seac components.
+    fn outline_depth(&self, name: &str, depth: usize, ops: &mut usize) -> Option<(BezPath, f64)> {
         let cs = self.charstrings.get(name)?;
         let mut st = T1 {
             font: self,
@@ -224,10 +225,11 @@ impl Type1 {
             flex: None,
             done: false,
             depth: 0,
-            ops: crate::cff::MAX_GLYPH_OPS,
+            ops: *ops,
             seac: None,
         };
         st.run(cs);
+        *ops = st.ops;
         if st.open {
             st.path.close_path();
         }
@@ -236,10 +238,10 @@ impl Type1 {
             && depth < 2
         {
             let name_of = |c: u8| crate::encoding::Base::Standard.name(c);
-            if let Some((bp, _)) = name_of(b).and_then(|n| self.outline_depth(&n, depth + 1)) {
+            if let Some((bp, _)) = name_of(b).and_then(|n| self.outline_depth(&n, depth + 1, ops)) {
                 path.extend(bp);
             }
-            if let Some((ap, _)) = name_of(a).and_then(|n| self.outline_depth(&n, depth + 1)) {
+            if let Some((ap, _)) = name_of(a).and_then(|n| self.outline_depth(&n, depth + 1, ops)) {
                 // The accent's origin: its own sidebearing is replaced by `asb`.
                 path.extend(kurbo::Affine::translate((adx - asb + st.sbx, ady)) * ap);
             }
