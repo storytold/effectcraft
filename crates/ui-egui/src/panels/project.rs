@@ -1160,12 +1160,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Column header: Name, Label, then the visible optional columns.
     let hdr = Rect::from_min_size(pos2(rect.min.x, sr.max.y + 6.0), vec2(rect.width(), 20.0));
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
-    let cl = layout_columns(app, rect);
+    // Rows and columns stay clear of the scroll bar. (By last frame's overflow: the rows are
+    // listed below, and how many there are does not depend on the width.)
+    let gutter_id = egui::Id::unique("project-gutter");
+    let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
+    let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
+    let cl = layout_columns(app, content);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
     // Rows.
     let footer_h = 28.0;
-    let list = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), pos2(rect.max.x, rect.max.y - footer_h));
+    let list = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), pos2(content.max.x, rect.max.y - footer_h));
     let lp = p.with_clip_rect(list);
     // The list's empty area (under the rows and the scroll bar, which take their own clicks):
     // a click deselects, a drag draws a selection box, a double-click imports, as in After
@@ -1173,7 +1178,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Not a Tab stop: the keyboard reaches the rows, and nothing else here takes a key.
     let empty = ui.interact(list, egui::Id::unique("proj-empty"), Sense::CLICK | Sense::DRAG);
     app.auto.add("project.empty", list, "Double-click to import files; drag to select items; right-click for project actions");
-    hscroll_wheel(app, ui, list, overflow);
+    // (The wheel works over the scroll bar too.)
+    let wheel_area = Rect::from_min_max(list.min, pos2(rect.max.x, list.max.y));
+    hscroll_wheel(app, ui, wheel_area, overflow);
     let moved = keyboard_nav(app, &ctx);
     let rows = visible_rows(app);
     enter_renames(app, &ctx);
@@ -1185,10 +1192,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let hover_y = ctx.pointer_hover_pos().filter(|p| list.contains(*p)).map(|p| p.y);
     let mut drop_row: Option<ItemId> = None;
     let mut actions: Vec<(String, serde_json::Value)> = vec![];
-    let (scroll, max_scroll) = update_scroll(app, ui, &ctx, list, &rows, moved);
+    let (scroll, max_scroll) = update_scroll(app, ui, &ctx, wheel_area, &rows, moved);
+    if gutter != (max_scroll > 0.0) {
+        ctx.data_mut(|d| d.insert_temp(gutter_id, max_scroll > 0.0));
+        ctx.request_repaint();
+    }
     let first = ((scroll / ROW_H).floor() as usize).min(rows.len());
     let mut y = list.min.y - (scroll - first as f32 * ROW_H);
     let project = app.session.project.clone();
+    // Clip the rows' widgets (and hit tests) to the list too.
+    let panel_clip = ui.clip_rect();
+    ui.set_clip_rect(list.intersect(panel_clip));
     for (i, (id, depth)) in rows.iter().enumerate().skip(first) {
         let Some(it) = project.item(*id) else { continue };
         let r = Rect::from_min_size(pos2(list.min.x, y), vec2(list.width(), ROW_H));
@@ -1295,6 +1309,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         crate::widgets::context_menu(&resp, |ui| item_menu(app, ui, &ctx, it, *id, selected, &mut actions));
     }
+    ui.set_clip_rect(panel_clip);
     // The scroll bars, over the rows (which would take their presses otherwise).
     if overflow > 0.0 {
         let track = Rect::from_min_max(pos2(opt_x0, list.max.y - 5.0), pos2(rect.max.x - 4.0, list.max.y - 1.0));

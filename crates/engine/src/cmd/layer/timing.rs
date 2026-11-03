@@ -201,6 +201,11 @@ pub(super) fn arrange(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// "Pre-comp N" with the lowest N no item already uses.
+fn unused_precomp_name(proj: &effectcraft_project::Project) -> String {
+    (1u32..).map(|n| format!("Pre-comp {n}")).find(|n| !proj.items.values().any(|i| &i.name == n)).unwrap_or_else(|| "Pre-comp".to_string())
+}
+
 /// Layer ▸ Pre-compose. `mode: move` (default; "Move all attributes into the new composition")
 /// nests the selected layers as they are; `mode: leave` ("Leave all attributes in", one footage,
 /// solid or precomp layer) nests only the layer's source, sized to it, and keeps the layer's
@@ -212,7 +217,10 @@ pub(super) fn precompose(s: &mut Session, p: &Value) -> Result<Value> {
     if ids.is_empty() {
         return Err(bad(c, "no layers"));
     }
-    let name = str_p(p, "name").unwrap_or("Pre-comp 1").to_string();
+    let name = match str_p(p, "name") {
+        Some(n) => n.to_string(),
+        None => unused_precomp_name(&s.project),
+    };
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let leave = match str_p(p, "mode").unwrap_or("move") {
         "move" => false,
@@ -280,6 +288,15 @@ pub(super) fn precompose(s: &mut Session, p: &Value) -> Result<Value> {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let at = c.layers.iter().position(|l| ids.contains(&l.id)).unwrap_or(0);
         c.layers.retain(|l| !ids.contains(&l.id));
+        // Layers left behind must not keep pointing at layers that moved into the new comp.
+        for l in &mut c.layers {
+            if l.parent.is_some_and(|p| ids.contains(&p)) {
+                l.parent = None;
+            }
+            if l.track_matte.as_ref().is_some_and(|m| ids.contains(&m.layer)) {
+                l.track_matte = None;
+            }
+        }
         let lid = l.id;
         c.layers.insert(at.min(c.layers.len()), l);
         st.selected_layers = vec![lid];

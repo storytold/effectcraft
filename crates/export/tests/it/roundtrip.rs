@@ -311,7 +311,8 @@ fn exr_sequence_writes_scan_lines() {
     let om = OutputModule::for_format(OutputFormat::ExrSequence);
     run(&p, cid, &NoFootage, &om, &d.join("f_[#####].exr"));
     let bytes = std::fs::read(d.join("f_00000.exr")).expect("exr");
-    // Version field: 2, then the flags byte whose 0x02 bit marks a single-part tiled file.
+    // Version field (little-endian u32 at bytes 4..8): version 2, then the flags byte. Its 0x02
+    // bit is the tiled bit, 0x200 of the field, so a scan-line file has 0 there.
     assert_eq!(&bytes[4..6], &[2, 0], "{:02x?}", &bytes[..8]);
     let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes), false).expect("exr header");
     assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines);

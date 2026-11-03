@@ -48,7 +48,7 @@ pub struct SnapTarget {
     pub priority: u8,
     pub source: SnapSource,
     /// A line's extent along itself (y of a vertical line, x of a horizontal one): a layer's
-    /// edge without Snap Edges Extended. `None` runs across the whole comp.
+    /// edge or centre line without Snap Edges Extended. `None` runs across the whole comp.
     #[serde(default)]
     pub span: Option<[f64; 2]>,
 }
@@ -70,7 +70,7 @@ impl SnapTarget {
 }
 
 /// Tools bar ▸ Snapping options, the two After Effects' Snapping menu has: Snap Edges Extended
-/// (layer edges snap along their whole line, beyond the layer's bounds) and Snap to Features in
+/// (layer edge and centre lines snap along their whole line, beyond the layer's bounds) and Snap to Features in
 /// Collapsed Compositions and Text Layers (the layers inside a precomp layer with Collapse
 /// Transformations on are targets too). Both are on by default. Every layer feature snaps
 /// (corners, edge midpoints, centre, anchor point, mask and shape path points), as in After
@@ -126,9 +126,10 @@ fn better(a: (f64, u8), b: (f64, u8)) -> bool {
 }
 
 /// Snap feature points `sources` (comp pixels) to the nearest target within `tol` comp pixels.
-/// A point target snaps both axes and wins when it is at least as near as the best lines;
-/// otherwise the nearest vertical and horizontal lines snap x and y independently. Ties go to
-/// the lower priority value.
+/// A point target snaps both axes and wins unless a vertical and a horizontal line both resolve
+/// and together lie nearer than it (one line alone leaves the other axis free, so it never beats
+/// a point: a layer's edge midpoint lies on its edge line); otherwise the nearest vertical and
+/// horizontal lines snap x and y independently. Ties go to the lower priority value.
 pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Snap> {
     let mut best_pt: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
     let mut best_x: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
@@ -150,9 +151,9 @@ pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Sn
             }
         }
     }
-    let line_best = [best_x.map(|b| b.0.0), best_y.map(|b| b.0.0)].into_iter().flatten().fold(f64::INFINITY, f64::min);
+    let both_lines = best_x.zip(best_y).map_or(f64::INFINITY, |(x, y)| x.0.0.hypot(y.0.0));
     if let Some((k, s, t)) = best_pt
-        && k.0 <= line_best + 1e-9
+        && k.0 <= both_lines + 1e-9
     {
         return Some(Snap { delta: [t.pos[0] - s[0], t.pos[1] - s[1]], hits: vec![t], at: t.pos });
     }
@@ -366,8 +367,8 @@ fn visible_layers<'a>(ctx: &EvalCtx<'a>, exclude: &'a [LayerId]) -> impl Iterato
     comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo) && !exclude.contains(&l.id))
 }
 
-/// A 2D layer's snap targets: its box points, its edges as lines while unrotated (across the
-/// comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
+/// A 2D layer's snap targets: its box points, its edges and centre as lines while unrotated (across
+/// the comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
 /// false (Pan Behind drags it, the box stays put), its mask and shape path vertices and, with
 /// Snap to Features in Collapsed Compositions, the targets of the visible layers inside a
 /// collapsed precomp layer. None for cameras, lights and 3D layers.
@@ -386,10 +387,10 @@ fn layer_targets_at(ctx: &EvalCtx, l: &Layer, anchor: bool, f: SnapFeatures, dep
         let [nw, ne, _, sw] = b.corners;
         if (nw[1] - ne[1]).abs() < 1e-6 && (nw[0] - sw[0]).abs() < 1e-6 {
             let (xs, ys) = if f.edges_extended { (None, None) } else { (Some([nw[0], ne[0]]), Some([nw[1], sw[1]])) };
-            for x in [nw[0], ne[0]] {
+            for x in [nw[0], b.center[0], ne[0]] {
                 out.push(SnapTarget::vline(x, PRI_LAYER, src).within(ys));
             }
-            for y in [nw[1], sw[1]] {
+            for y in [nw[1], b.center[1], sw[1]] {
                 out.push(SnapTarget::hline(y, PRI_LAYER, src).within(xs));
             }
         }
