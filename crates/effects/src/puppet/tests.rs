@@ -113,9 +113,12 @@ fn hostile_expansion_is_clamped() {
     let (w, h) = (40, 40);
     let alpha = disc_alpha(w, h, [20.0, 20.0], 10.0);
     let max = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], EXPANSION_RANGE.1)).abs();
+    // A non-finite Expansion is taken as zero (the unexpanded outline), not clamped to the maximum.
+    let zero = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], 0.0)).abs();
     for e in [1e12, f64::MAX, f64::INFINITY] {
         let a = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], e)).abs();
-        assert!((a - max).abs() < 1.0 || e.is_infinite(), "{e}: {a} vs {max}");
+        let want = if e.is_finite() { max } else { zero };
+        assert!((a - want).abs() < 1.0, "{e}: {a} vs {want}");
     }
     assert!(outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], f64::NAN).len() >= 3);
     assert!(outline(&alpha, w, h, 1e9, [0.0; 2], [20.0, 20.0], 100.0).is_empty());
