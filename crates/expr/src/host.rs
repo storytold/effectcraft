@@ -120,6 +120,9 @@ fn cell_json(c: &str) -> serde_json::Value {
     }
 }
 
+/// Bytes of header names the row objects of delimited data may repeat in all.
+const MAX_DATA_JSON_BYTES: usize = 64 << 20;
+
 /// The data of a data footage item as `{data, rows, header}` JSON (see [`Req::FootageData`]).
 pub fn footage_data_json(f: &effectcraft_project::Footage) -> Option<String> {
     let text = f.data.as_deref()?;
@@ -135,6 +138,12 @@ pub fn footage_data_json(f: &effectcraft_project::Footage) -> Option<String> {
                 Some((h, b)) => (h.clone(), b.to_vec()),
                 None => (vec![], vec![]),
             };
+            // Every row object repeats every header name: a long header over many rows is far
+            // more than the text itself.
+            let keys: usize = header.iter().map(|k| k.len() + 4).sum();
+            if keys.saturating_mul(body.len()) > MAX_DATA_JSON_BYTES {
+                return None;
+            }
             let objects: Vec<serde_json::Value> = body
                 .iter()
                 .map(|r| {

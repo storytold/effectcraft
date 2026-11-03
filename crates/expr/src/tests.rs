@@ -2095,4 +2095,22 @@ fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
         let pixel = crate::sample::sample_image(ctx, cid, layer, [0.0, 0.0], [0.5, 0.5], post, 0.0).unwrap();
         assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
+
+/// Delimited data whose row objects would repeat a long header many times is refused.
+#[test]
+fn delimited_data_row_objects_are_bounded() {
+    let header = "h".repeat(1 << 20);
+    let mut text = format!("{header}\n");
+    for _ in 0..100 {
+        text.push_str("1\n");
+    }
+    let f = effectcraft_project::Footage { path: "/d.csv".into(), kind: effectcraft_project::FootageKind::Data, data: Some(text), ..Default::default() };
+    assert!(crate::host::footage_data_json(&f).is_none());
+    let f = effectcraft_project::Footage {
+        path: "/d.csv".into(),
+        kind: effectcraft_project::FootageKind::Data,
+        data: Some("a,b\n1,2\n".into()),
+        ..Default::default()
+    };
+    assert!(crate::host::footage_data_json(&f).unwrap().contains("\"a\":1"));
 }
