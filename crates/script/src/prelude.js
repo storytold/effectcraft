@@ -296,10 +296,12 @@ function Folder(path) {
 // A case-insensitive `*` / `?` file mask match in time bounded by mask × name length (a
 // regular expression of `.*` runs backtracks combinatorially on overlapping wildcards).
 function __globMatch(mask, name) {
-  var p = mask.toLowerCase(), s = name.toLowerCase();
+  // Wildcards run over the original name (lowercasing it can change its length: "İ" becomes
+  // two code units); literal characters compare case-insensitively one at a time.
+  var p = mask, s = name;
   var i = 0, j = 0, star = -1, mark = 0;
   while (j < s.length) {
-    if (i < p.length && (p[i] === "?" || p[i] === s[j])) { i++; j++; }
+    if (i < p.length && (p[i] === "?" || p[i] === s[j] || p[i].toLowerCase() === s[j].toLowerCase())) { i++; j++; }
     else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
     else if (star !== -1) { i = star + 1; j = ++mark; }
     else return false;

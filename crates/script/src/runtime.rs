@@ -768,19 +768,61 @@ fn run_expanded(session: &mut Session, req: &ScriptRequest) -> Outcome {
 /// 8 MiB thread such as the Script Console's, so deeper scripts are rejected up front.
 pub const MAX_NESTING: usize = 96;
 
-/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, template literals
-/// and comments are skipped).
+/// Skip template-literal text from `*i` (just past a backtick or an interpolation's `}`). Returns
+/// true when it stopped past a `${` (code follows), false at the closing backtick or the end.
+fn skip_template_text(b: &[u8], i: &mut usize) -> bool {
+    while let Some(&d) = b.get(*i) {
+        match d {
+            b'\\' => *i += 2,
+            b'`' => {
+                *i += 1;
+                return false;
+            }
+            b'$' if b.get(*i + 1) == Some(&b'{') => {
+                *i += 2;
+                return true;
+            }
+            _ => *i += 1,
+        }
+    }
+    false
+}
+
+/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, template literal
+/// text and comments are skipped; the code inside `${…}` interpolations is checked).
 pub fn check_nesting(code: &str) -> Result<(), String> {
     let b = code.as_bytes();
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
+    // The bracket depth of each open `${`, to tell its closing `}` from an inner one.
+    let mut interpolations: Vec<usize> = vec![];
     while let Some(&c) = b.get(i) {
         match c {
+            b'`' => {
+                i += 1;
+                if skip_template_text(b, &mut i) {
+                    depth += 1;
+                    max = max.max(depth);
+                    interpolations.push(depth);
+                }
+                continue;
+            }
+            b'}' if interpolations.last() == Some(&depth) => {
+                interpolations.pop();
+                depth -= 1;
+                i += 1;
+                if skip_template_text(b, &mut i) {
+                    depth += 1;
+                    max = max.max(depth);
+                    interpolations.push(depth);
+                }
+                continue;
+            }
             b'(' | b'[' | b'{' => {
                 depth += 1;
                 max = max.max(depth);
             }
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            b'"' | b'\'' | b'`' => {
+            b'"' | b'\'' => {
                 // Skip to the closing quote (escapes skip a byte).
                 i += 1;
                 while let Some(&d) = b.get(i) {
@@ -877,6 +919,16 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    #[test]
+    fn template_interpolations_are_checked_but_template_text_is_not() {
+        let deep = |n: usize| format!("`a${{{}1{}}}b`", "(".repeat(n), ")".repeat(n));
+        assert!(check_nesting(&deep(5000)).is_err());
+        assert!(check_nesting(&deep(10)).is_ok());
+        // Brackets in the literal text, and a nested template, are fine; depth carries across `}`.
+        assert!(check_nesting(&format!("`{} ${{ `x${{1+(2)}}y` }} {}`", "(".repeat(500), "{".repeat(500))).is_ok());
+        assert!(check_nesting(&format!("`${{1}}${{{}2{}}}`", "[".repeat(MAX_NESTING), "]".repeat(MAX_NESTING))).is_err());
     }
 
     /// A canonical drive path and a lexical one compare once the `\\?\` prefix is gone; a UNC

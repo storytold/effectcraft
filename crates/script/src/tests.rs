@@ -1934,4 +1934,7 @@ fn file_masks_match_without_backtracking() {
         "[__globMatch('*.JSX', 'a.jsx'), __globMatch('a?c*', 'abcdef'), __globMatch('*a*b', 'xaxb'), __globMatch('*.png', 'a.jsx'), __globMatch('*a*a*a*a*a*a*a*a*a*a*a*b', new Array(60).join('a'))].join()",
     );
     assert_eq!(r.result.as_str(), Some("true,true,true,false,false"));
+    // `?` still matches one character that lowercases to two.
+    let r = ok(&mut s, "[__globMatch('?.txt', '\\u0130.txt'), __globMatch('\\u0130*', '\\u0130x')].join()");
+    assert_eq!(r.result.as_str(), Some("true,true"));
 }
