@@ -216,11 +216,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let resp = phase_menu(app, ui, &ectx, &mut v);
     phase_hover(app, ui, &ectx, &resp, &mut v);
     phase_press(app, ui, &ectx, &resp, &mut v);
-    phase_dragstart(app, ui, &ectx, &resp, &mut v);
-    phase_drag(app, ui, &ectx, &resp, &mut v);
-    phase_stopped(app, ui, &ectx, &resp, &mut v);
-    phase_clicked(app, &ectx, &resp, &mut v);
-    phase_dblclick(app, &ectx, &resp, &mut v);
+    if !middle_pan(app, ui, &resp, &v) {
+        phase_dragstart(app, ui, &ectx, &resp, &mut v);
+        phase_drag(app, ui, &ectx, &resp, &mut v);
+        phase_stopped(app, ui, &ectx, &resp, &mut v);
+        phase_clicked(app, &ectx, &resp, &mut v);
+        phase_dblclick(app, &ectx, &resp, &mut v);
+    }
     phase_tail(app, ui, &ectx, &mut v);
 }
 
@@ -1064,6 +1066,24 @@ fn phase_press(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
     v.text_owns = text_owns;
 }
 
+/// A middle-drag pans with any tool and doesn't enter the gesture phases, so nothing else can
+/// happen under it (#2854). A left-button gesture already running keeps going until it ends.
+fn middle_pan(app: &mut EffectcraftApp, ui: &egui::Ui, resp: &egui::Response, v: &Vw<'_>) -> bool {
+    let (middle, primary) = ui.input(|i| (i.pointer.middle_down(), i.pointer.primary_down() || i.pointer.primary_released()));
+    if !middle || !resp.is_pointer_button_down_on() || (primary && ui.data(|d| d.get_temp::<Gesture>(v.gid)).is_some()) {
+        return false;
+    }
+    // No left button: a stored gesture is one whose release the viewer missed.
+    ui.data_mut(|d| d.remove::<Gesture>(v.gid));
+    // Movement from before the press (in its frame) is not part of the drag.
+    let d = ui.input(|i| if i.pointer.button_pressed(egui::PointerButton::Middle) { egui::Vec2::ZERO } else { i.pointer.delta() });
+    if d != egui::Vec2::ZERO && d.x.is_finite() && d.y.is_finite() {
+        app.ui.viewer.pan = [app.ui.viewer.pan[0] + d.x, app.ui.viewer.pan[1] + d.y];
+    }
+    v.ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    true
+}
+
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1100,7 +1120,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
     {
         let cpt = map.to_comp(pos);
         let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
-        let tool = if space_pan || resp.dragged_by(egui::PointerButton::Middle) { Tool::Hand } else { app.ui.tool };
+        let tool = if space_pan { Tool::Hand } else { app.ui.tool };
         let g = match tool {
             Tool::Hand => Some(Gesture::Pan { start_pan: app.ui.viewer.pan }),
             // Region of Interest armed: the drag draws it.

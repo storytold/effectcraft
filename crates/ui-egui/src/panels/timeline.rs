@@ -77,6 +77,17 @@ pub(crate) fn bar_color(label: Color32, selected: bool) -> Color32 {
 const TRIM_OUTSIDE: f32 = 4.0;
 const TRIM_INSIDE: f32 = 5.0;
 
+/// A middle-drag in the timeline pans it (`hand_tool_pan`, #2854): a middle press here starts no
+/// drag, so it can't move a bar or a key. A widget that takes a drag on press was given it this frame,
+/// before anything here ran. Handing that drag to an id nothing uses and ending it means no
+/// widget sees it start or stop.
+fn ignore_middle_press(ui: &egui::Ui, rect: Rect) {
+    if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle) && !i.pointer.primary_down()) {
+        ui.ctx().set_dragged_id(egui::Id::unique("tl-middle-press"));
+        ui.ctx().stop_dragging();
+    }
+}
+
 /// A layer bar's body (drag to move) and its In/Out trim zones. Short bars keep their middle
 /// third as body; a bar too short for that is all trim zones (the Out one on top).
 fn trim_zones(bar: Rect) -> (Rect, Rect, Rect) {
@@ -1850,6 +1861,7 @@ fn begin_rows(app: &mut EffectcraftApp, ui: &mut egui::Ui, tl: Tl) -> Rw {
 /// open rows and the drags in progress) lives in
 /// `app.ui.timeline` and egui's temp data.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    ignore_middle_press(ui, rect);
     let Some(cid) = app.session.active_comp_id() else {
         empty_timeline(app, ui, rect);
         return;
@@ -4835,7 +4847,7 @@ fn comp_markers_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     super::markers_ui::marker_bin(app, ui, &comp, tm, bin, mstrip);
 }
 
-/// Spacebar held: the Hand tool.
+/// Spacebar held: the Hand tool. A middle-drag begun in the rows, layer list included, pans too.
 fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     let rect = g.tl.rect;
     let graph_x0 = g.tl.graph_x0;
@@ -4847,6 +4859,7 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     let max_scroll = g.tl.max_scroll;
     let ctx = g.tl.ctx.clone();
     let comp = g.tl.comp.clone();
+    let mut pan = ui.input(|i| i.pointer.middle_down() && !i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|p| rows_rect.contains(p)));
     if super::space_hand(&ctx) {
         let area = Rect::from_min_max(pos2(graph_x0, ruler.min.y), pos2(rect.max.x, rows_rect.max.y));
         let hand = ui.interact(area, egui::Id::unique("tl-hand"), Sense::drag());
@@ -4854,14 +4867,15 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
         if hand.hovered() || hand.dragged() {
             ctx.set_cursor_icon(if hand.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
         }
-        if hand.dragged() {
-            let dy = ui.input(|i| i.pointer.delta().y);
-            app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - dy).clamp(0.0, max_scroll);
-            if app.ui.timeline.pps.is_some() {
-                let start = app.ui.timeline.start;
-                let last = (comp.duration.seconds() - (tm.t(graph_x1) - tm.start)).max(start).max(0.0);
-                app.ui.timeline.start = (start - hand.drag_delta().x as f64 / pps).clamp(0.0, last);
-            }
+        pan |= hand.dragged();
+    }
+    if pan {
+        let delta = ui.input(|i| i.pointer.delta());
+        app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - delta.y).clamp(0.0, max_scroll);
+        if app.ui.timeline.pps.is_some() {
+            let start = app.ui.timeline.start;
+            let last = (comp.duration.seconds() - (tm.t(graph_x1) - tm.start)).max(start).max(0.0);
+            app.ui.timeline.start = (start - delta.x as f64 / pps).clamp(0.0, last);
         }
     }
 }

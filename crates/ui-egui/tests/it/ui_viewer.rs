@@ -1771,6 +1771,66 @@ fn middle_and_hand_drags_pan_the_viewer_and_the_pan_stays_after_release() {
     assert!((end[0] - after[0] + 50.0).abs() < 1.0 && (end[1] - after[1] + 30.0).abs() < 1.0, "{after:?} → {end:?}");
 }
 
+/// #2854: a middle-drag over a layer pans the view and leaves the layer alone, selected or not,
+/// with any tool, and adds no undo step.
+#[test]
+fn middle_drag_over_a_layer_pans_and_leaves_the_layer_where_it_is() {
+    let mut h = harness();
+    let id = layer_named(&h, "Box");
+    let c = rect(&h, "viewer.comp").center();
+    for (select, tool) in [(false, Tool::Selection), (true, Tool::Selection), (true, Tool::Rotate), (true, Tool::Type)] {
+        let selection = if select { json!({"layers": [id.0]}) } else { json!({"layers": []}) };
+        h.state_mut().session.execute("layer.select", selection).unwrap();
+        h.state_mut().ui.tool = tool;
+        h.state_mut().ui.viewer.pan = [0.0, 0.0];
+        h.run_steps(2);
+        let (p0, steps) = (position_of(&h, id), h.state().session.history.undo.len());
+        drag_with(&mut h, egui::PointerButton::Middle, c, c + vec2(120.0, 60.0));
+        let pan = h.state().ui.viewer.pan;
+        assert!((pan[0] - 120.0).abs() < 1.0 && (pan[1] - 60.0).abs() < 1.0, "{select} {tool:?}: {pan:?}");
+        assert_eq!(position_of(&h, id), p0, "{select} {tool:?}: the layer stays");
+        assert_eq!(h.state().session.history.undo.len(), steps, "{select} {tool:?}: no undo step");
+    }
+}
+
+/// #2854: a left drag whose release the viewer never saw (the panel wasn't drawn on that frame)
+/// leaves its move gesture stored. A middle press must not run it.
+#[test]
+fn middle_drag_does_not_run_a_gesture_left_over_from_a_missed_release() {
+    let mut h = harness();
+    let id = layer_named(&h, "Box");
+    h.state_mut().session.execute("layer.select", json!({"layers": [id.0]})).unwrap();
+    h.run_steps(2);
+    let c = rect(&h, "viewer.comp").center();
+    let p = egui::PointerButton::Primary;
+    h.input_mut().events.push(Event::PointerMoved(c));
+    h.input_mut().events.push(Event::PointerButton { pos: c, button: p, pressed: true, modifiers: Default::default() });
+    h.step();
+    for i in 1..=4 {
+        h.input_mut().events.push(Event::PointerMoved(c + vec2(10.0 * i as f32, 0.0)));
+        h.step();
+    }
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.openLayer", json!({"layer": id.0})).unwrap();
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: c + vec2(40.0, 0.0), button: p, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::Composition);
+    h.run_steps(3);
+    let c = rect(&h, "viewer.comp").center();
+    let p0 = position_of(&h, id);
+    drag_with(&mut h, egui::PointerButton::Middle, c, c + vec2(120.0, 60.0));
+    assert_eq!(position_of(&h, id), p0, "the stored move didn't run");
+}
+
+fn layer_named(h: &Harness<'_, EffectcraftApp>, name: &str) -> LayerId {
+    h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap().id
+}
+
+fn position_of(h: &Harness<'_, EffectcraftApp>, id: LayerId) -> [f64; 3] {
+    h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+}
+
 /// A Spacebar press or release (`repeat`: the keyboard's auto-repeat while it is held).
 fn space(h: &mut Harness<'_, EffectcraftApp>, pressed: bool, repeat: bool) {
     h.input_mut().events.push(Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat, modifiers: Default::default() });
