@@ -844,6 +844,12 @@ pub fn is_crypto_layer(g: &PropGroup, prop: &effectcraft_engine::project::Proper
     matches!(&g.kind, GroupKind::Effect { effect } if effect == CRYPTOMATTE) && prop.match_id == "layer"
 }
 
+/// Whether `prop` is the Layer of a Cryptomatte effect on `layer` (the timeline finds it without
+/// its group).
+pub fn is_crypto_layer_of(layer: &Layer, prop: &effectcraft_engine::project::Property) -> bool {
+    layer.effects().is_some_and(|fx| fx.groups().any(|g| g.match_id == CRYPTOMATTE && g.get("layer").is_some_and(|q| q.uid == prop.uid)))
+}
+
 /// The OpenEXR layer EXtractoR's red, green and blue come from (`""`: the unnamed layer), or
 /// `None` when they mix layers.
 fn extractor_layer(vals: &[String; 4]) -> Option<&str> {

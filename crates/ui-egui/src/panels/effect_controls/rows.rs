@@ -419,12 +419,7 @@ fn value_crypto_layer(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, 
     let PropCx { t, uid, cy, vx, r, p, layer, prop, .. } = *cx;
     // The channels of the frame the render just read: decoded files are cached.
     let aux = app.session.layer_channels(layer.id);
-    let choices = effectcraft_engine::effects::crypto_layer_choices(aux.as_deref());
-    // What is rendered: the stored value's layer, else the file's first (as the effect does).
-    let shown = aux
-        .as_deref()
-        .and_then(|a| effectcraft_engine::effects::crypto_layer_name(a, *i as usize))
-        .or_else(|| choices.iter().find(|c| c.0 == *i as usize).map(|c| c.1.clone()));
+    let (choices, shown) = effectcraft_engine::effects::crypto_layer_menu(aux.as_deref(), *i as usize);
     let names: Vec<String> = choices.iter().map(|c| c.1.clone()).collect();
     let widest = names.iter().map(|o| p.layout_no_wrap(o.clone(), Tokens::ui(11.5), t.text).size().x).fold(0.0, f32::max);
     let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((widest + 30.0).clamp(80.0, (r.max.x - vx - 56.0).max(80.0)), 18.0));

@@ -5857,16 +5857,30 @@ fn enum_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
     let (p, layer, prop, at, uid) = (ve.p, ve.layer, ve.prop, ve.at, ve.uid);
     let t = app.tokens;
     let x = at.x;
-    if let Some(options) = layer.popup_options(prop) {
+    // Cryptomatte's Layer lists the footage's Cryptomatte layers (value k is the choice's own).
+    let crypto = crate::panels::fx_editors::is_crypto_layer_of(layer, prop).then(|| {
+        let aux = app.session.layer_channels(layer.id);
+        effectcraft_engine::effects::crypto_layer_menu(aux.as_deref(), *i as usize)
+    });
+    let options = match &crypto {
+        Some((choices, _)) => Some(std::borrow::Cow::Owned(choices.iter().map(|c| c.1.clone()).collect::<Vec<_>>())),
+        None => layer.popup_options(prop),
+    };
+    if let Some(options) = options {
         let r = Rect::from_min_size(pos2(x, at.y - 9.0), vec2(150.0, 18.0));
-        let label = options.get(*i as usize).cloned().unwrap_or_default();
+        let label = match &crypto {
+            Some((_, shown)) => shown.clone().unwrap_or_default(),
+            None => options.get(*i as usize).cloned().unwrap_or_default(),
+        };
+        let cur = if crypto.is_some() { options.iter().position(|o| *o == label) } else { Some(*i as usize) };
         let pop = egui::Id::unique(("epop", uid));
         if widgets::dropdown(ui, r, &label, &t, egui::Id::unique(("en", uid))).clicked() {
             widgets::open_popup(ui, pop);
         }
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
-        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, Some(*i as usize)) {
-            ve.set_step(actions, json!(ni));
+        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, cur) {
+            let value = crypto.as_ref().and_then(|(choices, _)| choices.get(ni)).map_or(ni, |c| c.0);
+            ve.set_step(actions, json!(value));
         }
     } else {
         p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.for_value(prop.has_expression()).hot_text);

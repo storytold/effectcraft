@@ -433,6 +433,19 @@ fn crypto_layer_popup_lists_the_layers_of_the_footage() {
     assert_eq!(choices(&["CryptoAsset", "ViewLayer.CryptoObject"]), vec![(0, "ViewLayer.CryptoObject".to_string()), (2, "CryptoAsset".to_string())]);
     // A layer under another name gets a value after the standard ones, in name order.
     assert_eq!(choices(&["Zed", "CryptoMaterial", "Alpha"]), vec![(1, "CryptoMaterial".to_string()), (3, "Alpha".to_string()), (4, "Zed".to_string())]);
+    // A name that only ends in a standard one fills its slot, as the effect always matched it.
+    assert_eq!(
+        choices(&["MyCryptoObject", "ViewLayer.CryptoMaterial", "Other"]),
+        vec![(0, "MyCryptoObject".to_string()), (1, "ViewLayer.CryptoMaterial".to_string()), (3, "Other".to_string())]
+    );
+    // The entry shown: the value's own, else the first layer; with no layers, the standard one.
+    let shown = |names: &[&str], i| crypto_layer_menu(Some(&crypto_only(names).0), i).1;
+    assert_eq!(
+        [0, 1, 7].map(|i| shown(&["CryptoMaterial"], i)),
+        [Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string())]
+    );
+    assert_eq!(crypto_layer_menu(None, 2).1.as_deref(), Some("CryptoAsset"));
+    assert_eq!(crypto_layer_menu(None, 9).1.as_deref(), Some("CryptoObject"), "a custom value with no footage");
     // Two layers for one slot: the first, which the effect renders.
     assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string())]);
 }

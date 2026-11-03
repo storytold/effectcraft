@@ -421,19 +421,30 @@ fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
 /// (stored value, name), or the three standard ones when there is none (no footage, not an
 /// OpenEXR, no Cryptomatte channels).
 pub fn crypto_layer_choices(aux: Option<&AuxChannels>) -> Vec<(usize, String)> {
+    crypto_layer_menu(aux, 0).0
+}
+
+/// The Layer popup for the stored value `index`: [`crypto_layer_choices`], and the name of the
+/// entry the effect reads (the first when `index` names none, as the effect does).
+pub fn crypto_layer_menu(aux: Option<&AuxChannels>, index: usize) -> (Vec<(usize, String)>, Option<String>) {
     let layers = aux.map(AuxChannels::crypto_layers).unwrap_or_default();
     if layers.is_empty() {
-        return CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+        let all: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+        let shown = all.iter().find(|c| c.0 == index).or(all.first()).map(|c| c.1.clone());
+        return (all, shown);
     }
-    crypto_layer_slots(&layers).into_iter().map(|(i, n)| (i, n.to_string())).collect()
+    let slots = crypto_layer_slots(&layers);
+    let shown = slots.iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string()).or_else(|| layers.first().cloned());
+    (slots.into_iter().map(|(i, n)| (i, n.to_string())).collect(), shown)
 }
 
 /// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
 /// the first layer (what a file without that layer has always shown). `None` without any.
 pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
-    let layers = aux.crypto_layers();
-    let by_slot = crypto_layer_slots(&layers).into_iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string());
-    by_slot.or_else(|| layers.into_iter().next())
+    if aux.crypto_layers().is_empty() {
+        return None;
+    }
+    crypto_layer_menu(Some(aux), index).1
 }
 
 /// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
