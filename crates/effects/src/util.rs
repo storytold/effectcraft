@@ -545,13 +545,22 @@ struct SimEntry<S> {
 /// Checkpoint every this many steps.
 pub const SIM_CHECKPOINT: u64 = 15;
 
+/// Most steps a simulation runs: three hours of layer time at 60 steps per second. The layer
+/// time comes from the project (start time, stretch), so without a limit a tiny file could ask
+/// for years of steps; past this the state stays where it is.
+pub const MAX_SIM_STEPS: u64 = 60 * 60 * 60 * 3;
+
+/// Most checkpoints kept per simulation (and made by one run, which spaces them further apart
+/// as it goes).
+const MAX_SIM_CHECKPOINTS: usize = 256;
+
 impl<S: Clone> SimCache<S> {
     pub const fn new(cap: usize) -> SimCache<S> {
         SimCache { inner: std::sync::Mutex::new(Vec::new()), cap }
     }
 
-    /// State after `target` steps. `init` builds step 0; `step(state, i)` advances from step
-    /// `i` to `i + 1`.
+    /// State after `target` steps (at most [`MAX_SIM_STEPS`]). `init` builds step 0;
+    /// `step(state, i)` advances from step `i` to `i + 1`.
     pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
         self.run_where(key, target, init, step, |_, _| true)
     }
@@ -569,6 +578,7 @@ impl<S: Clone> SimCache<S> {
         valid: impl Fn(u64, &S) -> bool,
     ) -> std::sync::Arc<S> {
         use std::sync::Arc;
+        let target = target.min(MAX_SIM_STEPS);
         let start = {
             let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
@@ -587,11 +597,17 @@ impl<S: Clone> SimCache<S> {
         if !had_start {
             fresh.push((0, Arc::new(st.clone())));
         }
+        let mut every = SIM_CHECKPOINT;
         while i < target {
             step(&mut st, i);
             i += 1;
-            if i % SIM_CHECKPOINT == 0 && i != target {
+            if i % every == 0 && i != target {
                 fresh.push((i, Arc::new(st.clone())));
+                // A long run keeps a bounded number of states: spread them twice as far apart.
+                if fresh.len() > MAX_SIM_CHECKPOINTS {
+                    every = every.saturating_mul(2);
+                    fresh.retain(|(s, _)| s % every == 0);
+                }
             }
         }
         let out = Arc::new(st);
@@ -611,19 +627,21 @@ impl<S: Clone> SimCache<S> {
         };
         let e = &mut g[idx];
         e.used = tick;
-        for (s, st) in fresh {
-            e.checkpoints.retain(|(c, _)| *c != s);
-            e.checkpoints.push((s, st));
-        }
+        // Fresh checkpoints replace those at the same step (one pass, not one per checkpoint).
+        let steps: std::collections::HashSet<u64> = fresh.iter().map(|(s, _)| *s).collect();
+        e.checkpoints.retain(|(c, _)| !steps.contains(c));
+        e.checkpoints.extend(fresh);
         // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
-        if e.checkpoints.len() > 256 {
+        if e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
             e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0);
             e.checkpoints.sort_by_key(|(s, _)| *s);
-            let mut k = 0;
-            e.checkpoints.retain(|_| {
-                k += 1;
-                k % 2 == 1
-            });
+            while e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
+                let mut k = 0;
+                e.checkpoints.retain(|_| {
+                    k += 1;
+                    k % 2 == 1
+                });
+            }
         }
         out
     }
@@ -799,6 +817,24 @@ mod tests {
         assert_eq!(b, direct);
         assert_eq!(a, c);
         assert_eq!(d, e);
+    }
+
+    /// Layer time from a project cannot run a simulation without end, and a long run keeps a
+    /// bounded number of checkpoints that still give the same answer when seeking.
+    #[test]
+    fn sim_cache_bounds_steps_and_checkpoints() {
+        let c: SimCache<u64> = SimCache::new(2);
+        let count = |s: &mut u64, _: u64| *s += 1;
+        assert_eq!(*c.run(1, u64::MAX, || 0, count), MAX_SIM_STEPS);
+        let n = c.inner.lock().map(|g| g.iter().map(|e| e.checkpoints.len()).max().unwrap_or(0)).unwrap_or(0);
+        assert!(n <= MAX_SIM_CHECKPOINTS + 1, "{n} checkpoints");
+        let fresh: SimCache<u64> = SimCache::new(2);
+        let step = |s: &mut u64, i: u64| *s = s.wrapping_mul(6364136223846793005).wrapping_add(i);
+        let far = *fresh.run(1, 100_000, || 7, step);
+        let mid = *fresh.run(1, 54_321, || 7, step);
+        let again: SimCache<u64> = SimCache::new(2);
+        assert_eq!(*again.run(1, 54_321, || 7, step), mid);
+        assert_eq!(*again.run(1, 100_000, || 7, step), far);
     }
 
     #[test]
