@@ -284,5 +284,12 @@ mod tests {
         held.keep(1, &small);
         assert!(held.take(1).is_some());
         assert_eq!(held.bytes, 0);
+        // the cap is cumulative: frames that fit together are kept, the one that breaks it is not
+        let third = Arc::new(ClipFrame { rgb: vec![[0.0; 3]; HELD_BYTES / 12 / 3 + 1], w: 1, h: HELD_BYTES / 12 / 3 + 1 });
+        for i in 0..4 {
+            held.keep(i, &third);
+        }
+        assert_eq!(held.frames.len(), 2);
+        assert!(held.bytes <= HELD_BYTES);
     }
 }
