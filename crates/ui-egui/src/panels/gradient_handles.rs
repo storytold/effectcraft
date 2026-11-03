@@ -32,7 +32,7 @@ fn gradient_paints<'a>(g: &'a PropGroup, depth: usize, out: &mut Vec<&'a PropGro
 }
 
 /// `g` or something inside it is selected on `layer`.
-fn selected_in(g: &PropGroup, layer: LayerId, selected: &[(LayerId, u64)]) -> bool {
+pub(crate) fn selected_in(g: &PropGroup, layer: LayerId, selected: &[(LayerId, u64)]) -> bool {
     fn contains(g: &PropGroup, uid: u64, depth: usize) -> bool {
         g.uid == uid || (depth < 16 && g.children.iter().any(|n| n.uid() == uid || matches!(n, Node::Group(c) if contains(c, uid, depth + 1))))
     }
@@ -76,7 +76,7 @@ pub fn viewer_hook(
             }
             for (pr, s) in pts.iter().zip(screen) {
                 let hr = Rect::from_center_size(s, vec2(16.0, 16.0));
-                let id = egui::Id::new(("viewer-gradient-pt", pr.uid));
+                let id = egui::Id::unique(("viewer-gradient-pt", pr.uid));
                 let resp = ui.interact(hr, id, Sense::drag());
                 let col = if resp.hovered() || resp.dragged() { t.accent } else { Color32::WHITE };
                 fw::draw_crosshair(painter, s + vec2(1.0, 1.0), 5.0, Color32::from_black_alpha(160));

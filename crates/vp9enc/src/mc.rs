@@ -56,6 +56,26 @@ pub fn predict(r: &RefPlane, x16: i32, y16: i32, w: usize, h: usize, out: &mut [
     };
     let fh = &SUBPEL_REGULAR[fx];
     let fv = &SUBPEL_REGULAR[fy];
+    if inside && w <= 16 && h <= 16 {
+        // Rows straight from the reference (no edge clamping needed).
+        let (xs, ys) = ((x0 - 3) as usize, (y0 - 3) as usize);
+        let row = |i: usize| &r.data[(ys + i) * r.stride + xs..];
+        if fx == 0 && fy == 0 {
+            for i in 0..h {
+                out[i * w..i * w + w].copy_from_slice(&row(i + 3)[3..3 + w]);
+            }
+            return;
+        }
+        let mut tmp = [0u8; 23 * 16];
+        for i in 0..h + 7 {
+            let s = row(i);
+            filt8(std::array::from_fn(|t| &s[t..]), fh, &mut tmp[i * w..i * w + w]);
+        }
+        for i in 0..h {
+            filt8(std::array::from_fn(|t| &tmp[(i + t) * w..]), fv, &mut out[i * w..i * w + w]);
+        }
+        return;
+    }
     if fx == 0 && fy == 0 {
         for i in 0..h {
             for j in 0..w {
@@ -108,24 +128,23 @@ impl PhasePlanes {
         let rh = ph + 2 * M;
         let off = (border + M) as i32;
         let mut raw = vec![0u8; rs * rh];
-        for y in 0..rh {
+        let o = off as usize;
+        for (y, row) in raw.chunks_exact_mut(rs).enumerate() {
             let sy = (y as i32 - off).clamp(0, r.h as i32 - 1) as usize;
             let src = &r.data[sy * r.stride..sy * r.stride + r.w];
-            for x in 0..rs {
-                raw[y * rs + x] = src[(x as i32 - off).clamp(0, r.w as i32 - 1) as usize];
-            }
+            // Edge replication: src[clamp(x - off, 0, w - 1)].
+            let (left, rest) = row.split_at_mut(o.min(rs));
+            left.fill(src[0]);
+            let n = r.w.min(rest.len());
+            rest[..n].copy_from_slice(&src[..n]);
+            rest[n..].fill(src[r.w - 1]);
         }
         // Horizontal phases over every raw row (inner columns).
         let hpass = |fx: usize| -> Vec<u8> {
             let f = &SUBPEL_REGULAR[fx];
             let mut out = vec![0u8; pw * rh];
-            for y in 0..rh {
-                let row = &raw[y * rs..y * rs + rs];
-                for x in 0..pw {
-                    let s = &row[x + M - 3..x + M + 5];
-                    let acc: i32 = 64 + (0..8).map(|t| f[t] * s[t] as i32).sum::<i32>();
-                    out[y * pw + x] = (acc >> 7).clamp(0, 255) as u8;
-                }
+            for (row, o) in raw.chunks_exact(rs).zip(out.chunks_exact_mut(pw)) {
+                filt8(std::array::from_fn(|t| &row[M - 3 + t..]), f, o);
             }
             out
         };
@@ -140,14 +159,8 @@ impl PhasePlanes {
                 }
                 let f = &SUBPEL_REGULAR[fy * 4];
                 let mut out = vec![0u8; pw * ph];
-                for y in 0..ph {
-                    for x in 0..pw {
-                        let mut acc = 64;
-                        for t in 0..8 {
-                            acc += f[t] * hp[(y + M + t - 3) * pw + x] as i32;
-                        }
-                        out[y * pw + x] = (acc >> 7).clamp(0, 255) as u8;
-                    }
+                for (y, o) in out.chunks_exact_mut(pw).enumerate() {
+                    filt8(std::array::from_fn(|t| &hp[(y + M + t - 3) * pw..]), f, o);
                 }
                 planes.push(out);
             }
@@ -164,6 +177,51 @@ impl PhasePlanes {
             return None;
         }
         Some((&self.planes[(fy / 4) * 4 + fx / 4], y0 as usize * self.stride + x0 as usize, self.stride))
+    }
+}
+
+/// `out[x] = clip(Round2(sum_t f[t] * s[t][x], 7))` for 8-bit samples. Lanes are 16-bit sums
+/// kept modulo 2^16: with the regular filter every sum plus the rounding term lies in
+/// [-13706, 46474], so wrapped non-negative sums stay below 0xC000 and negative ones (clipped
+/// to 0) land above it (the decoder's `narrow8`).
+#[inline]
+fn filt8(s: [&[u8]; 8], f: &[i32; 8], out: &mut [u8]) {
+    let n = out.len();
+    let mut x = 0;
+    while x + 32 <= n {
+        filt_chunk::<32>(&s, f, out, x);
+        x += 32;
+    }
+    for w in [16, 8, 4] {
+        if x + w <= n {
+            match w {
+                16 => filt_chunk::<16>(&s, f, out, x),
+                8 => filt_chunk::<8>(&s, f, out, x),
+                _ => filt_chunk::<4>(&s, f, out, x),
+            }
+            x += w;
+        }
+    }
+    for j in x..n {
+        let acc: i32 = 64 + (0..8).map(|t| f[t] * s[t][j] as i32).sum::<i32>();
+        out[j] = (acc >> 7).clamp(0, 255) as u8;
+    }
+}
+
+#[inline(always)]
+fn filt_chunk<const W: usize>(s: &[&[u8]; 8], f: &[i32; 8], out: &mut [u8], x: usize) {
+    let mut acc = [64u16; W];
+    for t in 0..8 {
+        let c = f[t] as u16;
+        let Some(p) = s[t].get(x..).and_then(|p| p.first_chunk::<W>()) else { return };
+        for j in 0..W {
+            acc[j] = acc[j].wrapping_add(c.wrapping_mul(p[j] as u16));
+        }
+    }
+    if let Some(o) = out.get_mut(x..).and_then(|o| o.first_chunk_mut::<W>()) {
+        for j in 0..W {
+            o[j] = if acc[j] < 0xC000 { (acc[j] >> 7).min(255) as u8 } else { 0 };
+        }
     }
 }
 

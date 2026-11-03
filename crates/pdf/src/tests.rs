@@ -4,6 +4,11 @@ use super::*;
 
 use crate::write::pdf;
 
+mod groups;
+mod import;
+mod reader;
+mod shading;
+
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
 /Pattern cs /P0 scn 100 0 100 50 re f\n\
@@ -48,7 +53,10 @@ fn pdf_paths_clip_gradient_and_layers() {
         assert_eq!(page_count(&bytes), 1);
         let doc = parse(&bytes).unwrap();
         assert_eq!((doc.width, doc.height), (200.0, 100.0));
-        assert_eq!(layer_names(&doc), vec!["Background", "Art"], "object stream {objstm}");
+        assert_eq!(layer_names(&doc), vec!["Background", "Art"], "object stream {objstm}, skipped: {:?}", doc.skipped);
+        if objstm {
+            assert!(doc.skipped.iter().any(|warning| warning.contains("recovered PDF object")), "the malformed xref repair is reported");
+        }
         assert!(doc.skipped.contains(&"text (no font)".to_string()), "{:?}", doc.skipped);
         let (w, h) = doc.pixel_size();
         let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
@@ -196,7 +204,7 @@ fn nested_bomb_in_the_second_flate_filter_is_refused() {
     const MAX: usize = 1 << 20;
     let flate = object::Obj::Name("FlateDecode".into());
     let chain: object::Dict = [("Filter".to_string(), object::Obj::Array(vec![flate.clone(), flate]))].into_iter().collect();
-    let file = object::File::parse(b"");
+    let file = object_file(vec![]);
     let mut nested = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 16 << 20], 6);
     nested.resize(MAX - 1, 0);
     let raw = miniz_oxide::deflate::compress_to_vec_zlib(&nested, 6);
@@ -206,7 +214,7 @@ fn nested_bomb_in_the_second_flate_filter_is_refused() {
 
 fn bounded_filter(dict: &str, raw: &[u8], max: usize) -> Option<Vec<u8>> {
     let object::Obj::Dict(d) = object::Lexer::new(dict.as_bytes(), 0).next().unwrap() else { panic!("not a dictionary") };
-    object::decode_stream_within(&object::File::parse(b""), &d, raw, max)
+    object::decode_stream_within(&object_file(vec![]), &d, raw, max)
 }
 
 #[test]
@@ -660,9 +668,31 @@ fn tiling_patterns_coloured_and_uncoloured() {
     assert_eq!(at(115, 15)[3], 0.0);
 }
 
+/// Build isolated interpreter objects without presenting a function or colour space as a
+/// document catalog. Complete-document parsing is covered by the page and reader fixtures.
+fn object_file(objs: Objs) -> object::File {
+    let objects = objs
+        .into_iter()
+        .map(|(number, body, stream)| {
+            let mut lexer = object::Lexer::new(body.as_bytes(), 0);
+            let value = lexer.next().unwrap();
+            let value = lexer.maybe_ref(value);
+            let value = match stream {
+                Some(bytes) => {
+                    let object::Obj::Dict(dict) = value else { panic!("stream fixture must have a dictionary") };
+                    object::Obj::Stream(dict, bytes)
+                }
+                None => value,
+            };
+            ((number, 0), value)
+        })
+        .collect();
+    object::File { objects, trailers: vec![], repairs: vec![] }
+}
+
 /// Object 1 of a file holding just `objs`, read as a function.
 fn read_function(objs: Objs) -> color::Func {
-    color::Func::read(&object::File::parse(&pdf(&objs, 1)), &object::Obj::Ref(1, 0))
+    color::Func::read(&object_file(objs), &object::Obj::Ref(1, 0))
 }
 
 /// A sampled (type 0) function, read from a file holding just its stream.
@@ -672,7 +702,7 @@ fn read_sampled_function(dict: &str, data: Vec<u8>) -> color::Func {
 
 /// Object 1 of a file holding just `objs`, read as a colour space.
 fn read_color_space(objs: Objs) -> color::Cs {
-    color::color_space(&object::File::parse(&pdf(&objs, 1)), &object::Obj::Ref(1, 0), None)
+    color::color_space(&object_file(objs), &object::Obj::Ref(1, 0), None)
 }
 
 #[test]
@@ -1019,4 +1049,93 @@ fn multiple_pages_and_calculator_shadings() {
     let img = render(&p2);
     assert!(img.get(5, 25)[0] < 0.1 && img.get(95, 25)[0] > 0.9, "{:?} {:?}", img.get(5, 25), img.get(95, 25));
     assert_eq!(parse_page(&bytes, 2), Err(Error::PageOutOfRange(2)));
+}
+
+#[test]
+fn retained_layers_keep_strokes_clips_and_empty_layers() {
+    let doc = parse(&sample_pdf(false)).unwrap();
+    for i in 0..layer_names(&doc).len() {
+        let full = layer_doc(&doc, i);
+        let (cropped, offset) = layer_doc_with_sizes(&doc, i, true);
+        let (w, h) = cropped.pixel_size();
+        let image = effectcraft_svg::rasterize(&cropped, w, h, 1.0);
+        let original = effectcraft_svg::rasterize(&full, 200, 100, 1.0);
+        for y in 0..100 {
+            for x in 0..200 {
+                let a = image.get(x - offset[0] as i64, y - offset[1] as i64);
+                let b = original.get(x, y);
+                assert!(a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5), "layer {i} at {x},{y}: {a:?} vs {b:?}");
+            }
+        }
+    }
+    let (empty, _) = layer_doc_with_sizes(&doc, usize::MAX, true);
+    assert_eq!(empty.pixel_size(), (1, 1));
+}
+
+#[test]
+fn retained_layers_measure_transformed_artwork_without_rasterizing() {
+    let doc = effectcraft_svg::parse(br#"<svg width="120" height="80"><g transform="translate(60,0)"><rect x="10" y="20" width="30" height="10" transform="rotate(90)"/></g><path d="M 10 20 L 30 20" fill="none" stroke="red" stroke-width="4" stroke-linecap="square"/></svg>"#).unwrap();
+    let (rotated, offset) = layer_doc_with_sizes(&doc, 0, true);
+    assert_eq!(offset, [30.0, 10.0]);
+    assert_eq!(rotated.pixel_size(), (10, 30));
+    let (stroked, offset) = layer_doc_with_sizes(&doc, 1, true);
+    assert_eq!(offset, [8.0, 18.0]);
+    assert_eq!(stroked.pixel_size(), (24, 4));
+}
+
+#[test]
+fn retained_layers_preserve_artwork_beyond_the_bounds_depth_limit() {
+    let mut doc = effectcraft_svg::parse(br#"<svg width="120" height="80"><rect x="20" y="15" width="30" height="20"/></svg>"#).unwrap();
+    for _ in 0..300 {
+        let mut group = Group::new("nested");
+        group.children = std::mem::take(&mut doc.root.children);
+        doc.root.children.push(Node::Group(group));
+    }
+    let (cropped, offset) = layer_doc_with_sizes(&doc, 0, true);
+    assert_eq!(cropped.pixel_size(), (120, 80), "unknown bounds keep the full page");
+    assert_eq!(offset, [0.0, 0.0]);
+}
+
+#[test]
+fn cid_width_entries_at_the_top_of_the_cid_range_do_not_overflow() {
+    // A first CID of u32::MAX (larger values saturate to it) used to overflow `first + k` and `first + 65535`:
+    // a panic in debug builds; in release builds the list wrapped round to CID 0 and the range was dropped.
+    let load = |entry: &str| {
+        let type0 = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [13 0 R] >>";
+        let desc = format!("<< /Type /Font /Subtype /CIDFontType2 {entry} >>");
+        let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", vec![(10, type0.into(), None), (13, desc, None)])).unwrap();
+        let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+        font::Font::load(&file, d, &mut vec![])
+    };
+    let max = u32::MAX;
+    // c [w1 w2 ...]
+    let f = load("/W [4294967295 [500 600 700]]");
+    assert_eq!((f.width(max), f.width(0)), (0.5, 1.0));
+    // cfirst clast w
+    assert_eq!(load("/W [4294967295 4294967295 400]").width(max), 0.4);
+    // c [w1y vx vy ...]
+    let f = load("/W2 [4294967295 [1 2 3 4 5 6]]");
+    assert_eq!((f.vmetrics(max), f.vmetrics(0)), ((0.001, 0.002, 0.003), (-1.0, 0.5, 0.88)));
+    // cfirst clast w1y vx vy
+    assert_eq!(load("/W2 [4294967295 4294967295 1 2 3]").vmetrics(max), (0.001, 0.002, 0.003));
+}
+
+#[test]
+fn cmap_entries_at_the_top_of_the_code_range_do_not_overflow() {
+    // A bfrange array starting at code 0xFFFFFFFF and a cidrange mapping onto CID u32::MAX used to overflow
+    // `lo + k` and `c + (code - lo)`: a panic in debug builds, a wrap round to code / CID 0 in release builds.
+    let to_unicode = "beginbfrange <FFFFFFFF> <FFFFFFFF> [<0041> <0042>] endbfrange";
+    let encoding = "begincodespacerange <0000> <FFFF> endcodespacerange begincidrange <0000> <FFFF> 4294967295 endcidrange";
+    let objs: Objs = vec![
+        (10, "<< /Type /Font /Subtype /Type0 /Encoding 15 0 R /ToUnicode 14 0 R /DescendantFonts [13 0 R] >>".into(), None),
+        (13, "<< /Type /Font /Subtype /CIDFontType2 /W [0 [700 800] 4294967295 [500]] >>".into(), None),
+        (14, "<< >>".into(), Some(to_unicode.as_bytes().to_vec())),
+        (15, "<< /Type /CMap >>".into(), Some(encoding.as_bytes().to_vec())),
+    ];
+    let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", objs)).unwrap();
+    let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+    let f = font::Font::load(&file, d, &mut vec![]);
+    assert_eq!((f.unicode(0xFFFF_FFFF), f.unicode(0)), ("A".to_string(), String::new()));
+    // Code 0 is CID u32::MAX; code 2 would be past it, so it falls back to CID 0 like an unmapped code.
+    assert_eq!((f.width(0), f.width(2)), (0.5, 0.7));
 }

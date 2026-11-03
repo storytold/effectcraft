@@ -14,18 +14,52 @@ use std::sync::Arc;
 
 use crate::{AlphaMode, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
 
+/// The last component of a referenced path, treating `\` as a separator too: a path from a
+/// machine of another kind (`C:\textures\checker.png`) still finds `checker.png` next to the
+/// model (#1274). `None` when the name carries no path at all.
+fn sibling_name(name: &str) -> Option<&str> {
+    let file = name.rsplit(['/', '\\']).next()?;
+    (!file.is_empty() && file.len() < name.len()).then_some(file)
+}
+
+/// A material reference resolved against the model's folder: the name as written (a name
+/// containing spaces is one name), then its file name (an absolute path from another machine,
+/// #1274), then the final token (the options convention, `-bm 1 file.png`).
+fn resolve_reference(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> Option<Vec<u8>> {
+    let mut tried: Vec<&str> = vec![];
+    for candidate in [name, sibling_name(name).unwrap_or(name), name.split_whitespace().last().unwrap_or(name)] {
+        if tried.contains(&candidate) {
+            continue;
+        }
+        tried.push(candidate);
+        if let Some(b) = resolve(candidate) {
+            return Some(b);
+        }
+    }
+    None
+}
+
 /// Parse MTL text into named materials (textures appended to `textures`).
 pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>) -> Vec<Material> {
     let mut out: Vec<Material> = vec![];
     let mut loaded: HashMap<String, Option<usize>> = HashMap::new();
     let mut tex = |name: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
-        // Options (`-bm 1 file.png`): the file name is the last token.
-        let file = name.split_whitespace().last()?.to_string();
-        let t = *loaded.entry(file.clone()).or_insert_with(|| {
-            let b = resolve(&file)?;
-            let t = Texture::decode(&b).ok()?;
-            textures.push(Arc::new(t));
-            Some(textures.len() - 1)
+        let key = name.trim().to_string();
+        let t = *loaded.entry(key.clone()).or_insert_with(|| {
+            let Some(b) = resolve_reference(resolve, &key) else {
+                log::warn!("model: texture `{key}` was not found next to the model");
+                return None;
+            };
+            match Texture::decode(&b) {
+                Ok(t) => {
+                    textures.push(Arc::new(t));
+                    Some(textures.len() - 1)
+                }
+                Err(e) => {
+                    log::warn!("model: cannot decode texture `{key}`: {e}");
+                    None
+                }
+            }
         });
         t.map(|texture| TexRef { texture, uv_set: 0 })
     };
@@ -147,12 +181,17 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             }
             "mtllib" => {
                 let name = line["mtllib".len()..].trim();
-                for file in std::iter::once(name).chain(name.split_whitespace()) {
+                let mut found = false;
+                for file in std::iter::once(name).chain(name.split_whitespace()).chain(sibling_name(name)) {
                     if let Some(b) = resolve(file) {
                         let mut ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures);
                         materials.append(&mut ms);
+                        found = true;
                         break;
                     }
+                }
+                if !found && !name.is_empty() {
+                    log::warn!("model: material library `{name}` was not found next to the model");
                 }
             }
             "usemtl" => {

@@ -301,7 +301,8 @@ impl OffsetCurve {
         }
         let n = ext.len();
         // Tangents: the mean of the neighbouring slopes, flat at local extrema and next to flat
-        // segments so the curve never overshoots its points.
+        // segments, and at most three times either slope (Fritsch-Carlson) so the curve never
+        // overshoots its points, even beside a short steep segment.
         let slope = |k: usize| (ext[k + 1].1 - ext[k].1) / (ext[k + 1].0 - ext[k].0).max(1e-6);
         let m: Vec<f32> = (0..n)
             .map(|k| {
@@ -309,7 +310,12 @@ impl OffsetCurve {
                     return 0.0;
                 }
                 let (a, b) = (slope(k - 1), slope(k));
-                if a * b <= 0.0 { 0.0 } else { (a + b) * 0.5 }
+                if a * b <= 0.0 {
+                    0.0
+                } else {
+                    let lim = 3.0 * a.abs().min(b.abs());
+                    ((a + b) * 0.5).clamp(-lim, lim)
+                }
             })
             .collect();
         let eval = |x: f32| -> f32 {
@@ -986,6 +992,28 @@ mod tests {
             let out = run("ec.color.lumetri", &[(&format!("curves/hueSaturationCurves/{id}"), s("0,0 1,0"))], img.clone());
             let p = out.get(0, 0);
             assert!((p[0] - p[1]).abs() < 1e-3 && (p[1] - p[2]).abs() < 1e-3, "{id}: {p:?}");
+        }
+    }
+
+    #[test]
+    fn hue_saturation_curve_stays_between_its_points() {
+        // #1656: a point dragged to the bottom right next to another one. The steep short
+        // segment used to pull the long one beside it far outside the box (|offset| > 0.5).
+        // The third pair sits across the hue wrap (0.98 and 0.005 are neighbours).
+        let cases = [("0.3,0.4 0.31,0 0.7,0.6", true), ("0.1,0.3 0.3,0.5 0.31,1 0.7,0.5", false), ("0.5,0.6 0.98,0.4 0.005,0", true)];
+        for (pts, periodic) in cases {
+            let c = OffsetCurve::parse(pts, periodic).unwrap();
+            for i in 0..=1000 {
+                let x = i as f32 / 1000.0;
+                let v = c.at(x);
+                assert!((-0.5..=0.5).contains(&v), "{pts} at {x}: {v}");
+            }
+            for p in parse_points(pts) {
+                assert!((c.at(p.0) - (p.1 - 0.5)).abs() < 0.02, "{pts}: passes through {p:?}");
+            }
+            if periodic {
+                assert!((c.at(0.0) - c.at(1.0)).abs() < 1e-4, "{pts}: no seam at the wrap");
+            }
         }
     }
 

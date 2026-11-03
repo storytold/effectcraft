@@ -186,9 +186,16 @@ fn to_layer(c: [f64; 2], b: f64, roll_deg: f64, q: [f64; 2]) -> [f64; 2] {
 
 /// Layer pixels → face frame.
 fn to_face(c: [f64; 2], b: f64, roll_deg: f64, p: [f64; 2]) -> [f64; 2] {
+    face_mapper(c, b, roll_deg)(p)
+}
+
+/// [`to_face`] with the rotation worked out once, for mapping many points.
+fn face_mapper(c: [f64; 2], b: f64, roll_deg: f64) -> impl Fn([f64; 2]) -> [f64; 2] {
     let (sn, cs) = roll_deg.to_radians().sin_cos();
-    let d = [(p[0] - c[0]) / b, (p[1] - c[1]) / b];
-    [cs * d[0] + sn * d[1], -sn * d[0] + cs * d[1]]
+    move |p| {
+        let d = [(p[0] - c[0]) / b, (p[1] - c[1]) / b];
+        [cs * d[0] + sn * d[1], -sn * d[0] + cs * d[1]]
+    }
 }
 
 /// A synthetic face's landmarks in layer pixels.
@@ -547,6 +554,32 @@ fn fit_from_face(face: &Face, topo: &Topology, offset: [f64; 2]) -> Option<FaceF
     Some(FaceFit { landmarks, detected, outline, center, height: b, roll })
 }
 
+/// Find the first skin pixel in successive rings around the predicted center.
+fn nearest_skin(skin: &[bool], size: (usize, usize), center: (usize, usize), radius: i64) -> Option<(usize, usize)> {
+    let (w, h) = size;
+    let (ci, cj) = center;
+    for r in 0..radius {
+        for dj in -r..=r {
+            for di in -r..=r {
+                if di.abs() != r && dj.abs() != r {
+                    continue;
+                }
+                let (i, j) = (ci as i64 + di, cj as i64 + dj);
+                if i >= 0 && j >= 0 && (i as usize) < w && (j as usize) < h && skin[j as usize * w + i as usize] {
+                    return Some((i as usize, j as usize));
+                }
+            }
+        }
+    }
+    None
+}
+
+struct FaceGeometry {
+    center: [f64; 2],
+    height: f64,
+    roll: f64,
+}
+
 /// A pixel window of a frame in layer coordinates.
 struct Window {
     x0: i64,
@@ -576,6 +609,44 @@ impl Window {
         let y = (p[1] + frame.offset[1]).floor() as i64 - self.y0;
         (x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h).then_some((x as usize, y as usize))
     }
+}
+
+/// Per pixel of a `w × h` window: not skin and inside `poly` (even-odd rule, same comparisons as
+/// [`crate::mask::inside_polygon`] at `layer(i, j)`). A scanline crosses the polygon at the same
+/// edges for every pixel of a row, so the crossings are found once per row and each pixel's
+/// parity follows from how many lie right of it.
+fn non_skin_inside(poly: &[[f64; 2]], skin: &[bool], layer: impl Fn(usize, usize) -> [f64; 2], w: usize, h: usize) -> Vec<bool> {
+    let mut feat = vec![false; w * h];
+    let n = poly.len();
+    if n < 3 {
+        return feat;
+    }
+    let mut xs: Vec<f64> = Vec::with_capacity(n);
+    for j in 0..h {
+        let y = layer(0, j)[1];
+        xs.clear();
+        let mut prev = poly[n - 1];
+        for &cur in poly {
+            let (a, b) = (cur, prev);
+            if (a[1] > y) != (b[1] > y) {
+                xs.push((b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]);
+            }
+            prev = cur;
+        }
+        if xs.is_empty() {
+            continue;
+        }
+        xs.sort_by(f64::total_cmp);
+        let mut left = 0;
+        for i in 0..w {
+            let x = layer(i, j)[0];
+            while left < xs.len() && xs[left] <= x {
+                left += 1;
+            }
+            feat[j * w + i] = (xs.len() - left) % 2 == 1 && !skin[j * w + i];
+        }
+    }
+    feat
 }
 
 fn median(v: &mut [f32]) -> f32 {
@@ -752,6 +823,53 @@ impl FaceTracker {
         Some(fit)
     }
 
+    /// Connected dark features inside the fitted face, in normalized face coordinates.
+    fn feature_blobs(&self, frame: &Frame, win: &Window, skin: &[bool], luma: &[f32], outline: &[[f64; 2]], geometry: FaceGeometry) -> Vec<Blob> {
+        let FaceGeometry { center, height: b, roll } = geometry;
+        let (w, h) = (win.w, win.h);
+        // Non-skin components inside the face outline (shrunk a little: anti-aliased edges).
+        let inner: Vec<[f64; 2]> = outline.iter().map(|p| [center[0] + 0.9 * (p[0] - center[0]), center[1] + 0.9 * (p[1] - center[1])]).collect();
+        let feat = non_skin_inside(&inner, skin, |i, j| win.layer(frame, i, j), w, h);
+        let min_area = (0.0006 * b * b).max(2.0) as usize;
+        let mut seen = vec![false; w * h];
+        let mut blobs: Vec<Blob> = vec![];
+        let skin_luma = self.skin.med[0] as f64;
+        let to_face = face_mapper(center, b, roll);
+        for j0 in 0..h {
+            for i0 in 0..w {
+                if !feat[j0 * w + i0] || seen[j0 * w + i0] {
+                    continue;
+                }
+                let mut st = vec![(i0, j0)];
+                seen[j0 * w + i0] = true;
+                let mut pts = vec![];
+                while let Some((i, j)) = st.pop() {
+                    let q = to_face(win.layer(frame, i, j));
+                    pts.push((q, skin_luma - luma[j * w + i] as f64));
+                    for dj in -1i64..=1 {
+                        for di in -1i64..=1 {
+                            let (a, c) = (i as i64 + di, j as i64 + dj);
+                            if a < 0 || c < 0 || a as usize >= w || c as usize >= h {
+                                continue;
+                            }
+                            let (a, c) = (a as usize, c as usize);
+                            if feat[c * w + a] && !seen[c * w + a] {
+                                seen[c * w + a] = true;
+                                st.push((a, c));
+                            }
+                        }
+                    }
+                }
+                if pts.len() >= min_area {
+                    let n = pts.len() as f64;
+                    let centroid = [pts.iter().map(|p| p.0[0]).sum::<f64>() / n, pts.iter().map(|p| p.0[1]).sum::<f64>() / n];
+                    blobs.push(Blob { pts, centroid });
+                }
+            }
+        }
+        blobs
+    }
+
     fn fit(&self, frame: &Frame) -> Option<FaceFit> {
         let pv = &self.prev;
         let b0 = pv.height;
@@ -769,22 +887,7 @@ impl FaceTracker {
         }
         // Seed: the skin pixel nearest the predicted centre.
         let (ci, cj) = win.cell(frame, pv.center)?;
-        let mut seed = None;
-        'search: for r in 0..(0.6 * b0).ceil() as i64 {
-            for dj in -r..=r {
-                for di in -r..=r {
-                    if di.abs() != r && dj.abs() != r {
-                        continue;
-                    }
-                    let (i, j) = (ci as i64 + di, cj as i64 + dj);
-                    if i >= 0 && j >= 0 && (i as usize) < w && (j as usize) < h && skin[j as usize * w + i as usize] {
-                        seed = Some((i as usize, j as usize));
-                        break 'search;
-                    }
-                }
-            }
-        }
-        let (si, sj) = seed?;
+        let (si, sj) = nearest_skin(&skin, (w, h), (ci, cj), (0.6 * b0).ceil() as i64)?;
         // Flood fill (4-connected).
         let mut comp = vec![false; w * h];
         let mut stack = vec![(si, sj)];
@@ -855,52 +958,7 @@ impl FaceTracker {
             roll += 180.0;
         }
         let b = major;
-        // Non-skin components inside the face outline (shrunk a little: anti-aliased edges).
-        let inner: Vec<[f64; 2]> = outline.iter().map(|p| [center[0] + 0.9 * (p[0] - center[0]), center[1] + 0.9 * (p[1] - center[1])]).collect();
-        let mut feat = vec![false; w * h];
-        for j in 0..h {
-            for i in 0..w {
-                if !skin[j * w + i] && crate::mask::inside_polygon(&inner, win.layer(frame, i, j)) {
-                    feat[j * w + i] = true;
-                }
-            }
-        }
-        let min_area = (0.0006 * b * b).max(2.0) as usize;
-        let mut seen = vec![false; w * h];
-        let mut blobs: Vec<Blob> = vec![];
-        let skin_luma = self.skin.med[0] as f64;
-        for j0 in 0..h {
-            for i0 in 0..w {
-                if !feat[j0 * w + i0] || seen[j0 * w + i0] {
-                    continue;
-                }
-                let mut st = vec![(i0, j0)];
-                seen[j0 * w + i0] = true;
-                let mut pts = vec![];
-                while let Some((i, j)) = st.pop() {
-                    let q = to_face(center, b, roll, win.layer(frame, i, j));
-                    pts.push((q, skin_luma - luma[j * w + i] as f64));
-                    for dj in -1i64..=1 {
-                        for di in -1i64..=1 {
-                            let (a, c) = (i as i64 + di, j as i64 + dj);
-                            if a < 0 || c < 0 || a as usize >= w || c as usize >= h {
-                                continue;
-                            }
-                            let (a, c) = (a as usize, c as usize);
-                            if feat[c * w + a] && !seen[c * w + a] {
-                                seen[c * w + a] = true;
-                                st.push((a, c));
-                            }
-                        }
-                    }
-                }
-                if pts.len() >= min_area {
-                    let n = pts.len() as f64;
-                    let centroid = [pts.iter().map(|p| p.0[0]).sum::<f64>() / n, pts.iter().map(|p| p.0[1]).sum::<f64>() / n];
-                    blobs.push(Blob { pts, centroid });
-                }
-            }
-        }
+        let blobs = self.feature_blobs(frame, &win, &skin, &luma, &outline, FaceGeometry { center, height: b, roll });
         // Match components to features near their expected positions.
         let ex = &self.expect;
         let mean_of = |ids: &[usize]| {
@@ -1172,6 +1230,35 @@ mod tests {
         let (fit, _) = fit_shape(&truth, &w, [50.0 * cs, 50.0 * sn, 100.0, 80.0]);
         let err = (0..N).map(|i| (fit[i][0] - truth[i][0]).hypot(fit[i][1] - truth[i][1])).fold(0.0, f64::max);
         assert!(err < 0.06 * 50.0, "max error {err}");
+    }
+
+    #[test]
+    fn row_crossings_match_the_point_in_polygon_test() {
+        let (w, h) = (97, 83);
+        let off = [13.0, 7.0];
+        let layer = |i: usize, j: usize| [(20 + i) as f64 + 0.5 - off[0] + 0.25, (11 + j) as f64 + 0.5 - off[1]];
+        let star: Vec<[f64; 2]> = (0..48)
+            .map(|k| {
+                let a = k as f64 / 48.0 * std::f64::consts::TAU;
+                let r = 30.0 + 9.0 * (5.0 * a).sin() + 3.0 * (k % 3) as f64;
+                [50.0 + a.cos() * r, 40.0 + a.sin() * r * 1.3]
+            })
+            .collect();
+        // Vertices on pixel-centre rows and columns exercise the tie cases.
+        let tied: Vec<[f64; 2]> = vec![[10.0, 5.0], [70.0, 5.0], [70.0, 60.5], [40.0, 30.5], [10.0, 60.5], [10.0, 5.0]];
+        for poly in [star, tied, vec![[1.0, 1.0], [5.0, 5.0]]] {
+            let skin: Vec<bool> = (0..w * h).map(|i| (i * 7 + i / w) % 5 == 0).collect();
+            let got = non_skin_inside(&poly, &skin, layer, w, h);
+            let mut inside = 0;
+            for j in 0..h {
+                for i in 0..w {
+                    let want = !skin[j * w + i] && crate::mask::inside_polygon(&poly, layer(i, j));
+                    assert_eq!(got[j * w + i], want, "({i}, {j})");
+                    inside += want as usize;
+                }
+            }
+            assert!(inside > 0 || poly.len() < 3);
+        }
     }
 
     #[test]

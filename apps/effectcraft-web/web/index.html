@@ -71,7 +71,13 @@
         ...ec.info(),
         crossOriginIsolated: self.crossOriginIsolated,
         webgpu: !!navigator.gpu,
-        serviceWorker: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+        serviceWorker: (() => {
+          try {
+            return !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+          } catch {
+            return false;
+          }
+        })(),
         load: window.effectcraftLoad,
       }),
       // Browser storage (OPFS / IndexedDB): save without downloading, list, remove, wait for writes.
@@ -83,8 +89,14 @@
       workerFrameCheck: (params) => ec.workerFrameCheck(params ?? {}).then(JSON.parse),
     };
     // Offline start and install (PWA): the service worker caches the app's files.
-    if ("serviceWorker" in navigator && !new URLSearchParams(location.search).has("nosw")) {
-      navigator.serviceWorker.register("sw.js").catch((e) => console.warn("service worker:", e));
+    if (!new URLSearchParams(location.search).has("nosw")) {
+      try {
+        if ("serviceWorker" in navigator && navigator.serviceWorker) {
+          navigator.serviceWorker.register("sw.js").catch((e) => console.warn("service worker:", e));
+        }
+      } catch (e) {
+        console.warn("service worker:", e);
+      }
     }
     try {
       // Compile once: the page and its render workers instantiate the same module.
