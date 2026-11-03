@@ -830,9 +830,9 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     // Interaction.
     let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
-    if resp.secondary_clicked()
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
+    // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
+    let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
+    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked()).or(forwarded) {
         // Picking an already selected layer preserves the group; an unselected hit
         // becomes the target, using the same visible/unlocked hit test as left-click.
         pick(app, ectx, map.to_comp(pos), false);
@@ -844,7 +844,9 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
         app.session.state.selected_layers.iter().filter(|id| comp.layer(**id).is_some_and(|l| !l.switches.locked)).map(|id| id.0).collect();
     let mut context_actions = Vec::new();
     let copy_frame = crate::i18n::label(app, "comp.copyFrame", "Copy Frame to Clipboard");
-    crate::widgets::context_menu(&resp, |ui| {
+    let menu = egui::Popup::context_menu(&resp).style(crate::widgets::menu_style);
+    let open = forwarded.map(|_| egui::containers::SetOpenCommand::Bool(true));
+    if open.is_some() { menu.open_memory(open) } else { menu }.show(|ui| {
         let hits = ui.data(|d| d.get_temp::<Vec<(u64, String)>>(menu_hits_id)).unwrap_or_default();
         if !hits.is_empty() {
             ui.menu_button(crate::i18n::tr("Select"), |ui| {

@@ -23,6 +23,8 @@ mod ui_color_hex;
 mod ui_comp_presets;
 mod ui_contrast;
 mod ui_control_modifiers;
+mod ui_crypto_pick;
+mod ui_crypto_pick_undo;
 mod ui_dialog_preview;
 mod ui_dock_resize;
 mod ui_drag_drop;

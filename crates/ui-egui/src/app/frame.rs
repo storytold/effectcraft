@@ -327,7 +327,9 @@ impl EffectcraftApp {
             ctx.request_repaint();
             return;
         }
+        panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
+        panels::crypto_pick::upkeep(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
