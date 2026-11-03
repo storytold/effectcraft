@@ -203,6 +203,42 @@ fn cached_patterns_reuse_same_viewport_but_separate_percentage_sized_viewports()
 }
 
 #[test]
+fn symbol_viewports_select_distinct_percentage_sized_pattern_cache_entries() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="10">
+            <defs>
+                <pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                    <rect width="4" height="100%" fill="red"/>
+                </pattern>
+                <symbol id="small-symbol" viewBox="0 0 20 10">
+                    <rect id="small-symbol-shape" width="20" height="10" fill="url(#p) blue"/>
+                </symbol>
+                <symbol id="large-symbol" viewBox="0 0 40 10">
+                    <rect id="large-symbol-shape" width="40" height="10" fill="url(#p) green"/>
+                </symbol>
+            </defs>
+            <use href="#small-symbol" width="20" height="10"/>
+            <use href="#large-symbol" x="20" width="40" height="10"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-symbol-shape") else { panic!("small symbol shape expected") };
+    let Some(Paint::Pattern(small)) = small.fill.as_ref() else { panic!("small symbol pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large-symbol-shape") else { panic!("large symbol shape expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large symbol pattern expected") };
+    assert_eq!(small.width, 10.0);
+    assert_eq!(large.width, 20.0);
+
+    let img = rasterize(&doc, 60, 10, 1.0);
+    assert!(near(px(&img, 1, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 5, 5)[3], 0.0);
+    assert!(near(px(&img, 21, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 25, 5)[3], 0.0);
+    assert!(near(px(&img, 41, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
 fn bare_urls_and_hrefs_do_not_resolve_as_local_pattern_ids() {
     let doc = parse(
         br##"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="2">
@@ -453,6 +489,39 @@ fn paths_gradients_css_use() {
 }
 
 #[test]
+fn repeated_gradient_paints_share_their_cached_stop_storage() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+            <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/>
+            </linearGradient></defs>
+            <rect id="first" width="2" height="2" fill="url(#g)"/>
+            <rect id="second" x="2" width="2" height="2" fill="url(#g)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, first)) = shapes.iter().find(|(_, _, shape)| shape.name == "first") else { panic!("first shape expected") };
+    let Some(Paint::Gradient(first_gradient)) = first.fill.as_ref() else { panic!("first gradient expected") };
+    let Some((_, _, second)) = shapes.iter().find(|(_, _, shape)| shape.name == "second") else { panic!("second shape expected") };
+    let Some(Paint::Gradient(second_gradient)) = second.fill.as_ref() else { panic!("second gradient expected") };
+    assert!(std::sync::Arc::ptr_eq(&first_gradient.stops, &second_gradient.stops));
+}
+
+#[test]
+fn oversized_svg_path_geometry_fails_with_a_bounded_import_error() {
+    let data = format!("M0 0{}", "h1".repeat(pathdata::MAX_PATH_ELEMENTS + 1));
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="{data}"/></svg>"#);
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("bounded path-data work budget"), "{error}");
+
+    let points = (0..=pathdata::MAX_PATH_ELEMENTS).map(|x| format!("{x} 0")).collect::<Vec<_>>().join(" ");
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><polyline points="{points}"/></svg>"#);
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("bounded path-data work budget"), "{error}");
+}
+
+#[test]
 fn root_svg_percentages_use_the_document_viewport() {
     for (attrs, width, height) in [
         ("width=\"100\" height=\"80\"", 100.0, 80.0),
@@ -505,6 +574,68 @@ fn nested_svg_percentages_use_the_nearest_viewport() {
     assert_eq!(px(&img, 35, 17)[3], 0.0);
     assert_eq!(px(&img, 45, 65)[3], 1.0);
     assert_eq!(px(&img, 55, 65)[3], 0.0);
+}
+
+#[test]
+fn symbol_viewport_sets_percentage_pattern_units_and_cache_key() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="10">
+            <defs>
+                <pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                    <rect width="4" height="100%" fill="red"/>
+                </pattern>
+                <symbol id="small" viewBox="0 0 20 10">
+                    <rect id="small-shape" width="20" height="10" fill="url(#p)"/>
+                </symbol>
+                <symbol id="large" viewBox="0 0 40 10">
+                    <rect id="large-shape" width="40" height="10" fill="url(#p)"/>
+                </symbol>
+            </defs>
+            <use href="#small" width="20" height="10"/>
+            <use href="#large" x="20" width="40" height="10"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-shape") else { panic!("small symbol shape expected") };
+    let Some(Paint::Pattern(small)) = small.fill.as_ref() else { panic!("small symbol pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large-shape") else { panic!("large symbol shape expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large symbol pattern expected") };
+    assert_eq!(small.width, 10.0);
+    assert_eq!(large.width, 20.0);
+}
+
+#[test]
+fn non_finite_opacity_values_do_not_write_nan_pixels() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="2">
+            <defs><linearGradient id="g"><stop offset="0" stop-color="red" stop-opacity="NaN"/><stop offset="1" stop-color="blue"/></linearGradient></defs>
+            <rect width="2" height="2" fill="red" fill-opacity="NaN"/>
+            <rect x="2" width="2" height="2" fill="blue" opacity="1e400"/>
+            <rect x="4" width="2" height="2" fill="url(#g)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 6, 2, 1.0);
+    assert!(img.data.iter().flatten().all(|channel| channel.is_finite()));
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 3, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(px(&img, 4, 1)[3].is_finite());
+}
+
+#[test]
+fn basic_shapes_with_overflowing_derived_bounds_are_skipped() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <rect x="1e308" y="0" width="1e308" height="1" fill="red"/>
+            <circle cx="1e308" cy="0" r="1e308" fill="blue"/>
+        </svg>"#,
+    )
+    .unwrap();
+
+    assert!(doc.flatten().is_empty());
+    let image = rasterize(&doc, 2, 2, 1.0);
+    assert!(image.data.iter().flatten().all(|channel| channel.is_finite()));
 }
 
 #[test]

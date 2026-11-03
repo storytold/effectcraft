@@ -30,6 +30,9 @@ chains are depth-limited and cycles are rejected. Tiles render once and are samp
 painted area; both live surfaces and aggregate tile work are bounded. Pattern paints are
 rasterised in SVG footage; editable shape layers retain geometry and convert only a supplied
 `url(...)` fallback to solid fill/stroke.
+Path expansion and gradient resolution have per-import work limits. The rasterizer also caps live
+surface memory and cumulative pattern, clip-coverage, and source-image work. Over-budget imports
+return an error; over-budget raster operations are skipped, using a paint fallback where available.
 Other unsupported content (ignored): text, images, filters, clip paths, masks, markers and
 animation, including pattern animation.
 XML parsing uses `roxmltree` (MIT/Apache-2.0). Test fixtures are original work (see

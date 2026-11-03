@@ -91,7 +91,7 @@ pub enum GradientKind {
 pub struct Gradient {
     pub kind: GradientKind,
     /// (offset 0..1, straight RGBA 0..1), sorted.
-    pub stops: Vec<(f64, [f64; 4])>,
+    pub stops: Arc<[(f64, [f64; 4])]>,
     /// `gradientUnits="objectBoundingBox"` (the default): coordinates are fractions of the
     /// shape's bounding box.
     pub bbox_units: bool,
@@ -114,6 +114,8 @@ pub struct Pattern {
     pub transform: Affine,
     /// Immutable tile content shared by every use of the resolved pattern.
     pub content: Arc<Group>,
+    /// Conservative shape/path traversal cost per tile pixel, charged during rasterisation.
+    pub render_complexity: usize,
     /// The fallback from `url(#id) fallback`, used if the target bbox or tile is invalid.
     pub fallback: Option<[f64; 4]>,
 }
@@ -638,8 +640,16 @@ struct Parser<'a, 'i> {
     pattern_work: usize,
     pattern_work_budget: usize,
     pattern_work_exceeded: bool,
+    path_data_work: usize,
+    path_element_work: usize,
+    path_work_budget: usize,
+    path_work_exceeded: bool,
     /// Parsed pattern content is viewport-dependent because lengths may be percentages; the cache is bounded.
     pattern_cache: HashMap<(roxmltree::NodeId, u64, u64), Option<Pattern>>,
+    /// Resolved gradients share their stop arrays across repeated paint references.
+    gradient_cache: HashMap<(roxmltree::NodeId, u64, u64), Gradient>,
+    gradient_work: usize,
+    gradient_work_exceeded: bool,
 }
 
 fn is_svg_ns(n: &roxmltree::Node) -> bool {
@@ -678,6 +688,33 @@ impl<'a, 'i> Parser<'a, 'i> {
         self.pattern_work = self.pattern_work.saturating_add(work);
         if self.pattern_work > self.pattern_work_budget {
             self.pattern_work_exceeded = true;
+            return false;
+        }
+        true
+    }
+
+    fn charge_gradient_work(&mut self, work: usize) -> bool {
+        self.gradient_work = self.gradient_work.saturating_add(work);
+        if self.gradient_work > MAX_GRADIENT_WORK {
+            self.gradient_work_exceeded = true;
+            return false;
+        }
+        true
+    }
+
+    fn charge_path_data(&mut self, bytes: usize) -> bool {
+        self.path_data_work = self.path_data_work.saturating_add(bytes.saturating_mul(PATH_DATA_WORK_FACTOR));
+        if self.path_data_work > self.path_work_budget {
+            self.path_work_exceeded = true;
+            return false;
+        }
+        true
+    }
+
+    fn charge_path_elements(&mut self, elements: usize) -> bool {
+        self.path_element_work = self.path_element_work.saturating_add(elements);
+        if self.path_element_work > MAX_PATH_ELEMENTS_PER_IMPORT {
+            self.path_work_exceeded = true;
             return false;
         }
         true
@@ -745,7 +782,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             unit = &s[num_end - 1..];
         }
         let v: f64 = num.parse().ok()?;
-        Some(match unit.trim() {
+        let value = match unit.trim() {
             "" | "px" => v,
             "pt" => v * 4.0 / 3.0,
             "pc" => v * 16.0,
@@ -763,7 +800,8 @@ impl<'a, 'i> Parser<'a, 'i> {
                 v / 100.0 * base
             }
             _ => v,
-        })
+        };
+        value.is_finite().then_some(value)
     }
 
     fn attr_len(&self, n: roxmltree::Node, name: &str, axis: char, st: &Style) -> f64 {
@@ -795,8 +833,11 @@ impl<'a, 'i> Parser<'a, 'i> {
     /// Apply an element's declared inherited properties to `st`. Returns (opacity, display).
     fn cascade(&self, n: roxmltree::Node, st: &mut Style) -> (f64, bool) {
         let d = self.declared(n);
-        let num =
-            |k: &str| d.get(k).and_then(|v| v.trim().trim_end_matches('%').parse::<f64>().ok().map(|x| if v.trim().ends_with('%') { x / 100.0 } else { x }));
+        let num = |k: &str| {
+            d.get(k)
+                .and_then(|v| v.trim().trim_end_matches('%').parse::<f64>().ok().map(|x| if v.trim().ends_with('%') { x / 100.0 } else { x }))
+                .filter(|x| x.is_finite())
+        };
         if let Some(c) = d.get("color").and_then(|v| parse_color(v)) {
             st.color = c;
         }
@@ -872,7 +913,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             PaintRef::Current => Some((Paint::Color([st.color[0], st.color[1], st.color[2]]), st.color[3])),
             PaintRef::Url(id, fallback) => match self.gradient(id, 0) {
                 Some(g) if g.stops.len() == 1 => {
-                    let c = g.stops[0].1;
+                    let (_, c) = g.stops.first()?;
                     Some((Paint::Color([c[0], c[1], c[2]]), c[3]))
                 }
                 Some(g) if !g.stops.is_empty() => Some((Paint::Gradient(g), 1.0)),
@@ -907,8 +948,25 @@ impl<'a, 'i> Parser<'a, 'i> {
         self.ids.get(id).copied()
     }
 
-    /// A gradient by id, with `href` inheritance of attributes and stops.
-    fn gradient(&self, id: &str, depth: usize) -> Option<Gradient> {
+    /// A gradient by id, with a viewport-specific cache for its resolved attributes and stops.
+    fn gradient(&mut self, id: &str, depth: usize) -> Option<Gradient> {
+        let node = *self.ids.get(id)?;
+        if !matches!(node.tag_name().name(), "linearGradient" | "radialGradient") || depth > 16 {
+            return None;
+        }
+        let key = (node.id(), self.vw.to_bits(), self.vh.to_bits());
+        if let Some(gradient) = self.gradient_cache.get(&key) {
+            return Some(gradient.clone());
+        }
+        let gradient = self.parse_gradient(id, depth)?;
+        if self.gradient_cache.len() < MAX_GRADIENT_CACHE_ENTRIES {
+            self.gradient_cache.insert(key, gradient.clone());
+        }
+        Some(gradient)
+    }
+
+    /// Parse a gradient by id, charging reference-chain and stop work before retaining the result.
+    fn parse_gradient(&mut self, id: &str, depth: usize) -> Option<Gradient> {
         let n = *self.ids.get(id)?;
         let tag = n.tag_name().name();
         if !matches!(tag, "linearGradient" | "radialGradient") || depth > 16 {
@@ -917,24 +975,31 @@ impl<'a, 'i> Parser<'a, 'i> {
         // Chain: this element, then what it references.
         let mut chain = vec![n];
         let mut cur = n;
+        if !self.charge_gradient_work(cur.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add)) {
+            return None;
+        }
         while let Some(next) = self.href(cur) {
             if chain.len() > 16 || chain.contains(&next) {
                 break;
             }
             chain.push(next);
             cur = next;
+            if !self.charge_gradient_work(cur.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add)) {
+                return None;
+            }
         }
         let attr = |name: &str| chain.iter().find_map(|e| e.attribute(name));
         let bbox_units = attr("gradientUnits") != Some("userSpaceOnUse");
         let st = Style::default();
         let len = |name: &str, axis: char, def: &str| -> f64 {
             let v = attr(name).unwrap_or(def);
-            if bbox_units {
+            let value = if bbox_units {
                 let v = v.trim();
                 if let Some(p) = v.strip_suffix('%') { p.parse::<f64>().unwrap_or(0.0) / 100.0 } else { v.parse::<f64>().unwrap_or(0.0) }
             } else {
                 self.length(v, axis, st.font_size).unwrap_or(0.0)
-            }
+            };
+            if value.is_finite() { value } else { 0.0 }
         };
         let kind = if tag == "linearGradient" {
             GradientKind::Linear { x1: len("x1", 'x', "0%"), y1: len("y1", 'y', "0%"), x2: len("x2", 'x', "100%"), y2: len("y2", 'y', "0%") }
@@ -954,9 +1019,25 @@ impl<'a, 'i> Parser<'a, 'i> {
         };
         // Stops: from the first element in the chain that has any.
         let mut stops = vec![];
-        if let Some(src) = chain.iter().find(|e| e.children().any(|c| c.is_element() && c.tag_name().name() == "stop")) {
+        let mut source = None;
+        'source: for candidate in &chain {
+            for child in candidate.children().filter(|child| child.is_element()) {
+                if !self.charge_gradient_work(1) {
+                    return None;
+                }
+                if child.tag_name().name() == "stop" {
+                    source = Some(*candidate);
+                    break 'source;
+                }
+            }
+        }
+        if let Some(src) = source {
             let mut last = 0.0f64;
             for s in src.children().filter(|c| c.is_element() && c.tag_name().name() == "stop") {
+                let stop_work = s.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add);
+                if !self.charge_gradient_work(stop_work) {
+                    return None;
+                }
                 let d = self.declared(s);
                 let off = s
                     .attribute("offset")
@@ -972,11 +1053,11 @@ impl<'a, 'i> Parser<'a, 'i> {
                     .get("stop-color")
                     .and_then(|c| if c.trim() == "currentColor" { d.get("color").and_then(|x| parse_color(x)) } else { parse_color(c) })
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                let o = d.get("stop-opacity").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
+                let o = d.get("stop-opacity").and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0);
                 stops.push((off, [c[0], c[1], c[2], c[3] * o]));
             }
         }
-        Some(Gradient { kind, stops, bbox_units, transform, spread })
+        Some(Gradient { kind, stops: Arc::from(stops.into_boxed_slice()), bbox_units, transform, spread })
     }
 
     /// Parse a pattern length using the coordinate system selected by its units attribute.
@@ -1142,6 +1223,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         if invalid || self.pattern_work_exceeded {
             return None;
         }
+        let render_complexity = pattern_render_complexity(&children);
         let content = Group {
             name: source.map_or_else(|| Self::element_name(first), Self::element_name),
             transform: Affine::IDENTITY,
@@ -1153,7 +1235,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             isolated: true,
             knockout: false,
         };
-        Some(Pattern { x, y, width, height, pattern_units: units, content_units, transform, content: Arc::new(content), fallback: None })
+        Some(Pattern { x, y, width, height, pattern_units: units, content_units, transform, content: Arc::new(content), render_complexity, fallback: None })
     }
 
     fn element_name(n: roxmltree::Node) -> String {
@@ -1257,9 +1339,12 @@ impl<'a, 'i> Parser<'a, 'i> {
                     let mut inner = vec![];
                     let mut sst = st.clone();
                     let (o, _) = self.cascade(target, &mut sst);
+                    let saved_viewport = (self.vw, self.vh);
+                    (self.vw, self.vh) = viewbox(target).map_or((w, h), |(_, vw, vh)| (vw, vh));
                     for c in target.children() {
                         self.node(c, &sst, &mut inner, depth + 1);
                     }
+                    (self.vw, self.vh) = saved_viewport;
                     children.push(Node::Group(Group {
                         name: Self::element_name(target),
                         transform: vb,
@@ -1291,7 +1376,40 @@ impl<'a, 'i> Parser<'a, 'i> {
                 if !st.visible {
                     return;
                 }
-                let Some(geom) = self.geometry(n, &st) else { return };
+                let (path_data, points) = match tag {
+                    "path" => {
+                        let Some(data) = n.attribute("d") else { return };
+                        if !self.charge_path_data(data.len()) {
+                            return;
+                        }
+                        let (path, exceeded) = pathdata::parse_path_data_bounded(data, MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT);
+                        if exceeded || !self.charge_path_elements(path.elements().len()) {
+                            self.path_work_exceeded = true;
+                            return;
+                        }
+                        (Some(path), None)
+                    }
+                    "polyline" | "polygon" => {
+                        let Some(data) = n.attribute("points") else { return };
+                        if !self.charge_path_data(data.len()) {
+                            return;
+                        }
+                        let max_values = MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT.saturating_sub(1).saturating_mul(2);
+                        let (points, exceeded) = pathdata::numbers_bounded(data, max_values);
+                        if exceeded {
+                            self.path_work_exceeded = true;
+                            return;
+                        }
+                        let point_count = points.len() / 2;
+                        let elements = point_count.saturating_add(usize::from(tag == "polygon"));
+                        if points.len() >= 4 && !self.charge_path_elements(elements) {
+                            return;
+                        }
+                        (None, Some(points))
+                    }
+                    _ => (None, None),
+                };
+                let Some(geom) = self.geometry(n, &st, path_data, points) else { return };
                 let fill = if matches!(tag, "line") { None } else { st.fill.as_ref().and_then(|p| self.resolve_paint(p, &st)) };
                 let (fill, fill_alpha) = match fill {
                     Some((p, a)) => (Some(p), a),
@@ -1342,11 +1460,11 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
     }
 
-    fn geometry(&self, n: roxmltree::Node, st: &Style) -> Option<Geom> {
+    fn geometry(&self, n: roxmltree::Node, st: &Style, path_data: Option<BezPath>, points: Option<Vec<f64>>) -> Option<Geom> {
         let l = |name: &str, axis: char| self.attr_len(n, name, axis, st);
         Some(match n.tag_name().name() {
             "path" => {
-                let p = parse_path_data(n.attribute("d")?);
+                let p = path_data?;
                 if p.elements().is_empty() {
                     return None;
                 }
@@ -1357,6 +1475,10 @@ impl<'a, 'i> Parser<'a, 'i> {
                 if !(w > 0.0 && h > 0.0) {
                     return None;
                 }
+                let (x, y) = (l("x", 'x'), l("y", 'y'));
+                if !(x + w).is_finite() || !(y + h).is_finite() {
+                    return None;
+                }
                 let rx_a = n.attribute("rx").and_then(|v| self.length(v, 'x', st.font_size));
                 let ry_a = n.attribute("ry").and_then(|v| self.length(v, 'y', st.font_size));
                 let (rx, ry) = match (rx_a, ry_a) {
@@ -1365,21 +1487,29 @@ impl<'a, 'i> Parser<'a, 'i> {
                     (None, Some(y)) => (y, y),
                     (None, None) => (0.0, 0.0),
                 };
-                Geom::Rect { x: l("x", 'x'), y: l("y", 'y'), w, h, rx: rx.clamp(0.0, w / 2.0), ry: ry.clamp(0.0, h / 2.0) }
+                Geom::Rect { x, y, w, h, rx: rx.clamp(0.0, w / 2.0), ry: ry.clamp(0.0, h / 2.0) }
             }
             "circle" => {
                 let r = l("r", 'o');
                 if r <= 0.0 {
                     return None;
                 }
-                Geom::Ellipse { cx: l("cx", 'x'), cy: l("cy", 'y'), rx: r, ry: r }
+                let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
+                if ![cx - r, cx + r, cy - r, cy + r].iter().all(|value| value.is_finite()) {
+                    return None;
+                }
+                Geom::Ellipse { cx, cy, rx: r, ry: r }
             }
             "ellipse" => {
                 let (rx, ry) = (l("rx", 'x'), l("ry", 'y'));
                 if rx <= 0.0 || ry <= 0.0 {
                     return None;
                 }
-                Geom::Ellipse { cx: l("cx", 'x'), cy: l("cy", 'y'), rx, ry }
+                let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
+                if ![cx - rx, cx + rx, cy - ry, cy + ry].iter().all(|value| value.is_finite()) {
+                    return None;
+                }
+                Geom::Ellipse { cx, cy, rx, ry }
             }
             "line" => {
                 let mut p = BezPath::new();
@@ -1388,14 +1518,17 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Geom::Path(p)
             }
             "polyline" | "polygon" => {
-                let nums = pathdata::numbers(n.attribute("points")?);
+                let nums = points?;
                 if nums.len() < 4 {
                     return None;
                 }
                 let mut p = BezPath::new();
-                p.move_to((nums[0], nums[1]));
-                for c in nums[2..].as_chunks::<2>().0 {
-                    p.line_to((c[0], c[1]));
+                let first_pair = nums.get(..2)?;
+                let (Some(&first_x), Some(&first_y)) = (first_pair.first(), first_pair.get(1)) else { return None };
+                p.move_to((first_x, first_y));
+                for pair in nums.get(2..).unwrap_or_default().chunks_exact(2) {
+                    let (Some(&x), Some(&y)) = (pair.first(), pair.get(1)) else { continue };
+                    p.line_to((x, y));
                 }
                 if n.tag_name().name() == "polygon" {
                     p.close_path();
@@ -1407,9 +1540,32 @@ impl<'a, 'i> Parser<'a, 'i> {
     }
 }
 
+/// Estimate tile raster work from group traversal and the shape/path operations it contains.
+fn pattern_render_complexity(nodes: &[Node]) -> usize {
+    nodes.iter().fold(0usize, |total, node| {
+        let cost = match node {
+            Node::Group(group) => 4usize.saturating_add(pattern_render_complexity(&group.children)),
+            Node::Shape(shape) => {
+                let segments = match &shape.geom {
+                    Geom::Path(path) => path.elements().len().max(1),
+                    Geom::Rect { .. } | Geom::Ellipse { .. } => 8,
+                };
+                let paints = usize::from(shape.fill.is_some()).saturating_add(usize::from(shape.stroke.is_some()));
+                1usize.saturating_add(segments.saturating_mul(paints))
+            }
+            Node::Image(_) => 1,
+        };
+        total.saturating_add(cost)
+    })
+}
+
 fn viewbox(n: roxmltree::Node) -> Option<([f64; 2], f64, f64)> {
-    let v = pathdata::numbers(n.attribute("viewBox")?);
-    (v.len() == 4 && v.iter().all(|x| x.is_finite()) && v[2] > 0.0 && v[3] > 0.0).then(|| ([v[0], v[1]], v[2], v[3]))
+    let (v, exceeded) = pathdata::numbers_bounded(n.attribute("viewBox")?, 5);
+    if exceeded || !v.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let [x, y, width, height] = v.as_slice() else { return None };
+    (*width > 0.0 && *height > 0.0).then_some(([*x, *y], *width, *height))
 }
 
 /// The viewBox → viewport transform (`preserveAspectRatio`, default `xMidYMid meet`).
@@ -1453,19 +1609,23 @@ pub fn parse_transform(s: &str) -> Affine {
     while let Some(open) = rest.find('(') {
         let name = rest[..open].trim().trim_start_matches(',').trim();
         let Some(close) = rest[open..].find(')') else { break };
-        let a = pathdata::numbers(&rest[open + 1..open + close]);
+        let (a, too_many) = pathdata::numbers_bounded(&rest[open + 1..open + close], 6);
         rest = &rest[open + close + 1..];
-        let t = match (name, a.len()) {
-            ("matrix", 6) => Affine::new([a[0], a[1], a[2], a[3], a[4], a[5]]),
-            ("translate", 1) => Affine::translate((a[0], 0.0)),
-            ("translate", 2) => Affine::translate((a[0], a[1])),
-            ("scale", 1) => Affine::scale(a[0]),
-            ("scale", 2) => Affine::scale_non_uniform(a[0], a[1]),
-            ("rotate", 1) => Affine::rotate(a[0].to_radians()),
-            ("rotate", 3) => Affine::translate((a[1], a[2])) * Affine::rotate(a[0].to_radians()) * Affine::translate((-a[1], -a[2])),
-            ("skewX", 1) => Affine::new([1.0, 0.0, a[0].to_radians().tan(), 1.0, 0.0, 0.0]),
-            ("skewY", 1) => Affine::new([1.0, a[0].to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
-            _ => Affine::IDENTITY,
+        let t = if too_many {
+            Affine::IDENTITY
+        } else {
+            match (name, a.as_slice()) {
+                ("matrix", [a0, a1, a2, a3, a4, a5]) => Affine::new([*a0, *a1, *a2, *a3, *a4, *a5]),
+                ("translate", [x]) => Affine::translate((*x, 0.0)),
+                ("translate", [x, y]) => Affine::translate((*x, *y)),
+                ("scale", [scale]) => Affine::scale(*scale),
+                ("scale", [x, y]) => Affine::scale_non_uniform(*x, *y),
+                ("rotate", [angle]) => Affine::rotate(angle.to_radians()),
+                ("rotate", [angle, x, y]) => Affine::translate((*x, *y)) * Affine::rotate(angle.to_radians()) * Affine::translate((-*x, -*y)),
+                ("skewX", [angle]) => Affine::new([1.0, 0.0, angle.to_radians().tan(), 1.0, 0.0, 0.0]),
+                ("skewY", [angle]) => Affine::new([1.0, angle.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
+                _ => Affine::IDENTITY,
+            }
         };
         m *= t;
     }
@@ -1479,6 +1639,15 @@ const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
+/// Bound path geometry expanded from a single path or point-list element.
+const MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT: usize = pathdata::MAX_PATH_ELEMENTS;
+/// Bound the path geometry retained across all path and point-list elements, including `<use>` copies.
+const MAX_PATH_ELEMENTS_PER_IMPORT: usize = 1_000_000;
+/// Bound repeated gradient-chain and stop scanning across the import.
+const MAX_GRADIENT_WORK: usize = 64 * 1024 * 1024;
+/// Bound viewport-specific resolved gradients; stop data is shared between clones.
+const MAX_GRADIENT_CACHE_ENTRIES: usize = 256;
+const PATH_DATA_WORK_FACTOR: usize = 8;
 /// Aggregate work that pattern references may revisit, including attributes and scanned children,
 /// even when many shapes share one large pattern definition.
 const MAX_PATTERN_WORK_BYTES: usize = 256 * 1024 * 1024;
@@ -1567,6 +1736,7 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     // Room for generous reuse, and always for every element of the file itself.
     let budget = MAX_EXPANDED_ELEMENTS.max(root.descendants().filter(|n| n.is_element()).count().saturating_mul(2));
     let pattern_work_budget = bytes.len().saturating_mul(8).clamp(MIN_PATTERN_WORK_BYTES, MAX_PATTERN_WORK_BYTES);
+    let path_work_budget = pattern_work_budget;
     let mut p = Parser {
         ids,
         css,
@@ -1582,7 +1752,14 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         pattern_work: 0,
         pattern_work_budget,
         pattern_work_exceeded: false,
+        path_data_work: 0,
+        path_element_work: 0,
+        path_work_budget,
+        path_work_exceeded: false,
         pattern_cache: HashMap::new(),
+        gradient_cache: HashMap::new(),
+        gradient_work: 0,
+        gradient_work_exceeded: false,
     };
     let st = Style::default();
     let pct_or = |name: &str, axis: char, def: f64| -> f64 {
@@ -1625,6 +1802,12 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     }
     if p.pattern_work_exceeded {
         return Err(Error::Xml(format!("resolving its <pattern> references scans more than {} work units", p.pattern_work_budget)));
+    }
+    if p.path_work_exceeded {
+        return Err(Error::Xml("its SVG paths expand beyond the bounded path-data work budget".to_string()));
+    }
+    if p.gradient_work_exceeded {
+        return Err(Error::Xml(format!("resolving its gradients exceeds the {MAX_GRADIENT_WORK}-unit work budget")));
     }
     if p.css_work.get() > MAX_CSS_WORK {
         // Never a silently unstyled drawing.
