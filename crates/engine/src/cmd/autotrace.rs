@@ -64,8 +64,9 @@ fn trace_frame(img: &Image, offset: [f64; 2], ch: Channel, invert: bool, blur: f
     let mut out = trace(&field, img.width as usize, img.height as usize, o);
     for t in &mut out {
         for v in &mut t.path.vertices {
-            v[0] += offset[0];
-            v[1] += offset[1];
+            // Source buffers are layer pixels + offset: subtract it to get back to layer space.
+            v[0] -= offset[0];
+            v[1] -= offset[1];
         }
     }
     out
@@ -210,4 +211,34 @@ pub fn specs() -> Vec<CommandSpec> {
         has_layers,
         run
     )]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_frame_converts_image_pixels_back_to_layer_space() {
+        // A synthetic cropped source avoids any dependency on installed fonts.
+        let mut img = Image::new(32, 32);
+        for y in 8..24 {
+            for x in 8..24 {
+                img.set(x, y, [1.0; 4]);
+            }
+        }
+        let opts = TraceOpts { corner_roundness: 0.0, ..Default::default() };
+        for offset in [[0.0, 0.0], [2.0, 58.0], [-12.5, 7.25]] {
+            let outlines = trace_frame(&img, offset, Channel::Alpha, false, 0.0, &opts);
+            assert_eq!(outlines.len(), 1);
+            let vertices = &outlines[0].path.vertices;
+            for axis in 0..2 {
+                // image = layer + offset, so the known image bounds map back
+                // to [8 - offset, 24 - offset] in layer space.
+                let lo = vertices.iter().map(|v| v[axis]).fold(f64::INFINITY, f64::min);
+                let hi = vertices.iter().map(|v| v[axis]).fold(f64::NEG_INFINITY, f64::max);
+                assert!((lo - (8.0 - offset[axis])).abs() < 0.01, "{offset:?}: {lo}");
+                assert!((hi - (24.0 - offset[axis])).abs() < 0.01, "{offset:?}: {hi}");
+            }
+        }
+    }
 }

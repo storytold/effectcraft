@@ -83,6 +83,9 @@ impl Dependencies<'_> {
             return None;
         }
         hash_debug(self.h, layer);
+        // An overridden clip plays on the layer clock and a keyed one from its key: the same
+        // selection at the same time can pose differently.
+        super::hash_overrides(self.h, ctx, layer.id);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         if let Some(item) = layer.source.item() {

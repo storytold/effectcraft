@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn render_scales_are_the_factors_the_thousandths_stand_for() {
+    assert_eq!(render_scale(333, Some(3)), 1.0 / 3.0);
+    assert_eq!(render_scale(333, None), 1.0 / 3.0);
+    assert_eq!(render_scale(167, Some(6)), 1.0 / 6.0);
+    assert_eq!((render_scale(1000, None), render_scale(500, None), render_scale(250, Some(4))), (1.0, 0.5, 0.25));
+    // 1/34 and 1/35 are both 29 thousandths: the comp's factor decides.
+    assert_eq!((render_scale(29, Some(35)), render_scale(29, Some(34))), (1.0 / 35.0, 1.0 / 34.0));
+    assert_eq!(render_scale(29, Some(2)), 1.0 / 34.0);
+}
+
+#[test]
 fn converting_a_frame_with_nan_alpha_keeps_the_viewer_alive() {
     let image = effectcraft_engine::render::Image::filled(1, 1, [0.5, 0.25, 0.1, f32::NAN]);
     assert_eq!(to_color_image(&image).pixels, [egui::Color32::TRANSPARENT]);
