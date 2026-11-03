@@ -141,6 +141,9 @@ fn gradient_stop_count_is_bounded() {
     assert!(g.coerce_json(&serde_json::Value::Array(many[..MAX_GRADIENT_STOPS].to_vec())).is_some());
     let ops: Vec<serde_json::Value> = (0..=MAX_GRADIENT_STOPS).map(|i| serde_json::json!([i as f64 / MAX_GRADIENT_STOPS as f64, 1.0])).collect();
     assert_eq!(g.coerce_json(&serde_json::json!({"colors": ["#000000", "#ffffff"], "opacities": ops})), None);
+    // The tagged (typed) form is bounded the same way.
+    let tagged = Value::Gradient(Gradient { colors: (0..=MAX_GRADIENT_STOPS).map(|i| (i as f64, [0.0; 4])).collect(), opacities: vec![(0.0, 1.0)] });
+    assert_eq!(g.coerce_json(&tagged.to_json()), None);
     // A stored gradient with a huge tail: stops past the limit don't take part in sampling.
     let mut colors: Vec<(f64, [f32; 4])> = (0..MAX_GRADIENT_STOPS).map(|i| (i as f64 / MAX_GRADIENT_STOPS as f64 * 0.5, [0.0, 0.0, 0.0, 1.0])).collect();
     colors.extend((0..100_000).map(|_| (1.0, [1.0, 1.0, 1.0, 1.0])));
