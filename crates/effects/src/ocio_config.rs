@@ -1321,7 +1321,7 @@ pub fn load_config(src: &str) -> Result<Arc<Config>, String> {
         Config::parse(src, Path::new("."))
     } else {
         let p = Path::new(t);
-        std::fs::read_to_string(p).map_err(|e| format!("{t}: {e}")).and_then(|text| Config::parse(&text, p.parent().unwrap_or(Path::new("."))))
+        crate::utility::read_text_file(p).map_err(|e| format!("{t}: {e}")).and_then(|text| Config::parse(&text, p.parent().unwrap_or(Path::new("."))))
     }
     .map(Arc::new);
     if let Ok(mut m) = cache.lock() {

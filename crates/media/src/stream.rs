@@ -24,6 +24,11 @@ pub(crate) struct FileReader {
 #[cfg(any(unix, windows))]
 impl FileReader {
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+        // Checked before opening too: opening a FIFO with no writer blocks, so the check after the
+        // open would never run. shortcut: a FIFO swapped in between still blocks; O_NONBLOCK would close it.
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
+        }
         let file = std::fs::File::open(path)?;
         let m = file.metadata()?;
         if !m.is_file() {
