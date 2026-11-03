@@ -123,6 +123,38 @@ fn unmasked_layer_skips_only_its_masks() {
     assert!(at(Some(id + 1000)) < 0.01);
 }
 
+/// Review of #2840: a layer reading the edited layer (Set Matte) sees it masked either way, so
+/// its cached result is right across both transitions with one shared cache.
+#[test]
+fn unmasked_layer_stays_masked_for_layers_reading_it() {
+    let (mut p, cid, comp) = setup();
+    let mut a = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    a.props.sub_mut("masks").unwrap().children.push(m.into());
+    a.switches.video = false;
+    let id = a.id.0;
+    let mut b = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    add_effect_200(
+        &mut p,
+        &mut b,
+        "ec.channel.setmatte",
+        &[("takeMatteFromLayer", Value::Layer(Some(id))), ("compositeMatteWithOriginal", Value::Bool(false))],
+    );
+    p.comp_mut(cid).unwrap().layers.extend([b, a]);
+    let cache = crate::LayerCache::default();
+    let at = |unmasked| {
+        let opts = crate::RenderOpts { unmasked_layer: unmasked, ..Default::default() };
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, opts);
+        r.cache = Some(&cache);
+        r.comp_frame(cid, Tick::ZERO).get(150, 50)[3]
+    };
+    for unmasked in [Some(id), None, Some(id)] {
+        assert!(at(unmasked) < 0.01, "{unmasked:?}");
+    }
+}
+
 #[test]
 fn first_intersect_and_darken_keep_their_rectangle() {
     let render = |modes: &[MaskMode], centers: &[[f64; 2]]| {

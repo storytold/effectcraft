@@ -159,9 +159,11 @@ impl<'a> Renderer<'a> {
     }
 
     /// The render options one level down (precomps, collapsed precomps, comps read by effects):
-    /// guide layers render only in their own comp, never when it is nested.
+    /// guide layers render only in their own comp, never when it is nested. Only the viewed
+    /// comp's own layer draws unmasked: what other layers read of it stays masked, so their
+    /// cached results don't depend on the edit (`RenderOpts::unmasked_layer`).
     fn nested_opts(&self) -> RenderOpts {
-        RenderOpts { guides: false, ..self.opts }
+        RenderOpts { guides: false, unmasked_layer: None, ..self.opts }
     }
 
     /// A renderer for nested work (precomps, layers read by effects): one level deeper.
