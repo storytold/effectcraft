@@ -94,6 +94,12 @@ impl Offload for WorkerOffload {
                         crate::files::put(&p, b.to_vec().into());
                     }
                 }
+                "unstore" => {
+                    // A kept file the job no longer needs (a fill that failed partway).
+                    if let Some(p) = path.as_string() {
+                        crate::files::STORE.remove_file(&p);
+                    }
+                }
                 _ => {
                     inbox.push(WorkerReply::Failed { error: json.as_string().unwrap_or_else(|| "worker failed".into()) });
                     inbox.push(WorkerReply::Done);
@@ -146,6 +152,12 @@ pub(crate) fn post_store(path: &str, data: &[u8]) {
     let bytes = js_sys::Uint8Array::from(data);
     let buf = bytes.buffer();
     post(&obj(&[("type", "store".into()), ("path", path.into()), ("bytes", buf.clone().into())]), Some(&js_sys::Array::of1(&buf)));
+}
+
+/// Tell the page to drop a file the job stored ([`post_store`]) and no longer needs
+/// (`Services::remove_file` in a job worker).
+pub(crate) fn post_unstore(path: &str) {
+    post(&obj(&[("type", "unstore".into()), ("path", path.into())]), None);
 }
 
 /// Set up the worker's engine session (called once by `web/worker.js`).

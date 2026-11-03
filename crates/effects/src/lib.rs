@@ -88,14 +88,14 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
-    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge, venetian_cover,
-    venetian_origin,
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, box_reach, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge,
+    venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
 // CPU helpers the GPU kernels share (effectcraft-gpu).
-pub use blur2::{camera_lens_plain, camera_lens_spans, radial_fast_pad};
+pub use blur2::{camera_lens_plain, camera_lens_spans, lens_reach, radial_fast_pad};
 pub use generate::{four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
@@ -312,6 +312,12 @@ impl Buf {
         self.offset[0] += l as f64;
         self.offset[1] += t as f64;
     }
+    /// Grow by `px` transparent pixels on the left and right and `py` above and below, within
+    /// the same budget as [`Buf::pad`] ([`pad_xy_within_budget`]) and the largest supported side.
+    pub fn pad_xy(&mut self, px: u32, py: u32) {
+        let (px, py) = pad_xy_plan(self.img.width, self.img.height, px, py);
+        self.pad_sides([px, py, px, py]);
+    }
     /// Grow by `left` and `top` transparent pixels on those sides only.
     pub fn grow_left_top(&mut self, left: u32, top: u32) {
         self.pad_sides([left, top, 0, 0]);
@@ -342,15 +348,49 @@ impl Buf {
 /// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
 /// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
 pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
-    const MIN_BUDGET: f64 = 16_777_216.0;
     let (w, h) = (f64::from(w), f64::from(h));
-    let budget = MIN_BUDGET.max(4.0 * w * h);
+    let budget = pad_budget(w, h);
     if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
         return pad;
     }
     // (w + 2p)(h + 2p) = budget, solved for p.
     let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
     (p.floor().max(0.0) as u32).min(pad)
+}
+
+/// The padding [`Buf::pad_xy`] (and the GPU's `GBuf::pad_xy`) applies for a requested `px`
+/// sideways and `py` up and down on a `w` × `h` buffer: within [`pad_xy_within_budget`], and
+/// neither side past [`effectcraft_raster::MAX_PADDED_SIDE`]. So whatever an effect asks for,
+/// the padded buffer holds at most max(16 Mpx, 4 × w × h) pixels (16 bytes each).
+pub fn pad_xy_plan(w: u32, h: u32, px: u32, py: u32) -> (u32, u32) {
+    let (px, py) = pad_xy_within_budget(w, h, px, py);
+    let side = |len: u32, p: u32| p.min(effectcraft_raster::MAX_PADDED_SIDE.saturating_sub(len) / 2);
+    (side(w, px), side(h, py))
+}
+
+/// The most pixels a `w` × `h` buffer may be padded to: 16 Mpx or four times its area.
+fn pad_budget(w: f64, h: f64) -> f64 {
+    16_777_216.0f64.max(4.0 * w * h)
+}
+
+/// [`pad_within_budget`] for a pad of `px` sideways and `py` up and down: both shrunk by the same
+/// factor until the padded buffer fits the budget.
+pub fn pad_xy_within_budget(w: u32, h: u32, px: u32, py: u32) -> (u32, u32) {
+    if px == py {
+        let p = pad_within_budget(w, h, px);
+        return (p, p);
+    }
+    let area = |k: f64| (f64::from(w) + 2.0 * k * f64::from(px)) * (f64::from(h) + 2.0 * k * f64::from(py));
+    let budget = pad_budget(f64::from(w), f64::from(h));
+    if area(1.0) <= budget {
+        return (px, py);
+    }
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        if area(mid) <= budget { lo = mid } else { hi = mid }
+    }
+    ((f64::from(px) * lo).floor() as u32, (f64::from(py) * lo).floor() as u32)
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
@@ -1409,6 +1449,32 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fast Box Blur and Camera Lens Blur at their largest settings grow every frame size up to
+    /// the largest supported side (30 000 px) within the padding budget: at most
+    /// max(16 Mpx, 4 × the frame's area), and neither side past 30 000 px. Computed, not
+    /// allocated (a 30 000 px frame is 14 GB).
+    #[test]
+    fn the_blurs_largest_settings_stay_within_the_padding_budget() {
+        let side = effectcraft_raster::MAX_PADDED_SIDE;
+        let frames = [(1, 1), (64, 64), (1920, 1080), (7680, 4320), (16384, 16384), (side, side), (side, 1), (1, side)];
+        let growth = [
+            ("Fast Box Blur, Radius 3000 × 50 iterations", misc::box_reach(3000, 50), misc::box_reach(3000, 50)),
+            ("Fast Box Blur, Horizontal", misc::box_reach(3000, 50), 0),
+            ("Camera Lens Blur, Radius 500, Aspect Ratio 100", blur2::lens_reach(500.0, 100.0).0, blur2::lens_reach(500.0, 100.0).1),
+            ("Camera Lens Blur, Aspect Ratio 0.01", blur2::lens_reach(500.0, 0.01).0, blur2::lens_reach(500.0, 0.01).1),
+            ("any request", u32::MAX, u32::MAX),
+        ];
+        for (w, h) in frames {
+            let budget = (16_777_216u64).max(4 * u64::from(w) * u64::from(h));
+            for (what, px, py) in growth {
+                let (gx, gy) = pad_xy_plan(w, h, px, py);
+                let (pw, ph) = (u64::from(w) + 2 * u64::from(gx), u64::from(h) + 2 * u64::from(gy));
+                assert!(pw * ph <= budget.max(u64::from(w) * u64::from(h)), "{what} on {w}×{h}: {pw}×{ph}");
+                assert!(pw <= u64::from(side.max(w)) && ph <= u64::from(side.max(h)), "{what} on {w}×{h}: {pw}×{ph}");
+            }
+        }
+    }
 
     /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
     /// big layers may still grow to four times their area, and small pads are untouched.

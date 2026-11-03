@@ -301,6 +301,16 @@ pub fn camera_lens_plain(ctx: &EffectCtx) -> bool {
     ctx.params.f("irisProperties/diffractionFringe") <= 0.0 && ctx.params.get("blurMap/blurMapLayer").and_then(|v| v.as_layer()).is_none()
 }
 
+/// The most a Camera Lens Blur grows its layer on each side (px).
+const MAX_LENS_PAD: f64 = 4096.0;
+
+/// How far Camera Lens Blur's iris of radius `r` (px) and Aspect Ratio `aspect` reaches beyond the
+/// layer, sideways and up / down, plus a pixel for rounding; capped at [`MAX_LENS_PAD`].
+pub fn lens_reach(r: f64, aspect: f64) -> (u32, u32) {
+    let reach = |d: f64| if d.is_finite() { d.clamp(0.0, MAX_LENS_PAD).ceil() as u32 + 1 } else { MAX_LENS_PAD as u32 + 1 };
+    (reach(r * aspect.max(1.0)), reach(r))
+}
+
 fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let r = ctx.params.f("blurRadius").max(0.0) * b.scale;
     if r < 0.5 {
@@ -311,10 +321,14 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let roundness = ctx.params.f("irisProperties/irisRoundness").clamp(0.0, 100.0) / 100.0;
     // Aspect Ratio stretches the iris horizontally (> 1) or squeezes it (< 1).
     let aspect = ctx.params.f("irisProperties/irisAspectRatio");
-    let reach = r * aspect.max(1.0);
     let repeat = ctx.params.b("repeatEdge") || ctx.adjustment;
     if !repeat {
-        b.pad(reach.ceil() as u32 + 1);
+        // The iris reaches `r × aspect` sideways but only `r` up and down. Padding both ways by
+        // the wider reach made a 1080p frame at Aspect Ratio 100 and Blur Radius 500 a
+        // 100 000 px square buffer (~160 GB) and the app was killed. Light that far out is
+        // spread over the whole iris, so the reach is capped like other effects' growth.
+        let (reach_x, reach_y) = lens_reach(r, aspect);
+        b.pad_xy(reach_x, reach_y);
     }
     let linear = ctx.params.b("useLinear");
     let to_lin = |px: &mut [f32; 4]| {
@@ -841,6 +855,26 @@ mod tests {
         let total: f32 = out.img.data.iter().map(|p| p[3]).sum();
         assert!((total - 1.0).abs() < 1e-3, "{total}");
         assert!(out.img.width > 9);
+    }
+
+    /// A wide iris (Aspect Ratio up to 100) grows the layer sideways only, and by at most
+    /// [`MAX_LENS_PAD`]: padding both ways by the wide reach made Blur Radius 500 at Aspect Ratio
+    /// 100 a ~100 000 px square buffer on a 1080p frame, and the app was killed for running out
+    /// of memory.
+    #[test]
+    fn lens_blur_wide_iris_grows_the_layer_sideways_within_a_cap() {
+        let mut dot = Image::new(9, 9);
+        dot.set(4, 4, [1.0, 1.0, 1.0, 1.0]);
+        let wide = [("blurRadius", num(45.0)), ("irisProperties/irisAspectRatio", num(100.0))];
+        let out = run("ec.blur.cameralens", &dot, &wide);
+        assert_eq!(out.img.width, 9 + 2 * (MAX_LENS_PAD as u32 + 1), "sideways: the reach, capped");
+        assert_eq!(out.img.height, 9 + 2 * 46, "up and down: the radius only");
+        assert_eq!(out.offset, [MAX_LENS_PAD + 1.0, 46.0]);
+        // The dot's light lands on its own row, spread sideways.
+        let (cx, cy) = (out.offset[0] as i64 + 4, out.offset[1] as i64 + 4);
+        assert!(out.img.get(cx, cy)[3] > 0.0 && out.img.get(cx + 1000, cy)[3] > 0.0);
+        assert_eq!(lens_reach(f64::INFINITY, 1.0), (MAX_LENS_PAD as u32 + 1, MAX_LENS_PAD as u32 + 1));
+        assert_eq!(lens_reach(10.0, 0.25), (11, 11), "a narrow iris still reaches its radius");
     }
 
     #[test]

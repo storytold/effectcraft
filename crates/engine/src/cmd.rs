@@ -60,7 +60,7 @@ pub(crate) mod relink_moved;
 mod render_queue;
 pub(crate) mod rig3d;
 pub mod roto_cmds;
-mod scene_detect;
+pub(crate) mod scene_detect;
 pub mod scripts;
 mod settings;
 pub mod shape_stroke;

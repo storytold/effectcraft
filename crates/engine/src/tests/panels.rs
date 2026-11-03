@@ -265,28 +265,9 @@ fn caf_frame(f: u32, with_object: bool) -> Image {
     img
 }
 
-#[test]
-fn content_aware_fill_removes_an_object() {
-    let (mut s, cid, clip, _) = setup(96, 64, 0.48, |f| caf_frame(f, true));
-    // Cut the object out with a Subtract mask; fill the work area (12 frames).
-    s.execute("layer.addMask", json!({"rect": [36.0, 22.0, 20.0, 18.0], "mode": "subtract"})).unwrap();
-    let out = tmp("caf");
-    s.execute("contentFill.set", json!({"method": "object", "range": "workArea", "alphaExpansion": 1})).unwrap();
-    let r = s.execute("contentFill.generate", json!({"outputDir": out.to_string_lossy(), "wait": true})).unwrap();
-    let fill = LayerId(r["layer"].as_u64().unwrap());
-    let files: Vec<String> = r["files"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-    assert_eq!(files.len(), 12);
-    // The Fill layer sits right above the source with the source's timing.
-    let comp = s.project.comp(cid).unwrap();
-    let i = comp.layers.iter().position(|l| l.id == fill).unwrap();
-    assert_eq!(comp.layers[i + 1].id, clip);
-    let fl = comp.layer(fill).unwrap();
-    assert_eq!((fl.in_point, fl.out_point.seconds()), (Tick::ZERO, 0.48));
-    let LayerSource::Footage { item } = fl.source else { panic!("footage") };
-    let Some(ItemKind::Footage(f)) = s.project.item(item).map(|i| &i.kind) else { panic!() };
-    assert_eq!((f.kind, f.sequence.len()), (FootageKind::Sequence, 12));
-    assert!(s.project.item(item).unwrap().name.starts_with("Fill 1"));
-    // The filled frames match the clean background inside the mask, and stay steady over time.
+/// The fill of [`caf_frame`]'s object matches the clean background inside the mask, leaves the
+/// rest of each frame alone and stays steady over time.
+fn assert_clean_fill(files: &[String]) {
     let region: Vec<bool> = (0..96 * 64).map(|i| (36..56).contains(&(i % 96)) && (22..40).contains(&(i / 96))).collect();
     let mut prev: Option<Image> = None;
     for (k, path) in files.iter().enumerate() {
@@ -312,6 +293,31 @@ fn content_aware_fill_removes_an_object() {
         }
         prev = Some(img);
     }
+}
+
+#[test]
+fn content_aware_fill_removes_an_object() {
+    let (mut s, cid, clip, _) = setup(96, 64, 0.48, |f| caf_frame(f, true));
+    // Cut the object out with a Subtract mask; fill the work area (12 frames).
+    s.execute("layer.addMask", json!({"rect": [36.0, 22.0, 20.0, 18.0], "mode": "subtract"})).unwrap();
+    let out = tmp("caf");
+    s.execute("contentFill.set", json!({"method": "object", "range": "workArea", "alphaExpansion": 1})).unwrap();
+    let r = s.execute("contentFill.generate", json!({"outputDir": out.to_string_lossy(), "wait": true})).unwrap();
+    let fill = LayerId(r["layer"].as_u64().unwrap());
+    let files: Vec<String> = r["files"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(files.len(), 12);
+    // The Fill layer sits right above the source with the source's timing.
+    let comp = s.project.comp(cid).unwrap();
+    let i = comp.layers.iter().position(|l| l.id == fill).unwrap();
+    assert_eq!(comp.layers[i + 1].id, clip);
+    let fl = comp.layer(fill).unwrap();
+    assert_eq!((fl.in_point, fl.out_point.seconds()), (Tick::ZERO, 0.48));
+    let LayerSource::Footage { item } = fl.source else { panic!("footage") };
+    let Some(ItemKind::Footage(f)) = s.project.item(item).map(|i| &i.kind) else { panic!() };
+    assert_eq!((f.kind, f.sequence.len()), (FootageKind::Sequence, 12));
+    assert!(s.project.item(item).unwrap().name.starts_with("Fill 1"));
+    // The filled frames match the clean background inside the mask, and stay steady over time.
+    assert_clean_fill(&files);
     // One undo step removes the fill layer.
     assert!(s.undo());
     assert!(s.project.comp(cid).unwrap().layer(fill).is_none());
@@ -319,6 +325,133 @@ fn content_aware_fill_removes_an_object() {
     // Without a hole there is nothing to fill.
     let (mut s2, _, _, _) = setup(32, 24, 0.2, |_| Image::filled(32, 24, [0.5, 0.5, 0.5, 1.0]));
     assert!(s2.execute("contentFill.generate", json!({"wait": true, "outputDir": tmp("caf2").to_string_lossy()})).is_err());
+}
+
+/// A range too long to hold in the fill's memory is filled in windows that carry the fill on
+/// from one to the next: the whole range at once held every frame several times over, and ten
+/// seconds of 1080p (about 70 GB) got the app killed for running out of memory.
+#[test]
+fn content_aware_fill_of_a_long_range_is_filled_in_windows() {
+    use crate::commands::content_fill::{apply_plan, fill_window, make_plan, run_plan};
+    let (mut s, cid, clip, _) = setup(96, 64, 0.48, |f| caf_frame(f, true));
+    s.execute("layer.addMask", json!({"rect": [36.0, 22.0, 20.0, 18.0], "mode": "subtract"})).unwrap();
+    let out = tmp("caf-windows");
+    s.execute("contentFill.set", json!({"method": "object", "range": "workArea", "alphaExpansion": 1})).unwrap();
+    let mut plan = make_plan(&mut s, &json!({"outputDir": out.to_string_lossy()})).unwrap();
+    assert_eq!(plan.times.len(), 12);
+    // Room for three frames at a time: windows of frames 0–2, 2–4, … 10–11.
+    plan.memory = 3 * 96 * 64 * 128;
+    assert_eq!(fill_window(96, 64, plan.memory), Some(3));
+    assert_eq!(fill_window(96, 64, 1), None, "not even two frames fit: refused, not over budget");
+    assert!(fill_window(1920, 1080, 0).is_some_and(|w| w < 30), "the default memory doesn't hold a second of 1080p at once");
+    let lf = crate::commands::scene_detect::LayerFrames::new(&s, cid, clip);
+    let (mut done, mut messages) = (vec![], Vec::<String>::new());
+    let files = effectcraft_render::passes::block_on(run_plan(
+        &plan,
+        &lf.project,
+        lf.footage.as_ref(),
+        lf.expr.as_deref(),
+        &lf.cache,
+        s.services.as_ref(),
+        None,
+        &mut |d, t| {
+            done.push((d, t));
+            true
+        },
+        &mut |m| messages.push(m.to_string()),
+    ))
+    .unwrap();
+    // Windows starting at frames 0, 2, 4, 6, 8 and 10.
+    assert_eq!(messages.iter().filter(|m| *m == "Filling").count(), 6, "{messages:?}");
+    assert_eq!(files.len(), 12, "every frame once");
+    for (k, f) in files.iter().enumerate() {
+        assert!(f.ends_with(&format!("fill_{k:05}.png")), "{f}");
+    }
+    assert!(done.iter().all(|&(d, t)| d <= t && t == 36), "{done:?}");
+    assert_eq!(done.last(), Some(&(36, 36)));
+    assert_clean_fill(&files);
+    apply_plan(&mut s, &plan, files).unwrap();
+    // A plan without frames is an error, not an empty fill (adding its layer read the first
+    // frame's time and file).
+    let empty = crate::commands::content_fill::FillPlan { times: vec![], ..plan };
+    let r = effectcraft_render::passes::block_on(run_plan(
+        &empty,
+        &lf.project,
+        lf.footage.as_ref(),
+        lf.expr.as_deref(),
+        &lf.cache,
+        s.services.as_ref(),
+        None,
+        &mut |_, _| true,
+        &mut |_| {},
+    ));
+    assert!(r.is_err(), "{r:?}");
+    // So is a work area inside one frame: from 60 % into frame 0 (the nearest frame start is
+    // frame 1) to 90 %.
+    let frame = FrameRate::new(FPS as i64, 1).frame_duration().0;
+    Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().work_area = (Tick(frame * 6 / 10), Tick(frame * 9 / 10));
+    let e = make_plan(&mut s, &json!({"layer": clip.0})).unwrap_err().to_string();
+    assert!(e.contains("no whole frame"), "{e}");
+    std::fs::remove_dir_all(&out).unwrap();
+}
+
+/// A windowed fill that finds nothing to fill fails without leaving the frames of its earlier
+/// windows behind (the check runs once every frame has been read).
+#[test]
+fn content_aware_fill_without_a_hole_leaves_no_files() {
+    use crate::commands::content_fill::{make_plan, run_plan};
+    let (mut s, cid, clip, _) = setup(96, 64, 0.48, |f| caf_frame(f, false));
+    let out = tmp("caf-nohole");
+    s.execute("contentFill.set", json!({"method": "object", "range": "workArea"})).unwrap();
+    let mut plan = make_plan(&mut s, &json!({"outputDir": out.to_string_lossy()})).unwrap();
+    plan.memory = 3 * 96 * 64 * 128;
+    let lf = crate::commands::scene_detect::LayerFrames::new(&s, cid, clip);
+    let r = effectcraft_render::passes::block_on(run_plan(
+        &plan,
+        &lf.project,
+        lf.footage.as_ref(),
+        lf.expr.as_deref(),
+        &lf.cache,
+        s.services.as_ref(),
+        None,
+        &mut |_, _| true,
+        &mut |_| {},
+    ));
+    assert!(r.as_ref().is_err_and(|e| e.contains("no transparent area")), "{r:?}");
+    let left = std::fs::read_dir(&out).map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "png")).count()).unwrap_or(0);
+    assert_eq!(left, 0, "the earlier windows' frames are removed");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A fill stopped partway (here, cancelled while writing its fourth window) removes the frames
+/// it wrote, as does any other failure: a fill leaves its whole sequence or nothing.
+#[test]
+fn a_cancelled_fill_leaves_no_files() {
+    use crate::commands::content_fill::{make_plan, run_plan};
+    let (mut s, cid, clip, _) = setup(96, 64, 0.48, |f| caf_frame(f, true));
+    s.execute("layer.addMask", json!({"rect": [36.0, 22.0, 20.0, 18.0], "mode": "subtract"})).unwrap();
+    let out = tmp("caf-cancel");
+    s.execute("contentFill.set", json!({"method": "object", "range": "workArea", "alphaExpansion": 1})).unwrap();
+    let mut plan = make_plan(&mut s, &json!({"outputDir": out.to_string_lossy()})).unwrap();
+    plan.memory = 3 * 96 * 64 * 128;
+    let lf = crate::commands::scene_detect::LayerFrames::new(&s, cid, clip);
+    let n = plan.times.len() as u64;
+    let r = effectcraft_render::passes::block_on(run_plan(
+        &plan,
+        &lf.project,
+        lf.footage.as_ref(),
+        lf.expr.as_deref(),
+        &lf.cache,
+        s.services.as_ref(),
+        None,
+        // Writing reports 2n + frames written: stop after the sixth frame is on disk.
+        &mut |d, _| d < 2 * n + 6,
+        &mut |_| {},
+    ));
+    assert!(r.is_err(), "{r:?}");
+    let left = std::fs::read_dir(&out).map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "png")).count()).unwrap_or(0);
+    assert_eq!(left, 0, "the frames written before the cancel are removed");
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]

@@ -62,6 +62,10 @@ fn camera_lens_blur() {
     // Large iris: per-row prefix sums.
     effect_case("ec.blur.cameralens", &[("blurRadius", n(14.0)), ("irisProperties/irisRoundness", n(60.0))]);
     effect_case("ec.blur.cameralens", &[("blurRadius", n(12.0)), ("repeatEdge", b(true)), ("useLinear", b(true))]);
+    // A wide or narrow iris without Repeat Edge Pixels grows each axis by its own reach
+    // (`lens_reach`), on both paths.
+    effect_case("ec.blur.cameralens", &[("blurRadius", n(6.0)), ("irisProperties/irisAspectRatio", n(2.5))]);
+    effect_case("ec.blur.cameralens", &[("blurRadius", n(8.0)), ("irisProperties/irisAspectRatio", n(0.5))]);
 }
 
 #[test]
