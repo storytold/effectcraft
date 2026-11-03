@@ -20,22 +20,35 @@ use crate::object::{Dict, File, Lexer, Obj, decode_stream};
 /// A page: its dictionary with inherited attributes resolved.
 pub struct Page {
     pub dict: Dict,
-    pub resources: Dict,
+    /// Shared with the pages that inherit it (one copy per `/Resources` dictionary).
+    pub resources: Rc<Dict>,
     /// CropBox (else MediaBox) `[x0, y0, x1, y1]`.
     pub bbox: [f64; 4],
     pub rotate: i32,
 }
+
+/// The most page-tree nodes visited: a node listed many times at each of several levels would
+/// otherwise be walked exponentially often within the depth limit.
+const MAX_PAGE_VISITS: usize = 100_000;
 
 /// The pages in order.
 pub fn pages(file: &File) -> Vec<Page> {
     let mut out = vec![];
     let Some(cat) = file.catalog() else { return out };
     let Some(root) = file.get_dict(cat, "Pages") else { return out };
-    fn walk(file: &File, node: &Dict, inherited: (Option<Dict>, Option<Vec<f64>>, Option<Vec<f64>>, i32), out: &mut Vec<Page>, depth: usize) {
-        if depth > 32 || out.len() > 10_000 {
+    fn walk(
+        file: &File,
+        node: &Dict,
+        inherited: (Option<Rc<Dict>>, Option<Vec<f64>>, Option<Vec<f64>>, i32),
+        out: &mut Vec<Page>,
+        depth: usize,
+        visits: &mut usize,
+    ) {
+        *visits += 1;
+        if depth > 32 || out.len() > 10_000 || *visits > MAX_PAGE_VISITS {
             return;
         }
-        let res = file.get_dict(node, "Resources").cloned().or(inherited.0);
+        let res = file.get_dict(node, "Resources").map(|r| Rc::new(r.clone())).or(inherited.0);
         let media = file.get(node, "MediaBox").map(|m| file.nums(m)).filter(|v| v.len() == 4).or(inherited.1);
         let crop = file.get(node, "CropBox").map(|m| file.nums(m)).filter(|v| v.len() == 4).or(inherited.2);
         let rot = file.get_num(node, "Rotate").map(|r| r as i32).unwrap_or(inherited.3);
@@ -43,7 +56,7 @@ pub fn pages(file: &File) -> Vec<Page> {
             Some(kids) if file.get(node, "Type").and_then(Obj::name) != Some("Page") => {
                 for k in kids {
                     if let Some(d) = file.resolve(k).dict() {
-                        walk(file, d, (res.clone(), media.clone(), crop.clone(), rot), out, depth + 1);
+                        walk(file, d, (res.clone(), media.clone(), crop.clone(), rot), out, depth + 1, visits);
                     }
                 }
             }
@@ -54,11 +67,14 @@ pub fn pages(file: &File) -> Vec<Page> {
             }
         }
     }
-    walk(file, root, (None, None, None, 0), &mut out, 0);
+    walk(file, root, (None, None, None, 0), &mut out, 0, &mut 0);
     out
 }
 
-/// The page's content streams, decoded and joined.
+/// The most decoded content bytes a page runs (the parts past it are left out).
+const MAX_CONTENT: usize = crate::object::MAX_OBJECT_STREAM;
+
+/// The page's content streams, decoded and joined, up to [`MAX_CONTENT`] bytes.
 pub fn page_content(file: &File, page: &Page) -> Vec<u8> {
     let mut out = vec![];
     let parts: Vec<&Obj> = match page.dict.get("Contents").map(|c| file.resolve(c)) {
@@ -70,6 +86,9 @@ pub fn page_content(file: &File, page: &Page) -> Vec<u8> {
         if let Obj::Stream(d, raw) = p
             && let Some(data) = decode_stream(file, d, raw)
         {
+            if out.len().saturating_add(data.len()) > MAX_CONTENT {
+                break;
+            }
             out.extend_from_slice(&data);
             out.push(b'\n');
         }
@@ -186,6 +205,10 @@ pub(crate) struct Interp<'a> {
     /// Glyph outlines collected for a clipping text render mode (page space).
     text_clip: Option<BezPath>,
     fonts: HashMap<String, Rc<Font>>,
+    /// Decoded pixels the page may still make (each distinct image is decoded once).
+    image_pixels: usize,
+    /// Decoded images by object and fill colour (stencil masks paint with it).
+    images: HashMap<(String, [u8; 3]), (u32, u32, std::sync::Arc<Vec<u8>>)>,
 }
 
 fn affine(v: &[f64]) -> Affine {
@@ -197,6 +220,16 @@ fn affine(v: &[f64]) -> Affine {
 
 /// The most tiles one tiling-pattern fill draws.
 const MAX_TILES: usize = 4096;
+
+/// The deepest `q` nests (the specification's implementation limit is 28; every saved state
+/// keeps a copy of the dash array).
+const MAX_SAVED: usize = 4096;
+
+/// The most entries of a dash array kept (every saved state and stroke copies it).
+const MAX_DASH: usize = 256;
+
+/// The most pixels one page decodes across its distinct images (1 GiB of RGBA).
+const MAX_IMAGE_PIXELS: usize = 256 << 20;
 
 /// A `TJ` element.
 enum TextItem {
@@ -222,6 +255,8 @@ impl<'a> Interp<'a> {
             tlm: Affine::IDENTITY,
             text_clip: None,
             fonts: HashMap::new(),
+            image_pixels: MAX_IMAGE_PIXELS,
+            images: HashMap::new(),
         }
     }
 
@@ -257,7 +292,13 @@ impl<'a> Interp<'a> {
             let nums = || args.iter().filter_map(Obj::num).collect::<Vec<f64>>();
             let locked = self.gs.lock_color;
             match op.as_str() {
-                "q" => self.saved.push((self.gs.clone(), self.b.depth())),
+                "q" => {
+                    if self.saved.len() >= MAX_SAVED {
+                        self.b.skip("content (nesting limit)");
+                        return;
+                    }
+                    self.saved.push((self.gs.clone(), self.b.depth()))
+                }
                 "Q" => {
                     if let Some((g, d)) = self.saved.pop() {
                         self.gs = g;
@@ -270,7 +311,8 @@ impl<'a> Interp<'a> {
                 "j" => self.gs.join = [Join::Miter, Join::Round, Join::Bevel][(n(0) as usize).min(2)],
                 "M" => self.gs.miter = n(0),
                 "d" => {
-                    let arr = args.first().map(|a| self.file.nums(a)).unwrap_or_default();
+                    let mut arr = args.first().map(|a| self.file.nums(a)).unwrap_or_default();
+                    arr.truncate(MAX_DASH);
                     self.gs.dash = (!arr.is_empty() && arr.iter().any(|v| *v > 0.0)).then(|| (arr, n(1)));
                 }
                 "gs" => {
@@ -536,7 +578,7 @@ impl<'a> Interp<'a> {
             p += 1;
         }
         lx.pos = (p + 2).min(data.len());
-        self.image(&d, &raw, res);
+        self.image(&d, &raw, res, None);
     }
 
     fn ocg_name(&self, ocg: &Dict) -> Option<String> {
@@ -588,7 +630,8 @@ impl<'a> Interp<'a> {
             self.gs.fill_alpha = v.clamp(0.0, 1.0);
         }
         if let Some(Obj::Array(d)) = f.get(g, "D") {
-            let arr = d.first().map(|a| f.nums(a)).unwrap_or_default();
+            let mut arr = d.first().map(|a| f.nums(a)).unwrap_or_default();
+            arr.truncate(MAX_DASH);
             let ph = d.get(1).and_then(|p| f.resolve(p).num()).unwrap_or(0.0);
             self.gs.dash = (!arr.is_empty() && arr.iter().any(|v| *v > 0.0)).then_some((arr, ph));
         }
@@ -766,6 +809,7 @@ impl<'a> Interp<'a> {
         self.gs = saved_gs;
         self.saved = saved_stack;
         self.path = saved_path;
+        let cell_shapes = cell_b.shapes;
         let (cell, _, sk) = cell_b.finish();
         for s in sk {
             self.b.skip(&s);
@@ -790,6 +834,14 @@ impl<'a> Interp<'a> {
             self.b.skip("tiling pattern (too many tiles)");
             return;
         }
+        // Every tile copies the cell: the shapes copied count as operations, so nested
+        // patterns cannot multiply a cell past the budget.
+        let tiles_n = ((i1 - i0 + 1.0) * (j1 - j0 + 1.0)).max(1.0) as usize;
+        let Some(cost) = tiles_n.checked_mul(cell_shapes.max(1)).filter(|c| *c <= self.budget) else {
+            self.b.skip("tiling pattern (operation limit)");
+            return;
+        };
+        self.budget -= cost;
         let cell_clip = kurbo::Rect::new(bx0, by0, bx1, by1).to_path(0.1);
         let mut tiles = Group::new("Pattern");
         for j in j0 as i64..=j1 as i64 {
@@ -974,36 +1026,57 @@ impl<'a> Interp<'a> {
 
     fn xobject(&mut self, res: &Dict, name: &str, depth: usize) {
         let f = self.file;
-        let Some(x) = f.get_dict(res, "XObject").and_then(|xs| xs.get(name)).map(|x| f.resolve(x)) else { return };
-        let Obj::Stream(d, raw) = x else { return };
+        let Some(entry) = f.get_dict(res, "XObject").and_then(|xs| xs.get(name)) else { return };
+        let key = match entry {
+            Obj::Ref(n, g) => Some(format!("{n} {g}")),
+            _ => None,
+        };
+        let Obj::Stream(d, raw) = f.resolve(entry) else { return };
         match f.get(d, "Subtype").and_then(Obj::name) {
             Some("Form") => self.form(d, raw, res, depth),
-            Some("Image") => self.image(d, raw, res),
+            Some("Image") => self.image(d, raw, res, key),
             _ => {}
         }
     }
 
-    /// Paint an image: the unit square of user space, pixel (0, 0) at its top-left corner.
-    fn image(&mut self, d: &Dict, raw: &[u8], res: &Dict) {
+    /// Paint an image: the unit square of user space, pixel (0, 0) at its top-left corner. An
+    /// image XObject (`key`: its object) placed again shares its pixels with the first placement.
+    fn image(&mut self, d: &Dict, raw: &[u8], res: &Dict, key: Option<String>) {
         let fill = match &self.gs.fill {
             Fill::Color(c) => *c,
             _ => [0.0; 3],
         };
-        match crate::image::decode(self.file, d, raw, Some(res), fill) {
-            Ok(img) => {
-                let (w, h) = (img.width as f64, img.height as f64);
-                let transform = self.gs.ctm * Affine::new([1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0]);
-                self.b.push(Node::Image(SvgImage {
-                    name: "Image".into(),
-                    transform,
-                    width: img.width,
-                    height: img.height,
-                    rgba: std::sync::Arc::new(img.rgba),
-                    opacity: self.gs.fill_alpha,
-                }));
+        let cache_key = key.map(|k| (k, fill.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)));
+        let decoded = match cache_key.as_ref().and_then(|k| self.images.get(k)) {
+            Some(img) => img.clone(),
+            None => {
+                // The declared size is charged before decoding, so repeated placements of
+                // distinct images stop at the page's pixel budget.
+                let w = self.file.get_num(d, "Width").unwrap_or(0.0).max(0.0) as usize;
+                let h = self.file.get_num(d, "Height").unwrap_or(0.0).max(0.0) as usize;
+                let Some(left) = w.checked_mul(h).and_then(|p| self.image_pixels.checked_sub(p)) else {
+                    self.b.skip("image (page pixel limit)");
+                    return;
+                };
+                match crate::image::decode(self.file, d, raw, Some(res), fill) {
+                    Ok(img) => {
+                        self.image_pixels = left;
+                        let decoded = (img.width, img.height, std::sync::Arc::new(img.rgba));
+                        if let Some(k) = cache_key {
+                            self.images.insert(k, decoded.clone());
+                        }
+                        decoded
+                    }
+                    Err(what) => {
+                        self.b.skip(&what);
+                        return;
+                    }
+                }
             }
-            Err(what) => self.b.skip(&what),
-        }
+        };
+        let (width, height, rgba) = decoded;
+        let transform = self.gs.ctm * Affine::new([1.0 / width as f64, 0.0, 0.0, -1.0 / height as f64, 0.0, 1.0]);
+        self.b.push(Node::Image(SvgImage { name: "Image".into(), transform, width, height, rgba, opacity: self.gs.fill_alpha }));
     }
 
     /// The font named `name` in the resources (cached by object).
@@ -1060,10 +1133,16 @@ impl<'a> Interp<'a> {
                         let (w1y, vx, vy) = if font.vertical { font.vmetrics(code) } else { (0.0, 0.0, 0.0) };
                         let trm = if font.vertical { trm * Affine::translate((-vx, -vy)) } else { trm };
                         if let Some((proc_, t3res)) = font.type3_proc(code) {
-                            let proc_ = proc_.to_vec();
-                            let r = t3res.cloned().unwrap_or_else(|| res.clone());
-                            self.type3_glyph(&proc_, &r, trm * font.matrix, pattern_base, depth);
+                            self.type3_glyph(proc_, t3res.unwrap_or(res), trm * font.matrix, pattern_base, depth);
                         } else if let Some(g) = font.glyph(code) {
+                            // Each outline element counts against the path limit and the budget
+                            // before it is copied.
+                            let n = g.elements().len();
+                            if path.elements().len().saturating_add(n) > MAX_PATH {
+                                self.b.skip("text (path limit)");
+                                return;
+                            }
+                            self.budget = self.budget.saturating_sub(n);
                             path.extend(trm * (*g).clone());
                         } else if code != 32 {
                             missing = true;
@@ -1092,7 +1171,11 @@ impl<'a> Interp<'a> {
         let name = if label.trim().is_empty() { "Text".to_string() } else { format!("Text: {}", label.trim()) };
         if mode >= 4 {
             let clip = self.text_clip.get_or_insert_with(BezPath::new);
-            clip.extend(self.gs.ctm * path.clone());
+            if clip.elements().len().saturating_add(path.elements().len()) > MAX_PATH {
+                self.b.skip("text (clip path limit)");
+            } else {
+                clip.extend(self.gs.ctm * path.clone());
+            }
         }
         if fill || stroke {
             self.paint_path(path, fill, FillRule::NonZero, stroke, &name, depth);
@@ -1104,6 +1187,9 @@ impl<'a> Interp<'a> {
         if depth >= 8 {
             return;
         }
+        // The procedure is read again for every character: its bytes count as operations
+        // (one for sixteen), so a long procedure shown many times spends the budget.
+        self.budget = self.budget.saturating_sub(content.len() / 16);
         self.saved.push((self.gs.clone(), self.b.depth()));
         self.gs.ctm *= m;
         let path = std::mem::take(&mut self.path);

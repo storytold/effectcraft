@@ -229,6 +229,10 @@ impl Reader<'_> {
         let Some(location) = location else { return Err(Error::Read(format!("PDF has ambiguous recovered object {number}"))) };
         let bytes = Arc::clone(&location.bytes);
         let Some(bytes) = bytes.get(location.start..location.end) else { return Ok(None) };
+        // An object of n bytes holds at most n values: one past the value budget is not built.
+        if bytes.len() > self.values_left {
+            return Ok(None);
+        }
         let mut lexer = Lexer::new(bytes, 0);
         let Some(object) = lexer.next() else { return Ok(None) };
         let object = lexer.maybe_ref(object);

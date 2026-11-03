@@ -2,6 +2,7 @@
 //! corrupt inputs (generated fixtures).
 
 use crate::tests::{coverage, page_pdf, render, shape_names};
+use crate::write::pdf;
 use crate::*;
 
 fn eps(body: &[u8]) -> Doc {
@@ -583,4 +584,71 @@ fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
         let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
         assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
+}
+
+/// Parses `bytes` on a thread of its own, and fails the test when parsing takes more than 20 s.
+fn pdf_soon(bytes: Vec<u8>) -> Result<Doc, Error> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(parse(&bytes)).ok());
+    rx.recv_timeout(std::time::Duration::from_secs(20)).expect("parsing did not finish")
+}
+
+#[test]
+fn a_fanning_out_page_tree_is_walked_within_the_visit_budget() {
+    // Three levels of Pages nodes each listing the next one 1,000 times: 10^9 visits (each
+    // copying the inherited resources) within the depth limit. The walk stops at 100,000.
+    let kids = |n: u32| format!("<< /Type /Pages /Kids [{}] /Count 1 >>", format!("{n} 0 R ").repeat(1000));
+    let objs = vec![
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
+        (2, format!("<< /Type /Pages /Kids [{}] /Count 1 /Resources << /Font << >> >> >>", "3 0 R ".repeat(1000)), None),
+        (3, kids(4), None),
+        (4, kids(5), None),
+        (5, "<< /Type /Page /Parent 4 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>".into(), None),
+        (6, "<< >>".into(), Some(b"0 0 10 10 re f".to_vec())),
+    ];
+    let doc = pdf_soon(pdf(&objs, 1)).unwrap();
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn saved_states_stop_nesting_at_the_limit() {
+    // `q` nests at most 4,096 deep (each copy keeps the dash array): past it the stream stops,
+    // and the square painted before it stays.
+    let doc = parse(&page_pdf(&format!("0 0 10 10 re f [1 2] 0 d {}20 20 10 10 re f", "q ".repeat(5000)), "", vec![])).unwrap();
+    assert_eq!(doc.flatten().len(), 1, "{:?}", doc.skipped);
+    assert_eq!(doc.skipped, ["content (nesting limit)"]);
+}
+
+#[test]
+fn text_stops_at_the_path_limit() {
+    // The outlines of 100,000 H's (13 elements each) pass the path limit: the text is left out
+    // (noted), and the square after it is still painted.
+    let content = format!("BT /F1 10 Tf ({}) Tj ET 20 20 10 10 re f", "H".repeat(100_000));
+    let doc = pdf_soon(page_pdf(&content, "/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>", vec![])).unwrap();
+    assert_eq!(doc.skipped, ["text (path limit)"]);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn an_image_placed_twice_is_decoded_once() {
+    let objs = vec![(10, "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 >>".into(), Some(vec![255; 12]))];
+    let doc = parse(&page_pdf("q 50 0 0 50 0 0 cm /Im1 Do Q q 50 0 0 50 100 0 cm /Im1 Do Q", "/XObject << /Im1 10 0 R >>", objs)).unwrap();
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    let images: Vec<_> = doc.root.children.iter().flat_map(|n| if let Node::Group(g) = n { g.children.iter().collect() } else { vec![] }).collect();
+    let [Node::Image(a), Node::Image(b)] = images.as_slice() else { panic!("two images: {images:?}") };
+    assert!(std::sync::Arc::ptr_eq(&a.rgba, &b.rgba), "the second placement shares the first's pixels");
+}
+
+#[test]
+fn a_tiling_pattern_is_charged_for_every_tile_it_copies() {
+    // A cell of 8,000 squares copied into 2,704 tiles would be 21.6 million nodes: more than the
+    // operation budget, so the fill is left out (noted) rather than expanded.
+    let cell = "0 0 1 1 re f ".repeat(8_000).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << >> >>".into(), Some(cell))],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
 }
