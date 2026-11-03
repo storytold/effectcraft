@@ -69,7 +69,7 @@ and recounted again at this tree after #1774 by counting catalog rows (`const` t
 `crates/ui-egui/src/i18n.rs`, `i18n/ui.rs` and `i18n/effects.rs`: 630 menu rows, 998
 panel/dialog sources in Simplified Chinese, 951 in Traditional Chinese and 996 in Japanese). The
 denominator, **≈ 4,200 user-visible strings**, is a rounded estimate: the 630 fixed menu entries,
-the 998 panel/dialog sources, 307 effect names, ≈ 1,650 distinct effect parameter names and
+the 998 panel/dialog sources, 308 effect names, ≈ 1,650 distinct effect parameter names and
 ≈ 620 other unwrapped interface strings (Home screen literals, engine-built tooltips, error and
 status messages). It counts distinct strings, not catalog rows; engine messages are only partly
 counted, so the true percentages are slightly lower.
@@ -93,18 +93,18 @@ Other languages EffectCraft ships (6):
 
 | Language | Code | UI strings translated | Status | To `full` |
 |---|---|---|---|---|
-| Traditional Chinese | `zh-hant` | 1,910 (≈ 45%): menus 630 rows, panels 951, effect names 308 + 21 categories | partial; effect names complete, parameter names and engine text still in English | 3–5 h + review |
+| Traditional Chinese | `zh-hant` | 1,889 (≈ 45%): menus 630 rows, panels 951, effect names 308 (+ 21 categories, not counted, as for the other languages) | partial; effect names complete, parameter names and engine text still in English | 3–5 h + review |
 | Ukrainian | `uk` | 1,153 (≈ 29%): menus 629 rows, panels 524 | partial | 6–9 h + review |
 | Polish | `pl` | 1,325 (≈ 34%): menus 630 rows, panels 695 | partial; unwrapped UI, effects and engine text still in English; AI-drafted, native review welcome | Remaining strings + native review |
 | Czech | `cs` | 1,147 (≈ 29%): menus 629 rows, panels 518 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
-| Georgian | `ka` | 1,514 (≈ 39%): menus 629 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
+| Georgian | `ka` | 1,822 (≈ 43%): menus 629 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
 | Swedish | `sv` | menus 630 rows, panels 723, effect names 308 and categories 21; added after the measurement above | Settings, Edit menu and Match System (`sv-*` locales) offer it; parameter and engine text still in English; not yet native-speaker reviewed | Remaining strings + native review |
 
 Russian (`ru`) has a menu catalog (630 rows, ≈ 15%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
-**Overall: ≈ 24%**, the average coverage of After Effects' 10 non-English languages
-(Simplified Chinese 46%, Traditional Chinese 38%, Japanese 46%, Brazilian Portuguese 34%,
-Spanish 29%, French, German and Russian 16%, Korean and Italian 0%; 241 / 10, was ≈ 21% on
+**Overall: ≈ 25%**, the average coverage of After Effects' 10 non-English languages
+(Simplified Chinese 46%, Traditional Chinese 45%, Japanese 46%, Brazilian Portuguese 34%,
+Spanish 29%, French, German and Russian 16%, Korean and Italian 0%; 248 / 10, was ≈ 24% before #2037's effect names and ≈ 21% on
 22 October; Ukrainian (≈ 29%) and Czech (≈ 29%) are EffectCraft-only and stay out of that
 average). This is the localization row in [target-app-parity.md](target-app-parity.md#by-dimension).
 

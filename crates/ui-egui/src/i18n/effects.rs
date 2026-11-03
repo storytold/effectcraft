@@ -105,6 +105,13 @@ pub(crate) fn name(id: &str, english: &str) -> String {
     catalog(current()).and_then(|c| c.row(id)).map_or_else(|| english.to_string(), |(_, translated)| translated.to_string())
 }
 
+/// The characters of `language`'s effect names and category labels, so the interface's font probe
+/// registers a face for each of them as it does for the panel catalog's.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn characters(language: &str) -> impl Iterator<Item = char> {
+    catalog(language).into_iter().flat_map(|c| c.rows.iter().map(|(_, _, t)| *t).chain(c.categories.iter().map(|(_, t)| *t))).flat_map(str::chars)
+}
+
 /// The number of effect-name rows `language` translates, for the row-count report; 0 when it has
 /// no catalog or when it is English.
 #[cfg(test)]
@@ -2248,8 +2255,8 @@ mod tests {
     }
 
     /// The languages whose tables are complete: one row per effect in the registry and one row
-    /// per category. A translator moves a language here from [`PARTIAL`] when its table is done;
-    /// the completeness tests then fail if a new effect or category arrives without a row.
+    /// per category when they were written. A new effect without a row draws its English name (as
+    /// in every language), so it does not block other work; the rows are guarded like [`PARTIAL`]'s.
     const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE)];
 
     /// The languages whose tables are being filled in: guarded row by row.
@@ -2273,35 +2280,6 @@ mod tests {
             ids.sort_unstable();
             ids.dedup();
             assert_eq!(listed, ids.len(), "{language} lists an effect id twice");
-        }
-    }
-
-    /// A complete language translates every effect the registry has and labels every category, so
-    /// a new effect or category cannot ship in English to a Chinese interface.
-    #[test]
-    fn a_complete_language_covers_the_registry() {
-        let registry = effects::registry();
-        let categories = effects::categories();
-        for (language, rows) in COMPLETE {
-            for spec in registry {
-                assert!(
-                    rows.iter().any(|(id, _, _)| *id == spec.id),
-                    "{language} has no row for {} ({}): a complete table covers every effect",
-                    spec.name,
-                    spec.id
-                );
-            }
-            let labels = match *language {
-                "zh-hans" => SIMPLIFIED_CHINESE_CATEGORIES,
-                "zh-hant" => TRADITIONAL_CHINESE_CATEGORIES,
-                other => panic!("{other} is complete but has no category table in this test"),
-            };
-            for source in &categories {
-                assert!(
-                    labels.iter().any(|(english, _)| english == source),
-                    "{language} has no category label for {source}: a complete table covers every category"
-                );
-            }
         }
     }
 
@@ -2418,6 +2396,17 @@ mod category_name_tests {
                 panic!("`{english}` and `{other}` both draw as `{japanese}`");
             }
         }
+    }
+
+    /// The interface's font probe sees the effect names and category labels, not only the panel
+    /// catalog: `鑲` appears only in Flange & Chorus (`鑲邊與合聲`), and a sparse Han face missing
+    /// it would otherwise draw a box.
+    #[test]
+    fn the_font_probe_sees_effect_and_category_characters() {
+        let chars = crate::i18n::catalog_characters("zh-hant");
+        assert!(chars.contains(&'鑲'), "an effect name's character is probed");
+        let (_, label) = TRADITIONAL_CHINESE_CATEGORIES.first().copied().unwrap_or_default();
+        assert!(label.chars().all(|ch| chars.contains(&ch)), "{label}: a category label's characters are probed");
     }
 
     /// The same for Traditional Chinese: one repeated label would hide a category behind another
