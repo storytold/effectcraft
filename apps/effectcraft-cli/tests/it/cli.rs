@@ -110,6 +110,197 @@ fn exec_set_get_with_saved_project() {
     assert_eq!(v[1]["result"]["time"], v[0]["result"]["time"], "{v}");
 }
 
+/// #2928: the text listing gives an enum's label next to its number (0-based, unlike After
+/// Effects scripting), the way `props --json` lists its `options`.
+#[test]
+fn props_lists_enum_labels() {
+    let proj = tmp("enum-labels.ecproj");
+    let p = proj.to_str().unwrap();
+    let anim = r#"{"layer":"t","properties":["opacity"]}"#;
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36}"#,
+        "layer.newText",
+        r#"{"text":"AB","name":"t"}"#,
+        "layer.addTextAnimator",
+        anim,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    ok_json(&["set", "T", "t", "text/animators/animator/selectors/rangeSelector/advanced/shape", "1", p, "--save"]);
+    let out = bin().args(["props", "T", "t", p]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let shape = text.lines().find(|l| l.contains("advanced/shape")).unwrap_or_else(|| panic!("no shape line in:\n{text}"));
+    assert!(shape.trim_end().ends_with("enum     1 (Ramp Up)"), "{shape}");
+    let units = text.lines().find(|l| l.contains("advanced/units")).unwrap_or_default();
+    assert!(units.trim_end().ends_with("0 (Percentage)"), "{units}");
+    let size = text.lines().find(|l| l.contains("transform/opacity")).unwrap_or_default();
+    assert!(size.trim_end().ends_with("100.0"), "a number without options stays bare: {size}");
+}
+
+/// A project in a new folder of its own, for the save lock tests (#2851).
+fn lock_test_project(tag: &str) -> (PathBuf, String) {
+    let dir = tmp(&format!("lock-{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.ecproj").to_str().unwrap().to_string();
+    ok_json(&["exec", "project.newFolder", r#"{"name":"start"}"#, "--empty", "--save-as", &proj]);
+    (dir, proj)
+}
+
+/// The lock of the project file `name`, held by this process.
+fn hold_lock(dir: &std::path::Path, name: &str) -> std::fs::File {
+    let lock = std::fs::File::options().create(true).truncate(false).read(true).write(true).open(dir.join(format!(".{name}.lock"))).unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+/// Start a run that has to wait for a lock this process holds; returns once it says it is waiting.
+fn start_waiting_run(args: &[&str]) -> std::process::Child {
+    let mut child = bin().args(args).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("waiting for another run saving") {
+        line.clear();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "{args:?} ended without waiting");
+    }
+    assert!(child.try_wait().unwrap().is_none(), "{args:?} did not wait");
+    child
+}
+
+/// Folder names in a saved project.
+fn has_folder(proj: &str, name: &str) -> bool {
+    std::fs::read_to_string(proj).unwrap().contains(&format!("\"{name}\""))
+}
+
+#[test]
+fn parallel_saves_keep_every_edit() {
+    let (dir, proj) = lock_test_project("parallel");
+    let names = |writer: usize| (0..300).map(move |i| format!("edit-{writer}-{i}"));
+    let mut writers: Vec<_> = (0..4)
+        .map(|_| {
+            bin()
+                .args(["run", "--project", &proj, "--commands", "-", "--save"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    // Each writer reads its whole script before it opens the project, so closing the stdins together
+    // starts all the edits at once, and long scripts keep each read-to-save span over the others.
+    for (n, writer) in writers.iter_mut().enumerate() {
+        let script: String = names(n).map(|name| format!("{}\n", json!({"command": "project.newFolder", "params": {"name": name}}))).collect();
+        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    }
+    for mut writer in writers {
+        assert!(writer.wait().unwrap().success());
+    }
+    let lost: Vec<String> = (0..4).flat_map(names).filter(|name| !has_folder(&proj, name)).collect();
+    assert!(lost.is_empty(), "lost {} edits: {lost:?}", lost.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_save_in_place_waits_for_the_lock_then_edits_the_latest_project() {
+    let (dir, proj) = lock_test_project("wait");
+    for save in [&["--save"][..], &["--save-as", proj.as_str()]] {
+        let held = hold_lock(&dir, "p.ecproj");
+        let before = std::fs::read(&proj).unwrap();
+        let params = json!({"name": format!("waited-{}", save.len())}).to_string();
+        let args = [&["exec", "project.newFolder", &params, "--project", &proj][..], save].concat();
+        let mut child = start_waiting_run(&args);
+        assert_eq!(std::fs::read(&proj).unwrap(), before, "{save:?} wrote while another run held the lock");
+        // an edit made meanwhile by the holder must survive: the waiter reads only after the lock is free
+        let held_params = json!({"name": format!("held-{}", save.len())}).to_string();
+        ok_json(&["exec", "project.newFolder", &held_params, "--project", &proj, "--save-as", &format!("{proj}.tmp")]);
+        std::fs::rename(format!("{proj}.tmp"), &proj).unwrap();
+        drop(held);
+        assert!(child.wait().unwrap().success(), "{save:?}");
+        for want in [format!("waited-{}", save.len()), format!("held-{}", save.len())] {
+            assert!(has_folder(&proj, &want), "{save:?} lost {want}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs through a symlink take the same lock before and after a save, or a run still waiting on
+/// the old one could overwrite a later run's save.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_keeps_its_lock_after_a_save() {
+    let (dir, proj) = lock_test_project("symlink");
+    let link = dir.join("link.ecproj");
+    std::os::unix::fs::symlink(&proj, &link).unwrap();
+    for name in [r#"{"name":"first"}"#, r#"{"name":"second"}"#] {
+        let held = hold_lock(&dir, "link.ecproj");
+        let mut child = start_waiting_run(&["exec", "project.newFolder", name, "--project", link.to_str().unwrap(), "--save"]);
+        drop(held);
+        assert!(child.wait().unwrap().success(), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn runs_that_do_not_save_in_place_ignore_the_lock() {
+    let (dir, proj) = lock_test_project("ignore");
+    let other = dir.join("other.ecproj").to_str().unwrap().to_string();
+    let _held = hold_lock(&dir, "p.ecproj");
+    let params = r#"{"name":"copy-only"}"#;
+    let cases: [&[&str]; 3] = [
+        &["info", "--project", &proj],
+        &["exec", "project.newFolder", params, "--project", &proj],
+        &["exec", "project.newFolder", params, "--project", &proj, "--save-as", &other],
+    ];
+    for args in cases {
+        let mut child = bin().args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("{args:?} is waiting for a lock it doesn't need");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success(), "{args:?}");
+    }
+    assert!(!has_folder(&proj, "copy-only"));
+    assert!(has_folder(&other, "copy-only"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_project_gets_no_lock_file_and_keeps_its_error() {
+    let (dir, _) = lock_test_project("missing");
+    let gone = dir.join("gone.ecproj").to_str().unwrap().to_string();
+    let other = dir.join("other.ecproj").to_str().unwrap().to_string();
+    // what opening it says, after the `effectcraft-cli <subcommand>: ` prefix
+    let error = |args: &[&str]| {
+        let out = bin().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        stderr.split_once(": ").map(|(_, e)| e.to_string()).unwrap_or(stderr)
+    };
+    let plain = error(&["info", "--project", &gone]);
+    assert!(plain.contains("gone.ecproj"), "{plain}");
+    // saving in place, saving elsewhere, or not saving: the error is the one opening gives
+    for save in [&["--save"][..], &["--save-as", gone.as_str()], &["--save-as", other.as_str()], &[]] {
+        let args = [&["exec", "project.newFolder", r#"{"name":"copy-only"}"#, "--project", &gone][..], save].concat();
+        assert_eq!(error(&args), plain, "{save:?}");
+    }
+    assert!(!dir.join(".gone.ecproj.lock").exists());
+    assert!(!dir.join("other.ecproj").exists());
+    // a project with --bridge stays a usage error
+    assert_eq!(bin().args(["exec", "project.newFolder", "--bridge", "9877", "--project", &gone, "--save"]).output().unwrap().status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `run --args-file` reads its command / params pairs from a file, one per line: a batch longer
 /// than a Windows command line (32 767 characters, os error 206) still runs.
 #[test]
@@ -136,7 +327,14 @@ fn run_reads_arguments_from_a_file() {
 /// Run with `stdin` piped in; returns (exit code, stdout, stderr).
 fn run_with_stdin(args: &[&str], stdin: &str) -> (i32, String, String) {
     let mut child = bin().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    // The child may exit before it has read all of standard input (the usage-error cases below
+    // exit with code 2 without draining stdin), so a broken pipe while writing is that early
+    // exit, not a failure of this helper; the assertions on the returned output still hold.
+    let mut stdin_pipe = child.stdin.take().unwrap();
+    if let Err(err) = stdin_pipe.write_all(stdin.as_bytes()) {
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe, "writing the child's standard input: {err}");
+    }
+    drop(stdin_pipe);
     let out = child.wait_with_output().unwrap();
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }

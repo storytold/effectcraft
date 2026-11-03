@@ -314,6 +314,8 @@ pub struct EffectcraftApp {
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
     /// (`None` texture: a half-float frame, drawn by the display pass.)
     pub(crate) viewer_shown: Option<(Option<egui::TextureId>, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames and
     /// half-float frames fill it on demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,

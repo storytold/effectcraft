@@ -77,6 +77,7 @@ impl EffectcraftApp {
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,
             viewer_shown: None,
+            crypto_probe_busy: Default::default(),
             viewer_image: None,
             viewer_f16: None,
             window_wgpu: None,

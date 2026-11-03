@@ -611,7 +611,9 @@ fn fxs_motiontile(@builtin(global_invocation_id) gid: vec3<u32>) {
             fy = 1.0 - fy;
         }
     }
-    textureStore(out, p, sample_bilinear(src, fx * P.f[0].y + P.f[1].x, fy * P.f[0].z + P.f[1].y));
+    // Clamped for the same reason as the CPU path: a fold on a pixel centre samples the
+    // source's geometric edge, where the plain sampler mixes in the transparent outside.
+    textureStore(out, p, sample_bilinear_clamped(src, fx * P.f[0].y + P.f[1].x, fy * P.f[0].z + P.f[1].y));
 }
 
 // CC RepeTile (stylize2::repetile) into a new output size. data: per output column (tile index,

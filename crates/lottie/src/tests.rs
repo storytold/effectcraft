@@ -521,6 +521,44 @@ fn zero_time_stretch_is_not_imported() {
 }
 
 #[test]
+fn embedded_glyphs_are_reported_when_dropped() {
+    let glyph = |ch: &str, fam: &str| json!({"ch": ch, "size": 100, "style": "Regular", "w": 60, "fFamily": fam, "data": {"shapes": []}});
+    let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [], "layers": [],
+        "fonts": {"list": [{"fName": "Sans-Regular", "fFamily": "Sans", "fStyle": "Regular"}]},
+        "chars": [glyph("A", "Sans"), glyph("B", ""), glyph("C", "Serif")]});
+    let warnings = |doc: &Json| import(&mut Project::default(), doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().warnings;
+    // A blank family name is left out, not listed as "of , …".
+    assert_eq!(warnings(&doc), ["embedded glyphs (`chars`) of Sans, Serif are not imported; text uses the installed fonts"]);
+    let blank = json!({"w": 20, "h": 20, "fr": 30, "layers": [], "chars": [glyph("A", " ")]});
+    assert_eq!(warnings(&blank), ["embedded glyphs (`chars`) are not imported; text uses the installed fonts"]);
+}
+
+#[test]
+fn legacy_closed_flags_close_masks_and_paths() {
+    // Bodymovin 3.x and early 4.x put the closed flag on the mask (`cl`) and on the `sh` item
+    // (`closed`), with no `c` in the path. An open mask would leave the solid whole.
+    let square = json!({"i": [[0, 0], [0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0], [0, 0]], "v": [[5, 5], [15, 5], [15, 15], [5, 15]]});
+    let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [], "layers": [
+        {"ty": 4, "ind": 1, "ip": 0, "op": 30, "st": 0, "ks": {},
+         "shapes": [{"ty": "sh", "closed": true, "ks": {"k": [{"t": 0, "s": [square], "e": [square]}, {"t": 10}]}}]},
+        {"ty": 1, "ind": 2, "sc": "#ff0000", "sw": 20, "sh": 20, "ip": 0, "op": 30, "st": 0, "ks": {},
+         "masksProperties": [{"mode": "a", "cl": true, "pt": {"k": square}}]}]});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let comp = q.comp(nc).unwrap();
+    let closed = |v: &Value| matches!(v, Value::Path(sp) if sp.closed);
+    let shape = comp.layers[0].props.sub("contents").unwrap().groups().next().unwrap();
+    let keys = &shape.get("path").unwrap().keys;
+    assert_eq!(keys.len(), 2);
+    assert!(keys.iter().all(|k| closed(&k.value)));
+    let mask = comp.layers[1].masks().unwrap().groups().next().unwrap();
+    assert!(closed(&mask.get("path").unwrap().value));
+    let img = render_frame(&q, nc, s(0.0), 1.0);
+    assert_eq!(img.data[0][3], 0.0, "the mask cuts the corner away");
+    assert!(img.data[10 * 20 + 10][3] > 0.99);
+}
+
+#[test]
 fn precomp_with_time_remap() {
     let (mut p, cid) = setup();
     let inner = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(Comp::new(100, 100, FrameRate::FPS_30, s(2.0)).into()));
