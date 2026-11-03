@@ -70,9 +70,36 @@ fn with_manifest(mut attrs: LayerAttributes) -> LayerAttributes {
 
 /// One part: `list` channels over a data window of `size` at `pos`.
 fn part(name: Option<&str>, list: &[(&str, Kind)], size: (usize, usize), pos: (i32, i32), compression: Compression) -> Layer<AnyChannels<FlatSamples>> {
+    part_with(name, list, size, pos, encoding(compression))
+}
+
+/// [`part`] with its own block layout (tiles) and line order.
+fn part_with(name: Option<&str>, list: &[(&str, Kind)], size: (usize, usize), pos: (i32, i32), encoding: Encoding) -> Layer<AnyChannels<FlatSamples>> {
     let mut attrs = name.map_or_else(LayerAttributes::default, LayerAttributes::named);
     attrs.layer_position = Vec2(pos.0, pos.1);
-    Layer::new(size, with_manifest(attrs), encoding(compression), channels(list, size))
+    Layer::new(size, with_manifest(attrs), encoding, channels(list, size))
+}
+
+/// A tiled single-part file of `list` with mip levels down to 1×1 (each level its own values);
+/// the picture and the channels are its largest level.
+fn mipmapped(list: &[(&str, Kind)], compression: Compression) -> Vec<u8> {
+    let levels = |name: &str, kind: Kind, c: usize| {
+        let (mut data, mut size) = (vec![], (W, H));
+        loop {
+            data.push(channel(name, kind, size, c + data.len()).sample_data);
+            if size == (1, 1) {
+                break;
+            }
+            size = ((size.0 / 2).max(1), (size.1 / 2).max(1));
+        }
+        AnyChannel::new(name, Levels::Mip { rounding_mode: exr::math::RoundingMode::Down, level_data: data.into() })
+    };
+    let list: Vec<AnyChannel<Levels<FlatSamples>>> = list.iter().enumerate().map(|(c, (n, k))| levels(n, *k, c)).collect();
+    let encoding = Encoding { compression, blocks: Blocks::Tiles(Vec2(16, 16)), line_order: LineOrder::Increasing };
+    let layer = Layer::new((W, H), with_manifest(LayerAttributes::default()), encoding, AnyChannels::sort(list.into()));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    Image::from_layer(layer).write().non_parallel().to_buffered(&mut bytes).unwrap();
+    bytes.into_inner()
 }
 
 /// Encode `layers` with the display window `display` (position, size).
@@ -176,6 +203,63 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
         ("layered_window_larger_piz", write(vec![part(None, &layered, (45, 30), (-4, -3), Compression::PIZ)], origin), true),
         ("unnamed_rgb_plus_layers_dwaa", write(vec![part(None, &unnamed_plus, full, (0, 0), Compression::DWAA(None))], origin), false),
         ("layered_dwaa", write(vec![part(None, &layered, full, (0, 0), Compression::DWAA(None))], origin), false),
+        (
+            "unnamed_rgb_plus_layers_tiled_zip16",
+            write(
+                vec![part_with(None, &unnamed_plus, (30, 20), (3, 2), Encoding { blocks: Blocks::Tiles(Vec2(16, 8)), ..encoding(Compression::ZIP16) })],
+                origin,
+            ),
+            true,
+        ),
+        (
+            "layered_tiled_rle",
+            write(vec![part_with(None, &layered, full, (0, 0), Encoding { blocks: Blocks::Tiles(Vec2(8, 8)), ..encoding(Compression::RLE) })], origin),
+            true,
+        ),
+        ("unnamed_rgb_plus_layers_mipmapped_zip16", mipmapped(&unnamed_plus, Compression::ZIP16), true),
+        ("layered_mipmapped_piz", mipmapped(&layered, Compression::PIZ), true),
+        (
+            "unnamed_rgb_plus_layers_decreasing_zip1",
+            write(
+                vec![part_with(None, &unnamed_plus, (20, 10), (5, 7), Encoding { line_order: LineOrder::Decreasing, ..encoding(Compression::ZIP1) })],
+                origin,
+            ),
+            true,
+        ),
+        (
+            "layered_decreasing_rle",
+            write(vec![part_with(None, &layered, full, (0, 0), Encoding { line_order: LineOrder::Decreasing, ..encoding(Compression::RLE) })], origin),
+            true,
+        ),
+        ("unnamed_rgb_plus_layers_uncompressed", write(vec![part(None, &unnamed_plus, (20, 10), (-3, 4), Compression::Uncompressed)], origin), true),
+        ("layered_uncompressed", write(vec![part(None, &layered, full, (0, 0), Compression::Uncompressed)], origin), true),
+        (
+            "uint_rgb_zip16",
+            write(
+                vec![part(
+                    None,
+                    &[("R", Kind::Uint), ("G", Kind::Uint), ("B", Kind::Uint), ("A", Kind::Half), ("depth.Z", Kind::Float)],
+                    full,
+                    (0, 0),
+                    Compression::ZIP16,
+                )],
+                origin,
+            ),
+            true,
+        ),
+        (
+            // The image crate shows the part "depth" (the first with R, G and B), whose planes are
+            // filled with the background depth outside its data window: decoded by the image crate.
+            "multipart_depth_named_rgb_zip16",
+            write(
+                vec![
+                    part(Some("depth"), &[("R", Kind::Half), ("G", Kind::Half), ("B", Kind::Half)], (20, 10), (5, 7), Compression::ZIP16),
+                    part(Some("beauty"), &RGBA_HALF, full, (0, 0), Compression::ZIP16),
+                ],
+                origin,
+            ),
+            true,
+        ),
     ]
 }
 
@@ -331,6 +415,76 @@ const PINNED: &[(&str, &str, u64)] = &[
     ("layered_window_larger_piz", "ignore/linear", 0xaa01706accce2cc4),
     ("layered_window_larger_piz", "preserve_rgb", 0xb2cbb40b10bc56b4),
     ("layered_window_larger_piz", "aux", 0xb7d91c8eea56a772),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "probe", 0x0a32e074a28c1f66),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "probed/linear", 0x7612f20634fe957e),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "straight/linear", 0xaa5f42cb6a31c78a),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "premul/linear", 0x7612f20634fe957e),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "ignore/linear", 0xbbf236635dcaac90),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "preserve_rgb", 0x15b555a243d79613),
+    ("unnamed_rgb_plus_layers_tiled_zip16", "aux", 0x3d1439eed2202e41),
+    ("layered_tiled_rle", "probe", 0x0a32e074a28c1f66),
+    ("layered_tiled_rle", "probed/linear", 0xa84600283dce98f6),
+    ("layered_tiled_rle", "straight/linear", 0xf028e1367a2fbb30),
+    ("layered_tiled_rle", "premul/linear", 0xa84600283dce98f6),
+    ("layered_tiled_rle", "ignore/linear", 0xa90a57f9a67f7468),
+    ("layered_tiled_rle", "preserve_rgb", 0xc8e0050f5efe75b7),
+    ("layered_tiled_rle", "aux", 0xa6b9bd9f02c192ad),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "probe", 0x0a32e074a28c1f66),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "probed/linear", 0xa84600283dce98f6),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "straight/linear", 0xf028e1367a2fbb30),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "premul/linear", 0xa84600283dce98f6),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "ignore/linear", 0xa90a57f9a67f7468),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "preserve_rgb", 0xc8e0050f5efe75b7),
+    ("unnamed_rgb_plus_layers_mipmapped_zip16", "aux", 0x27cc9b53d0862db1),
+    ("layered_mipmapped_piz", "probe", 0x0a32e074a28c1f66),
+    ("layered_mipmapped_piz", "probed/linear", 0xa84600283dce98f6),
+    ("layered_mipmapped_piz", "straight/linear", 0xf028e1367a2fbb30),
+    ("layered_mipmapped_piz", "premul/linear", 0xa84600283dce98f6),
+    ("layered_mipmapped_piz", "ignore/linear", 0xa90a57f9a67f7468),
+    ("layered_mipmapped_piz", "preserve_rgb", 0xc8e0050f5efe75b7),
+    ("layered_mipmapped_piz", "aux", 0xa6b9bd9f02c192ad),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "probe", 0x0a32e074a28c1f66),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "probed/linear", 0x19eb3b1a88d108a7),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "straight/linear", 0x2c73f9acaa936420),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "premul/linear", 0x19eb3b1a88d108a7),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "ignore/linear", 0x3b86057d18a16bf0),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "preserve_rgb", 0x5b999014e4a64bb2),
+    ("unnamed_rgb_plus_layers_decreasing_zip1", "aux", 0x8f78d3233450acf3),
+    ("layered_decreasing_rle", "probe", 0x0a32e074a28c1f66),
+    ("layered_decreasing_rle", "probed/linear", 0xa84600283dce98f6),
+    ("layered_decreasing_rle", "straight/linear", 0xf028e1367a2fbb30),
+    ("layered_decreasing_rle", "premul/linear", 0xa84600283dce98f6),
+    ("layered_decreasing_rle", "ignore/linear", 0xa90a57f9a67f7468),
+    ("layered_decreasing_rle", "preserve_rgb", 0xc8e0050f5efe75b7),
+    ("layered_decreasing_rle", "aux", 0xa6b9bd9f02c192ad),
+    ("unnamed_rgb_plus_layers_uncompressed", "probe", 0x0a32e074a28c1f66),
+    ("unnamed_rgb_plus_layers_uncompressed", "probed/linear", 0xa27668bf31d9426b),
+    ("unnamed_rgb_plus_layers_uncompressed", "straight/linear", 0xfc73fe89457ce029),
+    ("unnamed_rgb_plus_layers_uncompressed", "premul/linear", 0xa27668bf31d9426b),
+    ("unnamed_rgb_plus_layers_uncompressed", "ignore/linear", 0xb3276cc5126776d4),
+    ("unnamed_rgb_plus_layers_uncompressed", "preserve_rgb", 0xdee1105fa6e6822a),
+    ("unnamed_rgb_plus_layers_uncompressed", "aux", 0x854a5e84e7aaa5c2),
+    ("layered_uncompressed", "probe", 0x0a32e074a28c1f66),
+    ("layered_uncompressed", "probed/linear", 0xa84600283dce98f6),
+    ("layered_uncompressed", "straight/linear", 0xf028e1367a2fbb30),
+    ("layered_uncompressed", "premul/linear", 0xa84600283dce98f6),
+    ("layered_uncompressed", "ignore/linear", 0xa90a57f9a67f7468),
+    ("layered_uncompressed", "preserve_rgb", 0xc8e0050f5efe75b7),
+    ("layered_uncompressed", "aux", 0xa6b9bd9f02c192ad),
+    ("uint_rgb_zip16", "probe", 0x0a32e074a28c1f66),
+    ("uint_rgb_zip16", "probed/linear", 0xed89310ef0cdb9fd),
+    ("uint_rgb_zip16", "straight/linear", 0xf9fe11ab8ed97cc8),
+    ("uint_rgb_zip16", "premul/linear", 0xed89310ef0cdb9fd),
+    ("uint_rgb_zip16", "ignore/linear", 0xf78cd263c0d74f12),
+    ("uint_rgb_zip16", "preserve_rgb", 0x2a19d67b07cf4359),
+    ("uint_rgb_zip16", "aux", 0x03e42411f8521856),
+    ("multipart_depth_named_rgb_zip16", "probe", 0x6a38346c4c5662d5),
+    ("multipart_depth_named_rgb_zip16", "probed/linear", 0x3b86057d18a16bf0),
+    ("multipart_depth_named_rgb_zip16", "straight/linear", 0x3b86057d18a16bf0),
+    ("multipart_depth_named_rgb_zip16", "premul/linear", 0x869374e9b0384cea),
+    ("multipart_depth_named_rgb_zip16", "ignore/linear", 0x3b86057d18a16bf0),
+    ("multipart_depth_named_rgb_zip16", "preserve_rgb", 0x3b86057d18a16bf0),
+    ("multipart_depth_named_rgb_zip16", "aux", 0x0fa56884e83b4417),
 ];
 
 #[test]
