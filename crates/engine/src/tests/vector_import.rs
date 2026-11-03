@@ -383,3 +383,31 @@ fn psd_with_damaged_layer_section_imports_the_flattened_image() {
     let ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!() };
     assert!(f.layer.is_none(), "the merged image, not a Photoshop layer");
 }
+
+/// A vector footage thumbnail is drawn at the thumbnail's size, never at its declared size.
+#[test]
+fn vector_footage_thumbnails_are_drawn_at_thumbnail_size() {
+    use std::sync::{Arc, Mutex};
+
+    use effectcraft_project::{Footage, ItemId};
+    use effectcraft_raster::Image;
+    use effectcraft_time::Tick;
+
+    struct Vector(Mutex<Vec<f64>>);
+    impl crate::render::FootageSource for Vector {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            panic!("the full-size frame was decoded");
+        }
+        fn vector_frame(&self, _: ItemId, f: &Footage, scale: f64) -> Option<Arc<Image>> {
+            self.0.lock().unwrap().push(scale);
+            Some(Arc::new(Image::new((f.width as f64 * scale).ceil() as u32, (f.height as f64 * scale).ceil() as u32)))
+        }
+    }
+    let source = Arc::new(Vector(Mutex::new(vec![])));
+    let mut s = Session { footage: source.clone(), ..Default::default() };
+    let f = Footage { path: "/m/huge.svg".into(), codec: "SVG".into(), width: 16_000, height: 8_000, has_video: true, ..Default::default() };
+    let item = std::sync::Arc::make_mut(&mut s.project).add_item("huge.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
+    let (w, h, _) = (s.thumbnail_job(item, Tick::ZERO, 64).unwrap())().unwrap();
+    assert_eq!((w, h), (64, 32));
+    assert_eq!(*source.0.lock().unwrap(), [64.0 / 16_000.0]);
+}
