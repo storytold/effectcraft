@@ -19,7 +19,14 @@ impl PathMeasure {
         let mut closed = false;
         let mut started = false;
         let mut done = false;
-        kurbo::flatten(path.iter(), 0.05, |el| {
+        // The tolerance grows with the path's size (0.05 for ordinary layer-sized paths): a
+        // path with huge coordinates would otherwise flatten into hundreds of millions of points.
+        let bbox = kurbo::Shape::bounding_box(path);
+        let size = bbox.width().max(bbox.height());
+        if !size.is_finite() {
+            done = true;
+        }
+        kurbo::flatten(path.iter(), 0.05_f64.max(size * 1e-6), |el| {
             if done {
                 return;
             }
@@ -127,6 +134,21 @@ pub fn arc_positions(xs: &[f64], line: [f64; 2], align: u8, length: f64, first_m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_curve_flattens_into_a_bounded_number_of_points() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((1e15, 0.0), (1e15, 1e15), (0.0, 1e15));
+        let m = PathMeasure::new(&p, false);
+        assert!(m.pts.len() < 100_000, "{}", m.pts.len());
+        assert!(m.length() > 1e15);
+        // Non-finite coordinates measure nothing.
+        let mut q = BezPath::new();
+        q.move_to((0.0, 0.0));
+        q.curve_to((f64::INFINITY, 0.0), (1.0, 1.0), (2.0, 0.0));
+        assert_eq!(PathMeasure::new(&q, false).pts.len(), 0);
+    }
 
     #[test]
     fn measures_a_line_and_a_circle() {
