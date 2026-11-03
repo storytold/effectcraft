@@ -268,8 +268,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         hresp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, &shown));
         app.auto.add(&format!("effectControls.effect.{}", g.uid), r, &g.name);
         if hresp.clicked() || hresp.drag_started() || hresp.secondary_clicked() {
-            let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-            if add && hresp.clicked() {
+            let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+            if shift && hresp.clicked() {
+                // A range from the last effect picked, which stays the end the next range starts from.
+                let from = app.session.state.selected_props.iter().rev().find_map(|(l, u)| fx.iter().position(|f| *l == layer.id && f.uid == *u));
+                let from = from.unwrap_or(fi);
+                let range = fx.iter().enumerate().filter(|(i, _)| (from.min(fi)..=from.max(fi)).contains(i));
+                let mut picked: Vec<_> = range.filter(|(i, _)| *i != from).map(|(_, f)| (layer.id, f.uid)).collect();
+                picked.extend(fx.get(from).map(|f| (layer.id, f.uid)));
+                app.session.state.selected_props = picked;
+            } else if command && hresp.clicked() {
                 if selected {
                     app.session.state.selected_props.retain(|(l, u)| !(*l == layer.id && *u == g.uid));
                 } else {
