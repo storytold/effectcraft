@@ -80,6 +80,7 @@ mod fx_transition;
 mod fx_vr;
 mod fx_warp;
 mod inpaint;
+mod memcap;
 mod ops;
 mod particles;
 mod readback;

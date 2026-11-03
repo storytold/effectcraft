@@ -108,8 +108,9 @@ pub trait Accelerator: Send + Sync {
     fn pass_begin(&self) {}
     /// A rendered comp frame is done (the GPU pool ages sizes no frame asks for, and evicts
     /// only those once full). The multi-frame render paths call it once per comp frame:
-    /// [`crate::passes::comp_frame`] (exports; a field-rendered output frame is two), remote frames
-    /// and the preview workers. One-off renders (`Session::render`, single-frame export,
+    /// [`crate::passes::comp_frame`] (exports; a field-rendered output frame is two), the
+    /// export's 4:2:0 frames ([`Accelerator::comp_frame_yuv420`]), remote frames and the
+    /// preview workers. One-off renders (`Session::render`, single-frame export,
     /// thumbnails) don't, so they don't advance the pool's clock. Without it the pool never
     /// finds a stale size and keeps its first sizes, dropping newcomers.
     fn frame_end(&self) {}
