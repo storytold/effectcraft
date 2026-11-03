@@ -433,6 +433,19 @@ FCM: NON-DROP FRAME
     assert_eq!(linked, Some(false));
 }
 
+/// Only an EDL's guessed paths are probed: an OTIO missing reference also gets a path built from
+/// the clip name, and a same-named file beside the document is not the intended clip.
+#[test]
+fn otio_missing_reference_stays_a_placeholder_even_with_a_file_of_that_name() {
+    let otio = r#"{"OTIO_SCHEMA":"Timeline.1","name":"t","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","name":"tracks","children":[{"OTIO_SCHEMA":"Track.1","name":"V1","kind":"Video","children":[{"OTIO_SCHEMA":"Clip.2","name":"a.mov","source_range":{"OTIO_SCHEMA":"TimeRange.1","start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":25.0,"value":0.0},"duration":{"OTIO_SCHEMA":"RationalTime.1","rate":25.0,"value":50.0}},"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"MissingReference.1","name":"","available_range":null}},"active_media_reference_key":"DEFAULT_MEDIA"}]}]}}"#;
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "t.otio".into(), edl_frame_rate: None, base_dir: Some("/work".into()) };
+    let mut probe_any = |path: &str| probe(path);
+    let r = import(&mut p, otio.as_bytes(), None, &opts, &mut probe_any).unwrap();
+    assert_eq!(r.format, Some(TimelineFormat::Otio));
+    assert!(!r.missing.is_empty(), "the missing reference stays a placeholder: {:?}", r.warnings);
+}
+
 /// A drop-frame list counts its hour in timecode: a clip cut at 01:00:00;00 (3599.996 s at 29.97
 /// fps) from a missing file is still named.
 #[test]

@@ -175,7 +175,16 @@ pub fn import(
     }
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
-    let mut im = Importer { src: &imported.project, project, res, items: HashMap::new(), solids: HashMap::new(), solids_folder: None, bins: HashMap::new() };
+    let mut im = Importer {
+        src: &imported.project,
+        project,
+        res,
+        items: HashMap::new(),
+        solids: HashMap::new(),
+        solids_folder: None,
+        bins: HashMap::new(),
+        probe_offline: format == TimelineFormat::Edl,
+    };
     im.run(&imported.sequences, &mut probe_once);
     Ok(im.res)
 }
@@ -240,6 +249,11 @@ struct Importer<'a> {
     solids_folder: Option<ItemId>,
     /// Folder of each source item (from the bins).
     bins: HashMap<fp::ItemId, ItemId>,
+    /// Probe media the reader flags offline too. An EDL line without `SOURCE FILE` names its clip and
+    /// FilmCraft guesses the path beside the list; other readers flag media offline for other reasons
+    /// (an OTIO missing reference also gets a guessed path), and a same-named file there is not
+    /// the intended clip.
+    probe_offline: bool,
 }
 
 impl Importer<'_> {
@@ -312,10 +326,11 @@ impl Importer<'_> {
     }
 
     fn footage(&mut self, name: &str, path: &str, m: &fp::MediaClip, probe: &mut dyn FnMut(&str) -> Option<Footage>) -> Footage {
-        // Offline media is probed too: a reader flags a clip offline when it can only guess the
-        // path (an EDL line without `SOURCE FILE` names the clip, and the file may sit beside the
-        // list). A path that is not there probes to nothing and stays a placeholder.
-        if let Some(mut f) = probe(path) {
+        // An EDL's offline media is probed: the clip is named and the file may sit beside the list.
+        // A path that is not there probes to nothing and stays a placeholder.
+        if (!m.offline || self.probe_offline)
+            && let Some(mut f) = probe(path)
+        {
             if let Some(r) = m.interpret.frame_rate
                 && matches!(f.kind, FootageKind::Video | FootageKind::Sequence)
             {
