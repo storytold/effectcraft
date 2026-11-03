@@ -477,18 +477,36 @@ fn a_newer_viewer_frame_drops_the_ones_still_waiting() {
     assert_eq!(f.inflight(), 3, "dropped frames aren't in flight: the viewer can ask again");
 }
 
-/// Each time the GPU runs out of memory, half as many GPU frames are kept, down to a floor.
+/// One OOM burst halves once; separate episodes back off to a floor and healthy GPU work recovers.
 #[test]
 fn running_out_of_video_memory_halves_the_gpu_frame_budget() {
     let f = Frames::default();
     let mut c = f.cache.lock().unwrap();
     assert_eq!(c.gpu_budget, GPU_BUDGET);
+    assert!(c.gpu_ready());
     c.gpu_out_of_memory();
+    assert!(!c.gpu_ready(), "allocation failures must not be retried for every frame");
     assert_eq!(c.gpu_budget, GPU_BUDGET / 2);
     for _ in 0..20 {
         c.gpu_out_of_memory();
     }
+    assert_eq!(c.gpu_budget, GPU_BUDGET / 2, "one burst must not collapse the shared budget");
+    for _ in 0..20 {
+        c.gpu_pressure = None;
+        c.gpu_out_of_memory();
+    }
     assert_eq!(c.gpu_budget, MIN_GPU_BUDGET);
+    let before = web_time::Instant::now() - GPU_RECOVERY_INTERVAL;
+    c.gpu_pressure = Some(before);
+    assert!(c.gpu_ready(), "GPU attempts resume after the cooldown");
+    c.gpu_adjusted = Some(before);
+    c.gpu_succeeded();
+    assert_eq!(c.gpu_budget, 2 * MIN_GPU_BUDGET);
+    c.gpu_succeeded();
+    assert_eq!(c.gpu_budget, 2 * MIN_GPU_BUDGET, "recovery is paced");
+    drop(c);
+    f.clear();
+    assert_eq!(f.cache.lock().unwrap().gpu_budget, GPU_BUDGET);
 }
 
 #[test]
@@ -1191,9 +1209,9 @@ fn half_float_frames_count_twice_the_bytes() {
 fn half_float_frames_survive_in_the_disk_cache() {
     use effectcraft_engine::Session;
     use serde_json::json;
-    let dir = std::env::temp_dir().join(format!("ec-f16-disk-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    // Removed on drop, a failed assertion included.
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 1 << 30).unwrap();
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"width": 16, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
     s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb", "hdr": "compand"})).unwrap();
@@ -1230,7 +1248,15 @@ fn half_float_frames_survive_in_the_disk_cache() {
     let first = Frames::default();
     let (key, rendered) = shown(&first, &disk);
     assert!(rendered.pixel(0).unwrap()[0] > 1.0, "over range, without the HDR step");
-    disk.flush();
+    // The worker releases the frame before it queues the disk write: wait for the entry, not
+    // only for the queue to drain.
+    for _ in 0..400 {
+        disk.flush();
+        if disk.stats().entries >= 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(disk.stats().entries, 1, "written as a frame entry");
     // The timeline's blue bar: on disk, not in this (new) RAM cache.
     let again = Frames::default();
@@ -1247,5 +1273,4 @@ fn half_float_frames_survive_in_the_disk_cache() {
     assert_eq!(disk.stats().hits, hits + 1, "read from the disk cache");
     assert_eq!(read.bits(), rendered.bits());
     assert_eq!(read.encoding, rendered.encoding);
-    let _ = std::fs::remove_dir_all(&dir);
 }
