@@ -1182,8 +1182,7 @@ pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, Stri
                     return Err(format!("variations: at most {MAX_VARIATION_AXES} axes"));
                 }
                 // One keyed merge (the result sorted by tag), applied only when every entry is valid.
-                let mut axes: std::collections::BTreeMap<String, f32> =
-                    if m.is_empty() { Default::default() } else { s.variations.iter().cloned().collect() };
+                let mut axes: std::collections::BTreeMap<String, f32> = if m.is_empty() { Default::default() } else { s.variations.iter().cloned().collect() };
                 for (tag, val) in m {
                     if tag.is_empty() || tag.len() > 4 {
                         return Err(format!("variations: `{tag}` is not an axis tag"));
