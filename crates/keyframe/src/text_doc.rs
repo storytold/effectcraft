@@ -977,7 +977,18 @@ impl TextDoc {
             if r.start >= r.end && n > 0 {
                 return Ok(true);
             }
-            self.apply_style(r.start..r.end.max(r.start + usize::from(n == 0)), |s| {
+            let range = r.start..r.end.max(r.start + usize::from(n == 0));
+            // Check every affected run first, so a value one run refuses changes none of them.
+            let mut err = None;
+            self.apply_style(range.clone(), |s| {
+                if let Err(e) = apply_char_attr(&mut s.clone(), key, v) {
+                    err.get_or_insert(e);
+                }
+            });
+            if let Some(e) = err {
+                return Err(e);
+            }
+            self.apply_style(range, |s| {
                 let _ = apply_char_attr(s, key, v);
             });
             return Ok(true);
@@ -1352,6 +1363,18 @@ mod tests {
         let _ = doc.set_attr("variations", &serde_json::json!({"zzzz": 1}), None);
         assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
         assert!(!doc.style_at(0).variations.iter().any(|(t, _)| t == "zzzz"));
+    }
+
+    #[test]
+    fn refused_variation_leaves_every_run_unchanged() {
+        // "ab" is at the axis limit; "cd" has none. Three new axes over both runs must be refused
+        // for both, not applied to "cd" only.
+        let mut doc = TextDoc::plain("abcd");
+        let fill: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES).map(|i| (format!("b{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(fill), Some(0..2)).unwrap());
+        assert!(doc.set_attr("variations", &serde_json::json!({"x1": 1, "x2": 1, "x3": 1}), None).is_err());
+        assert_eq!(doc.style_at(3).variations.len(), 0);
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
     }
 
     #[test]
