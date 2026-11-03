@@ -155,8 +155,16 @@ impl RotoData {
     pub fn strokes_of(&self, frame: i64, object: u32) -> Vec<&Stroke> {
         self.strokes.iter().filter(|s| s.frame == frame && (s.object == object || matches!(s.kind, StrokeKind::Refine | StrokeKind::RefineErase))).collect()
     }
+    /// The stored span cut to at most MAX_CHAIN frames either side of the base: a project's
+    /// numbers must not make one render build billions of keys. Frames past it have no key.
+    fn bounded_span(&self, base: i64) -> [i64; 2] {
+        [self.span[0].max(base.saturating_sub(MAX_CHAIN)), self.span[1].min(base.saturating_add(MAX_CHAIN))]
+    }
     pub fn in_span(&self, f: i64) -> bool {
-        self.base.is_some() && f >= self.span[0] && f <= self.span[1]
+        self.base.is_some_and(|b| {
+            let span = self.bounded_span(b);
+            f >= span[0] && f <= span[1]
+        })
     }
     /// Add a stroke: the first segmentation stroke sets the base frame and a span of
     /// `default_span` frames each side (clamped to `limits`); strokes outside the span extend it.
@@ -201,12 +209,13 @@ impl RotoData {
         let k0 = key(seed, base);
         out.insert(base, k0);
         let mut k = k0;
-        // A stored span reaches at most MAX_CHAIN frames either side of the base: a project's
-        // numbers must not make one render build billions of keys.
-        let span = [self.span[0].max(base.saturating_sub(MAX_CHAIN)), self.span[1].min(base.saturating_add(MAX_CHAIN))];
-        for f in base + 1..=span[1] {
-            k = key(k, f);
-            out.insert(f, k);
+        let span = self.bounded_span(base);
+        // `base + 1` only when there is a frame after the base (it overflows at i64::MAX).
+        if base < span[1] {
+            for f in base + 1..=span[1] {
+                k = key(k, f);
+                out.insert(f, k);
+            }
         }
         k = k0;
         for f in (span[0]..base).rev() {
