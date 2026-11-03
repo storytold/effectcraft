@@ -667,6 +667,8 @@ fn save_frame_to_png_writes_behind_the_file_gate() {
 #[test]
 fn export_commands_run_directly_by_a_script_respect_the_file_gate() {
     let dir = std::env::temp_dir().join(format!("ec-direct-export-{}", std::process::id()));
+    // A leftover dir from an interrupted run (same pid) must not feed stale absence checks.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let png = dir.join("frame.png");
     let tpl = dir.join("card.ectemplate");
