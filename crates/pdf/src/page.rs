@@ -842,7 +842,6 @@ impl<'a> Interp<'a> {
         self.gs = saved_gs;
         self.saved = saved_stack;
         self.path = saved_path;
-        let cell_shapes = cell_b.shapes;
         let (cell, _, sk) = cell_b.finish();
         for s in sk {
             self.b.skip(&s);
@@ -867,10 +866,19 @@ impl<'a> Interp<'a> {
             self.b.skip("tiling pattern (too many tiles)");
             return;
         }
-        // Every tile copies the cell: the shapes copied count as operations, so nested
-        // patterns cannot multiply a cell past the budget.
+        // Every tile copies the cell: the nodes copied (shapes, images and groups, with what the
+        // groups hold) count as operations, so nested patterns cannot multiply a cell past the
+        // budget.
         let tiles_n = ((i1 - i0 + 1.0) * (j1 - j0 + 1.0)).max(1.0) as usize;
-        let Some(cost) = tiles_n.checked_mul(cell_shapes.max(1)).filter(|c| *c <= self.budget) else {
+        let mut cell_nodes = 0usize;
+        let mut pending: Vec<&Node> = cell.iter().collect();
+        while let Some(n) = pending.pop() {
+            cell_nodes += 1;
+            if let Node::Group(g) = n {
+                pending.extend(g.children.iter());
+            }
+        }
+        let Some(cost) = tiles_n.checked_mul(cell_nodes.max(1)).filter(|c| *c <= self.budget) else {
             self.b.skip("tiling pattern (operation limit)");
             return;
         };
@@ -1079,7 +1087,11 @@ impl<'a> Interp<'a> {
             Fill::Color(c) => *c,
             _ => [0.0; 3],
         };
-        let cache_key = key.map(|k| (k, fill.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)));
+        // A named colour space other than a device one is looked up in `res`, which differs
+        // between placements, so those images are decoded each time.
+        let named_space =
+            self.file.get(d, "ColorSpace").and_then(Obj::name).is_some_and(|n| !matches!(n, "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "G" | "RGB" | "CMYK"));
+        let cache_key = key.filter(|_| !named_space).map(|k| (k, fill.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)));
         let decoded = match cache_key.as_ref().and_then(|k| self.images.get(k)) {
             Some(img) => img.clone(),
             None => {
