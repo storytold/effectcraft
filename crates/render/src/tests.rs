@@ -1463,6 +1463,37 @@ fn an_instance_of_a_model_is_cached_and_follows_the_camera() {
     assert!(b < a - 20.0, "panning the camera right moves the copy left: {a} -> {b}");
 }
 
+/// A referenced 3D model is read as the comp's pixels already: with Sampling Space set to Comp
+/// the copy stays where the model is drawn when the owner moves, instead of moving with it.
+#[test]
+fn a_model_read_in_comp_space_stays_where_the_model_is_drawn() {
+    let t = Tick::from_seconds_f64(1.0);
+    let scene = |space: u32, dx: f64| {
+        let (mut p, cid) = instance_scene(0.0);
+        let c = p.comp_mut(cid).unwrap();
+        // Only the copy: the model itself is not composited. Off the comp's centre, where its
+        // layer space and the comp's differ.
+        let model = &mut c.layers[2];
+        model.switches.video = false;
+        let pos = model.props.prop_mut("transform/position").unwrap();
+        let Value::Vec3(v) = pos.value else { panic!("position: {:?}", pos.value) };
+        pos.value = Value::Vec3([v[0] - 25.0, v[1], v[2]]);
+        let owner = &mut c.layers[1];
+        owner.props.prop_mut("effects/#1/layerSpace").unwrap().value = Value::Enum(space);
+        let pos = owner.props.prop_mut("transform/position").unwrap();
+        let Value::Vec3(v) = pos.value else { panic!("position: {:?}", pos.value) };
+        pos.value = Value::Vec3([v[0] + dx, v[1], v[2]]);
+        render_models(&p, cid, t, None)
+    };
+    let layer_space = cover_x(&scene(0, 0.0));
+    // The owner fills the comp: both spaces agree.
+    let comp_space = cover_x(&scene(1, 0.0));
+    assert!((comp_space - layer_space).abs() < 0.5, "{layer_space} vs {comp_space}");
+    // Moving the owner 30 px right moves the layer-space copy with it; the comp-space one stays.
+    assert!((cover_x(&scene(0, 30.0)) - (layer_space + 30.0)).abs() < 1.5);
+    assert!((cover_x(&scene(1, 30.0)) - layer_space).abs() < 1.5);
+}
+
 /// The camera's depth of field blurs the solo render (focus, aperture, iris, highlights) —
 /// none of it is in the projection matrix: changing any of it must change the copy's key, or
 /// it would serve the un-blurred pixels.
@@ -1758,4 +1789,98 @@ fn a_copy_of_an_overridden_clip_is_not_served_the_keyed_clips_pixels() {
     let (keyed, overridden) = (collapsed_clip_scene(false, true), collapsed_clip_scene(true, true));
     assert_same(&render(&keyed, Some(&cache)), &render(&keyed, None), "the keyed clip's copy");
     assert_same(&render(&overridden, Some(&cache)), &render(&overridden, None), "the overridden clip's copy");
+}
+
+#[test]
+fn layer_parameter_comp_sampling_space_lines_up_with_the_comp() {
+    use crate::{EffectHost, FxHost, NoFootage, RenderOpts, Renderer};
+    // A 40x40 matte layer sitting at comp (130..170, 30..70), read by a full-comp layer.
+    let build = |space: u32| {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        let mut matte = solid(&mut p, &comp, [0.0, 1.0, 0.0], 40, 40);
+        matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([150.0, 50.0, 0.0]);
+        matte.switches.video = false;
+        let mid = matte.id.0;
+        add_effect_200(
+            &mut p,
+            &mut l,
+            "ec.channel.setmatte",
+            &[
+                ("takeMatteFromLayer", Value::Layer(Some(mid))),
+                ("takeMatteFromLayerSource", Value::Enum(0)),
+                ("takeMatteFromLayerSpace", Value::Enum(space)),
+                ("stretchMatteToFit", Value::Bool(false)),
+                ("compositeMatteWithOriginal", Value::Bool(false)),
+            ],
+        );
+        let lid = l.id.0;
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(l);
+        c.layers.push(matte);
+        (p, cid, lid, mid)
+    };
+    // Comp space: the matte appears where the matte layer is in the comp, whatever its size.
+    let (p, cid, _, _) = build(1);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(img.get(150, 50)[3] > 0.99, "inside the matte layer's comp footprint");
+    assert!(img.get(100, 50)[3] < 0.01, "outside it: the layer-space centring must not apply");
+    assert!(img.get(10, 10)[3] < 0.01);
+    // Layer space (the default): the 40x40 matte is centred on the 200x100 layer instead.
+    let (p, cid, _, _) = build(0);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(img.get(100, 50)[3] > 0.99 && img.get(150, 50)[3] < 0.01);
+    // Host level: the result has the running layer's size and grid.
+    let (p, cid, lid, mid) = build(1);
+    let c = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
+    let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let l = c.layers.iter().find(|l| l.id.0 == lid).unwrap();
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
+    let own = host.layer(mid, false).unwrap();
+    assert_eq!(own.size, [40.0, 40.0]);
+    let comp_space = host.to_comp_space(mid, own);
+    assert_eq!(comp_space.size, [200.0, 100.0]);
+    assert_eq!((comp_space.buf.img.width, comp_space.buf.img.height), (200, 100));
+}
+
+#[test]
+fn comp_sampling_space_follows_both_layers_through_the_layer_cache() {
+    // The owner's cached pixels depend on where the owner and the referenced layer sit.
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let mut matte = solid(&mut p, &comp, [0.0, 1.0, 0.0], 40, 40);
+    matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+    matte.switches.video = false;
+    let mid = matte.id.0;
+    add_effect_200(
+        &mut p,
+        &mut l,
+        "ec.channel.setmatte",
+        &[
+            ("takeMatteFromLayer", Value::Layer(Some(mid))),
+            ("takeMatteFromLayerSource", Value::Enum(0)),
+            ("takeMatteFromLayerSpace", Value::Enum(1)),
+            ("compositeMatteWithOriginal", Value::Bool(false)),
+        ],
+    );
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(l);
+    c.layers.push(matte);
+    let cache = crate::LayerCache::default();
+    let at = |p: &Project, x: i64| render_cached(p, cid, Tick::ZERO, Some(&cache)).get(x, 50)[3];
+    assert!(at(&p, 50) > 0.99 && at(&p, 150) < 0.01);
+    // Move the referenced layer.
+    let set = |p: &mut Project, layer: usize, x: f64| {
+        let l = p.comp_mut(cid).and_then(|c| c.layers.get_mut(layer)).unwrap();
+        l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([x, 50.0, 0.0]);
+    };
+    set(&mut p, 1, 150.0);
+    assert!(at(&p, 50) < 0.01 && at(&p, 150) > 0.99, "moving the referenced layer");
+    // Move the layer that owns the effect: the 40x40 matte stays put in the comp, so the
+    // owner (200 wide, now shifted 100 right) still shows it at comp x 150, but a point of the
+    // owner left of it is outside the owner's footprint.
+    set(&mut p, 0, 200.0);
+    assert!(at(&p, 150) > 0.99, "moving the owner keeps the matte where it sits in the comp");
+    assert!(at(&p, 50) < 0.01);
 }

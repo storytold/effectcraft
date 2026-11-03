@@ -411,28 +411,79 @@ fn value_layer_ref(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, val
     let Value::Layer(l) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, r, layer, prop, group, .. } = *cx;
+    let PropCx { t, uid, cy, vx, r, prop, group, .. } = *cx;
     let comp = app.session.active_comp_arc();
     if let Some(comp) = comp {
+        // Source / Masks / Effects & Masks and Sampling Space (Layer / Comp): the hidden
+        // companion parameters, both in one popup next to the layer popup.
+        let src = group.get(&effectcraft_engine::effects::layer_source_id(&prop.match_id));
+        let space = group.get(&effectcraft_engine::effects::layer_space_id(&prop.match_id));
         let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
         if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::unique(("ec-l", uid))) {
             cx.set_step(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
         }
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
-        // Source / Masks / Effects & Masks (the hidden companion parameter).
-        if let Some(src) = group.get(&effectcraft_engine::effects::layer_source_id(&prop.match_id)) {
-            let si = src.value.as_enum() as usize;
-            let opts: Vec<String> = effectcraft_engine::effects::LAYER_SOURCE_OPTIONS.iter().map(|s| s.to_string()).collect();
-            let sr = Rect::from_min_size(pos2(dr.max.x + 6.0, cy - 9.0), vec2(((r.max.x - dr.max.x) - 64.0).clamp(70.0, 120.0), 18.0));
-            let spop = egui::Id::unique(("ec-lspop", uid));
-            if widgets::dropdown(ui, sr, opts.get(si).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("ec-ls", uid))).clicked() {
-                widgets::open_popup(ui, spop);
-            }
-            app.auto.add(&format!("effectControls.prop.{uid}.source"), sr, &src.name);
-            if let Some(ni) = widgets::popup_menu(ui, spop, sr.left_bottom(), &opts, Some(si)) {
-                actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": src.uid, "value": ni})));
-            }
+        if src.is_some() || space.is_some() {
+            // Up to the panel's edge: in a narrow panel (the default workspace's) the popup
+            // shrinks down to just its arrow (the text elides and stays as its tooltip), so it
+            // stays on screen while the layer popup keeps the layer's name readable.
+            companion_popup(app, ui, cx, src, space, pos2(dr.max.x + 6.0, cy - 9.0), (r.max.x - dr.max.x - 12.0).max(24.0), actions);
         }
+    }
+}
+
+/// The popup of a layer parameter's companion parameters (automation id
+/// `effectControls.prop.<uid>.source`) at `at`, as wide as its text up to `max_w`: its source
+/// choice, then its Sampling Space, each section checked at its value. It reads as the source
+/// choice, with the space appended when it is Comp.
+#[allow(clippy::too_many_arguments)]
+fn companion_popup(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    cx: &PropCx,
+    src: Option<&Property>,
+    space: Option<&Property>,
+    at: egui::Pos2,
+    max_w: f32,
+    actions: &mut Actions,
+) {
+    use effectcraft_engine::effects::{LAYER_SOURCE_OPTIONS, LAYER_SPACE_OPTIONS};
+    let PropCx { t, uid, layer, p, .. } = *cx;
+    let si = src.map(|p| p.value.as_enum() as usize);
+    let pi = space.map(|p| p.value.as_enum() as usize);
+    let text = [si.and_then(|i| LAYER_SOURCE_OPTIONS.get(i)), pi.filter(|i| *i != 0).and_then(|i| LAYER_SPACE_OPTIONS.get(i))]
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    // Entries: the source options, a separator, then the spaces (as "<option> Space").
+    let mut options: Vec<String> = vec![];
+    if let Some(si) = si {
+        options.extend(LAYER_SOURCE_OPTIONS.iter().enumerate().map(|(i, o)| widgets::check_label(i == si, o)));
+    }
+    let first_space = if si.is_some() && pi.is_some() { options.len() + 1 } else { options.len() };
+    if let Some(pi) = pi {
+        if si.is_some() {
+            options.push("-".into());
+        }
+        options.extend(LAYER_SPACE_OPTIONS.iter().enumerate().map(|(i, o)| widgets::check_label(i == pi, &format!("{o} Space"))));
+    }
+    let w = p.layout_no_wrap(text.clone(), Tokens::ui(11.5), t.text).size().x + 30.0;
+    let rect = Rect::from_min_size(at, vec2(w.clamp(70.0, 170.0).min(max_w), 18.0));
+    let pop = egui::Id::unique(("ec-lspop", uid));
+    if widgets::dropdown(ui, rect, &text, &t, egui::Id::unique(("ec-ls", uid))).clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    let name = src.or(space).map_or("", |p| p.name.as_str());
+    app.auto.add(&format!("effectControls.prop.{uid}.source"), rect, name);
+    let chosen = widgets::popup_menu(ui, pop, rect.left_bottom(), &options, None).and_then(|ni| match (src, space) {
+        (Some(src), _) if ni < LAYER_SOURCE_OPTIONS.len() => Some((src.uid, ni)),
+        (_, Some(space)) if ni >= first_space => Some((space.uid, ni - first_space)),
+        _ => None,
+    });
+    if let Some((prop, value)) = chosen {
+        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": prop, "value": value})));
     }
 }
 

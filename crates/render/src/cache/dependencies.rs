@@ -49,6 +49,11 @@ impl Dependencies<'_> {
                     if let Some(id) = ctx.value(layer, p).as_layer() {
                         p.uid.hash(self.h);
                         id.hash(self.h);
+                        // Sampling Space "Comp": the pixels read depend on where the owner sits
+                        // in the comp too (its transform, parents and, in 3D, the camera).
+                        if g.get(&effectcraft_effects::layer_space_id(&p.match_id)).is_some_and(|s| ctx.value(layer, s).as_enum() == 1) {
+                            hash_debug(self.h, &ctx.layer_to_comp(layer));
+                        }
                         let other = ctx.layer(LayerId(id));
                         other.is_some().hash(self.h);
                         if let Some(other) = other {
