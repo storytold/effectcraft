@@ -824,3 +824,82 @@ fn double_click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
     }
     h.run_steps(2);
 }
+
+#[test]
+fn select_all_effects_with_cmd_a_in_effect_controls() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    let ctx = h.ctx.clone();
+    assert!(h.state().session.state.selected_props.is_empty());
+
+    // Non-exact modifiers (e.g. Cmd+Alt+A) do not select all effects
+    h.key_press_modifiers(egui::Modifiers { alt: true, ..egui::Modifiers::COMMAND }, egui::Key::A);
+    h.run_steps(2);
+    assert!(h.state().session.state.selected_props.is_empty());
+
+    // Cmd+A / Ctrl+A via the shared shortcut dispatcher selects all effects on the active layer
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(3);
+
+    let fx_count = layer(&h.state().session, x.small).effects().unwrap().groups().count();
+    assert_eq!(h.state().session.state.selected_props.len(), fx_count);
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(x.small)]);
+
+    // Deselect All deselects the effects while keeping the layer selected
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.deselectAll", json!({})).unwrap();
+    assert!(h.state().session.state.selected_props.is_empty());
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(x.small)]);
+
+    // edit.selectAll menu command also selects all effects
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.selectAll", json!({})).unwrap();
+    assert_eq!(h.state().session.state.selected_props.len(), fx_count);
+
+    // Pressing Delete / Clear removes all effects
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.clear", json!({})).unwrap();
+    assert_eq!(layer(&h.state().session, x.small).effects().map(|f| f.groups().count()).unwrap_or(0), 0);
+
+    // On a layer with no effects, edit.selectAll is disabled and does nothing
+    let back_layer = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.state.selected_layers = vec![back_layer];
+    h.state_mut().session.state.selected_props.clear();
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    let enabled = effectcraft_ui_egui::menus::menu_items(h.state()).into_iter().find(|m| m.id == "edit.selectAll").is_some_and(|m| m.enabled);
+    assert!(!enabled, "edit.selectAll menu item is disabled on layer with no effects");
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(3);
+    assert!(h.state().session.state.selected_props.is_empty(), "no effects are selected on layer with no effects");
+
+    // When Timeline is focused, Cmd+A selects all layers rather than effects
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.state_mut().session.state.selected_layers = vec![back_layer];
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(3);
+    assert!(h.state().session.state.selected_props.is_empty(), "Timeline focus does not select effects");
+    assert_eq!(h.state().session.state.selected_layers.len(), 2, "Timeline focus selects all layers");
+}
+
+#[test]
+fn effect_controls_redirect_stands_down_during_text_edit() {
+    let (app, _x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    let ctx = h.ctx.clone();
+
+    // Create a real text layer and start an active text edit session
+    let text_layer = h.state_mut().session.execute("layer.newText", json!({"text": "Hello"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.state.text_edit =
+        Some(effectcraft_engine::commands::text_edit::TextEdit { layer: LayerId(text_layer), anchor: 0, caret: 2, ..Default::default() });
+    assert!(h.state().session.state.selected_props.is_empty());
+
+    // While a text edit is active, edit.selectAll stands down (does not redirect to effect.selectAll)
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.selectAll", json!({})).unwrap();
+    assert!(h.state().session.state.selected_props.is_empty(), "redirect stands down for edit.selectAll during text edit");
+
+    // While a text edit is active, edit.deselectAll stands down from effect.deselectAll and commits/ends the text edit
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.deselectAll", json!({})).unwrap();
+    assert!(h.state().session.state.text_edit.is_none(), "edit.deselectAll ends the text edit instead of redirecting");
+}

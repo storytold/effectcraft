@@ -1040,9 +1040,36 @@ fn channels(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"channels": aux.names(), "layers": layers}))
 }
 
+/// `effect.selectAll`: select all effect groups on `layer` (or the selected layer).
+fn select_all(s: &mut Session, p: &Value) -> Result<Value> {
+    let (cid, lid) = super::layer_p(s, p, "effect.selectAll")?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let uids: Vec<Uid> = layer.effects().map(|fx| fx.groups().map(|g| g.uid).collect()).unwrap_or_default();
+    if !s.state.selected_layers.contains(&lid) {
+        s.state.selected_layers = vec![lid];
+    }
+    s.state.selected_props = uids.iter().map(|uid| (lid, *uid)).collect();
+    s.state.selected_keys.clear();
+    Ok(json!(uids.len()))
+}
+
+/// `effect.deselectAll`: deselect all effects and effect properties on `layer` (or the selected layer).
+fn deselect_all(s: &mut Session, p: &Value) -> Result<Value> {
+    let (cid, lid) = super::layer_p(s, p, "effect.deselectAll")?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    if let Some(fx) = layer.effects() {
+        s.state.selected_props.retain(|(l, u)| !(*l == lid && (fx.find(*u).is_some() || fx.find_group(*u).is_some())));
+    }
+    Ok(Value::Null)
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("effect.apply", "Apply Effect", [], None, "{effect: id|name (e.g. Gaussian Blur), layers?}", has_layers, apply),
+        cmd!("effect.selectAll", "Select All Effects", [], None, "{layer?}", has_layers, select_all),
+        cmd!("effect.deselectAll", "Deselect All Effects", [], None, "{layer?}", has_layers, deselect_all),
         crate::query!(
             "layer.channels",
             "Layer Channels",

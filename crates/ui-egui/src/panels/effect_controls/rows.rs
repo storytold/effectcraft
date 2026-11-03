@@ -145,6 +145,7 @@ fn prop_row(
     let cy = r.center().y;
     let uid = prop.uid;
     if ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(r) {
+        app.ui.focused = crate::dock::PanelKind::EffectControls;
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
         actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "add": add})));
     }

@@ -118,6 +118,24 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
             _ => {}
         }
     }
+    if app.ui.focused == PanelKind::EffectControls && app.session.state.text_edit.is_none() {
+        match e.command.as_str() {
+            "edit.selectAll" => {
+                let comp = app.session.active_comp();
+                let layer = app.session.state.selected_layers.first().and_then(|id| comp.as_ref()?.layer(*id));
+                return layer.and_then(|l| l.effects()).is_some_and(|fx| fx.groups().next().is_some());
+            }
+            "edit.deselectAll" => {
+                let comp = app.session.active_comp();
+                let layer = app.session.state.selected_layers.first().and_then(|id| comp.as_ref()?.layer(*id));
+                return layer.is_some_and(|l| {
+                    let fx = l.effects();
+                    app.session.state.selected_props.iter().any(|(sl, u)| *sl == l.id && fx.is_some_and(|f| f.find(*u).is_some() || f.find_group(*u).is_some()))
+                });
+            }
+            _ => {}
+        }
+    }
     if e.command == "edit.clear" && app.ui.focused == PanelKind::Project {
         // An open text edit stands down: Clear must not delete the comp being typed into (#2227).
         return app.session.state.text_edit.is_none() && app.session.is_enabled("project.delete");
