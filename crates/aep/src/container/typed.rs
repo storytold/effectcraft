@@ -42,6 +42,11 @@ impl<'f, 'a> Project<'f, 'a> {
         self.fold.children().iter().filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
     }
 
+    /// True when the `LIST Fold` could not be read as chunks (damaged): its items cannot be seen.
+    pub fn items_unreadable(&self) -> bool {
+        self.fold.is_opaque_list()
+    }
+
     /// Every item including those inside folders, depth-first, without recursion.
     pub fn all_items(&self) -> Vec<Item<'f, 'a>> {
         let mut out = Vec::new();
@@ -108,6 +113,11 @@ impl<'f, 'a> Item<'f, 'a> {
     /// one for an empty folder).
     pub fn has_folder_contents(&self) -> bool {
         self.chunk.child_list(b"Sfdr").is_some()
+    }
+
+    /// True when the folder's `LIST Sfdr` is there but could not be read as chunks (damaged).
+    pub fn folder_contents_unreadable(&self) -> bool {
+        self.chunk.child_list(b"Sfdr").is_some_and(Chunk::is_opaque_list)
     }
 
     /// The composition view when this item has composition data (`cdta`).

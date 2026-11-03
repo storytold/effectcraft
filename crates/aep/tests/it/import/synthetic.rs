@@ -201,3 +201,97 @@ fn an_unknown_colour_depth_code_is_reported() {
     let r = r.unwrap();
     assert!(losses(&r, LossCategory::ProjectSettings).iter().any(|d| d.contains("colour depth code 7")), "{:?}", r.report.losses);
 }
+
+/// The project with every `LIST` of type `list_type` made unreadable: its content replaced by three
+/// bytes that are no chunk sequence, so the reader keeps it as an opaque list. Returns the bytes and
+/// how many lists were damaged.
+fn damage_lists(list_type: &[u8; 4], only_empty: bool) -> (Vec<u8>, usize) {
+    fn walk(chunks: &mut [Chunk<'_>], list_type: &[u8; 4], only_empty: bool, n: &mut usize) {
+        for c in chunks.iter_mut() {
+            if c.is_list(list_type) && (!only_empty || c.children().is_empty()) {
+                c.body = Body::OpaqueList { list_type: *list_type, data: vec![0xff; 3].into() };
+                *n += 1;
+            } else {
+                walk(c.children_mut(), list_type, only_empty, n);
+            }
+        }
+    }
+    let mut file = parse(SYNTHETIC).unwrap();
+    let mut n = 0;
+    walk(&mut file.chunks, list_type, only_empty, &mut n);
+    let bytes = write(&file).unwrap();
+    // The damage survives a round trip through the reader.
+    let reread = parse(&bytes).unwrap();
+    let mut opaque = 0;
+    fn count(chunks: &[Chunk<'_>], list_type: &[u8; 4], n: &mut usize) {
+        for c in chunks {
+            *n += usize::from(c.is_list(list_type) && c.is_opaque_list());
+            count(c.children(), list_type, n);
+        }
+    }
+    count(&reread.chunks, list_type, &mut opaque);
+    assert_eq!(opaque, n, "the damaged lists read back as opaque");
+    (bytes, n)
+}
+
+#[test]
+fn a_damaged_project_item_list_is_reported() {
+    // Before, the import gave an empty project folder and no loss.
+    let (bytes, n) = damage_lists(b"Fold", false);
+    assert_eq!(n, 1);
+    reported_and_refused(&bytes, LossCategory::DamagedData, "item list is damaged");
+}
+
+#[test]
+fn a_damaged_folder_contents_list_is_reported() {
+    let (bytes, n) = damage_lists(b"Sfdr", true);
+    assert_eq!(n, 1, "the synthetic project has one empty folder");
+    reported_and_refused(&bytes, LossCategory::DamagedData, "contents list is damaged");
+}
+
+/// The project with the `ldta` time at byte `at` (numerator, then denominator) set to `num/den`
+/// in every layer.
+fn layer_time(at: usize, num: i32, den: u32) -> Vec<u8> {
+    mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, at, &num.to_be_bytes());
+            set_data(c, at + 4, &den.to_be_bytes());
+        }
+    })
+}
+
+#[test]
+fn layer_times_with_a_zero_denominator_are_reported() {
+    // ldta bytes 12 (start), 20 (in point) and 28 (out point), each a numerator and a
+    // denominator. Before, a zero denominator silently became 0 s.
+    for (at, what) in [(12, "start"), (20, "in point"), (28, "out point")] {
+        let bytes = layer_time(at, 2, 0);
+        reported_and_refused(&bytes, LossCategory::DamagedData, &format!("stored {what} time is unreadable"));
+    }
+    // A valid time with another denominator is no damage.
+    let (_, r) = run(&layer_time(12, 4, 2), true);
+    assert!(losses(&r.unwrap(), LossCategory::DamagedData).is_empty());
+}
+
+/// The project with `nhed` bytes from `at` replaced.
+fn header(at: usize, bytes: &[u8]) -> Vec<u8> {
+    mutate(&mut |c| {
+        if c.id == *b"nhed" {
+            set_data(c, at, bytes);
+        }
+    })
+}
+
+#[test]
+fn unknown_time_display_and_frame_start_codes_are_reported() {
+    // nhed byte 8: 0 timecode, 1 frames or feet + frames; byte 11 = 1 feet + frames, byte 13 the
+    // frames per foot (16 or 40); byte 14 the frame count start (2 from 0, 1 from 1).
+    reported_and_refused(&header(8, &[5]), LossCategory::ProjectSettings, "time display code 5/");
+    reported_and_refused(&header(8, &[1, 0, 0, 1, 0, 24]), LossCategory::ProjectSettings, "24 frames per foot");
+    reported_and_refused(&header(14, &[9]), LossCategory::ProjectSettings, "frame count start code 9");
+    // The known codes are no loss.
+    for (at, bytes) in [(8, &[1u8, 0, 0, 0][..]), (8, &[1, 0, 0, 1, 0, 16]), (8, &[1, 0, 0, 1, 0, 40]), (14, &[1])] {
+        let (_, r) = run(&header(at, bytes), true);
+        assert!(losses(&r.unwrap(), LossCategory::ProjectSettings).is_empty(), "nhed {at}: {bytes:?}");
+    }
+}

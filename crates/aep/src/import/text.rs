@@ -172,6 +172,15 @@ fn rgba(argb: [f64; 4]) -> Option<[f32; 4]> {
     Some([c(r)?, c(g)?, c(b)?, c(a)?])
 }
 
+/// Reports a colour whose channels [`rgba`] clipped to `0..=1` (a normal file stays inside; as in
+/// [`fit`], float noise of 1e-9 is not reported).
+fn clipped(argb: [f64; 4], which: &str, what: &str, col: &mut Collector) {
+    let outside: Vec<String> = argb.iter().filter(|v| !(-1e-9..=1.0 + 1e-9).contains(*v)).map(|v| v.to_string()).collect();
+    if !outside.is_empty() {
+        col.lose(LossCategory::TextLayers, format!("{what}: a {which} colour channel is outside 0..1 ({}), clipped", outside.join(", ")));
+    }
+}
+
 fn char_style(doc: &TextDocument, run: &AepRun, what: &str, has_font: &dyn Fn(&str) -> bool, col: &mut Collector) -> CharStyle {
     let mut s = CharStyle::default();
     match doc.font_of(run) {
@@ -186,11 +195,20 @@ fn char_style(doc: &TextDocument, run: &AepRun, what: &str, has_font: &dyn Fn(&s
     s.style = "Regular".to_string();
     s.size = fit(run.font_size, (0.1, 10_000.0), s.size, "the font size", what, col);
     match rgba(run.fill_argb) {
-        Some(c) => s.fill = c,
+        Some(c) => {
+            s.fill = c;
+            clipped(run.fill_argb, "fill", what, col);
+        }
         None => col.lose(LossCategory::DamagedData, format!("{what}: a fill colour is not valid, the default is used")),
     }
-    if let Some(c) = run.stroke_argb.and_then(rgba) {
-        s.stroke = c;
+    if let Some(argb) = run.stroke_argb {
+        match rgba(argb) {
+            Some(c) => {
+                s.stroke = c;
+                clipped(argb, "stroke", what, col);
+            }
+            None => col.lose(LossCategory::DamagedData, format!("{what}: a stroke colour is not valid, the default is used")),
+        }
     }
     // Whether fill and stroke are drawn and the stroke width (544-546).
     s.apply_fill = run.apply_fill;
@@ -367,5 +385,69 @@ mod tests {
         let details: Vec<_> = report.losses.iter().flat_map(|l| l.details.iter().cloned()).collect();
         assert_eq!(details.len(), 2, "{details:?}");
         assert!(details[0].contains("outside") && details[1].contains("not a number"), "{details:?}");
+    }
+
+    #[test]
+    fn colour_channels_outside_0_to_1_are_clipped_and_reported() {
+        // A fill channel of 2.0 used to become 1.0 silently.
+        let mut col = Collector::default();
+        let argb = [1.0, 2.0, 0.5, -0.25];
+        assert_eq!(rgba(argb), Some([1.0, 0.5, 0.0, 1.0]));
+        clipped(argb, "fill", "t", &mut col);
+        let report = col.finish();
+        assert_eq!(report.count(LossCategory::TextLayers), 1, "{:?}", report.losses);
+        let detail = &report.losses[0].details[0];
+        assert!(detail.contains("fill colour") && detail.contains('2') && detail.contains("-0.25"), "{detail}");
+        // Inside the range, and its edges: nothing to report.
+        let mut col = Collector::default();
+        clipped([1.0, 0.0, 0.5, 1.0], "stroke", "t", &mut col);
+        assert!(col.finish().is_lossless());
+        // Not a number: no colour (the caller reports that as damage).
+        assert_eq!(rgba([1.0, f64::NAN, 0.0, 0.0]), None);
+    }
+
+    /// A document with one style run, `run`, over the text "A".
+    fn doc_with(run: AepRun) -> TextDocument {
+        TextDocument {
+            text: "A".into(),
+            raw_text: "A\r".into(),
+            font_size: run.font_size,
+            fill_argb: run.fill_argb,
+            font_index: 0,
+            font: Some("F".into()),
+            fonts: vec!["F".into()],
+            paragraphs: Vec::new(),
+            style_runs: vec![AepRun { length: 2, ..run }],
+            text_box: None,
+            incomplete_runs: 0,
+            undecoded_style_fields: Vec::new(),
+            undecoded_paragraph_fields: Vec::new(),
+            kerning: Vec::new(),
+            line_orientation: None,
+        }
+    }
+
+    #[test]
+    fn a_text_layer_reports_its_clipped_fill_and_stroke() {
+        let any_font = |_: &str| true;
+        // The sampled run imports without a text loss.
+        let mut col = Collector::default();
+        text_doc(&doc_with(AepRun::SAMPLED), "t", &any_font, &mut col);
+        assert_eq!(col.finish().count(LossCategory::TextLayers), 0);
+        // A fill red of 2.0 and a stroke blue of -1: imported as 1 and 0, both reported.
+        let mut col = Collector::default();
+        let run = AepRun { fill_argb: [1.0, 2.0, 0.0, 0.0], stroke_argb: Some([1.0, 0.0, 0.0, -1.0]), ..AepRun::SAMPLED };
+        let doc = text_doc(&doc_with(run), "t", &any_font, &mut col);
+        let report = col.finish();
+        let details: Vec<_> = report.losses.iter().flat_map(|l| l.details.iter().cloned()).collect();
+        assert!(details.iter().any(|d| d.contains("fill colour channel")), "{details:?}");
+        assert!(details.iter().any(|d| d.contains("stroke colour channel")), "{details:?}");
+        // One run: its style is the document's own.
+        assert!(doc.runs.is_empty());
+        assert_eq!((doc.fill[0], doc.stroke[2]), (1.0, 0.0));
+        // A stroke that is not a number is damage, as the fill already was.
+        let mut col = Collector::default();
+        text_doc(&doc_with(AepRun { stroke_argb: Some([1.0, f64::NAN, 0.0, 0.0]), ..AepRun::SAMPLED }), "t", &any_font, &mut col);
+        assert!(col.finish().count(LossCategory::DamagedData) == 1);
     }
 }

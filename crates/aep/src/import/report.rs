@@ -59,7 +59,8 @@ pub enum LossCategory {
     /// Data that could not be read (damaged headers, unreadable keyframes).
     DamagedData,
     /// Project settings without an EffectCraft counterpart (a working space other than None,
-    /// sRGB and Rec. 709).
+    /// sRGB and Rec. 709) or stored as an unknown code (colour depth, time display, frames per
+    /// foot, frame count start).
     ProjectSettings,
 }
 

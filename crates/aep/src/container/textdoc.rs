@@ -601,7 +601,7 @@ pub struct StyleRun {
 
 impl StyleRun {
     /// The style of the sampled untouched document (244), used for a damaged first run.
-    const SAMPLED: StyleRun = StyleRun {
+    pub(crate) const SAMPLED: StyleRun = StyleRun {
         length: 0,
         font_size: 100.0,
         fill_argb: [1.0; 4],
