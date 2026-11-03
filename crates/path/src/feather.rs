@@ -73,7 +73,7 @@ impl Flat {
     /// Keep every other point (and the last), with their arc lengths.
     fn thin(&mut self) {
         let n = self.pts.len();
-        let keep = |i: usize| i % 2 == 0 || i + 1 == n;
+        let keep = |i: usize| i.is_multiple_of(2) || i + 1 == n;
         let mut i = 0;
         self.pts.retain(|_| {
             i += 1;
