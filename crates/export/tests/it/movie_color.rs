@@ -1,6 +1,7 @@
 //! H.264, HEVC and AV1 MP4s describe the frames the render path made (#2879): the `colr` box, read
 //! back with FilmCraft's demuxer, and the bitstream's own colour description (the SPS VUI, AV1's
-//! `color_config`), which ffprobe reports for the first decoded frame when it can decode it.
+//! `color_config`), which ffprobe reports for the first frame of the bare elementary stream when
+//! ffmpeg can copy it out and decode it.
 
 use std::path::Path;
 use std::process::Command;
@@ -49,23 +50,19 @@ fn render(output: Option<ColorSpace>, format: OutputFormat, path: &Path) {
     export(&job, &mut |_| true).expect("export");
 }
 
-/// ffprobe's primaries, transfer and matrix of the first decoded frame, or `None` without ffprobe
-/// or when its build can't decode the stream.
-fn frame_tags(path: &Path) -> Option<Vec<String>> {
+/// ffprobe's primaries, transfer and matrix of the first frame of the movie's video copied out as a
+/// bare elementary stream (`h264`, `hevc` or `obu`), so no container metadata can stand in for the
+/// bitstream's own; `None` without ffmpeg or when its build can't copy or decode the stream.
+fn bitstream_tags(path: &Path, format: &str) -> Option<Vec<String>> {
+    let es = path.with_extension(format);
+    let copied =
+        Command::new("ffmpeg").args(["-v", "error", "-y", "-i"]).arg(path).args(["-map", "0:v:0", "-c", "copy", "-f", format]).arg(&es).status().ok()?;
+    if !copied.success() {
+        return None;
+    }
     let out = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-read_intervals",
-            "%+#1",
-            "-show_entries",
-            "frame=color_primaries,color_transfer,color_space",
-            "-of",
-            "default=nw=1",
-        ])
-        .arg(path)
+        .args(["-v", "error", "-read_intervals", "%+#1", "-show_entries", "frame=color_primaries,color_transfer,color_space", "-of", "default=nw=1"])
+        .arg(&es)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -78,7 +75,7 @@ fn mp4_tags_describe_the_frames() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/export/movie_color");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
-    for (format, codec) in [(OutputFormat::H264, "h264"), (OutputFormat::Hevc, "hevc"), (OutputFormat::Av1, "av1")] {
+    for (format, codec, stream) in [(OutputFormat::H264, "h264", "h264"), (OutputFormat::Hevc, "hevc", "hevc"), (OutputFormat::Av1, "av1", "obu")] {
         for &(name, output, [primaries, transfer, matrix], names) in ROWS {
             let path = dir.join(format!("{codec}_{name}.mp4"));
             render(output, format, &path);
@@ -89,7 +86,7 @@ fn mp4_tags_describe_the_frames() {
             let colr = track.entries[0].video.as_ref().and_then(|v| v.color.clone());
             assert_eq!(colr, Some(ColorInfo::Nclx { primaries, transfer, matrix, full_range: false }), "{codec} {name}: colr");
 
-            match frame_tags(&path) {
+            match bitstream_tags(&path, stream) {
                 Some(tags) => assert_eq!(tags, names, "{codec} {name}: the bitstream's colour description"),
                 None => eprintln!("{codec} {name}: ffprobe can't decode it here, bitstream not checked"),
             }
