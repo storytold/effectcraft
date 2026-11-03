@@ -464,6 +464,36 @@ mod tests {
         assert_eq!(out.img.data, again.img.data);
     }
 
+    /// #2919: a sample box beside transparent pixels measured the edge as grain. Its own
+    /// pixels are opaque, but the high-pass blur reads 3 px around it, where transparent pixels
+    /// are black once unpremultiplied. An earlier blur pads the layer with transparent pixels,
+    /// so a clean plate got blocky colour grain on the frames whose flattest boxes sat at the
+    /// edge, and fine grain on the others.
+    #[test]
+    fn match_grain_ignores_the_edge_of_a_transparent_border() {
+        // A flat, noiseless sky inside the 2 px transparent frame of a padded buffer.
+        let (w, h) = (64u32, 48u32);
+        let mut sky = Image::filled(w, h, [0.4, 0.6, 0.9, 1.0]);
+        for y in 0..h {
+            for x in 0..w {
+                if x < 2 || y < 2 || x >= w - 2 || y >= h - 2 {
+                    sky.set(x, y, [0.0; 4]);
+                }
+            }
+        }
+        let boxes = crate::noise::sample_boxes(&sky, 80, 9);
+        assert!(!boxes.is_empty());
+        let st = grain_stats_boxes(&sky, &boxes);
+        assert!(st.std.iter().all(|s| *s < 1e-5), "{st:?} from {boxes:?}");
+        // So Match Grain finds no grain to add.
+        let host = FakeHost(sky);
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        let target = Image::filled(w, h, [0.2, 0.3, 0.5, 1.0]);
+        let out = run_fx("ec.noise.matchgrain", &[("noiseSourceLayer", Value::Layer(Some(7)))], target.clone(), 0.5, env);
+        let most = out.img.data.iter().zip(&target.data).flat_map(|(a, b)| (0..3).map(move |k| (a[k] - b[k]).abs())).fold(0.0f32, f32::max);
+        assert!(most < 1e-5, "Match Grain added {most}");
+    }
+
     #[test]
     fn median_legacy_radius_zero_identity_and_removes_speck() {
         let mut img = Image::filled(9, 9, [0.2, 0.2, 0.2, 1.0]);
