@@ -871,7 +871,8 @@ impl Inner {
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
-            Err(e) => crate::exr_channels::layered_picture(path, bytes, op, shared).ok_or_else(|| MediaError::Decode(format!("{path}: {e}"))),
+            Err(e) => crate::exr_channels::layered_picture(path, bytes, op, shared)
+                .map_err(|why| MediaError::Decode(format!("{path}: {}", why.unwrap_or_else(|| e.to_string())))),
         }
     }
 

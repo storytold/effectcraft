@@ -92,7 +92,7 @@ fn mipmapped(list: &[(&str, Kind)], compression: Compression) -> Vec<u8> {
             }
             size = ((size.0 / 2).max(1), (size.1 / 2).max(1));
         }
-        AnyChannel::new(name, Levels::Mip { rounding_mode: exr::math::RoundingMode::Down, level_data: data.into() })
+        AnyChannel::new(name, Levels::Mip { rounding_mode: exr::math::RoundingMode::Down, level_data: data })
     };
     let list: Vec<AnyChannel<Levels<FlatSamples>>> = list.iter().enumerate().map(|(c, (n, k))| levels(n, *k, c)).collect();
     let encoding = Encoding { compression, blocks: Blocks::Tiles(Vec2(16, 16)), line_order: LineOrder::Increasing };
