@@ -1111,8 +1111,12 @@ fn a_frame_step_while_a_click_waits_settles_within_a_few_builds() {
 
 /// Footage whose Cryptomatte read on the probe's thread waits while `hold` is set. It logs the
 /// probe threads' reads: (thread, a picture frame rather than the IDs).
-struct Held(std::sync::Arc<dyn effectcraft_engine::render::FootageSource>, std::sync::Arc<std::sync::atomic::AtomicBool>, ReadLog);
-type ReadLog = std::sync::Arc<std::sync::Mutex<Vec<(std::thread::ThreadId, bool)>>>;
+pub(crate) struct Held(
+    pub(crate) std::sync::Arc<dyn effectcraft_engine::render::FootageSource>,
+    pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) ReadLog,
+);
+pub(crate) type ReadLog = std::sync::Arc<std::sync::Mutex<Vec<(std::thread::ThreadId, bool)>>>;
 impl Held {
     fn log(&self, frame: bool) {
         if std::thread::current().name() == Some("crypto-probe") {

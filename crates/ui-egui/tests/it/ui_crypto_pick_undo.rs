@@ -6,6 +6,7 @@
 //! viewer's chip and highlight, and the eyedropper's armed state are checked. Undo while the IDs
 //! are being read and with clicks waiting, across Open / Revert / New, and after Esc.
 
+use crate::ui_crypto_pick::{Held, ReadLog};
 use effectcraft_engine::Session;
 use effectcraft_engine::project::{LayerId, Resolution};
 use effectcraft_engine::raster::channels3d::{crypto_float, crypto_hash};
@@ -15,6 +16,7 @@ use effectcraft_ui_egui::panels::viewer::comp_to_screen;
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::{Value, json};
+use std::sync::atomic::Ordering;
 
 const READING: &str = "Reading Cryptomatte IDs…";
 const HINT: &str = "Click: replace · Shift: add · Alt or Ctrl: remove";
@@ -834,12 +836,16 @@ fn each_pick_is_one_step_and_clicks_that_change_nothing_are_none() {
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 
-/// Clicks made while the IDs are read (a 4K plate behind a blur) are one undo step each, in the
-/// order clicked; Ctrl+Z takes them back one at a time and Ctrl+Shift+Z makes them again.
+/// Clicks made while the IDs are read (a 4K plate behind a blur; the build is held until the
+/// clicks are checked) are one undo step each, in the order clicked; Ctrl+Z takes them back one
+/// at a time and Ctrl+Shift+Z makes them again.
 #[test]
 fn clicks_queued_while_reading_are_one_step_each_and_undo_in_order() {
-    let (s, f) = session("queue", 3840, 2160, true, false);
+    let (mut s, f) = session("queue", 3840, 2160, true, false);
     let dims = [3840.0, 2160.0];
+    let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log = ReadLog::default();
+    s.footage = std::sync::Arc::new(Held(s.footage.clone(), hold.clone(), log.clone()));
     let mut h = harness(s, vec2(1280.0, 860.0));
     let mut m = Model::new(&h, f.comp);
     let pl = f.plate;
@@ -850,6 +856,8 @@ fn clicks_queued_while_reading_are_one_step_each_and_undo_in_order() {
     // The verify above built the probe; drop it again.
     run_step(&mut h, &f, &mut m, dims, &Step::Blur(pl, 42.0), 2);
     let pa = sp(&h, &m, a);
+    hold.store(true, Ordering::Release);
+    log.lock().unwrap().clear();
     h.state_mut().session.execute_checked("prop.set", json!({"comp": f.comp, "layer": pl, "path": "effects/#1/blurriness", "value": 43.0})).unwrap();
     let label = h.state().session.history.undo.last().unwrap().0.clone();
     let o = m.state().clone();
@@ -865,6 +873,23 @@ fn clicks_queued_while_reading_are_one_step_each_and_undo_in_order() {
     }
     assert_eq!(chip(&h).as_deref(), Some(READING), "all four made while reading");
     assert_eq!(h.state().session.history.undo.len(), before, "none made yet");
+    for _ in 0..3000 {
+        h.step();
+        if log.lock().unwrap().iter().any(|(_, frame)| !*frame) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    if !log.lock().unwrap().iter().any(|(_, frame)| !*frame) {
+        panic!("the held build never reached the ID read");
+    }
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(chip(&h).as_deref(), Some(READING), "still reading while the build is held");
+    assert_eq!(h.state().session.history.undo.len(), before, "none made yet while held");
+    hold.store(false, Ordering::Release);
     wait_probe(&mut h);
     h.run_steps(3);
     assert_eq!(h.state().session.history.undo.len(), before + 4, "one step per click");
