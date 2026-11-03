@@ -157,7 +157,7 @@ fn parented_session(parent: serde_json::Value) -> (effectcraft_engine::Session, 
 
 fn with_ctx<T>(s: &effectcraft_engine::Session, f: impl FnOnce(&EvalCtx) -> T) -> T {
     let comp = s.active_comp().unwrap();
-    f(&EvalCtx::new(&s.project, comp.id, comp, Tick::ZERO))
+    f(&EvalCtx::new(&s.project, s.active_comp_id().unwrap(), comp, Tick::ZERO))
 }
 
 /// #2870: the pivot of a child follows its parent, through the camera for a 3D layer
