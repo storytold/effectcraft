@@ -161,9 +161,9 @@ impl<'a> Renderer<'a> {
     /// The render options one level down (precomps, collapsed precomps, comps read by effects):
     /// guide layers render only in their own comp, never when it is nested. Only the viewed
     /// comp's own layer draws unmasked: what other layers read of it stays masked, so their
-    /// cached results don't depend on the edit (`RenderOpts::unmasked_layer`).
+    /// cached results don't depend on the edit (`RenderOpts::edited_text`).
     fn nested_opts(&self) -> RenderOpts {
-        RenderOpts { guides: false, unmasked_layer: None, ..self.opts }
+        RenderOpts { guides: false, edited_text: None, ..self.opts }
     }
 
     /// A renderer for nested work (precomps, layers read by effects): one level deeper.
@@ -776,7 +776,7 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
+            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer), self.edited(layer)))),
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }

@@ -248,14 +248,19 @@ impl<'a> Renderer<'a> {
         self.opts.motion_blur && ctx.comp.enable_motion_blur && self.layer_motion_blur(layer)
     }
 
-    /// `masks::apply`, except for the text layer being edited (`RenderOpts::unmasked_layer`).
-    pub(crate) fn apply_masks(&self, ctx: &EvalCtx, layer: &Layer, buf: &mut Buf) -> bool {
-        self.opts.unmasked_layer != Some(layer.id.0) && masks::apply(ctx, layer, buf, self.mask_blur(ctx, layer))
+    /// Whether `layer` is the text layer being edited, drawn whole (`RenderOpts::edited_text`).
+    pub(crate) fn edited(&self, layer: &Layer) -> bool {
+        self.opts.edited_text == Some(layer.id.0)
     }
 
-    /// A cache key of `layer`, told apart from the masked render's when its masks are skipped.
+    /// `masks::apply`, except for the text layer being edited.
+    pub(crate) fn apply_masks(&self, ctx: &EvalCtx, layer: &Layer, buf: &mut Buf) -> bool {
+        !self.edited(layer) && masks::apply(ctx, layer, buf, self.mask_blur(ctx, layer))
+    }
+
+    /// A cache key of `layer`, told apart from the finished render's while it is edited (drawn whole).
     pub(crate) fn mask_aware_key(&self, layer: &Layer, key: Option<u64>) -> Option<u64> {
-        key.map(|k| if self.opts.unmasked_layer == Some(layer.id.0) { cache::derive(k, 0x756e_6d73) } else { k })
+        key.map(|k| if self.edited(layer) { cache::derive(k, 0x756e_6d73) } else { k })
     }
 
     /// What a layer's mask motion blur may do in this render (see [`masks::MaskBlur`]).

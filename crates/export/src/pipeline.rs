@@ -252,7 +252,7 @@ impl<'a> Cx<'a> {
             nested_switches: self.job.nested_switches,
             draft_shadows: true,
             proxy: s.proxy_use,
-            unmasked_layer: None,
+            edited_text: None,
         };
         let mut r = Renderer::new(&self.project, self.job.footage, opts);
         r.expr = self.job.expr;

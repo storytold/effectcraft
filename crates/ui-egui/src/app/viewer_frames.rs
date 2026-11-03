@@ -165,16 +165,15 @@ impl EffectcraftApp {
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
             proxy: Default::default(),
-            unmasked_layer: self.edited_masked_text(comp),
+            edited_text: self.edited_text(comp),
         }
     }
 
-    /// The text layer of `comp` being edited, when it has masks: they would cut the text while
-    /// typing, so viewer frames render it without them (`request_frame_with`).
-    fn edited_masked_text(&self, comp: ItemId) -> Option<u64> {
+    /// The text layer of `comp` being edited: viewer frames draw it whole (no masks, every line of
+    /// a paragraph box) so the text typed shows where the caret is (`RenderOpts::edited_text`).
+    fn edited_text(&self, comp: ItemId) -> Option<u64> {
         let id = self.session.state.text_edit.as_ref()?.layer;
-        let layer = self.session.project.comp(comp)?.layer(id)?;
-        layer.masks().is_some_and(|m| !m.children.is_empty()).then_some(id.0)
+        self.session.project.comp(comp)?.layer(id).map(|_| id.0)
     }
 
     fn request_frame_with(

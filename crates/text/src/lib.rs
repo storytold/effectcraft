@@ -223,6 +223,12 @@ const ROT90: Affine = Affine::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
 /// baseline (left), its centre (centre) or end (right). Paragraph text fills `box_size` from
 /// `box_pos`. Vertical text runs down from the origin (point) or the box's top-right corner.
 pub fn layout_doc(doc: &TextDoc) -> TextLayout {
+    layout_doc_with(doc, true)
+}
+
+/// [`layout_doc`]; without `clip_to_box` every line shows, also those past a paragraph box (the
+/// text being edited: its glyphs then match the carets and selections of `layout`).
+pub fn layout_doc_with(doc: &TextDoc, clip_to_box: bool) -> TextLayout {
     let text = doc.text.as_str();
     let byte_of_char: Vec<usize> = text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).collect();
     let nchars = byte_of_char.len() - 1;
@@ -278,7 +284,7 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
     // Paragraph text is clipped by its box: lines that end below it are not drawn. The first
     // stays, cut at the box's far edge (bottom; left in vertical type) when it overflows.
-    let depth = doc.box_size.map(|b| if doc.vertical { b[0] } else { b[1] } as f32);
+    let depth = doc.box_size.filter(|_| clip_to_box).map(|b| if doc.vertical { b[0] } else { b[1] } as f32);
     let far_edge = match (doc.vertical, doc.box_size) {
         (false, Some(b)) => Some((kurbo::Vec2::new(0.0, 1.0), doc.box_pos[1] + b[1])),
         (true, Some(_)) => Some((kurbo::Vec2::new(-1.0, 0.0), -doc.box_pos[0])),
@@ -727,6 +733,18 @@ mod tests {
         let short = layout_doc(&TextDoc { text, size: 20.0, box_size: Some([80.0, 50.0]), ..Default::default() });
         assert!(short.glyphs.len() < tall.glyphs.len() && !short.glyphs.is_empty(), "{} vs {}", short.glyphs.len(), tall.glyphs.len());
         assert!(short.line_boxes.iter().all(|b| b[1] < 50.0 + 20.0), "{:?}", short.line_boxes);
+    }
+
+    /// Review of #2840: the text being edited keeps every line (they hold the caret), uncut.
+    #[test]
+    fn unclipped_layout_keeps_lines_past_the_box() {
+        let doc = TextDoc { text: "one\ntwo\nthree".into(), size: 20.0, box_size: Some([80.0, 10.0]), ..Default::default() };
+        let (clipped, whole) = (layout_doc(&doc), layout_doc_with(&doc, false));
+        assert_eq!(clipped.line_boxes.len(), 1);
+        assert_eq!(whole.line_boxes.len(), whole.layout.lines.len());
+        assert_eq!(whole.glyphs.iter().map(|g| g.line_index).max(), Some(2));
+        let full = layout_doc(&TextDoc { box_size: Some([80.0, 400.0]), ..doc });
+        assert!(whole.glyphs.iter().zip(&full.glyphs).all(|(a, b)| a.path == b.path && a.origin == b.origin), "not cut");
     }
 
     /// Review of #2840: a box shorter than the first line keeps it, cut at the box's bottom

@@ -99,9 +99,9 @@ fn mask_cuts_layer() {
     assert!(img.get(150, 50)[3] < 0.01);
 }
 
-/// Review of #2840: the layer named by `unmasked_layer` shows whole, the others stay masked.
+/// Review of #2840: the layer named by `edited_text` shows whole, the others stay masked.
 #[test]
-fn unmasked_layer_skips_only_its_masks() {
+fn edited_text_skips_only_its_masks() {
     let (mut p, cid, comp) = setup();
     let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
     let mut next = p.next_id;
@@ -113,7 +113,7 @@ fn unmasked_layer_skips_only_its_masks() {
     // One cache for all three renders: the masked buffers it keeps must not serve the others.
     let cache = crate::LayerCache::default();
     let at = |unmasked| {
-        let opts = crate::RenderOpts { unmasked_layer: unmasked, ..Default::default() };
+        let opts = crate::RenderOpts { edited_text: unmasked, ..Default::default() };
         let mut r = crate::Renderer::new(&p, &crate::NoFootage, opts);
         r.cache = Some(&cache);
         r.comp_frame(cid, Tick::ZERO).get(150, 50)[3]
@@ -126,7 +126,7 @@ fn unmasked_layer_skips_only_its_masks() {
 /// Review of #2840: a layer reading the edited layer (Set Matte) sees it masked either way, so
 /// its cached result is right across both transitions with one shared cache.
 #[test]
-fn unmasked_layer_stays_masked_for_layers_reading_it() {
+fn edited_text_stays_masked_for_layers_reading_it() {
     let (mut p, cid, comp) = setup();
     let mut a = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
     let mut next = p.next_id;
@@ -145,7 +145,7 @@ fn unmasked_layer_stays_masked_for_layers_reading_it() {
     p.comp_mut(cid).unwrap().layers.extend([b, a]);
     let cache = crate::LayerCache::default();
     let at = |unmasked| {
-        let opts = crate::RenderOpts { unmasked_layer: unmasked, ..Default::default() };
+        let opts = crate::RenderOpts { edited_text: unmasked, ..Default::default() };
         let mut r = crate::Renderer::new(&p, &crate::NoFootage, opts);
         r.cache = Some(&cache);
         r.comp_frame(cid, Tick::ZERO).get(150, 50)[3]
@@ -1331,6 +1331,29 @@ fn paragraph_text_content_bounds_are_its_box() {
     p.comp_mut(cid).unwrap().layers.push(l.clone());
     let ctx = crate::EvalCtx::new(&p, cid, p.comp(cid).unwrap(), Tick::ZERO);
     assert_eq!(crate::content_bounds(&ctx, &l), Some([-75.0, -30.0, 75.0, 30.0]));
+}
+
+/// Review of #2840: the paragraph text being edited shows the lines past its box (they hold the
+/// caret while typing), the finished render clips them; one shared cache serves both ways.
+#[test]
+fn edited_box_text_shows_lines_past_its_box() {
+    let (mut p, cid, comp) = setup();
+    let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+    let doc = TextDoc { text: "one\ntwo\nthree".into(), size: 20.0, box_size: Some([150.0, 25.0]), box_pos: [-75.0, -40.0], ..Default::default() };
+    l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(doc));
+    let id = l.id.0;
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let cache = crate::LayerCache::default();
+    let ink_below_box = |edited| {
+        let opts = crate::RenderOpts { edited_text: edited, ..Default::default() };
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, opts);
+        r.cache = Some(&cache);
+        let img = r.comp_frame(cid, Tick::ZERO);
+        (40..100).flat_map(|y| (0..200).map(move |x| (x, y))).filter(|&(x, y)| img.get(x, y)[3] > 0.2).count()
+    };
+    for edited in [None, Some(id), None, Some(id)] {
+        assert_eq!(ink_below_box(edited) > 0, edited.is_some(), "{edited:?}");
+    }
 }
 
 /// Solo is not time-dependent (as in After Effects): while any layer is soloed, the others stay

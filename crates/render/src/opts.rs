@@ -28,9 +28,10 @@ pub struct RenderOpts {
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,
-    /// Viewer only: the id of a text layer being edited whose mask compositing is skipped (the text
-    /// shows whole while typing; its mask paths stay, a text path may use them).
-    pub unmasked_layer: Option<u64>,
+    /// Viewer only: the id of the text layer being edited, drawn whole while typing: its mask
+    /// compositing is skipped (its mask paths stay, a text path may use them) and lines past its
+    /// paragraph box show, so the glyphs match the caret and selection.
+    pub edited_text: Option<u64>,
 }
 
 impl RenderOpts {
@@ -53,7 +54,7 @@ impl Default for RenderOpts {
             nested_switches: true,
             draft_shadows: true,
             proxy: effectcraft_project::render_queue::ProxyUse::CurrentSettings,
-            unmasked_layer: None,
+            edited_text: None,
         }
     }
 }

@@ -115,7 +115,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));
         // The layer's own past frames draw as it does (unmasked while edited; keyed apart).
         let mut sub = self.r.nested();
-        sub.opts.unmasked_layer = self.r.opts.unmasked_layer;
+        sub.opts.edited_text = self.r.opts.edited_text;
         sub.layer_input(&self.ctx.at(t), self.layer, n).map(|b| (*b).clone())
     }
 
