@@ -438,3 +438,18 @@ fn stacked_expanding_operators_stay_within_the_segment_budget() {
     // Within the budget nothing changes: 4 segments × 11 pieces.
     assert_eq!(vertex_count(&zigzag(&[sq(0.0, 0.0, 100.0)], 1.0, 10.0, false)[0]), 44);
 }
+
+#[test]
+fn many_short_open_paths_keep_their_requested_detail_within_the_budget() {
+    // 1000 open lines at 1000 ridges: 1,001,000 segments fit the budget, so nothing is reduced.
+    let lines: Vec<BezPath> = (0..1000)
+        .map(|i| {
+            let mut p = BezPath::new();
+            p.move_to((0.0, i as f64));
+            p.line_to((100.0, i as f64));
+            p
+        })
+        .collect();
+    let z = zigzag(&lines, 1.0, 1000.0, false);
+    assert!(z.iter().all(|q| q.elements().len() == 1 + 1001));
+}

@@ -448,11 +448,16 @@ struct Sample {
 /// output keeps a short stack from multiplying a simple path into billions of points.
 pub const MAX_OPERATOR_SEGMENTS: usize = 1 << 20;
 
-/// `want` pieces (or copies) per input segment, reduced so the whole output stays within
-/// [`MAX_OPERATOR_SEGMENTS`] (never below 1, so the input itself always passes through).
+/// `want` pieces (or copies) per input segment, reduced so the whole output (segments times
+/// pieces, plus per-subpath overhead) stays within [`MAX_OPERATOR_SEGMENTS`] (never below 1, so the input itself always passes through).
 fn pieces_within_budget(paths: &[BezPath], want: usize) -> usize {
-    let segs: usize = paths.iter().map(|p| p.elements().len()).sum();
-    want.min(MAX_OPERATOR_SEGMENTS / segs.max(1)).max(1)
+    // Count what is subdivided (drawn segments) and keep room for each subpath's own MoveTo/Close.
+    let (mut segs, mut overhead) = (0usize, 0usize);
+    for sub in paths.iter().flat_map(subs) {
+        segs = segs.saturating_add(sub.segs.len());
+        overhead = overhead.saturating_add(2);
+    }
+    want.min(MAX_OPERATOR_SEGMENTS.saturating_sub(overhead) / segs.max(1)).max(1)
 }
 
 /// Split every segment into `m` pieces of equal arc length. Original vertices get the average of
