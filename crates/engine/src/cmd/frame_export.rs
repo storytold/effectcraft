@@ -27,15 +27,14 @@ struct Isolated {
     image: Image,
 }
 
-/// `scene_output`: a float output (ProEXR), rendered without the HDR step
-/// ([`RenderOpts::scene_output`]).
-fn render_with(s: &Session, project: &Project, comp: ItemId, t: Tick, scale: f64, scene_output: bool) -> Image {
+/// `skip_hdr_step`: no HDR step, for a float output (ProEXR; [`RenderOpts::skip_hdr_step`]).
+fn render_with(s: &Session, project: &Project, comp: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -> Image {
     let opts = RenderOpts {
         scale,
         backend: Backend::Auto,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
         draft_shadows: s.prefs.three_d.realtime_shadows,
-        scene_output,
+        skip_hdr_step,
         ..Default::default()
     };
     let mut r = Renderer::new(project, s.footage.as_ref(), opts);
@@ -44,11 +43,11 @@ fn render_with(s: &Session, project: &Project, comp: ItemId, t: Tick, scale: f64
     r.comp_frame(comp, t)
 }
 
-/// The comp frame and each visible layer rendered alone (top layer first). `scene_output`: as
+/// The comp frame and each visible layer rendered alone (top layer first). `skip_hdr_step`: as
 /// [`render_with`].
-fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, scene_output: bool) -> Result<(Image, Vec<Isolated>)> {
+fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -> Result<(Image, Vec<Isolated>)> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let full = render_with(s, &s.project, cid, t, scale, scene_output);
+    let full = render_with(s, &s.project, cid, t, scale, skip_hdr_step);
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.has_video());
     let ids: Vec<LayerId> = comp
         .layers
@@ -76,7 +75,7 @@ fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, scene_output: bool) ->
             }
         }
         let Some((name, blend, opacity)) = info else { continue };
-        let image = render_with(s, &p, cid, t, scale, scene_output);
+        let image = render_with(s, &p, cid, t, scale, skip_hdr_step);
         out.push(Isolated { name, blend, opacity, image });
     }
     Ok((full, out))

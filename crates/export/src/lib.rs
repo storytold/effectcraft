@@ -302,7 +302,7 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
         OutputFormat::ExrSequence => {
             // Linear light, premultiplied (the EXR convention); RGB keeps alpha = 1 over the background.
             // Colour is floored at 0 but not capped at 1: a 32 bpc frame's over-range values survive (#339).
-            // The frame was rendered without the HDR step (`RenderOpts::scene_output`) and is
+            // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
             // decoded with the output space's curve, in the output space's primaries.
             let dec = effectcraft_render::color::Pipe::of(&cx.project.settings).output_linear();
             let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
@@ -311,10 +311,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                 for x in 0..w {
                     let p = if x < img.width && y < img.height { img.data[img.idx(x, y)] } else { [0.0; 4] };
                     let (c, a) = match channels {
-                        Channels::Alpha => {
-                            let a = p[3].clamp(0.0, 1.0);
-                            (lin3([a; 3]), 1.0)
-                        }
+                        // Alpha is coverage, not encoded colour: written as it is.
+                        Channels::Alpha => ([p[3].clamp(0.0, 1.0); 3], 1.0),
                         Channels::Rgba => {
                             let a = p[3].clamp(0.0, 1.0);
                             let c = if a > 0.0 { lin3([p[0] / a, p[1] / a, p[2] / a]).map(|v| v * a) } else { [0.0; 3] };

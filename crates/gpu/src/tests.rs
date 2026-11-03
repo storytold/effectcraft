@@ -1316,11 +1316,16 @@ fn owned_devices_favour_memory_usage() {
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
 }
 
-/// A float output (`RenderOpts::scene_output`) skips Project Settings ▸ HDR on the GPU as on the
+/// `RenderOpts::skip_hdr_step` (float outputs) skips Project Settings ▸ HDR on the GPU as on the
 /// CPU: both compositors agree, and the frame is the Clip frame with its over-range values.
 #[test]
-fn scene_output_skips_the_hdr_step_on_the_gpu() {
+fn skipping_the_hdr_step_on_the_gpu_matches_clip() {
     use effectcraft_project::HdrMode;
+    let Some(g) = gpu() else {
+        // Visible skip (EFFECTCRAFT_REQUIRE_GPU=1 makes a missing adapter fail instead).
+        eprintln!("skipping_the_hdr_step_on_the_gpu_matches_clip: skipped: no GPU adapter");
+        return;
+    };
     for mode in [HdrMode::Compand, HdrMode::ToneMap] {
         let mut s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
         let mut bright = s.solid([3.0, 1.5, 0.5], 30, 20);
@@ -1329,9 +1334,8 @@ fn scene_output_skips_the_hdr_step_on_the_gpu() {
         s.p.settings.working_space = Some(ColorSpace::Srgb);
         s.p.settings.linearize = true;
         s.p.settings.hdr = mode;
-        let scene = RenderOpts { scene_output: true, ..opts() };
-        check(&format!("scene output {mode:?}"), compare_at(&s, scene, Tick::ZERO), 0.0);
-        let Some(g) = gpu() else { continue };
+        let scene = RenderOpts { skip_hdr_step: true, ..opts() };
+        check(&format!("no HDR step {mode:?}"), compare_at(&s, scene, Tick::ZERO), 0.0);
         let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..scene });
         r.accel = Some(g);
         let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");

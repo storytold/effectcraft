@@ -409,9 +409,10 @@ Interpret Footage, else sRGB) and the top-level comp is converted to the sRGB di
 Working Space runs everything in linear light; Blend Colors Using 1.0 Gamma linearises only for
 blending. Layer cache keys include these settings. Project Settings ▸ HDR (compand / tone
 mapping) is the last top-level step, for standard-dynamic-range displays and outputs; OpenEXR
-renders (sequences and ProEXR) skip it (`RenderOpts::scene_output`) and decode the frame with the
+renders (sequences and ProEXR) skip it (`RenderOpts::skip_hdr_step`) and decode the frame with the
 output space's own curve (`Pipe::output_linear`), so they hold linear light in the output space's
-primaries.
+primaries; unmanaged projects decode with the Working Gamma's curve (sRGB at 2.2, a pure 2.4 power
+curve at 2.4). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by

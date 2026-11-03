@@ -174,10 +174,11 @@ impl<'a> Renderer<'a> {
         self.pipe
     }
 
-    /// The colour pipeline of the top-level output steps: the project's, without the HDR step
-    /// for a float output ([`crate::RenderOpts::scene_output`]).
+    /// The colour pipeline of the top-level output steps: the project's, with no HDR step under
+    /// [`crate::RenderOpts::skip_hdr_step`] (the consumer decodes with
+    /// [`color::Pipe::output_linear`] or applies the step itself).
     pub fn output_pipe(&self) -> color::Pipe {
-        if self.opts.scene_output { self.pipe.scene_output() } else { self.pipe }
+        if self.opts.skip_hdr_step { self.pipe.without_hdr_step() } else { self.pipe }
     }
 
     /// Nesting depth (0 = the top-level comp).

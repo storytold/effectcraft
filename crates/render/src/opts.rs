@@ -28,11 +28,11 @@ pub struct RenderOpts {
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,
-    /// A float output (OpenEXR): the top-level comp leaves the working space for the output
-    /// space without Project Settings ▸ HDR (compand / tone mapping are for standard-dynamic-range
-    /// displays and outputs), so over-range values reach the file as they are. The writer
-    /// decodes the frame with [`crate::color::Pipe::output_linear`].
-    pub scene_output: bool,
+    /// No HDR step: the top-level comp leaves the working space for the output space without
+    /// Project Settings ▸ HDR (compand / tone mapping), so over-range values stay. The consumer
+    /// decodes the frame with [`crate::color::Pipe::output_linear`] (float outputs: OpenEXR)
+    /// or applies the step itself. Part of the viewer's frame keys (`opts_hash`).
+    pub skip_hdr_step: bool,
 }
 
 impl RenderOpts {
@@ -54,7 +54,7 @@ impl Default for RenderOpts {
             backend: Backend::Cpu,
             nested_switches: true,
             draft_shadows: true,
-            scene_output: false,
+            skip_hdr_step: false,
             proxy: effectcraft_project::render_queue::ProxyUse::CurrentSettings,
         }
     }

@@ -43,6 +43,34 @@ fn project(depth: BitDepth, hdr: HdrMode, ws: Option<ColorSpace>, linearize: boo
     (p, cid)
 }
 
+/// A comp builder: bit depth, HDR mode, working space, Linearize Working Space, output space.
+type Build = fn(BitDepth, HdrMode, Option<ColorSpace>, bool, Option<ColorSpace>) -> (Project, ItemId);
+
+/// The half-opacity layer of [`half_project`]: over range in red.
+const HALF: [f32; 3] = [4.0, 0.6, 0.3];
+
+/// A one-frame comp over a coloured background whose only layer, [`HALF`] at 50% opacity,
+/// covers the left two thirds: semi-transparent and transparent pixels (the premultiplied and
+/// RGB-over-background paths of the writers).
+fn half_project(depth: BitDepth, hdr: HdrMode, ws: Option<ColorSpace>, linearize: bool, out: Option<ColorSpace>) -> (Project, ItemId) {
+    let mut p = Project::default();
+    p.settings.bit_depth = depth;
+    p.settings.hdr = hdr;
+    p.settings.working_space = ws;
+    p.settings.linearize = linearize;
+    p.settings.output_space = out;
+    let mut comp = Comp::new(W, H, FrameRate::new(10, 1), Tick::from_seconds_f64(0.1));
+    comp.background = [0.2, 0.3, 0.4];
+    let w = W / 3 * 2;
+    let sid = p.add_item("Half", Label::Red, None, ItemKind::Solid(Solid { color: HALF, width: w, height: H, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &comp, "Half", LayerSource::Solid { item: sid }, (w, H), None);
+    l.props.prop_mut("transform/position").expect("position").value = effectcraft_keyframe::Value::Vec3([w as f64 / 2.0, H as f64 / 2.0, 0.0]);
+    l.props.prop_mut("transform/opacity").expect("opacity").value = effectcraft_keyframe::Value::Scalar(50.0);
+    comp.layers.push(l);
+    let cid = p.add_item("Comp 1", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+    (p, cid)
+}
+
 /// Export the comp's one frame as a `fmt` sequence; the frame file's path.
 fn render(p: &Project, cid: ItemId, fmt: OutputFormat, channels: Channels, dir: &Path, ext: &str) -> PathBuf {
     let mut om = OutputModule::for_format(fmt);
@@ -80,11 +108,11 @@ const STILLS: [(OutputFormat, Channels, &str); 3] = [
 
 /// The bytes of every 8-bit still for each bit depth × HDR mode, in a managed linear sRGB
 /// project with a Display P3 output.
-fn still_hashes() -> Vec<u64> {
+fn still_hashes(build: Build) -> Vec<u64> {
     let mut out = vec![];
     for depth in DEPTHS {
         for mode in MODES {
-            let (p, cid) = project(depth, mode, Some(ColorSpace::Srgb), true, Some(ColorSpace::DisplayP3));
+            let (p, cid) = build(depth, mode, Some(ColorSpace::Srgb), true, Some(ColorSpace::DisplayP3));
             for (fmt, ch, ext) in STILLS {
                 let d = out_dir(&format!("golden-{depth:?}-{mode:?}-{ext}"));
                 let bytes = std::fs::read(render(&p, cid, fmt, ch, &d, ext)).expect("read");
@@ -130,8 +158,40 @@ const STILL_GOLDEN: [u64; 27] = [
 
 #[test]
 fn eight_bit_stills_are_unchanged() {
-    assert_eq!(still_hashes(), STILL_GOLDEN);
+    assert_eq!(still_hashes(project), STILL_GOLDEN);
+    assert_eq!(still_hashes(half_project), HALF_STILL_GOLDEN);
 }
+
+/// [`still_hashes`] of [`half_project`] before: premultiplied and RGB-over-background stills.
+const HALF_STILL_GOLDEN: [u64; 27] = [
+    0x3abd611ee63b7edd,
+    0x51e7ec0426773cdb,
+    0xbee34abe9f0a3d87,
+    0x554c03dba915d290,
+    0xe98490fc826a7adb,
+    0x0a0e77927bf1a187,
+    0x4f1c076634822d50,
+    0xe790f474e05b3adb,
+    0xe517c3136471a187,
+    0x07cd5e73765539f9,
+    0x68e51bbd8d442a64,
+    0x844a5f23a9cc9a3d,
+    0xc302b2b86f4cdd70,
+    0xb7247795d204a2c5,
+    0x3b18867537c69265,
+    0x9a5f7679bb5a2399,
+    0x868b729dcc804656,
+    0x2e0bc64a3fb562f0,
+    0x6dc9e1a1eac1220d,
+    0x6e101cd849e78f32,
+    0x7b7a2a776f73d70b,
+    0x6b3244f808c65d4e,
+    0xbfa1b35fada2c77d,
+    0x8c3a31415ed47e33,
+    0xac787507caf1c896,
+    0x4a38297060de19ff,
+    0x300d6e4222eaa5b5,
+];
 
 /// The decoded samples of a still EXR frame, row-major RGBA.
 fn exr_samples(path: &Path) -> Vec<f32> {
@@ -143,12 +203,12 @@ fn bits_hash(v: &[f32]) -> u64 {
 }
 
 /// Clip-mode EXR samples with an sRGB output, for each colour setup × bit depth × channels.
-fn exr_clip_hashes() -> Vec<u64> {
+fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
     let mut out = vec![];
     for (ws, linearize) in [(None, false), (Some(ColorSpace::Srgb), false), (Some(ColorSpace::Srgb), true), (Some(ColorSpace::AcesCg), true)] {
         for depth in DEPTHS {
-            let (p, cid) = project(depth, HdrMode::Clip, ws, linearize, None);
-            for ch in [Channels::Rgba, Channels::Rgb, Channels::Alpha] {
+            let (p, cid) = build(depth, HdrMode::Clip, ws, linearize, None);
+            for &ch in channels {
                 let d = out_dir(&format!("clip-{ws:?}-{linearize}-{depth:?}-{ch:?}"));
                 out.push(bits_hash(&exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"))));
                 let _ = std::fs::remove_dir_all(&d);
@@ -200,7 +260,54 @@ const EXR_CLIP_GOLDEN: [u64; 36] = [
 
 #[test]
 fn exr_clip_with_srgb_output_is_unchanged() {
-    assert_eq!(exr_clip_hashes(), EXR_CLIP_GOLDEN);
+    // The bands are opaque everywhere, so the Alpha-only files (alpha 1.0) are unchanged too.
+    assert_eq!(exr_clip_hashes(project, &[Channels::Rgba, Channels::Rgb, Channels::Alpha]), EXR_CLIP_GOLDEN);
+    assert_eq!(exr_clip_hashes(half_project, &[Channels::Rgba, Channels::Rgb]), HALF_EXR_CLIP_GOLDEN);
+}
+
+/// [`exr_clip_hashes`] of [`half_project`] before (RGBA premultiplied, RGB over the background).
+const HALF_EXR_CLIP_GOLDEN: [u64; 24] = [
+    0xe7f7d517df7baf25,
+    0xc9d6dcb2671f9925,
+    0x2fe5733c26d16325,
+    0x8b267197d2645925,
+    0x6fe736332cb80f25,
+    0x30d5f66395d92d25,
+    0xe7f7d517df7baf25,
+    0xc9d6dcb2671f9925,
+    0x2fe5733c26d16325,
+    0x8b267197d2645925,
+    0x6fe736332cb80f25,
+    0x30d5f66395d92d25,
+    0x8c261c1cd9674b25,
+    0xace550c3a8e72925,
+    0xb9bd0b7863b78325,
+    0xdf8e948c5e8af125,
+    0x6fe736332cb80f25,
+    0x30d5f66395d92d25,
+    0xe4aedfefacc80725,
+    0x95ddfccddc885525,
+    0x81fa3c39c1d09725,
+    0x49cc0014f05a1d25,
+    0x4ed1b417cc847725,
+    0x2df6df5ce394d925,
+];
+
+/// An Alpha-only EXR holds the alpha (coverage) as it is in every output space: no transfer
+/// curve is decoded from it (it used to be sRGB-decoded, 0.5 → 0.214).
+#[test]
+fn exr_alpha_only_is_raw_alpha() {
+    for out in [None, Some(ColorSpace::Rec709), Some(ColorSpace::Rec2100Pq), Some(ColorSpace::AcesCg)] {
+        for ws in [None, Some(ColorSpace::Srgb)] {
+            let (p, cid) = half_project(BitDepth::Bpc32, HdrMode::Clip, ws, false, out);
+            let d = out_dir(&format!("alpha-{ws:?}-{out:?}"));
+            let v = exr_samples(&render(&p, cid, OutputFormat::ExrSequence, Channels::Alpha, &d, "exr"));
+            let _ = std::fs::remove_dir_all(&d);
+            let at = |x: u32| &v[((H / 2 * W + x) * 4) as usize..][..4];
+            assert_eq!(at(2), [0.5, 0.5, 0.5, 1.0], "{ws:?} {out:?} covered");
+            assert_eq!(at(W - 2), [0.0, 0.0, 0.0, 1.0], "{ws:?} {out:?} transparent");
+        }
+    }
 }
 
 /// Compand and tone mapping leave EXR output alone: the file holds the Clip mode's samples, for
@@ -215,17 +322,19 @@ fn exr_ignores_compand_and_tone_mapping() {
     ];
     for (ws, linearize, out) in setups {
         for depth in DEPTHS {
-            for ch in [Channels::Rgba, Channels::Rgb] {
+            for (ch, (name, build)) in
+                [Channels::Rgba, Channels::Rgb].into_iter().flat_map(|c| [(c, ("bands", project as Build)), (c, ("half", half_project as Build))])
+            {
                 let samples = |mode: HdrMode| {
-                    let (p, cid) = project(depth, mode, ws, linearize, out);
-                    let d = out_dir(&format!("modes-{ws:?}-{linearize}-{out:?}-{depth:?}-{ch:?}-{mode:?}"));
+                    let (p, cid) = build(depth, mode, ws, linearize, out);
+                    let d = out_dir(&format!("modes-{name}-{ws:?}-{linearize}-{out:?}-{depth:?}-{ch:?}-{mode:?}"));
                     let v = exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"));
                     let _ = std::fs::remove_dir_all(&d);
                     v
                 };
                 let clip = samples(HdrMode::Clip);
                 for mode in [HdrMode::Compand, HdrMode::ToneMap] {
-                    assert!(samples(mode) == clip, "{ws:?} {linearize} {out:?} {depth:?} {ch:?} {mode:?}");
+                    assert!(samples(mode) == clip, "{name} {ws:?} {linearize} {out:?} {depth:?} {ch:?} {mode:?}");
                 }
             }
         }
@@ -273,6 +382,23 @@ fn exr_holds_scene_linear_values_in_output_primaries() {
     }
     let (p, cid) = project(BitDepth::Bpc32, HdrMode::ToneMap, Some(ColorSpace::AcesCg), true, Some(ColorSpace::AcesCg));
     assert_eq!(exr_centre(&p, cid, "lin-exact")[..3], band, "4.0 is exactly 4.0");
+}
+
+/// Rec. 2100 PQ and HLG outputs (no HDR step there in any mode) are decoded with their own
+/// curves: linear light in Rec. 2020 primaries, 1.0 = reference white (203 cd/m²).
+#[test]
+fn exr_decodes_pq_and_hlg_outputs() {
+    let [_, _, band] = BANDS;
+    let want = Conversion::new(ColorSpace::AcesCg, true, ColorSpace::Rec2020, true).expect("matrix").apply(band).map(|v| v.max(0.0));
+    for out in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
+        for mode in MODES {
+            let (p, cid) = project(BitDepth::Bpc32, mode, Some(ColorSpace::AcesCg), true, Some(out));
+            let got = exr_centre(&p, cid, &format!("hdr-out-{out:?}-{mode:?}"));
+            for i in 0..3 {
+                assert!((got[i] - want[i]).abs() <= 1e-3 * want[i].max(1.0), "{out:?} {mode:?} channel {i}: got {got:?}, want {want:?}");
+            }
+        }
+    }
 }
 
 /// The EXR is decoded with the output space's curve, not always sRGB's: a Rec. 709 output (pure

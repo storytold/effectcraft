@@ -252,7 +252,7 @@ impl<'a> Cx<'a> {
             nested_switches: self.job.nested_switches,
             draft_shadows: true,
             // OpenEXR keeps over-range values: no HDR compand / tone mapping on its frames.
-            scene_output: self.job.output.format == effectcraft_project::render_queue::OutputFormat::ExrSequence,
+            skip_hdr_step: self.job.output.format == effectcraft_project::render_queue::OutputFormat::ExrSequence,
             proxy: s.proxy_use,
         };
         let mut r = Renderer::new(&self.project, self.job.footage, opts);

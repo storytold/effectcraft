@@ -340,18 +340,18 @@ fn float_footage_is_encoded_once_with_the_working_gamma() {
     }
 }
 
-/// A float output (`RenderOpts::scene_output`) skips Project Settings ▸ HDR: its top-level frame
+/// `RenderOpts::skip_hdr_step` (float outputs) skips Project Settings ▸ HDR: its top-level frame
 /// is the Clip frame in every mode, while other renders keep compand / tone mapping.
 #[test]
-fn scene_output_skips_the_hdr_step() {
+fn skip_hdr_step_frames_are_the_clip_frames() {
     use effectcraft_project::HdrMode;
     for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
         let (mut p, cid, _) = setup(depth);
         p.settings.working_space = Some(ColorSpace::Srgb);
         p.settings.linearize = true;
         add_solid(&mut p, cid, [4.0, 2.0, 0.5], BlendMode::Normal, 100.0);
-        let frame = |p: &Project, scene_output: bool| {
-            Renderer::new(p, &crate::NoFootage, RenderOpts { scene_output, ..Default::default() }).comp_frame(cid, Tick::ZERO)
+        let frame = |p: &Project, skip_hdr_step: bool| {
+            Renderer::new(p, &crate::NoFootage, RenderOpts { skip_hdr_step, ..Default::default() }).comp_frame(cid, Tick::ZERO)
         };
         let clip = frame(&p, false);
         assert_eq!(clip.data, frame(&p, true).data, "{depth:?} Clip");
