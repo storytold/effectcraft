@@ -95,6 +95,8 @@ impl Interp {
         let ctm = self.gs.ctm;
         for (i, &code) in bytes.iter().enumerate() {
             let code = code as u32;
+            // Every input character costs at least one unit, so empty outlines are not free.
+            self.spend(1)?;
             if let Some(g) = font.glyph(code) {
                 // Each outline element counts against the path limit and the budget before it
                 // is copied, so a long string cannot expand into unbounded geometry.

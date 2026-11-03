@@ -67,7 +67,8 @@ pub(super) fn embedded_fonts(ps: &[u8]) -> HashMap<String, (Rc<Vec<u8>>, bool)> 
     while let Some(ee) = find_from(ps, b"eexec", from) {
         from = ee + 5;
         let last_before = |v: &[usize]| v[..v.partition_point(|&p| p < ee)].last().copied().filter(|&p| p >= used);
-        let start = last_before(&heads).or_else(|| last_before(&names).map(|p| p.saturating_sub(512)));
+        // The fallback look-back stops at the previous font's end, so it cannot pick up its header.
+        let start = last_before(&heads).or_else(|| last_before(&names).map(|p| p.saturating_sub(512).max(used)));
         let Some(start) = start else { continue };
         let end = find_from(ps, b"cleartomark", ee).map_or(ps.len(), |p| p + 11);
         if let Some(name) = name_after(&ps[start..ee], b"/FontName") {
@@ -105,5 +106,15 @@ mod tests {
         let fonts = embedded_fonts(&ps);
         assert_eq!(fonts.len(), 1);
         assert!(fonts.contains_key("Real"));
+    }
+
+    #[test]
+    fn header_less_font_after_a_short_one_does_not_take_its_header() {
+        let a = "%!PS-AdobeFont-1.0: A\n/FontName /A def\ncurrentfile eexec\n0000\ncleartomark\n";
+        let b = "/FontName /B def\ncurrentfile eexec\n0000\ncleartomark\n";
+        let ps = format!("%!PS-Adobe-3.0 EPSF-3.0\n{a}{b}");
+        let fonts = embedded_fonts(ps.as_bytes());
+        let (data, _) = fonts.get("B").expect("second font found");
+        assert!(!String::from_utf8_lossy(data).contains("AdobeFont"), "{}", String::from_utf8_lossy(data));
     }
 }
