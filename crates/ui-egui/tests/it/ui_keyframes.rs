@@ -12,7 +12,7 @@ use serde_json::json;
 /// A 4 s, 30 fps comp with a Box layer whose Opacity has keys at 0 s and 1 s, revealed in the
 /// Timeline; returns the harness, the layer and the property uid.
 fn harness() -> (Harness<'static, EffectcraftApp>, LayerId, u64) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Keys", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Box", "color": "#e04020", "width": 80, "height": 80})).unwrap();
     let id = s.active_comp().unwrap().layers[0].id;
@@ -507,7 +507,7 @@ fn graph_editor_buttons_that_do_not_fit_move_to_the_more_menu() {
 /// the same amount.
 #[test]
 fn properties_panel_edits_every_selected_layer() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Three", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     let mut ids = vec![];
     for (i, c) in ["#e04020", "#20e040", "#2040e0"].iter().enumerate() {
@@ -557,7 +557,7 @@ fn properties_panel_edits_every_selected_layer() {
 /// moves the last by the whole change and the middle one by half, whichever layer is scrubbed.
 #[test]
 fn ctrl_alt_scrub_in_the_timeline_is_proportional() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Three", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     let mut ids = vec![];
     for c in ["#e04020", "#20e040", "#2040e0"] {

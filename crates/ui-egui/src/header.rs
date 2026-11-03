@@ -404,7 +404,6 @@ fn workspace_tabs(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     let shown = ["Standard", "Small Screen", "Learn", "Review", "Default"];
     for name in shown {
         let g = p.layout_no_wrap(crate::i18n::command_label("window.workspace", name).to_string(), Tokens::ui(12.0), t.text);
-
         let w = g.size().x + 16.0;
         let r = Rect::from_min_max(pos2(rx - w, cy - 13.0), pos2(rx, cy + 13.0));
         if r.min.x < left + 120.0 {

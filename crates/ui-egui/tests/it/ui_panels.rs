@@ -15,7 +15,7 @@ use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Panels", "width": 320, "height": 180, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
@@ -419,7 +419,7 @@ fn settings_buttons_stay_in_view_at_200_percent() {
 #[test]
 #[ignore]
 fn panels_snapshot() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let solid = s.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).map(|i| i.id.0);
     let mut app = Some(EffectcraftApp::new(s));

@@ -30,7 +30,7 @@ fn layer(s: &Session, id: u64) -> Layer {
 /// A 640×360 comp: a full-frame green solid under a 200×100 solid scaled 200% at the centre,
 /// carrying controls, Curves and Levels (Individual Controls).
 fn app() -> (EffectcraftApp, Ids) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "frameRate": 30, "duration": 10})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Back", "color": "#20c040"})).unwrap();
     let small = s.execute("layer.newSolid", json!({"name": "Small", "color": "#ff0000", "width": 200, "height": 100})).unwrap()["layer"].as_u64().unwrap();
@@ -137,7 +137,7 @@ fn effect_controls_widgets_register_automation_ids() {
 
 #[test]
 fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"width": 640, "height": 360, "frameRate": 30, "duration": 5})).unwrap();
     let lid = s.execute("layer.newSolid", json!({"color": "#000000"})).unwrap()["layer"].as_u64().unwrap();
     let first = s.execute("effect.apply", json!({"effect": "Tint"})).unwrap()["effects"][0].as_u64().unwrap();
@@ -228,7 +228,7 @@ fn the_eyedropper_samples_under_the_pointer_in_a_region_of_interest() {
 #[test]
 fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
     // A large blurred frame, so the first render outlasts the click.
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Slow", "width": 7680, "height": 4320, "frameRate": 30, "duration": 1})).unwrap();
     let back = s.execute("layer.newSolid", json!({"name": "Back", "color": "#20c040"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("effect.apply", json!({"layers": [back], "effect": "Gaussian Blur"})).unwrap();
@@ -264,7 +264,7 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
 /// already keyed (the default screen colour takes most of a green), so sampling it would miss.
 #[test]
 fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Key", "width": 320, "height": 180, "frameRate": 30, "duration": 1})).unwrap();
     let screen = s.execute("layer.newSolid", json!({"name": "Screen", "color": "#30b050"})).unwrap()["layer"].as_u64().unwrap();
     let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Key Light"})).unwrap()["effects"][0].as_u64().unwrap();
@@ -442,7 +442,7 @@ fn hover(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
 /// header keeps its own menu.
 #[test]
 fn right_click_in_effect_controls_shows_the_effect_menu() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     let a = s.execute("layer.newSolid", json!({"name": "A", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
     let b = s.execute("layer.newSolid", json!({"name": "B", "color": "#804060"})).unwrap()["layer"].as_u64().unwrap();
@@ -558,7 +558,7 @@ fn extractor_offers_the_exr_layers_and_channels() {
 #[test]
 fn point_picker_handle_follows_hover_then_commits_once_across_effects() {
     for (effect, parameter) in [("ec.control.point", "point"), ("ec.blur.ccradialfast", "center"), ("ec.generate.gradientramp", "start")] {
-        let mut s = crate::english_test_session(Session::default());
+        let mut s = Session::default();
         s.execute("comp.new", json!({"width":640,"height":360,"duration":1})).unwrap();
         let lid = s.execute("layer.newSolid", json!({"width":200,"height":100,"color":"#406080"})).unwrap()["layer"].as_u64().unwrap();
         s.execute("prop.set", json!({"layer":lid,"path":"transform/scale","value":[200,200]})).unwrap();
@@ -673,7 +673,7 @@ fn non_point_parameters_activate_handles_across_effect_families() {
         ("ec.generate.gradientramp", "startColor", vec!["start", "end"]),
         ("ec.generate.beam", "length", vec!["startPoint", "endPoint"]),
     ] {
-        let mut s = crate::english_test_session(Session::default());
+        let mut s = Session::default();
         s.execute("comp.new", json!({"width":320,"height":180,"duration":1})).unwrap();
         let lid = s.execute("layer.newSolid", json!({"color":"#406080"})).unwrap()["layer"].as_u64().unwrap();
         let uid = s.execute("effect.apply", json!({"layer":lid,"effect":effect})).unwrap()["effects"][0].as_u64().unwrap();
@@ -728,7 +728,7 @@ fn file_and_text_parameters_have_widgets() {
     let (invert, identity) = (dir.join("invert.cube"), dir.join("identity.cube"));
     std::fs::write(&invert, cube(true)).unwrap();
     std::fs::write(&identity, cube(false)).unwrap();
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "LUT", "width": 64, "height": 32, "frameRate": 30, "duration": 1})).unwrap();
     let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#ff0000", "width": 64, "height": 32})).unwrap()["layer"].as_u64().unwrap();
     s.state.selected_layers = vec![LayerId(l)];

@@ -497,8 +497,7 @@ mod tests {
 
     #[test]
     fn every_engine_entry_is_in_the_native_menu() {
-        let mut app = app();
-        app.session.prefs.general.language = "en".into();
+        let app = app();
         let spec = build(&app);
         fn commands(n: &[NativeNode], out: &mut Vec<(String, String)>) {
             for x in n {

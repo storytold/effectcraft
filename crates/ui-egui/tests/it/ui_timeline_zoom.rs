@@ -11,7 +11,7 @@ use serde_json::json;
 
 /// A 10-minute comp with one solid, zoomed in on its start.
 fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Long", "width": 320, "height": 180, "frameRate": 30, "duration": 600})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
     let mut app = EffectcraftApp::new(s);
@@ -268,7 +268,7 @@ fn work_area_context_menu_trims_the_comp() {
 /// indicator when it comes within reach; without Shift it lands where the pointer is.
 #[test]
 fn shift_dragging_the_work_area_snaps_to_the_current_time() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Short", "width": 320, "height": 180, "frameRate": 30, "duration": 10})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
     let mut app = EffectcraftApp::new(s);

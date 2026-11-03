@@ -9,7 +9,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4, "fps": 24})).unwrap();
     let comp = s.active_comp_id().unwrap().0;
     // Arabic, Hebrew, Devanagari and Thai names typed below need installed system faces: draw

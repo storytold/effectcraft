@@ -11,7 +11,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn harness(page: &str) -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(crate::english_test_session(Session::default())));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": page})).unwrap();

@@ -116,12 +116,6 @@ mod ui_workspace_focus;
 mod viewer_geometry;
 mod viewer_passive_display;
 
-/// Pin English for UI tests that assert English labels, independently of the host locale.
-pub(crate) fn english_test_session(mut session: effectcraft_engine::Session) -> effectcraft_engine::Session {
-    session.prefs.general.language = "en".into();
-    session
-}
-
 /// Register the managed build's canonical craft-fonts checkout (`CRAFT_FONTS_DIR/fonts`) through
 /// the same directory source production scans for `EFFECTCRAFT_FONT_DIRS`. The UI tests then render
 /// real Japanese glyphs from the canonical external input instead of relying on host fonts.

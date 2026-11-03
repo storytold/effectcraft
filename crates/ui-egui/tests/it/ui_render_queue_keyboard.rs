@@ -14,7 +14,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     for name in ["Alpha", "Beta", "Gamma"] {
         let comp = s.execute("comp.new", json!({"name": name, "width": 320, "height": 180, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
         s.execute("renderQueue.add", json!({"comp": comp})).unwrap();

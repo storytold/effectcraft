@@ -11,7 +11,7 @@ use serde_json::json;
 /// A 20 s comp whose Box layer has Rotation keys 300° at 8 s and 720° at 12 s; the Timeline is
 /// zoomed in on 0–4 s, so neither key is in view. Returns the harness and Rotation's uid.
 fn harness(select_layer: bool) -> (Harness<'static, EffectcraftApp>, u64, u64) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Fit", "width": 320, "height": 180, "frameRate": 30, "duration": 20})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Box", "color": "#e04020", "width": 80, "height": 80})).unwrap();
     let id = s.active_comp().unwrap().layers[0].id;

@@ -15,7 +15,7 @@ const F: i64 = 8_467_200_000;
 
 /// A 4 s, 30 fps comp with three solids, each with Opacity keys at 0 s and 1 s, revealed.
 fn harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Stagger", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     let mut ids = vec![];
     for i in 0..3 {
@@ -204,7 +204,7 @@ fn shift_ranges_and_key_boxes_stagger_in_comp_order() {
 /// that bar moves the selection together, as its own undo step.
 #[test]
 fn a_quick_offset_released_off_screen_ends() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Many", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     let ids: Vec<u64> =
         (0..40).map(|i| s.execute("layer.newSolid", json!({"name": format!("L{i}"), "color": "#e04020"})).unwrap()["layer"].as_u64().unwrap()).collect();

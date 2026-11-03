@@ -94,7 +94,7 @@ fn picks_are_separate_steps(h: &mut Harness<'_, EffectcraftApp>, value_id: &str,
 /// Timeline and undo restores None.
 #[test]
 fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "frameRate": 30, "duration": 4})).unwrap();
     s.execute("comp.settings", json!({"renderer": "advanced3D"})).unwrap();
     let sky = s.execute("layer.newSolid", json!({"name": "Sky HDRI", "color": "#66aaff"})).unwrap()["layer"].as_u64().unwrap();
@@ -164,7 +164,7 @@ fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
 /// parameter still picks from the drop-down and still undoes.
 #[test]
 fn effect_controls_layer_param_picks_through_the_shared_widget() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "frameRate": 30, "duration": 4})).unwrap();
     let map = s.execute("layer.newSolid", json!({"name": "Disp", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
     let base = s.execute("layer.newSolid", json!({"name": "Base", "color": "#20c040"})).unwrap()["layer"].as_u64().unwrap();
@@ -208,7 +208,7 @@ fn effect_controls_layer_param_picks_through_the_shared_widget() {
 #[ignore = "renders with wgpu; run with --ignored (set EC_SNAPSHOT_DIR to keep PNGs)"]
 fn snapshot_source_dropdown_open_and_chosen() {
     let _device = crate::gpu_test::lock();
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 1280, "height": 720, "frameRate": 30, "duration": 5})).unwrap();
     s.execute("comp.settings", json!({"renderer": "advanced3D"})).unwrap();
     let sky = s.execute("layer.newSolid", json!({"name": "Sky HDRI", "color": "#66aaff"})).unwrap()["layer"].as_u64().unwrap();

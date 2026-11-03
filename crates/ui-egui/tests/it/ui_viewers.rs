@@ -61,7 +61,7 @@ fn new_comp(s: &mut Session, name: &str) -> u64 {
 
 #[test]
 fn new_viewers_lock_route_comps_and_activate_on_click() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     let c = new_comp(&mut s, "C");
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
@@ -124,7 +124,7 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
 /// record the new comp as its own then, so the lock no longer applied.
 #[test]
 fn a_locked_viewer_keeps_its_comp_when_the_project_panel_opens_another() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
@@ -147,7 +147,7 @@ fn a_locked_viewer_keeps_its_comp_when_the_project_panel_opens_another() {
 #[test]
 #[ignore]
 fn viewers_snapshot() {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let other = s.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.id).find(|id| Some(*id) != s.active_comp_id()).unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));

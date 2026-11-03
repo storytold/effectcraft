@@ -15,7 +15,7 @@ use super::ui_tail::drag;
 
 /// Open the demo project in a UI test harness with the requested window size.
 fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
-    let mut s = crate::english_test_session(Session::default());
+    let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let mut h = Harness::builder().with_size(vec2(w, h)).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
@@ -497,7 +497,7 @@ fn settings_page_column_fits_japanese_names() {
     use effectcraft_text::fonts;
     use effectcraft_ui_egui::theme::Tokens;
 
-    let mut session = crate::english_test_session(Session::default());
+    let mut session = Session::default();
     session.prefs.general.language = "ja".into();
     let app = EffectcraftApp::new(session);
     // The panel titles a page with its Settings menu row, minus the ellipsis.

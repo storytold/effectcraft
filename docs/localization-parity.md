@@ -86,7 +86,7 @@ counted, so the true percentages are slightly lower.
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,923 (≈ 46%): menus 630 rows, panels 996, effect names 297 | Panels and dialogs partly; no help, effect names translated for 297 of the 308 ids and their parameter names not; Home screen literals unwrapped (#574, closed) | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
 | German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
-| Korean | `ko` | 628 fixed menu rows + 687 panel/settings rows (catalog counts; keys can overlap) | Existing translated panels and settings; effect names, parameters, engine errors and tutorials remain English | Existing system Hangul fallback; macOS/web still need platform review | pending | partial | Remaining engine/effect text + native review |
+| Korean | `ko` | 628 fixed menu rows + 693 panel/settings rows (catalog counts; keys can overlap) | Existing translated panels and settings; effect names, parameters, engine errors and tutorials remain English | Existing system Hangul fallback; macOS/web still need platform review | pending | partial | Remaining engine/effect text + native review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
 
 Other languages EffectCraft ships (6):
@@ -102,9 +102,9 @@ Other languages EffectCraft ships (6):
 
 Russian (`ru`) has a menu catalog (630 rows, ≈ 15%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
-**Overall: ≈ 25%**, the average coverage of After Effects' 10 non-English languages
+**Overall: ≈ 28%**, the average coverage of After Effects' 10 non-English languages
 (Simplified Chinese 46%, Traditional Chinese 45%, Japanese 46%, Brazilian Portuguese 34%,
-Spanish 29%, French, German and Russian 16%, Korean and Italian 0%; 248 / 10, was ≈ 24% before #2037's effect names and ≈ 21% on
+Spanish 29%, French, German and Russian 16%, Korean ≈ 31% and Italian 0%; 279 / 10, was ≈ 24% before #2037's effect names and ≈ 21% on
 22 October; Ukrainian (≈ 29%) and Czech (≈ 29%) are EffectCraft-only and stay out of that
 average). This is the localization row in [target-app-parity.md](target-app-parity.md#by-dimension).
 

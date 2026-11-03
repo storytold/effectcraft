@@ -1,8 +1,10 @@
 # Korean interface localization
 
 Korean can be selected in Settings > General > Language > 한국어. `Match System`
-recognizes `ko`, `ko-KR`, and `ko_KR` locales. The preference uses the stable value
-`ko`; command ids, effect ids, property paths and project contents stay unchanged.
+recognizes `ko`, `ko-KR`, and `ko_KR` locales on desktop. The browser's Match System
+skips Korean because it has no bundled Hangul font; an explicit language choice is
+still available. The preference uses the stable value `ko`; command ids, effect ids,
+property paths and project contents stay unchanged.
 
 ## Credits and scope
 
@@ -15,7 +17,7 @@ to have originated Korean support. Ordinary Korean compositing terms are used;
 these are not advertised as official Adobe translations.
 
 The fixed menu catalog has 628 rows, and the existing translated panel/settings
-catalog has 687 rows. Product names and technical identifiers remain verbatim.
+catalog has 693 rows. Product names and technical identifiers remain verbatim.
 Effect registry names, effect parameters, engine error messages, property names
 and tutorials can still be English. This patch does not claim full-interface
 translation. Missing strings deliberately fall back to English.
