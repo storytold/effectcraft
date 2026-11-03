@@ -731,3 +731,75 @@ fn gltf_strip_expansion_is_charged_to_the_read_budget() {
     let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 5000).err().unwrap_or_else(|| panic!("imported"));
     assert!(e.to_string().contains("more than 5000 components"), "{e}");
 }
+
+#[test]
+fn texture_decoding_is_charged_to_the_import_budget() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mut left = 4;
+    assert_eq!(Texture::decode_within(&png, &mut left).unwrap().data.len(), 4);
+    assert_eq!(left, 0);
+    assert!(matches!(Texture::decode_within(&png, &mut left), Err(ModelError::Unsupported(_))));
+}
+
+#[test]
+fn obj_repeated_material_libraries_and_textures_load_once() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mtl = b"newmtl A\nmap_Kd t.png\nnewmtl B\nmap_Kd t.png\n".to_vec();
+    let src = b"mtllib m.mtl\nmtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\nusemtl B\nf 1 2 3\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "t.png" => Some(png.clone()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(m.materials.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(m.textures.len(), 1);
+    assert_eq!(m.meshes[0].primitives.iter().map(|p| (p.material, p.triangle_count())).collect::<Vec<_>>(), [(Some(0), 2), (Some(1), 1)]);
+}
+
+#[test]
+fn gltf_textures_naming_one_image_share_it() {
+    let doc = String::from_utf8(fixture("quad.gltf")).unwrap();
+    // Three textures of one image: the fixture's sampler, the same sampler again, no sampler.
+    let doc = doc.replace(
+        "\"textures\": [\n  {\n   \"source\": 0,\n   \"sampler\": 0\n  }\n ]",
+        "\"textures\": [{\"source\": 0, \"sampler\": 0}, {\"source\": 0, \"sampler\": 0}, {\"source\": 0}]",
+    );
+    let m = gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_eq!(m.textures.len(), 2);
+    assert_eq!(m.textures[0].wrap, [Wrap::Clamp, Wrap::Repeat]);
+    assert_eq!(m.textures[1].wrap, [Wrap::Repeat, Wrap::Repeat]);
+}
+
+#[test]
+fn instances_of_one_skin_share_its_joint_matrices() {
+    let p = mesh(PrimitiveKind::Plane, &PrimParams { size: [2.0, 2.0, 0.0], ..Default::default() });
+    let mut m = Model::single(Mesh { name: "s".into(), primitives: vec![p] }, vec![Material::default()]);
+    m.nodes[0].skin = Some(0);
+    m.nodes.push(Node { mesh: Some(0), skin: Some(0), ..Node::default() });
+    m.roots = vec![0, 1];
+    m.skins.push(Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] });
+    let inst = m.instances(None, 0.0);
+    assert_eq!(inst.len(), 2);
+    assert!(Arc::ptr_eq(inst[0].joints.as_ref().unwrap(), inst[1].joints.as_ref().unwrap()));
+}
+
+#[test]
+fn contour_grouping_is_bounded() {
+    let sq = |x: f64, y: f64, s: f64| vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]];
+    let n = extrude::MAX_CONTOURS + 1;
+    let cs: Vec<Vec<[f64; 2]>> = (0..n).map(|i| sq(i as f64 * 2.0, 0.0, 1.0)).collect();
+    let g = group_contours(cs);
+    assert_eq!(g.len(), extrude::MAX_CONTOURS);
+    assert!(g.iter().all(|o| o.holes.is_empty()));
+}

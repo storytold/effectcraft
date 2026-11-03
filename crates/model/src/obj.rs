@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{AlphaMode, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
+use crate::{AlphaMode, MAX_IMPORT_TEXTURE_PIXELS, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
 
 /// The last component of a referenced path, treating `\` as a separator too: a path from a
 /// machine of another kind (`C:\textures\checker.png`) still finds `checker.png` next to the
@@ -39,10 +39,23 @@ fn resolve_reference(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> O
     None
 }
 
-/// Parse MTL text into named materials (textures appended to `textures`).
-pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>) -> Vec<Material> {
+/// The textures an OBJ import has decoded, by reference, and the pixels it may still decode.
+pub struct TextureCache {
+    loaded: HashMap<String, Option<usize>>,
+    pixels_left: u64,
+}
+
+impl Default for TextureCache {
+    fn default() -> Self {
+        TextureCache { loaded: HashMap::new(), pixels_left: MAX_IMPORT_TEXTURE_PIXELS }
+    }
+}
+
+/// Parse MTL text into named materials (textures appended to `textures`, decoded once per
+/// reference through `cache`).
+pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>, cache: &mut TextureCache) -> Vec<Material> {
     let mut out: Vec<Material> = vec![];
-    let mut loaded: HashMap<String, Option<usize>> = HashMap::new();
+    let TextureCache { loaded, pixels_left } = cache;
     let mut tex = |name: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
         let key = name.trim().to_string();
         let t = *loaded.entry(key.clone()).or_insert_with(|| {
@@ -50,7 +63,7 @@ pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures
                 log::warn!("model: texture `{key}` was not found next to the model");
                 return None;
             };
-            match Texture::decode(&b) {
+            match Texture::decode_within(&b, pixels_left) {
                 Ok(t) => {
                     textures.push(Arc::new(t));
                     Some(textures.len() - 1)
@@ -151,9 +164,13 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
     let mut vt: Vec<[f32; 2]> = vec![];
     let mut vn: Vec<[f32; 3]> = vec![];
     let mut materials: Vec<Material> = vec![];
+    let mut material_of: HashMap<String, usize> = HashMap::new();
     let mut textures: Vec<Arc<Texture>> = vec![];
+    let mut cache = TextureCache::default();
+    let mut libraries: Vec<String> = vec![];
     // One primitive per material, in order of first use.
     let mut prims: Vec<(Option<usize>, Primitive, HashMap<Key, u32>, Vec<bool>)> = vec![];
+    let mut prim_of: HashMap<Option<usize>, usize> = HashMap::new();
     let mut current: Option<usize> = None;
     let mut smooth = 0u32;
     let mut flat_id = 1u32 << 31;
@@ -181,11 +198,19 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             }
             "mtllib" => {
                 let name = line["mtllib".len()..].trim();
+                // A library named again is already loaded.
+                if libraries.iter().any(|l| l == name) {
+                    continue;
+                }
+                libraries.push(name.to_string());
                 let mut found = false;
                 for file in std::iter::once(name).chain(name.split_whitespace()).chain(sibling_name(name)) {
                     if let Some(b) = resolve(file) {
-                        let mut ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures);
-                        materials.append(&mut ms);
+                        let ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures, &mut cache);
+                        for m in ms {
+                            material_of.entry(m.name.clone()).or_insert(materials.len());
+                            materials.push(m);
+                        }
                         found = true;
                         break;
                     }
@@ -196,12 +221,11 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             }
             "usemtl" => {
                 let name = line["usemtl".len()..].trim();
-                current = materials.iter().position(|m| m.name == name);
-                if current.is_none() {
+                current = Some(*material_of.entry(name.to_string()).or_insert_with(|| {
                     // Unknown material: a named grey default.
                     materials.push(Material { name: name.to_string(), metallic: 0.0, roughness: 0.5, base_color: [0.8, 0.8, 0.8, 1.0], ..Material::default() });
-                    current = Some(materials.len() - 1);
-                }
+                    materials.len() - 1
+                }));
             }
             "f" => {
                 if rest.len() < 3 {
@@ -234,13 +258,10 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
                 } else {
                     smooth
                 };
-                let slot = match prims.iter().position(|p| p.0 == current) {
-                    Some(i) => i,
-                    None => {
-                        prims.push((current, Primitive { material: current, ..Default::default() }, HashMap::new(), vec![]));
-                        prims.len() - 1
-                    }
-                };
+                let slot = *prim_of.entry(current).or_insert_with(|| {
+                    prims.push((current, Primitive { material: current, ..Default::default() }, HashMap::new(), vec![]));
+                    prims.len() - 1
+                });
                 let (_, prim, map, need) = &mut prims[slot];
                 let mut ids = vec![];
                 for (vi, ti, ni) in refs {
