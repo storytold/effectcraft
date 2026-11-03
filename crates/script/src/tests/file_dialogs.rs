@@ -131,3 +131,30 @@ fn a_dialog_button_opens_a_file_dialog() {
     assert_eq!(r["result"], "1 other.json", "{r}");
     assert!(s.script_ui.windows.is_empty());
 }
+
+/// Another script can't answer a script's file dialog (by `app.run`, a batch or a command
+/// script): its answer would let it read the files it names.
+#[test]
+fn scripts_cant_answer_file_dialogs() {
+    let d = folder("answer");
+    let mut s = session();
+    let o = run_code(&mut s, OPEN, "open.jsx");
+    assert!(o.waiting, "{o:?}");
+    let other = js(&d.join("other.json"));
+    for code in [
+        format!("app.run('scriptui.fileDialog', {{paths: [{other}]}})"),
+        format!("app.run('engine.batch', {{steps: [{{command: 'scriptui.fileDialog', params: {{paths: [{other}]}}}}]}})"),
+        "app.run('scriptui.resume', {})".to_string(),
+    ] {
+        let o = run_code(&mut s, &code, "answer.jsx");
+        assert!(o.error.is_some(), "{code}: {o:?}");
+    }
+    let cmds = d.join("answer.json");
+    std::fs::write(&cmds, format!(r#"[{{"command": "scriptui.fileDialog", "params": {{"paths": [{other}]}}}}]"#)).unwrap();
+    let e = s.execute("file.runScript", json!({"path": cmds})).unwrap_err().to_string();
+    assert!(e.contains("can't answer"), "{e}");
+    // The script still waits, and the file it named stays unreadable.
+    assert!(s.script_ui.file_dialog.is_some() && s.script_ui.picked.is_empty());
+    let o = run_code(&mut s, &format!("var f = new File({other}); f.open('r'); f.read()"), "read.jsx");
+    assert!(o.error.as_ref().is_some_and(|e| e.message.contains("Allow Scripts to Write Files")), "{o:?}");
+}

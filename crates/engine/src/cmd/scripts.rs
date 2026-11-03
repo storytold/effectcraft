@@ -41,6 +41,10 @@ pub const RUNS_SCRIPTS: &[&str] = &[
     // File ▸ Import ▸ Converted Project… runs the installed converter's script.
     "file.importConvertedProject",
 ];
+/// Commands that answer a script waiting in a file dialog or in `Window.update()`: the app's or
+/// an agent's answer. Scripts and batches can't run them, as they can't run [`RUNS_SCRIPTS`]:
+/// what a file dialog's answer names, the script may read.
+pub const ANSWERS_SCRIPTS: &[&str] = &["scriptui.fileDialog", "scriptui.resume"];
 /// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
 /// `$.evalFile` allow.
 const MAX_SCRIPT_BYTES: usize = 16 << 20;

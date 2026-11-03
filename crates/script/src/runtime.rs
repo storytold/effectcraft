@@ -142,6 +142,9 @@ fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
     if effectcraft_engine::commands::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
         return Err(throw("scripts can't run scripts"));
     }
+    if effectcraft_engine::commands::scripts::ANSWERS_SCRIPTS.contains(&id.as_str()) {
+        return Err(throw("scripts can't answer scripts' file dialogs"));
+    }
     let keys = params.as_object_mut().and_then(|o| o.remove("__keys"));
     let r = with_active(|a| {
         Ok(match &keys {

@@ -852,9 +852,15 @@ pub(crate) fn file_dialog(s: &mut Session, p: &Value) -> Result<Value> {
     if !req.multi {
         paths.truncate(1);
     }
+    let before = s.script_ui.picked.len();
     s.script_ui.picked.extend(paths.iter().map(|path| Picked { path: path.clone(), write: req.kind == "save" }));
     let value = if paths.is_empty() { Value::Null } else { json!(paths) };
-    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value })
+    let r = dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value });
+    if r.is_err() {
+        // The script didn't get the answer: nor may it read what it named.
+        s.script_ui.picked.truncate(before);
+    }
+    r
 }
 
 /// `scriptui.resume`: let the script that showed its progress (`Window.update()`) carry on to
