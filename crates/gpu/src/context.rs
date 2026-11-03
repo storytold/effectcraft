@@ -41,6 +41,15 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`]).
 const UPLOAD_BUDGET: usize = 1536 << 20;
 
+/// Sets the uploaded-layer budget in MiB, as [`GpuContext::set_upload_budget`] does.
+pub const UPLOAD_BUDGET_ENV: &str = "EFFECTCRAFT_GPU_UPLOAD_MB";
+
+/// The budget from the `EFFECTCRAFT_GPU_UPLOAD_MB` value: that many MiB (1 to 1048576), else
+/// [`UPLOAD_BUDGET`].
+fn upload_budget_from(var: Option<&str>) -> usize {
+    var.and_then(|v| v.trim().parse::<usize>().ok()).filter(|mb| (1..=(1 << 20)).contains(mb)).map_or(UPLOAD_BUDGET, |mb| mb << 20)
+}
+
 /// Working textures kept for reuse once their last image is dropped (bytes).
 const POOL_BUDGET: usize = 256 << 20;
 
@@ -991,7 +1000,7 @@ impl GpuContext {
             dummy,
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(upload_budget_from(std::env::var(UPLOAD_BUDGET_ENV).ok().as_deref())),
             upload_full_warned: Default::default(),
             pool,
             staging: Default::default(),
@@ -1337,7 +1346,7 @@ impl GpuContext {
             dummy: self.dummy.clone(),
             dummy_buf: self.dummy_buf.clone(),
             uploads: Mutex::new(Uploads::default()),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(upload_budget_from(std::env::var(UPLOAD_BUDGET_ENV).ok().as_deref())),
             upload_full_warned: Default::default(),
             pool: self.pool.clone(),
             staging: Default::default(),
@@ -2123,6 +2132,21 @@ mod pool_stall_tests {
         assert_eq!(p.stalled, 0);
         p.dying.store(0, Relaxed);
         assert_eq!(p.frame_end(), 0);
+    }
+}
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use super::{UPLOAD_BUDGET, upload_budget_from};
+
+    #[test]
+    fn upload_budget_is_the_default_unless_a_number_of_mib() {
+        assert_eq!(upload_budget_from(None), UPLOAD_BUDGET);
+        assert_eq!(upload_budget_from(Some("12288")), 12288 << 20);
+        assert_eq!(upload_budget_from(Some(" 1 ")), 1 << 20);
+        for bad in ["", "0", "-5", "lots", "2.5", "1048577"] {
+            assert_eq!(upload_budget_from(Some(bad)), UPLOAD_BUDGET, "{bad:?}");
+        }
     }
 }
 
