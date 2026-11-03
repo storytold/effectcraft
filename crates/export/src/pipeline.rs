@@ -66,19 +66,18 @@ pub(crate) fn cpu_inflight(var: Option<&str>) -> Option<usize> {
 pub(crate) const LAYER_CACHE_ENV: &str = "EFFECTCRAFT_LAYER_CACHE_MB";
 
 /// The layer cache budget in bytes from the `EFFECTCRAFT_LAYER_CACHE_MB` value: the number of MiB
-/// (at least 64), or `None` (the default budget) when unset, blank, not a number or too large.
+/// (at least 64), or `None` (the default budget) when unset, blank, not a number or too large
+/// (including more bytes than a `usize` holds, as on 32-bit targets).
 pub(crate) fn layer_cache_budget(var: Option<&str>) -> Option<usize> {
     let v = var?.trim();
     if v.is_empty() {
         return None;
     }
-    match v.parse::<usize>().ok().filter(|mb| (64..=(1 << 20)).contains(mb)) {
-        Some(mb) => Some(mb << 20),
-        None => {
-            log::warn!(target: "effectcraft_export", "{LAYER_CACHE_ENV}={v:?} is not a number of MiB between 64 and 1048576: using the default layer cache");
-            None
-        }
+    let bytes = v.parse::<usize>().ok().filter(|mb| (64..=(1 << 20)).contains(mb)).and_then(|mb| mb.checked_mul(1 << 20));
+    if bytes.is_none() {
+        log::warn!(target: "effectcraft_export", "{LAYER_CACHE_ENV}={v:?} is not a number of MiB between 64 and 1048576 that fits this target: using the default layer cache");
     }
+    bytes
 }
 
 /// The frames-in-flight caps of a batch: `gpu` (#879) for the GPU's memory, `cpu` (#1615) for

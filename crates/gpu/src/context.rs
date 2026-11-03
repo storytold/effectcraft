@@ -45,9 +45,9 @@ const UPLOAD_BUDGET: usize = 1536 << 20;
 pub const UPLOAD_BUDGET_ENV: &str = "EFFECTCRAFT_GPU_UPLOAD_MB";
 
 /// The budget from the `EFFECTCRAFT_GPU_UPLOAD_MB` value: that many MiB (1 to 1048576), else
-/// [`UPLOAD_BUDGET`].
+/// [`UPLOAD_BUDGET`] (also when that many bytes do not fit a `usize`, as on 32-bit targets).
 fn upload_budget_from(var: Option<&str>) -> usize {
-    var.and_then(|v| v.trim().parse::<usize>().ok()).filter(|mb| (1..=(1 << 20)).contains(mb)).map_or(UPLOAD_BUDGET, |mb| mb << 20)
+    var.and_then(|v| v.trim().parse::<usize>().ok()).filter(|mb| (1..=(1 << 20)).contains(mb)).and_then(|mb| mb.checked_mul(1 << 20)).unwrap_or(UPLOAD_BUDGET)
 }
 
 /// Working textures kept for reuse once their last image is dropped (bytes).
