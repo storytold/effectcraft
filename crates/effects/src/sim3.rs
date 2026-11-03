@@ -501,7 +501,12 @@ impl Pg {
         if self.pex_radius > 0.0 {
             let mut out = Vec::with_capacity(st.parts.len());
             for q in std::mem::take(&mut st.parts) {
-                if q.src == SRC_PARTICLE_EXPLODER || q.ch != 0 || q.r <= self.pex_radius * 1.01 || self.pex_affects.weight(&q) <= 0.5 || out.len() > 60_000 {
+                if q.src == SRC_PARTICLE_EXPLODER
+                    || q.ch != 0
+                    || q.r <= self.pex_radius * 1.01
+                    || self.pex_affects.weight(&q) <= 0.5
+                    || out.len() > MAX_PG_PARTICLES
+                {
                     out.push(q);
                     continue;
                 }
@@ -529,7 +534,7 @@ impl Pg {
             let n = st.carry.floor() as u32;
             st.carry -= n as f64;
             for _ in 0..n {
-                if st.parts.len() >= 60_000 {
+                if st.parts.len() >= MAX_PG_PARTICLES {
                     break;
                 }
                 let id = st.next_id;
@@ -668,7 +673,7 @@ impl Affects {
 fn pg_accelerated(ctx: &EffectCtx, key: u64, pg: &Pg) -> Option<std::sync::Arc<PgState>> {
     let backend = ctx.env.host?.particles()?;
     let steps = steps_at(ctx.time);
-    let births = crate::psim::births(pg.rate, steps, 60_000)?;
+    let births = crate::psim::births(pg.rate, steps, MAX_PG_PARTICLES)?;
     let desc = crate::psim::CannonDesc {
         pos: pg.pos,
         barrel_angle: pg.barrel_angle,
@@ -721,6 +726,10 @@ fn particle_playground(ctx: &EffectCtx, b: Buf) -> Buf {
     playground_plan(ctx, &b).finish(b)
 }
 
+/// Most particles Particle Playground keeps, from all its producers (Grid, Layer Exploder,
+/// Cannon, Particle Exploder).
+const MAX_PG_PARTICLES: usize = 60_000;
+
 /// Particle Playground's [`PgPlan`] for buffer geometry `b` (its pixels are not read).
 pub fn playground_plan(ctx: &EffectCtx, b: &Buf) -> PgPlan {
     let pr = ctx.params;
@@ -768,38 +777,43 @@ pub fn playground_plan(ctx: &EffectCtx, b: &Buf) -> PgPlan {
         let mut st = PgState::default();
         if grid_on && across > 0 && down > 0 {
             let mut k = 0usize;
-            for j in 0..down {
-                for i in 0..across {
-                    // Edit Grid Text: one character per grid point in reading order; spaces
-                    // leave the point empty.
-                    let ch = if grid_text.is_empty() {
-                        0
-                    } else {
-                        let c = grid_text[k % grid_text.len()];
-                        k += 1;
-                        if c == ' ' {
-                            continue;
-                        }
-                        c as u32
-                    };
-                    let fx = if across > 1 { i as f64 / (across - 1) as f64 - 0.5 } else { 0.0 };
-                    let fy = if down > 1 { j as f64 / (down - 1) as f64 - 0.5 } else { 0.0 };
-                    let p = [(gpos[0] + fx * gw) as f32, (gpos[1] + fy * gh) as f32];
-                    let id = st.next_id;
-                    st.next_id += 1;
-                    let mut q = PgParticle::new(p, [0.0; 2], gcol, grad, id, SRC_GRID);
-                    q.ch = ch;
-                    st.parts.push(q);
-                }
+            // The grid's points in reading order, at most the particle budget of them (the
+            // counts come from the project: 10⁶ × 10⁶ would be a trillion particles).
+            let points = (across as usize).saturating_mul(down as usize).min(MAX_PG_PARTICLES);
+            for n in 0..points {
+                let (i, j) = (n as u32 % across, n as u32 / across);
+                // Edit Grid Text: one character per grid point in reading order; spaces
+                // leave the point empty.
+                let ch = if grid_text.is_empty() {
+                    0
+                } else {
+                    let c = grid_text[k % grid_text.len()];
+                    k += 1;
+                    if c == ' ' {
+                        continue;
+                    }
+                    c as u32
+                };
+                let fx = if across > 1 { i as f64 / (across - 1) as f64 - 0.5 } else { 0.0 };
+                let fy = if down > 1 { j as f64 / (down - 1) as f64 - 0.5 } else { 0.0 };
+                let p = [(gpos[0] + fx * gw) as f32, (gpos[1] + fy * gh) as f32];
+                let id = st.next_id;
+                st.next_id += 1;
+                let mut q = PgParticle::new(p, [0.0; 2], gcol, grad, id, SRC_GRID);
+                q.ch = ch;
+                st.parts.push(q);
             }
         }
         if let Some(e) = &exploder {
             let m = MapImg::from(ctx, e.clone());
             let step = (ex_r * 2.0).max(1.0);
             let mut y = step * 0.5;
-            while y < lh {
+            'explode: while y < lh {
                 let mut x = step * 0.5;
                 while x < lw {
+                    if st.parts.len() >= MAX_PG_PARTICLES {
+                        break 'explode;
+                    }
                     let c = m.at(x, y);
                     if c[3] > 0.05 {
                         let id = st.next_id;

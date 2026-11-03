@@ -370,3 +370,21 @@ fn cc_hair_grows_from_opaque_pixels() {
     let none = run_fx("ec.sim.cchair", &[("length", num(0.0))], img.clone(), 0.0, EffectEnv::default());
     assert_eq!(none.img.data, img.data);
 }
+
+/// Grid counts from a project are held to the particle budget instead of asking for a
+/// trillion particles (or visiting a trillion empty grid points behind a blank Grid Text).
+#[test]
+fn hostile_grid_counts_stay_within_the_particle_budget() {
+    for text in ["", " "] {
+        let img = run(
+            &[
+                ("cannonEnabled", Value::Bool(false)),
+                ("grid/particlesAcross", num(1e9)),
+                ("grid/particlesDown", num(1e9)),
+                ("options/gridText", Value::Str(text.into())),
+            ],
+            0.0,
+        );
+        assert_eq!((img.width, img.height), (80, 60));
+    }
+}
