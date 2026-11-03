@@ -201,20 +201,20 @@ fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str
             on_timecode.extend(seq.all_tracks().flat_map(|t| &t.items).filter(|ti| ti.source_in >= hour).map(|ti| ti.item));
         }
     }
-    let files: Vec<(fp::ItemId, String, String, bool)> = project
+    let files: Vec<(fp::ItemId, String, String)> = project
         .items
         .values()
         .filter_map(|it| match &it.kind {
             fp::ItemKind::Media(m) => match &m.media {
-                fp::MediaRef::File { path } => Some((it.id, it.name.clone(), path.clone(), m.offline)),
+                fp::MediaRef::File { path } => Some((it.id, it.name.clone(), path.clone())),
                 _ => None,
             },
             _ => None,
         })
         .collect();
     let mut left = Vec::new();
-    for (id, name, path, offline) in files {
-        match if offline { None } else { probe(&path) } {
+    for (id, name, path) in files {
+        match probe(&path) {
             // A corrupt timecode past a day of frames (at up to 1000 fps) would overflow the tick
             // arithmetic; such a file stays on timecode.
             Some(Footage { file_timecode: Some(tc), native_rate, frame_rate, .. }) if (0..=MAX_FILE_TIMECODE).contains(&tc) => {
@@ -312,9 +312,10 @@ impl Importer<'_> {
     }
 
     fn footage(&mut self, name: &str, path: &str, m: &fp::MediaClip, probe: &mut dyn FnMut(&str) -> Option<Footage>) -> Footage {
-        if !m.offline
-            && let Some(mut f) = probe(path)
-        {
+        // Offline media is probed too: a reader flags a clip offline when it can only guess the
+        // path (an EDL line without `SOURCE FILE` names the clip, and the file may sit beside the
+        // list). A path that is not there probes to nothing and stays a placeholder.
+        if let Some(mut f) = probe(path) {
             if let Some(r) = m.interpret.frame_rate
                 && matches!(f.kind, FootageKind::Video | FootageKind::Sequence)
             {

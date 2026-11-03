@@ -408,6 +408,31 @@ fn edl_media_left_on_timecode_is_named() {
     assert_eq!(notes, ["EDL source timecodes stay media time for b.mov, c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
 }
 
+/// An EDL line without `SOURCE FILE` only names its clip; the file beside the list is still found
+/// (the reader flags such media offline, but the guess is probed all the same).
+#[test]
+fn edl_clip_without_a_source_file_links_the_file_beside_the_list() {
+    let edl = "TITLE: CUT
+FCM: NON-DROP FRAME
+
+001  A002C003 V     C        10:00:31:00 10:00:33:00 02:00:00:00 02:00:02:00
+* FROM CLIP NAME: A002C003.mov
+
+002  A001C001 V     C        10:00:24:00 10:00:26:00 02:00:02:00 02:00:04:00
+* FROM CLIP NAME: A001C001.mov
+";
+    let mut probe_beside = |path: &str| (path == "/work/A002C003.mov").then(|| probe(path)).flatten();
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "hand.edl".into(), edl_frame_rate: Some(25.0), base_dir: Some("/work".into()) };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_beside).unwrap();
+    assert_eq!(r.missing, ["/work/A001C001.mov"], "only the file that is not there is missing");
+    let linked = p.items.values().find_map(|it| match &it.kind {
+        ItemKind::Footage(f) if f.path == "/work/A002C003.mov" => Some(f.missing),
+        _ => None,
+    });
+    assert_eq!(linked, Some(false));
+}
+
 /// A drop-frame list counts its hour in timecode: a clip cut at 01:00:00;00 (3599.996 s at 29.97
 /// fps) from a missing file is still named.
 #[test]
