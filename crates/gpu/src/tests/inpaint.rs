@@ -44,7 +44,7 @@ fn rect_hole(w: u32, h: u32, x0: u32, y0: u32, s: u32) -> Vec<bool> {
 #[test]
 fn the_inpaint_kernels_are_available() {
     let Some(g) = gpu() else { return };
-    let bad: Vec<&str> = g.ctx.unavailable_kernels().iter().filter(|(e, _)| crate::inpaint::KERNELS.contains(e)).map(|(e, _)| *e).collect();
+    let bad: Vec<&str> = crate::inpaint::KERNELS.iter().copied().filter(|e| !g.ctx.has_kernel(e)).collect();
     assert!(bad.is_empty(), "inpaint kernels did not build on {}: {bad:?}", g.ctx.name);
 }
 
