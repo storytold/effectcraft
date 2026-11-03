@@ -449,7 +449,7 @@ fn exr_writes_the_output_spaces_chromaticities() {
         (ColorSpace::Rec2100Pq, REC2020),
         (ColorSpace::Rec2100Hlg, REC2020),
     ];
-    assert_eq!(table.len(), ColorSpace::ALL.len());
+    assert!(ColorSpace::ALL.iter().all(|c| table.iter().filter(|(t, _)| t == c).count() == 1), "every space once");
     for (out, want) in table {
         for ch in [Channels::Rgba, Channels::Rgb] {
             let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, Some(ColorSpace::Srgb), true, Some(out));
