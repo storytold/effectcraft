@@ -47,7 +47,7 @@ mod nav_more;
 pub mod paint;
 pub mod panels_cmds;
 pub(crate) mod path_nulls;
-mod paths;
+pub(crate) mod paths;
 mod project_items;
 pub(crate) mod prop;
 mod prop_groups;

@@ -167,6 +167,19 @@ pub(super) fn vertex_grab_radius(pos: Pos2, handles: impl IntoIterator<Item = Po
     if handles.into_iter().any(|h| h.distance(pos) < HANDLE + 2.0) { HANDLE + 2.0 } else { VERTEX_GRAB }
 }
 
+/// The path vertex, or tangent handle, a press at `pos` grabs. The nearest candidate wins rather
+/// than the last one drawn: overlapping points and handles (several layers, a tangent beside its
+/// vertex) must not steal each other's clicks.
+pub(super) fn vertex_at(vertex_hits: &[ov::VertexHit], handles: impl IntoIterator<Item = Pos2>, pos: Pos2, tangents: bool) -> Option<ov::VertexHit> {
+    let reach = vertex_grab_radius(pos, handles);
+    vertex_hits
+        .iter()
+        .filter(|h| h.tangent.is_some() == tangents)
+        .filter(|h| h.pos.distance(pos) < reach)
+        .min_by(|a, b| a.pos.distance(pos).total_cmp(&b.pos.distance(pos)))
+        .copied()
+}
+
 /// Shown when a Roto Brush tool is used in the Composition panel (#753).
 pub(super) const ROTO_HINT: &str = "The Roto Brush works in the Layer panel. Double-click the layer to open it.";
 

@@ -963,10 +963,10 @@ Layer
   Ungroup Shapes | path.ungroupShapes
   ---
   Arrange
-    Bring Layer to Front | layer.arrange {"to":"front"} | Cmd+Shift+]
-    Bring Layer Forward | layer.arrange {"to":"forward"} | Cmd+]
-    Send Layer Backward | layer.arrange {"to":"backward"} | Cmd+[
-    Send Layer to Back | layer.arrange {"to":"back"} | Cmd+Shift+[
+    Bring Layer to Front | layer.arrange {"to":"front"} | Cmd+Shift+] , Cmd+Alt+Shift+ArrowUp
+    Bring Layer Forward | layer.arrange {"to":"forward"} | Cmd+] , Cmd+Alt+ArrowUp
+    Send Layer Backward | layer.arrange {"to":"backward"} | Cmd+[ , Cmd+Alt+ArrowDown
+    Send Layer to Back | layer.arrange {"to":"back"} | Cmd+Shift+[ , Cmd+Alt+Shift+ArrowDown
   ---
   Reveal
     Reveal in Finder | layer.revealInFinder

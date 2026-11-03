@@ -4420,6 +4420,16 @@ fn pick_whip_drag(g: &mut Rw) {
                         params["range"] = json!([a, b]);
                         let after = text.chars().count().saturating_sub(b);
                         focus_expression(&ctx, src_prop, [after, after]);
+                    } else {
+                        // The same property on every selected layer (the engine finds it by its
+                        // match path; layers without it are skipped).
+                        // The layer dropped on is included: the engine skips it only when its
+                        // matching property is the drop target itself, so with A Position and B
+                        // Position + Opacity selected, B's Position links too.
+                        let layers: Vec<u64> = g.selected.iter().map(|l| l.0).collect();
+                        if layers.len() > 1 {
+                            params["layers"] = json!(layers);
+                        }
                     }
                     actions.push(("prop.pickWhip".into(), params));
                 }
