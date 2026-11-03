@@ -2035,3 +2035,33 @@ fn pasting_a_mask_onto_its_own_layer_drops_the_source_vertex_selection() {
     s.execute("edit.clear", json!({})).unwrap();
     assert_eq!(layer(&s, a).masks().unwrap().groups().count(), 1, "the pasted mask goes, the source stays");
 }
+
+#[test]
+fn precompose_unlinks_layers_left_behind_and_numbers_default_names() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64, "frameRate": 30, "duration": 4})).unwrap();
+    let mk = |s: &mut Session, name: &str| {
+        s.execute("layer.newSolid", json!({"name": name, "color": "#fff", "width": 64, "height": 64})).unwrap()["layer"].as_u64().unwrap()
+    };
+    let (a, b, c, d) = (mk(&mut s, "A"), mk(&mut s, "B"), mk(&mut s, "C"), mk(&mut s, "D"));
+    s.execute("layer.setParent", json!({"layers": [c], "parent": a})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layers": [d], "matte": b, "kind": "alpha"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    s.execute("layer.precompose", json!({"layers": [a, b]})).unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    assert_eq!(comp.layers.len(), 3);
+    for l in &comp.layers {
+        assert!(l.parent.is_none_or(|p| comp.layer(p).is_some()), "{} has a dangling parent", l.name);
+        assert!(l.track_matte.as_ref().is_none_or(|m| comp.layer(m.layer).is_some()), "{} has a dangling matte", l.name);
+    }
+    s.execute("layer.precompose", json!({"layers": [c, d]})).unwrap();
+    let mut names: Vec<String> = s
+        .project
+        .items
+        .values()
+        .filter(|i| matches!(i.kind, effectcraft_project::ItemKind::Comp(_)) && i.name.starts_with("Pre-comp"))
+        .map(|i| i.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Pre-comp 1", "Pre-comp 2"]);
+}

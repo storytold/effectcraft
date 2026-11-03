@@ -500,6 +500,39 @@ pub(crate) fn crypto_probe_job(s: &Session, p: &Value) -> Result<Option<CryptoPr
     })))
 }
 
+/// [`Session::crypto_coverage`].
+pub(crate) fn crypto_coverage(s: &Session, p: &Value, hash: u32, max_side: usize) -> Option<CryptoCoverage> {
+    let (key, ..) = probe_key(s, p, "effect.cryptomatteAt").ok()?;
+    let probe = cached_probe(s, key)?;
+    let b = probe.grid.as_ref().ok()?;
+    let (aw, ah) = (b.aux.width as usize, b.aux.height as usize);
+    if aw == 0 || ah == 0 {
+        return None;
+    }
+    let step = aw.max(ah).div_ceil(max_side.max(1)).max(1);
+    let (w, h) = (aw.div_ceil(step), ah.div_ceil(step));
+    let planes = b.aux.crypto_rank_planes(&b.layer);
+    let sample = |j: usize| {
+        planes.iter().filter(|(id, _)| id.get(j).is_some_and(|v| v.to_bits() == hash)).map(|(_, c)| c.get(j).map_or(0.0, |c| c.max(0.0))).sum::<f32>().min(1.0)
+    };
+    // Each sample at the centre of its step × step cell; the last cells are cut by the layer.
+    let at = |x: usize, y: usize| sample((y * step + step / 2).min(ah - 1) * aw + (x * step + step / 2).min(aw - 1));
+    let coverage = (0..w * h).map(|i| at(i % w, i / w)).collect();
+    let (size, uv) = ([aw as f64 / b.aux.scale, ah as f64 / b.aux.scale], [aw as f64 / (w * step) as f64, ah as f64 / (h * step) as f64]);
+    Some(CryptoCoverage { width: w, height: h, coverage, size, uv })
+}
+
+/// An ID's coverage over a layer, for the eyedropper's hover highlight: `width` × `height`
+/// samples (row-major, 0..1). The layer, `size` effect-space pixels from its origin, shows the
+/// texture from (0, 0) to `uv`.
+pub struct CryptoCoverage {
+    pub width: usize,
+    pub height: usize,
+    pub coverage: Vec<f32>,
+    pub size: [f64; 2],
+    pub uv: [f64; 2],
+}
+
 /// What a pick finds at a point.
 enum Hit {
     /// `probeOnly` and the probe isn't built yet.

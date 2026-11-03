@@ -1,3 +1,4 @@
+mod add_item_options;
 mod anim_presets;
 mod anim_tools;
 mod blender;

@@ -60,6 +60,62 @@ fn snap_lines_snap_axes_independently_and_priority_breaks_ties() {
     assert_eq!(snap(&[[0.0, 0.0]], &t3, 5.0).unwrap().hits[0].source, SnapSource::Vertex(LayerId(3)));
 }
 
+/// #2855: an edge midpoint lies on its edge line, so one line nearer than the point must not win
+/// and leave the other axis free. Two lines do win when together they are nearer.
+#[test]
+fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
+    let src = SnapSource::Layer(LayerId(1));
+    let mid = SnapTarget::point([100.0, 50.0], PRI_LAYER, src);
+    let top = SnapTarget::hline(50.0, PRI_LAYER, src);
+    // The line alone is nearer (1 against √10), and the point still snaps both axes.
+    let s = snap(&[[103.0, 51.0]], &[top, mid], 5.0).unwrap();
+    assert_eq!(s.at, [100.0, 50.0]);
+    assert_eq!(s.delta, [-3.0, -1.0]);
+    assert_eq!(s.hits, [mid]);
+    // Lines through the point itself tie with it: the point.
+    let centre = SnapTarget::vline(100.0, PRI_LAYER, src);
+    assert_eq!(snap(&[[103.0, 51.0]], &[top, centre, mid], 5.0).unwrap().hits, [mid]);
+    // Two lines together nearer than the point: both snap.
+    let far = SnapTarget::point([101.0, 55.0], PRI_LAYER, src);
+    let v = SnapTarget::vline(102.0, PRI_GUIDE, SnapSource::Guide);
+    let h = SnapTarget::hline(52.0, PRI_GUIDE, SnapSource::Guide);
+    let s = snap(&[[103.0, 51.0]], &[v, h, far], 5.0).unwrap();
+    assert_eq!(s.at, [102.0, 52.0]);
+    assert_eq!(s.hits, [v, h]);
+}
+
+/// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
+/// through a collapsed precomp layer, and a rotated layer keeps its points only.
+#[test]
+fn layer_centre_lines_follow_the_edges() {
+    use crate::viewer::{SnapFeatures, SnapOptions, targets};
+    let mut s = comp();
+    // A 100×50 solid moved off the comp's centre lines: x 70–170, y 55–105, centre (120, 80).
+    let a = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [120, 80, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, f: SnapFeatures| {
+        let comp = s.project.comp(cid).unwrap().clone();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+        targets(&ctx, &[], SnapOptions { layers: true, features: f, guides: false, grid: false, grid_spacing: 0.0 })
+    };
+    let lines = |t: &[SnapTarget], l: LayerId| {
+        let of = |kind: SnapKind, i: usize, c: f64| t.iter().find(|t| t.kind == kind && t.source == SnapSource::Layer(l) && t.pos[i] == c).map(|t| t.span);
+        (of(SnapKind::VLine, 0, 120.0), of(SnapKind::HLine, 1, 80.0))
+    };
+    assert_eq!(lines(&at(&s, SnapFeatures::default()), LayerId(a)), (Some(None), Some(None)));
+    let off = SnapFeatures { edges_extended: false, ..Default::default() };
+    assert_eq!(lines(&at(&s, off), LayerId(a)), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Through a collapsed precomp layer (it fills the comp, unmoved, so the numbers stay).
+    s.execute("layer.precompose", json!({"layers": [a], "name": "Inner"})).unwrap();
+    let pre = s.active_comp().unwrap().layers[0].id;
+    s.execute("layer.setSwitch", json!({"layers": [pre.0], "switch": "collapse", "value": true})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Rotated: no lines at all.
+    s.execute("prop.set", json!({"layer": pre.0, "path": "transform/rotation", "value": 30})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (None, None));
+}
+
 #[test]
 fn snap_targets_cover_layers_comp_guides_and_grid() {
     let mut s = comp();

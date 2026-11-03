@@ -312,6 +312,8 @@ pub struct EffectcraftApp {
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
     pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
     /// demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
@@ -442,6 +444,10 @@ impl FileDialogsUp {
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
+    /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
+    /// paths lose the window they came from, so this keeps the one thing the import still needs
+    /// (#2661); each drop clears it.
+    pub(crate) dropped_on_timeline: bool,
 }
 
 /// Record the scale the viewer drew at (called by the viewer panel each pass).

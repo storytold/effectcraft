@@ -102,5 +102,6 @@ fn h264_movie_bytes_are_pinned() {
 #[test]
 fn prores_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::ProRes, "/out/pinned.mov");
-    assert_eq!((data.len(), fnv1a(&data)), (270_094, 8_038_709_743_204_075_800), "ProRes MOV");
+    // The `nclc` colr atom (#2801) adds exactly 18 bytes; the frames don't move.
+    assert_eq!((data.len(), fnv1a(&data)), (270_112, 2_693_123_490_992_200_481), "ProRes MOV");
 }

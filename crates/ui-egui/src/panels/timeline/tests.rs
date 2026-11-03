@@ -628,6 +628,52 @@ fn a_key_menu_edit_selects_the_clicked_key_before_applying_the_command() {
     assert_eq!(app.session.state.selected_keys[0].time, prop.keys[0].time);
 }
 
+/// A key's marquee target is the marker it draws: a roving key's is its smaller dot.
+#[test]
+fn a_keys_glyph_rect_is_what_it_draws() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 2})).unwrap();
+    let id = s.execute("layer.newSolid", json!({"name": "Box", "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": 0.5, "value": 0})).unwrap();
+    let comp = s.active_comp().unwrap();
+    let mut k = comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().keys[0].clone();
+    let c = pos2(100.0, 50.0);
+    k.roving = true;
+    assert_eq!(key_glyph_rect(&k, c), Rect::from_center_size(c, vec2(5.0, 5.0)));
+}
+
+/// Keys come back in row order, and only the rows and keys the box touches. Rows taller than one
+/// line (an expression editor) push the keys below them down, as they are drawn.
+#[test]
+fn keys_in_box_walks_the_rows_and_tests_each_glyph() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4, "frameRate": 30})).unwrap();
+    let mut layers = vec![];
+    for name in ["A", "B"] {
+        let id = s.execute("layer.newSolid", json!({"name": name, "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+        for t in [1.0, 2.0] {
+            s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": t, "value": 50})).unwrap();
+        }
+        layers.push(id);
+    }
+    let comp = s.active_comp().unwrap();
+    let uid = |id: u64| comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let row = |id: u64, kind: RowKind| Row { layer: LayerId(id), depth: 1, kind };
+    let rows = vec![
+        row(layers[1], RowKind::Prop { uid: uid(layers[1]) }),
+        row(layers[1], RowKind::Expr { uid: uid(layers[1]), lines: 3 }),
+        row(layers[0], RowKind::Prop { uid: uid(layers[0]) }),
+    ];
+    // 1 s = 100 pt. Rows are 20 pt: centers at y 10 and, past the 60 pt editor, 90.
+    let tm = TMap { x0: 0.0, start: 0.0, pps: 100.0 };
+    let hit = |br: Rect| -> Vec<(u64, i64)> { keys_in_box(comp, &rows, &tm, 0.0, 20.0, br).iter().map(|k| (k.layer.0, k.time.0)).collect() };
+    let (one, two) = (Tick::from_seconds_f64(1.0).0, Tick::from_seconds_f64(2.0).0);
+    let across = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0, 0.0), pos2(x1, 200.0));
+    assert_eq!(hit(across(0.0, 300.0)), [(layers[1], one), (layers[1], two), (layers[0], one), (layers[0], two)], "row order");
+    assert_eq!(hit(Rect::from_min_max(pos2(0.0, 95.5), pos2(300.0, 200.0))), [(layers[0], one), (layers[0], two)], "the box reaches the glyph's bottom point");
+    assert!(hit(Rect::from_min_max(pos2(0.0, 97.0), pos2(300.0, 200.0))).is_empty(), "the box is below the glyph");
+}
+
 #[test]
 fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
     let mut rows: Vec<Row> = (1..=6).map(|id| Row { layer: LayerId(id), depth: 0, kind: RowKind::Layer }).collect();

@@ -98,12 +98,12 @@ struct Lease {
     pool: Weak<Mutex<Pool>>,
     /// The [`Enc`] that took it (see [`Pool::owned`]).
     owner: u64,
-    /// The pool's [`Pool::generation`] when it was taken.
-    generation: u64,
     /// Another [`Enc`] recorded work on it ([`Enc::uses`], [`GpuImage::escape`]):
     /// its owner can no longer reuse it at once, since that other encoder may still be open, so
     /// it is released through the guarded [`Pool::release`].
     escaped: std::sync::atomic::AtomicBool,
+    /// The pool's [`Pool::generation`] when it was taken.
+    generation: u64,
 }
 
 impl std::fmt::Debug for Lease {
@@ -120,14 +120,11 @@ impl Drop for Lease {
             // Always undo `pooled`'s leased count first: `Pool::discard` does not reset
             // `leased`, and a stale-generation lease must still clear its contribution.
             p.leased = p.leased.saturating_sub(tex_bytes(&self.texture));
-            // A lease from a discarded failed frame (#1326) never returns, escaped or not.
-            if self.generation != p.generation {
-                return;
-            }
-            if self.escaped.load(std::sync::atomic::Ordering::Relaxed) {
-                p.release(self.texture.clone());
-            } else {
+            if !self.escaped.load(std::sync::atomic::Ordering::Relaxed) {
                 p.release_owned(self.texture.clone(), self.owner, self.generation);
+            } else if self.generation == p.generation {
+                // Like `release_owned`, nothing taken before a failed frame comes back (#1319).
+                p.release(self.texture.clone());
             }
         }
     }
@@ -1414,7 +1411,7 @@ impl GpuContext {
             .unwrap_or((None, u64::MAX));
         let was_reused = reused.is_some();
         let texture = reused.unwrap_or_else(|| self.texture(w, h));
-        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, generation, escaped: Default::default() });
+        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, escaped: Default::default(), generation });
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
@@ -1685,8 +1682,8 @@ impl<'g> Enc<'g> {
     }
 
     /// The command encoder, to record work that touches `imgs` (every pooled image the commands
-    /// read or write; buffers and textures of the caller's own need not be named). The way to
-    /// record outside this module: naming the images marks foreign leases escaped
+    /// read or write; buffers and textures of the caller's own need not be named). The only
+    /// way to record outside this module: naming the images marks foreign leases escaped
     /// ([`Enc::uses`]). Callers must name every pooled image the encoder's work uses, here or
     /// with separate [`Enc::uses`] calls (`record(&[])` plus `uses()` is allowed); this is a
     /// convention, not enforced, and skipping it reintroduces the reuse race it guards (#1441).
@@ -1697,10 +1694,8 @@ impl<'g> Enc<'g> {
         self.encoder()
     }
 
-    /// The raw encoder; prefer [`Enc::record`]. Name every pooled image of another `Enc` the
-    /// work touches with [`Enc::uses`] first, unless the work is submitted while those images
-    /// are still alive (as `yuv::record` does), so no reuse of their textures can precede it.
-    pub(crate) fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
+    /// The raw encoder: within this module only, after [`Enc::uses`] on every pooled image.
+    fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
         let g = self.g;
         &mut self
             .enc
