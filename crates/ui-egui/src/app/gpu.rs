@@ -73,11 +73,22 @@ impl EffectcraftApp {
                 renderer.free_texture(id);
             }
             for (_, texture) in self.passive_tex.values() {
-                if let panels::viewers::PassiveTexture::Gpu(id, _) = texture {
-                    renderer.free_texture(id);
+                match texture {
+                    panels::viewers::PassiveTexture::Gpu(id, _) => renderer.free_texture(id),
+                    panels::viewers::PassiveTexture::Baked(b) => {
+                        if let Some(id) = b.id() {
+                            renderer.free_texture(&id);
+                        }
+                    }
+                    panels::viewers::PassiveTexture::Cpu(_) => {}
                 }
             }
+            drop(renderer);
+            // The display pass's textures: half-float frames go through the CPU from now on.
+            self.viewer_bake.free(Some(rs));
+            self.snapshot_bake.free(Some(rs));
         }
+        self.display_gpu = None;
         self.viewer_native = None;
         self.passive_tex.retain(|_, (_, texture)| matches!(texture, panels::viewers::PassiveTexture::Cpu(_)));
         self.viewer_shown = self.viewer_tex.as_ref().map(|(texture, key, _)| (texture.id(), *key));

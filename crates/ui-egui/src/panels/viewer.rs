@@ -346,6 +346,7 @@ fn phase_frame(app: &mut EffectcraftApp, v: &mut Vw<'_>) {
         let stale = app.viewer_shown.as_ref().is_none_or(|(_, s)| *s != k);
         // A CPU frame goes up again when the magnification calls for another factor.
         let minify = minify_factor(app.session.prefs.viewer_zoom_smooth(), scale, (zoom * ppp) as f64);
+        // (Half-float frames have no such texture: the display pass makes mips.)
         let refit = !app.viewer_on_gpu() && app.viewer_tex.as_ref().is_some_and(|(_, _, m)| *m != minify);
         if stale || refit {
             show_frame(app, &ctx, k, img, minify);

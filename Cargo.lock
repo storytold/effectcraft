@@ -1931,6 +1931,7 @@ dependencies = [
 name = "effectcraft-ui-egui"
 version = "0.21.0"
 dependencies = [
+ "bytemuck",
  "chrono",
  "craft-quit",
  "craft-ui",
@@ -1951,6 +1952,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "exr",
+ "half",
  "image",
  "kurbo",
  "log",

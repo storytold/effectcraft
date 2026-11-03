@@ -1092,3 +1092,84 @@ fn timing_markers_and_expressions_still_change_the_frames() {
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
     assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }
+
+const SRGB: effectcraft_engine::viewer::FrameEncoding =
+    effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Srgb, hdr: effectcraft_engine::project::HdrMode::Clip };
+
+/// Half floats keep over-range values (the point of #2797); NaN becomes 0 and values past the
+/// half-float range ±65504.
+#[test]
+fn half_float_frames_keep_over_range_values() {
+    let mut img = effectcraft_engine::render::Image::new(3, 1);
+    img.data.copy_from_slice(&[[4.0, 16.0, 1.825, 1.0], [70_000.0, f32::NAN, -f32::INFINITY, 0.5], [0.1, -0.25, 1000.0, f32::NAN]]);
+    let f = F16Frame::from_image(&img, SRGB);
+    assert_eq!(f.pixel(0), Some([4.0, 16.0, half::f16::from_f32(1.825).to_f32(), 1.0]));
+    assert_eq!(f.pixel(1), Some([65504.0, 0.0, -65504.0, 0.5]));
+    let p = f.pixel(2).unwrap();
+    assert_eq!((p[2], p[3]), (1000.0, 0.0));
+    assert!((p[0] - 0.1).abs() < 1e-4 && (p[1] + 0.25).abs() < 1e-4);
+    assert_eq!(f.bytes(), 3 * F16_PIXEL_BYTES);
+    // Averaged down for the texture limit, keeping the range.
+    let big = F16Frame::from_image(&effectcraft_engine::render::Image::filled(5, 3, [8.0, 2.0, 0.5, 1.0]), SRGB);
+    let small = big.averaged_down(2);
+    assert_eq!(small.size(), [3, 2]);
+    assert_eq!(small.pixel(5), Some([8.0, 2.0, 0.5, 1.0]));
+}
+
+/// 65 536 colours spread over 0..1 (each channel on its own 16-bit grid), premultiplied by
+/// `alpha`: the 8-bit parity input.
+pub(crate) fn parity_frame(alpha: f32) -> effectcraft_engine::render::Image {
+    let mut img = effectcraft_engine::render::Image::new(256, 256);
+    for (i, p) in img.data.iter_mut().enumerate() {
+        let v = |k: usize| ((i * k) % 65_536) as f32 / 65_535.0;
+        *p = [v(1) * alpha, v(7_919) * alpha, v(104_729) * alpha, alpha];
+    }
+    img
+}
+
+/// At 0 EV the half-float viewer shows the bytes of the old 8-bit frames for values in 0..1: at
+/// least 97.9 % of the colour bytes equal (alpha all), never more than 1 apart. The rest is the
+/// half-float storage.
+#[test]
+fn half_float_frames_show_what_8_bit_frames_showed() {
+    use effectcraft_engine::viewer::{Channel, DisplayPass};
+    let pass = DisplayPass::new(Channel::Rgb, false, 0.0, SRGB, None);
+    for alpha in [1.0f32, 0.5] {
+        let img = parity_frame(alpha);
+        let f = F16Frame::from_image(&img, SRGB);
+        let new = f.to_color_image(&pass);
+        let old = to_color_image(&img);
+        let (mut same, mut total, mut max) = (0, 0, 0);
+        for (n, o) in new.pixels.iter().zip(&old.pixels) {
+            let (n, o) = (n.to_array(), o.to_array());
+            assert_eq!(n[3], o[3]);
+            for c in 0..3 {
+                total += 1;
+                same += (n[c] == o[c]) as usize;
+                max = max.max((n[c] as i32 - o[c] as i32).abs());
+            }
+        }
+        let share = same as f64 / total as f64;
+        eprintln!("alpha {alpha}: {:.2} % of colour bytes equal, max {max}", share * 100.0);
+        assert!(share >= 0.979 && max <= 1, "alpha {alpha}: {share} equal, max {max}");
+    }
+}
+
+/// The RAM preview counts half-float frames at 8 bytes a pixel: in a budget of three 8-bit
+/// frames, a half-float frame of the same size takes the room of two.
+#[test]
+fn half_float_frames_count_twice_the_bytes() {
+    let f16 = || FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(2, 2), SRGB)));
+    assert_eq!(f16().bytes(), 32);
+    assert_eq!(img().bytes(), 16);
+    let frames = Frames::default();
+    frames.set_budget(48);
+    for i in 0..3 {
+        frames.cache.lock().unwrap().insert(key(1, i, 0), img());
+    }
+    assert_eq!(frames.cached_frames(&key(1, 0, 0)).len(), 3);
+    frames.cache.lock().unwrap().insert(key(2, 0, 0), f16());
+    let c = frames.cache.lock().unwrap();
+    assert!(c.bytes <= 48, "{}", c.bytes);
+    assert_eq!(c.map.len(), 2, "the half-float frame took two 8-bit frames' room");
+}
