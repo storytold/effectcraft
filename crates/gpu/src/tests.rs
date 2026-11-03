@@ -26,6 +26,37 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::Gpu;
 
+mod adjust;
+mod adv3d;
+mod deferred;
+mod deferred_jobs;
+mod fx_color;
+mod fx_depth;
+mod fx_distort;
+mod fx_extra;
+mod fx_gen2;
+mod fx_generate;
+mod fx_key;
+mod fx_light;
+mod fx_lut;
+mod fx_noise;
+mod fx_particles;
+mod fx_pixel2;
+mod fx_sim;
+mod fx_stylize;
+mod fx_text;
+mod fx_time;
+mod fx_tone;
+mod fx_transition;
+mod fx_vr;
+mod fx_warp;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod init;
+mod inpaint;
+mod particles;
+mod three_d;
+mod wgsl_grammar;
+
 pub(crate) const MATH_PROBE_SHADER: &str = r#"
 @compute @workgroup_size(16, 16)
 fn math_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -149,9 +180,29 @@ pub(crate) fn gpu() -> Option<&'static Gpu> {
     static G: OnceLock<Result<Gpu, String>> = OnceLock::new();
     hold_gpu_lock();
     let g = G.get_or_init(|| {
+        // Readback mapping/allocation errors become None without necessarily retiring the
+        // context. Preserve their original messages alongside the failure's health snapshot.
+        struct GpuTestLog;
+        impl log::Log for GpuTestLog {
+            fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                metadata.level() <= log::Level::Warn && metadata.target().starts_with("effectcraft_gpu")
+            }
+
+            fn log(&self, record: &log::Record<'_>) {
+                if self.enabled(record.metadata()) {
+                    eprintln!("{} {}: {}", record.level(), record.target(), record.args());
+                }
+            }
+
+            fn flush(&self) {}
+        }
+        static LOGGER: GpuTestLog = GpuTestLog;
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Warn);
+        }
         let g = Gpu::try_headless();
         match &g {
-            Ok(g) => eprintln!("effectcraft-gpu tests: adapter {}", g.ctx.name),
+            Ok(g) => eprintln!("effectcraft-gpu tests: adapter {}, median {:?}", g.ctx.name, g.ctx.median_kernel),
             Err(e) => eprintln!("effectcraft-gpu tests: no GPU ({e}), skipping GPU comparisons"),
         }
         g
@@ -545,7 +596,7 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
             b.blend_mode = BlendMode::Difference;
             (a, b)
         };
-        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a];
+        s.p.comp_mut(inner_id).unwrap().layers = vec![b, a].into();
         let bg = s.footage(97, 61);
         s.push(bg);
         let mut pre = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (60, 40), None);
@@ -556,6 +607,12 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
         let mut adj = s.solid([1.0, 1.0, 1.0], 50, 61);
         adj.switches.adjustment = true;
         s.effect(&mut adj, "ec.channel.invert", &[]);
+        s.push(adj);
+        // An adjustment layer in another blend mode blends the adjusted comp in that mode (#2618).
+        let mut adj = s.solid([1.0, 1.0, 1.0], 70, 40);
+        adj.switches.adjustment = true;
+        adj.blend_mode = BlendMode::Screen;
+        set(&mut adj, "transform/opacity", Value::Scalar(60.0));
         s.push(adj);
         check(&format!("collapse + adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
     }
@@ -578,7 +635,16 @@ pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) 
         let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale };
         let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment, env: Default::default() };
         let cpu = (spec.render)(&ctx(), buf.clone());
-        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).expect("the GPU runs the effect");
+        let started = std::time::Instant::now();
+        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).unwrap_or_else(|| {
+            panic!(
+                "the GPU runs {id} {vals:?} adj {adjustment} scale {scale}; elapsed={:?}, health={:?}, unavailable={:?}, transfers={:?}",
+                started.elapsed(),
+                g.ctx.check_health(),
+                g.ctx.unavailable_kernels(),
+                g.ctx.transfer_stats()
+            )
+        });
         if expect_empty {
             assert!(out.img.data.iter().all(|p| p[3] == 0.0), "{id} {vals:?} adj {adjustment} scale {scale}: Cut Away 100 produced non-zero alpha");
         }
@@ -816,7 +882,7 @@ fn display_frames_are_mipmapped() {
         view_formats: &[],
     });
     let mut e = crate::context::Enc::new(&g.ctx);
-    e.encoder().copy_texture_to_texture(
+    e.record(&[]).copy_texture_to_texture(
         wgpu::TexelCopyTextureInfo { texture: &f.texture, mip_level: 1, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
         wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
         wgpu::Extent3d { width: w1, height: h1, depth_or_array_layers: 1 },
@@ -900,6 +966,71 @@ fn within_memory_returns_the_work_when_there_is_room() {
     let Some(g) = gpu() else { return };
     let img = g.within_memory(|| g.ctx.image(64, 32)).expect("room for a 64×32 texture");
     assert_eq!((img.width, img.height), (64, 32));
+}
+
+/// A texture the device rejected (deliberately too wide), made outside any frame under a scope
+/// of its own: the view a frame then makes of it is the reported validation error.
+fn rejected_texture(g: &Gpu) -> wgpu::Texture {
+    let scope = g.ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let too_wide = g.ctx.device.limits().max_texture_dimension_2d.saturating_add(1);
+    let t = g.ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("deliberately too wide"),
+        size: wgpu::Extent3d { width: too_wide, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    assert!(pollster::block_on(scope.pop()).is_some(), "the device rejected the texture");
+    t
+}
+
+/// A frame that makes a view of an invalid texture ("Texture with '' label is invalid", #1319)
+/// fails alone: the validation error doesn't reach the device's handler (which retires the
+/// compositor for the session, and panics in tests), and the next frame composites on the GPU,
+/// read back, like the CPU.
+#[test]
+fn a_view_of_an_invalid_texture_fails_the_frame_not_the_compositor() {
+    hold_gpu_lock();
+    let Some(g) = Gpu::headless() else { return };
+    let rejected = rejected_texture(&g);
+    let err = g.within_memory(|| rejected.create_view(&Default::default())).expect_err("the frame fails");
+    assert!(matches!(&err, crate::FrameError::Validation(e) if e.contains("deliberately too wide")), "{err:?}");
+    assert!(g.ctx.check_health().is_ok(), "the compositor stays on: {:?}", g.ctx.check_health());
+    let s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
+    let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+    let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+    r.accel = Some(&g);
+    let img = g.within_memory(|| g.render(&r, s.cid, Tick::ZERO)).expect("the next frame isn't rejected").expect("the GPU renders it");
+    let mut d = diff(&cpu, &img, tolerance(BitDepth::Bpc32));
+    d.quantized = false;
+    check("after a rejected frame", Some(d), 0.0);
+}
+
+/// No texture of a failed frame is reused: not one released while another encoder is still
+/// open (it waits for that encoder), nor one taken before the failure and handed back after.
+#[test]
+fn a_failed_frame_returns_no_texture_to_the_pool() {
+    hold_gpu_lock();
+    let Some(g) = Gpu::headless() else { return };
+    let rejected = rejected_texture(&g);
+    let earlier = g.within_memory(|| crate::context::Enc::new(&g.ctx).image(48, 16)).expect("an earlier frame");
+    let mut other = crate::context::Enc::new(&g.ctx);
+    other.record(&[]);
+    g.within_memory(|| (crate::context::Enc::new(&g.ctx).image(64, 32), rejected.create_view(&Default::default()))).expect_err("the frame fails");
+    drop(earlier);
+    drop(other);
+    let (hits, _) = g.ctx.pool_stats();
+    let (a, b) = g
+        .within_memory(|| {
+            let mut e = crate::context::Enc::new(&g.ctx);
+            (e.image(64, 32), e.image(48, 16))
+        })
+        .expect("the next frame");
+    assert_eq!(((a.width, a.height), (b.width, b.height)), ((64, 32), (48, 16)));
+    assert_eq!(g.ctx.pool_stats().0, hits, "no texture of the failed frame was reused");
 }
 
 /// A buffer whose allocation fails (here: over the device's buffer size limit; on Adreno an
@@ -994,6 +1125,16 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
         d.quantized = depth != BitDepth::Bpc32;
         check(&format!("missing kernels {depth:?}"), Some(d), 0.0);
     }
+}
+
+/// WGSL cannot read the CPU's constants, so Glow's bright pass repeats them as literals; this
+/// ties them to `effects::GLOW_GAIN` / `GLOW_KNEE` (runs without a GPU).
+#[test]
+fn glow_constants_match_the_cpu() {
+    use effectcraft_effects::{GLOW_GAIN, GLOW_KNEE};
+    let kernels = include_str!("shaders/kernels.wgsl");
+    let want = format!("max({GLOW_GAIN:?} * (px.xyz / a - vec3<f32>(thr - {GLOW_KNEE:?})), vec3<f32>(0.0))");
+    assert!(kernels.contains(&want), "Glow's bright pass in kernels.wgsl is not `{want}`");
 }
 
 /// The GPU Tint gives After Effects 2026's greys for full-frame solids at its defaults (sRGB
@@ -1271,4 +1412,486 @@ fn owned_devices_favour_memory_usage() {
     assert!(matches!(d.memory_hints, wgpu::MemoryHints::MemoryUsage));
     assert_eq!(d.label, Some("effectcraft gpu"));
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
+}
+
+/// A GPU context of its own with a small pool budget, so other tests (sharing [`gpu`]) neither
+/// see the budget nor add to what the pool keeps.
+fn private_gpu(budget: usize) -> Option<Gpu> {
+    gpu()?;
+    let g = Gpu::headless()?;
+    g.context().set_pool_budget(budget);
+    Some(g)
+}
+
+/// Three effect calls while a frame encoder is open with recorded work reuse one set of
+/// textures: lent calls give them back at once, without waiting for that frame to submit.
+#[test]
+fn three_effect_calls_in_a_frame_reuse_one_set_of_textures() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let mut frame = crate::context::Enc::new(ctx);
+    // Open the frame encoder with real work so the pool has an open id (an empty Enc::new does not).
+    let src = frame.image(64, 64);
+    let dst = frame.image(64, 64);
+    frame.copy_into(&src, &dst, 0, 0);
+    let (hits0, misses0) = ctx.pool_stats();
+    for _ in 0..3 {
+        let mut e = crate::context::Enc::lent(ctx);
+        let a = e.image(256, 256);
+        let b = e.image(256, 256);
+        drop((a, b));
+        drop(e);
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert_eq!(misses, 2, "only the first effect call allocates: {hits} hits, {misses} misses");
+    assert_eq!(hits, 4, "calls 2 and 3 reuse both textures: {hits} hits, {misses} misses");
+    frame.submit();
+    drop((src, dst, frame));
+}
+
+/// Review of #1523: after the first frame fills the free list, later identical frames hit
+/// instead of allocating again.
+#[test]
+fn a_repeated_frame_reuses_after_the_first() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let frame = || {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256, 256), e.image(128, 64)));
+        drop(e);
+        ctx.pool_frame_end();
+    };
+    let (hits0, misses0) = ctx.pool_stats();
+    frame();
+    let (hits1, misses1) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert_eq!(misses1, 2, "first frame allocates both sizes: {hits1} hits, {misses1} misses");
+    let (hits_a, misses_a) = ctx.pool_stats();
+    for _ in 0..3 {
+        frame();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits_a, ctx.pool_stats().1 - misses_a);
+    assert_eq!(misses, 0, "frames 2..4 allocate nothing: {hits} hits, {misses} misses");
+    assert!(hits >= 6, "frames 2..4 reuse both sizes: {hits} hits");
+}
+
+/// Review of #1523: every idle effect-call owner kept up to the pool budget of its own,
+/// outside the shared accounting, and there are as many as calls ever ran at once (16 frame
+/// threads: ~12 GB after a 4K render). Finished calls share the free list's one budget, and
+/// the end of a render drops it.
+#[test]
+fn idle_effect_calls_share_one_pool_budget() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // 16 effect calls in flight at once, each with three 1 MB working textures.
+    let mut encs: Vec<_> = (0..16).map(|_| crate::context::Enc::lent(ctx)).collect();
+    for e in &mut encs {
+        let imgs: Vec<_> = (0..3).map(|_| e.image(256, 256)).collect();
+        drop(imgs);
+    }
+    drop(encs);
+    let kept = ctx.pool_retained_bytes();
+    assert!(kept <= budget, "idle effect calls keep {} MB, budget {} MB", kept >> 20, budget >> 20);
+    // A later call reuses them instead of allocating.
+    let (hits, _) = ctx.pool_stats();
+    drop(crate::context::Enc::lent(ctx).image(256, 256));
+    assert_eq!(ctx.pool_stats().0, hits + 1, "a later effect call reuses a kept texture");
+    effectcraft_render::Accelerator::render_end(&g);
+    assert_eq!(ctx.pool_retained_bytes(), 0, "the end of a render drops the kept textures");
+}
+
+/// Review of #1523: a full free list rejected every new texture instead of evicting, so once
+/// sizes that no longer occur (per-frame blur bounds, padded layer sizes) filled it, a steady
+/// size never got a hit again: ~0.75 GB of dead weight plus an allocation per working texture.
+#[test]
+fn stale_sizes_do_not_starve_a_steady_size() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    for k in 0..16 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256 + k, 256), e.image(256 + k, 256)));
+        drop(e);
+        ctx.pool_frame_end();
+    }
+    let (hits0, misses0) = ctx.pool_stats();
+    for _ in 0..10 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(300, 300), e.image(300, 300)));
+        drop(e);
+        ctx.pool_frame_end();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(ctx.pool_evictions() > 0, "the stale sizes were evicted");
+    assert!(hits >= 18 && misses <= 2, "steady 300x300 calls after stale sizes: {hits} hits, {misses} misses");
+}
+
+/// Review of #1523: a `pool_frame_end` wait that clears none of the evicted bytes (timeout, or
+/// callbacks that never run) must not re-wait on every later frame while `dying` stays put.
+#[test]
+fn a_wait_without_progress_is_not_repeated() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let phantom = 1 << 20;
+    ctx.pool_charge_dying(phantom as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 1, "first frame with dying bytes waits once");
+    for _ in 0..3 {
+        ctx.pool_frame_end();
+    }
+    assert_eq!(ctx.pool_waits(), 1, "no progress: later frames must not wait again");
+    ctx.pool_charge_dying(-(phantom as isize));
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 1, "dying cleared: poll only, stall cleared");
+    ctx.pool_charge_dying(phantom as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 2, "a new stall waits once");
+    // Partial progress: more dying while stalled → still no wait; drop below stalled → wait.
+    let extra = phantom / 2;
+    ctx.pool_charge_dying(extra as isize);
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 2, "dying above stalled: poll only");
+    ctx.pool_charge_dying(-(extra as isize + 1));
+    ctx.pool_frame_end();
+    assert_eq!(ctx.pool_waits(), 3, "dying dropped below stalled: wait again");
+    ctx.pool_charge_dying(-((phantom - 1) as isize));
+}
+
+/// RTX 3090 4K runs of #1523: evicting the least recently freed texture to fit every newcomer
+/// thrashes when a frame frees more than the budget in a repeating order (blur/glow
+/// intermediates): each free evicts the size the next call takes first, so every take
+/// missed (d_blurglow misses back at the old level, and evict + reallocate raised the peak).
+/// Sizes still in use stay; a kept subset of the cycle must keep hitting.
+#[test]
+fn repeating_sizes_over_the_budget_keep_hitting() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // Five ~2.1 MB sizes a frame (10.5 MB > 8 MB), one effect call each, same order every frame.
+    let sizes: Vec<(u32, u32)> = (0..5).map(|k| (256 + 8 * k, 512)).collect();
+    let frame = || {
+        for &(w, h) in &sizes {
+            drop(crate::context::Enc::lent(ctx).image(w, h));
+        }
+        ctx.pool_frame_end();
+    };
+    for _ in 0..3 {
+        frame();
+    }
+    let (hits0, misses0) = ctx.pool_stats();
+    let evicted0 = ctx.pool_evictions();
+    for _ in 0..10 {
+        frame();
+    }
+    let (hits, misses) = (ctx.pool_stats().0 - hits0, ctx.pool_stats().1 - misses0);
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(hits >= 30, "10 frames of a 5-size cycle over the budget: {hits} hits, {misses} misses");
+    assert_eq!(ctx.pool_evictions(), evicted0, "sizes in use were evicted");
+}
+
+/// Review of #1523: a lent call's image read by another, still open encoder must not go back to
+/// the lent call for reuse when its lease drops first: that encoder's read is not submitted yet.
+#[test]
+fn image_read_by_an_open_encoder_is_not_reused_by_its_lent_call() {
+    let Some(g) = private_gpu(8 << 20) else { return };
+    let ctx = g.context();
+    let mut frame = crate::context::Enc::new(ctx);
+    let mut lent = crate::context::Enc::lent(ctx);
+    let img = lent.image(64, 64);
+    let dst = frame.image(64, 64);
+    frame.copy_into(&img, &dst, 0, 0);
+    drop(img);
+    let (hits, _) = ctx.pool_stats();
+    drop(lent.image(64, 64));
+    assert_eq!(ctx.pool_stats().0, hits, "the lent call reused a texture an open encoder still reads");
+    drop(lent);
+    let (hits, _) = ctx.pool_stats();
+    drop(crate::context::Enc::lent(ctx).image(64, 64));
+    // The other 64x64 (the lent call's second image) is free; the read one still waits.
+    let (hits2, _) = ctx.pool_stats();
+    assert_eq!(hits2, hits + 1);
+    let (h, _) = ctx.pool_stats();
+    let mut e = crate::context::Enc::lent(ctx);
+    let a = e.image(64, 64);
+    let b = e.image(64, 64);
+    assert_eq!(ctx.pool_stats().0, h + 1, "the read texture waits for the open encoder");
+    drop((a, b, e));
+    frame.submit();
+    drop(dst);
+}
+
+/// The same through [`Gpu::effects`] from 16 threads at once, as an export's frame threads.
+#[test]
+fn effect_calls_on_16_threads_keep_one_pool_budget() {
+    if on_gl() {
+        return; // one context lock per adapter on wgpu's GL backend (see hold_gpu_lock)
+    }
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let g = &g;
+    let ctx = g.context();
+    let spec = effectcraft_effects::find("ec.blur.gaussian").unwrap();
+    let size = [240.0, 240.0];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    params.values.insert("blurriness".into(), Value::Scalar(6.0));
+    let buf = effectcraft_effects::Buf { img: pattern(3, 240, 240), offset: [0.0, 0.0], scale: 1.0 };
+    let go = std::sync::Barrier::new(16);
+    std::thread::scope(|s| {
+        for i in 0..16 {
+            let (params, buf, go) = (&params, &buf, &go);
+            s.spawn(move || {
+                go.wait();
+                for _ in 0..3 {
+                    let fx = effectcraft_effects::EffectCtx { params, time: 0.0, layer_size: size, seed: i, adjustment: false, env: Default::default() };
+                    effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: fx }], buf, None).expect("the GPU runs the effect");
+                }
+            });
+        }
+    });
+    let kept = ctx.pool_retained_bytes();
+    assert!(kept <= budget, "16 threads of effect calls keep {} MB, budget {} MB", kept >> 20, budget >> 20);
+    effectcraft_render::Accelerator::render_end(g);
+    assert_eq!(ctx.pool_retained_bytes(), 0, "the end of a render drops the kept textures");
+}
+
+/// Sceptic r2 of #1523: only the export pipeline ended frames, so off export (preview, remote
+/// frames) the pool's clock stood still, no size ever went stale and a full free list dropped
+/// every newcomer again. Frames rendered through [`effectcraft_render::passes::comp_frame`]
+/// (no explicit `pool_frame_end`) must age the sizes they did not ask for.
+#[test]
+fn frames_outside_the_export_pipeline_age_the_pool() {
+    let budget = 8 << 20;
+    let Some(g) = private_gpu(budget) else { return };
+    let ctx = g.context();
+    // Fill the free list with sizes no frame asks for again.
+    for k in 0..16 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(256 + k, 256), e.image(256 + k, 256)));
+    }
+    let evicted0 = ctx.pool_evictions();
+    let s = blend_scene(BitDepth::Bpc8, BlendMode::Screen);
+    let mut r = Renderer::new(&s.p, &Pattern, opts());
+    r.accel = Some(&g);
+    for _ in 0..3 {
+        effectcraft_render::passes::block_on(effectcraft_render::passes::comp_frame(&r, s.cid, Tick::ZERO));
+    }
+    for _ in 0..4 {
+        let mut e = crate::context::Enc::lent(ctx);
+        drop((e.image(300, 300), e.image(300, 300)));
+    }
+    assert!(ctx.pool_retained_bytes() <= budget);
+    assert!(ctx.pool_evictions() > evicted0, "rendered frames did not age the pool: stale sizes were never evicted");
+}
+
+/// #1550: with a small `EFFECTCRAFT_GPU_MEMCAP_MB` on a backend that reports allocator usage
+/// (Vulkan, DX12), `Enc::mem_gate` stays quiet when the bytes over the cap are non-reclaimable
+/// (live uploads), submits and waits when dropped working textures push reclaimable bytes over
+/// the cap, carries on without retiring the context if a wait times out, warns once when a
+/// frame's kept memory alone exceeds the cap, waits between two frames that fit only one at a
+/// time, and recovers budget when a frame is dropped unfinished.
+#[test]
+fn mem_gate_reclaims_over_cap_and_tolerates_timeout() {
+    const ENV: &str = "EFFECTCRAFT_GPU_MEMCAP_TEST_CHILD";
+    const SKIP: &str = "mem_gate_reclaims_over_cap_and_tolerates_timeout: skipped";
+    if std::env::var_os(ENV).is_none() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .env(ENV, "1")
+            .env("EFFECTCRAFT_GPU_MEMCAP_MB", "8")
+            .args(["--exact", "tests::mem_gate_reclaims_over_cap_and_tolerates_timeout", "--nocapture"])
+            .output()
+            .expect("spawn child test process");
+        assert!(
+            out.status.success(),
+            "child test failed (status {:?}):\nstdout:\n{}\nstderr:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        // The child's output is captured: pass its skip line on.
+        String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.starts_with(SKIP)).for_each(|l| eprintln!("{l}"));
+        return;
+    }
+
+    // EFFECTCRAFT_REQUIRE_GPU=1 (inherited from the parent) fails on a GPU that didn't start.
+    let g = Gpu::try_headless();
+    let Some(g) = require_gpu("mem_gate child", g.as_ref()) else {
+        eprintln!("{SKIP}: no GPU ({})", g.as_ref().err().map_or("", String::as_str));
+        return;
+    };
+    let ctx = g.context();
+    if ctx.allocated_bytes() == 0 {
+        // The backend has no allocator report (Metal, GL, WebGPU): the gate never engages.
+        eprintln!("{SKIP}: adapter {} reports no allocator usage", ctx.name);
+        return;
+    }
+
+    // 1. Non-reclaimable memory (upload cache) over the 8 MiB cap must not trigger waits.
+    let img = pattern(7, 512, 512); // 4 MiB in RGBA f32
+    let held: Vec<_> = (0..3)
+        .map(|i| {
+            let b = std::sync::Arc::new(effectcraft_effects::Buf { img: img.clone(), offset: [i as f64, 0.0], scale: 1.0 });
+            ctx.upload_buf(&b).expect("upload");
+            b
+        })
+        .collect();
+    let idx = ctx.queue.submit([]);
+    let _ = ctx.poll_readbacks(wgpu::PollType::Wait { submission_index: Some(idx), timeout: Some(std::time::Duration::from_secs(1)) });
+    assert!(ctx.allocated_bytes() > (8 << 20), "uploads should put the allocator over the 8 MiB cap (got {} B)", ctx.allocated_bytes());
+    {
+        let mut e = crate::context::Enc::new(ctx);
+        for _ in 0..16 {
+            e.mem_gate();
+        }
+    }
+    assert_eq!(ctx.memcap_waits(), 0, "mem_gate must not wait when over-cap memory is held by live uploads");
+    assert!(ctx.memcap_warned(), "uploads alone over the cap log the one-time warning");
+    drop(held);
+    ctx.clear_uploads();
+    ctx.pool_frame_end();
+
+    // 2. Dropped working textures over the 2 MiB pool budget and 8 MiB cap trigger a wait and
+    // free the dropped textures in wgpu's allocator.
+    let mut e = crate::context::Enc::new(ctx);
+    let mut peak_before_wait = 0u64;
+    for k in 0..16u32 {
+        let a = e.image(512 + k * 16, 256); // ~2 MiB each, distinct sizes
+        let b = e.image(512 + k * 16, 256);
+        e.copy_into(&a, &b, 0, 0);
+        drop((a, b));
+        peak_before_wait = peak_before_wait.max(ctx.allocated_bytes());
+        e.mem_gate();
+    }
+    drop(e);
+    assert!(peak_before_wait > (8 << 20), "working textures should push allocator over 8 MiB before a wait (peak {} B)", peak_before_wait);
+    let waits = ctx.memcap_waits();
+    assert!(waits > 0, "mem_gate should have waited once reclaimable bytes exceeded the cap");
+    assert!(
+        ctx.allocated_bytes() < peak_before_wait,
+        "waiting should reclaim dropped textures (peak {} B, after {} B)",
+        peak_before_wait,
+        ctx.allocated_bytes()
+    );
+    assert!(ctx.check_health().is_ok());
+    ctx.pool_frame_end();
+
+    // 3. A frame bigger than the cap: live GpuImages count in Pool::leased (kept for every owner),
+    // so three live 512×512 RGBA f32 images (12 MiB) make kept alone exceed the 8 MiB cap.
+    // Waiting cannot free them; mem_gate must not add waits (warning already asserted in section 1).
+    let waits_before_big = ctx.memcap_waits();
+    {
+        let mut e = crate::context::Enc::new(ctx);
+        let live = [e.image(512, 512), e.image(512, 512), e.image(512, 512)];
+        for _ in 0..16 {
+            e.mem_gate();
+        }
+        assert_eq!(ctx.memcap_waits(), waits_before_big, "a frame whose live images alone exceed the cap must not wait");
+        assert!(ctx.check_health().is_ok());
+        drop(live);
+    }
+    ctx.pool_frame_end();
+
+    // 4. Two frames that fit only one at a time: frame 1 creates ~6 MiB, copies, submits its
+    // work and drops its images, so wgpu holds them until the submission is done and polled.
+    // Frame 2 keeps ~6 MiB of new live images and waits for frame 1's reclaimable memory.
+    {
+        let mut e1 = crate::context::Enc::new(ctx);
+        let hold = [e1.image(512, 384), e1.image(512, 384)]; // 6 MiB
+        e1.copy_into(&hold[0], &hold[1], 0, 0);
+        e1.submit();
+        drop((hold, e1));
+    }
+    let allocated_after_f1 = ctx.allocated_bytes();
+    let waits_before_pair = ctx.memcap_waits();
+    let allocated_before_gate;
+    let downloaded;
+    {
+        let mut e2 = crate::context::Enc::new(ctx);
+        let a = e2.image(520, 384);
+        let b = e2.image(504, 384); // ~6 MiB together, sizes distinct from each other and frame 1
+        e2.copy_into(&b, &a, 0, 0);
+        allocated_before_gate = ctx.allocated_bytes();
+        assert!(
+            allocated_before_gate > (8 << 20),
+            "frame 1's unreclaimed memory ({allocated_after_f1} B) plus frame 2's live images should exceed the 8 MiB cap (got {allocated_before_gate} B)"
+        );
+        for _ in 0..16 {
+            e2.mem_gate();
+        }
+        assert!(ctx.memcap_waits() > waits_before_pair, "frame 2 should wait for frame 1's reclaimable memory (its own images stay live)");
+        assert!(
+            ctx.allocated_bytes() < allocated_before_gate,
+            "waiting should reclaim frame 1's dropped textures (before {} B, after {} B)",
+            allocated_before_gate,
+            ctx.allocated_bytes()
+        );
+        downloaded = e2.download(&a);
+    }
+    assert!(downloaded.is_some(), "frame 2 must finish with a correct download after waiting");
+    ctx.pool_frame_end();
+
+    // 5. A failed / unfinished frame releases its budget: drop an Enc mid-flight, then a
+    // following frame must not wait once the pool has drained.
+    let baseline = ctx.allocated_bytes();
+    {
+        let mut e = crate::context::Enc::new(ctx);
+        let _hold = [e.image(512, 512), e.image(512, 512), e.image(480, 480)];
+        // Drop without finishing: same path as a frame that errors before submit.
+    }
+    ctx.pool_frame_end();
+    let _ = ctx.poll_readbacks(wgpu::PollType::Poll);
+    assert!(
+        ctx.allocated_bytes() <= baseline + (2 << 20) + (1 << 20),
+        "dropped frame must release to baseline + pool budget (2 MiB) with slack (got {} B, baseline {} B)",
+        ctx.allocated_bytes(),
+        baseline
+    );
+    let waits_after_drop = ctx.memcap_waits();
+    {
+        let mut e = crate::context::Enc::lent(ctx);
+        for _ in 0..16 {
+            e.mem_gate();
+        }
+    }
+    assert_eq!(ctx.memcap_waits(), waits_after_drop, "a following frame must not wait after a dropped frame released its memory");
+
+    // 6. A zero-timeout wait must not retire the context or break subsequent renders.
+    ctx.set_memcap_wait_timeout(std::time::Duration::ZERO);
+    {
+        let mut e = crate::context::Enc::lent(ctx);
+        for k in 0..16u32 {
+            let a = e.image(384 + k * 16, 256);
+            let b = e.image(384 + k * 16, 256);
+            e.copy_into(&a, &b, 0, 0);
+            drop((a, b));
+            e.mem_gate();
+        }
+    }
+    assert!(ctx.memcap_waits() > waits_after_drop, "mem_gate should have fired again under zero timeout");
+    assert!(ctx.check_health().is_ok(), "a mem_gate wait timeout must carry on without retiring the context");
+    let s = blend_scene(BitDepth::Bpc8, BlendMode::Screen);
+    let r = Renderer::new(&s.p, &Pattern, opts());
+    assert!(g.render(&r, s.cid, Tick::ZERO).is_some(), "context renders normally after a zero-timeout mem_gate wait");
+
+    // 7. Non-blocking polls (`Gpu::poll`, `pool_frame_end`) skip when `poll_lock` is held by
+    // another thread, and `read_buffer` waits for `poll_lock` without consuming its deadline.
+    // Drain any dying pool textures first so the timed path takes Poll (try_lock) rather than Wait.
+    ctx.set_memcap_wait_timeout(crate::readback::TIMEOUT);
+    ctx.pool_frame_end();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            let _guard = ctx.lock_poll_for_test();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        });
+        locked_rx.recv().unwrap();
+        let t0 = std::time::Instant::now();
+        g.poll();
+        ctx.pool_frame_end();
+        assert!(t0.elapsed() < std::time::Duration::from_millis(30), "non-blocking polls must not wait on a contended poll_lock (took {:?})", t0.elapsed());
+        assert!(g.render(&r, s.cid, Tick::ZERO).is_some(), "readback waits for poll_lock and succeeds without retiring the context");
+    });
 }

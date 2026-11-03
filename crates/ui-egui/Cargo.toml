@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 craft-ui = { workspace = true }
+craft-quit = { workspace = true, features = ["egui"] }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -33,6 +34,8 @@ kurbo = { workspace = true }
 image = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Floating panels open in OS windows of their own on desktop; the web keeps them in the page.
+craft-ui = { workspace = true, features = ["native-windows"] }
 craft-update = { workspace = true }
 sys-locale = { workspace = true }
 
@@ -41,7 +44,8 @@ sys-locale = { workspace = true }
 # here documents the requirement (kittest's own dev-dependencies do not propagate to consumers).
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
-pollster = "0.4"
+pollster = "1"
+effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
 exr = { workspace = true }
 

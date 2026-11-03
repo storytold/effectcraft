@@ -206,6 +206,12 @@ pub fn reverses(id: &str) -> bool {
     id == "ec.audio.backwards"
 }
 
+/// Does each output sample depend only on the input sample at the same time (no state), so the
+/// mixer may run the effect in short pieces with parameters animated between them?
+pub fn per_sample(id: &str) -> bool {
+    matches!(id, "ec.audio.stereomixer" | "ec.audio.backwards")
+}
+
 /// Seconds of input history the effect needs before a block to reach the state it would have
 /// had when processing continuously.
 pub fn preroll(id: &str, params: &Params) -> f64 {

@@ -36,8 +36,12 @@ fn info(kind: filmcraft_media::MediaKind, video: bool, audio: bool) -> filmcraft
             color: Default::default(),
             has_alpha: false,
             bitrate: None,
+            hdr: None,
         }),
-        audio: audio.then(|| filmcraft_media::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) }),
+        audio_streams: audio
+            .then(|| filmcraft_media::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) })
+            .into_iter()
+            .collect(),
         container: String::new(),
         start_timecode: None,
         file_size: None,
@@ -361,6 +365,61 @@ fn edl_imports_one_track() {
     assert!(c.layers.len() >= 2);
 }
 
+/// An EDL's source timecodes are footage time once the file's own start timecode is known:
+/// 01:00:01:00 in a file that starts at 01:00:00:00 is one second in, not 3601 s.
+#[test]
+fn edl_source_timecode_lands_on_the_files_own_time() {
+    let edl = "TITLE: CUT\nFCM: NON-DROP FRAME\n\n001  A001     V     C        01:00:01:00 01:00:02:00 01:00:00:00 01:00:01:00\n* FROM CLIP NAME: a.mov\n* SOURCE FILE: /media/a.mov\n";
+    let mut probe_tc = |path: &str| probe(path).map(|f| Footage { file_timecode: Some(3600 * 25), ..f });
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(25.0), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_tc).unwrap();
+    let c = p.comp(r.comps[0]).unwrap();
+    let l = layer(c, "a.mov");
+    assert!(near(l.layer_time(l.in_point), t(1.0)), "{}", l.layer_time(l.in_point).seconds());
+    assert!(near(l.start_time, t(-1.0)), "{}", l.start_time.seconds());
+    assert!(!r.warnings.iter().any(|w| w.contains("media time")), "the rebase is done: {:?}", r.warnings);
+}
+
+/// The reader's note to rebase after probing is replaced by the media that couldn't be rebased:
+/// a file with no start timecode and a missing file. Media cut from 00:00:00:00 needs no rebase.
+#[test]
+fn edl_media_left_on_timecode_is_named() {
+    let event = |n: u32, reel: &str, ch: &str, src: (&str, &str), rec: (&str, &str), file: &str| {
+        format!("{n:03}  {reel:<8} {ch:<5} C        {} {} {} {}\n* FROM CLIP NAME: {file}\n* SOURCE FILE: /media/{file}\n\n", src.0, src.1, rec.0, rec.1)
+    };
+    let edl = [
+        "TITLE: CUT\nFCM: NON-DROP FRAME\n\n".to_string(),
+        event(1, "A", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:00:00", "01:00:01:00"), "a.mov"),
+        event(2, "B", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:01:00", "01:00:02:00"), "b.mov"),
+        event(3, "C", "V", ("01:00:01:00", "01:00:02:00"), ("01:00:02:00", "01:00:03:00"), "c.mov"),
+        event(4, "D", "A", ("00:00:00:00", "00:00:03:00"), ("01:00:00:00", "01:00:03:00"), "d.wav"),
+    ]
+    .concat();
+    let mut probe_some = |path: &str| match path {
+        "/media/a.mov" => probe(path).map(|f| Footage { file_timecode: Some(3600 * 25), ..f }),
+        "/media/c.mov" => None,
+        _ => probe(path),
+    };
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(25.0), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_some).unwrap();
+    let notes: Vec<&String> = r.warnings.iter().filter(|w| w.contains("media time")).collect();
+    assert_eq!(notes, ["EDL source timecodes stay media time for b.mov, c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
+}
+
+/// A drop-frame list counts its hour in timecode: a clip cut at 01:00:00;00 (3599.996 s at 29.97
+/// fps) from a missing file is still named.
+#[test]
+fn edl_drop_frame_media_left_on_timecode_is_named() {
+    let edl = "TITLE: CUT\nFCM: DROP FRAME\n\n001  C        V     C        01:00:00;00 01:00:01;00 01:00:00;00 01:00:01;00\n* FROM CLIP NAME: c.mov\n* SOURCE FILE: /media/c.mov\n";
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "cut.edl".into(), edl_frame_rate: Some(29.97), ..Default::default() };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut |_: &str| None).unwrap();
+    let notes: Vec<&String> = r.warnings.iter().filter(|w| w.contains("media time")).collect();
+    assert_eq!(notes, ["EDL source timecodes stay media time for c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
+}
+
 #[test]
 fn rejects_unknown_documents() {
     let mut p = Project::default();
@@ -411,7 +470,7 @@ fn ae_project() -> (Project, ItemId) {
     let mut ls = effectcraft_project::build::layer(&mut p, &c, "tone", LayerSource::Footage { item: s }, (0, 0), None);
     ls.out_point = t(3.0);
     ls.props.prop_mut("audio/levels").unwrap().value = Value::Vec2([-3.0, -3.0]);
-    c.layers = vec![lt, lp, la, ls];
+    c.layers = vec![lt, lp, la, ls].into();
     let cid = comp_item(&mut p, "Main", c);
     (p, cid)
 }
@@ -427,6 +486,36 @@ fn plan_prerenders_rendered_only_layers() {
     let all = plan_prerender(&p, cid, &ExportOptions { prerender: PrerenderMode::All, ..Default::default() });
     assert_eq!(all.len(), 3, "audio-only layers are never rendered");
     assert!(plan_prerender(&p, cid, &ExportOptions { prerender: PrerenderMode::None, ..Default::default() }).is_empty());
+}
+
+/// A Layer Styles group that doesn't change the picture (Blending Options at their defaults, or
+/// every style switched off) keeps a clip a clip; Fill Opacity or a style that is on pre-renders it.
+#[test]
+fn only_layer_styles_that_change_pixels_prerender() {
+    use effectcraft_project::styles::{self as st, GROUP};
+    let opts = ExportOptions::default();
+    let reason = |edit: &dyn Fn(&mut Project, &mut Layer)| {
+        let (mut p, cid) = ae_project();
+        let c = p.comp(cid).unwrap();
+        let gl = c.global_light.clone();
+        let mut l = c.layers.iter().find(|l| l.name == "clip a").unwrap().clone();
+        st::add_blending_options(&mut l, &mut effectcraft_project::build::Ids(&mut p.next_id), &gl).unwrap();
+        edit(&mut p, &mut l);
+        let lid = l.id;
+        *p.comp_mut(cid).unwrap().layers.iter_mut().find(|x| x.id == lid).unwrap() = l;
+        prerender_reason(&p, cid, lid, &opts)
+    };
+    let fill = |l: &mut Layer, v: f64| l.props.prop_mut(&format!("{GROUP}/blendingOptions/advancedBlending/fillOpacity")).unwrap().value = Value::Scalar(v);
+    assert_eq!(reason(&|_, _| {}), None, "Blending Options at their defaults");
+    assert_eq!(reason(&|_, l| fill(l, 40.0)).as_deref(), Some("layer styles"));
+    let style = |on: bool| {
+        move |p: &mut Project, l: &mut Layer| {
+            let gl = effectcraft_project::styles::GlobalLight::default();
+            st::add_style(l, &mut effectcraft_project::build::Ids(&mut p.next_id), "dropShadow", &gl, on).unwrap();
+        }
+    };
+    assert_eq!(reason(&style(false)), None, "a style switched off");
+    assert_eq!(reason(&style(true)).as_deref(), Some("layer styles"));
 }
 
 #[test]
@@ -480,6 +569,59 @@ fn tr_orig(l: &Layer) -> &effectcraft_project::Property {
     l.transform().unwrap().get("position").unwrap()
 }
 
+/// #1894: XML timelines have no mute state, so a muted key must not be written as a keyframe
+/// (the export would otherwise animate through it).
+#[test]
+fn export_skips_muted_keyframes() {
+    let mut p = Project::default();
+    let a = footage_item(&mut p, "/media/a.mov");
+    let mut c = Comp::new(W, H, FrameRate::new(25, 1), t(4.0));
+    let mut l = effectcraft_project::build::layer(&mut p, &c, "clip", LayerSource::Footage { item: a }, (W, H), None);
+    {
+        let pos = l.transform_mut().unwrap().get_mut("position").unwrap();
+        pos.keys = vec![
+            Keyframe::new(t(0.0), Value::Vec3([100.0, 120.0, 0.0])),
+            Keyframe::new(t(1.0), Value::Vec3([500.0, 240.0, 0.0])),
+            Keyframe::new(t(2.0), Value::Vec3([300.0, 60.0, 0.0])),
+        ];
+        pos.keys[1].muted = true;
+    }
+    c.layers.push(l);
+    let cid = comp_item(&mut p, "Main", c);
+    let out = export(&p, cid, &ExportOptions { format: TimelineFormat::Fcp7Xml, ..Default::default() }, &HashMap::new()).unwrap();
+    let (q, r) = import_doc(&out.bytes, "Main.xml", &mut probe);
+    let main = r.comps.iter().copied().find(|c| q.item(*c).unwrap().name == "Main").expect("Main");
+    let pos = layer(q.comp(main).unwrap(), "clip").transform().unwrap().get("position").unwrap();
+    assert_eq!(pos.keys.len(), 2, "the muted key was exported");
+    assert_eq!(pos.keys[0].value.as_vec3()[0], 100.0);
+    assert_eq!(pos.keys[1].value.as_vec3()[0], 300.0);
+}
+
+/// #1894: a muted non-uniform scale key must not force a uniform layer to pre-render; only the
+/// active keys matter, and the static value when every key is muted.
+#[test]
+fn muted_non_uniform_scale_does_not_force_prerendering() {
+    let mut p = Project::default();
+    let a = footage_item(&mut p, "/media/a.mov");
+    let mut c = Comp::new(W, H, FrameRate::new(25, 1), t(2.0));
+    let mut l = effectcraft_project::build::layer(&mut p, &c, "clip", LayerSource::Footage { item: a }, (W, H), None);
+    {
+        let scale = l.transform_mut().unwrap().get_mut("scale").unwrap();
+        scale.keys = vec![Keyframe::new(t(0.0), Value::Vec3([100.0, 100.0, 100.0])), Keyframe::new(t(1.0), Value::Vec3([50.0, 200.0, 100.0]))];
+        scale.keys[1].muted = true;
+    }
+    let lid = l.id;
+    c.layers.push(l);
+    let cid = comp_item(&mut p, "Main", c);
+    assert_eq!(prerender_reason(&p, cid, lid, &ExportOptions::default()), None);
+    // With every key muted the static value drives evaluation, so a non-uniform static scale
+    // still takes the flattened path.
+    let scale = p.comp_mut(cid).unwrap().layer_mut(lid).unwrap().transform_mut().unwrap().get_mut("scale").unwrap();
+    scale.keys[0].muted = true;
+    scale.value = Value::Vec3([50.0, 200.0, 100.0]);
+    assert_eq!(prerender_reason(&p, cid, lid, &ExportOptions::default()).as_deref(), Some("non-uniform scale"));
+}
+
 #[test]
 fn export_without_prerender_leaves_text_out() {
     let (p, cid) = ae_project();
@@ -518,6 +660,21 @@ fn export_survives_a_precomp_layer_pointing_at_a_non_comp() {
         }
     }
     assert!(matches!(export(&p, footage, &ExportOptions::default(), &HashMap::new()), Err(Error::NoComp(_))));
+}
+
+#[test]
+fn xml_timelines_declaring_entities_are_refused() {
+    // #2129: the timeline parser expands internal entities without a node limit.
+    let dtd = "<!DOCTYPE x [<!ENTITY a \"aaaaaaaaaa\"><!ENTITY b \"&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;\">]>";
+    let docs = [
+        (TimelineFormat::Fcp7Xml, format!("<?xml version=\"1.0\"?>{dtd}<xmeml version=\"5\">&b;</xmeml>")),
+        (TimelineFormat::Fcpxml, format!("<?xml version=\"1.0\"?>{dtd}<fcpxml version=\"1.9\">&b;</fcpxml>")),
+    ];
+    for (format, doc) in docs {
+        let mut p = Project::default();
+        let r = import(&mut p, doc.as_bytes(), Some(format), &ImportOptions::default(), &mut |_| None);
+        assert!(matches!(r, Err(Error::XmlEntities)), "{format:?}");
+    }
 }
 
 #[test]

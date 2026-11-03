@@ -39,3 +39,9 @@ rayon = { workspace = true }
 image = { workspace = true }
 web-time = { workspace = true }
 exr = { workspace = true }
+
+# Native file identity and SAM 2 inference; browsers keep the built-in engines.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+same-file = { workspace = true }
+tempfile = { workspace = true }
+effectcraft-sam2 = { workspace = true }

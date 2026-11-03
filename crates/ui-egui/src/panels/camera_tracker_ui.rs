@@ -9,7 +9,7 @@
 //!   and Camera, Create Multiple …, Delete Selected Points; Delete removes the selection;
 //! - the "Analyzing in background (step 1 of 2)" / "Solving camera" banner;
 //! - the Effect Controls block with Analyze / Cancel / Create Camera, Method Used and Average
-//!   Error.
+//!   Error, and how many frames a partial solve solved.
 //!
 //! Everything is dispatched to the `camera.*` commands.
 
@@ -413,23 +413,30 @@ pub fn editor(
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(84.0, 22.0));
     let b3 = Rect::from_min_size(pos2(b2.max.x + 8.0, b1.min.y), vec2(110.0, 22.0));
-    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::unique(("ct-analyze", g.uid))).clicked() && !busy {
+    if widgets::text_button(ui, b1, crate::i18n::tr("Analyze"), false, &t, egui::Id::unique(("ct-analyze", g.uid))).clicked() && !busy {
         actions.push(("camera.analyze".into(), me.clone()));
     }
     app.auto.add(&format!("effectControls.cameraTracker.{}.analyze", g.uid), b1, "Analyze");
     if running {
-        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::unique(("ct-cancel", g.uid))).clicked() {
+        if widgets::text_button(ui, b2, crate::i18n::tr("Cancel"), false, &t, egui::Id::unique(("ct-cancel", g.uid))).clicked() {
             actions.push(("camera.cancel".into(), json!({})));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.cancel", g.uid), b2, "Cancel");
     }
     let params = effectcraft_engine::camera_track::static_params(g);
     let solve = ct::solve(&params);
+    let partial = solve.as_deref().and_then(partial_frames);
+    let dy = if partial.is_some() { PARTIAL_LINE } else { 0.0 };
     if solve.is_some() {
-        if widgets::text_button(ui, b3, "Create Camera", false, &t, egui::Id::unique(("ct-camera", g.uid))).clicked() {
+        if widgets::text_button(ui, b3, crate::i18n::tr("Create Camera"), false, &t, egui::Id::unique(("ct-camera", g.uid))).clicked() {
             actions.push(("camera.create".into(), me.clone()));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.createCamera", g.uid), b3, "Create Camera");
+        let export = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 70.0 + dy), vec2(218.0, 22.0));
+        if widgets::text_button(ui, export, tr("Export Scene to Blender..."), false, &t, egui::Id::unique(("ct-blender", g.uid))).clicked() && !busy {
+            actions.push(("camera.exportBlender".into(), me.clone()));
+        }
+        app.auto.add(&format!("effectControls.cameraTracker.{}.exportBlender", g.uid), export, "Export Scene to Blender...");
     }
     let status = match app.session.camera_progress() {
         Some(pr) if running => pr.banner(),
@@ -444,10 +451,19 @@ pub fn editor(
         },
     };
     p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, status, Tokens::ui(11.5), t.text_dim);
+    if let Some((solved, frames)) = partial {
+        let text = tr_args("Partial solve: {} of {} frames solved", &[&solved, &frames]);
+        p.text(pos2(r.min.x + 24.0, r.min.y + 56.0), Align2::LEFT_CENTER, &text, Tokens::ui(11.5), t.warning);
+        app.auto.add(
+            &format!("effectControls.cameraTracker.{}.partialSolve", g.uid),
+            Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 48.0), vec2(r.width() - 24.0, 16.0)),
+            &text,
+        );
+    }
     if let Some(sv) = &solve {
         let f = sv.focal();
         p.text(
-            pos2(r.min.x + 24.0, r.min.y + 56.0),
+            pos2(r.min.x + 24.0, r.min.y + 56.0 + dy),
             Align2::LEFT_CENTER,
             format!("{} solved points · Horizontal Angle of View {:.1}°", sv.points.len(), sv.hfov(f)),
             Tokens::ui(11.5),
@@ -456,5 +472,19 @@ pub fn editor(
     }
 }
 
-/// Height of [`editor`].
-pub const EDITOR_HEIGHT: f32 = 68.0;
+/// Height of [`editor`] without the partial-solve line.
+const EDITOR_HEIGHT: f32 = 100.0;
+const PARTIAL_LINE: f32 = 18.0;
+
+/// Height of [`editor`] for tracker `g`.
+pub fn editor_height(g: &PropGroup) -> f32 {
+    let partial = ct::solve(&effectcraft_engine::camera_track::static_params(g)).is_some_and(|sv| partial_frames(&sv).is_some());
+    if partial { EDITOR_HEIGHT + PARTIAL_LINE } else { EDITOR_HEIGHT }
+}
+
+/// `(solved, all)` frames of a solve with unsolved frames, where the solver interpolates the
+/// camera; `None` when every frame is solved.
+fn partial_frames(sv: &CameraSolve) -> Option<(usize, usize)> {
+    let solved = sv.frames.iter().filter(|c| c.solved).count();
+    (solved < sv.frames.len()).then_some((solved, sv.frames.len()))
+}

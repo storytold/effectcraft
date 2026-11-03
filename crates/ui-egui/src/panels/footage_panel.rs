@@ -1,7 +1,8 @@
 //! The Footage panel (double-click footage in the Project panel): the source on its own time
 //! ruler, play / pause, In and Out marks, and the Edit Target buttons — Overlay Edit and Ripple
 //! Insert Edit — that cut the marked range into the active composition at its current time.
-//! Everything runs `footage.*` commands (state in `EditorState::footage_panel`).
+//! Time, marks and edits run `footage.*` commands (state in `EditorState::footage_panel`);
+//! the Play/Pause flag is local egui state.
 
 use crate::i18n::{tr, tr_args};
 use effectcraft_engine::project::{FootageKind, ItemKind};
@@ -13,6 +14,11 @@ use super::panel_kit as kit;
 use crate::EffectcraftApp;
 use crate::theme::Tokens;
 
+/// The Footage panel for the item opened into it: the frame at the panel's current time (cached
+/// per item, time and session revision), a ruler with the in/out span and CTI that scrubs on click
+/// or drag, Play/Pause, set In/Out, and Ripple Insert / Overlay Edit into the active comp. A solid
+/// shows its colour, footage without video says so, and an empty panel explains how to open one.
+/// Time changes run `footage.*` commands; the panel's Play/Pause flag is local egui state.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -62,7 +68,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let cached: Option<((u64, i64, u64), egui::TextureHandle, [u32; 2])> = ctx.data(|d| d.get_temp(tid));
         let tex = match cached {
             Some((k, tex, size)) if k == key => Some((tex, size)),
-            _ => app.session.footage.frame(view.item, f, view.time).map(|img| {
+            _ => effectcraft_engine::commands::footage_panel::frame(&app.session, view.item, f, view.time).map(|img| {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.to_rgba8());
                 let tex = crate::frames::load_fitted(&ctx, "footage-panel", ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| d.insert_temp(tid, (key, tex.clone(), [img.width, img.height])));

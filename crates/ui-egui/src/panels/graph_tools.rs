@@ -34,6 +34,7 @@ struct BoxDrag {
     last: [f64; 2],
 }
 
+/// The `egui::Id` of the transform-box drag in progress ([`BoxDrag`]).
 fn box_id() -> egui::Id {
     egui::Id::unique("graph-transform-box")
 }
@@ -254,6 +255,7 @@ struct AltScale {
     span: Option<f64>,
 }
 
+/// The `egui::Id` of the Timeline Alt-drag group scale in progress ([`AltScale`]).
 fn alt_id() -> egui::Id {
     egui::Id::unique("timeline-alt-scale")
 }

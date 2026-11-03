@@ -122,6 +122,7 @@ fn cpu_pixels(f: &FrameImage) -> Vec<egui::Color32> {
 
 #[test]
 fn gpu_worker_renders_effect_frames_and_the_disk_cache_survives_a_reload() {
+    let _device = crate::gpu_test::lock();
     let (Some(page_gpu), Some(worker_gpu)) = (Gpu::headless(), Gpu::headless_deferred()) else {
         eprintln!("no GPU adapter: skipped");
         return;

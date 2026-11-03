@@ -60,15 +60,24 @@ struct KeyOpened {
     pointer: Option<Pos2>,
 }
 
+/// The temp-data id of the [`FirstEntry`] depth to highlight after a keyboard-opened menu is
+/// first drawn.
 fn pending_id() -> Id {
     Id::unique("menu-keys-first")
 }
+
+/// The temp-data id of the [`KeyOpened`] record: submenus opened from the keyboard and the
+/// pointer position they were opened at.
 fn opened_id() -> Id {
     Id::unique("menu-keys-opened")
 }
+
+/// The temp-data id of the flag saying the menu bar currently holds the keyboard.
 fn active_id() -> Id {
     Id::unique("menu-keys-active")
 }
+
+/// The temp-data id of the `(armed, held)` Alt-key state used to detect an Alt tap.
 fn alt_id() -> Id {
     Id::unique("menu-keys-alt")
 }

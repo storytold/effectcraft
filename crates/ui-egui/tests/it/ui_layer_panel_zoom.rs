@@ -107,8 +107,8 @@ fn wheel_zooms_around_the_pointer_and_hand_tool_pans() {
     let at = canvas.min + canvas.size() * 0.25;
     h.input_mut().events.push(Event::PointerMoved(at));
     h.input_mut().events.push(Event::MouseWheel {
-        unit: egui::MouseWheelUnit::Point,
-        delta: vec2(0.0, 120.0),
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, 3.0),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
         source: egui::MouseWheelSource::Wheel,
@@ -175,4 +175,34 @@ fn roto_brush_in_the_composition_panel_says_where_it_works() {
     h.run_steps(3);
     assert_eq!(h.state().ui.layer_panel, Some(box_id(&h)));
     assert_eq!(h.state().ui.focused, PanelKind::Layer);
+}
+
+/// A two-finger trackpad scroll pans the layer with any tool and a pinch zooms around the pointer.
+#[test]
+fn trackpad_scroll_pans_and_pinch_zooms_around_the_pointer() {
+    let mut h = harness();
+    let canvas = rect(&h, "layerPanel.canvas");
+    let at = canvas.min + canvas.size() * 0.25;
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(60.0, -30.0),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+    });
+    h.run_steps(30);
+    let panned = rect(&h, "layerPanel.canvas");
+    let moved = panned.min - canvas.min;
+    assert!((moved.x - 60.0).abs() < 1.5 && (moved.y + 30.0).abs() < 1.5, "the scroll pans: {moved:?}");
+    assert!((panned.width() - canvas.width()).abs() < 0.5, "a scroll doesn't zoom: {} → {}", canvas.width(), panned.width());
+    // Pinch: zooms, keeping the point under the pointer.
+    let at = panned.min + panned.size() * 0.25;
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::Zoom(1.5));
+    h.run_steps(3);
+    let zoomed = rect(&h, "layerPanel.canvas");
+    assert!((zoomed.width() / panned.width() - 1.5).abs() < 0.01, "the pinch zooms: {} → {}", panned.width(), zoomed.width());
+    let still = zoomed.min + zoomed.size() * 0.25;
+    assert!(still.distance(at) < 2.0, "the point under the pointer stays put: {at:?} vs {still:?}");
 }

@@ -247,7 +247,9 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
                     let (s, c) = (t * amount).to_radians().sin_cos();
                     (center.0 + vx * c - vy * s, center.1 + vx * s + vy * c)
                 };
-                let p = img.sample_bilinear(sx, sy);
+                // Samples outside the image repeat its edge: After Effects' Radial Blur keeps a
+                // layer's edges (cases 713, 829) instead of fading them toward transparency.
+                let p = img.sample_bilinear(sx.clamp(0.5, (img.width as f64 - 0.5).max(0.5)), sy.clamp(0.5, (img.height as f64 - 0.5).max(0.5)));
                 for ch in 0..4 {
                     acc[ch] += p[ch];
                 }

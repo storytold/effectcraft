@@ -404,8 +404,14 @@ fn dispatch_inline(session: &mut Session, host: u32, name: &str, ev: &ScriptUiEv
 
 // ---------------------------------------------------------------- scheduled tasks
 
+/// Whether `host`'s tasks stop now that the project it ran with was closed: it has no window
+/// open and is not a Startup script's.
+fn ends_with_project(session: &Session, host: u32) -> bool {
+    !session.script_ui.windows.iter().any(|w| w.host == host) && !session.script_ui.startup_hosts.contains(&host)
+}
+
 /// Run the due tasks of the script-host threads; hosts without windows whose project was closed
-/// end.
+/// end, except Startup scripts' hosts.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut crate::tasks::Report) {
     let epoch = session.script_ui.project_epoch;
@@ -413,8 +419,7 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
     if let Ok(mut h) = hosts().lock() {
         for host in session.script_ui.task_hosts.clone() {
             let Some(end) = h.get(&host) else { continue };
-            let windowless = !session.script_ui.windows.iter().any(|w| w.host == host);
-            if windowless && end.epoch != epoch {
+            if end.epoch != epoch && ends_with_project(session, host) {
                 // Dropping its end lets the host thread finish.
                 stale.extend(h.remove(&host));
             } else if end.next_due.is_some_and(|d| d <= now) {
@@ -441,7 +446,7 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
 }
 
 /// Run the due tasks of the inline hosts on this thread (the Script Console, web runs); those
-/// without windows whose project was closed stop.
+/// without windows whose project was closed stop, except Startup scripts' hosts.
 pub(crate) fn tick_inline(session: &mut Session, now: Instant, report: &mut crate::tasks::Report) {
     for (host, name, epoch) in crate::tasks::hosts() {
         if !session.script_ui.task_hosts.contains(&host) {
@@ -449,7 +454,7 @@ pub(crate) fn tick_inline(session: &mut Session, now: Instant, report: &mut crat
         }
         let windowless = !session.script_ui.windows.iter().any(|w| w.host == host);
         let alive = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
-        if !alive || (windowless && epoch != session.script_ui.project_epoch) {
+        if !alive || (epoch != session.script_ui.project_epoch && ends_with_project(session, host)) {
             crate::tasks::drop_host(host);
             if host != CONSOLE_HOST && windowless {
                 drop_inline(host);

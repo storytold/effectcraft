@@ -23,6 +23,8 @@ struct Cache {
     current: usize,
 }
 
+/// The `egui::Id` under which the error bar's cache for composition `cid` is kept: this pass's
+/// failing expressions and which one is shown.
 fn cache_id(cid: ItemId) -> egui::Id {
     egui::Id::unique(("expr-error-bar", cid.0))
 }
@@ -46,6 +48,11 @@ pub fn height(app: &mut EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> f32
     if errors(app, ctx, cid).errors.is_empty() { 0.0 } else { HEIGHT }
 }
 
+/// Draws the expression error strip for composition `cid` in `rect`: a warning, the shown error's
+/// description and ◀ n/m ▶ buttons to step through the failing expressions. Clicking the message
+/// selects that layer and property, reveals it in the Timeline and opens its expression. Does
+/// nothing when every expression evaluates. Stepping and clicking only change UI state (the
+/// cached index, selection and Timeline state), never the document.
 pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
