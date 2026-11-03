@@ -293,6 +293,11 @@ impl Psd {
         if comp == 0 && size.checked_mul(want).is_none_or(|need| need > r.remaining()) {
             return Err(Error::Truncated);
         }
+        if let PlaneStream::Zip(v) = &stream
+            && size.checked_mul(want).is_none_or(|need| v.len() < need)
+        {
+            return Err(Error::Truncated);
+        }
         // Opaque black until a channel says otherwise.
         let mut data = budget.filled(n, [0.0f32, 0.0, 0.0, 1.0])?;
         let mut black = if self.mode == ColorMode::Cmyk && want > 3 { Some(budget.filled(n, 0.0f32)?) } else { None };
@@ -355,6 +360,15 @@ impl Psd {
             let cc = self.mode.color_channels();
             for c in l.channels.iter().filter(|c| c.id == -1 || (c.id >= 0 && (c.id as usize) < cc)) {
                 self.check_channel(c.offset, c.len, sw, sh)?;
+            }
+        }
+        // The layer mask's channel too: it is decoded after the result is allocated.
+        if let Some(m) = l.mask.filter(|m| !m.disabled)
+            && let Some(c) = l.channels.iter().find(|c| c.id == -2)
+        {
+            let (mw, mh) = (m.rect.width() as usize, m.rect.height() as usize);
+            if mw > 0 && mh > 0 {
+                self.check_channel(c.offset, c.len, mw, mh)?;
             }
         }
         let mut out = budget.filled(n, [0.0f32; 4])?;
