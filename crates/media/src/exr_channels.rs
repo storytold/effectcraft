@@ -653,7 +653,7 @@ impl ChannelCache {
                 decoded_here = true;
                 self.decodes.fetch_add(1, Ordering::Relaxed);
                 #[cfg(test)]
-                count_decode();
+                count_decode(true);
                 let _abandon = Abandon { cache: self, slot: &slot };
                 let bytes = read()?;
                 // The planes it will allocate count against the budget while it decodes.
@@ -742,21 +742,27 @@ pub(crate) fn cached(path: &str, read: impl FnOnce() -> Option<Arc<[u8]>>) -> Op
 
 #[cfg(test)]
 thread_local! {
-    /// Decodes of a still's pixels on this thread: the channel cache's and the `image` crate's
-    /// ([`count_decode`]).
-    static DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Decodes of a still's pixels on this thread ([`count_decode`]): the `image` crate's, then
+    /// the channel cache's.
+    static DECODES: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
 }
 
-/// Count a decode of a file's pixels on this thread (tests).
+/// Count a decode of a file's pixels on this thread (tests): by the channel cache (`channels`)
+/// or by the `image` crate.
 #[cfg(test)]
-pub(crate) fn count_decode() {
-    DECODES.with(|d| d.set(d.get() + 1));
+pub(crate) fn count_decode(channels: bool) {
+    DECODES.with(|d| {
+        let mut n = d.get();
+        n[usize::from(channels)] += 1;
+        d.set(n);
+    });
 }
 
-/// The decodes [`count_decode`] counted on this thread since the last call.
+/// The decodes [`count_decode`] counted on this thread since the last call: by the `image` crate
+/// and by the channel cache.
 #[cfg(test)]
-pub(crate) fn take_decodes() -> u64 {
-    DECODES.with(|d| d.replace(0))
+pub(crate) fn take_decodes() -> [u64; 2] {
+    DECODES.with(|d| d.replace([0; 2]))
 }
 
 #[cfg(test)]
@@ -1088,11 +1094,11 @@ mod tests {
         pool.frame_at(&f[given], t).unwrap();
         let aux = pool.aux(effectcraft_project::ItemId(1), &f[given], t).unwrap();
         assert_eq!(aux.get("GlossDir.R").and_then(|p| p.first()).copied(), Some(0.25));
-        assert_eq!(take_decodes(), 1, "the picture and the channels share one decode");
+        assert_eq!(take_decodes(), [0, 1], "the picture and the channels share one decode");
         // Learned only at the first `aux()`: the picture was decoded on its own before.
         pool.frame_at(&f[learned], t).unwrap();
         pool.aux(effectcraft_project::ItemId(2), &f[learned], t).unwrap();
-        assert_eq!(take_decodes(), 2);
+        assert_eq!(take_decodes(), [1, 1]);
     }
 
     /// #474: once the project no longer names footage (its effect removed), later frames decode
@@ -1109,21 +1115,22 @@ mod tests {
         f.kind = effectcraft_project::FootageKind::Sequence;
         f.sequence = paths.clone();
         let at = |i: i64| f.frame_rate.tick_of(i);
-        let in_cache = |p: &str| cache().cached().iter().any(|c| c == p);
+        // (counted on this thread, so other tests sharing the channel cache don't change them)
+        let frame = |i: i64| {
+            take_decodes();
+            pool.frame_at(&f, at(i)).unwrap();
+            take_decodes()
+        };
         pool.set_aux_footage(std::slice::from_ref(&f.path));
-        pool.frame_at(&f, at(0)).unwrap();
-        assert!(in_cache(&paths[0]), "given: the picture comes from the channel decode");
+        assert_eq!(frame(0), [0, 1], "given: the picture comes from the channel decode");
         pool.set_aux_footage(&[]);
         assert!(!cache().lock().held.iter().any(|(p, _)| *p == paths[0]), "no longer kept once no effect reads it");
-        pool.frame_at(&f, at(1)).unwrap();
-        assert!(!in_cache(&paths[1]), "no longer given: the picture alone");
+        assert_eq!(frame(1), [1, 0], "no longer given: the picture alone");
         // Learned by `aux()`, then a new set without it: picture only again.
         pool.aux(effectcraft_project::ItemId(1), &f, at(1)).unwrap();
-        pool.frame_at(&f, at(2)).unwrap();
-        assert!(in_cache(&paths[2]), "learned");
+        assert_eq!(frame(2), [0, 1], "learned");
         pool.set_aux_footage(&[]);
-        pool.frame_at(&f, at(3)).unwrap();
-        assert!(!in_cache(&paths[3]), "a new set drops what was learned");
+        assert_eq!(frame(3), [1, 0], "a new set drops what was learned");
     }
 
     /// #474: the picture made of the cached planes of a file with exact R, G, B channels is the

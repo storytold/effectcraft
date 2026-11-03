@@ -83,9 +83,9 @@ fn effect_edits_undo_and_redo_update_the_set() {
     let mut s = session(&rec);
     let item = import(&mut s, "/renders/a.exr");
     let l = add_layer(&mut s, &item);
-    assert_eq!(rec.last().unwrap_or_default(), Vec::<String>::new(), "no effect reads it yet");
+    assert_eq!(rec.last(), paths(&[]), "no effect reads it yet");
     s.execute_checked("effect.apply", json!({"effect": "Gaussian Blur", "layers": [l]})).unwrap();
-    assert_eq!(rec.last().unwrap_or_default(), Vec::<String>::new(), "a blur doesn't read channels");
+    assert_eq!(rec.last(), paths(&[]), "a blur doesn't read channels");
     s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
     assert_eq!(rec.last(), paths(&["/renders/a.exr"]));
     assert!(s.undo());
@@ -172,4 +172,29 @@ fn source_and_footage_replacement_follow() {
     assert_eq!(rec.last(), paths(&["/renders/b.exr"]), "the layer's new source");
     s.execute_checked("file.replaceFootage", json!({"item": b, "path": "/renders/c.exr"})).unwrap();
     assert_eq!(rec.last(), paths(&["/renders/c.exr"]), "the item's new file");
+}
+
+/// A watch-folder render opens its project in a session sharing the host's footage source: the
+/// host's set is given back afterwards.
+#[test]
+fn a_watch_folder_render_gives_the_host_set_back() {
+    let dir = std::env::temp_dir().join(format!("ec-aux-footage-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut other = Session::default();
+    other.execute("comp.new", json!({"name": "Idle", "width": 8, "height": 8, "duration": 1})).unwrap();
+    other.execute("file.saveAs", json!({"path": dir.join("idle.ecproj").to_string_lossy()})).unwrap();
+
+    let rec = Arc::new(Recorder::default());
+    let mut s = session(&rec);
+    let item = import(&mut s, "/renders/a.exr");
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    let calls = rec.calls();
+    let r = s.execute("file.watchFolder", json!({"folder": dir.to_string_lossy()})).unwrap();
+    assert_eq!(r["rendered"].as_array().map(Vec::len), Some(1), "{r}");
+    assert!(rec.calls() > calls + 1, "the watched project gave its own set");
+    assert_eq!(rec.last(), paths(&["/renders/a.exr"]), "the host's set is back");
+    s.execute("file.watchFolder", json!({"stop": true})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }

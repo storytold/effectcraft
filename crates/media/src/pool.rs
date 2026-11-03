@@ -885,7 +885,7 @@ impl Inner {
             return Ok(img);
         }
         #[cfg(test)]
-        crate::exr_channels::count_decode();
+        crate::exr_channels::count_decode(false);
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
