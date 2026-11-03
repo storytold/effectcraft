@@ -302,9 +302,10 @@ impl FillBackend for Gpu {
     /// parallel search actually pays. (`membrane_tex` still runs on the device *inside* this
     /// stage, where it is the coarsest level's start and never crosses back to the CPU.)
     fn patch(&self, img: &Image, hole: &[bool], init: Option<&Image>, patch: usize, seed: u32) -> Image {
+        // The error scopes make an allocation or validation failure local to this frame: the
+        // CPU fills it instead, rather than an uncaptured error retiring the shared context.
         if self.ctx.can_wait()
-            && self.ctx.check_health().is_ok()
-            && let Some(out) = patch_image(&self.ctx, img, hole, init, patch, seed)
+            && let Ok(Some(out)) = self.within_memory(|| patch_image(&self.ctx, img, hole, init, patch, seed))
         {
             return out;
         }
@@ -331,9 +332,9 @@ impl FillBackend for Gpu {
     /// take; keeping it here also keeps the completed field the CPU's to within the search's
     /// rounding.
     fn flow(&self, a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flow {
+        // Frame-local error scopes, as for the patch: a failed GPU search falls back to the CPU.
         if self.ctx.can_wait()
-            && self.ctx.check_health().is_ok()
-            && let Some(f) = flow_image(&self.ctx, a, b)
+            && let Ok(Some(f)) = self.within_memory(|| flow_image(&self.ctx, a, b))
         {
             return complete_flow(f, hole_a, hole_b, a.width as usize, a.height as usize);
         }
