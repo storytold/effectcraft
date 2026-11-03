@@ -197,6 +197,14 @@ the Progress panel, `jobs.list`); headless sessions run `footage.check` when the
 
 ### Pitfalls
 
+Headless sessions keep their deterministic defaults unless `--memory-prefs` explicitly opts
+into the `memory` section of `prefs.json` in the config directory (`EFFECTCRAFT_CONFIG_DIR`
+can select it). The flag applies layer/media cache budgets, not a process RAM limit; a
+headless session has no viewer cache. It does not load disk-cache, recovery or scripting
+preferences and cannot be combined with `--bridge` or synthetic `bench --ops`/`--roto` runs.
+Missing, malformed or oversized preferences fail explicitly. `info --json` includes
+`system.cacheBytes`: effective layer/media budgets and the separate `previewLimit` setting.
+
 Things that tripped up a long agent-driven session (a multi-scene 3D piece built entirely over MCP).
 
 - **Layer time vs comp time.** `add_keyframe` and `set_property` with `time` take layer time;

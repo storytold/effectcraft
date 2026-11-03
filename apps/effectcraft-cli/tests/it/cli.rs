@@ -53,6 +53,42 @@ fn info_and_commands() {
     assert!(ids.iter().all(|i| i.contains("layer.new") || !i.is_empty()));
 }
 
+#[test]
+fn headless_memory_preferences_are_opt_in_and_report_effective_budgets() {
+    let dir = tmp("memory-prefs-applied");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("prefs.json"), r#"{"memory":{"layerCacheMb":80,"mediaCacheMb":96,"previewCacheMb":128},"disk":{"diskCacheEnabled":true}}"#).unwrap();
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(["info", "--empty", "--memory-prefs", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["system"]["cacheBytes"]["layer"], 80u64 << 20);
+    assert_eq!(report["system"]["cacheBytes"]["footage"], 96u64 << 20);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("effective cache budgets"));
+
+    std::fs::write(dir.join("prefs.json"), "not json").unwrap();
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(["info", "--empty", "--json"]).output().unwrap();
+    assert!(out.status.success(), "preferences must stay opt-in");
+}
+
+#[test]
+fn headless_memory_preferences_fail_explicitly_and_reject_bridge_mode() {
+    let dir = tmp("memory-prefs-errors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = ["info", "--empty", "--memory-prefs", "--json"];
+    let missing = bin().env("EFFECTCRAFT_CONFIG_DIR", dir.join("missing")).args(args).output().unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--memory-prefs"));
+    for text in ["not json".to_string(), "{}".to_string(), r#"{"memory":{"layerCacheMb":"invalid"}}"#.to_string(), "x".repeat((1 << 20) + 1)] {
+        std::fs::write(dir.join("prefs.json"), text).unwrap();
+        let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(args).output().unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--memory-prefs"));
+    }
+    let out = bin().args(["info", "--memory-prefs", "--bridge", "1", "--json"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("headless sessions"));
+}
+
 /// The agent-interface audit (CLI side): `exec --list` lists every registered engine command
 /// with its label, params doc and (with `--schemas`) params JSON Schema, and `exec` routes every
 /// id to its command (an unknown parameter is rejected by that command).
