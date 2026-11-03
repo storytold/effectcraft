@@ -290,6 +290,8 @@ pub fn layout_doc_with(doc: &TextDoc, clip_to_box: bool) -> TextLayout {
         (true, Some(_)) => Some((kurbo::Vec2::new(-1.0, 0.0), -doc.box_pos[0])),
         (_, None) => None,
     };
+    // Horizontal paragraph text is also cut at the box's right edge (a glyph wider than the box).
+    let width_edge = doc.box_size.filter(|_| clip_to_box && !doc.vertical).map(|b| doc.box_pos[0] + b[0]);
     for (li, line) in lay.lines.iter().enumerate() {
         let overflows = depth.is_some_and(|d| line.baseline + line.descent > d + 0.5);
         if li > 0 && overflows {
@@ -355,7 +357,10 @@ pub fn layout_doc_with(doc: &TextDoc, clip_to_box: bool) -> TextLayout {
                     outline_xf = ROT90 * outline_xf;
                 }
             }
-            if let Some((n, c)) = clip {
+            if let Some(x) = width_edge {
+                path = clip_half_plane(&path, kurbo::Vec2::new(1.0, 0.0), x - origin.x);
+            }
+            if let Some((n, c)) = clip.filter(|_| !path.elements().is_empty()) {
                 path = clip_half_plane(&path, n, c - n.dot(origin.to_vec2()));
             }
             if let Some(r) = (!path.elements().is_empty()).then(|| kurbo::Shape::bounding_box(&path)) {
@@ -767,6 +772,18 @@ mod tests {
         }
     }
 
+    /// Review of #2840: a glyph wider than the box is cut at its right edge, except while editing.
+    #[test]
+    fn glyph_wider_than_the_box_is_cut_at_its_right_edge() {
+        let doc = TextDoc { text: "Hgj".into(), size: 40.0, box_size: Some([20.0, 400.0]), box_pos: [10.0, 0.0], ..Default::default() };
+        let right = |l: &TextLayout| {
+            l.glyphs.iter().filter(|g| !g.path.elements().is_empty()).map(|g| (kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).x1).fold(f64::MIN, f64::max)
+        };
+        let clipped = layout_doc(&doc);
+        assert!(right(&clipped) > 29.0 && right(&clipped) <= 30.0 + 1e-6, "{}", right(&clipped));
+        assert!(right(&layout_doc_with(&doc, false)) > 30.0 + 1e-6, "editing keeps the glyphs whole");
+    }
+
     /// Review of #2840: a wide word never splits a combining sequence across lines.
     #[test]
     fn overlong_word_keeps_combining_marks_with_base() {
@@ -777,8 +794,10 @@ mod tests {
             ..Default::default()
         };
         let l = layout_doc(&doc);
-        assert!(l.glyphs.iter().all(|g| g.line_index == l.glyphs.iter().find(|h| h.char_index == g.char_index).map_or(0, |h| h.line_index)));
         assert!(l.line_boxes.len() > 1);
+        // No line starts at a combining mark, and every base character still has a glyph.
+        assert!(l.layout.lines.iter().all(|line| doc.text[line.range.start..].chars().next() != Some('\u{301}')), "a line begins at a mark");
+        assert!((0..doc.char_len()).step_by(2).all(|ci| l.glyphs.iter().any(|g| g.char_index == ci)), "a base character lost its glyph");
     }
 
     #[test]
