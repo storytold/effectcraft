@@ -361,7 +361,7 @@ fn exr_compressions_and_bit_depths_round_trip() {
     let reference = render(ExrCompression::None, ExrBitDepth::Float);
     let (want, _) = exr_samples(&reference);
     let want_pooled = pooled(&reference);
-    assert!(want.iter().any(|v| *v > 0.5) && want.iter().any(|v| *v == 0.0), "the frame has red, background and transparent corners");
+    assert!(want.iter().any(|v| *v > 0.5) && want.contains(&0.0), "the frame has red, background and transparent corners");
     for d in ExrBitDepth::ALL {
         let ty = if d == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
         for c in ExrCompression::ALL {
