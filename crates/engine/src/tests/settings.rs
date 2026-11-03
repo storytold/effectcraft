@@ -651,6 +651,18 @@ fn context_shortcuts_on_the_same_keys_conflict() {
     assert!(t.conflicts(b, "F9").iter().any(|c| c.key == "test.paint" && !c.overrides));
 }
 
+/// A script loads effect plug-ins only with Allow Scripts to Write Files on.
+#[test]
+fn scripts_load_effect_plugins_only_with_file_access() {
+    let mut s = Session::default();
+    let p = json!({"path": "/etc/hostname"});
+    let e = s.execute_for_script("effect.plugins.load", p.clone()).unwrap_err().to_string();
+    assert!(e.contains("Allow Scripts to Write Files"), "{e}");
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let e = s.execute_for_script("effect.plugins.load", p).unwrap_err().to_string();
+    assert!(!e.contains("Allow Scripts to Write Files"), "{e}");
+}
+
 // ---------------------------------------------------------------- auto-save / recovery
 
 /// The names in `d`, sorted.
