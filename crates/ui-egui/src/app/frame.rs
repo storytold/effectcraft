@@ -327,7 +327,9 @@ impl EffectcraftApp {
             ctx.request_repaint();
             return;
         }
+        panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
+        panels::crypto_pick::upkeep(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
@@ -454,10 +456,22 @@ impl EffectcraftApp {
         }
     }
 
+    /// Sets the status line and restarts its 5 s, also when the same text is still showing (a
+    /// message set again would otherwise keep the time it was first shown).
+    pub(crate) fn say(&mut self, ctx: &egui::Context, msg: String) {
+        ctx.data_mut(|d| d.remove::<(f64, String)>(egui::Id::unique("status-since")));
+        self.ui.status = msg;
+    }
+
     /// The status message or the latest toast, bottom left (`lift` points higher while the
     /// Importing card is there).
     fn draw_toast(&mut self, ui: &mut egui::Ui, full: egui::Rect, lift: f32) {
         let now = self.now;
+        // A message cleared before its time (a click on it, Esc, another pick) forgets its time, so
+        // the same message shown again later gets its own 5 s.
+        if self.ui.status.is_empty() {
+            ui.data_mut(|d| d.remove::<(f64, String)>(egui::Id::unique("status-since")));
+        }
         let msg = if !self.ui.status.is_empty() {
             Some(self.ui.status.clone())
         } else {
@@ -485,11 +499,14 @@ impl EffectcraftApp {
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             if !self.ui.status.is_empty() {
-                let since: f64 = ui.data(|d| d.get_temp(egui::Id::unique("status-since")).unwrap_or(now));
-                ui.data_mut(|d| d.insert_temp(egui::Id::unique("status-since"), since));
+                // Each message gets its own 5 s (a new one doesn't inherit the old one's time).
+                let key = egui::Id::unique("status-since");
+                let shown = ui.data(|d| d.get_temp::<(f64, String)>(key)).filter(|(_, m)| *m == self.ui.status);
+                let since = shown.map_or(now, |(t, _)| t);
+                ui.data_mut(|d| d.insert_temp(key, (since, self.ui.status.clone())));
                 if now - since > 5.0 {
                     self.ui.status.clear();
-                    ui.data_mut(|d| d.remove::<f64>(egui::Id::unique("status-since")));
+                    ui.data_mut(|d| d.remove::<(f64, String)>(key));
                 }
             }
         }

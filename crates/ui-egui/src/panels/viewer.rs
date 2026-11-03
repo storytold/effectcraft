@@ -63,6 +63,10 @@ fn map_id() -> egui::Id {
     egui::Id::unique("viewer-map")
 }
 
+/// The egui data key (an `egui::Pos2`) of a right-click on the viewer that an overlay sensed:
+/// the viewer opens its context menu there on the next pass.
+pub(crate) const FORWARDED_SECONDARY: &str = "viewer-forwarded-secondary";
+
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
     let m: ViewerMap = ctx.data(|d| d.get_temp(map_id()))?;
     Some(m.to_screen([p[0] as f64, p[1] as f64]))
@@ -216,11 +220,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let resp = phase_menu(app, ui, &ectx, &mut v);
     phase_hover(app, ui, &ectx, &resp, &mut v);
     phase_press(app, ui, &ectx, &resp, &mut v);
-    phase_dragstart(app, ui, &ectx, &resp, &mut v);
-    phase_drag(app, ui, &ectx, &resp, &mut v);
-    phase_stopped(app, ui, &ectx, &resp, &mut v);
-    phase_clicked(app, &ectx, &resp, &mut v);
-    phase_dblclick(app, &ectx, &resp, &mut v);
+    if !middle_pan(app, ui, &resp, &v) {
+        phase_dragstart(app, ui, &ectx, &resp, &mut v);
+        phase_drag(app, ui, &ectx, &resp, &mut v);
+        phase_stopped(app, ui, &ectx, &resp, &mut v);
+        phase_clicked(app, &ectx, &resp, &mut v);
+        phase_dblclick(app, &ectx, &resp, &mut v);
+    }
     phase_tail(app, ui, &ectx, &mut v);
 }
 
@@ -826,9 +832,9 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     // Interaction.
     let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
-    if resp.secondary_clicked()
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
+    // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
+    let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
+    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked()).or(forwarded) {
         // Picking an already selected layer preserves the group; an unselected hit
         // becomes the target, using the same visible/unlocked hit test as left-click.
         pick(app, ectx, map.to_comp(pos), false);
@@ -840,7 +846,9 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
         app.session.state.selected_layers.iter().filter(|id| comp.layer(**id).is_some_and(|l| !l.switches.locked)).map(|id| id.0).collect();
     let mut context_actions = Vec::new();
     let copy_frame = crate::i18n::label(app, "comp.copyFrame", "Copy Frame to Clipboard");
-    crate::widgets::context_menu(&resp, |ui| {
+    let menu = egui::Popup::context_menu(&resp).style(crate::widgets::menu_style);
+    let open = forwarded.map(|_| egui::containers::SetOpenCommand::Bool(true));
+    if open.is_some() { menu.open_memory(open) } else { menu }.show(|ui| {
         let hits = ui.data(|d| d.get_temp::<Vec<(u64, String)>>(menu_hits_id)).unwrap_or_default();
         if !hits.is_empty() {
             ui.menu_button(crate::i18n::tr("Select"), |ui| {
@@ -1064,6 +1072,24 @@ fn phase_press(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
     v.text_owns = text_owns;
 }
 
+/// A middle-drag pans with any tool and doesn't enter the gesture phases, so nothing else can
+/// happen under it (#2854). A left-button gesture already running keeps going until it ends.
+fn middle_pan(app: &mut EffectcraftApp, ui: &egui::Ui, resp: &egui::Response, v: &Vw<'_>) -> bool {
+    let (middle, primary) = ui.input(|i| (i.pointer.middle_down(), i.pointer.primary_down() || i.pointer.primary_released()));
+    if !middle || !resp.is_pointer_button_down_on() || (primary && ui.data(|d| d.get_temp::<Gesture>(v.gid)).is_some()) {
+        return false;
+    }
+    // No left button: a stored gesture is one whose release the viewer missed.
+    ui.data_mut(|d| d.remove::<Gesture>(v.gid));
+    // Movement from before the press (in its frame) is not part of the drag.
+    let d = ui.input(|i| if i.pointer.button_pressed(egui::PointerButton::Middle) { egui::Vec2::ZERO } else { i.pointer.delta() });
+    if d != egui::Vec2::ZERO && d.x.is_finite() && d.y.is_finite() {
+        app.ui.viewer.pan = [app.ui.viewer.pan[0] + d.x, app.ui.viewer.pan[1] + d.y];
+    }
+    v.ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    true
+}
+
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1092,7 +1118,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.drag_started()
         && !text_owns
@@ -1100,7 +1128,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
     {
         let cpt = map.to_comp(pos);
         let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
-        let tool = if space_pan || resp.dragged_by(egui::PointerButton::Middle) { Tool::Hand } else { app.ui.tool };
+        let tool = if space_pan { Tool::Hand } else { app.ui.tool };
         let g = match tool {
             Tool::Hand => Some(Gesture::Pan { start_pan: app.ui.viewer.pan }),
             // Region of Interest armed: the drag draws it.
@@ -1126,22 +1154,16 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
             }
             Tool::MaskFeather => ov::begin_feather(app, ectx, &paths, &map, press).map(Gesture::Overlay),
             Tool::Rotate => pick(app, ectx, cpt, mods.shift).map(|l| {
-                let others = selected_others(app, comp, l).into_iter().filter_map(|o| Some((o.id, ectx.f(o, o.transform()?, "rotation", 0.0)))).collect();
                 let layer = comp.layer(l).cloned();
-                let center = layer
-                    .as_ref()
-                    .and_then(|l| l.transform().map(|tr| ectx.v3(l, tr, "position", [0.0; 3])))
-                    .map(|p| map.to_screen([p[0], p[1]]))
-                    .unwrap_or(pos);
+                let sign = layer.as_ref().map_or(1.0, |l| rotation_sign(ectx, l));
+                let others = selected_others(app, comp, l)
+                    .into_iter()
+                    .filter_map(|o| Some((o.id, ectx.f(o, o.transform()?, "rotation", 0.0), rotation_sign(ectx, o) * sign)))
+                    .collect();
+                let pivot = layer.as_ref().and_then(|l| anchor_in_comp(ectx, l)).unwrap_or(cpt);
                 let rot = layer.as_ref().and_then(|l| l.transform().map(|tr| ectx.f(l, tr, "rotation", 0.0))).unwrap_or(0.0);
-                Gesture::Rotate {
-                    layer: l,
-                    center,
-                    last_angle: ((pos.y - center.y) as f64).atan2((pos.x - center.x) as f64).to_degrees(),
-                    turned: 0.0,
-                    start_rot: rot,
-                    others,
-                }
+                let last_angle = (cpt[1] - pivot[1]).atan2(cpt[0] - pivot[0]).to_degrees();
+                Gesture::Rotate { layer: l, pivot, sign, last_angle, turned: 0.0, start_rot: rot, others }
             }),
             Tool::PanBehind => pick(app, ectx, cpt, false).and_then(|l| {
                 let layer = comp.layer(l)?;
@@ -1166,8 +1188,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
             t if t.is_shape() => Some(Gesture::Create { tool: t, start: map.to_comp(press) }),
             Tool::ObjectMatte => Some(Gesture::ObjectMatteBox { start: press }),
             t if t.puppet_kind().is_some() && super::puppet_tool::hit(&pin_hits, press).is_none() => {
-                // Off the pins: Alt or a press outside the art drags a marquee that selects pins.
-                (mods.alt || puppet_layer(app, cpt).is_none()).then_some(Gesture::PinMarquee { start: press })
+                // Off the pins: Alt or a press outside the art drags a marquee that selects pins. Asked
+                // of where the button went down: the pointer may be over the art by the time this is a drag.
+                (mods.alt || puppet_layer(app, map.to_comp(press)).is_none()).then_some(Gesture::PinMarquee { start: press })
             }
             t if t.puppet_kind().is_some() => super::puppet_tool::hit(&pin_hits, press).and_then(|(h, part)| {
                 use super::puppet_tool::PinPart;
@@ -1399,18 +1422,18 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                     let _ = app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/scale", "value": v, "merge": merge}));
                 }
             }
-            Gesture::Rotate { layer, center, last_angle, turned, start_rot, others } => {
+            Gesture::Rotate { layer, pivot, sign, last_angle, turned, start_rot, others } => {
                 // Count the turn incrementally: the absolute angle wraps at ±180°, so writing it
                 // straight would jump a revolution back each time the pointer went round.
-                let ang = ((pos.y - center.y) as f64).atan2((pos.x - center.x) as f64).to_degrees();
-                let turned = turned + turn_delta(last_angle, ang);
-                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Rotate { layer, center, last_angle: ang, turned, start_rot, others: others.clone() }));
+                let ang = (cpt[1] - pivot[1]).atan2(cpt[0] - pivot[0]).to_degrees();
+                let turned = turned + sign * turn_delta(last_angle, ang);
+                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Rotate { layer, pivot, sign, last_angle: ang, turned, start_rot, others: others.clone() }));
                 // Shift snaps the accumulated value (so 405° snaps to 1x +45°, not to 45°).
                 let r = rotate_value(start_rot, turned, mods.shift);
                 let _ = app.session.execute("prop.set", json!({"layer": layer.0, "path": "transform/rotation", "value": r, "merge": merge}));
-                for (lid, r0) in others {
-                    let _ =
-                        app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/rotation", "value": r0 + (r - start_rot), "merge": merge}));
+                for (lid, r0, other) in others {
+                    let v = r0 + other * (r - start_rot);
+                    let _ = app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/rotation", "value": v, "merge": merge}));
                 }
             }
             Gesture::Anchor { layer, start_anchor, start_pos, start, inv, l2p, own, anchor_only } => {
@@ -1680,7 +1703,9 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.clicked()
         && !text_owns
@@ -1901,12 +1926,12 @@ mod view;
 
 use frame::{empty_state, rect_of, show_frame};
 pub(crate) use frame::{extended_region, minify_factor, snap_to_pixels, styled_line, zoom_sampler, zoom_texture_options};
+use geometry::{
+    anchor_in_comp, cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
+    rotation_sign, selected_others, snap_handle, turn_delta,
+};
 #[cfg(test)]
 use geometry::{box_corners, project_clipped};
-use geometry::{
-    cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value, selected_others,
-    snap_handle, turn_delta,
-};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
 use shapes::{create_shape, draw_shape_ghost, shape_drag};

@@ -281,12 +281,13 @@ fn layer_fill_stroke(app: &EffectcraftApp, layer: u64) -> u32 {
 /// edited range; failures show in `app.ui.status`.
 pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("character-scroll"), rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let x0 = rect.min.x + 10.0;
@@ -602,14 +603,15 @@ pub fn paint_justify_glyph(p: &egui::Painter, r: Rect, j: Justify, c: egui::Colo
 /// target exists; failures show in `app.ui.status`.
 pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("paragraph-scroll"), rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 10.0;
     let w = rect.width() - 20.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("paragraph-scroll"), rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let mut actions: Vec<serde_json::Value> = vec![];

@@ -420,6 +420,42 @@ fn layer_drag_snaps_to_other_layers_edges_ctrl_toggles_and_options_apply() {
     assert!(!snapped(p), "edges not extended: {p:?}");
 }
 
+/// #2855: a dragged layer's edge midpoints snap to another layer's on both axes, side by side and
+/// stacked, with Snap Edges Extended on and off.
+#[test]
+fn layer_drag_snaps_to_other_layers_midpoints() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    // A 100×100 target at x 450–550, y 50–150, centre (500, 100).
+    let target = h.state_mut().session.execute("layer.newSolid", json!({"name": "Target", "color": "#20e040", "width": 100, "height": 100})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    // Grab the 80×80 box (at x 60–140, y 210–290) by the feature at `grab` and take that feature
+    // to `to`: returns where the box's centre lands.
+    let drop = |h: &mut Harness<'_, EffectcraftApp>, grab: [f32; 2], to: [f32; 2]| {
+        let s = &mut h.state_mut().session;
+        s.execute("prop.set", json!({"layer": target, "path": "transform/position", "value": [500, 100, 0]})).unwrap();
+        s.execute("prop.set", json!({"layer": box_id.0, "path": "transform/position", "value": [100, 250, 0]})).unwrap();
+        s.execute("edit.deselectAll", json!({})).unwrap();
+        h.run_steps(2);
+        let (from, to) = (screen(h, grab), screen(h, to));
+        hold_drag(h, from, to, Default::default());
+        let l = h.state().session.active_comp().unwrap().layer(box_id).unwrap().clone();
+        let p = l.props.prop("transform/position").unwrap().value.as_vec3();
+        [p[0], p[1]]
+    };
+    let near = |p: [f64; 2], x: f64, y: f64| (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01;
+    for extended in [true, false] {
+        h.state_mut().session.execute("view.snappingOptions", json!({"edgesExtended": extended})).unwrap();
+        // Side by side: the box's left midpoint onto the target's right midpoint (550, 100).
+        let p = drop(&mut h, [60.5, 250.0], [553.0, 102.0]);
+        assert!(near(p, 590.0, 100.0), "left to right midpoint, extended {extended}: {p:?}");
+        // Stacked: the box's top midpoint onto the target's bottom midpoint (500, 150).
+        let p = drop(&mut h, [100.0, 210.5], [502.0, 153.0]);
+        assert!(near(p, 500.0, 190.0), "top to bottom midpoint, extended {extended}: {p:?}");
+    }
+}
+
 /// With a shape layer selected the Rectangle tool draws a new group into its Contents (After
 /// Effects' behaviour); with nothing selected it draws a new shape layer (#227).
 #[test]
@@ -1657,6 +1693,42 @@ fn puppet_pins_go_on_the_deformed_mesh_and_the_tool_stays_on_the_rigged_layer() 
     assert!(!rigged(&h, plate));
 }
 
+/// #2865: a press where the deformed layer is empty, though on its original bounds, adds nothing:
+/// a click leaves the rig alone and a drag from there is a pin marquee.
+#[test]
+fn puppet_press_where_the_deformed_layer_is_empty_is_a_marquee_not_a_copy() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("edit.clear", json!({"layers": ["Plate"]})).unwrap();
+    s.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
+    let id = s.state.selected_layers[0].0;
+    let a = s.execute("puppet.addPin", json!({"layer": id, "position": [10, 40]})).unwrap()["pin"].as_u64().unwrap();
+    let b = s.execute("puppet.addPin", json!({"layer": id, "position": [70, 40]})).unwrap()["pin"].as_u64().unwrap();
+    // Carry the Box 60 px right: its left part (comp x 280..340) is now empty.
+    s.execute("puppet.movePin", json!({"layer": id, "pin": a, "position": [70, 40]})).unwrap();
+    s.execute("puppet.movePin", json!({"layer": id, "pin": b, "position": [130, 40]})).unwrap();
+    h.state_mut().ui.tool = Tool::Puppet;
+    h.run_steps(3);
+    let rig = |h: &mut Harness<'_, EffectcraftApp>| {
+        let info = h.state_mut().session.execute("puppet.info", json!({"layer": id})).unwrap();
+        let meshes = info["meshes"].as_array().unwrap().clone();
+        (meshes.len(), meshes.iter().map(|m| m["pins"].as_array().unwrap().len()).sum::<usize>())
+    };
+    let at = screen(&h, [285.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(rig(&mut h), (1, 2), "the click made nothing");
+    let comp = rect(&h, "viewer.comp");
+    drag(&mut h, at, comp.max - vec2(4.0, 4.0));
+    assert_eq!(rig(&mut h), (1, 2), "nor did the drag");
+    let mut sel: Vec<u64> = h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect();
+    sel.sort();
+    assert_eq!(sel, [a, b], "the drag's marquee selected the pins");
+    // On the deformed shape a click still pins it.
+    let at = screen(&h, [380.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(rig(&mut h), (1, 3));
+}
+
 /// Filled circles painted this frame (flattening nested shape lists).
 fn circles(h: &Harness<'_, EffectcraftApp>) -> Vec<egui::epaint::CircleShape> {
     fn walk(s: &egui::Shape, out: &mut Vec<egui::epaint::CircleShape>) {
@@ -1769,6 +1841,66 @@ fn middle_and_hand_drags_pan_the_viewer_and_the_pan_stays_after_release() {
     drag_with(&mut h, egui::PointerButton::Primary, c, c - vec2(50.0, 30.0));
     let end = h.state().ui.viewer.pan;
     assert!((end[0] - after[0] + 50.0).abs() < 1.0 && (end[1] - after[1] + 30.0).abs() < 1.0, "{after:?} → {end:?}");
+}
+
+/// #2854: a middle-drag over a layer pans the view and leaves the layer alone, selected or not,
+/// with any tool, and adds no undo step.
+#[test]
+fn middle_drag_over_a_layer_pans_and_leaves_the_layer_where_it_is() {
+    let mut h = harness();
+    let id = layer_named(&h, "Box");
+    let c = rect(&h, "viewer.comp").center();
+    for (select, tool) in [(false, Tool::Selection), (true, Tool::Selection), (true, Tool::Rotate), (true, Tool::Type)] {
+        let selection = if select { json!({"layers": [id.0]}) } else { json!({"layers": []}) };
+        h.state_mut().session.execute("layer.select", selection).unwrap();
+        h.state_mut().ui.tool = tool;
+        h.state_mut().ui.viewer.pan = [0.0, 0.0];
+        h.run_steps(2);
+        let (p0, steps) = (position_of(&h, id), h.state().session.history.undo.len());
+        drag_with(&mut h, egui::PointerButton::Middle, c, c + vec2(120.0, 60.0));
+        let pan = h.state().ui.viewer.pan;
+        assert!((pan[0] - 120.0).abs() < 1.0 && (pan[1] - 60.0).abs() < 1.0, "{select} {tool:?}: {pan:?}");
+        assert_eq!(position_of(&h, id), p0, "{select} {tool:?}: the layer stays");
+        assert_eq!(h.state().session.history.undo.len(), steps, "{select} {tool:?}: no undo step");
+    }
+}
+
+/// #2854: a left drag whose release the viewer never saw (the panel wasn't drawn on that frame)
+/// leaves its move gesture stored. A middle press must not run it.
+#[test]
+fn middle_drag_does_not_run_a_gesture_left_over_from_a_missed_release() {
+    let mut h = harness();
+    let id = layer_named(&h, "Box");
+    h.state_mut().session.execute("layer.select", json!({"layers": [id.0]})).unwrap();
+    h.run_steps(2);
+    let c = rect(&h, "viewer.comp").center();
+    let p = egui::PointerButton::Primary;
+    h.input_mut().events.push(Event::PointerMoved(c));
+    h.input_mut().events.push(Event::PointerButton { pos: c, button: p, pressed: true, modifiers: Default::default() });
+    h.step();
+    for i in 1..=4 {
+        h.input_mut().events.push(Event::PointerMoved(c + vec2(10.0 * i as f32, 0.0)));
+        h.step();
+    }
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.openLayer", json!({"layer": id.0})).unwrap();
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: c + vec2(40.0, 0.0), button: p, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::Composition);
+    h.run_steps(3);
+    let c = rect(&h, "viewer.comp").center();
+    let p0 = position_of(&h, id);
+    drag_with(&mut h, egui::PointerButton::Middle, c, c + vec2(120.0, 60.0));
+    assert_eq!(position_of(&h, id), p0, "the stored move didn't run");
+}
+
+fn layer_named(h: &Harness<'_, EffectcraftApp>, name: &str) -> LayerId {
+    h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap().id
+}
+
+fn position_of(h: &Harness<'_, EffectcraftApp>, id: LayerId) -> [f64; 3] {
+    h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
 }
 
 /// A Spacebar press or release (`repeat`: the keyboard's auto-repeat while it is held).
@@ -2888,6 +3020,133 @@ fn rotate_tool_counts_revolutions_both_ways() {
     assert!((ccw + 180.0).abs() < 1.0, "back two turns: {ccw}");
     assert!(seen.windows(2).all(|w| (w[1] - w[0]).abs() <= 20.0), "no jump: {seen:?}");
     assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one drag, one undo step");
+}
+
+/// A harness whose Box is a child of Plate (anchor 320,180) with `plate` set on Plate first, at
+/// parent-space position (200, 120). Returns the two layers' ids.
+fn rotate_child_harness(plate: serde_json::Value) -> (Harness<'static, EffectcraftApp>, u64, u64) {
+    let mut h = harness();
+    let (parent, child) = (layer_id(&h, "Plate"), layer_id(&h, "Box"));
+    let s = &mut h.state_mut().session;
+    for (path, value) in plate.as_object().unwrap() {
+        s.execute("prop.set", json!({"layer": parent, "path": format!("transform/{path}"), "value": value})).unwrap();
+    }
+    s.execute("layer.setParent", json!({"layers": [child], "parent": parent, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/position", "value": [200.0, 120.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    (h, parent, child)
+}
+
+/// Goes round comp point `pivot` with the Rotation tool, 10° clockwise a frame for 400°, starting
+/// inside the 80 px box to its right. The rotations of `layers` on each frame, from the pointer's
+/// first move on.
+fn rotate_round(h: &mut Harness<'static, EffectcraftApp>, pivot: [f32; 2], layers: &[u64]) -> Vec<Vec<f64>> {
+    let center = screen(h, pivot);
+    let r = (screen(h, [pivot[0] + 30.0, pivot[1]]) - center).x;
+    let at = |deg: f64| center + vec2((deg.to_radians().cos() as f32) * r, (deg.to_radians().sin() as f32) * r);
+    let press = center + vec2(r * 0.3, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(press));
+    h.input_mut().events.push(Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let mut seen = vec![];
+    for i in 0..=40 {
+        h.input_mut().events.push(Event::PointerMoved(at(i as f64 * 10.0)));
+        h.step();
+        let comp = h.state().session.active_comp().unwrap();
+        seen.push(layers.iter().map(|l| comp.layer(LayerId(*l)).unwrap().props.prop("transform/rotation").unwrap().value.as_f64()).collect());
+    }
+    let end = at(400.0);
+    h.input_mut().events.push(Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    seen
+}
+
+/// Layer `i` of `rotate_round` turned by `step`° on every frame once the drag was under way.
+fn assert_turns_by(seen: &[Vec<f64>], i: usize, step: f64) {
+    let v: Vec<f64> = seen.iter().map(|f| f[i]).collect();
+    let live: Vec<f64> = v.iter().copied().skip_while(|x| *x == v[0]).collect();
+    assert!(live.len() > 30, "layer {i} hardly turned: {v:?}");
+    assert!(live.windows(2).all(|w| (w[1] - w[0] - step).abs() < 0.5), "layer {i} should turn {step}° a frame: {v:?}");
+}
+
+/// #2870: a child of a moved parent turns about its anchor where it shows, not about its raw
+/// Position read as comp pixels.
+#[test]
+fn rotate_tool_turns_a_child_of_a_moved_parent_smoothly() {
+    let (mut h, _, child) = rotate_child_harness(json!({"position": [420.0, 240.0]}));
+    assert_turns_by(&rotate_round(&mut h, [300.0, 180.0], &[child]), 0, 10.0);
+}
+
+/// #2870: under a mirrored parent the value runs opposite to the pointer, so the layer on screen
+/// still follows it.
+#[test]
+fn rotate_tool_follows_the_pointer_under_a_flipped_parent() {
+    let (mut h, _, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    assert_turns_by(&rotate_round(&mut h, [440.0, 120.0], &[child]), 0, -10.0);
+}
+
+/// #2870: a parent's rotation offsets the angle but not the turn.
+#[test]
+fn rotate_tool_turns_a_child_of_a_rotated_parent_smoothly() {
+    let (mut h, _, child) = rotate_child_harness(json!({"rotation": 90.0}));
+    assert_turns_by(&rotate_round(&mut h, [380.0, 60.0], &[child]), 0, 10.0);
+}
+
+/// #2870: a parent's pixel aspect isn't inherited by its child, so it doesn't move the pivot either.
+#[test]
+fn rotate_tool_ignores_a_parents_pixel_aspect() {
+    let mut h = harness();
+    let child = layer_id(&h, "Box");
+    let s = &mut h.state_mut().session;
+    let parent = s.execute("layer.newSolid", json!({"name": "Wide", "color": "#000000", "width": 100, "height": 100, "pixelAspect": 2.0})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [parent], "switch": "video", "value": false})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [500.0, 300.0]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [child], "parent": parent, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/position", "value": [100.0, 60.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    assert_turns_by(&rotate_round(&mut h, [550.0, 310.0], &[child]), 0, 10.0);
+}
+
+/// #2870: every selected layer turns the same way on screen, whichever way its own parent is
+/// flipped: the value of a layer whose parent is mirrored relative to the grabbed one's runs opposite.
+#[test]
+fn rotate_tool_turns_a_mixed_selection_the_same_way_on_screen() {
+    let (mut h, plate, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    let s = &mut h.state_mut().session;
+    let new = |s: &mut Session, name: &str| {
+        s.execute("layer.newSolid", json!({"name": name, "color": "#00ff00", "width": 20, "height": 20})).unwrap()["layer"].as_u64().unwrap()
+    };
+    let (free, sibling) = (new(s, "Free"), new(s, "Sibling"));
+    s.execute("layer.setParent", json!({"layers": [sibling], "parent": plate, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": free, "path": "transform/rotation", "value": 15.0})).unwrap();
+    s.execute("layer.select", json!({"layers": [child, free, sibling]})).unwrap();
+    h.run_steps(2);
+    let seen = rotate_round(&mut h, [440.0, 120.0], &[child, free, sibling]);
+    assert_turns_by(&seen, 0, -10.0);
+    assert_turns_by(&seen, 1, 10.0);
+    assert_turns_by(&seen, 2, -10.0);
+}
+
+/// #2870: a 3D child turns about its anchor as the camera shows it, and with its value running
+/// opposite under a flipped parent.
+#[test]
+fn rotate_tool_turns_a_3d_child_about_its_anchor_through_the_camera() {
+    let (mut h, _, child) = rotate_child_harness(json!({"scale": [-100.0, 100.0]}));
+    let s = &mut h.state_mut().session;
+    s.execute("layer.setSwitch", json!({"layers": [child], "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({"name": "Cam", "type": "oneNode"})).unwrap()["layer"].as_u64().unwrap();
+    let at = s.active_comp().unwrap().layer(LayerId(cam)).unwrap().props.prop("transform/position").unwrap().value.as_vec3();
+    // One comp-plane unit to the right moves everything in the comp plane one pixel to the left.
+    s.execute("prop.set", json!({"layer": cam, "path": "transform/position", "value": [at[0] + 100.0, at[1], at[2]]})).unwrap();
+    s.execute("layer.select", json!({"layers": [child]})).unwrap();
+    h.run_steps(2);
+    assert_turns_by(&rotate_round(&mut h, [340.0, 120.0], &[child]), 0, -10.0);
 }
 
 /// Mask vertices multi-select with the Selection tool: Shift-click adds a vertex to the

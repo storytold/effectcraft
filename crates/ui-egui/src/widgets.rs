@@ -647,25 +647,59 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     s
 }
 
+/// The width a scrolled panel keeps clear on its right for the [`scroll_bar`] (its track, and a
+/// little air before it).
+pub const SCROLL_GUTTER: f32 = 8.0;
+
+/// Whether a [`PanelScroll`]'s rows give up the [`SCROLL_GUTTER`], kept from frame to frame.
+#[derive(Clone, Copy, Default)]
+struct Gutter {
+    on: bool,
+    /// The rows' height at full width, until the first frame in the narrower width has measured
+    /// `shrunk`.
+    wide: Option<f32>,
+    /// How much shorter the rows got in the narrower width. Most rows only get taller, but a graph
+    /// sized by the width gets shorter: without this, rows that overflow at full width and fit
+    /// narrowed would drop the gutter and take it back every frame.
+    shrunk: f32,
+}
+
 /// Vertical scrolling for a panel that lays out its own rows: [`PanelScroll::begin`] gives the
-/// offset to draw them at (moved by the mouse wheel over `area`), [`PanelScroll::end`] takes the
-/// rows' height and draws a [`scroll_bar`] on the right edge while they overflow, so every
-/// panel can be scrolled without a wheel or touchpad (#271).
+/// offset to draw them at (moved by the mouse wheel over `area`) and the [`PanelScroll::content`]
+/// to lay them out in, which clips `ui` until [`PanelScroll::end`]; that takes the rows' height
+/// and draws a [`scroll_bar`] on the right edge while they overflow, so every panel can be
+/// scrolled without a wheel or touchpad (#271).
 pub struct PanelScroll {
     id: egui::Id,
     area: Rect,
+    /// `ui`'s clip before [`PanelScroll::begin`].
+    clip: Rect,
+    gutter: Gutter,
     /// How far the rows are scrolled up.
     pub offset: f32,
+    /// Where the rows go: the area, less the [`SCROLL_GUTTER`] while they overflow, so they are
+    /// cut off before the scroll bar rather than under it (#2867). Painters made before `begin`
+    /// keep their own clip: derive them from this.
+    pub content: Rect,
 }
 
 impl PanelScroll {
-    pub fn begin(ui: &Ui, id: egui::Id, area: Rect) -> Self {
+    pub fn begin(ui: &mut Ui, id: egui::Id, area: Rect) -> Self {
         // (Clamped to last frame's overflow: the rows' height is known once they are drawn.)
         let (mut offset, max): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // (Before the clip narrows: the wheel works over the scroll bar too.)
         if ui.rect_contains_pointer(area) {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
         }
-        Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
+        let gutter: Gutter = ui.data(|d| d.get_temp(id.with("gutter"))).unwrap_or_default();
+        let mut content = area;
+        if gutter.on {
+            content.max.x = (area.max.x - SCROLL_GUTTER).max(area.min.x);
+        }
+        // Rows scroll under whatever is around them: clip their widgets (and hit tests) too.
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(content.intersect(clip));
+        Self { id, area, clip, gutter, offset: offset.clamp(0.0, max.max(0.0)), content }
     }
 
     /// Scroll the panel `id` (a [`PanelScroll`] kept under that id) so the content from `top` to
@@ -687,6 +721,7 @@ impl PanelScroll {
     /// The rows were `content` points tall: keep the offset, with the scroll bar registered for
     /// automation as `key`.
     pub fn end(self, ui: &mut Ui, auto: &mut Registry, key: &str, content: f32, t: &Tokens) {
+        ui.set_clip_rect(self.clip);
         let max = (content - self.area.height()).max(0.0);
         let mut offset = self.offset.min(max);
         if max > 0.0 {
@@ -694,6 +729,20 @@ impl PanelScroll {
             offset = scroll_bar(ui, auto, key, track, offset, max, t);
         }
         ui.data_mut(|d| d.insert_temp(self.id, (offset, max)));
+        let mut gutter = self.gutter;
+        if gutter.on {
+            if let Some(wide) = gutter.wide.take() {
+                gutter.shrunk = (wide - content).max(0.0);
+            }
+            gutter.on = content + gutter.shrunk > self.area.height();
+        } else if max > 0.0 {
+            gutter = Gutter { on: true, wide: Some(content), shrunk: 0.0 };
+        }
+        ui.data_mut(|d| d.insert_temp(self.id.with("gutter"), gutter));
+        // The rows were laid out for the other width: lay them out again.
+        if gutter.on != self.gutter.on {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -1059,6 +1108,44 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
+    fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {
+        let t = Tokens::for_kind(Default::default());
+        let mut auto = Registry::default();
+        let mut width = 0.0;
+        let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 100.0));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let outer = ui.clip_rect();
+            let scroll = PanelScroll::begin(ui, egui::Id::unique("rows"), area);
+            width = scroll.content.width();
+            assert_eq!(ui.clip_rect(), scroll.content.intersect(outer), "the widgets are clipped to the rows");
+            scroll.end(ui, &mut auto, "rows.scroll", rows(width), &t);
+            assert_eq!(ui.clip_rect(), outer, "and only until the end");
+        });
+        output.textures_delta.clear();
+        width
+    }
+
+    /// Rows that fit only in the narrower width (a graph sized by the width gets shorter) keep the
+    /// gutter instead of dropping it and taking it back every frame, and give it up once they fit
+    /// at full width too (#2867).
+    #[test]
+    fn panel_scroll_gutter_settles() {
+        let (full, narrow) = (300.0, 300.0 - SCROLL_GUTTER);
+        let ctx = egui::Context::default();
+        let widths = |tall: f32, frames: usize| {
+            let rows = move |w: f32| if w < full { tall - 8.0 } else { tall };
+            (0..frames).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>()
+        };
+        assert_eq!(widths(90.0, 3), [full; 3], "rows that fit: full width");
+        assert_eq!(widths(104.0, 6), [full, narrow, narrow, narrow, narrow, narrow], "fit only narrowed: stays narrowed");
+        assert_eq!(widths(200.0, 3), [narrow; 3], "overflow: narrowed");
+        assert_eq!(widths(90.0, 3), [narrow, full, full], "fit again: full width");
+        // Rows that overflow only when narrowed stay at full width.
+        let rows = |w: f32| if w < full { 104.0 } else { 96.0 };
+        assert_eq!((0..3).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>(), [full; 3]);
+    }
 
     fn checkbox_frame(ctx: &egui::Context, values: &mut [Option<bool>; 5], events: Vec<egui::Event>) {
         let t = Tokens::for_kind(Default::default());

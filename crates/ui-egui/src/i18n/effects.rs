@@ -30,6 +30,13 @@
 //! `Face Measurements` / `Face Track Points` are EffectCraft's own effects, so their wording is
 //! ours.
 //!
+//! The Traditional Chinese names for Taiwan are written from the meaning of the English ones, with
+//! the terms Taiwan's creative software uses (`圖層`, `遮罩`, `筆刷`, `雜訊`, `發光`, `漸層`); they
+//! are not converted from the Simplified table. Brand and coined names (`Cryptomatte`,
+//! `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Lumetri Color`, `Colorama`, `Minimax`,
+//! `Vegas`, `Mocha`) stay in English; the `CC` series keeps its prefix and translates the
+//! descriptive tail, and the `VR` and `OCIO` sets keep their prefix in Chinese word order.
+//!
 //! The French names are written from the meaning of the English ones, with the vocabulary of the
 //! French menus; they come from no other application's interface. Brand and coined names
 //! (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Lumetri Color`, `Colorama`,
@@ -70,9 +77,9 @@ impl Catalog {
 ///
 /// **Adding a language** is two tables and one arm: write its rows (one per effect, ids from
 /// [`SIMPLIFIED_CHINESE`]) and its category labels, name them in the `static` below and in this
-/// `match`. Nothing else changes — not the lookups, not one panel. `zh-hant` and `ja` are listed
-/// with empty tables, so a translator fills rows in without touching this function, and until
-/// then those languages draw the registry's English name.
+/// `match`. Nothing else changes — not the lookups, not one panel. `zh-hant` now covers every
+/// effect and category; `ja` ships a table that a translator fills in without touching this
+/// function. An effect with no row draws the registry's English name until its row arrives.
 fn catalog(language: &str) -> Option<&'static Catalog> {
     static SIMPLIFIED: Catalog = Catalog { rows: SIMPLIFIED_CHINESE, categories: SIMPLIFIED_CHINESE_CATEGORIES, index: OnceLock::new() };
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
@@ -96,6 +103,13 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
 /// The effect's name to draw: the catalog row for `id`, else the registry's `english`.
 pub(crate) fn name(id: &str, english: &str) -> String {
     catalog(current()).and_then(|c| c.row(id)).map_or_else(|| english.to_string(), |(_, translated)| translated.to_string())
+}
+
+/// The characters of `language`'s effect names and category labels, so the interface's font probe
+/// registers a face for each of them as it does for the panel catalog's.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn characters(language: &str) -> impl Iterator<Item = char> {
+    catalog(language).into_iter().flat_map(|c| c.rows.iter().map(|(_, _, t)| *t).chain(c.categories.iter().map(|(_, t)| *t))).flat_map(str::chars)
 }
 
 /// The number of effect-name rows `language` translates, for the row-count report; 0 when it has
@@ -462,10 +476,323 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.vr.sharpen", "VR Sharpen", "VR 锐化"),
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球面到平面"),
 ];
-/// Traditional Chinese (`zh-hant`): no rows yet. A translator fills one row per effect, ids from
-/// [`SIMPLIFIED_CHINESE`]; a row may repeat the English name, which is what the language draws
-/// for that effect.
-const TRADITIONAL_CHINESE: &[Row] = &[];
+/// Traditional Chinese (`zh-hant`): one row per effect in the registry, ids from
+/// [`SIMPLIFIED_CHINESE`]. Written from the meaning of the English names with the vocabulary
+/// Taiwan's creative software uses (圖層, 遮罩, 筆刷, 雜訊, 發光, 漸層), not converted from the
+/// Simplified table. Brand and coined names (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`,
+/// `Unmult`, `Lumetri Color`, `Colorama`, `Minimax`, `Vegas`, `Mocha`) stay in English; the `CC`
+/// series keeps its prefix and translates the descriptive tail, and the `VR` and `OCIO` sets keep
+/// their prefix in Chinese word order.
+const TRADITIONAL_CHINESE: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "3D 通道擷取"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "深度遮罩"),
+    ("ec.3d.depthoffield", "Depth of Field", "景深"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "3D 霧"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "ID 遮罩"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D 圖層實體"),
+    ("ec.audio.backwards", "Backwards", "倒轉"),
+    ("ec.audio.basstreble", "Bass & Treble", "低音與高音"),
+    ("ec.audio.compressor", "Compressor", "壓縮器"),
+    ("ec.audio.delay", "Delay", "延遲"),
+    ("ec.audio.distortion", "Distortion", "失真"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "鑲邊與合聲"),
+    ("ec.audio.gate", "Gate", "雜訊閘"),
+    ("ec.audio.highlowpass", "High-Low Pass", "高通/低通"),
+    ("ec.audio.modulator", "Modulator", "調變器"),
+    ("ec.audio.parametriceq", "Parametric EQ", "參數等化器"),
+    ("ec.audio.reverb", "Reverb", "殘響"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "立體聲混音器"),
+    ("ec.audio.tone", "Tone", "音調"),
+    ("ec.blur.bilateral", "Bilateral Blur", "雙邊模糊"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "相機鏡頭模糊"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "相機晃動去模糊"),
+    ("ec.blur.cccross", "CC Cross Blur", "CC 十字模糊"),
+    ("ec.blur.ccradial", "CC Radial Blur", "CC 徑向模糊"),
+    ("ec.blur.ccradialfast", "CC Radial Fast Blur", "CC 徑向快速模糊"),
+    ("ec.blur.ccvector", "CC Vector Blur", "CC 向量模糊"),
+    ("ec.blur.channel", "Channel Blur", "通道模糊"),
+    ("ec.blur.compound", "Compound Blur", "複合模糊"),
+    ("ec.blur.directional", "Directional Blur", "方向模糊"),
+    ("ec.blur.fastbox", "Fast Box Blur", "快速方框模糊"),
+    ("ec.blur.gaussian", "Gaussian Blur", "高斯模糊"),
+    ("ec.blur.radial", "Radial Blur", "徑向模糊"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "減少交錯閃爍"),
+    ("ec.blur.sharpen", "Sharpen", "銳利化"),
+    ("ec.blur.smart", "Smart Blur", "智慧型模糊"),
+    ("ec.blur.unsharp", "Unsharp Mask", "遮色片銳利化"),
+    ("ec.channel.arithmetic", "Arithmetic", "算術"),
+    ("ec.channel.blend", "Blend", "混合"),
+    ("ec.channel.calculations", "Calculations", "運算"),
+    ("ec.channel.cccomposite", "CC Composite", "CC 合成"),
+    ("ec.channel.combiner", "Channel Combiner", "通道合成器"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "複合算術"),
+    ("ec.channel.invert", "Invert", "反轉"),
+    ("ec.channel.minimax", "Minimax", "Minimax"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "移除色彩殘邊"),
+    ("ec.channel.setchannels", "Set Channels", "設定通道"),
+    ("ec.channel.setmatte", "Set Matte", "設定遮罩"),
+    ("ec.channel.shiftchannels", "Shift Channels", "轉移通道"),
+    ("ec.channel.solidcomposite", "Solid Composite", "實色合成"),
+    ("ec.color.autocolor", "Auto Color", "自動色彩"),
+    ("ec.color.autocontrast", "Auto Contrast", "自動對比"),
+    ("ec.color.autolevels", "Auto Levels", "自動色階"),
+    ("ec.color.blackwhite", "Black & White", "黑白"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "亮度與對比"),
+    ("ec.color.broadcast", "Broadcast Colors", "廣播色彩"),
+    ("ec.color.cccolorneutralizer", "CC Color Neutralizer", "CC 色彩中和器"),
+    ("ec.color.cccoloroffset", "CC Color Offset", "CC 色彩偏移"),
+    ("ec.color.cckernel", "CC Kernel", "CC 核心"),
+    ("ec.color.cctoner", "CC Toner", "CC 色調"),
+    ("ec.color.changecolor", "Change Color", "變更色彩"),
+    ("ec.color.changetocolor", "Change to Color", "變更為色彩"),
+    ("ec.color.channelmixer", "Channel Mixer", "通道混合器"),
+    ("ec.color.colorama", "Colorama", "Colorama"),
+    ("ec.color.colorbalance", "Color Balance", "色彩平衡"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "色彩平衡（HLS）"),
+    ("ec.color.colorlink", "Color Link", "色彩連結"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "色彩穩定器"),
+    ("ec.color.curves", "Curves", "曲線"),
+    ("ec.color.equalize", "Equalize", "等化"),
+    ("ec.color.exposure", "Exposure", "曝光"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "伽瑪/基準/增益"),
+    ("ec.color.huesaturation", "Hue/Saturation", "色相/飽和度"),
+    ("ec.color.leavecolor", "Leave Color", "保留色彩"),
+    ("ec.color.levels", "Levels", "色階"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "色階（個別控制項）"),
+    ("ec.color.lumetri", "Lumetri Color", "Lumetri Color"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL 轉換"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO 色彩空間轉換"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO 顯示轉換"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO 檔案轉換"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO 外觀轉換"),
+    ("ec.color.photofilter", "Photo Filter", "相片濾鏡"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS 任意映射"),
+    ("ec.color.selectivecolor", "Selective Color", "選擇性色彩"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "陰影/亮部"),
+    ("ec.color.tint", "Tint", "染色"),
+    ("ec.color.tritone", "Tritone", "三色調"),
+    ("ec.color.vibrance", "Vibrance", "自然飽和度"),
+    ("ec.color.videolimiter", "Video Limiter", "視訊限制器"),
+    ("ec.control.angle", "Angle Control", "角度控制"),
+    ("ec.control.checkbox", "Checkbox Control", "核取方塊控制"),
+    ("ec.control.color", "Color Control", "色彩控制"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "下拉式選單控制"),
+    ("ec.control.layer", "Layer Control", "圖層控制"),
+    ("ec.control.point", "Point Control", "點控制"),
+    ("ec.control.point3d", "3D Point Control", "3D 點控制"),
+    ("ec.control.slider", "Slider Control", "滑桿控制"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "立體 3D 控制"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "貝茲彎曲"),
+    ("ec.distort.bulge", "Bulge", "凸出"),
+    ("ec.distort.ccbender", "CC Bender", "CC 彎曲"),
+    ("ec.distort.ccbendit", "CC Bend It", "CC 彎折"),
+    ("ec.distort.ccblobbylize", "CC Blobbylize", "CC 團塊化"),
+    ("ec.distort.ccflomotion", "CC Flo Motion", "CC 流動"),
+    ("ec.distort.ccgriddler", "CC Griddler", "CC 格線"),
+    ("ec.distort.cclens", "CC Lens", "CC 鏡頭"),
+    ("ec.distort.ccpageturn", "CC Page Turn", "CC 翻頁"),
+    ("ec.distort.ccpowerpin", "CC Power Pin", "CC 強力釘選"),
+    ("ec.distort.ccripplepulse", "CC Ripple Pulse", "CC 漣漪脈衝"),
+    ("ec.distort.ccslant", "CC Slant", "CC 傾斜"),
+    ("ec.distort.ccsmear", "CC Smear", "CC 塗抹"),
+    ("ec.distort.ccsplit", "CC Split", "CC 分割"),
+    ("ec.distort.ccsplit2", "CC Split 2", "CC 分割 2"),
+    ("ec.distort.cctiler", "CC Tiler", "CC 並排"),
+    ("ec.distort.cornerpin", "Corner Pin", "邊角釘選"),
+    ("ec.distort.displacementmap", "Displacement Map", "位移映射"),
+    ("ec.distort.liquify", "Liquify", "液化"),
+    ("ec.distort.magnify", "Magnify", "放大"),
+    ("ec.distort.meshwarp", "Mesh Warp", "網格彎曲"),
+    ("ec.distort.mirror", "Mirror", "鏡像"),
+    ("ec.distort.offset", "Offset", "位移"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "光學補償"),
+    ("ec.distort.polar", "Polar Coordinates", "極座標"),
+    ("ec.distort.puppet", "Puppet", "木偶"),
+    ("ec.distort.reshape", "Reshape", "重塑"),
+    ("ec.distort.ripple", "Ripple", "漣漪"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "滾動快門修正"),
+    ("ec.distort.smear", "Smear", "塗抹"),
+    ("ec.distort.spherize", "Spherize", "球面化"),
+    ("ec.distort.transform", "Transform", "變形"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "擾流位移"),
+    ("ec.distort.twirl", "Twirl", "扭轉"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "扭轉（舊版）"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "保留細節放大"),
+    ("ec.distort.warp", "Warp", "彎曲"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "彎曲穩定器"),
+    ("ec.distort.wavewarp", "Wave Warp", "波浪彎曲"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "進階閃電"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "音訊頻譜"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "音訊波形"),
+    ("ec.generate.beam", "Beam", "光束"),
+    ("ec.generate.ccgluegun", "CC Glue Gun", "CC 膠水槍"),
+    ("ec.generate.cclightburst", "CC Light Burst 2.5", "CC 光爆 2.5"),
+    ("ec.generate.cclightrays", "CC Light Rays", "CC 光線"),
+    ("ec.generate.cclightsweep", "CC Light Sweep", "CC 光線掃掠"),
+    ("ec.generate.ccthreads", "CC Threads", "CC 絲線"),
+    ("ec.generate.cellpattern", "Cell Pattern", "細胞圖樣"),
+    ("ec.generate.checkerboard", "Checkerboard", "棋盤格"),
+    ("ec.generate.circle", "Circle", "圓形"),
+    ("ec.generate.ellipse", "Ellipse", "橢圓"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "滴管填色"),
+    ("ec.generate.fill", "Fill", "填色"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "四色漸層"),
+    ("ec.generate.fractal", "Fractal", "碎形"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "漸層色帶"),
+    ("ec.generate.grid", "Grid", "格線"),
+    ("ec.generate.lensflare", "Lens Flare", "鏡頭光暈"),
+    ("ec.generate.paintbucket", "Paint Bucket", "油漆桶"),
+    ("ec.generate.radiowaves", "Radio Waves", "無線電波"),
+    ("ec.generate.scribble", "Scribble", "塗鴉"),
+    ("ec.generate.stroke", "Stroke", "筆畫"),
+    ("ec.generate.vegas", "Vegas", "Vegas"),
+    ("ec.generate.writeon", "Write-on", "書寫"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "進階溢色抑制"),
+    ("ec.key.ccsimplewireremoval", "CC Simple Wire Removal", "CC 簡易鋼絲移除"),
+    ("ec.key.colordifference", "Color Difference Key", "色彩差異去背"),
+    ("ec.key.colorkey", "Color Key", "色彩去背"),
+    ("ec.key.colorrange", "Color Range", "色彩範圍"),
+    ("ec.key.differencematte", "Difference Matte", "差異遮罩"),
+    ("ec.key.extract", "Extract", "擷取"),
+    ("ec.key.innerouter", "Inner/Outer Key", "內/外去背"),
+    ("ec.key.keycleaner", "Key Cleaner", "去背淨化"),
+    ("ec.key.linearcolor", "Linear Color Key", "線性色彩去背"),
+    ("ec.key.luma", "Luma Key", "亮度去背"),
+    ("ec.key.screen", "Screen Key", "螢幕去背"),
+    ("ec.key.spill", "Spill Suppressor", "溢色抑制"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Key Light", "Key Light"),
+    ("ec.matte.mattechoker", "Matte Choker", "遮罩收縮器"),
+    ("ec.matte.objectmatte", "Object Matte", "物件遮罩"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "調整硬邊遮罩"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "調整柔邊遮罩"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "Roto 筆刷與邊緣調整"),
+    ("ec.matte.simplechoker", "Simple Choker", "簡單收縮器"),
+    ("ec.noise.addgrain", "Add Grain", "新增顆粒"),
+    ("ec.noise.curlnoise", "Curl Noise", "捲曲雜訊"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "汙點與刮痕"),
+    ("ec.noise.fractal", "Fractal Noise", "碎形雜訊"),
+    ("ec.noise.matchgrain", "Match Grain", "符合顆粒"),
+    ("ec.noise.median", "Median", "中值"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "中值（舊版）"),
+    ("ec.noise.noise", "Noise", "雜訊"),
+    ("ec.noise.noisealpha", "Noise Alpha", "雜訊 Alpha"),
+    ("ec.noise.noisehls", "Noise HLS", "雜訊 HLS"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "雜訊 HLS 自動"),
+    ("ec.noise.removegrain", "Remove Grain", "移除顆粒"),
+    ("ec.noise.turbulent", "Turbulent Noise", "擾流雜訊"),
+    ("ec.obsolete.basic3d", "Basic 3D", "基礎 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "基礎文字"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "高斯模糊（舊版）"),
+    ("ec.obsolete.lightning", "Lightning", "閃電"),
+    ("ec.obsolete.mochashape", "Mocha shape", "Mocha 形狀"),
+    ("ec.obsolete.pathtext", "Path Text", "路徑文字"),
+    ("ec.paint.paint", "Paint", "繪畫"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3D 眼鏡"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "Alpha 斜角"),
+    ("ec.perspective.beveledges", "Bevel Edges", "邊緣斜角"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D 攝影機追蹤"),
+    ("ec.perspective.cccylinder", "CC Cylinder", "CC 圓柱"),
+    ("ec.perspective.ccenvironment", "CC Environment", "CC 環境"),
+    ("ec.perspective.ccsphere", "CC Sphere", "CC 球體"),
+    ("ec.perspective.ccspotlight", "CC Spotlight", "CC 聚光燈"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "陰影"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "徑向陰影"),
+    ("ec.sim.carddance", "Card Dance", "卡片舞蹈"),
+    ("ec.sim.caustics", "Caustics", "焦散"),
+    ("ec.sim.ccballaction", "CC Ball Action", "CC 球狀動作"),
+    ("ec.sim.ccbubbles", "CC Bubbles", "CC 泡泡"),
+    ("ec.sim.ccdrizzle", "CC Drizzle", "CC 細雨"),
+    ("ec.sim.cchair", "CC Hair", "CC 毛髮"),
+    ("ec.sim.ccmrmercury", "CC Mr. Mercury", "CC 水銀先生"),
+    ("ec.sim.ccparticlesystems2", "CC Particle Systems II", "CC 粒子系統 II"),
+    ("ec.sim.ccparticleworld", "CC Particle World", "CC 粒子世界"),
+    ("ec.sim.ccpixelpolly", "CC Pixel Polly", "CC 像素破碎"),
+    ("ec.sim.ccrainfall", "CC Rainfall", "CC 下雨"),
+    ("ec.sim.ccscatterize", "CC Scatterize", "CC 散開"),
+    ("ec.sim.ccsnowfall", "CC Snowfall", "CC 下雪"),
+    ("ec.sim.ccstarburst", "CC Star Burst", "CC 星爆"),
+    ("ec.sim.foam", "Foam", "泡沫"),
+    ("ec.sim.particleplayground", "Particle Playground", "粒子遊樂場"),
+    ("ec.sim.shatter", "Shatter", "粉碎"),
+    ("ec.sim.waveworld", "Wave World", "波浪世界"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "筆觸"),
+    ("ec.stylize.cartoon", "Cartoon", "卡通"),
+    ("ec.stylize.ccblockload", "CC Block Load", "CC 區塊載入"),
+    ("ec.stylize.ccburnfilm", "CC Burn Film", "CC 燒灼底片"),
+    ("ec.stylize.ccglass", "CC Glass", "CC 玻璃"),
+    ("ec.stylize.cchextile", "CC HexTile", "CC 六角並排"),
+    ("ec.stylize.cckaleida", "CC Kaleida", "CC 萬花筒"),
+    ("ec.stylize.ccmrsmoothie", "CC Mr. Smoothie", "CC 平滑先生"),
+    ("ec.stylize.ccplastic", "CC Plastic", "CC 塑膠"),
+    ("ec.stylize.ccrepetile", "CC RepeTile", "CC 重複並排"),
+    ("ec.stylize.ccthreshold", "CC Threshold", "CC 臨界值"),
+    ("ec.stylize.ccthresholdrgb", "CC Threshold RGB", "CC 臨界值 RGB"),
+    ("ec.stylize.ccvignette", "CC Vignette", "CC 暗角"),
+    ("ec.stylize.coloremboss", "Color Emboss", "彩色浮雕"),
+    ("ec.stylize.emboss", "Emboss", "浮雕"),
+    ("ec.stylize.findedges", "Find Edges", "尋找邊緣"),
+    ("ec.stylize.glow", "Glow", "發光"),
+    ("ec.stylize.mosaic", "Mosaic", "馬賽克"),
+    ("ec.stylize.motiontile", "Motion Tile", "動態並排"),
+    ("ec.stylize.posterize", "Posterize", "色調分離"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "粗糙邊緣"),
+    ("ec.stylize.scatter", "Scatter", "散佈"),
+    ("ec.stylize.strobe", "Strobe Light", "頻閃光"),
+    ("ec.stylize.texturize", "Texturize", "材質化"),
+    ("ec.stylize.threshold", "Threshold", "臨界值"),
+    ("ec.text.numbers", "Numbers", "數字"),
+    ("ec.text.timecode", "Timecode", "時間碼"),
+    ("ec.time.ccforcemotionblur", "CC Force Motion Blur", "CC 強制動態模糊"),
+    ("ec.time.ccwidetime", "CC Wide Time", "CC 寬廣時間"),
+    ("ec.time.echo", "Echo", "回音"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "像素動態模糊"),
+    ("ec.time.posterizetime", "Posterize Time", "色調分離時間"),
+    ("ec.time.timedifference", "Time Difference", "時間差異"),
+    ("ec.time.timedisplacement", "Time Displacement", "時間位移"),
+    ("ec.time.timewarp", "Timewarp", "時間扭曲"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "區塊溶解"),
+    ("ec.transition.cardwipe", "Card Wipe", "卡片擦拭"),
+    ("ec.transition.ccglasswipe", "CC Glass Wipe", "CC 玻璃擦拭"),
+    ("ec.transition.ccgridwipe", "CC Grid Wipe", "CC 格線擦拭"),
+    ("ec.transition.ccimagewipe", "CC Image Wipe", "CC 影像擦拭"),
+    ("ec.transition.ccjaws", "CC Jaws", "CC 巨顎"),
+    ("ec.transition.cclightwipe", "CC Light Wipe", "CC 光線擦拭"),
+    ("ec.transition.cclinesweep", "CC Line Sweep", "CC 線條掃掠"),
+    ("ec.transition.ccradialscalewipe", "CC Radial ScaleWipe", "CC 徑向縮放擦拭"),
+    ("ec.transition.ccscalewipe", "CC Scale Wipe", "CC 縮放擦拭"),
+    ("ec.transition.cctwister", "CC Twister", "CC 扭轉"),
+    ("ec.transition.ccwarpomatic", "CC WarpoMatic", "CC 自動彎曲"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "漸層擦拭"),
+    ("ec.transition.iriswipe", "Iris Wipe", "光圈擦拭"),
+    ("ec.transition.linearwipe", "Linear Wipe", "線性擦拭"),
+    ("ec.transition.radialwipe", "Radial Wipe", "徑向擦拭"),
+    ("ec.transition.venetian", "Venetian Blinds", "百葉窗"),
+    ("ec.utility.applylut", "Apply Color LUT", "套用色彩 LUT"),
+    ("ec.utility.ccoverbrights", "CC Overbrights", "CC 過亮"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon 轉換器"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "色彩設定檔轉換器"),
+    ("ec.utility.facemeasurements", "Face Measurements", "臉部測量"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "臉部追蹤點"),
+    ("ec.utility.growbounds", "Grow Bounds", "擴展範圍"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR 壓縮擴展器"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR 亮部壓縮"),
+    ("ec.vr.blur", "VR Blur", "VR 模糊"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR 色差"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR 色彩漸層"),
+    ("ec.vr.converter", "VR Converter", "VR 轉換器"),
+    ("ec.vr.denoise", "VR De-Noise", "VR 降噪"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR 數位故障"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR 碎形雜訊"),
+    ("ec.vr.glow", "VR Glow", "VR 發光"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR 平面轉球體"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR 旋轉球體"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR 銳利化"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球體轉平面"),
+];
 
 /// Japanese (`ja`): reserved for the Japanese data point on #821, so both languages share this
 /// one catalog instead of inventing a second mechanism. A translator fills one row per effect,
@@ -795,8 +1122,32 @@ const JAPANESE_EFFECTS: &[Row] = &[
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球体から平面"),
 ];
 
-/// Traditional Chinese (`zh-hant`) category labels, keyed by the registry's English category.
-const TRADITIONAL_CHINESE_CATEGORIES: &[(&str, &str)] = &[];
+/// The 21 category folder names in Traditional Chinese, written from the English source with the
+/// vocabulary Taiwan's creative software uses; the labels stay distinct so the Effect menu shows
+/// one folder per category.
+const TRADITIONAL_CHINESE_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D 通道"),
+    ("Audio", "音訊"),
+    ("Blur & Sharpen", "模糊與銳利化"),
+    ("Channel", "通道"),
+    ("Color Correction", "色彩校正"),
+    ("Distort", "扭曲"),
+    ("Expression Controls", "表示式控制"),
+    ("Generate", "產生"),
+    ("Immersive Video", "沉浸式影片"),
+    ("Keying", "去背"),
+    ("Matte", "遮罩"),
+    ("Noise & Grain", "雜訊與顆粒"),
+    ("Obsolete", "過時"),
+    ("Paint", "繪畫"),
+    ("Perspective", "透視"),
+    ("Simulation", "模擬"),
+    ("Stylize", "風格化"),
+    ("Text", "文字"),
+    ("Time", "時間"),
+    ("Transition", "轉場"),
+    ("Utility", "公用程式"),
+];
 
 /// Japanese (`ja`) category labels, keyed by the registry's English category.
 const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
@@ -1880,38 +2231,42 @@ mod tests {
     #[test]
     fn every_row_names_a_registry_effect() {
         let registry = effects::registry();
-        for (id, english, translated) in SIMPLIFIED_CHINESE {
-            let Some(spec) = registry.iter().find(|spec| spec.id == *id) else {
-                panic!("{id} ({english}) is not an effect in the registry");
-            };
-            assert_eq!(*english, spec.name, "{id}: the catalog says {english:?}, the registry {:?}", spec.name);
-            assert!(!translated.is_empty(), "{id}: empty translation");
+        for (language, rows) in COMPLETE {
+            for (id, english, translated) in *rows {
+                let Some(spec) = registry.iter().find(|spec| spec.id == *id) else {
+                    panic!("{language} row {id} ({english}) is not an effect in the registry");
+                };
+                assert_eq!(*english, spec.name, "{language} row {id}: the catalog says {english:?}, the registry {:?}", spec.name);
+                assert!(!translated.is_empty(), "{language} row {id}: empty translation");
+            }
         }
     }
 
     /// Rows are keyed by id, so a repeated id would shadow a translation.
     #[test]
     fn ids_are_unique() {
-        let mut ids: Vec<&str> = SIMPLIFIED_CHINESE.iter().map(|(id, _, _)| *id).collect();
-        let listed = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(listed, ids.len(), "an effect id is listed twice");
+        for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
+            let mut ids: Vec<&str> = rows.iter().map(|(id, _, _)| *id).collect();
+            let listed = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(listed, ids.len(), "{language} lists an effect id twice");
+        }
     }
 
-    /// The languages that have no rows yet, with the table a translator fills in for each. A new
-    /// language is added here and to [`catalog`]; the test then guards its rows as they arrive.
-    const PENDING: &[(&str, &[Row])] = &[("zh-hant", TRADITIONAL_CHINESE)];
+    /// The languages whose tables are complete: one row per effect in the registry and one row
+    /// per category when they were written. A new effect without a row draws its English name (as
+    /// in every language), so it does not block other work; the rows are guarded like [`PARTIAL`]'s.
+    const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE)];
 
-    /// The languages whose tables are being filled in: guarded like [`PENDING`] row by row.
+    /// The languages whose tables are being filled in: guarded row by row.
     const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH)];
 
-    /// A pending language may lag Simplified Chinese but may not invent ids or disagree about
-    /// which effect an id names: a translator fills these tables row by row. While they are
-    /// empty the test is a no-op, which is why the slot ships before the data does.
+    /// A partial language may lag Simplified Chinese but may not invent ids or disagree about
+    /// which effect an id names: a translator fills these tables row by row.
     #[test]
-    fn a_pending_language_only_uses_known_ids() {
-        for (language, rows) in PENDING.iter().chain(PARTIAL) {
+    fn a_partial_language_only_uses_known_ids() {
+        for (language, rows) in PARTIAL {
             let mut ids: Vec<&str> = vec![];
             for (id, english, translated) in *rows {
                 let Some((_, hans_english, _)) = SIMPLIFIED_CHINESE.iter().find(|(hans_id, _, _)| hans_id == id) else {
@@ -1966,13 +2321,13 @@ mod tests {
 
     /// English, and a language with no catalog or no row for an effect, draws the registry's
     /// name rather than an empty label; a language with a row draws the row. Every table in
-    /// [`PENDING`] and [`PARTIAL`] has an arm in [`catalog`]: an arm-less table's rows would be dead.
+    /// [`COMPLETE`] and [`PARTIAL`] has an arm in [`catalog`]: an arm-less table's rows would be dead.
     #[test]
     fn languages_without_rows_draw_the_registry_name() {
-        for (language, _) in PENDING.iter().chain(PARTIAL) {
+        for (language, _) in COMPLETE.iter().chain(PARTIAL) {
             assert!(catalog(language).is_some(), "{language} has a table but no arm in `catalog`: its rows would be dead");
         }
-        let tables = PENDING.iter().chain(PARTIAL).copied().chain([("zh-hans", SIMPLIFIED_CHINESE)]);
+        let tables = COMPLETE.iter().chain(PARTIAL).map(|(language, rows)| (*language, *rows));
         for (language, rows) in [("en", &[][..]), ("uk", &[][..]), ("cs", &[][..])].into_iter().chain(tables) {
             set_current(language);
             let expected = rows.iter().find(|(id, _, _)| *id == "ec.blur.gaussian").map_or("Gaussian Blur", |(_, _, translated)| *translated);
@@ -2027,7 +2382,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod japanese_category_tests {
+mod category_name_tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -2039,6 +2394,29 @@ mod japanese_category_tests {
         for (english, japanese) in JAPANESE_CATEGORIES {
             if let Some(other) = seen.insert(japanese, english) {
                 panic!("`{english}` and `{other}` both draw as `{japanese}`");
+            }
+        }
+    }
+
+    /// The interface's font probe sees the effect names and category labels, not only the panel
+    /// catalog: `鑲` appears only in Flange & Chorus (`鑲邊與合聲`), and a sparse Han face missing
+    /// it would otherwise draw a box.
+    #[test]
+    fn the_font_probe_sees_effect_and_category_characters() {
+        let chars = crate::i18n::catalog_characters("zh-hant");
+        assert!(chars.contains(&'鑲'), "an effect name's character is probed");
+        let (_, label) = TRADITIONAL_CHINESE_CATEGORIES.first().copied().unwrap_or_default();
+        assert!(label.chars().all(|ch| chars.contains(&ch)), "{label}: a category label's characters are probed");
+    }
+
+    /// The same for Traditional Chinese: one repeated label would hide a category behind another
+    /// in the Effect menu.
+    #[test]
+    fn no_two_categories_share_a_traditional_chinese_name() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (english, traditional) in TRADITIONAL_CHINESE_CATEGORIES {
+            if let Some(other) = seen.insert(traditional, english) {
+                panic!("`{english}` and `{other}` both draw as `{traditional}`");
             }
         }
     }
