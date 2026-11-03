@@ -359,14 +359,18 @@ impl Layer {
             let changed: Vec<Tick> =
                 p1.keys.iter().filter(|k| !p0.keys.contains(k)).chain(p0.keys.iter().filter(|k| !p1.keys.contains(k))).map(|k| k.time).collect();
             let (Some(first), Some(last)) = (changed.iter().min(), changed.iter().max()) else { continue };
-            // Two keys before the first changed one and two after the last, on either side.
+            // Two keys before the first changed one and two after the last, on either side (the
+            // first or last key when there are fewer: values hold beyond it). Past the first or
+            // last key the change reaches the in or out point (`None`).
             let mut lo = Some(Tick(i64::MAX));
             let mut hi = Some(Tick(i64::MIN));
             for keys in [&p1.keys, &p0.keys] {
                 let before = keys.iter().filter(|k| k.time < *first).count();
-                lo = lo.zip(before.checked_sub(2).and_then(|i| keys.get(i))).map(|(a, k)| a.min(k.time));
+                let back = if before == 0 { None } else { keys.get(before.saturating_sub(2)) };
+                lo = lo.zip(back).map(|(a, k)| a.min(k.time));
                 let upto = keys.iter().filter(|k| k.time <= *last).count();
-                hi = hi.zip(keys.get(upto.saturating_add(1))).map(|(a, k)| a.max(k.time));
+                let ahead = if upto >= keys.len() { None } else { keys.get(upto.saturating_add(1).min(keys.len().saturating_sub(1))) };
+                hi = hi.zip(ahead).map(|(a, k)| a.max(k.time));
             }
             let (x, y) = (lo.map_or(self.in_point, |t| self.comp_time(t)), hi.map_or(self.out_point, |t| self.comp_time(t)));
             let (x, y) = (x.min(y).max(self.in_point), x.max(y).min(self.out_point));

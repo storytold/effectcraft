@@ -362,7 +362,7 @@ impl Comp {
     /// or a changed one draws differently, widened by the shutter. A trim reaches only the part it
     /// cut, a split only the copy's half (#1641). A layer that reads a changed one (its parent,
     /// track matte, a layer it picks in an effect or tracker) draws differently wherever it is
-    /// active, and so does a layer with an expression (it can read anything) when anything
+    /// active, and so does a layer with an expression that may read other layers or items when anything
     /// changed: here or, `elsewhere`, outside these layers (markers, layers that draw nothing,
     /// other comps and items). `None` when the edit can reach any frame: a comp setting, a layer
     /// reorder, Solo turning on or off, an environment layer. A layer's audio counts when `heard`
@@ -376,10 +376,18 @@ impl Comp {
         elsewhere: bool,
         touched: &[LayerId],
     ) -> Option<Vec<(Tick, Tick)>> {
-        fn has_expression(g: &PropGroup) -> bool {
+        // An expression that may read outside its own layer: it names another comp, layer,
+        // footage, the project or its precomp's source (its parent and the layers it picks in an
+        // effect are read through `referenced_layers` below).
+        // ponytail: text heuristic; misses another layer reached through a variable from a call
+        // without those words. Upgrade: record reads in the expression host.
+        fn reads_outside(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
-                Node::Prop(p) => p.expr.is_some(),
-                Node::Group(g) => has_expression(g),
+                Node::Prop(p) => p.expr.as_ref().is_some_and(|e| {
+                    let t = e.text.to_lowercase().replace("thislayer", "");
+                    ["comp", "layer", "footage", "project", "source"].iter().any(|w| t.contains(w))
+                }),
+                Node::Group(g) => reads_outside(g),
             })
         }
         // Solo hides every other layer at every frame.
@@ -423,7 +431,7 @@ impl Comp {
         let both = || self.layers.iter().chain(&o.layers);
         let mut reached: Vec<LayerId> = Vec::new();
         if !changed.is_empty() || elsewhere || !touched.is_empty() {
-            reached.extend(both().filter(|l| has_expression(&l.props)).map(|l| l.id));
+            reached.extend(both().filter(|l| reads_outside(&l.props)).map(|l| l.id));
         }
         // (each pass adds a layer or stops: at most one pass per layer)
         loop {

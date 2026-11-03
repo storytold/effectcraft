@@ -1863,3 +1863,46 @@ fn music_volume_keeps_the_frames_with_expressions_that_dont_read_audio() {
     let (frames, disk) = kept("value + thisComp.layer(\"Music\")(\"Audio\")(\"Audio Levels\")[0]");
     assert!(frames < 120 && !disk, "the expression reads the music's levels: {frames} frames kept, disk kept {disk}");
 }
+
+/// A Scale edit with only two keys re-renders from the other key on (values hold past it), not
+/// the layer's whole length; a full-length layer whose expression reads only itself (a wiggle)
+/// keeps its frames. Every frame kept renders as before.
+#[test]
+fn a_two_key_edit_beside_a_wiggle_keeps_the_other_frames() {
+    use effectcraft_engine::project::{Expression, LayerId, Value};
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let wig = LayerId(s.execute("layer.newSolid", json!({"color": "#0000ff", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap());
+    let l = LayerId(s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap());
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    for (f, v) in [(20, 50.0), (80, 150.0)] {
+        s.execute("prop.addKey", json!({"layer": l.0, "path": "transform/scale", "time": fr.tick_of(f).seconds(), "value": [v, v, 100.0]})).unwrap();
+    }
+    let mut p0 = (*s.project).clone();
+    p0.comp_mut(cid).unwrap().layer_mut(wig).unwrap().props.prop_mut("transform/position").unwrap().expr =
+        Some(Expression { text: "wiggle(2, 3)".into(), enabled: true });
+    let p0 = Arc::new(p0);
+    let host = s.expr.clone().unwrap();
+    let render = |p: &Project, i: i64| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&*host);
+        r.comp_frame(cid, fr.tick_of(i))
+    };
+    // (key index, frames that must stay, frames that must go)
+    for (n, keep, go) in [(1, 0..18, [21, 60, 119]), (0, 82..120, [0, 20, 79])] {
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..120).for_each(|i| insert(&f, k(id0, i)));
+        let mut p1 = p0.clone();
+        Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/scale").unwrap().keys[n].value =
+            Value::Vec3([90.0, 90.0, 100.0]);
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        assert!(keep.clone().all(|i| kept.contains(&i)) && !go.iter().any(|i| kept.contains(i)), "key {n}: {kept:?}");
+        for i in kept {
+            assert_eq!(render(&p0, i), render(&p1, i), "key {n}: kept frame {i} draws other pixels now");
+        }
+    }
+}
