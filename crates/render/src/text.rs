@@ -243,7 +243,9 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
             }
             "expressionSelector" => {
                 let Some(prop) = sel.get("amount") else { continue };
-                let stat = ctx.v3(layer, sel, "amount", [100.0; 3]);
+                // The keyframed amount, read without running its expression (the fallback when the
+                // expression cannot run); an Essential Property override still applies.
+                let stat = if prop.has_expression() { prop.value_at(layer.layer_time(ctx.time)) } else { ctx.value(layer, prop) }.as_vec3();
                 // One allowance for the whole layer: the expression runs per character, each run
                 // with its own time limit, so a slow expression on a long text is stopped once it
                 // has failed or the layer's evaluations pass MAX_SELECTOR_TIME.

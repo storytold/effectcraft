@@ -44,34 +44,29 @@ pub fn mix_comp(project: &Project, footage: &dyn FootageSource, expr: Option<&dy
 /// Whether the comp has anything audible (footage with audio, a sound generator, or a precomp
 /// that has).
 pub fn comp_has_audio(project: &Project, comp: ItemId) -> bool {
-    // Each comp is answered once: a comp used by many layers at each of several levels was
-    // walked again for every use.
-    fn walk(project: &Project, comp: ItemId, depth: usize, seen: &mut std::collections::HashMap<ItemId, bool>) -> bool {
-        if let Some(&r) = seen.get(&comp) {
-            return r;
+    // Breadth first, so each comp is looked at once and at its shallowest level: a comp reached
+    // first through a long chain (past MAX_DEPTH) is still found by a shorter route, and a cycle
+    // cannot hide a result (nothing is cached as "silent" while it is being explored).
+    let mut seen = std::collections::HashSet::from([comp]);
+    let mut level = vec![comp];
+    for _ in 0..MAX_DEPTH {
+        let mut next = vec![];
+        for id in level {
+            let Some(c) = project.comp(id) else { continue };
+            for l in c.layers.iter().filter(|l| l.switches.audio) {
+                match &l.source {
+                    _ if generates(l) => return true,
+                    LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing) => {
+                        return true;
+                    }
+                    LayerSource::Comp { item } if seen.insert(*item) => next.push(*item),
+                    _ => {}
+                }
+            }
         }
-        // In progress: a cycle back into it adds nothing.
-        seen.insert(comp, false);
-        let r = walk_once(project, comp, depth, seen);
-        seen.insert(comp, r);
-        r
+        level = next;
     }
-    fn walk_once(project: &Project, comp: ItemId, depth: usize, seen: &mut std::collections::HashMap<ItemId, bool>) -> bool {
-        let Some(c) = project.comp(comp) else { return false };
-        depth < MAX_DEPTH
-            && c.layers.iter().any(|l| {
-                l.switches.audio
-                    && (generates(l)
-                        || match &l.source {
-                            LayerSource::Footage { item } => {
-                                matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing)
-                            }
-                            LayerSource::Comp { item } => walk(project, *item, depth + 1, seen),
-                            _ => false,
-                        })
-            })
-    }
-    walk(project, comp, 0, &mut std::collections::HashMap::new())
+    false
 }
 
 /// Enabled audio effects of a layer (in stack order) with their effect ids.
@@ -417,6 +412,33 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(comp_has_audio(&p, below)).ok());
         assert!(!rx.recv_timeout(std::time::Duration::from_secs(20)).expect("detection finishes"));
+    }
+
+    #[test]
+    fn audio_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
+        let mut p = Project::default();
+        let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+        let mk = |p: &mut Project, layers: Vec<Layer>| {
+            let mut c = base.clone();
+            c.layers = layers.into();
+            p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(c.into()))
+        };
+        let f = Footage { kind: FootageKind::Audio, has_audio: true, ..Default::default() };
+        let fid = p.add_item("x.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(f));
+        let sound = build::layer(&mut p, &base, "s", LayerSource::Footage { item: fid }, (0, 0), None);
+        let audible = mk(&mut p, vec![sound]);
+        // A chain of MAX_DEPTH comps ends in `audible` one level past what is searched; the root
+        // reaches `audible` directly as well, after the chain.
+        let mut chain = audible;
+        for _ in 0..MAX_DEPTH {
+            let l = build::layer(&mut p, &base, "c", LayerSource::Comp { item: chain }, (0, 0), None);
+            chain = mk(&mut p, vec![l]);
+        }
+        assert!(!comp_has_audio(&p, chain), "too deep to be found");
+        let via_chain = build::layer(&mut p, &base, "chain", LayerSource::Comp { item: chain }, (0, 0), None);
+        let direct = build::layer(&mut p, &base, "direct", LayerSource::Comp { item: audible }, (0, 0), None);
+        let root = mk(&mut p, vec![via_chain, direct]);
+        assert!(comp_has_audio(&p, root));
     }
 
     #[test]

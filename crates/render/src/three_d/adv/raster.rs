@@ -127,8 +127,8 @@ fn setup(s: &Scene, clip: &[[f32; 4]], range: std::ops::Range<usize>) -> Vec<STr
                 y1 = y1.max(v.0[1]);
             }
             // Clamped on both sides to the viewport before narrowing to i32, so a far-off
-            // coordinate cannot wrap into a huge pixel range.
-            let (w, h) = (s.width as i64, s.height as i64);
+            // coordinate cannot wrap into a huge pixel range (a viewport past i32::MAX is capped there).
+            let (w, h) = (i64::from(s.width.min(i32::MAX as u32)), i64::from(s.height.min(i32::MAX as u32)));
             let bbox = [
                 (x0.floor() as i64).clamp(0, w) as i32,
                 (y0.floor() as i64).clamp(0, h) as i32,

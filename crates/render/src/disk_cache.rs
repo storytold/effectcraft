@@ -310,7 +310,13 @@ pub fn default_folder() -> PathBuf {
 #[cfg(unix)]
 fn make_private(folder: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    if !folder.starts_with(std::env::temp_dir()) {
+    // Judge the folder as written and as it resolves (a relative path, a link or an alias such as
+    // /tmp -> /private/tmp can all land in the shared temp folder).
+    let tmp = std::env::temp_dir();
+    let tmp_real = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
+    let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
+    if ![&given, &real].iter().any(|p| p.starts_with(&tmp) || p.starts_with(&tmp_real)) {
         return Ok(());
     }
     if std::fs::symlink_metadata(folder)?.file_type().is_symlink() {
@@ -634,7 +640,7 @@ impl DiskCache {
 
     /// Queue a layer buffer for writing.
     pub fn put_layer(&self, key: u128, buf: &Buf) {
-        if self.contains(Kind::Layer, key) {
+        if !layer_fits(buf.img.data.len()) || self.contains(Kind::Layer, key) {
             return;
         }
         self.enqueue(Kind::Layer, key, encode_layer(buf));
@@ -642,6 +648,9 @@ impl DiskCache {
 
     /// Write a layer buffer synchronously (tests).
     pub fn put_layer_now(&self, key: u128, buf: &Buf) {
+        if !layer_fits(buf.img.data.len()) {
+            return;
+        }
         self.write_now(Kind::Layer, key, &encode_layer(buf));
     }
 
@@ -825,6 +834,12 @@ fn decode_frame(p: &[u8]) -> Option<Frame8> {
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
     let rgba = decompress_checked(&p[8..], Some((w as usize).checked_mul(h as usize)?.checked_mul(4)?))?;
     (rgba.len() == w as usize * h as usize * 4).then_some(Frame8 { width: w, height: h, rgba })
+}
+
+/// Whether a layer of `pixels` pixels (16 bytes each, decompressed) is within what a cache entry
+/// may hold: a larger one could never be read back, so it is not compressed or written.
+fn layer_fits(pixels: usize) -> bool {
+    pixels.checked_mul(16).is_some_and(|b| b <= MAX_ENTRY_BYTES)
 }
 
 fn encode_layer(b: &Buf) -> Vec<u8> {
@@ -1032,6 +1047,32 @@ mod tests {
         assert!(DiskCache::open(&link, 1 << 20).is_err());
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_resolves_into_the_temp_folder_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // `<cwd>/link` names a folder in the temp folder only through the link.
+        let real = tmpdir("alias-real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = std::env::current_dir().unwrap().join(format!("effectcraft-alias-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dc = DiskCache::open(link.join("cache"), 1 << 20);
+        let mode = std::fs::metadata(real.join("cache")).map(|m| m.permissions().mode() & 0o777);
+        drop(dc);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
+        assert_eq!(mode.unwrap(), 0o700);
+    }
+
+    #[test]
+    fn layers_too_big_to_read_back_are_not_written() {
+        assert!(layer_fits(MAX_ENTRY_BYTES / 16));
+        assert!(!layer_fits(MAX_ENTRY_BYTES / 16 + 1));
+        assert!(!layer_fits(10_000 * 10_000));
+        assert!(!layer_fits(usize::MAX));
     }
 
     #[test]
