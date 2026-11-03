@@ -243,6 +243,15 @@ fn ps_push(st: &mut Vec<f64>, v: f64) {
     }
 }
 
+/// The most operators and operands a calculator program may hold (nested procedures included).
+/// It has no loops, so this bounds what one evaluation runs; real programs hold a few dozen.
+const MAX_CALC_OPS: usize = 4096;
+
+/// The operators and operands in `code`, nested procedures included.
+fn ps_len(code: &[PsOp]) -> usize {
+    code.iter().map(|op| if let PsOp::Proc(p) = op { 1 + ps_len(p) } else { 1 }).sum()
+}
+
 fn ps_run(code: &[PsOp], st: &mut Vec<f64>, depth: usize) {
     if depth > 32 {
         return;
@@ -431,6 +440,12 @@ impl Budget {
         Budget { nodes: MAX_NODES, samples: MAX_SAMPLES, overrun: false }
     }
 
+    /// Charge `n` retained values (coefficients, bounds, program operators) as nodes, eight to a
+    /// node, so a cached copy of a function is charged for what it holds, not just its node.
+    fn take_values(&mut self, n: usize) -> bool {
+        self.take_nodes(n.div_ceil(8))
+    }
+
     /// Charge `n` nodes; `false` (and the read is abandoned) once the cap is passed.
     fn take_nodes(&mut self, n: usize) -> bool {
         match self.nodes.checked_sub(n) {
@@ -484,7 +499,8 @@ impl Func {
     /// [`Func::read`] nested `depth` levels deep, charging `budget`: unsupported past [`MAX_DEPTH`]
     /// or once the budget is spent.
     fn read_at(file: &File, o: &Obj, depth: usize, budget: &mut Budget) -> Func {
-        if depth >= MAX_DEPTH || !budget.take_nodes(1) {
+        // Charged first: the fallback past the depth limit is a node a copy keeps too.
+        if !budget.take_nodes(1) || depth >= MAX_DEPTH {
             return Func::Unsupported;
         }
         let o = file.resolve(o);
@@ -499,12 +515,14 @@ impl Func {
         let dom = file.get(d, "Domain").map(|x| file.nums(x)).unwrap_or_default();
         let domain = [dom.first().copied().unwrap_or(0.0), dom.get(1).copied().unwrap_or(1.0)];
         match file.get_num(d, "FunctionType").unwrap_or(-1.0) as i32 {
-            2 => Func::Exp {
-                domain,
-                c0: file.get(d, "C0").map(|x| file.nums(x)).unwrap_or_else(|| vec![0.0]),
-                c1: file.get(d, "C1").map(|x| file.nums(x)).unwrap_or_else(|| vec![1.0]),
-                n: file.get_num(d, "N").unwrap_or(1.0),
-            },
+            2 => {
+                let c0 = file.get(d, "C0").map(|x| file.nums(x)).unwrap_or_else(|| vec![0.0]);
+                let c1 = file.get(d, "C1").map(|x| file.nums(x)).unwrap_or_else(|| vec![1.0]);
+                if !budget.take_values(c0.len() + c1.len()) {
+                    return Func::Unsupported;
+                }
+                Func::Exp { domain, c0, c1, n: file.get_num(d, "N").unwrap_or(1.0) }
+            }
             3 => {
                 // A stitching function's pieces: no element cap (a repeating gradient lists one
                 // piece once per repeat); the budget bounds the total work.
@@ -513,12 +531,12 @@ impl Func {
                     None => Some(vec![]),
                 };
                 let Some(funcs) = funcs else { return Func::Unsupported };
-                Func::Stitch {
-                    domain,
-                    funcs,
-                    bounds: file.get(d, "Bounds").map(|x| file.nums(x)).unwrap_or_default(),
-                    encode: file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default(),
+                let bounds = file.get(d, "Bounds").map(|x| file.nums(x)).unwrap_or_default();
+                let encode = file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default();
+                if !budget.take_values(bounds.len() + encode.len()) {
+                    return Func::Unsupported;
                 }
+                Func::Stitch { domain, funcs, bounds, encode }
             }
             0 => {
                 let Obj::Stream(sd, raw) = o else { return Func::Unsupported };
@@ -535,6 +553,10 @@ impl Func {
                 let Some(total) = total else { return Func::Unsupported };
                 let Some(count) = sample_count(total, outputs) else { return Func::Unsupported };
                 if !budget.take_samples(count) {
+                    return Func::Unsupported;
+                }
+                // The stream must hold the table: missing bytes are not made up as zeros.
+                if count.checked_mul(bps).is_none_or(|bits| bits.div_ceil(8) > data.len()) {
                     return Func::Unsupported;
                 }
                 let enc = file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default();
@@ -571,6 +593,10 @@ impl Func {
                     Some(PsOp::Proc(p)) => p,
                     _ => return Func::Unsupported,
                 };
+                let ops = ps_len(&code);
+                if ops > MAX_CALC_OPS || !budget.take_values(ops) {
+                    return Func::Unsupported;
+                }
                 Func::Calc { domain: dom, range: file.get(d, "Range").map(|x| file.nums(x)).unwrap_or_default(), code }
             }
             _ => Func::Unsupported,
