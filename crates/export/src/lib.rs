@@ -304,7 +304,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             // Colour is floored at 0 but not capped at 1: a 32 bpc frame's over-range values survive (#339).
             // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
             // decoded with the output space's curve, in the output space's primaries.
-            let dec = effectcraft_render::color::Pipe::of(&cx.project.settings).output_linear();
+            let pipe = effectcraft_render::color::Pipe::of(&cx.project.settings);
+            let dec = pipe.output_linear();
             let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
             let mut data = Vec::with_capacity((w * h * 4) as usize);
             for y in 0..h {
@@ -335,7 +336,11 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                 (data[o], data[o + 1], data[o + 2], data[o + 3])
             });
             let layer = Layer::new((w as usize, h as usize), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, pixels);
-            exr::image::Image::from_layer(layer).write().to_buffered(file).map_err(|e| ExportError::Encode(e.to_string()))
+            let mut image = exr::image::Image::from_layer(layer);
+            // The primaries and white the values are in (the output space's), for Nuke, AE and Blender.
+            let [red, green, blue, white] = pipe.output_linear_space().exr_chromaticities().map(|[x, y]| Vec2(x, y));
+            image.attributes.chromaticities = Some(exr::meta::attribute::Chromaticities { red, green, blue, white });
+            image.write().to_buffered(file).map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
             let px = cx.pixels(img, comp, if channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb }, w, h);
