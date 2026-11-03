@@ -237,7 +237,19 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
     };
     // The expression of an effect parameter is stored as on any property (534).
     if let Some(stored) = p.stored() {
-        import_expression(&stored, prop, col);
+        // The expression evaluates in the units After Effects shows (a Glow midpoint 0.25, a popup's
+        // 1-based item), the property here holds the converted value (25, a 0-based item): with a
+        // conversion the expression would read and write the wrong scale, so it is reported instead.
+        let converted = match kind {
+            Kind::EffectNumber(factor) => (factor - 1.0).abs() > f64::EPSILON,
+            Kind::EffectPopup(_) => true,
+            _ => false,
+        };
+        if converted && stored.expression().is_some() {
+            col.lose(LossCategory::Effects, format!("{here}: the expression on parameter {label} is not imported (the value is converted here)"));
+        } else {
+            import_expression(&stored, prop, col);
+        }
     }
     if p.is_animated() {
         if kind == Kind::EffectBool {

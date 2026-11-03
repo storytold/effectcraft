@@ -62,11 +62,20 @@ struct Ctx<'o> {
     options: &'o ImportOptions<'o>,
     /// Sequence file names the import may still create (all sequences together).
     sequence_budget: u32,
+    /// Bytes of sequence file names the import may still create (all sequences together).
+    sequence_bytes: u64,
 }
 
 pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &ImportOptions<'_>) -> (ItemId, Vec<ItemId>, Vec<ItemId>, ImportReport) {
-    let mut cx =
-        Ctx { sources: HashMap::new(), uses: HashMap::new(), created: Vec::new(), col: Collector::default(), options, sequence_budget: MAX_SEQUENCE_FILES };
+    let mut cx = Ctx {
+        sources: HashMap::new(),
+        uses: HashMap::new(),
+        created: Vec::new(),
+        col: Collector::default(),
+        options,
+        sequence_budget: MAX_SEQUENCE_FILES,
+        sequence_bytes: MAX_SEQUENCE_BYTES,
+    };
     let root = project.add_item(options.folder_name, Label::None, None, ItemKind::Folder);
     cx.created.push(root);
 
@@ -86,6 +95,11 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                 let id = project.add_item(&name, label, Some(parent), ItemKind::Folder);
                 cx.created.push(id);
                 cx.col.imported.folders += 1;
+                // After Effects writes an `Sfdr` even for an empty folder (and other chunks next to the
+                // items in it); without one the contents are lost.
+                if !item.has_folder_contents() {
+                    cx.col.lose(LossCategory::DamagedData, format!("folder '{name}': its contents list is missing, imported empty"));
+                }
                 let mut kids: Vec<_> = item.children().map(|k| (k, id)).collect();
                 kids.reverse();
                 stack.extend(kids);
@@ -106,7 +120,7 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                     continue;
                 };
                 let map = TimeMap { timescale: tb.timescale, frame_duration: tb.frame_duration, rate };
-                let comp = new_comp(&header, comp_view.renderer(), &map);
+                let comp = new_comp(&header, comp_view.renderer(), &map, &name, &mut cx.col);
                 let id = project.add_item(&name, label, Some(parent), ItemKind::Comp(Arc::new(comp)));
                 cx.created.push(id);
                 cx.col.imported.compositions += 1;
@@ -158,14 +172,22 @@ fn null_only_sources(view: &AepProject<'_, '_>) -> (HashSet<u32>, HashSet<u32>) 
     (only, by_other)
 }
 
-fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap) -> Comp {
+fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: &str, col: &mut Collector) -> Comp {
     let duration = map.units(i64::from(h.duration_units), map.timescale);
     let mut comp = Comp::new(u32::from(h.width), u32::from(h.height), map.rate, duration);
     let start = map.units(i64::from(h.work_area_start_units), map.timescale);
     let end = h.work_area_end_units.map_or(duration, |e| map.units(i64::from(e), map.timescale));
-    comp.work_area = if start >= Tick::ZERO && end > start { (start, end) } else { (Tick::ZERO, duration) };
+    comp.work_area = if start >= Tick::ZERO && end > start {
+        (start, end)
+    } else {
+        col.lose(LossCategory::DamagedData, format!("composition '{name}': the work area is empty or negative, the whole composition is used"));
+        (Tick::ZERO, duration)
+    };
     comp.background = h.background.map(|c| f32::from(c) / 255.0);
-    comp.pixel_aspect = h.pixel_aspect.to_f64().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0);
+    comp.pixel_aspect = h.pixel_aspect.to_f64().filter(|v| v.is_finite() && *v > 0.0).unwrap_or_else(|| {
+        col.lose(LossCategory::DamagedData, format!("composition '{name}': the pixel aspect ratio is not valid, 1 is used"));
+        1.0
+    });
     comp.shutter_angle = f64::from(h.shutter_angle);
     // The stored phase; a header without one centres the shutter on the frame.
     comp.shutter_phase = h.shutter_phase.map_or(-comp.shutter_angle / 2.0, f64::from);
@@ -196,7 +218,12 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
             }
             return;
         }
-        let rgb = f.solid_rgb().unwrap_or([0.0; 3]);
+        // A channel that is not a number cannot be saved or rendered: it falls back to 0 and is reported.
+        let mut rgb = f.solid_rgb().unwrap_or([0.0; 3]);
+        if rgb.iter().any(|c| !c.is_finite()) {
+            rgb = rgb.map(|c| if c.is_finite() { c } else { 0.0 });
+            cx.col.lose(LossCategory::DamagedData, format!("solid '{name}': a color channel is not a number, replaced by 0"));
+        }
         let solid = Solid { color: rgb, width: f.width, height: f.height, pixel_aspect: 1.0 };
         let id = project.add_item(&name, label, Some(parent), ItemKind::Solid(solid));
         cx.created.push(id);
@@ -214,7 +241,11 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         let frames = (seq.end - seq.start).saturating_add(1);
         let sep = if path.contains('\\') { '\\' } else { '/' };
         let folder = path.trim_end_matches(['\\', '/']).to_string();
-        if frames > MAX_SEQUENCE_FRAMES || frames > cx.sequence_budget {
+        // One name is the folder, a separator and the file name; the number is as wide as the stored
+        // digits or as the largest number, whichever is longer (an upper bound for every frame).
+        let name_bytes = (folder.len() + 1 + seq.prefix.len() + seq.suffix.len() + usize::try_from(seq.digits.min(16)).unwrap_or(16).max(10)) as u64;
+        let bytes = name_bytes.saturating_mul(u64::from(frames));
+        if frames > MAX_SEQUENCE_FRAMES || frames > cx.sequence_budget || bytes > cx.sequence_bytes {
             // Not expanded: the item keeps its first file (a still standing for the sequence).
             cx.col.lose(
                 LossCategory::DamagedData,
@@ -223,6 +254,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
             path = format!("{folder}{sep}{}", seq.file_name(seq.start));
         } else {
             cx.sequence_budget -= frames;
+            cx.sequence_bytes -= bytes;
             sequence = (seq.start..=seq.end).map(|n| format!("{folder}{sep}{}", seq.file_name(n))).collect();
         }
         if let Some(first) = sequence.first() {
@@ -292,6 +324,9 @@ fn default_footage_name(item: &AepItem<'_, '_>, f: &crate::Footage) -> Option<St
 const MAX_SEQUENCE_FRAMES: u32 = 100_000;
 /// The most sequence file names one import creates (all sequences together).
 const MAX_SEQUENCE_FILES: u32 = 1_000_000;
+/// The most bytes of sequence file names one import creates (all sequences together): long names
+/// times many frames would otherwise expand a small file into hundreds of megabytes.
+const MAX_SEQUENCE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `num / den` seconds as ticks (saturating).
 fn cx_ticks(num: i64, den: i64) -> Tick {
@@ -498,7 +533,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         let mut l: Layer = build::layer(project, &comp, &name, source.clone(), size, None);
         l.name = name.clone();
         l.label = Label::ALL.get(usize::from(h.label)).copied().unwrap_or(Label::None);
-        apply_timing(&mut l, &h, &tm);
+        apply_timing(&mut l, &h, &tm, &name, &mut cx.col);
         apply_switches(&mut l, &h);
         match blend(h.blend_mode) {
             Some(b) => l.blend_mode = b,
@@ -634,10 +669,13 @@ fn would_loop(uses: &HashMap<ItemId, Vec<ItemId>>, from: ItemId, to: ItemId) -> 
     false
 }
 
-fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap) {
+fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &mut Collector) {
     // The exact ratio `stretch / stretch_den` (50 % is 1/2, -100 % is -1/1); a zero or unreadable
     // one is 100 %.
-    let stretch = h.stretch_ratio().filter(|r| r.num != 0).unwrap_or(Rational { num: 1, den: 1 });
+    let stretch = h.stretch_ratio().filter(|r| r.num != 0).unwrap_or_else(|| {
+        col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch is zero or unreadable, 100 % is used"));
+        Rational { num: 1, den: 1 }
+    });
     l.stretch = stretch.to_f64().map_or(100.0, |r| r * 100.0);
     l.start_time = tm.ticks(h.start.num, h.start.den);
     let abs = |offset: Rational, reduced: Option<Rational>| absolute(h.start, offset, stretch, reduced).map_or(Tick::ZERO, |(n, d)| tm.ticks(n, d));
