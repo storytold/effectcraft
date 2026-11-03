@@ -1057,6 +1057,11 @@ pub const CHAR_ATTRS: &[&str] = &[
 pub const PARA_ATTRS: &[&str] =
     &["justify", "indentLeft", "indentRight", "indentFirst", "spaceBefore", "spaceAfter", "direction", "composer", "hangingPunctuation"];
 
+/// Most variable font axes one style can set. Real fonts have a handful (OpenType registers
+/// five; custom axes rarely bring the total past twenty); a `variations` object with more is
+/// rejected before any of it is applied.
+pub const MAX_VARIATION_AXES: usize = 64;
+
 /// Set one character attribute; Ok(false) for keys that aren't character attributes.
 pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, String> {
     match key {
@@ -1173,20 +1178,29 @@ pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, Stri
         "variations" => match v {
             J::Null => s.variations.clear(),
             J::Object(m) => {
-                if m.is_empty() {
-                    s.variations.clear();
+                if m.len() > MAX_VARIATION_AXES {
+                    return Err(format!("variations: at most {MAX_VARIATION_AXES} axes"));
                 }
+                // One keyed merge (the result sorted by tag), applied only when every entry is valid.
+                let mut axes: std::collections::BTreeMap<String, f32> =
+                    if m.is_empty() { Default::default() } else { s.variations.iter().cloned().collect() };
                 for (tag, val) in m {
                     if tag.is_empty() || tag.len() > 4 {
                         return Err(format!("variations: `{tag}` is not an axis tag"));
                     }
-                    s.variations.retain(|(t, _)| t != tag);
                     match val {
-                        J::Null => {}
-                        _ => s.variations.push((tag.clone(), val.as_f64().ok_or("variations: expected {tag: number}")? as f32)),
+                        J::Null => {
+                            axes.remove(tag);
+                        }
+                        _ => {
+                            axes.insert(tag.clone(), val.as_f64().ok_or("variations: expected {tag: number}")? as f32);
+                        }
                     }
                 }
-                s.variations.sort_by(|a, b| a.0.cmp(&b.0));
+                if axes.len() > MAX_VARIATION_AXES {
+                    return Err(format!("variations: at most {MAX_VARIATION_AXES} axes"));
+                }
+                s.variations = axes.into_iter().collect();
             }
             _ => return Err("variations: expected {tag: number, …}".into()),
         },
@@ -1320,6 +1334,26 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variations_merge_by_tag_and_reject_too_many_axes() {
+        let mut doc = TextDoc::plain("ab");
+        assert!(doc.set_attr("variations", &serde_json::json!({"wght": 650, "wdth": 90}), None).unwrap());
+        assert!(doc.set_attr("variations", &serde_json::json!({"wght": 700, "wdth": null, "opsz": 12}), None).unwrap());
+        assert_eq!(doc.style_at(0).variations, vec![("opsz".to_string(), 12.0), ("wght".to_string(), 700.0)]);
+        // More axes than any font has: refused up front, the style untouched.
+        let many: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES + 1).map(|i| (format!("a{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(many), None).is_err());
+        assert_eq!(doc.style_at(0).variations.len(), 2);
+        // A merge that would grow past the limit is refused too.
+        let fill: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES - 2).map(|i| (format!("b{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(fill), None).unwrap());
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+        // (The probe on an empty style passes; the styles already at the limit keep their axes.)
+        let _ = doc.set_attr("variations", &serde_json::json!({"zzzz": 1}), None);
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+        assert!(!doc.style_at(0).variations.iter().any(|(t, _)| t == "zzzz"));
+    }
 
     #[test]
     fn mixed_line_breaks_keep_original_byte_and_character_ranges() {
