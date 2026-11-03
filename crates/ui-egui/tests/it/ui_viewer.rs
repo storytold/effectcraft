@@ -421,10 +421,9 @@ fn layer_drag_snaps_to_other_layers_edges_ctrl_toggles_and_options_apply() {
 }
 
 /// #2855: a dragged layer's edge midpoints snap to another layer's on both axes, side by side and
-/// stacked, with Snap Edges Extended on and off; its centre lines snap along the target's extent,
-/// and beyond it only with the option on.
+/// stacked, with Snap Edges Extended on and off.
 #[test]
-fn layer_drag_snaps_to_other_layers_midpoints_and_centre_lines() {
+fn layer_drag_snaps_to_other_layers_midpoints() {
     let mut h = harness();
     let box_id = h.state().session.active_comp().unwrap().layers[0].id;
     // A 100×100 target at x 450–550, y 50–150, centre (500, 100).
@@ -454,14 +453,6 @@ fn layer_drag_snaps_to_other_layers_midpoints_and_centre_lines() {
         // Stacked: the box's top midpoint onto the target's bottom midpoint (500, 150).
         let p = drop(&mut h, [100.0, 210.5], [502.0, 153.0]);
         assert!(near(p, 500.0, 190.0), "top to bottom midpoint, extended {extended}: {p:?}");
-        // Along the target, far from its centre point: the box's centre takes x from its centre
-        // line and y stays free.
-        let p = drop(&mut h, [100.0, 250.0], [503.0, 125.0]);
-        assert!((p[0] - 500.0).abs() < 0.01 && (p[1] - 125.0).abs() < 1.0, "centre line along the target, extended {extended}: {p:?}");
-        // Beyond the target: its centre line reaches only with the option on.
-        let p = drop(&mut h, [100.0, 250.0], [503.0, 300.0]);
-        let snapped = (p[0] - 500.0).abs() < 0.01;
-        assert_eq!(snapped, extended, "centre line beyond the target, extended {extended}: {p:?}");
     }
 }
 

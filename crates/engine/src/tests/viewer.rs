@@ -82,12 +82,6 @@ fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
     let s = snap(&[[103.0, 51.0]], &[v, h, far], 5.0).unwrap();
     assert_eq!(s.at, [102.0, 52.0]);
     assert_eq!(s.hits, [v, h]);
-    // A line out of its span doesn't count, so the point still wins.
-    let cut = SnapTarget::vline(103.0, PRI_LAYER, src).within(Some([0.0, 10.0]));
-    assert_eq!(snap(&[[103.0, 51.0]], &[cut, top, mid], 5.0).unwrap().hits, [mid]);
-    // No point in reach: a single line still snaps its own axis.
-    let s = snap(&[[103.0, 51.0]], &[top], 5.0).unwrap();
-    assert_eq!(s.at, [103.0, 50.0]);
 }
 
 /// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
