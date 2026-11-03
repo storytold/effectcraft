@@ -1254,7 +1254,11 @@ fn flow_pairs(
         let img = backend.membrane(&base, &holes[t].to_vec());
         store.put(t, img)
     });
-    if pre.is_err() || frames.has_error() {
+    if let Err(e) = pre {
+        record_spill_error(&error_cell, e);
+        return None;
+    }
+    if frames.has_error() {
         return None;
     }
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
