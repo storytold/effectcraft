@@ -1112,7 +1112,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.drag_started()
         && !text_owns
@@ -1186,8 +1188,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
             t if t.is_shape() => Some(Gesture::Create { tool: t, start: map.to_comp(press) }),
             Tool::ObjectMatte => Some(Gesture::ObjectMatteBox { start: press }),
             t if t.puppet_kind().is_some() && super::puppet_tool::hit(&pin_hits, press).is_none() => {
-                // Off the pins: Alt or a press outside the art drags a marquee that selects pins.
-                (mods.alt || puppet_layer(app, cpt).is_none()).then_some(Gesture::PinMarquee { start: press })
+                // Off the pins: Alt or a press outside the art drags a marquee that selects pins. Asked
+                // of where the button went down: the pointer may be over the art by the time this is a drag.
+                (mods.alt || puppet_layer(app, map.to_comp(press)).is_none()).then_some(Gesture::PinMarquee { start: press })
             }
             t if t.puppet_kind().is_some() => super::puppet_tool::hit(&pin_hits, press).and_then(|(h, part)| {
                 use super::puppet_tool::PinPart;
@@ -1700,7 +1703,9 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
         if puppet_layers.is_empty() {
             return pick(app, ectx, cpt, false);
         }
-        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| layers_at(ectx, cpt).any(|h| h.id == l.id))
+        super::puppet_tool::target(ectx, &puppet_layers, cpt, |l| {
+            layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
+        })
     };
     if resp.clicked()
         && !text_owns
