@@ -19,7 +19,6 @@ pub(crate) struct Builder {
     /// Which of the finished top-level nodes are optional-content layers.
     pub top_layers: Vec<bool>,
     pub skipped: Vec<String>,
-    pub shapes: usize,
 }
 
 pub(crate) fn group(name: &str) -> Group {
@@ -28,7 +27,7 @@ pub(crate) fn group(name: &str) -> Group {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0 }
+        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![] }
     }
 
     pub fn depth(&self) -> usize {
@@ -94,7 +93,6 @@ impl Builder {
         if path.elements().is_empty() || (fill.is_none() && stroke.is_none()) {
             return;
         }
-        self.shapes += 1;
         let (f, fo, rule) = match fill {
             Some((p, o, r)) => (Some(p), o, r),
             None => (None, 1.0, FillRule::NonZero),

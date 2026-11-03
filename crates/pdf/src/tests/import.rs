@@ -652,3 +652,50 @@ fn a_tiling_pattern_is_charged_for_every_tile_it_copies() {
     .unwrap();
     assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
 }
+
+#[test]
+fn a_tiling_pattern_is_charged_for_images_it_copies() {
+    // The cell holds 8,000 image placements, which are not shapes: each tile still copies them.
+    let cell = "/Im1 Do ".repeat(8_000).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![
+            (
+                10,
+                "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << /XObject << /Im1 11 0 R >> >> >>"
+                    .into(),
+                Some(cell),
+            ),
+            (11, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>".into(), Some(vec![255])),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
+}
+
+#[test]
+fn an_image_with_a_named_colour_space_is_not_shared_between_resource_dictionaries() {
+    fn images<'a>(g: &'a effectcraft_svg::Group, out: &mut Vec<&'a effectcraft_svg::Image>) {
+        for n in &g.children {
+            match n {
+                Node::Group(g) => images(g, out),
+                Node::Image(i) => out.push(i),
+                Node::Shape(_) => {}
+            }
+        }
+    }
+    let form = |space: &str| {
+        format!("<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << /XObject << /Im 10 0 R >> /ColorSpace << /CS1 /{space} >> >> >>")
+    };
+    let objs = vec![
+        (10, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /CS1 /BitsPerComponent 8 >>".into(), Some(vec![10, 20, 30])),
+        (11, form("DeviceGray"), Some(b"/Im Do".to_vec())),
+        (12, form("DeviceRGB"), Some(b"/Im Do".to_vec())),
+    ];
+    let doc = parse(&page_pdf("/FA Do /FB Do", "/XObject << /FA 11 0 R /FB 12 0 R >>", objs)).unwrap();
+    let mut found = vec![];
+    images(&doc.root, &mut found);
+    assert_eq!(found.len(), 2, "{:?}", doc.skipped);
+    assert_ne!(found[0].rgba, found[1].rgba, "each placement is decoded with its own colour space");
+}
