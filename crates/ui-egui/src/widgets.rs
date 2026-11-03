@@ -1089,9 +1089,11 @@ pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     let open = popup_is_open(ui, id);
     // The trigger's rect is the list's anchor, so a press on it is never a press outside the list.
     // egui withholds hover from a control a clamped list covers, so the press is tested against the
-    // rect as well: the second press must still toggle such a list shut (#2686).
+    // rect as well: the second press must still toggle such a list shut (#2686). A disabled trigger
+    // takes neither: egui does not let a disabled control take input, so a list left open over one
+    // waits for a press elsewhere (#2686).
     let over_trigger = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| resp.rect.contains(p));
-    let pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (resp.hovered() || (open && over_trigger));
+    let pressed = resp.enabled() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (resp.hovered() || (open && over_trigger));
     ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
     if pressed {
         ui.data_mut(|d| {
@@ -1168,10 +1170,12 @@ pub fn browse_hover(ui: &Ui, r: Response) -> Response {
 /// it as a click would. egui reports no click for that release (it is far from the press), and
 /// nothing but the pressed widget is hovered while a button is down, so the row tests the release
 /// itself: its position, not the pointer's, which by then can be a later move in the same pass
-/// over another row. Rows that are disabled are skipped, as in native menus, and so is a release
-/// back over the trigger: a long list is moved up to fit the window and can cover the control that
-/// opened it, and the click that opened it must not choose the entry that happens to lie under it
-/// then.
+/// over another row. The position is tested against the row's `interact_rect`, which egui cuts to
+/// the list's viewport: a long list scrolls and a row scrolled out keeps a `rect` under the
+/// pointer's path, but it is not the one the user sees. Rows that are disabled are skipped, as in
+/// native menus, and so is a release back over the trigger: a long list is moved up to fit the
+/// window and can cover the control that opened it, and the click that opened it must not choose
+/// the entry that happens to lie under it then.
 pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
     if !(browsing(ui.ctx()) && r.enabled()) {
         return false;
@@ -1179,7 +1183,7 @@ pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
     let Some(pos) = release_pos(ui) else {
         return false;
     };
-    if !r.rect.contains(pos) {
+    if !r.interact_rect.contains(pos) {
         return false;
     }
     let trigger = ui.data(|d| d.get_temp::<Rect>(browse_trigger_id()));
@@ -1485,18 +1489,22 @@ mod tests {
         open: bool,
         trigger: Rect,
         rows: Vec<Rect>,
+        /// The list's visible viewport (its ScrollArea's clip), recorded from inside the body.
+        viewport: Rect,
+        /// Whether the trigger is drawn disabled.
+        disabled: bool,
     }
 
     const SIZES: [&str; 3] = ["Small", "Medium", "Large"];
 
-    const EMPTY: Browsing = Browsing { current: None, open: false, trigger: Rect::NOTHING, rows: Vec::new() };
+    const EMPTY: Browsing = Browsing { current: None, open: false, trigger: Rect::NOTHING, rows: Vec::new(), viewport: Rect::NOTHING, disabled: false };
 
     fn list() -> egui_kittest::Harness<'static, Browsing> {
         egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
             |ui, s: &mut Browsing| {
                 let t = Tokens::for_kind(Default::default());
                 let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 20.0));
-                let resp = dropdown(ui, rect, "Pick", &t, egui::Id::unique("browse-trigger"));
+                let resp = ui.add_enabled_ui(!s.disabled, |ui| dropdown(ui, rect, "Pick", &t, egui::Id::unique("browse-trigger"))).inner;
                 s.trigger = resp.rect;
                 let pop = egui::Id::unique("browse-list");
                 open_on_press(ui, &resp, pop);
@@ -1561,6 +1569,7 @@ mod tests {
                 if popup_is_open(ui, pop) {
                     let chosen = popup_list(ui, pop, rect.left_bottom(), Rect::NOTHING, 20, 0, |ui| {
                         let mut chosen = None;
+                        s.viewport = ui.clip_rect();
                         for i in 0..20 {
                             let r = ui.selectable_label(s.current == Some(i), format!("Entry {i}"));
                             let r = browse_hover(ui, r);
@@ -1868,5 +1877,51 @@ mod tests {
         h.step();
         assert_eq!(h.state().current, Some(0), "the entry the button came up over is chosen");
         assert!(!h.state().open, "and closes the list");
+    }
+
+    /// A trigger that becomes disabled while its list is open takes no press: egui gives a
+    /// disabled control no input, so the press must not toggle the list shut over it — and the
+    /// list still closes on a press elsewhere (#2686).
+    #[test]
+    fn a_press_on_a_disabled_trigger_leaves_the_open_list_open() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        pointer_button(&mut h, trigger, false);
+        assert!(h.state().open, "the click opens the list");
+        h.state_mut().disabled = true;
+        h.run();
+        pointer_button(&mut h, trigger, true);
+        assert!(h.state().open, "a press on the disabled trigger leaves the list open");
+        pointer_button(&mut h, trigger, false);
+        assert!(h.state().open, "and so does its release");
+        pointer_button(&mut h, pos2(360.0, 360.0), true);
+        assert!(!h.state().open, "a press outside the list still closes it");
+    }
+
+    /// A row below the list's viewport keeps a `rect` under the pointer's path, but its
+    /// `interact_rect` is cut to the viewport: a release over that clipped strip must not choose
+    /// the hidden row (#2686).
+    #[test]
+    fn a_release_over_a_clipped_row_chooses_nothing() {
+        let mut h = clamped_list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        h.run();
+        assert!(h.state().open, "the press opens the list");
+        // A point inside the window, over some row's rect, but below the list's viewport.
+        let rows = h.state().rows.clone();
+        let viewport = h.state().viewport;
+        let p = pos2(rows[0].center().x, 238.0);
+        let over = rows.iter().position(|r| r.contains(p)).expect("a row's rect reaches the release point");
+        assert!(!viewport.contains(p), "the release point is clipped away (row {over} lies under it)");
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+        assert!(h.state().open, "moving over the clipped strip keeps the list open");
+        pointer_button(&mut h, p, false);
+        h.run_steps(2);
+        assert_eq!(h.state().current, None, "the release over the clipped row chooses nothing");
     }
 }
