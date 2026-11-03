@@ -356,7 +356,7 @@ mod tests {
     fn random_decoder() -> MaskDecoder {
         let d = &Device::Cpu;
         let mut map: HashMap<String, Tensor> = HashMap::new();
-        loop {
+        for _ in 0..1000 {
             match MaskDecoder::load(&Weights::from_map(map.clone()).unwrap()) {
                 Ok(m) => return m,
                 Err(Error::Weights(m)) => {
@@ -375,6 +375,7 @@ mod tests {
                 Err(e) => panic!("{e}"),
             }
         }
+        panic!("the decoder kept asking for tensors");
     }
 
     #[test]
