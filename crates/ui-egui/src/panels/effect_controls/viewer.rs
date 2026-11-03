@@ -221,9 +221,19 @@ pub fn viewer_hook(
     let ctx = ui.ctx().clone();
     crate::color_picker::note_viewer(&ctx, map.area);
     let mut actions: Actions = vec![];
-    let point_preview = match fx_pick_session(app, ui, painter, map, ectx, l2c, &mut actions) {
-        ControlFlow::Break(()) => return,
-        ControlFlow::Continue(p) => p,
+    let point_preview = if let Some(pick) = app.ui.fx_pick.clone().filter(|p| p.kind == crate::panels::crypto_pick::KIND) {
+        match ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)) {
+            Some(l) => {
+                crate::panels::crypto_pick::viewer_hook(app, ui, painter, map, ectx, l, &crate::panels::viewer::from_effect_space(ectx, l, l2c(ectx, l)), &pick)
+            }
+            None => app.ui.fx_pick = None,
+        }
+        None
+    } else {
+        match fx_pick_session(app, ui, painter, map, ectx, l2c, &mut actions) {
+            ControlFlow::Break(()) => return,
+            ControlFlow::Continue(p) => p,
+        }
     };
     text_color_pick(app, ui, painter, map, ectx, &mut actions);
     popup_eyedropper(app, ui, painter, map);

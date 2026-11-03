@@ -127,6 +127,10 @@ picture and the effects together, and kept for a while: about 1 GB of decoded ch
 in the browser), a soft bound, as the newest file and files still in use stay whatever their
 size. Several frames asking for the same file at once wait for one decode.
 
+The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
+file's manifest. Pick them with the eyedropper next to its Selection, then click in the
+Composition viewer (Shift adds, Alt or Ctrl removes).
+
 ## Replacing and reloading
 
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
