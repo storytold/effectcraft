@@ -107,14 +107,19 @@ fn extra_dirs(var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     var.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
 }
 
-fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
+fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>) {
+    // Each real folder is listed once: symlinks fanning out to the same folders would otherwise
+    // be walked again along every path to them (exponentially many within the depth bound).
+    if !seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())) {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
             // Bounded, so a symlink loop ends.
             if depth < 8 {
-                walk(&p, depth + 1, out);
+                walk(&p, depth + 1, out, seen);
             }
         } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
             out.push(p);
@@ -125,8 +130,9 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
 impl FontSource for DirectorySource {
     fn faces(&self) -> Vec<FaceInfo> {
         let mut files = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for d in &self.dirs {
-            walk(d, 0, &mut files);
+            walk(d, 0, &mut files, &mut seen);
         }
         files.sort();
         files.dedup();
@@ -205,6 +211,21 @@ pub struct VMetrics {
     pub x_height: f32,
     pub underline_pos: f32,
     pub underline_thickness: f32,
+}
+
+/// A font file's bytes, shared by every face of it that is loaded (the faces of a collection
+/// each held their own copy of the whole file).
+fn file_bytes(p: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Vec<u8>>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut files = FILES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(b) = files.get(p).and_then(std::sync::Weak::upgrade) {
+        return Some(b);
+    }
+    let b = Arc::new(std::fs::read(p).ok()?);
+    files.retain(|_, w| w.strong_count() > 0);
+    files.insert(p.to_path_buf(), Arc::downgrade(&b));
+    Some(b)
 }
 
 impl Face {

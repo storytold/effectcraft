@@ -505,3 +505,17 @@ fn a_later_vertical_run_keeps_the_first_line_baseline() {
     let mixed = layout_rich_uncached(text, &[(0..4, horiz), (4..text.len(), vert)], &[p]);
     assert!((mixed.lines[0].baseline - plain.lines[0].baseline).abs() < 1e-3, "{} vs {}", mixed.lines[0].baseline, plain.lines[0].baseline);
 }
+
+#[test]
+fn run_lookup_by_bisection_matches_the_scan() {
+    let scan = |runs: &[(Range<usize>, TextStyle)], b: usize| {
+        runs.iter().position(|(r, _)| b >= r.start && b < r.end).unwrap_or_else(|| runs.iter().rposition(|(r, _)| r.start <= b).unwrap_or(0))
+    };
+    let runs: Vec<(Range<usize>, TextStyle)> = (0..50).map(|i| (i * 3..i * 3 + 3, st(10.0))).collect();
+    let gapped: Vec<(Range<usize>, TextStyle)> = (0..50).map(|i| (i * 4..i * 4 + 3, st(10.0))).collect();
+    for b in 0..220 {
+        assert_eq!(run_at(&runs, b), scan(&runs, b), "{b}");
+        assert_eq!(run_at(&gapped, b), scan(&gapped, b), "{b}");
+    }
+    assert_eq!(run_at(&[], 5), 0);
+}
