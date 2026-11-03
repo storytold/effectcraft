@@ -95,7 +95,14 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
     let origin = ((0, 0), full);
     let cat = |a: &[(&'static str, Kind)], b: &[(&'static str, Kind)]| -> Vec<(&'static str, Kind)> { a.iter().chain(b).copied().collect() };
     let layered: Vec<(&str, Kind)> = cat(
-        &[("Image.R", Kind::Half), ("Image.G", Kind::Half), ("Image.B", Kind::Half), ("Image.A", Kind::Half), ("depth.Z", Kind::Float), ("ObjectID", Kind::Uint)],
+        &[
+            ("Image.R", Kind::Half),
+            ("Image.G", Kind::Half),
+            ("Image.B", Kind::Half),
+            ("Image.A", Kind::Half),
+            ("depth.Z", Kind::Float),
+            ("ObjectID", Kind::Uint),
+        ],
         &CRYPTO,
     );
     let unnamed_plus: Vec<(&str, Kind)> =
@@ -103,7 +110,11 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
     let rgb_float = [("R", Kind::Float), ("G", Kind::Float), ("B", Kind::Float), ("depth.Z", Kind::Float)];
     vec![
         ("rgba_half_zip16", write(vec![part(None, &RGBA_HALF, full, (0, 0), Compression::ZIP16)], origin), true),
-        ("rgb_float_piz", write(vec![part(None, &[("R", Kind::Float), ("G", Kind::Float), ("B", Kind::Float), ("Z", Kind::Float)], full, (0, 0), Compression::PIZ)], origin), true),
+        (
+            "rgb_float_piz",
+            write(vec![part(None, &[("R", Kind::Float), ("G", Kind::Float), ("B", Kind::Float), ("Z", Kind::Float)], full, (0, 0), Compression::PIZ)], origin),
+            true,
+        ),
         ("layered_rle", write(vec![part(None, &layered, full, (0, 0), Compression::RLE)], origin), true),
         ("unnamed_rgb_plus_layers_zip1", write(vec![part(None, &unnamed_plus, full, (0, 0), Compression::ZIP1)], origin), true),
         (
@@ -112,7 +123,13 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
                 vec![
                     part(Some("Image"), &RGBA_HALF, full, (0, 0), Compression::ZIP16),
                     part(Some("depth"), &[("Z", Kind::Float)], full, (0, 0), Compression::ZIP16),
-                    part(Some("CryptoObject00"), &[("r", Kind::Float), ("g", Kind::Float), ("b", Kind::Float), ("a", Kind::Float)], full, (0, 0), Compression::ZIP16),
+                    part(
+                        Some("CryptoObject00"),
+                        &[("r", Kind::Float), ("g", Kind::Float), ("b", Kind::Float), ("a", Kind::Float)],
+                        full,
+                        (0, 0),
+                        Compression::ZIP16,
+                    ),
                 ],
                 origin,
             ),
@@ -138,7 +155,12 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
                     part(Some("ViewLayer.Depth"), &[("ViewLayer.Depth.Z", Kind::Float)], full, (0, 0), Compression::RLE),
                     part(
                         Some("ViewLayer.Combined"),
-                        &[("ViewLayer.Combined.R", Kind::Half), ("ViewLayer.Combined.G", Kind::Half), ("ViewLayer.Combined.B", Kind::Half), ("ViewLayer.Combined.A", Kind::Half)],
+                        &[
+                            ("ViewLayer.Combined.R", Kind::Half),
+                            ("ViewLayer.Combined.G", Kind::Half),
+                            ("ViewLayer.Combined.B", Kind::Half),
+                            ("ViewLayer.Combined.A", Kind::Half),
+                        ],
                         full,
                         (0, 0),
                         Compression::RLE,
@@ -194,7 +216,9 @@ fn aux_hash(pool: &MediaPool, f: &Footage) -> u64 {
 /// The interpretations a picture is decoded in: (label, footage, curve, size, pinned).
 fn variants(f: &Footage) -> Vec<(String, Footage, FloatCurve, Option<(u32, u32)>, bool)> {
     let mut out = vec![];
-    for (mode, label) in [(None, "probed"), (Some(AlphaMode::Straight), "straight"), (Some(AlphaMode::Premultiplied), "premul"), (Some(AlphaMode::Ignore), "ignore")] {
+    for (mode, label) in
+        [(None, "probed"), (Some(AlphaMode::Straight), "straight"), (Some(AlphaMode::Premultiplied), "premul"), (Some(AlphaMode::Ignore), "ignore")]
+    {
         let mut g = f.clone();
         if let Some(m) = mode {
             g.alpha = m;
