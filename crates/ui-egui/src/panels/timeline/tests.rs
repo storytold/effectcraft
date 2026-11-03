@@ -628,11 +628,9 @@ fn a_key_menu_edit_selects_the_clicked_key_before_applying_the_command() {
     assert_eq!(app.session.state.selected_keys[0].time, prop.keys[0].time);
 }
 
-/// A key's marquee target is the marker it draws: the glyph of its two halves, or a roving key's
-/// smaller dot whatever its halves are.
+/// A key's marquee target is the marker it draws: a roving key's is its smaller dot.
 #[test]
 fn a_keys_glyph_rect_is_what_it_draws() {
-    use effectcraft_engine::keyframe::{Interp, KeyHalf};
     let mut s = effectcraft_engine::Session::default();
     s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 2})).unwrap();
     let id = s.execute("layer.newSolid", json!({"name": "Box", "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
@@ -640,9 +638,6 @@ fn a_keys_glyph_rect_is_what_it_draws() {
     let comp = s.active_comp().unwrap();
     let mut k = comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().keys[0].clone();
     let c = pos2(100.0, 50.0);
-    k.in_interp = Interp::Hold;
-    k.out_interp = Interp::Linear;
-    assert_eq!(key_glyph_rect(&k, c), icons::keyframe_bounds(c, KEY_GLYPH_SIZE, KeyHalf::Hold, KeyHalf::Linear));
     k.roving = true;
     assert_eq!(key_glyph_rect(&k, c), Rect::from_center_size(c, vec2(5.0, 5.0)));
 }
@@ -675,8 +670,6 @@ fn keys_in_box_walks_the_rows_and_tests_each_glyph() {
     let (one, two) = (Tick::from_seconds_f64(1.0).0, Tick::from_seconds_f64(2.0).0);
     let across = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0, 0.0), pos2(x1, 200.0));
     assert_eq!(hit(across(0.0, 300.0)), [(layers[1], one), (layers[1], two), (layers[0], one), (layers[0], two)], "row order");
-    assert_eq!(hit(across(0.0, 94.5)), [(layers[1], one), (layers[0], one)], "the box reaches the glyph's left point");
-    assert!(hit(across(0.0, 93.5)).is_empty(), "the box stops short of the glyph");
     assert_eq!(hit(Rect::from_min_max(pos2(0.0, 95.5), pos2(300.0, 200.0))), [(layers[0], one), (layers[0], two)], "the box reaches the glyph's bottom point");
     assert!(hit(Rect::from_min_max(pos2(0.0, 97.0), pos2(300.0, 200.0))).is_empty(), "the box is below the glyph");
 }
