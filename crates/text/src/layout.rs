@@ -10,6 +10,7 @@
 //! the centre (centre) or the right edge (right). For **area text** (`width == Some(w)`) the
 //! origin is the top-left of the text box and lines wrap at `w`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -352,6 +353,7 @@ fn line_dist(l: &Line, y: f32) -> f32 {
     }
 }
 
+#[derive(Clone)]
 struct ShapedGlyph {
     face: FaceId,
     id: u32,
@@ -367,6 +369,7 @@ struct ShapedGlyph {
     rise: f32,
 }
 
+#[derive(Clone)]
 struct Item {
     range: Range<usize>,
     rtl: bool,
@@ -873,7 +876,12 @@ impl<'a> Para<'a> {
         let avail = avail_for(self.para, self.base_rtl, self.width, li == 0);
         let (ce, tw) = self.trailing_ws(&r);
         let hang = self.hang_of(&r, ce);
-        let content = self.range_w(r.start..ce);
+        let items = self.line_items(&r);
+        let content = if items.iter().any(|i| matches!(i, Cow::Owned(_))) {
+            items.iter().flat_map(|i| &i.glyphs).filter(|g| (r.start..ce).contains(&g.cluster)).map(|g| g.adv + g.pre).sum()
+        } else {
+            self.range_w(r.start..ce)
+        };
         // justification
         let mut space_extra = 0.0;
         if align == Align::Justify
@@ -884,7 +892,7 @@ impl<'a> Para<'a> {
                 space_extra = ((maxw - (content - hang.0 - hang.1)) / spaces as f32).max(0.0);
             }
         }
-        let placed = self.place_glyphs(&r, space_extra, ce);
+        let placed = self.place_glyphs(&items, &r, space_extra, ce);
         let carets = self.carets(&r, &placed.extents, placed.pen);
         let (asc, desc, adv, first) = self.line_metrics(&r, &placed.glyphs);
         let content_w = if space_extra > 0.0 { avail.map_or(content, |a| a + hang.0 + hang.1) } else { content };
@@ -906,7 +914,32 @@ impl<'a> Para<'a> {
         }
     }
 
-    fn place_glyphs(&self, r: &Range<usize>, space_extra: f32, ce: usize) -> Placed {
+    /// The shaped items of line `r`. An item the line cuts inside a word (a word wider than the
+    /// box) is shaped again over its part on the line, so a joining script (Arabic) takes the
+    /// forms of its new neighbours at the wrap; breaks at spaces keep the paragraph's shaping.
+    fn line_items(&self, r: &Range<usize>) -> Vec<Cow<'_, Item>> {
+        let mid_word = |b: usize| {
+            let (before, after) = (self.text.get(..b).and_then(|t| t.chars().next_back()), self.text.get(b..).and_then(|t| t.chars().next()));
+            before.zip(after).is_some_and(|(x, y)| !x.is_whitespace() && !y.is_whitespace())
+        };
+        let (cut_start, cut_end) = (mid_word(r.start), mid_word(r.end));
+        // Items are ordered and disjoint: binary-search both ends of the overlapping slice.
+        let last = self.items.partition_point(|it| it.range.start < r.end);
+        let first = self.items[..last].partition_point(|it| it.range.end <= r.start);
+        self.items[first..last]
+            .iter()
+            .filter_map(|it| {
+                if !(cut_start && it.range.start < r.start) && !(cut_end && it.range.end > r.end) {
+                    return Some(Cow::Borrowed(it));
+                }
+                let (s, e) = (it.range.start.max(r.start), it.range.end.min(r.end));
+                let chars = self.chars.get(self.chars.partition_point(|c| c.0 < s)..self.chars.partition_point(|c| c.0 < e))?;
+                shape_span(self.text, chars, self.runs, e).map(Cow::Owned)
+            })
+            .collect()
+    }
+
+    fn place_glyphs(&self, items: &[Cow<'_, Item>], r: &Range<usize>, space_extra: f32, ce: usize) -> Placed {
         let (levels, vruns) = self.bidi.visual_runs(&self.bidi.paragraphs[0], r.clone());
         let mut pen = 0.0f32;
         let mut glyphs = Vec::new();
@@ -915,14 +948,14 @@ impl<'a> Para<'a> {
         for run in vruns {
             let rtl = levels[run.start].is_rtl();
             // Items are ordered and disjoint: binary-search both ends of the overlapping slice.
-            let run_limit = self.items.partition_point(|item| item.range.start < run.end);
-            let run_first = self.items[..run_limit].partition_point(|item| item.range.end <= run.start);
+            let run_limit = items.partition_point(|item| item.range.start < run.end);
+            let run_first = items[..run_limit].partition_point(|item| item.range.end <= run.start);
             let mut idx: Vec<usize> = (run_first..run_limit).collect();
             if rtl {
                 idx.reverse();
             }
             for k in idx {
-                for g in self.items[k].glyphs.iter().filter(|g| run.contains(&g.cluster)) {
+                for g in items[k].glyphs.iter().filter(|g| run.contains(&g.cluster)) {
                     let st = &self.runs[g.run].1;
                     let x0 = pen;
                     pen += g.pre;
@@ -949,7 +982,7 @@ impl<'a> Para<'a> {
                         u.0 = u.0.min(x0);
                         u.1 = u.1.max(pen);
                     }
-                    let e = extents.entry(g.cluster).or_insert((x0, pen, self.items[k].rtl));
+                    let e = extents.entry(g.cluster).or_insert((x0, pen, items[k].rtl));
                     e.0 = e.0.min(x0);
                     e.1 = e.1.max(pen);
                 }
@@ -1077,21 +1110,26 @@ fn build_items(text: &str, chars: &[CharInfo], runs: &[(Range<usize>, TextStyle)
         while j < chars.len() && key(&chars[j]) == k0 {
             j += 1;
         }
-        let (face, rtl, form, si, _) = k0;
-        let style = &runs[si].1;
-        let sub: Vec<(usize, char, char)> = chars[i..j].iter().map(|c| (c.0, c.1, c.2)).collect();
-        let size = match form {
-            Form::FauxSmall => style.glyph_size() * SMALL_CAPS_SCALE,
-            Form::TrueScript => style.size,
-            _ => style.glyph_size(),
-        };
-        let mut glyphs = shape_item(&sub, rtl, face, size, style, si, form);
-        space_item(&mut glyphs, style, text, true);
         let end = if j < chars.len() { chars[j].0 } else { text.len() };
-        items.push(Item { range: chars[i].0..end, rtl, glyphs });
+        items.extend(shape_span(text, &chars[i..j], runs, end));
         i = j;
     }
     items
+}
+
+/// One item: `chars` (same face, direction, form and run) shaped and spaced, ending at byte `end`.
+fn shape_span(text: &str, chars: &[CharInfo], runs: &[(Range<usize>, TextStyle)], end: usize) -> Option<Item> {
+    let &(start, _, _, face, rtl, form, si) = chars.first()?;
+    let style = &runs.get(si)?.1;
+    let sub: Vec<(usize, char, char)> = chars.iter().map(|c| (c.0, c.1, c.2)).collect();
+    let size = match form {
+        Form::FauxSmall => style.glyph_size() * SMALL_CAPS_SCALE,
+        Form::TrueScript => style.size,
+        _ => style.glyph_size(),
+    };
+    let mut glyphs = shape_item(&sub, rtl, face, size, style, si, form);
+    space_item(&mut glyphs, style, text, true);
+    Some(Item { range: start..end, rtl, glyphs })
 }
 
 fn paragraph(

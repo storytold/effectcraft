@@ -494,3 +494,21 @@ fn a_later_vertical_run_keeps_the_first_line_baseline() {
     let mixed = layout_rich_uncached(text, &[(0..4, horiz), (4..text.len(), vert)], &[p]);
     assert!((mixed.lines[0].baseline - plain.lines[0].baseline).abs() < 1e-3, "{} vs {}", mixed.lines[0].baseline, plain.lines[0].baseline);
 }
+
+/// Review of #2840: a word wider than the box breaks inside it; each line's edge letters take the
+/// forms of their new neighbours (an Arabic letter at a wrap is final / initial, not medial).
+#[test]
+fn overlong_arabic_word_reshapes_at_its_wraps() {
+    let text =
+        "\u{0645}\u{0633}\u{062a}\u{0634}\u{0641}\u{064a}\u{0645}\u{0633}\u{062a}\u{0634}\u{0641}\u{064a}\u{0645}\u{0633}\u{062a}\u{0634}\u{0641}\u{064a}";
+    let s = st(40.0);
+    if ids(text, &s).contains(&0) {
+        return; // no Arabic face on this machine
+    }
+    let lay = layout_uncached(text, &s, &ParagraphStyle { width: Some(100.0), ..Default::default() });
+    assert!(lay.lines.len() > 1, "{:?}", lay.lines.iter().map(|l| l.range.clone()).collect::<Vec<_>>());
+    for l in &lay.lines {
+        let got: Vec<u32> = lay.glyphs[l.glyphs.clone()].iter().map(|g| g.id).collect();
+        assert_eq!(got, ids(&text[l.range.clone()], &s), "line {:?}", l.range);
+    }
+}
