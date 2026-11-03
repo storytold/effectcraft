@@ -205,6 +205,12 @@ fn evaluate_out(
             Run::Pending => {
                 let misses = FRAMES.with(|f| f.borrow_mut().get_mut(depth).map(|fr| std::mem::take(&mut fr.misses)).unwrap_or_default());
                 for m in misses {
+                    // A request caught and repeated by the script is answered once; each answer
+                    // can be costly (`sampleImage`), so the time budget is checked between them.
+                    if FRAMES.with(|f| f.borrow().get(depth).is_some_and(|fr| fr.memo.contains_key(&m))) {
+                        continue;
+                    }
+                    budget_left()?;
                     // May evaluate other expressions (nested frames above ours).
                     let r = resolver.resolve(&m);
                     FRAMES.with(|f| f.borrow_mut().get_mut(depth).map(|fr| fr.memo.insert(m, r)));

@@ -1187,7 +1187,7 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
 // which throws once the run has used its share of the stack. `Proxy` (chains of proxies nest
 // without any script frame) and `Reflect` are not available to expressions.
 (function () {
-  var nest = __nest, stack = __stack, apply = Reflect.apply, construct = Reflect.construct;
+  var nest = __nest, stack = __stack, apply = Reflect.apply, construct = Reflect.construct, str = String;
   var define = Object.defineProperty, describe = Object.getOwnPropertyDescriptor, proto = Object.getPrototypeOf;
   // Replace `obj[name]` keeping its attributes.
   function replace(obj, name, f) {
@@ -1212,12 +1212,20 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
   };
   // `Function` and the generator / async variants (reachable as `(function* () {}).constructor`).
   function dynamic(F) {
+    // Each argument is converted once, and the strings checked are the ones compiled: built
+    // in helpers (`push`, `slice`, `join`, `String`) can be replaced by the expression, and
+    // must not make the check see other text than the constructor gets.
     var w = function () {
-      var args = [];
-      for (var i = 0; i < arguments.length; i++) args.push(String(arguments[i]));
+      var n = arguments.length, args = [], params = '';
+      for (var i = 0; i < n; i++) {
+        var s = str(arguments[i]);
+        if (typeof s !== 'string') s = '';
+        define(args, i, { value: s, writable: true, enumerable: true, configurable: true });
+        if (i < n - 1) params = i ? params + ',' + s : s;
+      }
       stack();
-      nest(args.slice(0, -1).join(','));
-      nest(args.length ? args[args.length - 1] : '');
+      nest(params);
+      nest(n ? args[n - 1] : '');
       return construct(F, args);
     };
     define(w, 'name', { value: F.name, configurable: true });
