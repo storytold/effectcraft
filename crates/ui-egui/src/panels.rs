@@ -324,12 +324,18 @@ pub(crate) fn panel_menu_area(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     }
     let mut close = false;
     let area_id = id.with("area");
-    // measured afresh on each opening, as egui's popups are: its items and its window change between openings
-    let opening = ui.ctx().read_response(area_id).is_none();
+    // a small window (a floated panel can be narrower than the menu) gets the menu at its width
+    let width = (ui.ctx().content_rect().width() - 16.0).max(0.0);
+    let grew = ui.ctx().data_mut(|d| {
+        let last = d.get_temp::<f32>(area_id);
+        d.insert_temp(area_id, width);
+        last.is_some_and(|last| width > last)
+    });
+    // measured afresh on each opening, as egui's popups are: its items and its window change between
+    // openings. A window that grows under it gives back the width a narrower one took.
+    let opening = ui.ctx().read_response(area_id).is_none() || grew;
     let area = egui::Area::new(area_id).order(egui::Order::Foreground).fixed_pos(pos).sizing_pass(opening).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            // a small window (a floated panel can be narrower than the menu) gets the menu at its width
-            let width = (ui.ctx().content_rect().width() - 16.0).max(0.0);
             ui.set_min_width(200.0_f32.min(width));
             // only ever narrows what the area measured: the separator fills whatever width it is given
             ui.set_max_width(ui.max_rect().width().min(width));
@@ -523,6 +529,22 @@ mod panel_menu_viewport_tests {
         }
         let rect = pass(&mut app, &ctx, window(), 160.0, vec![]).unwrap();
         assert!(rect.min.x >= -0.5 && rect.max.x <= 160.5, "the menu follows the window: {rect:?}");
+    }
+
+    /// A long translation (here French) makes the menu wider than its minimum.
+    #[test]
+    fn a_window_widened_under_the_open_menu_gives_the_labels_their_room_back() {
+        crate::i18n::set_current("fr");
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        open(&ctx, window());
+        let wide = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        let narrow = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 160.0, vec![])).last().unwrap();
+        let again = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        crate::i18n::set_current("en");
+        assert!(narrow.width() < wide.width(), "it fits the narrow window: {narrow:?}, wide {wide:?}");
+        assert!((again.width() - wide.width()).abs() < 1.0, "back to its own width: {again:?}, first {wide:?}");
     }
 
     #[test]
