@@ -31,7 +31,7 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Home screen, Learn, templates | Home with recent projects, template gallery, interactive Learn tutorials | 70% | Layout nitpicks (#581); Home literals untranslated (#574) |
 | Quick Apply (26.2) | Search to apply effects, presets or commands | partial | A command palette exists; not After Effects' Quick Apply |
 | Accessibility | AccessKit enabled; `ui_accessibility_audit` counts unnamed or roleless controls per panel: Project (#776), Effects & Presets, Settings (all pages) and Render Queue with Templates are at zero, with names, roles, selected / open / checked state and arrow-key, Home / End, Enter, Space operation (#1335); `ui_contrast` checks theme tokens against WCAG 2 | 20% | No screen reader has been run on anything; the other panels are counted, not fixed (Timeline ≈ 55 unnamed controls); 13 of 48 token pairs are below WCAG 2 (primary button text, error text, control borders, Light theme warning colour); focus order across panels, colour-blindness and reduced motion are unchecked; app shortcuts pause while a widget has keyboard focus |
-| UI scale | Settings ▸ Appearance ▸ UI Scale 75–200% | beyond | After Effects follows the system's scaling (#284) |
+| UI scale | Settings ▸ Appearance ▸ UI Scale 50–200% | beyond | After Effects follows the system's scaling (#284) |
 
 Path editing (#1220): the Composition viewer suppresses a selected layer’s transform box while
 using a Pen-family tool on a visible path, or while selecting its vertices with the Selection

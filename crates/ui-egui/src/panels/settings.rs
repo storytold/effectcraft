@@ -124,7 +124,8 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Int(lo, hi, unit) => {
                                     // A dragged value applies on release, and a typed one once
                                     // entered: UI Scale doesn't resize the interface under the
-                                    // pointer mid-drag (#2582) or at a typed number's first digit.
+                                    // pointer mid-drag (#2582) or at a typed number's first digit
+                                    // (typing 85 would otherwise start at 50 %).
                                     let held = egui::Id::unique(("settings-drag", key));
                                     let mut x = ui.data(|d| d.get_temp::<i64>(held)).unwrap_or_else(|| v.as_i64().unwrap_or(0));
                                     let drag = egui::DragValue::new(&mut x).range(lo..=hi).speed(0.25).update_while_editing(false);

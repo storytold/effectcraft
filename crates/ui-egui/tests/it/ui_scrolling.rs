@@ -442,3 +442,75 @@ fn settings_page_column_fits_japanese_names() {
     let row = rect(&h, "settings.page.scripting");
     assert!(row.width() >= text_width + 20.0, "{name} needs {text_width} points; row is {row:?}");
 }
+
+/// The width a finger can land on, in points (#2365). `widgets::TOUCH_BAR_TARGET` is private to
+/// that module; this is the number the touch pass promises.
+const TOUCH_BAR_WIDTH: f32 = 24.0;
+
+/// The vertical scroll bars laid out under the app's root `Ui`, as their finger-reachable width:
+/// the a11y node's rect is the bar's full interaction rect, whose thin axis is the style's
+/// `bar_width` (`scroll_area.rs` hit-tests the full width whatever the bar is drawn at).
+/// Horizontal bars of their own are excluded — the Composition panel's bottom bar keeps its own
+/// 4-point style, and it is a strip a finger aims at along its length, not across it.
+fn finger_reachable_bars(h: &Harness<'_, EffectcraftApp>) -> Vec<f32> {
+    h.query_all_by_role(egui::accesskit::Role::ScrollBar).map(|node| node.rect()).filter(|r| r.height() > r.width()).map(|r| r.width()).collect()
+}
+
+/// A touch screen's widened bar target must apply in the *same* frame the finger first appears
+/// (#2365, review on `app/frame.rs`): the widening happens inside the frame, but the pass's root
+/// `Ui` was built from the styles before it, so a panel laid out under that root takes the
+/// theme's thin bar for that one frame. Dialogs, menus and popups build their own `Ui` from the
+/// current pass's styles and are never stale.
+///
+/// A theme switch alone cannot show the staleness: the stale root `Ui` still holds the *previous*
+/// pass's styles, which the previous frame had already widened. So the warm-up runs with no touch
+/// at all (bars thin), and the touch and the theme switch land together in one frame.
+///
+/// Essential Graphics is the container: its body is an `egui::ScrollArea` drawn under the pass's
+/// root `Ui` (`panels/essential.rs`), and enough added controls overflow it in a short window. A
+/// ScriptUI panel would have been the obvious tall container, but its content needs a JavaScript
+/// engine this CI does not build.
+#[test]
+fn a_first_finger_widens_the_panel_scroll_bars_in_its_own_frame() {
+    use effectcraft_ui_egui::dock::PanelKind;
+
+    let mut h = harness(1200.0, 240.0);
+    let app = h.state_mut();
+    let lid = app.session.active_comp().unwrap().layers[0].id.0;
+    app.session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    // Twelve Slider Controls, each exposing its own `slider` property: one row each, tall enough
+    // as a list to overflow the panel body at this height. `effects/#N` indexes the layer's effect
+    // list one-based (`cmd/params.rs::resolve_effect_path`), and a Slider Control has only a
+    // `slider` property, so every path names an effect's own control rather than another's.
+    for _ in 0..12 {
+        app.session.execute("effect.apply", json!({"effect": "ec.control.slider", "layers": [lid]})).unwrap();
+    }
+    let mut paths: Vec<String> = (1..=12).map(|n| format!("effects/#{n}/slider")).collect();
+    paths.push("transform/opacity".into());
+    for path in paths {
+        app.session.execute("essential.addProperty", json!({"layer": lid, "path": &path})).unwrap();
+    }
+    app.show_panel(PanelKind::EssentialGraphics);
+    app.ui.maximized = Some(PanelKind::EssentialGraphics);
+    // Warm-up without a finger: the theme's own bar, the animation for showing it already done.
+    h.run_steps(12);
+    let thin = finger_reachable_bars(&h);
+    assert!(!thin.is_empty(), "the maximised panel overflows its controls, so its scroll area draws a bar");
+    assert!(thin.iter().all(|w| *w < TOUCH_BAR_WIDTH), "a mouse-only window keeps the theme's thin bar: {thin:?}");
+
+    // The finger's first frame, which also switches the theme (styles rebuilt from scratch):
+    // exactly one step, so the pass's root `Ui` is the one built before the widening.
+    let ctx = h.ctx.clone();
+    h.input_mut().events.push(Event::Touch {
+        device_id: egui::TouchDeviceId(3),
+        id: egui::TouchId(1),
+        phase: egui::TouchPhase::Start,
+        pos: pos2(10.0, 10.0),
+        force: None,
+    });
+    h.state_mut().set_theme(&ctx, effectcraft_ui_egui::theme::ThemeKind::Light);
+    h.step();
+    let wide = finger_reachable_bars(&h);
+    assert!(!wide.is_empty(), "the panel still overflows after the theme switch");
+    assert!(wide.iter().all(|w| *w >= TOUCH_BAR_WIDTH), "the frame a finger lands in must already give a 24-point bar: {wide:?}");
+}
