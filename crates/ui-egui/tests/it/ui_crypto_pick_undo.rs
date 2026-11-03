@@ -697,16 +697,19 @@ fn long_sequence(tag: &str, size: egui::Vec2, res: Resolution) {
     for _ in 0..3 {
         step_history(&mut h, &f, &mut m, dims, false, "undo before Ctrl+Y");
     }
-    let armed = m.armed;
+    if m.armed.is_none() {
+        let l = if m.state().iter().find(|l| l.id == pl).and_then(|l| l.crypto()).is_some() { pl } else { pre };
+        run_step(&mut h, &f, &mut m, dims, &Arm(l), 99);
+    }
     key(&mut h, Key::Y, CTRL);
     assert!(h.state().dialog.is_some(), "Ctrl+Y opens the New Solid dialog");
     assert_eq!(h.state().session.history.redo.len(), 3, "Ctrl+Y doesn't redo");
     key(&mut h, Key::Escape, Modifiers::NONE);
     assert!(h.state().dialog.is_none());
-    if armed.is_some() && h.state().ui.fx_pick.is_none() {
-        eprintln!("FINDING {tag}: Esc that closed the New Solid dialog also disarmed the eyedropper");
-        m.armed = None;
-    }
+    assert!(h.state().ui.fx_pick.is_some(), "Esc that closes the New Solid dialog keeps the eyedropper armed");
+    key(&mut h, Key::Escape, Modifiers::NONE);
+    assert!(h.state().ui.fx_pick.is_none(), "a second Esc disarms");
+    m.armed = None;
     verify(&mut h, &f, &mut m, dims, "after Ctrl+Y and Esc");
     // Undo partway, then a new pick: no redo left, the undone steps kept as a branch.
     for k in 0..4 {

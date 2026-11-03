@@ -97,8 +97,9 @@ struct State {
     /// The waiting clicks took the focus from a text field (the Selection being typed): they
     /// are made once it has committed, on top of what it committed.
     after_typing: bool,
-    /// A text field or a popup had the keyboard the pass before: its Esc isn't the pick's
-    /// (egui lets go of the focus and closes popups before the viewer runs).
+    /// A text field, a popup or a dialog had the keyboard the pass before: its Esc isn't the
+    /// pick's (egui lets go of the focus and closes popups, and Esc closes the dialog, before
+    /// the viewer runs).
     esc_taken: bool,
     /// The press of the click in progress.
     press: Option<Press>,
@@ -507,12 +508,13 @@ fn draw_status_chip(app: &mut EffectcraftApp, ctx: &egui::Context, painter: &egu
     painter.galley(chip.left_center() + vec2(12.0, -galley.size().y / 2.0), galley, colour);
 }
 
-/// Esc disarms the eyedropper only when no text field or popup had the keyboard this pass or
-/// the pass before (egui lets go of the focus and closes popups before the viewer runs).
+/// Esc disarms the eyedropper only when no text field, popup, or dialog had the keyboard this
+/// pass or the pass before (egui lets go of the focus and closes popups, and Esc closes the
+/// dialog, before the viewer runs).
 fn handle_escape(app: &mut EffectcraftApp, ui: &mut egui::Ui, st: &mut State) {
     let ctx = ui.ctx();
-    // (Esc in a text field, the Selection being typed, only ends the typing; in a menu, it.)
-    let esc_taken = std::mem::replace(&mut st.esc_taken, ctx.text_edit_focused() || egui::Popup::is_any_open(ctx));
+    // (Esc in a text field, the Selection being typed, only ends the typing; in a menu or dialog, it.)
+    let esc_taken = std::mem::replace(&mut st.esc_taken, ctx.text_edit_focused() || egui::Popup::is_any_open(ctx) || app.dialog.is_some());
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !esc_taken && !st.esc_taken {
         app.ui.fx_pick = None;
         app.ui.status.clear();
