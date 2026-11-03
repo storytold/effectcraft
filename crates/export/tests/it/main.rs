@@ -7,6 +7,7 @@ mod hevc_av1_roundtrip;
 #[cfg(not(target_arch = "wasm32"))]
 mod mov_audio_sample_positions;
 mod movie_bytes;
+mod movie_color;
 mod ms_rounded_footage;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_audio_sample_positions;

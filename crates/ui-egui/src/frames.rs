@@ -39,10 +39,13 @@ use rayon::prelude::*;
 const MAX_KEEPERS: usize = 64;
 
 /// GPU frames kept for RAM preview (bytes of video memory) at first. wgpu can't tell how much
-/// video memory there is: each time the device runs out, the budget halves (to
-/// [`MIN_GPU_BUDGET`]) and the frame renders on the CPU (#106).
+/// video memory there is: allocation pressure halves the budget (to [`MIN_GPU_BUDGET`])
+/// and the frame renders on the CPU (#106). One burst is counted once; successful GPU
+/// renders gradually restore the budget after pressure subsides.
 const GPU_BUDGET: usize = 1 << 30;
 const MIN_GPU_BUDGET: usize = 64 << 20;
+const GPU_PRESSURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+const GPU_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A rendered viewer frame: CPU pixels or a GPU texture.
 #[derive(Clone)]
@@ -151,6 +154,8 @@ struct Cache {
     budget: usize,
     /// Bytes of GPU frames to keep at most ([`GPU_BUDGET`]).
     gpu_budget: usize,
+    gpu_pressure: Option<web_time::Instant>,
+    gpu_adjusted: Option<web_time::Instant>,
     /// The playing preview, if any: evictions spare the frames it shows next.
     playhead: Option<Playhead>,
     /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
@@ -207,10 +212,27 @@ impl Cache {
             }
         }
     }
-    /// The GPU ran out of memory: keep half as many GPU frames from now on.
+    /// Several workers failing in one burst must not halve the shared budget repeatedly.
     fn gpu_out_of_memory(&mut self) {
-        self.gpu_budget = (self.gpu_budget / 2).max(MIN_GPU_BUDGET);
+        let now = web_time::Instant::now();
+        if self.gpu_pressure.is_none_or(|last| now.duration_since(last) >= GPU_PRESSURE_COOLDOWN) {
+            self.gpu_budget = (self.gpu_budget / 2).max(MIN_GPU_BUDGET);
+            self.gpu_adjusted = Some(now);
+        }
+        self.gpu_pressure = Some(now);
         self.evict_gpu();
+    }
+    fn gpu_succeeded(&mut self) {
+        let now = web_time::Instant::now();
+        if self.gpu_pressure.is_some_and(|last| now.duration_since(last) >= GPU_RECOVERY_INTERVAL)
+            && self.gpu_adjusted.is_some_and(|last| now.duration_since(last) >= GPU_RECOVERY_INTERVAL)
+        {
+            self.gpu_budget = self.gpu_budget.saturating_add(MIN_GPU_BUDGET).min(GPU_BUDGET);
+            self.gpu_adjusted = Some(now);
+        }
+    }
+    fn gpu_ready(&self) -> bool {
+        self.gpu_pressure.is_none_or(|last| last.elapsed() >= GPU_PRESSURE_COOLDOWN)
     }
     fn forget(&mut self, img: &FrameImage) {
         self.bytes -= img.bytes();
@@ -505,7 +527,7 @@ impl Default for Frames {
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None, scale: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -914,6 +936,9 @@ impl Frames {
             c.order.clear();
             c.bytes = 0;
             c.gpu_bytes = 0;
+            c.gpu_budget = GPU_BUDGET;
+            c.gpu_pressure = None;
+            c.gpu_adjusted = None;
         }
         // Disk keys hash the footage files' size and time, but are remembered per revision; a
         // file reloaded from disk without a new revision (a re-rendered image sequence) must be
@@ -1382,10 +1407,15 @@ impl Worker {
     /// `None` if that panicked too.
     fn render_guarded(&self, job: &Job) -> Option<FrameImage> {
         let attempt = |gpu: bool| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_job(job, gpu))).ok();
-        attempt(true).or_else(|| {
+        let img = attempt(true).or_else(|| {
             log::error!("a frame render panicked (frame {})", job.key.frame);
             job.src.gpu.as_ref().and_then(|_| attempt(false))
-        })
+        });
+        // A preview frame is done: the GPU pool ages the sizes it did not ask for.
+        if let Some(g) = &job.src.gpu {
+            effectcraft_engine::render::Accelerator::frame_end(g);
+        }
+        img
     }
 
     /// A failed scoped attempt retries on CPU. Retired contexts cannot recover by reducing
@@ -1406,9 +1436,19 @@ impl Worker {
         }
     }
 
+    fn gpu_succeeded(&self) {
+        if let Ok(mut c) = self.cache.lock() {
+            c.gpu_succeeded();
+        }
+    }
+
+    fn gpu_ready(&self) -> bool {
+        !self.gpu_retired.load(Ordering::Acquire) && self.cache.lock().is_ok_and(|c| c.gpu_ready())
+    }
+
     /// The frame on the GPU, kept there for the viewer, if the compositor can do it alone.
     fn render_gpu(&self, job: &Job) -> Option<FrameImage> {
-        if self.gpu_retired.load(Ordering::Acquire) {
+        if !self.gpu_ready() {
             return None;
         }
         let g = job.src.gpu.as_ref()?;
@@ -1418,8 +1458,15 @@ impl Worker {
         r.cache = Some(&job.src.layer_cache);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
-        match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
-            Ok(f) => f.map(|f| FrameImage::Gpu(Arc::new(f))),
+        let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
+        effectcraft_engine::render::Accelerator::frame_end(g);
+        match f {
+            Ok(f) => {
+                if f.is_some() {
+                    self.gpu_succeeded();
+                }
+                f.map(|f| FrameImage::Gpu(Arc::new(f)))
+            }
             Err(e) => {
                 self.gpu_attempt_failed(g, &e);
                 None
@@ -1432,7 +1479,7 @@ impl Worker {
         let footage = job.footage();
         let mut r = Renderer::new(&job.src.project, &footage, job.opts);
         r.expr = job.src.expr.as_deref();
-        let gpu_allowed = gpu && !self.gpu_retired.load(Ordering::Acquire);
+        let gpu_allowed = gpu && self.gpu_ready();
         // A failed GPU attempt may have populated intermediate entries before its scope
         // reported failure. The CPU retry must compute its own pixels from the snapshot.
         r.cache = gpu_allowed.then_some(job.src.layer_cache.as_ref());
@@ -1452,6 +1499,7 @@ impl Worker {
                 let t0 = web_time::Instant::now();
                 match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
                     Ok(Some(f)) => {
+                        self.gpu_succeeded();
                         if let Some((p, key)) = auto {
                             // Time the GPU's work, not just its recording.
                             g.wait();
@@ -1483,7 +1531,10 @@ impl Worker {
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
             return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
-                Ok(img) => FrameImage::Cpu(Arc::new(to_color_image(&img))),
+                Ok(img) => {
+                    self.gpu_succeeded();
+                    FrameImage::Cpu(Arc::new(to_color_image(&img)))
+                }
                 Err(e) => {
                     self.gpu_attempt_failed(g, &e);
                     self.render_job(job, false)
@@ -1578,6 +1629,14 @@ impl Queue {
             })
             .map(|(i, _)| i)
     }
+}
+
+/// The render scale a viewer frame's key stands for: it keeps thousandths, but the viewer
+/// renders every n-th pixel, and 0.333 is not 1/3 (2 pixels off by row 1000 at Third). The
+/// comp's own factor decides when two factors share the thousandths (from 1/34).
+pub(crate) fn render_scale(thousandths: u32, factor: Option<u8>) -> f64 {
+    let n = factor.map(f64::from).filter(|n| (1000.0 / n).round() == f64::from(thousandths));
+    1.0 / n.unwrap_or_else(|| (1000.0 / f64::from(thousandths.max(1))).round()).max(1.0)
 }
 
 #[cfg(test)]

@@ -145,11 +145,13 @@ fn string_literal(rest: &str) -> Option<String> {
     None
 }
 
-/// Characters required by the fixed panel catalog, for system-font coverage selection.
-/// Sorted and deduplicated so fallback registration is deterministic.
+/// Characters required by the fixed panel catalog and the effect names and categories, for
+/// system-font coverage selection. Sorted and deduplicated so fallback registration is
+/// deterministic.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn catalog_characters(language: &str) -> Vec<char> {
-    catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+    let panels = catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars());
+    panels.chain(super::effects::characters(language)).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
 }
 
 /// Translate one interface string: the current language's row for `text`, or `text` itself.
@@ -1034,7 +1036,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Feet + Frames (35mm)", "フィート + フレーム (35mm)"),
     ("Feet + Frames (16mm)", "フィート + フレーム (16mm)"),
     ("Current Frame", "現在のフレーム"),
-    ("Work Area", "作業領域"),
+    ("Work Area", "ワークエリア"),
     ("Create Markers", "マーカーを作成"),
     ("Split Layers", "レイヤーを分割"),
     ("Split and Precompose", "分割してプリコンポーズ"),

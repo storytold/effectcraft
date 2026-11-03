@@ -364,32 +364,54 @@ fn hex_cell(x: f64, y: f64, r: f64) -> ((f64, f64), (i64, i64)) {
     ((px, py), (rx as i64, rz as i64))
 }
 
+/// Stable f64 hex-cell selection and source geometry for CPU and GPU renders.
+pub struct HexTile {
+    r: f64,
+    c: (f64, f64),
+    sn: f64,
+    cs: f64,
+    smear: f64,
+    mode: u32,
+}
+impl HexTile {
+    /// No image pixels are read; only buffer geometry and parameters are used.
+    pub fn new(ctx: &EffectCtx, b: &Buf) -> Self {
+        let r = (ctx.params.f("radius") * b.scale).max(0.5);
+        let c = b.to_px(ctx.params.v2("center"));
+        let rot = ctx.params.f("rotate").to_radians();
+        let (sn, cs) = rot.sin_cos();
+        let smear = (ctx.params.f("smearing") / 100.0).clamp(0.0, 1.0);
+        let mode = ctx.params.e("render");
+        Self { r, c, sn, cs, smear, mode }
+    }
+    /// Bilinear source position at a buffer pixel centre.
+    pub fn source_at(&self, x: u32, y: u32) -> (f64, f64) {
+        let Self { r, c: (cx, cy), sn, cs, smear, mode } = *self;
+        let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+        // Into the rotated tiling frame.
+        let (u, v) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+        let ((hx, hy), (qi, ri)) = hex_cell(u, v, r);
+        let (mut lu, lv) = (u - hx, v - hy);
+        let odd = (qi + ri).rem_euclid(2) == 1;
+        match mode {
+            1 if odd => lu = -lu,
+            2 if odd => lu = -lu,
+            _ => {}
+        }
+        let lv = if mode == 2 && odd { -lv } else { lv };
+        // Every tile shows the hexagon around the centre point.
+        let (ox, oy) = (lu * cs - lv * sn, lu * sn + lv * cs);
+        let (tx, ty) = (cx + ox, cy + oy);
+        let (sx, sy) = (tx + (x as f64 + 0.5 - tx) * smear, ty + (y as f64 + 0.5 - ty) * smear);
+        (sx, sy)
+    }
+}
 fn hextile(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let r = (ctx.params.f("radius") * b.scale).max(0.5);
-    let (cx, cy) = b.to_px(ctx.params.v2("center"));
-    let rot = ctx.params.f("rotate").to_radians();
-    let (sn, cs) = rot.sin_cos();
-    let smear = (ctx.params.f("smearing") / 100.0).clamp(0.0, 1.0);
-    let mode = ctx.params.e("render");
+    let geometry = HexTile::new(ctx, &b);
     let src = b.img.clone();
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
-            let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
-            // Into the rotated tiling frame.
-            let (u, v) = (dx * cs + dy * sn, -dx * sn + dy * cs);
-            let ((hx, hy), (qi, ri)) = hex_cell(u, v, r);
-            let (mut lu, lv) = (u - hx, v - hy);
-            let odd = (qi + ri).rem_euclid(2) == 1;
-            match mode {
-                1 if odd => lu = -lu,
-                2 if odd => lu = -lu,
-                _ => {}
-            }
-            let lv = if mode == 2 && odd { -lv } else { lv };
-            // Every tile shows the hexagon around the centre point.
-            let (ox, oy) = (lu * cs - lv * sn, lu * sn + lv * cs);
-            let (tx, ty) = (cx + ox, cy + oy);
-            let (sx, sy) = (tx + (x as f64 + 0.5 - tx) * smear, ty + (y as f64 + 0.5 - ty) * smear);
+            let (sx, sy) = geometry.source_at(x as u32, y as u32);
             *px = src.sample_bilinear_clamped(sx, sy);
         }
     });
