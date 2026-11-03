@@ -271,7 +271,15 @@ impl Comp {
             return base.to_string();
         }
         let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
-        (2..).map(|i| format!("{stem} {i}")).find(|n| !self.layers.iter().any(|l| &l.name == n)).unwrap_or_default()
+        // The suffixes in use, gathered in one pass: trying each candidate against every layer
+        // made importing many layers of one name cubic.
+        let taken: std::collections::HashSet<u64> = self
+            .layers
+            .iter()
+            .filter_map(|l| l.name.strip_prefix(stem)?.strip_prefix(' '))
+            .filter_map(|s| s.parse::<u64>().ok().filter(|n| n.to_string() == s))
+            .collect();
+        (2..).find(|i| !taken.contains(i)).map(|i| format!("{stem} {i}")).unwrap_or_default()
     }
 }
 
