@@ -29,7 +29,12 @@ pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Colle
         Some(8) => out.bit_depth = BitDepth::Bpc8,
         Some(16) => out.bit_depth = BitDepth::Bpc16,
         Some(32) => out.bit_depth = BitDepth::Bpc32,
-        _ => {}
+        _ => {
+            // The stored code (`nhed` byte 15) is 0, 1 or 2; another one is not guessed at.
+            if let Some(code) = file.chunk(b"nhed").and_then(|c| c.bytes()).and_then(|b| b.get(15).copied()) {
+                col.lose(LossCategory::ProjectSettings, format!("colour depth code {code} (not known; the current depth is kept)"));
+            }
+        }
     }
     match &s.working_space {
         Some(WorkingSpace::None) => out.working_space = None,

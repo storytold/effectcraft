@@ -104,6 +104,12 @@ impl<'f, 'a> Item<'f, 'a> {
         self.chunk.child_list(b"Sfdr").into_iter().flat_map(|sfdr| sfdr.children().iter()).filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
     }
 
+    /// Whether the item has the `LIST Sfdr` of a folder's contents (After Effects writes an empty
+    /// one for an empty folder).
+    pub fn has_folder_contents(&self) -> bool {
+        self.chunk.child_list(b"Sfdr").is_some()
+    }
+
     /// The composition view when this item has composition data (`cdta`).
     pub fn comp(&self) -> Option<Comp<'f, 'a>> {
         self.chunk.child(b"cdta").map(|_| Comp { item: self.chunk })

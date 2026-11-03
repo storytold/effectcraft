@@ -21,6 +21,7 @@ mod robustness;
 mod shapes;
 mod shapes_round2;
 mod styles;
+mod synthetic;
 mod text;
 mod text_anim;
 mod timing;

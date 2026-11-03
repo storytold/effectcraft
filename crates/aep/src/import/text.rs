@@ -152,6 +152,20 @@ fn finite(v: f64, lo: f64, hi: f64) -> Option<f64> {
     v.is_finite().then(|| v.clamp(lo, hi))
 }
 
+/// `v` within `lo..=hi`: a value outside is clamped, a value that is not a number is replaced by
+/// `default`, and both are reported (a normal file stays inside the limits).
+fn fit(v: f64, (lo, hi): (f64, f64), default: f64, field: &str, what: &str, col: &mut Collector) -> f64 {
+    if !v.is_finite() {
+        col.lose(LossCategory::TextLayers, format!("{what}: {field} is not a number, {default} is used"));
+        return default;
+    }
+    let fitted = v.clamp(lo, hi);
+    if (fitted - v).abs() > 1e-9 {
+        col.lose(LossCategory::TextLayers, format!("{what}: {field} {v} is outside {lo}..{hi}, {fitted} is used"));
+    }
+    fitted
+}
+
 fn rgba(argb: [f64; 4]) -> Option<[f32; 4]> {
     let [a, r, g, b] = argb;
     let c = |v: f64| v.is_finite().then(|| v.clamp(0.0, 1.0) as f32);
@@ -170,10 +184,7 @@ fn char_style(doc: &TextDocument, run: &AepRun, what: &str, has_font: &dyn Fn(&s
         None => col.lose(LossCategory::DamagedData, format!("{what}: a style run names no readable font, the default font is used")),
     }
     s.style = "Regular".to_string();
-    match finite(run.font_size, 0.1, 10_000.0) {
-        Some(size) => s.size = size,
-        None => col.lose(LossCategory::DamagedData, format!("{what}: a font size is not a number, the default is used")),
-    }
+    s.size = fit(run.font_size, (0.1, 10_000.0), s.size, "the font size", what, col);
     match rgba(run.fill_argb) {
         Some(c) => s.fill = c,
         None => col.lose(LossCategory::DamagedData, format!("{what}: a fill colour is not valid, the default is used")),
@@ -184,14 +195,14 @@ fn char_style(doc: &TextDocument, run: &AepRun, what: &str, has_font: &dyn Fn(&s
     // Whether fill and stroke are drawn and the stroke width (544-546).
     s.apply_fill = run.apply_fill;
     s.apply_stroke = run.apply_stroke;
-    s.stroke_width = finite(run.stroke_width, 0.0, 10_000.0).unwrap_or(0.0);
-    s.tracking = finite(run.tracking, -100_000.0, 100_000.0).unwrap_or(0.0);
+    s.stroke_width = fit(run.stroke_width, (0.0, 10_000.0), 0.0, "the stroke width", what, col);
+    s.tracking = fit(run.tracking, (-100_000.0, 100_000.0), 0.0, "the tracking", what, col);
     // Scales are factors in the file (539, 540) and percent in EffectCraft; tsume is a fraction
     // (553) and a percentage.
-    s.h_scale = finite(run.horizontal_scale * 100.0, 1.0, 10_000.0).unwrap_or(100.0);
-    s.v_scale = finite(run.vertical_scale * 100.0, 1.0, 10_000.0).unwrap_or(100.0);
-    s.baseline_shift = finite(run.baseline_shift, -100_000.0, 100_000.0).unwrap_or(0.0);
-    s.tsume = finite(run.tsume * 100.0, 0.0, 100.0).unwrap_or(0.0);
+    s.h_scale = fit(run.horizontal_scale * 100.0, (1.0, 10_000.0), 100.0, "the horizontal scale", what, col);
+    s.v_scale = fit(run.vertical_scale * 100.0, (1.0, 10_000.0), 100.0, "the vertical scale", what, col);
+    s.baseline_shift = fit(run.baseline_shift, (-100_000.0, 100_000.0), 0.0, "the baseline shift", what, col);
+    s.tsume = fit(run.tsume * 100.0, (0.0, 100.0), 0.0, "the tsume", what, col);
     s.ligatures = run.ligatures;
     s.kerning = match run.auto_kern {
         AutoKern::Metrics => Kerning::Metrics,
@@ -334,5 +345,27 @@ pub(crate) fn report_text_extras(layer: &AepLayer<'_, '_>, what: &str, col: &mut
             "ADBE Text More Options" if has_stored(&g, 0) => col.lose(LossCategory::TextLayers, format!("{what}: More Options are not imported")),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_outside_their_limits_are_fitted_and_reported() {
+        let mut col = Collector::default();
+        // Inside the limits, and the edge itself: nothing to report.
+        assert_eq!(fit(12.0, (0.1, 10_000.0), 1.0, "the font size", "t", &mut col), 12.0);
+        assert_eq!(fit(100.0, (1.0, 10_000.0), 100.0, "the scale", "t", &mut col), 100.0);
+        assert!(col.finish().is_lossless());
+        // Clamped, and a number that is none.
+        let mut col = Collector::default();
+        assert_eq!(fit(1.0e9, (0.1, 10_000.0), 1.0, "the font size", "t", &mut col), 10_000.0);
+        assert_eq!(fit(f64::NAN, (-5.0, 5.0), 0.0, "the tracking", "t", &mut col), 0.0);
+        let report = col.finish();
+        let details: Vec<_> = report.losses.iter().flat_map(|l| l.details.iter().cloned()).collect();
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert!(details[0].contains("outside") && details[1].contains("not a number"), "{details:?}");
     }
 }
