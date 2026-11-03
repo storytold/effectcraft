@@ -1526,9 +1526,8 @@ impl<'a, 'i> Parser<'a, 'i> {
                 let first_pair = nums.get(..2)?;
                 let (Some(&first_x), Some(&first_y)) = (first_pair.first(), first_pair.get(1)) else { return None };
                 p.move_to((first_x, first_y));
-                for pair in nums.get(2..).unwrap_or_default().chunks_exact(2) {
-                    let (Some(&x), Some(&y)) = (pair.first(), pair.get(1)) else { continue };
-                    p.line_to((x, y));
+                for [x, y] in nums.get(2..).unwrap_or_default().as_chunks::<2>().0 {
+                    p.line_to((*x, *y));
                 }
                 if n.tag_name().name() == "polygon" {
                     p.close_path();
