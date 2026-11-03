@@ -325,6 +325,9 @@ pub struct Clut {
     pub data: Vec<f32>,
 }
 
+/// Most interpolating inputs [`Clut::eval`] combines (ICC allows 15).
+pub const MAX_CLUT_INPUTS: usize = 16;
+
 impl Clut {
     /// Multilinear interpolation at `x` (0..1 per input).
     pub fn eval(&self, x: &[f64]) -> Vec<f64> {
@@ -347,11 +350,18 @@ impl Clut {
             base += k * stride[i];
         }
         let mut out = vec![0.0; self.outputs];
-        for corner in 0..(1usize << n) {
+        // Only the axes that interpolate have two corners: a singleton axis, or one sampled on a
+        // grid point, contributes its lower corner alone. ICC tables have at most 15 inputs; a
+        // table built with more interpolating axes than that evaluates to zero.
+        let active: Vec<usize> = (0..n).filter(|&i| step[i] != 0 && frac[i] != 0.0).collect();
+        if active.len() > MAX_CLUT_INPUTS {
+            return out;
+        }
+        for corner in 0..(1usize << active.len()) {
             let mut w = 1.0;
             let mut off = base;
-            for i in 0..n {
-                if corner >> i & 1 == 1 {
+            for (bit, &i) in active.iter().enumerate() {
+                if corner >> bit & 1 == 1 {
                     w *= frac[i];
                     off += step[i];
                 } else {
@@ -1050,6 +1060,22 @@ mod tests {
         }
         // A matrix/TRC profile still parses as one.
         assert!(matches!(parse_profile(&write_matrix_profile("m", P709, D65, 2.2)).unwrap(), Profile::Matrix(_)));
+    }
+
+    #[test]
+    fn clut_corners_count_only_interpolating_axes() {
+        // 64 singleton axes and one interpolating one: two corners, not 2^65.
+        let mut grid = vec![1; 64];
+        grid.push(2);
+        let c = Clut { grid, outputs: 1, data: vec![0.0, 1.0] };
+        let mut x = vec![0.5; 64];
+        x.push(0.25);
+        assert!((c.eval(&x)[0] - 0.25).abs() < 1e-9);
+        // On grid points nothing interpolates.
+        let c = Clut { grid: vec![2; 40], outputs: 1, data: vec![] };
+        assert_eq!(c.eval(&[1.0; 40]), vec![0.0]);
+        // More interpolating axes than ICC allows: zero, at once.
+        assert_eq!(c.eval(&[0.5; 40]), vec![0.0]);
     }
 
     #[test]
