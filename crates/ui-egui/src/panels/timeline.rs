@@ -1366,6 +1366,48 @@ fn key_drag_id() -> egui::Id {
     egui::Id::unique("tl-key-drag")
 }
 
+/// A key marquee in progress, which selects as it moves (#2858): the comp, the box, the selection
+/// when it began (Shift keeps it, Escape puts it back) and what was last selected for: the
+/// keys touched, Shift and Cmd/Ctrl. It runs again only when one of those changes.
+#[derive(Clone, Debug)]
+struct KeyMarquee {
+    comp: ItemId,
+    rect: Rect,
+    keys: Vec<effectcraft_engine::KeyRef>,
+    props: Vec<(LayerId, u64)>,
+    layers: Vec<LayerId>,
+    vertices: Vec<effectcraft_engine::VertexRef>,
+    applied: Option<(Vec<effectcraft_engine::KeyRef>, bool, bool)>,
+}
+
+impl KeyMarquee {
+    fn begin(app: &EffectcraftApp, comp: ItemId, rect: Rect) -> Self {
+        let st = &app.session.state;
+        KeyMarquee {
+            comp,
+            rect,
+            keys: st.selected_keys.clone(),
+            props: st.selected_props.clone(),
+            layers: st.selected_layers.clone(),
+            vertices: st.selected_vertices.clone(),
+            applied: None,
+        }
+    }
+
+    /// Back to the selection from when the box began.
+    fn restore(&self, app: &mut EffectcraftApp) {
+        let st = &mut app.session.state;
+        st.selected_keys.clone_from(&self.keys);
+        st.selected_props.clone_from(&self.props);
+        st.selected_layers.clone_from(&self.layers);
+        st.selected_vertices.clone_from(&self.vertices);
+    }
+}
+
+fn key_marquee_id() -> egui::Id {
+    egui::Id::unique("tl-key-marquee")
+}
+
 /// A Quick Offset drag of selected layer bars (Ctrl/Cmd+Alt, #1012): the bar it started on, where
 /// the pointer started, how many layers it staggers and how many frames the last one has moved.
 #[derive(Clone, Copy, Debug)]
@@ -1914,12 +1956,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     outline_marquee(ui, g);
     pick_whip_drag(g);
     alt_scale_and_graph(app, ui, g, &ectx);
-    graph_empty_area(ui, g);
+    graph_empty_area(app, ui, g);
     layer_reorder_drag(ui, g);
     group_reorder_drag(ui, g);
     quick_offset_follow(g);
     key_drag_follow(app, g);
-    key_box_select(app, ui, g);
+    key_box_select(app, g);
     current_time_indicator(app, g);
     let footer = footer_bar(app, ui, g);
     footer_zoom(app, ui, g, footer);
@@ -4489,8 +4531,9 @@ fn alt_scale_and_graph(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, 
 }
 
 /// Click / marquee on empty track area.
-fn graph_empty_area(ui: &mut egui::Ui, g: &mut Rw) {
+fn graph_empty_area(app: &EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     let t = g.tl.t;
+    let cid = g.tl.cid;
     let ctx = g.tl.ctx.clone();
     let actions = &mut g.tl.actions;
     let gp = g.gp.clone();
@@ -4504,7 +4547,9 @@ fn graph_empty_area(ui: &mut egui::Ui, g: &mut Rw) {
         let br = Rect::from_two_pos(origin, cur);
         gp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
         gp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
-        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("tl-box"), br));
+        let mut km = ctx.data(|d| d.get_temp::<KeyMarquee>(key_marquee_id())).unwrap_or_else(|| KeyMarquee::begin(app, cid, br));
+        km.rect = br;
+        ctx.data_mut(|d| d.insert_temp(key_marquee_id(), km));
     }
 }
 
@@ -4718,8 +4763,11 @@ fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect
     keys
 }
 
-/// Releasing the key marquee selects the keys it touches.
-fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
+/// The key marquee selects the keys it touches as it moves, from the selection it began with, and
+/// the release keeps what it showed. Escape, or a drag that ends some other way, puts the one from
+/// before back. Selecting keys is no edit, so a marquee adds no undo step.
+fn key_box_select(app: &mut EffectcraftApp, g: &mut Rw) {
+    let cid = g.tl.cid;
     let tm = g.tl.tm;
     let rows_rect = g.tl.rows_rect;
     let rh = g.tl.rh;
@@ -4727,21 +4775,37 @@ fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     let comp = g.tl.comp.clone();
     let rows = &g.tl.rows;
     let actions = &mut g.tl.actions;
-    let empty = g.empty.clone();
-    if empty.drag_stopped()
-        && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(egui::Id::unique("tl-box")))
-    {
-        ctx.data_mut(|d| d.remove::<Rect>(egui::Id::unique("tl-box")));
-        let touched = keys_in_box(&comp, rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, br);
-        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
-        let mods = ui.input(|i| i.modifiers);
+    let Some(mut km) = ctx.data(|d| d.get_temp::<KeyMarquee>(key_marquee_id())) else { return };
+    let live = g.empty.dragged();
+    let (released, escape, mods) = ctx.input(|i| (i.pointer.any_released(), i.key_pressed(egui::Key::Escape), i.modifiers));
+    if !live || km.comp != cid {
+        ctx.data_mut(|d| d.remove::<KeyMarquee>(key_marquee_id()));
+    }
+    if km.comp != cid {
+        return;
+    }
+    if !live {
+        if escape || !released {
+            km.restore(app);
+            ctx.request_repaint();
+        }
+        return;
+    }
+    let touched = keys_in_box(&comp, rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, km.rect);
+    let applied = (touched, mods.shift, mods.command);
+    if km.applied.as_ref() != Some(&applied) {
+        km.restore(app);
+        let keys: Vec<serde_json::Value> = applied.0.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
         if keys.is_empty() && !(mods.shift || mods.command) {
             // A marquee that catches nothing leaves nothing selected (layers included).
             actions.push(("layer.select".into(), json!({"layers": []})));
         } else {
             actions.push(("keys.select".into(), json!({"keys": keys, "add": mods.shift, "selectProperties": true})));
         }
+        km.applied = Some(applied);
+        ctx.request_repaint();
     }
+    ctx.data_mut(|d| d.insert_temp(key_marquee_id(), km));
 }
 
 fn current_time_indicator(app: &mut EffectcraftApp, g: &Rw) {
