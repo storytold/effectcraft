@@ -859,50 +859,71 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut material_of: HashMap<i64, usize> = HashMap::new();
     let mut texture_of: HashMap<i64, Option<usize>> = HashMap::new();
-    // Decoded images by their source (embedded Video, then file name): Texture objects aliasing
-    // one image share its pixels instead of each keeping a copy.
-    let mut image_of: HashMap<(Vec<i64>, Vec<String>), Option<usize>> = HashMap::new();
-    let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
+    // Decoded images by the source actually used (embedded Video id, else the resolved file
+    // name): Texture objects aliasing one image share its pixels instead of each keeping a copy.
+    let mut image_of: HashMap<(Option<i64>, String), Option<usize>> = HashMap::new();
+    // Ok(None): no usable image (the material goes untextured). Err: the memory budget ran out.
+    let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Result<Option<usize>> {
         if let Some(t) = texture_of.get(&tid) {
-            return *t;
+            return Ok(*t);
         }
-        let t = (|| {
-            let tex = by_id.get(&tid)?;
-            let videos: Vec<i64> = children_of(tid).filter(|l| kind(l.0) == Some("Video")).map(|l| l.0).collect();
-            let files: Vec<String> = ["RelativeFilename", "FileName"].iter().filter_map(|k| Some(tex.child(k)?.str_at(0)?.replace('\\', "/"))).collect();
-            let key = (videos, files);
-            if let Some(i) = image_of.get(&key) {
-                return *i;
-            }
-            let embedded = key.0.iter().find_map(|v| {
-                let content = by_id.get(v)?.child("Content")?;
-                match content.props.first()? {
-                    Prop::Bytes(b) if !b.is_empty() => Some(b.clone()),
-                    Prop::Str(_) => {
-                        let s: String = content.props.iter().filter_map(Prop::as_str).collect();
-                        base64(&s).filter(|b| !b.is_empty())
-                    }
-                    _ => None,
+        let Some(tex) = by_id.get(&tid) else {
+            texture_of.insert(tid, None);
+            return Ok(None);
+        };
+        let videos: Vec<i64> = children_of(tid).filter(|l| kind(l.0) == Some("Video")).map(|l| l.0).collect();
+        let files: Vec<String> = ["RelativeFilename", "FileName"].iter().filter_map(|k| Some(tex.child(k)?.str_at(0)?.replace('\\', "/"))).collect();
+        let embedded = videos.iter().find_map(|&v| {
+            let content = by_id.get(&v)?.child("Content")?;
+            let bytes = match content.props.first()? {
+                Prop::Bytes(b) if !b.is_empty() => Some(b.clone()),
+                Prop::Str(_) => {
+                    let s: String = content.props.iter().filter_map(Prop::as_str).collect();
+                    base64(&s).filter(|b| !b.is_empty())
                 }
-            });
-            let i = (|| {
-                let bytes = embedded.or_else(|| key.1.iter().find_map(|f| resolve(f).or_else(|| resolve(f.rsplit('/').next()?))))?;
-                let t = Texture::decode(&bytes).ok()?;
-                budget.take(t.data.len().checked_mul(16), "a texture").ok()?;
-                textures.push(Arc::new(t));
-                Some(textures.len() - 1)
-            })();
-            image_of.insert(key, i);
-            i
-        })();
+                _ => None,
+            }?;
+            Some(((Some(v), String::new()), bytes))
+        });
+        let source = embedded.or_else(|| {
+            files.iter().find_map(|f| {
+                let g = resolve(f).map(|b| (f.clone(), b)).or_else(|| {
+                    let base = f.rsplit('/').next()?;
+                    Some((base.to_string(), resolve(base)?))
+                })?;
+                Some(((None, g.0), g.1))
+            })
+        });
+        let t = match source {
+            None => None,
+            Some((key, bytes)) => match image_of.get(&key) {
+                Some(i) => *i,
+                None => {
+                    // Charge the decoded size before decoding, so a small file claiming huge
+                    // dimensions is refused before its pixels are allocated.
+                    let i = match Texture::dimensions(&bytes) {
+                        Ok((w, h)) => {
+                            budget.take((w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(16)), "a texture")?;
+                            Texture::decode(&bytes).ok().map(|t| {
+                                textures.push(Arc::new(t));
+                                textures.len() - 1
+                            })
+                        }
+                        Err(_) => None,
+                    };
+                    image_of.insert(key, i);
+                    i
+                }
+            },
+        };
         texture_of.insert(tid, t);
-        t
+        Ok(t)
     };
-    let mut material_index = |mid: i64, materials: &mut Vec<Material>, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
+    let mut material_index = |mid: i64, materials: &mut Vec<Material>, textures: &mut Vec<Arc<Texture>>| -> Result<Option<usize>> {
         if let Some(&m) = material_of.get(&mid) {
-            return Some(m);
+            return Ok(Some(m));
         }
-        let node = by_id.get(&mid)?;
+        let Some(node) = by_id.get(&mid) else { return Ok(None) };
         let mut m = material(short_name(node.str_at(1).unwrap_or("")), node);
         for (tid, prop) in children_of(mid).filter(|l| kind(l.0) == Some("Texture")) {
             let slot = match prop {
@@ -912,7 +933,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
                 _ => continue,
             };
             if slot.is_none() {
-                *slot = load_texture(tid, textures).map(|texture| TexRef { texture, uv_set: 0 });
+                *slot = load_texture(tid, textures)?.map(|texture| TexRef { texture, uv_set: 0 });
             }
         }
         if m.emissive_tex.is_some() && m.emissive == [0.0; 3] {
@@ -920,7 +941,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
         }
         materials.push(m);
         material_of.insert(mid, materials.len() - 1);
-        Some(materials.len() - 1)
+        Ok(Some(materials.len() - 1))
     };
 
     // One mesh per Model with Mesh geometry (material slots are per Model). Models instancing the
@@ -931,8 +952,10 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
         let Some(&ni) = node_of.get(&id) else { continue };
         let Some(gid) = children_of(id).find(|l| kind(l.0) == Some("Geometry")).map(|l| l.0) else { continue };
         let Some(geom) = by_id.get(&gid) else { continue };
-        let mats: Vec<usize> =
-            children_of(id).filter(|l| kind(l.0) == Some("Material")).filter_map(|l| material_index(l.0, &mut materials, &mut textures)).collect();
+        let mut mats: Vec<usize> = vec![];
+        for (mid, _) in children_of(id).filter(|l| kind(l.0) == Some("Material")) {
+            mats.extend(material_index(mid, &mut materials, &mut textures)?);
+        }
         let name = nodes.get(ni).map(|n| n.name.clone()).unwrap_or_default();
         let mesh_index = match mesh_of.get(&(gid, mats.clone())) {
             Some(&i) => i,
