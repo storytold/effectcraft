@@ -95,7 +95,11 @@ fn nesting_depths(polys: &[(&[[f64; 2]], f64)], w: usize, h: usize) -> Vec<usize
     let cell = |v: f64, n: usize| (((v + 0.5) / DEPTH_CELL).floor().max(0.0) as usize).min(n - 1);
     let boxes: Vec<[f64; 4]> = polys
         .iter()
-        .map(|(p, _)| p.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |b, q| [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])]))
+        .map(|(p, _)| {
+            p.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |b, q| {
+                [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])]
+            })
+        })
         .collect();
     let mut grid: Vec<Vec<usize>> = vec![Vec::new(); gw * gh];
     for (j, b) in boxes.iter().enumerate() {
@@ -402,7 +406,7 @@ mod tests {
             for x in 0..w {
                 let (fx, fy) = (x as f64 + 0.5 - 60.0, y as f64 + 0.5 - 60.0);
                 let r = (fx * fx + fy * fy).sqrt();
-                let ring = r < 56.0 && (r / 8.0) as usize % 2 == 0;
+                let ring = r < 56.0 && ((r / 8.0) as usize).is_multiple_of(2);
                 let dot = x >= 130 && x % 6 < 3 && y % 6 < 3;
                 field[y * w + x] = if ring || dot { 1.0 } else { 0.0 };
             }
@@ -410,13 +414,11 @@ mod tests {
         let opts = TraceOpts { min_area: 1.0, ..Default::default() };
         let t = trace(&field, w, h, &opts);
         assert!(t.len() > 200, "{}", t.len());
-        let polys: Vec<(Vec<[f64; 2]>, f64)> =
-            t.iter().map(|t| (t.path.vertices.clone(), t.area.abs())).collect();
+        let polys: Vec<(Vec<[f64; 2]>, f64)> = t.iter().map(|t| (t.path.vertices.clone(), t.area.abs())).collect();
         let refs: Vec<(&[[f64; 2]], f64)> = polys.iter().map(|(p, a)| (p.as_slice(), *a)).collect();
         let fast = nesting_depths(&refs, w, h);
-        let pairs: Vec<usize> = (0..refs.len())
-            .map(|i| (0..refs.len()).filter(|&j| j != i && refs[j].1 > refs[i].1 && point_in_poly(refs[i].0[0], refs[j].0)).count())
-            .collect();
+        let pairs: Vec<usize> =
+            (0..refs.len()).map(|i| (0..refs.len()).filter(|&j| j != i && refs[j].1 > refs[i].1 && point_in_poly(refs[i].0[0], refs[j].0)).count()).collect();
         assert_eq!(fast, pairs);
         assert_eq!(fast, t.iter().map(|t| t.depth).collect::<Vec<_>>());
         assert!(fast.iter().max() >= Some(&5));
