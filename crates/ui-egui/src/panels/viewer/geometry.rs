@@ -210,9 +210,10 @@ pub(super) fn snap_handle(
     let c = snap(p);
     let s = [p[0] + c[0], p[1] + c[1]];
     if uniform {
-        // An edge on the anchor point can't scale: the pointer doesn't, so neither does a snap.
+        // An edge on the anchor point can't scale: the pointer doesn't, wherever on the handle it
+        // pressed, so neither does a snap.
         if axes != [true, true] && h[usize::from(axes[1])].abs() <= 1e-3 {
-            return f;
+            return [1.0, 1.0];
         }
         let o = at([0.0; 2]);
         let d = [p[0] - o[0], p[1] - o[1]];

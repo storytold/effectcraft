@@ -189,6 +189,9 @@ fn uniform_edge_handle_snaps_along_its_line_from_the_anchor() {
     // The edge sits on the anchor point: the pointer can't scale it, so neither does a snap.
     let f = snap_handle([1.0, 1.0], [0.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 1.0]);
     assert!(near(f, [1.0, 1.0]), "{f:?}");
+    // Nor does a press a little off the handle's centre, which `drag_ratio` reads as a tiny start.
+    let f = snap_handle(drag_ratio([2.0, -10.0], [22.0, -10.0], x, true), [0.0, -10.0], [0.0, 0.0], &m, x, true, |_| [0.0, 0.0]);
+    assert!(near(f, [1.0, 1.0]), "{f:?}");
 }
 
 /// Every 3D view names its own `view.3d.*` command: a typo in that mapping would fall back to the
