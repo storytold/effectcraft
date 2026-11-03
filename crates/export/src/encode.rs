@@ -4,8 +4,8 @@
 
 use std::io::Write;
 
-use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
+use effectcraft_project::{Comp, ProjectSettings};
 use effectcraft_time::{FrameRate, Tick};
 use filmcraft_isobmff::{Brand, ColorInfo, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
@@ -164,6 +164,28 @@ struct ProRes {
     w: u32,
     h: u32,
     alpha: bool,
+    colr: ColorInfo,
+}
+
+/// The `colr` atom of a ProRes render: what its frames are, in H.273 code points. MOV uses
+/// QuickTime's `nclc`, which has no range flag; ProRes frames are limited range. The matrix is the
+/// one [`rgba_to_yuv_10`] always uses. Primaries and transfer follow the render path
+/// (`Pipe::output`): only a working space converts to the output space, so unmanaged frames pass
+/// through. sRGB output keeps transfer 1 rather than 13 (#340), and an alpha matte is not in the
+/// output space.
+fn prores_colr(settings: &ProjectSettings, channels: Channels) -> ColorInfo {
+    use effectcraft_project::ColorSpace as Space;
+    let output = settings.working_space.and(settings.output_space).filter(|_| channels != Channels::Alpha);
+    let (primaries, transfer) = match output {
+        None | Some(Space::Srgb | Space::Rec709) => (1, 1),
+        Some(Space::Rec2020) => (9, 1),
+        Some(Space::DisplayP3) => (12, 13),
+        Some(Space::Rec2100Pq) => (9, 16),
+        Some(Space::Rec2100Hlg) => (9, 18),
+        // H.273 has no code for the ACES primaries: unspecified, in linear light.
+        Some(Space::AcesCg | Space::Aces2065) => (2, 8),
+    };
+    ColorInfo::Nclc { primaries, transfer, matrix: 1 }
 }
 
 fn prores_profile(p: ProResProfile) -> filmcraft_prores::Profile {
@@ -179,14 +201,20 @@ fn prores_profile(p: ProResProfile) -> filmcraft_prores::Profile {
 }
 
 impl ProRes {
-    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels) -> ProRes {
+    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels, colr: ColorInfo) -> ProRes {
         // Alpha needs a 4444 flavour.
         let profile = if channels == Channels::Rgba && !profile.is_4444() { ProResProfile::P4444 } else { profile };
         let profile = prores_profile(profile);
         let alpha = channels == Channels::Rgba;
         let mut cfg = filmcraft_prores::EncoderConfig::new(profile, w, h);
         cfg.encode_alpha = alpha;
-        ProRes { enc: filmcraft_prores::Encoder::with_config(cfg), profile, w, h, alpha }
+        // The frame header carries the same H.273 codes as the `colr` atom, so readers that trust
+        // either one agree.
+        if let ColorInfo::Nclc { primaries, transfer, matrix } = colr {
+            let code = |c| u8::try_from(c).unwrap_or(2);
+            cfg.color = filmcraft_prores::ColorInfo { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix) };
+        }
+        ProRes { enc: filmcraft_prores::Encoder::with_config(cfg), profile, w, h, alpha, colr }
     }
     fn is_444(&self) -> bool {
         matches!(self.profile, filmcraft_prores::Profile::P4444 | filmcraft_prores::Profile::P4444Xq)
@@ -195,7 +223,11 @@ impl ProRes {
 
 impl VideoEncoder for ProRes {
     fn sample_entry(&self) -> SampleEntry {
-        SampleEntry::prores(FourCc(self.profile.fourcc()), self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::prores(FourCc(self.profile.fourcc()), self.w as u16, self.h as u16);
+        if let Some(v) = entry.video.as_mut() {
+            v.color = Some(self.colr.clone());
+        }
+        entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let chroma = if self.is_444() { filmcraft_prores::ChromaFormat::Yuv444 } else { filmcraft_prores::ChromaFormat::Yuv422 };
@@ -301,7 +333,10 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
         OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
         OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
-        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels })),
+        _ => {
+            let colr = prores_colr(&job.project.settings, channels);
+            Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, colr))
+        }
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();

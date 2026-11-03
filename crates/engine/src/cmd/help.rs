@@ -20,7 +20,8 @@ fn sibling(s: &mut Session, p: &Value) -> Result<Value> {
 fn docs(s: &mut Session, p: &Value) -> Result<Value> {
     let page = match str_p(p, "page").unwrap_or("help") {
         "scripting" => "docs/control-protocol.md",
-        "expressions" => "docs/expressions.md",
+        // The reader-facing expression reference is not written yet: the closest page is the parity notes.
+        "expressions" => "docs/scripting-parity.md",
         "effects" => "docs/effects.md",
         "agents" => "docs/agents.md",
         _ => "README.md",

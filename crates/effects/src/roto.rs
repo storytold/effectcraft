@@ -543,24 +543,73 @@ impl Chain {
             }
             None
         };
+        self.carry(f, None, frame, cancel, &lookup, &mut |g, seg| {
+            let k = *self.keys.get(&g)?;
+            store(k, sc, seg.clone());
+            if let Some(st) = seg_store() {
+                st.put_seg(k, sc, seg);
+            }
+            Some(())
+        })
+    }
+
+    /// [`Chain::ensure`]'s walk: the matte carried to `f` from the nearest frame towards the base that `lookup` has,
+    /// else from the root cut afresh from its strokes. `object: None` carries every stroke from the base frame (the shown
+    /// matte); `Some(o)` carries only `o`'s, from its foreground-stroked frame nearest the base on the way. `keep`
+    /// gets every frame made on the way.
+    fn carry(
+        &self,
+        f: i64,
+        object: Option<u32>,
+        frame: &mut dyn FnMut(i64) -> Option<Arc<Image>>,
+        cancel: &dyn Fn() -> bool,
+        lookup: &dyn Fn(i64) -> Option<Arc<FrameSeg>>,
+        keep: &mut dyn FnMut(i64, &Arc<FrameSeg>) -> Option<()>,
+    ) -> Option<Arc<FrameSeg>> {
+        let strokes = |g: i64| match object {
+            Some(o) => self.data.strokes_of(g, o),
+            None => self.data.strokes_at(g),
+        };
         if let Some(s) = lookup(f) {
             return Some(s);
         }
         let base = self.data.base?;
+        let root = match object {
+            Some(o) => {
+                // one pass over the strokes, not one per frame on the way
+                let on_the_way = |g: i64| (g == base || g.cmp(&base) == f.cmp(&base)) && g.abs_diff(base) <= f.abs_diff(base);
+                let fg = self.data.strokes.iter().filter(|s| s.object == o && s.kind == StrokeKind::Fg && on_the_way(s.frame));
+                fg.map(|s| s.frame).min_by_key(|g| g.abs_diff(base)).unwrap_or(f)
+            }
+            None => base,
+        };
         if !self.data.in_span(f) {
             return None;
         }
-        // Walk towards the base to the nearest available frame.
+        // A new first stroke can still have a valid tracked matte nearer the base. Look for it
+        // without reading those frames; without one, start afresh at the object's first stroke.
         let mut path = vec![f];
+        let mut untracked_len = 1;
         let mut g = f;
         let mut start: Option<Arc<FrameSeg>> = None;
-        while let Some(src) = self.data.source_of(g) {
+        while g != base
+            && let Some(src) = self.data.source_of(g)
+        {
+            if cancel() {
+                return None;
+            }
             if let Some(s) = lookup(src) {
                 start = Some(s);
                 break;
             }
             path.push(src);
+            if src == root {
+                untracked_len = path.len();
+            }
             g = src;
+        }
+        if start.is_none() {
+            path.truncate(untracked_len);
         }
         path.reverse();
         let mut prev_img: Option<Arc<Image>> = None;
@@ -570,8 +619,8 @@ impl Chain {
                 return None;
             }
             let img = frame(g)?;
-            let strokes = self.data.strokes_at(g);
-            let seg = match (&cur, g == base) {
+            let strokes = strokes(g);
+            let seg = match (&cur, object.is_none() && g == root) {
                 (_, true) | (None, _) => rb::segment_with(&img, &strokes, None, &self.opts, self.refine_radius, self.model.as_deref()),
                 (Some(p), false) => {
                     let src = self.data.source_of(g)?;
@@ -587,11 +636,7 @@ impl Chain {
                 }
             };
             let seg = Arc::new(seg);
-            let k = *self.keys.get(&g)?;
-            store(k, sc, seg.clone());
-            if let Some(st) = seg_store() {
-                st.put_seg(k, sc, &seg);
-            }
+            keep(g, &seg)?;
             cur = Some(seg);
             prev_img = Some(img);
         }
@@ -674,7 +719,7 @@ impl Chain {
         max_pending_bytes: usize,
     ) -> Result<Option<TrackSummary>, String> {
         let Some(tracker) = self.model.as_ref().and_then(|m| m.tracker()) else { return Ok(None) };
-        let (Some(_), true) = (self.data.base, self.data.span[1] >= self.data.span[0]) else { return Err("no base frame".into()) };
+        let (Some(base), true) = (self.data.base, self.data.span[1] >= self.data.span[0]) else { return Err("no base frame".into()) };
         // Frames of the span that already have a tracked result (this session's, or the saved
         // tracking) are kept: only the rest is tracked. A correction stroke changes the keys of the
         // frames from it on (both directions), so only those come back here.
@@ -686,26 +731,48 @@ impl Chain {
         let (Some(&need_lo), Some(&need_hi)) = (needed.first(), needed.last()) else {
             return Ok(Some(TrackSummary::default()));
         };
-        // Each object has its own prompts: a few clicks from its strokes and a box around what the classic engine
-        // makes of them on that frame (clicks alone pick a part of the object, not all of it).
+        // Each object has its own prompts: a few clicks from its strokes and a box saying how far it reaches (clicks
+        // alone pick a part of the object). SAM 2 fills the box it is given, so the box surrounds the object's matte
+        // on that frame: the one shown for a lone object; with several, each object's own, carried with its own strokes
+        // as the shown one is (from its first prompted frame, or the nearest tracked or prompted frame), so a correction stroke on
+        // part of an object still boxes all of it. Those per-object mattes are not cached: their keys mean tracked results.
         let objects = self.data.objects();
         let several = objects.len() > 1;
         let mut by_object: Vec<Vec<(i64, effectcraft_segment::Prompt)>> = vec![];
         for &obj in &objects {
             let mut prompts = vec![];
-            for f in self.data.stroke_frames().into_iter().filter(|f| self.data.in_span(*f)) {
+            let mut carried: Option<(i64, Arc<FrameSeg>)> = None;
+            // from the base outwards on each side, so each carry goes on from the one before
+            let mut frames: Vec<i64> = self.data.stroke_frames().into_iter().filter(|f| self.data.in_span(*f)).collect();
+            frames.sort_by_key(|f| (*f < base, f.abs_diff(base)));
+            for f in frames {
                 let strokes = self.data.strokes_of(f, obj);
                 if !strokes.iter().any(|s| s.kind == StrokeKind::Fg) {
                     continue;
                 }
-                let p = match frame(f) {
-                    Some(img) => rb::tracker_prompt_boxed(&strokes, self.opts.scale, &rb::segment(&img, &strokes, None, &self.opts, self.refine_radius)),
-                    None => return Err(format!("cannot read Roto Brush prompt frame {f}")),
+                let own = if several {
+                    // a later correction frame carries on from the one before it (only the last can be on its way)
+                    let lookup = |g| self.object_seg(g, obj).or_else(|| carried.as_ref().filter(|(k, _)| *k == g).map(|(_, s)| s.clone()));
+                    let own = self.carry(f, Some(obj), &mut *frame, cancel, &lookup, &mut |_, _| Some(()));
+                    carried = own.clone().map(|s| (f, s));
+                    own
+                } else {
+                    self.ensure(f, &mut *frame, cancel)
                 };
+                let matte = match own {
+                    Some(own) => own,
+                    None if cancel() => return Err("tracking cancelled".into()),
+                    None => match frame(f) {
+                        Some(img) => Arc::new(rb::segment_with(&img, &strokes, None, &self.opts, self.refine_radius, self.model.as_deref())),
+                        None => return Err(format!("cannot read Roto Brush prompt frame {f}")),
+                    },
+                };
+                let p = rb::tracker_prompt_boxed(&strokes, self.opts.scale, &matte);
                 if p.points.iter().any(|(_, fg)| *fg) {
                     prompts.push((f, p));
                 }
             }
+            prompts.sort_by_key(|q| q.0);
             by_object.push(prompts);
         }
         // objects without a foreground prompt cannot be followed
@@ -1468,6 +1535,215 @@ mod tests {
             assert_eq!(overlays.len(), 1);
             assert_eq!((overlays[0].0, overlays[0].1.area()), (0, matte.area()));
         }
+    }
+
+    /// A model that sees only the left part of the disk, and records the tracker's box prompts.
+    #[derive(Default)]
+    struct LeftPart(std::sync::Mutex<Vec<(i64, Option<[f32; 4]>)>>);
+    impl effectcraft_segment::MaskModel for LeftPart {
+        fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+            &effectcraft_segment::SAM2_TINY
+        }
+        fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, _: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+            Ok((0..w * h).map(|i| f32::from((26..36).contains(&(i % w)) && (30..50).contains(&(i / w)))).collect())
+        }
+        fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+            Some(self)
+        }
+    }
+    impl effectcraft_segment::ObjectTracker for LeftPart {
+        fn track(
+            &self,
+            req: &effectcraft_segment::TrackRequest,
+            _: &mut dyn FnMut(i64) -> Option<Arc<ClipFrame>>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(usize, i64, effectcraft_segment::TrackedFrame),
+        ) -> effectcraft_segment::Result<()> {
+            *self.0.lock().unwrap() = req.objects.iter().flatten().map(|(f, p)| (*f, p.bbox)).collect();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_tracker_box_surrounds_the_matte_shown_on_each_stroked_frame() {
+        let mut data = RotoData::default();
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[30.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 3.0, points: vec![[50.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.span = [0, 3];
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("tracker-box-from-shown-matte".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        let fake = Arc::new(LeftPart::default());
+        chain.model = Some(fake.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        let mut get = |f: i64| Some(Arc::new(frame(f as f64 / 25.0)));
+        let expected: Vec<(i64, Option<[f32; 4]>)> = [0, 2]
+            .into_iter()
+            .map(|f| (f, rb::tracker_prompt_boxed(&data.strokes_of(f, 0), 1.0, &chain.ensure(f, &mut get, &|| false).expect("a shown matte")).bbox))
+            .collect();
+        assert!(expected.iter().all(|(_, b)| b.is_some()));
+        assert!(expected[0].1.unwrap()[2] < 44.0, "the base frame shows the model's part of the disk: {expected:?}");
+        chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(*fake.0.lock().unwrap(), expected, "the base frame and the correction frame are boxed around what they show");
+    }
+
+    /// A model that cuts only a small square around each foreground click, and records every object's box prompts.
+    #[derive(Default)]
+    struct ClickSquares(std::sync::Mutex<Vec<Vec<(i64, Option<[f32; 4]>)>>>);
+    impl effectcraft_segment::MaskModel for ClickSquares {
+        fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+            &effectcraft_segment::SAM2_TINY
+        }
+        fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, p: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+            let near = |x: f32, y: f32| p.points.iter().any(|(c, fg)| *fg && (c[0] - x).abs() <= 4.0 && (c[1] - y).abs() <= 4.0);
+            Ok((0..w * h).map(|i| f32::from(near((i % w) as f32 + 0.5, (i / w) as f32 + 0.5))).collect())
+        }
+        fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+            Some(self)
+        }
+    }
+    impl effectcraft_segment::ObjectTracker for ClickSquares {
+        fn track(
+            &self,
+            req: &effectcraft_segment::TrackRequest,
+            _: &mut dyn FnMut(i64) -> Option<Arc<ClipFrame>>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(usize, i64, effectcraft_segment::TrackedFrame),
+        ) -> effectcraft_segment::Result<()> {
+            *self.0.lock().unwrap() = req.objects.iter().map(|o| o.iter().map(|(f, p)| (*f, p.bbox)).collect()).collect();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_correction_stroke_on_part_of_one_of_several_objects_boxes_the_whole_object() {
+        let mut data = RotoData::default();
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[30.0, 40.0], [50.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[88.0, 72.0]], object: 1 }, 3, [0, 3]);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 2.0, points: vec![[54.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.span = [0, 3];
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("object-correction-box".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        let fake = Arc::new(ClickSquares::default());
+        chain.model = Some(fake.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        chain.track(&mut |f| Some(Arc::new(frame(f as f64 / 25.0))), &|| false, &mut |_| {}).unwrap();
+        let boxes = fake.0.lock().unwrap().clone();
+        let box_of = |o: usize, f: i64| boxes[o].iter().find(|(g, _)| *g == f).and_then(|(_, b)| *b).expect("a box prompt");
+        let (base, correction, other) = (box_of(0, 0), box_of(0, 2), box_of(1, 0));
+        assert!(correction[0] <= base[0] + 6.0, "the correction frame boxes the object carried from frame 0 {base:?}, not only the stroke: {correction:?}");
+        assert!(correction[2] >= 54.0 && correction[2] - correction[0] >= base[2] - base[0], "the box holds the whole object and the stroke: {correction:?}");
+        assert!(correction[2] < other[0], "object 1 {other:?} stays out of object 0's box {correction:?}");
+    }
+
+    #[test]
+    fn a_correction_after_propagate_carries_each_object_on_from_its_tracked_matte() {
+        let mut data = RotoData::default();
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[30.0, 40.0]], object: 0 }, 3, [0, 3]);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[15.0, 15.0]], object: 1 }, 3, [0, 3]);
+        data.span = [0, 3];
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("object-correction-after-propagate".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        chain.model = Some(Arc::new(TwoObjects(Default::default())));
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        assert_eq!(chain.track(&mut |f| Some(Arc::new(frame(f as f64 / 25.0))), &|| false, &mut |_| {}).unwrap().unwrap().frames, 4);
+        data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 2.0, points: vec![[56.0, 40.0]], object: 0 }, 3, [0, 3]);
+        chain.data = Arc::new(data.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        let fake = Arc::new(ClickSquares::default());
+        chain.model = Some(fake.clone());
+        let mut prompt_reads = vec![];
+        let mut get = |f: i64| {
+            if fake.0.lock().unwrap().is_empty() {
+                prompt_reads.push(f);
+            }
+            Some(Arc::new(frame(f as f64 / 25.0)))
+        };
+        chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(prompt_reads, [2, 1], "frame 2 carries on from the tracked frame 1; tracked frame 0 boxes both objects as it is");
+        let boxes = fake.0.lock().unwrap().clone();
+        let correction = boxes[0].iter().find(|(g, _)| *g == 2).and_then(|(_, b)| *b).expect("a box prompt");
+        // the tracked disk carried to frame 2 spans x 29..59
+        assert!(correction[0] <= 29.0 && correction[2] >= 59.0, "the box holds the whole disk: {correction:?}");
+    }
+
+    #[test]
+    fn a_correction_before_an_objects_first_stroke_keeps_its_tracked_matte() {
+        for base in [0, 4] {
+            let first = if base == 0 { 3 } else { 1 };
+            let prior = if base == 0 { 1 } else { 3 };
+            let mut data = RotoData::default();
+            data.add(Stroke { kind: StrokeKind::Fg, frame: base, radius: 3.0, points: vec![[40.0, 40.0]], object: 0 }, 4, [0, 4]);
+            data.add(Stroke { kind: StrokeKind::Fg, frame: first, radius: 3.0, points: vec![[15.0, 15.0]], object: 1 }, 4, [0, 4]);
+            data.span = [0, 4];
+            let mut params = params_with(&data);
+            params.values.insert(INPUT_KEY.into(), Value::Str(format!("earlier-object-correction-{base}")));
+            let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+            chain.model = Some(Arc::new(TwoObjects(Default::default())));
+            let seed = seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id);
+            chain.keys = data.chain_keys(seed);
+            let image = |f: i64| {
+                let mut img = frame(f as f64 / 25.0);
+                // Match the second object's tracked square, so the carry has a real image edge.
+                for y in 8..22 {
+                    for x in 8..22 {
+                        img.set(x, y, [0.95, 0.9, 0.1, 1.0]);
+                    }
+                }
+                Arc::new(img)
+            };
+            assert_eq!(chain.track(&mut |f| Some(image(f)), &|| false, &mut |_| {}).unwrap().unwrap().frames, 5);
+            let prior_key = chain.keys[&prior];
+            assert!(chain.object_seg(prior, 1).is_some());
+            data.add(Stroke { kind: StrokeKind::Fg, frame: 2, radius: 1.0, points: vec![[19.0, 15.0]], object: 1 }, 4, [0, 4]);
+            chain.data = Arc::new(data.clone());
+            chain.keys = data.chain_keys(seed);
+            assert_eq!(chain.keys[&prior], prior_key, "the nearer tracked frame is still valid");
+            let fake = Arc::new(ClickSquares::default());
+            chain.model = Some(fake.clone());
+            let mut prompt_reads = vec![];
+            let mut get = |f: i64| {
+                if fake.0.lock().unwrap().is_empty() {
+                    prompt_reads.push(f);
+                }
+                Some(image(f))
+            };
+            chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+            assert_eq!(prompt_reads, [2, prior, first, 2], "corrections carry from the valid tracked matte in either direction");
+            let boxes = fake.0.lock().unwrap().clone();
+            let correction = boxes[1].iter().find(|(g, _)| *g == 2).and_then(|(_, b)| *b).expect("a correction box");
+            assert!(correction[0] <= 10.0 && correction[2] >= 22.0, "the box keeps the whole tracked square, not only the correction: {correction:?}");
+            assert!(correction[2] < 30.0, "the other object's disk stays outside this box: {correction:?}");
+        }
+    }
+
+    #[test]
+    fn corrections_before_the_base_carry_on_from_each_other() {
+        let mut data = RotoData::default();
+        for (frame, object) in [(3, 0), (3, 1), (2, 0), (1, 0)] {
+            data.add(Stroke { kind: StrokeKind::Fg, frame, radius: 3.0, points: vec![[35.0, 40.0]], object }, 3, [0, 3]);
+        }
+        data.span = [0, 3];
+        assert_eq!(data.base, Some(3));
+        let mut params = params_with(&data);
+        params.values.insert(INPUT_KEY.into(), Value::Str("corrections-before-the-base".into()));
+        let mut chain = Chain::new(&params, [100.0, 80.0], 25.0, 1.0);
+        let fake = Arc::new(ClickSquares::default());
+        chain.model = Some(fake.clone());
+        chain.keys = data.chain_keys(seed_with(&params, [100.0, 80.0], 25.0, effectcraft_segment::SAM2_TINY.id));
+        let mut prompt_reads = vec![];
+        let mut get = |f: i64| {
+            if fake.0.lock().unwrap().is_empty() {
+                prompt_reads.push(f);
+            }
+            Some(Arc::new(frame(f as f64 / 25.0)))
+        };
+        chain.track(&mut get, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(prompt_reads, [3, 2, 3, 1, 2, 3], "object 0: the base, then 2 from 3, then 1 from 2; object 1: the base");
+        let frames: Vec<Vec<i64>> = fake.0.lock().unwrap().iter().map(|o| o.iter().map(|q| q.0).collect()).collect();
+        assert_eq!(frames, [vec![1, 2, 3], vec![3]], "prompts reach the tracker in frame order");
     }
 
     #[test]

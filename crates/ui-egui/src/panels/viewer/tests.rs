@@ -151,3 +151,14 @@ fn edge_pan_speed_moves_toward_the_edge() {
     let corner = edge_pan_speed(area, pos2(950.0, 700.0));
     assert!(corner.x < 0.0 && corner.y < 0.0, "{corner:?}");
 }
+
+/// Every 3D view names its own `view.3d.*` command: a typo in that mapping would fall back to the
+/// English label silently, which is what the viewer showed before (#2691).
+#[test]
+fn every_3d_view_finds_its_japanese_row() {
+    crate::i18n::ui::set_current("ja");
+    for v in View3D::ALL {
+        assert_ne!(view3d_label(v), v.label(), "{v:?} has no Japanese row");
+    }
+    crate::i18n::ui::set_current("en");
+}
