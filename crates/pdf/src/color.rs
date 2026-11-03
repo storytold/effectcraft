@@ -215,8 +215,9 @@ pub enum PsOp {
     Proc(Vec<PsOp>),
 }
 
-/// Parse a procedure. `ops` counts the tokens as [`ps_len`] does; past [`MAX_CALC_OPS`] the rest
-/// is not read, so an oversized program is never fully built (the caller rejects it by size).
+/// Parse a procedure. `ops` counts the tokens read (those skipped as unsupported included); past
+/// [`MAX_CALC_OPS`] the rest is not read, so an oversized program is never fully scanned or built
+/// (the caller rejects it when `ops` ends past the cap).
 fn ps_parse(lx: &mut crate::object::Lexer, depth: usize, ops: &mut usize) -> Vec<PsOp> {
     let mut out = vec![];
     while let Some(o) = lx.next() {
@@ -228,10 +229,16 @@ fn ps_parse(lx: &mut crate::object::Lexer, depth: usize, ops: &mut usize) -> Vec
             Obj::Bool(b) => PsOp::Num(if b { 1.0 } else { 0.0 }),
             Obj::Op(op) if op == "{" && depth < 32 => PsOp::Proc(ps_parse(lx, depth + 1, ops)),
             // Nested too deep: skip the procedure's opening brace (never push it as an operator).
-            Obj::Op(op) if op == "{" => continue,
+            Obj::Op(op) if op == "{" => {
+                *ops += 1;
+                continue;
+            }
             Obj::Op(op) if op == "}" => return out,
             Obj::Op(op) => PsOp::Op(op),
-            _ => continue,
+            _ => {
+                *ops += 1;
+                continue;
+            }
         };
         *ops += 1;
         out.push(op);
@@ -596,12 +603,13 @@ impl Func {
                 let Some(data) = decode_stream(file, sd, raw) else { return Func::Unsupported };
                 let mut lx = crate::object::Lexer::new(&data, 0);
                 // The program is one procedure: `{ … }`.
-                let code = match ps_parse(&mut lx, 0, &mut 0).into_iter().next() {
+                let mut scanned = 0;
+                let code = match ps_parse(&mut lx, 0, &mut scanned).into_iter().next() {
                     Some(PsOp::Proc(p)) => p,
                     _ => return Func::Unsupported,
                 };
                 let ops = ps_len(&code);
-                if ops > MAX_CALC_OPS || !budget.take_values(ops) {
+                if scanned > MAX_CALC_OPS || ops > MAX_CALC_OPS || !budget.take_values(ops) {
                     return Func::Unsupported;
                 }
                 Func::Calc { domain: dom, range: file.get(d, "Range").map(|x| file.nums(x)).unwrap_or_default(), code }
@@ -795,6 +803,16 @@ mod tests {
         let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
         let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         assert_eq!(ps_len(&code), MAX_CALC_OPS + 1);
+    }
+
+    #[test]
+    fn skipped_calculator_tokens_count_toward_the_cap() {
+        // `null` is not a calculator token: skipped, but still scanned.
+        let src = format!("{{ {}}}", "null ".repeat(MAX_CALC_OPS + 10));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let mut scanned = 0;
+        ps_parse(&mut lx, 0, &mut scanned);
+        assert!(scanned > MAX_CALC_OPS && scanned < MAX_CALC_OPS + 10, "parsing stops once the cap is passed ({scanned})");
     }
 
     #[test]
