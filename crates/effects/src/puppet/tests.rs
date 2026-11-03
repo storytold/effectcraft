@@ -106,6 +106,22 @@ fn expansion_grows_the_outline() {
     assert!((am - pi * 225.0).abs() < 60.0, "{am}");
 }
 
+/// An imported Expansion far past the property's range is clamped instead of padding the grid
+/// by that many pixels (a 1e12 expansion would ask for terabytes).
+#[test]
+fn hostile_expansion_is_clamped() {
+    let (w, h) = (40, 40);
+    let alpha = disc_alpha(w, h, [20.0, 20.0], 10.0);
+    let max = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], EXPANSION_RANGE.1)).abs();
+    for e in [1e12, f64::MAX, f64::INFINITY] {
+        let a = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], e)).abs();
+        assert!((a - max).abs() < 1.0 || e.is_infinite(), "{e}: {a} vs {max}");
+    }
+    assert!(outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], f64::NAN).len() >= 3);
+    assert!(outline(&alpha, w, h, 1e9, [0.0; 2], [20.0, 20.0], 100.0).is_empty());
+    let _ = outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], -1e12);
+}
+
 fn rect_mesh(w: f64, h: f64, tris: f64) -> Mesh {
     triangulate(&[[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], &MeshOpts { triangles: tris, density: 50.0, expansion: 0.0 })
 }

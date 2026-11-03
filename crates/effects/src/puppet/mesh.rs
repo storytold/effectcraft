@@ -614,13 +614,29 @@ pub fn triangulate(outline: &[[f64; 2]], opts: &MeshOpts) -> Mesh {
     Mesh { verts, tris, outline: poly }
 }
 
+/// The Expansion range the outline honours, in layer pixels (the property's slider range). A
+/// project file can store any number; outside this range it is clamped, so the padded grid
+/// below stays a few hundred pixels larger than the buffer.
+pub const EXPANSION_RANGE: (f64, f64) = (-100.0, 200.0);
+/// Most buffer pixels of padding the outline grid takes on each side (Expansion × buffer scale).
+const MAX_PAD: f64 = 4096.0;
+
 /// The outline of the alpha region under `seed` (buffer pixels → layer space via `scale` and
-/// `offset`), expanded by `expansion` layer pixels.
+/// `offset`), expanded by `expansion` layer pixels (clamped to [`EXPANSION_RANGE`]).
 pub fn outline(alpha: &[f32], w: usize, h: usize, scale: f64, offset: [f64; 2], seed: [f64; 2], expansion: f64) -> Vec<[f64; 2]> {
+    let expansion = if expansion.is_finite() { expansion.clamp(EXPANSION_RANGE.0, EXPANSION_RANGE.1) } else { 0.0 };
     // Pad so expansion can grow past the buffer edge.
-    let pad = (expansion.max(0.0) * scale).ceil() as usize + 2;
-    let (pw, ph) = (w + 2 * pad, h + 2 * pad);
-    let mut on = vec![false; pw * ph];
+    let pad = (expansion.max(0.0) * scale).ceil();
+    if !pad.is_finite() || pad > MAX_PAD {
+        return vec![];
+    }
+    let pad = pad as usize + 2;
+    let Some((pw, ph)) = w.checked_add(2 * pad).zip(h.checked_add(2 * pad)) else { return vec![] };
+    let Some(cells) = pw.checked_mul(ph) else { return vec![] };
+    if alpha.len() < w.saturating_mul(h) {
+        return vec![];
+    }
+    let mut on = vec![false; cells];
     for y in 0..h {
         for x in 0..w {
             on[(y + pad) * pw + x + pad] = alpha[y * w + x] >= 0.5;
