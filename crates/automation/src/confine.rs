@@ -75,6 +75,9 @@ const REFUSED: &[&str] = &[
     "library.preview",
 ];
 
+/// Most numbered folders `check_render_folder` inspects for one output; more are refused.
+const MAX_NUMBERED_FOLDERS: usize = 4096;
+
 /// Commands that read files named by these parameters.
 const READS: &[(&str, &[&str])] = &[
     ("file.open", &["path"]),
@@ -207,10 +210,44 @@ impl Confinement {
     /// sequence output without `#` gets `_00001` too) that the check of its template never
     /// resolved, and each frame file is created through whatever link already sits at its name,
     /// truncating the file it points to. A link that can't be resolved counts as outside: the
-    /// render would create its target.
+    /// render would create its target. When the frame number is in a folder name, the same goes for
+    /// each existing numbered folder and the folder it holds the frames in.
     fn check_render_folder(&self, output: &str) -> Result<()> {
         let real = self.check(output, Access::Write)?;
-        let Some(dir) = real.parent() else { return Ok(()) };
+        if let Some(dir) = real.parent() {
+            self.check_no_outward_links(dir, output)?;
+        }
+        // The frame number may sit in a folder name (`shots_[##]/f_[#####].png`): the folders the
+        // frames go to are the numbered ones that exist, which the template's own parent is not.
+        let (before, _, after) = effectcraft_engine::project::render_queue::sequence_parts(output);
+        let sep = ['/', '\\'];
+        let Some((dir_tail, rest)) = after.split_once(sep) else { return Ok(()) };
+        let (parent, prefix) = before.rsplit_once(sep).unwrap_or(("", &before));
+        let Ok(entries) = std::fs::read_dir(if parent.is_empty() { Path::new("/") } else { Path::new(parent) }) else { return Ok(()) };
+        let mut seen = 0;
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(digits) = name.strip_prefix(prefix).and_then(|n| n.strip_suffix(dir_tail)) else { continue };
+            if !digits.strip_prefix('-').unwrap_or(digits).bytes().all(|b| b.is_ascii_digit()) || digits.is_empty() {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_NUMBERED_FOLDERS {
+                return Err(Error::BadArgs(format!("cannot render to `{output}`: more than {MAX_NUMBERED_FOLDERS} numbered folders already exist to check")));
+            }
+            // The numbered folder itself may be a link out; `check` resolves every existing part.
+            let frame_file = e.path().join(rest);
+            let frame_file = frame_file.to_string_lossy();
+            self.check(&frame_file, Access::Write)?;
+            if let Some(dir) = Path::new(&*frame_file).parent().and_then(resolve) {
+                self.check_no_outward_links(&dir, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `dir` holds no symbolic link that leads outside the write roots.
+    fn check_no_outward_links(&self, dir: &Path, output: &str) -> Result<()> {
         let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
         for e in entries.flatten() {
             if !e.file_type().is_ok_and(|t| t.is_symlink()) {
@@ -850,6 +887,34 @@ mod tests {
         assert!(c.check_command("render.preRender", &add).is_err());
         let e = c.check_lookup(&Lookup::RenderOutputs, &queue).unwrap_err().to_string();
         assert!(e.contains("frames_00001.png"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn numbered_render_folders_with_links_out_of_the_write_roots_are_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (write, outside) = (base.join("out"), base.join("elsewhere"));
+        for d in [&write, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(&[], std::slice::from_ref(&write)).unwrap();
+        let template = write.join("shot_[###]/f_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        assert!(c.check_command("renderQueue.add", &add).is_ok(), "no numbered folder exists yet");
+        // A numbered folder inside the roots holding a link out is refused.
+        std::fs::create_dir(write.join("shot_001")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
+        std::os::unix::fs::symlink(outside.join("victim"), write.join("shot_001/f_00001.png")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_err());
+        std::fs::remove_file(write.join("shot_001/f_00001.png")).unwrap();
+        // A numbered folder that is itself a link out is refused.
+        std::os::unix::fs::symlink(&outside, write.join("shot_002")).unwrap();
+        assert!(c.check_command("render.preRender", &add).is_err());
+        // Unrelated names are left alone.
+        std::fs::remove_file(write.join("shot_002")).unwrap();
+        std::os::unix::fs::symlink(&outside, write.join("shot_notes")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
