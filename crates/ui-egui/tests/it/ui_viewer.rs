@@ -420,6 +420,42 @@ fn layer_drag_snaps_to_other_layers_edges_ctrl_toggles_and_options_apply() {
     assert!(!snapped(p), "edges not extended: {p:?}");
 }
 
+/// #2855: a dragged layer's edge midpoints snap to another layer's on both axes, side by side and
+/// stacked, with Snap Edges Extended on and off.
+#[test]
+fn layer_drag_snaps_to_other_layers_midpoints() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    // A 100×100 target at x 450–550, y 50–150, centre (500, 100).
+    let target = h.state_mut().session.execute("layer.newSolid", json!({"name": "Target", "color": "#20e040", "width": 100, "height": 100})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    // Grab the 80×80 box (at x 60–140, y 210–290) by the feature at `grab` and take that feature
+    // to `to`: returns where the box's centre lands.
+    let drop = |h: &mut Harness<'_, EffectcraftApp>, grab: [f32; 2], to: [f32; 2]| {
+        let s = &mut h.state_mut().session;
+        s.execute("prop.set", json!({"layer": target, "path": "transform/position", "value": [500, 100, 0]})).unwrap();
+        s.execute("prop.set", json!({"layer": box_id.0, "path": "transform/position", "value": [100, 250, 0]})).unwrap();
+        s.execute("edit.deselectAll", json!({})).unwrap();
+        h.run_steps(2);
+        let (from, to) = (screen(h, grab), screen(h, to));
+        hold_drag(h, from, to, Default::default());
+        let l = h.state().session.active_comp().unwrap().layer(box_id).unwrap().clone();
+        let p = l.props.prop("transform/position").unwrap().value.as_vec3();
+        [p[0], p[1]]
+    };
+    let near = |p: [f64; 2], x: f64, y: f64| (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01;
+    for extended in [true, false] {
+        h.state_mut().session.execute("view.snappingOptions", json!({"edgesExtended": extended})).unwrap();
+        // Side by side: the box's left midpoint onto the target's right midpoint (550, 100).
+        let p = drop(&mut h, [60.5, 250.0], [553.0, 102.0]);
+        assert!(near(p, 590.0, 100.0), "left to right midpoint, extended {extended}: {p:?}");
+        // Stacked: the box's top midpoint onto the target's bottom midpoint (500, 150).
+        let p = drop(&mut h, [100.0, 210.5], [502.0, 153.0]);
+        assert!(near(p, 500.0, 190.0), "top to bottom midpoint, extended {extended}: {p:?}");
+    }
+}
+
 /// With a shape layer selected the Rectangle tool draws a new group into its Contents (After
 /// Effects' behaviour); with nothing selected it draws a new shape layer (#227).
 #[test]
