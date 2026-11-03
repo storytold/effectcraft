@@ -179,14 +179,10 @@ pub(super) fn handle_cursor(sq: &[Pos2], handle: usize) -> egui::CursorIcon {
 /// Dragging past the anchor flips the layer, as in After Effects; an axis whose grabbed point sits
 /// on the anchor keeps its scale.
 pub(super) fn drag_ratio(start: [f64; 2], cur: [f64; 2], axes: [bool; 2], uniform: bool) -> [f64; 2] {
-    if uniform && axes != [true, true] {
-        let k = usize::from(axes[1]);
-        let f = if start[k].abs() > 1e-3 { cur[k] / start[k] } else { 1.0 };
-        return [f, f];
-    }
     if uniform {
-        let d2 = start[0] * start[0] + start[1] * start[1];
-        let f = if d2 > 1e-6 { (cur[0] * start[0] + cur[1] * start[1]) / d2 } else { 1.0 };
+        let s = [0, 1].map(|k| if axes[k] { start[k] } else { 0.0 });
+        let d2 = s[0] * s[0] + s[1] * s[1];
+        let f = if d2 > 1e-6 { (cur[0] * s[0] + cur[1] * s[1]) / d2 } else { 1.0 };
         return [f, f];
     }
     [0, 1].map(|k| if axes[k] && start[k].abs() > 1e-3 { cur[k] / start[k] } else { 1.0 })

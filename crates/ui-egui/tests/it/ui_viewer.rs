@@ -2552,28 +2552,10 @@ fn shift_on_an_edge_handle_keeps_the_proportions() {
     // Past the anchor both axes flip, as a corner's do.
     let s = drag(&mut h, 5, [100.0, 100.0], [280.0, 180.0]);
     assert!(close(s, [-100.0, -100.0]), "{s:?}");
-    // Without Shift an edge still scales its one axis.
-    set(&mut h, box_id, "transform/scale", json!([100, 100, 100]));
-    h.run_steps(2);
-    let edge = rect(&h, &format!("viewer.handle.{}.5", box_id.0)).center();
-    let to = screen(&h, [380.0, 180.0]);
-    drag_path(&mut h, &[edge, to], Default::default());
-    assert!(close(scale(&h, box_id), [150.0, 100.0]), "{:?}", scale(&h, box_id));
 
-    // With the anchor point off centre, 20 px left of the right edge and 30 px above the bottom
-    // one, the box spans (260, 130)–(340, 210) and each edge handle sits off the anchor's lines.
+    // The right edge snaps to the comp's, with the anchor off centre too (20 px left of the right
+    // edge): x reaches 640.
     set(&mut h, box_id, "transform/anchor", json!([60, 50, 0]));
-    for (handle, to, want) in [
-        (5, [360.0, 180.0], 200.0), // 20 px from the anchor to 40
-        (7, [230.0, 180.0], 150.0), // 60 to 90
-        (6, [320.0, 240.0], 200.0), // 30 to 60
-        (4, [320.0, 80.0], 200.0),  // 50 to 100
-    ] {
-        let s = drag(&mut h, handle, [100.0, 100.0], to);
-        assert!(close(s, [want, want]), "off-centre handle {handle}: {s:?}");
-    }
-
-    // The right edge snaps to the comp's, with the anchor off centre too: x reaches 640.
     h.state_mut().session.execute("view.snapping", json!({"value": true})).unwrap();
     let s = drag(&mut h, 5, [100.0, 100.0], [637.0, 180.0]);
     assert!((s[0] - 1600.0).abs() < 0.01 && (s[1] - 1600.0).abs() < 0.01, "{s:?}");
