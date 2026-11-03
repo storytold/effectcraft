@@ -181,12 +181,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
     let body = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), rect.max);
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("ec-scroll"), body);
+    let body = scroll.content;
     let mut y = body.min.y + 4.0 - scroll.offset;
     let mut actions: Actions = vec![];
     let bp = p.with_clip_rect(body);
-    // Rows scroll under the header: clip their widgets (and hit tests) to the body.
-    let panel_clip = ui.clip_rect();
-    ui.set_clip_rect(body.intersect(panel_clip));
     let fx: Vec<PropGroup> = layer.effects().map(|f| f.groups().cloned().collect()).unwrap_or_default();
     if fx.is_empty() {
         bp.text(
@@ -370,7 +368,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.set_min_width(200.0);
         actions.extend(crate::menus::menu_contents(app, ui, "Effect"));
     });
-    ui.set_clip_rect(panel_clip);
     let content_h = y + scroll.offset - body.min.y;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
     drop_payload(ui, rect, &p, &t, layer.id.0, &mut actions);

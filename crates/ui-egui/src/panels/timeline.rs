@@ -1809,12 +1809,17 @@ fn begin_rows(app: &mut EffectcraftApp, ui: &mut egui::Ui, tl: Tl) -> Rw {
     let graph_x0 = tl.graph_x0;
     let rect = tl.rect;
     let lp = tl.p.with_clip_rect(rows_rect.intersect(Rect::from_min_max(rows_rect.min, pos2(graph_x0 - 1.0, rows_rect.max.y))));
-    let gp = tl.p.with_clip_rect(rows_rect.intersect(Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max)));
+    // The rows reach through the gutter right of the time graph, but stop before the scroll bar.
+    let graph_rows = Rect::from_min_max(
+        pos2(graph_x0, rows_rect.min.y),
+        pos2(if tl.max_scroll > 0.0 { rect.max.x - widgets::SCROLL_GUTTER } else { rect.max.x }, rows_rect.max.y),
+    );
+    let gp = tl.p.with_clip_rect(rows_rect.intersect(graph_rows));
     let graph_on = app.ui.timeline.graph_editor;
     super::graph::track_open(ui.ctx(), graph_on);
     let full_clip = ui.clip_rect();
     let left_clip = full_clip.intersect(Rect::from_min_max(pos2(rect.min.x, rows_rect.min.y), pos2(graph_x0 - 1.0, rows_rect.max.y)));
-    let right_clip = full_clip.intersect(Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max));
+    let right_clip = full_clip.intersect(graph_rows);
     // Registered before the rows so keys, bars and editors on top of it get the pointer first.
     let empty_rect = if graph_on { Rect::NOTHING } else { Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max) };
     let empty = ui.interact(empty_rect, egui::Id::unique("tl-graph-bg"), Sense::click_and_drag());

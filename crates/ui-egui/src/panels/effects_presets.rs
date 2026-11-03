@@ -636,8 +636,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let force_scan = contents_menu(app, ui, &ctx, rect, sr, &t);
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
-    let lp = p.with_clip_rect(list);
     let mut scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("fx-scroll"), list);
+    let list = scroll.content;
+    let lp = p.with_clip_rect(list);
     let query = q.trim().to_lowercase();
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;
