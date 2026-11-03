@@ -477,6 +477,14 @@ fn entity_references_that_expand_past_the_limit_are_refused() {
 }
 
 #[test]
+fn a_decoy_entity_declaration_does_not_hide_the_real_one() {
+    // A commented-out `b` comes first; the parser uses the later `b = &e;` (1 MiB each, 100 times).
+    let dtd = format!("<!-- <!ENTITY b \"x\"> --><!ENTITY e \"{}\"><!ENTITY b \"&e;\">", "x".repeat(1 << 20));
+    let svg = format!("<!DOCTYPE svg [{dtd}]><svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"{}\"/></svg>", "&b;".repeat(100));
+    assert!(matches!(parse(svg.as_bytes()), Err(Error::Xml(e)) if e.contains("entity")));
+}
+
+#[test]
 fn gradient_stops_copied_past_the_budget_are_refused() {
     // 4,000 stops referenced by 2,100 shapes would keep 8.4 million stops.
     let stops: String = (0..4000).map(|i| format!("<stop offset=\"{}\" stop-color=\"red\"/>", i as f64 / 4000.0)).collect();

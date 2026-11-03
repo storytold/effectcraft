@@ -1318,7 +1318,9 @@ const MAX_ENTITY_BYTES: usize = 64 << 20;
 /// references to nested entities could otherwise expand attribute values to gigabytes.
 fn entity_bytes(text: &str) -> usize {
     use std::collections::HashMap;
-    let mut decls: HashMap<&str, &str> = HashMap::new();
+    // Every declaration of a name is kept, comments and quoted text included: the parser uses
+    // only one of them, and the largest bounds whichever it is.
+    let mut decls: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut rest = text;
     while let Some(p) = rest.find("<!ENTITY") {
         rest = &rest[p + 8..];
@@ -1332,7 +1334,7 @@ fn entity_bytes(text: &str) -> usize {
         let after = after.trim_start();
         let Some(q) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
         if let Some(end) = after[1..].find(q) {
-            decls.entry(name).or_insert(&after[1..1 + end]);
+            decls.entry(name).or_default().push(&after[1..1 + end]);
         }
     }
     if decls.is_empty() {
@@ -1341,13 +1343,17 @@ fn entity_bytes(text: &str) -> usize {
     fn refs(s: &str) -> impl Iterator<Item = &str> {
         s.split('&').skip(1).filter_map(|r| r.find(';').map(|e| &r[..e]))
     }
-    fn size<'t>(name: &'t str, decls: &HashMap<&'t str, &'t str>, memo: &mut HashMap<&'t str, usize>, depth: usize) -> usize {
+    fn size<'t>(name: &'t str, decls: &HashMap<&'t str, Vec<&'t str>>, memo: &mut HashMap<&'t str, usize>, depth: usize) -> usize {
         if let Some(&n) = memo.get(name) {
             return n;
         }
-        let Some(value) = decls.get(name) else { return 0 };
+        let Some(values) = decls.get(name) else { return 0 };
         // Nested past any real use (or a cycle, which the parser refuses): too large.
-        let n = if depth > 32 { usize::MAX } else { refs(value).fold(value.len(), |n, r| n.saturating_add(size(r, decls, memo, depth + 1))) };
+        let n = if depth > 32 {
+            usize::MAX
+        } else {
+            values.iter().map(|value| refs(value).fold(value.len(), |n, r| n.saturating_add(size(r, decls, memo, depth + 1)))).max().unwrap_or(0)
+        };
         memo.insert(name, n);
         n
     }
