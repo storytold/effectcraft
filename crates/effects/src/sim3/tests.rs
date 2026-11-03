@@ -281,6 +281,21 @@ fn particle_exploder_bursts_big_particles() {
     assert!(s.parts.is_empty());
 }
 
+/// Bursts count the particles still waiting to be processed, so a grid near the particle budget
+/// cannot end the frame over it.
+#[test]
+fn particle_exploder_stays_within_the_particle_budget() {
+    let st = Pg { pex_radius: 2.0, pex_dispersion: 30.0, ..bare(1) };
+    let mut s = PgState::default();
+    for _ in 0..MAX_PG_PARTICLES - 20 {
+        s.parts.push(PgParticle::new([50.0, 50.0], [0.0; 2], [1.0; 4], 6.0, 0, SRC_GRID));
+    }
+    st.step(&mut s);
+    assert!(s.parts.len() <= MAX_PG_PARTICLES, "{}", s.parts.len());
+    // Room was left for the first bursts: 20 spare slots hold two bursts of 9 - 1 new each.
+    assert!(s.parts.len() > MAX_PG_PARTICLES - 20);
+}
+
 #[test]
 fn text_particles_draw_characters() {
     let grid = |text: &str| {

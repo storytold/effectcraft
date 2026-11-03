@@ -499,18 +499,22 @@ impl Pg {
         // Particle Exploder: affected particles larger than the new radius burst into smaller
         // ones that fly apart (each new particle bursts no further).
         if self.pex_radius > 0.0 {
-            let mut out = Vec::with_capacity(st.parts.len());
-            for q in std::mem::take(&mut st.parts) {
+            let total = st.parts.len();
+            let mut out = Vec::with_capacity(total);
+            for (i, q) in std::mem::take(&mut st.parts).into_iter().enumerate() {
+                let n = ((q.r / self.pex_radius).powi(2).round() as u32).clamp(2, 16);
+                // The particles after this one are all kept, so a burst fits only if they and its
+                // children still fit the budget.
+                let unprocessed = total - i - 1;
                 if q.src == SRC_PARTICLE_EXPLODER
                     || q.ch != 0
                     || q.r <= self.pex_radius * 1.01
                     || self.pex_affects.weight(&q) <= 0.5
-                    || out.len() > MAX_PG_PARTICLES
+                    || out.len() + unprocessed + n as usize > MAX_PG_PARTICLES
                 {
                     out.push(q);
                     continue;
                 }
-                let n = ((q.r / self.pex_radius).powi(2).round() as u32).clamp(2, 16);
                 for k in 0..n {
                     let id = st.next_id;
                     st.next_id = st.next_id.wrapping_add(1);
