@@ -195,6 +195,11 @@ impl ImageRef {
     }
 }
 
+/// Most edges a ScriptUI `fillPath` is filled with (eight 256-segment ellipses).
+pub const MAX_FILL_EDGES: usize = 2048;
+/// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings).
+pub const MAX_FILL_BANDS: usize = 8192;
+
 impl PathSeg {
     /// The subpaths of `path` as polylines (ellipses flattened to `n` segments), each with
     /// whether it is closed.
@@ -248,7 +253,9 @@ impl PathSeg {
     /// self-intersecting and holed paths fill correctly (frontends' polygon fills are often
     /// convex-only). Exact trapezoid decomposition: the plane is cut into horizontal bands at
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
-    /// trapezoid (two triangles).
+    /// trapezoid (two triangles). A path of more than [`MAX_FILL_EDGES`] edges, or cut into more
+    /// than [`MAX_FILL_BANDS`] bands, fills nothing: edges are compared pairwise and every band
+    /// looks at every edge, on the UI thread, for geometry a script chooses.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
         // Non-horizontal edges, top to bottom, with their winding direction.
         let mut edges: Vec<([f64; 2], [f64; 2], i32)> = vec![];
@@ -261,7 +268,7 @@ impl PathSeg {
                 edges.push(if a[1] < b[1] { (a, b, 1) } else { (b, a, -1) });
             }
         }
-        if edges.len() < 2 {
+        if edges.len() < 2 || edges.len() > MAX_FILL_EDGES {
             return vec![];
         }
         let x_at = |e: &([f64; 2], [f64; 2], i32), y: f64| e.0[0] + (e.1[0] - e.0[0]) * (y - e.0[1]) / (e.1[1] - e.0[1]);
@@ -282,6 +289,9 @@ impl PathSeg {
         }
         ys.sort_by(f64::total_cmp);
         ys.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        if ys.len() > MAX_FILL_BANDS {
+            return vec![];
+        }
         let mut out = vec![];
         let mut row: Vec<(f64, f64, f64, i32)> = vec![];
         for w in ys.windows(2) {
@@ -928,5 +938,23 @@ mod tests {
         assert!((a - 8.0 - std::f64::consts::PI * 100.0).abs() < 1.0, "{a}");
         let open = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 4.0, y: 0.0 }, PathSeg::L { x: 0.0, y: 4.0 }];
         assert!((area(&PathSeg::fill_triangles(&open, 48, false)) - 8.0).abs() < 1e-9);
+    }
+
+    /// A script's path of thousands of crossing edges fills nothing instead of tying up the UI
+    /// thread: comparing every pair of edges and every band against every edge.
+    #[test]
+    fn a_fill_past_its_edge_or_band_budget_is_empty() {
+        // A zigzag of MAX_FILL_EDGES + 2 edges.
+        let zig: Vec<[f64; 2]> = (0..MAX_FILL_EDGES + 2).map(|i| [i as f64, if i % 2 == 0 { 0.0 } else { 100.0 }]).collect();
+        assert!(PathSeg::fill_triangles(&poly(&zig), 48, false).is_empty());
+        // A star of crossing chords under the edge budget, whose crossings exceed the bands.
+        let n = 1001;
+        let star: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                let a = (i * 500 % n) as f64 * std::f64::consts::TAU / n as f64;
+                [100.0 * a.cos(), 100.0 * a.sin()]
+            })
+            .collect();
+        assert!(PathSeg::fill_triangles(&poly(&star), 48, false).is_empty());
     }
 }
