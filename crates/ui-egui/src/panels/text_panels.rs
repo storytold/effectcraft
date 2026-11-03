@@ -260,6 +260,12 @@ fn apply_layer_fill_stroke(app: &mut EffectcraftApp, ctx: &egui::Context, tt: &T
     let mut params = json!({"layer": tt.layer, "path": "text/moreOptions/fillStroke", "value": v});
     if tt.range.is_none() {
         params["selected"] = json!(true);
+        // `prop.set` writes the layer it names, locked or not: name one `selected` may change.
+        let comp = app.session.active_comp();
+        let mut selected = app.session.state.selected_layers.iter().filter_map(|id| comp?.layer(*id));
+        if let Some(l) = selected.find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text) && !l.switches.locked) {
+            params["layer"] = json!(l.id.0);
+        }
     }
     let set = json!({"command": "prop.set", "params": params});
     let steps: Vec<serde_json::Value> =

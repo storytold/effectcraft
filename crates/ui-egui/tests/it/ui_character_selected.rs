@@ -98,6 +98,24 @@ fn character_and_paragraph_changes_reach_every_selected_text_layer() {
     assert_eq!((doc(&h, a).justify, doc(&h, b).justify), (Justify::Right, Justify::Right));
 }
 
+/// A locked layer that the panel shows stays as it is: the stroke order's layer-wide Fill & Stroke
+/// goes to the other selected text layers, as every other Character change does.
+#[test]
+fn a_layer_wide_stroke_order_leaves_a_locked_shown_layer_alone() {
+    let (mut h, a, b) = two_text_layers(false);
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
+    h.run_steps(2);
+    let order = center(&h, "character.strokeOverFill");
+    click(&mut h, order);
+    h.get_by_role_and_label(Role::Button, "All Fills Over All Strokes").click();
+    h.run_steps(3);
+    let fill_stroke = |h: &mut Harness<'_, EffectcraftApp>, l: u64| {
+        h.state_mut().session.execute("prop.get", json!({"layer": l, "path": "text/moreOptions/fillStroke"})).unwrap()["value"].clone()
+    };
+    assert_eq!(fill_stroke(&mut h, b), json!(1));
+    assert_eq!(fill_stroke(&mut h, a), json!(0), "the locked layer keeps its order");
+}
+
 /// While one layer's text is edited, the panel changes its selected characters only.
 #[test]
 fn character_changes_stay_on_the_edited_layer_while_editing() {
