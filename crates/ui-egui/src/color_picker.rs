@@ -6,7 +6,7 @@
 //! Colours are sRGB components (0–1), as the project stores them. Changes apply as they are made
 //! (After Effects' Preview); Cancel or Escape goes back to the colour the picker opened with.
 
-use egui::{Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::i18n::tr;
 use crate::widgets::{open_popup, popup_is_open, pressed_outside, select_all};
@@ -486,12 +486,23 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
 /// The channels in the order of their buttons.
 const CHANS: [(Chan, &str); 6] = [(Chan::H, "H"), (Chan::S, "S"), (Chan::V, "B"), (Chan::R, "R"), (Chan::G, "G"), (Chan::B, "B")];
 
+/// The pointer's position while the primary button is down over `rect`. The square and the slider
+/// take it even when the gesture did not start on them: the picker opens on the press on its
+/// swatch (#2686), so a drag that begins there must travel into the square, and egui gives that
+/// gesture to the swatch alone — `is_pointer_button_down_on` is false for these controls.
+fn held_pos(ui: &Ui, rect: Rect) -> Option<Pos2> {
+    if !ui.input(|i| i.pointer.primary_down()) {
+        return None;
+    }
+    ui.input(|i| i.pointer.interact_pos()).filter(|p| rect.contains(*p))
+}
+
 /// Drag or click on the square to set its two channels.
 fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
     let (rect, resp) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color field"));
     let (x, y) = chan.square();
-    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+    if let Some(p) = held_pos(ui, rect) {
         *pick = pick.at(chan, (p.x - rect.min.x) / rect.width(), 1.0 - (p.y - rect.min.y) / rect.height());
     }
     // Hue changes unevenly across a row, so the HSB squares get a finer grid.
@@ -520,7 +531,7 @@ fn slider(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
     let (outer, resp) = ui.allocate_exact_size(vec2(SLIDER_W + 12.0, SQUARE), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color slider"));
     let bar = Rect::from_center_size(outer.center(), vec2(SLIDER_W, SQUARE));
-    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+    if let Some(p) = held_pos(ui, outer) {
         *pick = pick.set(chan, 1.0 - (p.y - bar.min.y) / bar.height());
     }
     let n: u32 = if chan == Chan::H { 36 } else { 16 };

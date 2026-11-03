@@ -572,7 +572,10 @@ fn contents_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Contex
                     if label == &copy_label {
                         app.auto.add("effects.copyPresetsFolderPath", resp.rect, "Copy Presets Folder Path");
                     }
-                    if resp.clicked() {
+                    // Browsed with the button held like every other list: egui reports no click for
+                    // a release far from the press, and no hover while a button is down (#2686).
+                    let resp = widgets::browse_hover(ui, resp);
+                    if resp.clicked() || widgets::browse_pick(ui, &resp) {
                         chosen = Some(i);
                     }
                 }

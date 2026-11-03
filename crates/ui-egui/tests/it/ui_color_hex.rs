@@ -69,6 +69,47 @@ fn hex_code_sets_an_effect_colour() {
     assert!(close(midtones(&h), [0.0, 1.0, 136.0 / 255.0]), "{:?}", midtones(&h));
 }
 
+/// The picker opens on the press on its swatch (#2686), so a drag that starts on the swatch can
+/// travel into the square: while the button stays down, the square follows the pointer even
+/// though the gesture began on the swatch, which egui gives to the swatch alone.
+#[test]
+fn a_drag_from_the_swatch_into_the_square_sets_the_colour() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Drag", "width": 320, "height": 180, "duration": 4})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Toner"})).unwrap()["effects"][0].as_u64().unwrap();
+    let uid = s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("midtones").unwrap().uid;
+    s.state.selected_layers = vec![LayerId(layer)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let midtones = |h: &Harness<'_, EffectcraftApp>| {
+        let c = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find(uid).unwrap().value.as_color();
+        [c[0], c[1], c[2]]
+    };
+    let before = midtones(&h);
+
+    let [x, y, w, ht] = h.state().auto.find(&format!("effectControls.prop.{uid}.value")).expect("the Midtones swatch").rect;
+    let swatch = pos2(x + w / 2.0, y + ht / 2.0);
+    // Press on the swatch and keep the button down: the picker opens on this press.
+    h.input_mut().events.push(Event::PointerMoved(swatch));
+    h.input_mut().events.push(Event::PointerButton { pos: swatch, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(4);
+    assert!(close(midtones(&h), before), "the press that opens the picker changes nothing: {:?}", midtones(&h));
+    // Still held, onto the square: the colour follows the pointer.
+    let square = h.get_by_label("Color field").rect();
+    let target = pos2(square.min.x + square.width() * 0.25, square.min.y + square.height() * 0.75);
+    h.input_mut().events.push(Event::PointerMoved(target));
+    h.run_steps(2);
+    let after = midtones(&h);
+    assert!(!close(after, before), "the drag into the square sets the colour: {:?} -> {:?}", before, after);
+    h.input_mut().events.push(Event::PointerButton { pos: target, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(close(midtones(&h), after), "the release keeps the colour the drag set");
+}
+
 /// A colour button in a harness of its own, its picker open.
 fn picker(c: [f32; 3]) -> Harness<'static, [f32; 3]> {
     let mut h = Harness::builder().with_size(vec2(560.0, 400.0)).build_ui_state(
