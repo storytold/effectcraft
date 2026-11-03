@@ -29,6 +29,12 @@ pub enum Role {
     Hide,
     HideOthers,
     ShowAll,
+    SelectAll,
+    Cut,
+    Copy,
+    Paste,
+    Undo,
+    Redo,
 }
 
 /// One node of the native menu.
@@ -155,6 +161,32 @@ pub fn build_now(app: &EffectcraftApp, ctx: &egui::Context) -> NativeMenu {
     let dialog = cfg!(target_os = "macos") && app.file_dialogs.count() > 0;
     if text_field_window(ctx).is_some() && !dialog {
         enable(app, &mut menu.menus);
+    }
+    if dialog {
+        // The sandboxed open panel is a remote view: it gets Cmd+A, C, X, V, Z through the host's
+        // standard Edit items (first-responder selectors), not through items that run our
+        // commands, which swallow the key or leave the panel without one (#1986).
+        fn standard(nodes: &mut [NativeNode]) {
+            for node in nodes {
+                match node {
+                    NativeNode::Item(item) => {
+                        let role = match item.command.as_str() {
+                            "edit.selectAll" => Role::SelectAll,
+                            "edit.cut" => Role::Cut,
+                            "edit.copy" => Role::Copy,
+                            "edit.paste" => Role::Paste,
+                            "edit.undo" => Role::Undo,
+                            "edit.redo" => Role::Redo,
+                            _ => continue,
+                        };
+                        *node = NativeNode::Predefined { role, label: item.label.clone(), command: item.command.clone() };
+                    }
+                    NativeNode::Submenu { children, .. } => standard(children),
+                    _ => {}
+                }
+            }
+        }
+        standard(&mut menu.menus);
     }
     menu
 }
@@ -517,6 +549,8 @@ mod tests {
     fn app() -> EffectcraftApp {
         let mut s = effectcraft_engine::Session::default();
         s.execute("file.openDemoProject", json!({})).unwrap();
+        // The default is "Match System": pin English so the tests do not follow the machine's locale.
+        s.execute("prefs.set", json!({"key": "general.language", "value": "en"})).unwrap();
         EffectcraftApp::new(s)
     }
 
@@ -891,6 +925,61 @@ mod tests {
         app.hooks.file_dialog_async = Some(Box::new(|_, _| {}));
         crate::menus::invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
         assert_eq!(select_all(&build_now(&app, &ctx)), !cfg!(target_os = "macos"));
+    }
+
+    /// #1986: while a file dialog is open on macOS the Edit items for select-all, cut, copy,
+    /// paste, undo and redo become the host's standard (predefined) items, keeping label and
+    /// command; without a dialog they stay plain command items.
+    #[test]
+    fn a_file_dialog_turns_the_edit_keys_into_standard_items() {
+        fn predefined(menu: &NativeMenu) -> Vec<(String, Role, String)> {
+            fn rec(n: &[NativeNode], out: &mut Vec<(String, Role, String)>) {
+                for x in n {
+                    match x {
+                        NativeNode::Predefined { role, label, command }
+                            if matches!(role, Role::SelectAll | Role::Cut | Role::Copy | Role::Paste | Role::Undo | Role::Redo) =>
+                        {
+                            out.push((command.clone(), *role, label.to_string()))
+                        }
+                        NativeNode::Submenu { children, .. } => rec(children, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = vec![];
+            rec(&menu.menus, &mut out);
+            out
+        }
+        fn by_command<'a>(menu: &'a NativeMenu, id: &str) -> Option<&'a NativeItem> {
+            menu.items().into_iter().find(|i| i.command == id)
+        }
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let ids = ["edit.selectAll", "edit.cut", "edit.copy", "edit.paste", "edit.undo", "edit.redo"];
+        let before = build_now(&app, &ctx);
+        assert!(predefined(&before).is_empty(), "no dialog: no standard edit items");
+        let plain: Vec<_> = ids.iter().filter(|id| by_command(&before, id).is_some()).collect();
+        app.hooks.file_dialog_async = Some(Box::new(|_, _| {}));
+        crate::menus::invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        let after = build_now(&app, &ctx);
+        let got = predefined(&after);
+        if cfg!(target_os = "macos") {
+            let want = [Role::SelectAll, Role::Cut, Role::Copy, Role::Paste, Role::Undo, Role::Redo];
+            for (id, role) in ids.iter().zip(want) {
+                if !plain.contains(&id) {
+                    continue;
+                }
+                let (_, r, label) = got.iter().find(|(c, _, _)| c == id).unwrap_or_else(|| panic!("{id} not predefined"));
+                assert_eq!(*r, role, "{id}");
+                assert_eq!(label, &by_command(&before, id).map(|i| i.label.to_string()).unwrap_or_default(), "{id} keeps its label");
+                assert!(by_command(&after, id).is_none(), "{id} no longer runs our command");
+            }
+            assert_eq!(got.len(), plain.len());
+            // Unrelated items are untouched.
+            assert!(by_command(&after, "file.importMultiple").is_some());
+        } else {
+            assert!(got.is_empty());
+        }
     }
 
     /// #2459: while a text field has the keyboard the Edit menu's Undo and Redo act on the field and
