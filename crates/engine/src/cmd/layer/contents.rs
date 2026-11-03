@@ -1,7 +1,7 @@
 use super::create::{apply_text_params, text_range_p};
 use super::{
     EngineError, GroupKind, Ids, ItemId, KV, LayerId, LayerSource, MaskMode, Node, Project, PropGroup, Result, Session, TextDoc, Value, b_p, bad, build, json,
-    layer_mut, layer_p, layers_or, merge_p, str_p, unlocked,
+    layer_mut, layer_p, merge_p, str_p,
 };
 
 pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
@@ -145,18 +145,11 @@ fn shape_item_target(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: O
     })
 }
 
-/// The layers `layer.setText` changes: `layers` (locked ones left alone), else `layer` (or the
-/// first selected layer). With `selected` (the Character, Paragraph and Properties panels pass it)
-/// and that layer selected, every selected, unlocked text layer instead, as in After Effects
-/// (#2862). A `range` belongs to one layer's text, so it never reaches the others.
+/// The layers `layer.setText` changes: `layer` (or the first selected layer). With `selected` (the
+/// Character, Paragraph and Properties panels pass it) and that layer selected, every selected,
+/// unlocked text layer instead, as in After Effects (#2862). A `range` belongs to one layer's text,
+/// so it never reaches the others.
 fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
-    if p.get("layers").is_some_and(Value::is_array) {
-        if p.get("range").is_some() {
-            return Err(bad("layer.setText", "`range` applies to one `layer`, not to `layers`"));
-        }
-        let (cid, ids) = layers_or(s, p, &[])?;
-        return Ok((cid, unlocked(s, cid, ids, "layer.setText")?));
-    }
     let (cid, lid) = layer_p(s, p, "layer.setText")?;
     if b_p(p, "selected") != Some(true) || p.get("range").is_some() || !s.state.selected_layers.contains(&lid) {
         return Ok((cid, vec![lid]));
