@@ -685,9 +685,9 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
     }
 }
 
-/// #2897: every switch of the A/V Features and Switches columns has its own tooltip.
+/// #2897: every switch of the A/V Features and Switches columns has its own tooltip text.
 #[test]
-fn every_layer_switch_has_a_tooltip() {
+fn every_layer_switch_name_has_its_own_tip_text() {
     let names = ["video", "audio", "solo", "lock", "shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"];
     let tips: Vec<&str> = names.iter().map(|n| switch_tip(n)).collect();
     assert!(tips.iter().all(|t| !t.is_empty()), "{tips:?}");
@@ -695,4 +695,23 @@ fn every_layer_switch_has_a_tooltip() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted.len(), names.len(), "each switch has its own tip: {tips:?}");
+}
+
+/// #2897: `layer_switch` draws each switch with its tooltip, which is also the switch's accessible
+/// name (the icon has no text), in the interface language.
+#[test]
+fn layer_switches_are_drawn_with_their_tooltip() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let t = crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark);
+    let project = effectcraft_engine::project::Project::default();
+    let comp = Comp::new(64, 64, effectcraft_engine::time::FrameRate::new(25, 1), effectcraft_engine::time::Tick(1));
+    for name in ["video", "audio", "solo", "lock", "shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"] {
+        let mut actions = vec![];
+        let br = Rect::from_min_size(pos2(10.0, 10.0), vec2(16.0, 16.0));
+        let spec = SwitchSpec { row: br, br, icon: Icon::Shy, on: true, id: egui::Id::new(("sw", name)), layer: 1, name, others: false };
+        let mut h = Harness::new_ui(|ui| layer_switch(ui, &t, &spec, &comp, &project, &[], &mut actions));
+        h.run();
+        let tip = tr(switch_tip(name));
+        assert!(h.query_by_label(&tip).is_some(), "the {name} switch is named by its tooltip {tip:?}");
+    }
 }
