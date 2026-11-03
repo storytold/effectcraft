@@ -285,6 +285,12 @@ pub(crate) fn guide_color(app: &EffectcraftApp) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// The title/action safe lines and the centre cross: the Grids & Guides grid colour at `alpha`.
+pub(crate) fn safe_color(app: &EffectcraftApp, alpha: u8) -> Color32 {
+    let [r, g, b] = super::viewer::hex_rgb(&app.session.prefs.grids.grid_color).unwrap_or([120, 160, 255]);
+    Color32::from_rgba_unmultiplied(r, g, b, alpha)
+}
+
 /// The guide under a screen point (visible, unlocked guides only): (index, vertical).
 pub(crate) fn guide_at(app: &EffectcraftApp, comp: &Comp, map: &ViewerMap, pos: Pos2) -> Option<(usize, bool)> {
     if !app.ui.viewer.guides || app.ui.viewer.lock_guides {
