@@ -313,13 +313,18 @@ function noise(x) {
 // ---------------------------------------------------------------------------------------------
 // Time conversion.
 
-function timeToFrames(t, fps, isDuration) {
-  if (t === undefined) t = time + thisComp.displayStartTime;
-  if (fps === undefined) fps = 1 / __S.fd;
+// Absolute times round toward negative infinity; durations round away from zero.
+function __frames(t, fps, isDuration) {
   var frames = t * fps;
   // The 1e-6 keeps a whole number of frames that floating point overshoots (31/24 - 5/24) whole.
   if (isDuration && frames !== 0) return frames < 0 ? Math.floor(frames + 1e-6) : Math.ceil(frames - 1e-6);
   return Math.floor(frames + 1e-6);
+}
+
+function timeToFrames(t, fps, isDuration) {
+  if (t === undefined) t = time + thisComp.displayStartTime;
+  if (fps === undefined) fps = 1 / __S.fd;
+  return __frames(t, fps, isDuration);
 }
 
 function framesToTime(frames, fps) {
@@ -332,8 +337,8 @@ function __pad(n) { return n < 10 ? '0' + n : '' + n; }
 function timeToTimecode(t, base, isDuration) {
   if (t === undefined) t = time + thisComp.displayStartTime;
   if (base === undefined) base = 30;
-  var neg = t < 0;
-  var f = Math.floor(Math.abs(t) * base + 1e-6);
+  var f = __frames(t, base, isDuration), neg = f < 0;
+  f = Math.abs(f);
   var ff = f % base, s = Math.floor(f / base), ss = s % 60, m = Math.floor(s / 60), mm = m % 60, h = Math.floor(m / 60);
   return (neg ? '-' : '') + h + ':' + __pad(mm) + ':' + __pad(ss) + ':' + __pad(ff);
 }
@@ -342,17 +347,17 @@ function timeToFeetAndFrames(t, fps, framesPerFoot, isDuration) {
   if (t === undefined) t = time + thisComp.displayStartTime;
   if (fps === undefined) fps = 1 / __S.fd;
   if (framesPerFoot === undefined) framesPerFoot = 16;
-  var neg = t < 0;
-  var f = Math.floor(Math.abs(t) * fps + 1e-6);
+  var f = __frames(t, fps, isDuration), neg = f < 0;
+  f = Math.abs(f);
   var feet = Math.floor(f / framesPerFoot), fr = f % framesPerFoot;
   var s = String(fr);
   while (s.length < 2) s = '0' + s;
   return (neg ? '-' : '') + feet + '+' + s;
 }
 
-function timeToCurrentFormat(t, fps) {
+function timeToCurrentFormat(t, fps, isDuration) {
   if (fps === undefined) fps = Math.round(1 / __S.fd);
-  return timeToTimecode(t, fps);
+  return timeToTimecode(t, fps, isDuration);
 }
 
 function posterizeTime(fps) {
