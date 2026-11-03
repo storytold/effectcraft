@@ -1713,9 +1713,15 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    // At most a file name's worth (255 characters): a template repeating a long name token
-    // must not expand to gigabytes.
-    let s: String = name.chars().take(255).map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
+    // a long name token must not expand to gigabytes.
+    let mut s = String::new();
+    for c in name.chars() {
+        if s.len() + c.len_utf8() > 255 {
+            break;
+        }
+        s.push(if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c });
+    }
     // `.` and `..` would name the folder itself or its parent when the token is a path component.
     if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
@@ -1740,6 +1746,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn sanitize_limits_the_name_in_bytes() {
+        // 255 two-byte characters: 127 fit (254 bytes); the 128th would pass the limit.
+        let s = sanitize(&"é".repeat(255));
+        assert_eq!(s.len(), 254);
+        assert!(s.chars().all(|c| c == 'é'));
+    }
 
     #[test]
     fn templates_and_sequences() {
