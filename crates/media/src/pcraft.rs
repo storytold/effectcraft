@@ -9,6 +9,10 @@ use crate::{MediaError, Result};
 
 /// Keep the decoded float frame and its conversion buffers within the still-image budget.
 const MAX_PIXELS: u64 = 16 << 20;
+// Conservatively count source RGBA (16 B), raw mask samples (4 B), mask image
+// (16 B), two blur images (32 B) and output (16 B), even where lifetimes do not
+// overlap. Twelve Mi pixels fit within a 1 GiB working-buffer budget (84 B/pixel).
+const MAX_LAYER_PIXELS: u64 = 12 << 20;
 pub(crate) const MAX_INPUT_BYTES: u64 = 512 << 20;
 
 pub(crate) fn sniff(path: &str, bytes: &[u8]) -> bool {
@@ -113,6 +117,9 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
     let outline = craft_doc::outline(bytes, &craft_doc::Limits::default()).map_err(|e| error(path, e))?;
     let canvas = outline.canvas.ok_or_else(|| error(path, "PhotoCraft document has no canvas"))?;
     check_size(path, canvas.width, canvas.height)?;
+    if u64::from(canvas.width) * u64::from(canvas.height) > MAX_LAYER_PIXELS {
+        return Err(error(path, "PhotoCraft layer exceeds the 1 GiB working-buffer budget; import as Footage for the saved composite"));
+    }
     let indexes = layer_path(&outline.layers, layer.index).ok_or_else(|| error(path, format!("no PhotoCraft layer {}", layer.index)))?;
     let pixels = craft_doc::pcraft_layer_rgba(bytes, &indexes, &craft_doc::Limits::default())
         .map_err(|e| error(path, e))?

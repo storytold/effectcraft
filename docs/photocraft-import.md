@@ -20,6 +20,8 @@ Use `"importAs":"composition"` for layers. Import uses the existing still-footag
 
 ## Limits
 
-PhotoCraft input is limited to 512 MiB. Whole-file ZIP reads share that limit, checked from the archive signature before allocating the input, so renaming a bundle does not bypass it. Decoded composites and layer canvases are limited to 16,777,216 pixels. Composition import also respects EffectCraft's composition size limit, allows up to 4,096 layers and 100 levels of group nesting, and rejects unsupported CMYK or Lab layer data. Footage can still import a supported saved composite when the document's layers exceed those limits.
+PhotoCraft input is limited to 512 MiB. Whole-file ZIP reads share that limit, checked from the archive signature before allocating the input, so renaming a bundle does not bypass it. Decoded composites are limited to 16,777,216 pixels and layer canvases to 12,582,912 pixels. Composition import also respects EffectCraft's composition size limit, allows up to 4,096 layers and 100 levels of group nesting, and rejects unsupported CMYK or Lab layer data. Footage can still import a supported saved composite when the document's layers exceed those limits.
 
 Unsupported layer kinds are skipped with a message naming the layer. A nonempty document with no supported pixel layers cannot import as a composition; the error recommends Footage. Invalid input reports an error before adding a composition.
+
+Layer decoding has a separate limit of 12,582,912 canvas pixels, checked before reading source samples. A conservative budget counts the source, raw mask, mask image, both feathering intermediates and output together, within 1 GiB of working buffers. Larger canvases report an error recommending Footage before decoding layer pixels. This includes masked and unmasked layers; saved composites retain the 16,777,216-pixel limit.

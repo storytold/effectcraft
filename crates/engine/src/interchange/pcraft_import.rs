@@ -47,8 +47,10 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Document, String> {
     if width == 0 || height == 0 || width > effectcraft_project::limits::MAX_SIZE || height > effectcraft_project::limits::MAX_SIZE {
         return Err(format!("PhotoCraft canvas {width} × {height} is outside the composition size limits"));
     }
-    if u64::from(width) * u64::from(height) > 16 << 20 {
-        return Err("PhotoCraft layer decoding exceeds 16777216 canvas pixels; import as Footage for the saved composite".into());
+    if u64::from(width) * u64::from(height) > 12 << 20 {
+        return Err(
+            "PhotoCraft layer decoding exceeds the 1 GiB working-buffer budget (12582912 canvas pixels); import as Footage for the saved composite".into()
+        );
     }
     if matches!(canvas.mode.as_str(), "Cmyk" | "Lab") {
         return Err(format!("PhotoCraft {} layer pixels are not supported; import as Footage for the saved composite", canvas.mode));

@@ -235,3 +235,25 @@ fn photocraft_large_files_are_rejected_before_reading() {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn photocraft_layer_buffers_are_bounded_before_decoding_pixels() {
+    use effectcraft_project::{AlphaMode, Footage, SourceLayer};
+    // An invalid source sample proves the budget is checked before the pixel reader.
+    let mut raster = layer("Large masked layer", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("invalid-pixel-sample")}));
+    raster["mask"] = json!({"enabled":true,"density":1.0,"feather":4.0,
+        "surface":{"format":{"mode":"Grayscale","sample":"U8","alpha":false},"default":"ff","tiles":[]}});
+    let path = fixture_bytes("mask-budget.pcraft", bundle_sized(json!([raster]), (4097, 3072)));
+    let f = Footage {
+        path: path.clone(),
+        width: 4097,
+        height: 3072,
+        has_video: true,
+        alpha: AlphaMode::Straight,
+        layer: Some(SourceLayer { index: 0, name: "Large masked layer".into(), layer_size: false, embedded: None, placed: false }),
+        ..Default::default()
+    };
+    let error = effectcraft_media::MediaPool::new().frame_at(&f, effectcraft_time::Tick::ZERO).unwrap_err().to_string();
+    assert!(error.contains("1 GiB working-buffer budget") && error.contains("Footage"), "{error}");
+    std::fs::remove_file(path).unwrap();
+}
