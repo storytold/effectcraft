@@ -31,6 +31,7 @@
 //! deterministic function of its *chain*: the base frame's strokes, then every frame's strokes
 //! on the way out to it ([`RotoData::chain_keys`]).
 
+pub mod bench;
 pub mod gmm;
 pub mod matting;
 pub mod maxflow;
@@ -87,6 +88,15 @@ pub struct Stroke {
     pub frame: i64,
     pub radius: f64,
     pub points: Vec<[f64; 2]>,
+    /// Which object of the instance the stroke belongs to (0 for the first, and for every older project).
+    /// With a tracker each object is followed on its own and the mattes are combined; the classic engine
+    /// treats all foreground strokes as one object.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub object: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// A Roto Brush instance's user data: strokes, the base frame and the segmentation span
@@ -128,6 +138,18 @@ impl RotoData {
         v.sort_unstable();
         v.dedup();
         v
+    }
+    /// The objects that have a foreground stroke, in order.
+    pub fn objects(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.strokes.iter().filter(|s| s.kind == StrokeKind::Fg).map(|s| s.object).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+    /// The strokes of `object` on `frame`: its own foreground, background and box strokes, and the Refine Edge
+    /// strokes (which belong to the whole matte).
+    pub fn strokes_of(&self, frame: i64, object: u32) -> Vec<&Stroke> {
+        self.strokes.iter().filter(|s| s.frame == frame && (s.object == object || matches!(s.kind, StrokeKind::Refine | StrokeKind::RefineErase))).collect()
     }
     pub fn in_span(&self, f: i64) -> bool {
         self.base.is_some() && f >= self.span[0] && f <= self.span[1]
@@ -223,6 +245,26 @@ pub struct FrameSeg {
 }
 
 impl FrameSeg {
+    /// The union of several objects' segmentations of one frame (the largest keeps its colour models). The
+    /// parts must share one size; any that does not is ignored.
+    pub fn union(parts: Vec<FrameSeg>) -> FrameSeg {
+        let Some(first) = parts.first() else { return FrameSeg::default() };
+        let (w, h) = (first.w, first.h);
+        let mut parts: Vec<FrameSeg> = parts.into_iter().filter(|p| p.w == w && p.h == h && p.matte.len() == w * h).collect();
+        parts.sort_by_key(|p| std::cmp::Reverse(p.area()));
+        let mut it = parts.into_iter();
+        let Some(mut out) = it.next() else { return FrameSeg::default() };
+        for p in it {
+            for (a, b) in out.matte.iter_mut().zip(&p.matte) {
+                *a = (*a).max(*b);
+            }
+            for (a, b) in out.refine.iter_mut().zip(&p.refine) {
+                *a = (*a).max(*b);
+            }
+        }
+        out
+    }
+
     pub fn empty(w: usize, h: usize) -> FrameSeg {
         let Some(n) = w.checked_mul(h).filter(|n| *n <= rle::MAX_PLANE_BYTES) else {
             return FrameSeg::default();
@@ -900,6 +942,70 @@ fn points_along(s: &Stroke, scale: f64, max: usize) -> Vec<[f32; 2]> {
         carry = (carry + d) % step;
     }
     out
+}
+
+/// A tracker's prompt from a frame's strokes (points along the foreground and background strokes,
+/// in frame pixels at `scale`).
+///
+/// SAM 2 was trained on a handful of clicks: with sixteen or more points it doubts its own mask
+/// (measured: confidence 0.25 with 16 points, 0.00 with 32, 0.99 with 1 to 7), so this picks at
+/// most [`TRACKER_FG_POINTS`] foreground and [`TRACKER_BG_POINTS`] background points, spread
+/// along the strokes. Like [`stroke_prompt`], later corrections win over earlier paint.
+pub fn tracker_prompt(strokes: &[&Stroke], scale: f64, w: usize, h: usize) -> Prompt {
+    let hard = resolve(strokes, StrokeKind::Fg, StrokeKind::Bg, scale, w, h);
+    let prompt = stroke_prompt(strokes, &hard, scale, w, h);
+    let mut points = vec![];
+    for (fg, max) in [(true, TRACKER_FG_POINTS), (false, TRACKER_BG_POINTS)] {
+        let all: Vec<[f32; 2]> = prompt.points.iter().filter_map(|(p, label)| (*label == fg).then_some(*p)).collect();
+        let n = all.len().min(max);
+        // evenly spaced picks, keeping the first and the last
+        points.extend((0..n).filter_map(|i| all.get(if n > 1 { i * (all.len() - 1) / (n - 1) } else { all.len() / 2 }).map(|p| (*p, fg))));
+    }
+    Prompt { points, ..prompt }
+}
+
+/// [`tracker_prompt`] plus a box around the classic engine's matte of the same strokes. Clicks alone
+/// make SAM 2 pick the part they land on (a torso, not the legs and shoes: measured IoU 0.41 on a
+/// multi-part figure, against 1.00 with the box); the box says how far the object reaches. A box
+/// stroke the user drew wins over the matte's.
+pub fn tracker_prompt_boxed(strokes: &[&Stroke], scale: f64, classic: &FrameSeg) -> Prompt {
+    let mut p = tracker_prompt(strokes, scale, classic.w, classic.h);
+    if p.bbox.is_none() {
+        let (w, h) = (classic.w, classic.h);
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        for (i, v) in classic.matte.iter().enumerate() {
+            if *v != 0 && w > 0 {
+                let (x, y) = (i % w, i / w);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+        if x0 <= x1 {
+            let (mx, my) = (((x1 - x0) as f32 * 0.05).max(4.0), ((y1 - y0) as f32 * 0.05).max(4.0));
+            p.bbox = Some([(x0 as f32 - mx).max(0.0), (y0 as f32 - my).max(0.0), (x1 as f32 + 1.0 + mx).min(w as f32), (y1 as f32 + 1.0 + my).min(h as f32)]);
+        }
+    }
+    p
+}
+
+/// Most foreground / background points a tracker prompt carries.
+pub const TRACKER_FG_POINTS: usize = 3;
+pub const TRACKER_BG_POINTS: usize = 3;
+
+/// A frame's segmentation from a tracker's probability map: the map is the shape prior of the
+/// same graph cut as everywhere else, so the strokes stay hard constraints and the edges snap
+/// to colour. An absent object gives an empty matte (strokes on the frame still win); a map of
+/// the wrong size is ignored.
+pub fn segment_tracked(img: &Image, strokes: &[&Stroke], prob: Vec<f32>, occluded: bool, opts: &SegOpts, refine_radius: f64) -> FrameSeg {
+    let (w, h) = (img.width as usize, img.height as usize);
+    if prob.len() != w * h || w == 0 || h == 0 {
+        return segment(img, strokes, None, opts, refine_radius);
+    }
+    let has_fg = strokes.iter().any(|s| s.kind == StrokeKind::Fg);
+    if (occluded || !prob.iter().any(|p| *p >= 0.5)) && !has_fg {
+        return FrameSeg::empty(w, h);
+    }
+    let prior = Prior { soft: prob, fg: Gmm::default(), bg: Gmm::default(), refine: vec![0; w * h], weight: MODEL_PRIOR };
+    segment(img, strokes, Some(&prior), opts, refine_radius)
 }
 
 /// A model's prompt from the strokes: points along the foreground and background strokes, but

@@ -135,6 +135,17 @@ pub fn import(
             cx.fonts.push((n, fam, st));
         }
     }
+    // Glyph outlines embedded for players without the fonts. Text is set in installed fonts.
+    if let Some(chars) = doc.get("chars").and_then(Json::as_array).filter(|c| !c.is_empty()) {
+        let mut fams: Vec<&str> = vec![];
+        for fam in chars.iter().filter_map(|c| s(c, "fFamily")).filter(|f| !f.trim().is_empty()) {
+            if !fams.contains(&fam) {
+                fams.push(fam);
+            }
+        }
+        let of = if fams.is_empty() { String::new() } else { format!(" of {}", fams.join(", ")) };
+        cx.im.warn(format!("embedded glyphs (`chars`){of} are not imported; text uses the installed fonts"));
+    }
     let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
     let duration = tb.tick(op);
     // Pass 1: asset items (precomps empty for now, images stored).
@@ -305,7 +316,8 @@ fn masks(im: &Im, ids: &mut Ids, list: &[Json], g: &mut PropGroup) {
                 import_prop(im, j, p, conv);
             }
         };
-        set("pt", "path", &shapes::to_path);
+        let closed = m.get("cl").and_then(Json::as_bool).unwrap_or(false);
+        set("pt", "path", &|v| shapes::to_path(v, closed));
         set("o", "opacity", &anim::to_scalar);
         set("x", "expansion", &anim::to_scalar);
         set("f", "feather", &anim::to_vec2);

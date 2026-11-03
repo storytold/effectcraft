@@ -486,6 +486,21 @@ fn autosave_flushes_on_read_errors_and_broken_output() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn fake_render_frame(session: &Session, params: &Value) -> Value {
+    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
+    if params["write"] == true {
+        let Some(path) = params["path"].as_str() else { return json!({"ok": false, "error": "missing output path"}) };
+        if let Err(error) = session.write_output(path, &png) {
+            return json!({"ok": false, "error": error.to_string()});
+        }
+    }
+    let mut result = json!({"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)});
+    if params["write"] == true {
+        result["path"] = params["path"].clone();
+    }
+    json!({"ok": true, "result": result})
+}
+
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
@@ -503,10 +518,7 @@ fn fake_app() -> u16 {
                     Ok(v) => json!({"ok": true, "result": v}),
                     Err(e) => json!({"ok": false, "error": e.to_string()}),
                 },
-                "render.frame" => {
-                    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
-                    json!({"ok": true, "result": {"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)}})
-                }
+                "render.frame" => fake_render_frame(&session, p),
                 "ui.screenshot" => {
                     let png = crate::encode_png(8, 8, vec![128; 256], 0).unwrap();
                     std::fs::write(p["path"].as_str().unwrap(), png).unwrap();
@@ -1614,4 +1626,231 @@ fn blender_export_requires_an_absolute_path_in_a_write_root() {
         assert!(confinement.check_command("engine.batch", &batch).is_err());
     }
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// `render_frame` writes the frame to the `path` it is given, and never over a file the open
+/// project reads (#1743): footage, a proxy or the project file. The refusal comes before the
+/// frame is rendered, and the file is untouched.
+#[test]
+fn render_frame_never_writes_over_a_file_the_project_reads() {
+    use effectcraft_engine::{
+        color::Label,
+        project::{Footage, FootageKind, ItemKind},
+    };
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (clip, project) = (dir.join("clip.png"), dir.join("Project.ecproj"));
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 16, "height": 16})).unwrap();
+    session.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();
+    Arc::make_mut(&mut session.project).add_item(
+        "clip.png",
+        Label::Aqua,
+        None,
+        ItemKind::Footage(Footage {
+            path: clip.to_string_lossy().into_owned(),
+            kind: FootageKind::Still,
+            width: 16,
+            height: 16,
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let saved = std::fs::read(&project).unwrap();
+    let mut s = McpServer::new(Backend::headless(session));
+    for (file, what) in [(&clip, "footage"), (&project, "project")] {
+        let (c, err) = call(&mut s, "render_frame", json!({"path": file.to_string_lossy(), "inline": false}));
+        let text = c[0]["text"].as_str().unwrap();
+        assert!(err && text.contains(&*file.to_string_lossy()) && text.contains(what), "{what}: {text}");
+    }
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same through the desktop app: the app knows the project's files, so the tool asks it
+/// (`file.checkOutput`) before it writes anything.
+#[test]
+fn bridged_render_frame_asks_the_app_before_it_writes() {
+    use effectcraft_engine::project::{Footage, FootageKind};
+    struct Probe;
+    impl effectcraft_engine::Importer for Probe {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            Ok(Footage { path: path.to_string(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-bridge-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("clip.png");
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (stream, _) = l.accept().unwrap();
+        let mut out = stream.try_clone().unwrap();
+        let mut session = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+        for line in BufReader::new(stream).lines() {
+            let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let p = &msg["params"];
+            let mut reply = match msg["method"].as_str().unwrap() {
+                "engine.execute" => match session.execute(p["command"].as_str().unwrap(), p["params"].clone()) {
+                    Ok(v) => json!({"ok": true, "result": v}),
+                    Err(e) => json!({"ok": false, "error": e.to_string()}),
+                },
+                "render.frame" if p["write"] == true && p["path"].is_string() => fake_render_frame(&session, p),
+                "render.frame" => json!({"ok": false, "error": "a frame save must be one app-owned write"}),
+                m => json!({"ok": false, "error": format!("unknown method `{m}`")}),
+            };
+            reply["id"] = msg["id"].clone();
+            writeln!(out, "{reply}").unwrap();
+        }
+    });
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"width": 16, "height": 16}}));
+    call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [clip.to_string_lossy()]}}));
+
+    let (c, err) = call(&mut s, "render_frame", json!({"path": clip.to_string_lossy(), "inline": false}));
+    let text = c[0]["text"].as_str().unwrap();
+    assert!(err && text.contains("clip.png") && text.contains("footage"), "{text}");
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2131 F-11 ("Indirect reads"): a project opened or imported from inside a read root names its
+/// footage, and those files are read when it renders. Footage outside the roots (an absolute
+/// path, `../`, a symbolic link to a file or a folder out of the root) must not reach the agent:
+/// its layer renders as missing footage, while footage inside the roots still renders.
+#[test]
+fn automation_roots_confine_the_footage_a_project_names() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-footage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+    for d in [&read, &write, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let red = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]));
+    red.save(outside.join("secret.png")).unwrap();
+    red.save(read.join("own.png")).unwrap();
+    let p = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().into_owned();
+    // A project in the read root showing `footage`, saved unconfined.
+    let project = |name: &str, footage: &str| {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "C", "width": 8, "height": 8}}));
+        let imported = call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [footage]}}));
+        let item = imported["items"][0].as_u64().or_else(|| imported["item"].as_u64()).unwrap_or_else(|| panic!("{imported}"));
+        call_json(&mut s, "execute_command", json!({"command": "layer.addItem", "params": {"comp": "C", "item": item}}));
+        let path = p(&read, name);
+        call_json(&mut s, "save_project", json!({"path": path}));
+        path
+    };
+    // The middle pixel of comp C: red when the footage was read.
+    let shows_red = |s: &mut McpServer| {
+        let (c, err) = call(s, "render_frame", json!({"comp": "C"}));
+        assert!(!err, "{c:?}");
+        let png = base64::decode(c[0]["data"].as_str().unwrap()).unwrap();
+        let px = image::load_from_memory(&png).unwrap().to_rgba8().get_pixel(4, 4).0;
+        px[0] > 200 && px[3] > 200
+    };
+    let mut projects = vec![("absolute", project("absolute.ecproj", &p(&outside, "secret.png")))];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.join("secret.png"), read.join("link.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, read.join("dir")).unwrap();
+        projects.push(("linked file", project("linked-file.ecproj", &p(&read, "link.png"))));
+        projects.push(("linked folder", project("linked-folder.ecproj", &p(&read.join("dir"), "secret.png"))));
+    }
+    // Relative to the project: `../elsewhere/secret.png`, written into a copy of a project.
+    let own = project("own.ecproj", &p(&read, "own.png"));
+    let text = std::fs::read_to_string(&own).unwrap();
+    assert!(text.contains(&p(&read, "own.png")) || text.contains("own.png"), "{text}");
+    let relative = text.replace(&p(&read, "own.png"), "../elsewhere/secret.png").replace("\"own.png\"", "\"../elsewhere/secret.png\"");
+    std::fs::write(read.join("relative.ecproj"), relative).unwrap();
+    projects.push(("relative", p(&read, "relative.ecproj")));
+
+    let confined = || {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+        s
+    };
+    // Footage inside the read root renders.
+    let mut s = confined();
+    call_json(&mut s, "open_project", json!({"path": own}));
+    assert!(shows_red(&mut s), "footage inside the read root");
+    for (how, path) in &projects {
+        // Unconfined, the project shows the outside file.
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "open_project", json!({"path": path}));
+        assert!(shows_red(&mut s), "{how}: unconfined shows the footage");
+        // Confined: opened, or imported into the open project.
+        let mut s = confined();
+        call_json(&mut s, "open_project", json!({"path": path}));
+        assert!(!shows_red(&mut s), "{how}: opened, the footage outside the roots was read");
+        let mut s = confined();
+        call_json(&mut s, "execute_command", json!({"command": "file.importProject", "params": {"path": path}}));
+        assert!(!shows_red(&mut s), "{how}: imported, the footage outside the roots was read");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A symbolic link inside the read root, read once while it pointed inside, is checked again
+/// on every read: pointed outside afterwards, its footage must not come back once the frame
+/// cache is emptied.
+#[cfg(unix)]
+#[test]
+fn automation_roots_check_relinked_footage_again() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-relink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+    for d in [&read, &write, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255])).save(read.join("own.png")).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(outside.join("secret.png")).unwrap();
+    let link = read.join("link.png");
+    std::os::unix::fs::symlink(read.join("own.png"), &link).unwrap();
+    let link_path = link.to_string_lossy().into_owned();
+    let project = read.join("relink.ecproj").to_string_lossy().into_owned();
+    {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "C", "width": 8, "height": 8}}));
+        let imported = call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [link_path]}}));
+        let item = imported["items"][0].as_u64().or_else(|| imported["item"].as_u64()).unwrap_or_else(|| panic!("{imported}"));
+        call_json(&mut s, "execute_command", json!({"command": "layer.addItem", "params": {"comp": "C", "item": item}}));
+        call_json(&mut s, "save_project", json!({"path": project}));
+    }
+    // The middle pixel of comp C.
+    let pixel = |s: &mut McpServer| {
+        let (c, err) = call(s, "render_frame", json!({"comp": "C"}));
+        assert!(!err, "{c:?}");
+        let png = base64::decode(c[0]["data"].as_str().unwrap()).unwrap();
+        image::load_from_memory(&png).unwrap().to_rgba8().get_pixel(4, 4).0
+    };
+    let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+    s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+    call_json(&mut s, "open_project", json!({"path": project}));
+    let px = pixel(&mut s);
+    assert!(px[2] > 200 && px[0] < 50, "the link pointing inside renders: {px:?}");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.png"), &link).unwrap();
+    call_json(&mut s, "execute_command", json!({"command": "edit.purge", "params": {"what": "memory"}}));
+    let px = pixel(&mut s);
+    assert!(!(px[0] > 200 && px[3] > 200), "the link pointed outside afterwards was read: {px:?}");
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -7,11 +7,14 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-/// EffectCraft as craft-update knows it, with its 128 px icon: the update prompt shows the icon,
-/// and an AppImage's menu entry gets it.
+pub(crate) mod a11y;
+
+/// EffectCraft as craft-update knows it, with its 128 px icon and accent colour: the update
+/// prompt shows both, and an AppImage's menu entry gets the icon.
 #[cfg(not(target_arch = "wasm32"))]
 pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
     icon_png: Some(include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.effectcraft.png")),
+    accent: Some([0xe0, 0x36, 0x8f]),
     ..craft_update::suite::EFFECTCRAFT
 };
 
@@ -309,6 +312,8 @@ pub struct EffectcraftApp {
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
     pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
     /// demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
@@ -439,6 +444,10 @@ impl FileDialogsUp {
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
+    /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
+    /// paths lose the window they came from, so this keeps the one thing the import still needs
+    /// (#2661); each drop clears it.
+    pub(crate) dropped_on_timeline: bool,
 }
 
 /// Record the scale the viewer drew at (called by the viewer panel each pass).

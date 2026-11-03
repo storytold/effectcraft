@@ -195,7 +195,7 @@ fn sc_export(s: &mut Session, p: &Value) -> Result<Value> {
     let doc = s.keymaps.export(str_p(p, "preset")).map_err(|e| bad("shortcuts.export", e))?;
     if let Some(path) = str_p(p, "path") {
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-        s.services.write_file(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+        s.write_output(path, text.as_bytes())?;
         return Ok(json!({"path": path, "preset": doc["name"]}));
     }
     Ok(doc)

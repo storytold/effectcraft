@@ -232,6 +232,43 @@ fn material_commands_and_serde() {
     assert_eq!(&back, &*s.project);
 }
 
+/// #2917: a 3D model layer keeps its file's materials, so it has no Base Color, Metallic or
+/// Roughness. material.set refused them with "no Material Options property matched (…,
+/// baseColor, metallic, roughness, …)", naming the very parameters it refused, and next to a
+/// parameter the layer does have it dropped them without a word.
+#[test]
+fn material_set_names_the_parameters_a_layer_lacks() {
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [fixture("quad.glb")]})).unwrap();
+    let item = r["items"][0].as_u64().unwrap();
+    let m = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let e = s.execute_checked("material.set", json!({"layers": [m], "baseColor": "#3366ff", "roughness": 20})).unwrap_err().to_string();
+    assert!(e.contains("`baseColor`, `roughness`") && e.contains("model file") && e.contains("appearsInReflections"), "{e}");
+    assert!(!e.contains("`metallic`"), "{e}");
+    // A parameter the layer has doesn't hide one it lacks, and nothing is set.
+    assert!(s.execute_checked("material.set", json!({"layers": [m], "castsShadows": "on", "metallic": 50})).is_err());
+    assert_eq!(layer(&s, m).props.prop("materialOptions/castsShadows").unwrap().value, KV::Enum(0));
+    s.execute_checked("material.set", json!({"layers": [m], "castsShadows": "on"})).unwrap();
+    assert_eq!(layer(&s, m).props.prop("materialOptions/castsShadows").unwrap().value, KV::Enum(1));
+    // Across layers, a parameter goes to the ones that have it.
+    let cube = s.execute("layer.newPrimitive", json!({"kind": "cube"})).unwrap()["layer"].as_u64().unwrap();
+    assert_eq!(s.execute_checked("material.set", json!({"layers": [m, cube], "roughness": 20})).unwrap()["set"], 1);
+    assert_eq!(layer(&s, cube).props.prop("materialOptions/roughness").unwrap().value.as_f64(), 20.0);
+    // A solid has the classic shading, not the primitive's material.
+    let solid = s.execute("layer.newSolid", json!({"width": 64, "height": 32})).unwrap()["layer"].as_u64().unwrap();
+    let e = s.execute_checked("material.set", json!({"layers": [solid], "emissive": "#ffffff"})).unwrap_err().to_string();
+    assert!(e.contains("`emissive`") && e.contains("specularShininess"), "{e}");
+    assert!(s.execute_checked("material.set", json!({"layers": [m]})).is_err());
+    // The parameter list still names every parameter, or agents' calls are refused before they run.
+    let spec = crate::command_specs().iter().find(|c| c.id == "material.set").unwrap();
+    let keys = crate::commands::accepted_params(spec.params).unwrap();
+    let want = "layers time castsShadows acceptsShadows acceptsLights appearsInReflections baseColor metallic roughness emissive \
+                lightTransmission ambient diffuse specularIntensity specularShininess metal";
+    for k in want.split_whitespace() {
+        assert!(keys.iter().any(|a| a == k), "{k}: {keys:?}");
+    }
+}
+
 /// #264: only Advanced 3D draws models and primitives, and new comps are Classic 3D, so an
 /// imported model was invisible. Adding one switches the comp to Advanced 3D (in the same undo
 /// step, with a toast), as After Effects does.

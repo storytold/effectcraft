@@ -668,3 +668,494 @@ fn object_matte_mattes_persist_in_the_disk_cache() {
     assert!(om::ensure(&moved, size, 25.0, 0, None, &mut |_| None, &|| false).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SAM 2 tracks the clip end to end (needs the real weights: `EFFECTCRAFT_SAM2=path/to/model.safetensors`).
+/// Every frame comes from the tracker with a confidence, the mattes are right, and nothing changes
+/// once the model is deselected.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sam2_tracks_the_clip_through_roto_propagate() {
+    let Ok(weights) = std::env::var("EFFECTCRAFT_SAM2") else { return };
+    let dir = std::env::temp_dir().join(format!("ec-roto-sam2-{}", std::process::id()));
+    hold_roto_cache_test_lock();
+    let (mut s, clip, _) = painted(center, "disk-sam2.mov");
+    s.models_dir = Some(dir.join("models"));
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    s.execute_checked("roto.model.install", json!({"path": weights})).unwrap();
+    s.execute_checked("roto.model.select", json!({"id": "sam2.1-hiera-tiny", "wait": true})).unwrap();
+    assert_eq!(s.models.status(effectcraft_segment::Task::Mask).active.as_deref(), Some("sam2.1-hiera-tiny"));
+    let r = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap();
+    assert_eq!(r["frames"], 21, "{r}");
+    let mut worst: f64 = 1.0;
+    for f in 0..=20 {
+        let j = iou_at(&mut s, clip, f, center(f));
+        let st = s.execute("roto.status", json!({"layer": clip.0, "frame": f})).unwrap();
+        eprintln!("frame {f}: IoU {j:.3}, {:?}", st["tracker"]["frames"][f.to_string()]);
+        worst = worst.min(j);
+    }
+    assert!(worst > 0.9, "worst IoU over the span with SAM 2: {worst}");
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    let frames = st["tracker"]["frames"].as_object().unwrap();
+    assert_eq!(frames.len(), 21);
+    assert!(frames.values().all(|t| t["occluded"] == false && t["confidence"].as_f64().unwrap() > 0.3), "{frames:?}");
+    assert_eq!(st["tracker"]["model"], "sam2.1-hiera-tiny");
+    // Settings choose the classic engine: the saved tracking stays until a Propagate replaces it.
+    s.execute_checked("roto.model.select", json!({"id": "classical", "wait": true})).unwrap();
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    assert!(st["notice"].as_str().unwrap().contains("Propagate again"), "{st}");
+    assert_eq!(st["computed"].as_array().unwrap().len(), 21, "still computed under another model: {st}");
+    // A classic Propagate: its own segmentation, no tracker data.
+    s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap();
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "classical", "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Choosing a model that is not installed must not fall back to the classic engine silently:
+/// propagate refuses and `roto.status` says why. Choosing the classic engine runs it again.
+#[test]
+fn a_selected_model_that_is_not_installed_refuses_to_propagate() {
+    hold_roto_cache_test_lock();
+    let (mut s, clip, _) = painted(center, "disk-not-installed.mov");
+    s.models_dir = Some(std::env::temp_dir().join(format!("ec-roto-none-{}", std::process::id())));
+    s.execute_checked("roto.model.select", json!({"id": "sam2.1-hiera-tiny"})).unwrap();
+    let st = s.execute("roto.status", json!({"layer": clip.0})).unwrap();
+    assert_eq!(st["model"]["selected"], "sam2.1-hiera-tiny", "{st}");
+    assert_eq!(st["model"]["installed"], false, "{st}");
+    assert!(st["notice"].as_str().unwrap().contains("not installed"), "{st}");
+    let e = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap_err().to_string();
+    assert!(e.contains("not installed"), "{e}");
+    assert_eq!(s.execute("roto.status", json!({"layer": clip.0, "frame": 10})).unwrap()["source"], "classical");
+    s.execute_checked("roto.model.select", json!({"id": "classical"})).unwrap();
+    let r = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap();
+    assert_eq!(r["frames"], 21, "{r}");
+    assert!(s.execute("roto.status", json!({"layer": clip.0})).unwrap()["notice"].is_null());
+}
+
+/// Selecting SAM 2 without `wait` and propagating at once: propagate loads the model first, so the
+/// tracker (not the classic engine) does the work. Needs EFFECTCRAFT_SAM2 like the test above.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sam2_selected_without_wait_is_loaded_before_propagate() {
+    let Ok(weights) = std::env::var("EFFECTCRAFT_SAM2") else { return };
+    hold_roto_cache_test_lock();
+    let dir = std::env::temp_dir().join(format!("ec-roto-sam2-wait-{}", std::process::id()));
+    let (mut s, clip, _) = painted(center, "disk-sam2-wait.mov");
+    s.models_dir = Some(dir.join("models"));
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    s.execute_checked("roto.model.install", json!({"path": weights})).unwrap();
+    s.execute_checked("roto.model.select", json!({"id": "sam2.1-hiera-tiny"})).unwrap();
+    let r = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap();
+    assert_eq!(r["frames"], 21, "{r}");
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    assert_eq!(st["tracker"]["model"], "sam2.1-hiera-tiny");
+    assert!(st["notice"].is_null(), "{st}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tracker that follows the disc exactly: its true mask on every frame of the request. A stand-in
+/// for SAM 2, so the saved tracking can be tested without the weights.
+struct Exact;
+
+impl effectcraft_segment::MaskModel for Exact {
+    fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+        &effectcraft_segment::SAM2_TINY
+    }
+    fn segment(&self, _: &[[f32; 3]], _: usize, _: usize, _: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+        Err("no weights".into())
+    }
+    fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+        Some(self)
+    }
+}
+
+impl effectcraft_segment::ObjectTracker for Exact {
+    fn track(
+        &self,
+        req: &effectcraft_segment::TrackRequest,
+        frame: &mut dyn FnMut(i64) -> Option<std::sync::Arc<effectcraft_segment::ClipFrame>>,
+        _: &dyn Fn() -> bool,
+        out: &mut dyn FnMut(usize, i64, effectcraft_segment::TrackedFrame),
+    ) -> effectcraft_segment::Result<()> {
+        for g in req.first..req.first + req.count as i64 {
+            let Some(img) = frame(g) else { return Err(format!("no frame {g}")) };
+            let c = center(g as u32);
+            let prob = (0..img.w * img.h)
+                .map(|i| ((((i % img.w) as f64 + 0.5 - c[0]).hypot((i / img.w) as f64 + 0.5 - c[1])) <= R) as u8 as f32)
+                .collect::<Vec<f32>>();
+            out(0, g, effectcraft_segment::TrackedFrame { prob, w: img.w, h: img.h, confidence: 0.99, occluded: false });
+        }
+        Ok(())
+    }
+}
+
+/// Saved tracking is part of the project: written with the instance, it applies when the project
+/// opens, with or without the model loaded, and Settings choosing the classic engine leaves it in place
+/// until a Propagate replaces it.
+#[test]
+fn saved_tracking_is_kept_in_the_project_and_applies_when_it_reopens() {
+    let sam2 = "sam2.1-hiera-tiny";
+    let (s, clip, uid, path) = saved_project("saved");
+    // Reopened with SAM 2 chosen but not loaded (none is installed here): the saved frames apply.
+    forget(&s, clip, uid);
+    let mut s2 = Session::default();
+    s2.execute_checked("file.open", json!({"path": path})).unwrap();
+    s2.execute_checked("roto.model.select", json!({"id": sam2})).unwrap();
+    let st = s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    assert_eq!(st["tracker"]["saved"], sam2, "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 21, "{st}");
+    // The span bar's "computed" frames include the saved ones before anything has been decoded.
+    assert_eq!(st["computed"].as_array().unwrap().len(), 21, "{st}");
+    let j = iou_at(&mut s2, clip, 12, center(12));
+    assert!(j > 0.9, "IoU of a saved frame: {j}");
+    // The render path (Chain::ensure) reads the same frame.
+    let comp = s2.active_comp().unwrap();
+    let l = comp.layer(clip).unwrap();
+    let g = l.props.find_group(uid).unwrap();
+    let size = crate::roto::layer_size(&s2.project, comp, l);
+    let ch = effectcraft_effects::roto::Chain::new(&crate::roto::params_static(g), size, comp.frame_rate.as_f64(), 1.0);
+    let seg = ch.ensure(12, &mut |_| None, &|| false).expect("the render path reads the saved frame");
+    let truth = rle::decode(&gt(center(12))).unwrap();
+    let inter = seg.matte.iter().zip(&truth).filter(|(a, b)| **a != 0 && **b != 0).count();
+    let uni = seg.matte.iter().zip(&truth).filter(|(a, b)| **a != 0 || **b != 0).count();
+    assert!(inter as f64 / uni as f64 > 0.9, "the render path's frame: IoU {}", inter as f64 / uni as f64);
+    // Settings choose the classic engine: the saved frames still apply, and the notice says so.
+    s2.execute_checked("roto.model.select", json!({"id": "classical"})).unwrap();
+    let st = s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    assert!(st["notice"].as_str().unwrap().contains("Propagate again"), "{st}");
+    // A classic Propagate replaces the saved tracking with nothing.
+    // The synthetic source is not a file on disk; give the reopened session its provider before
+    // asking it to recompute frames. The checks above intentionally rendered without that provider.
+    s2.footage = s.footage.clone();
+    s2.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true})).unwrap();
+    let st = s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "classical", "{st}");
+    assert!(st["tracker"]["saved"].is_null() && st["notice"].is_null(), "{st}");
+    let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+}
+
+/// A reopened project propagated again with the same model and nothing new to track keeps the tracking it has: the
+/// saved frames are not replaced by an empty one, so a later reopen still finds them.
+#[test]
+fn propagating_with_nothing_new_keeps_the_saved_tracking() {
+    let (s, clip, uid, path) = saved_project("keep-saved");
+    forget(&s, clip, uid);
+    let mut s2 = Session::default();
+    s2.execute_checked("file.open", json!({"path": path})).unwrap();
+    s2.footage = s.footage.clone();
+    effectcraft_effects::roto::set_model(Some(std::sync::Arc::new(Exact)));
+    let result = s2.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true}));
+    effectcraft_effects::roto::set_model(None);
+    result.unwrap();
+    let st = s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["tracker"]["saved"], "sam2.1-hiera-tiny", "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 21, "{st}");
+    // and it is still in the file after saving and reopening
+    s2.execute_checked("file.save", json!({})).unwrap();
+    let mut s3 = Session::default();
+    s3.execute_checked("file.open", json!({"path": path})).unwrap();
+    let st = s3.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 21, "{st}");
+    let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+}
+
+/// Freeze reads saved tracking without its model: choosing a model that is not installed does not stop it when
+/// the saved frames cover every frame it freezes.
+#[test]
+fn freeze_uses_complete_saved_tracking_without_the_model() {
+    let (s, clip, uid, path) = saved_project("freeze-saved");
+    forget(&s, clip, uid);
+    let mut s2 = Session::default();
+    s2.execute_checked("file.open", json!({"path": path})).unwrap();
+    s2.footage = s.footage.clone();
+    s2.execute_checked("roto.model.select", json!({"id": "sam2.1-hiera-tiny"})).unwrap();
+    s2.execute_checked("roto.freeze", json!({"layer": clip.0, "wait": true})).unwrap();
+    let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+}
+
+/// Propagate replaces a fully saved span when a different tracking model is active.
+#[test]
+fn propagating_saved_tracking_uses_the_new_model() {
+    struct OtherModel;
+    impl effectcraft_segment::MaskModel for OtherModel {
+        fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+            &effectcraft_segment::SAM2_SMALL
+        }
+        fn segment(&self, _: &[[f32; 3]], _: usize, _: usize, _: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+            Err("no weights".into())
+        }
+        fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+            Some(&Exact)
+        }
+    }
+    let (mut s, clip, _uid, path) = saved_project("model-switch");
+    effectcraft_effects::roto::set_model(Some(std::sync::Arc::new(OtherModel)));
+    let result = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true}));
+    effectcraft_effects::roto::set_model(None);
+    result.unwrap();
+    let status = s.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(status["tracker"]["saved"], "sam2.1-hiera-small", "{status}");
+    assert_eq!(status["tracker"]["frames"].as_object().unwrap().len(), 21, "{status}");
+    let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+}
+
+/// A tracked clip saved to a project file: the session that tracked it, its layer and instance, and the
+/// file.
+fn saved_project(name: &str) -> (Session, LayerId, u64, String) {
+    let (mut s, clip, uid) = painted(center, &format!("disk-{name}.mov"));
+    effectcraft_effects::roto::set_model(Some(std::sync::Arc::new(Exact)));
+    let r = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true}));
+    effectcraft_effects::roto::set_model(None);
+    assert_eq!(r.unwrap()["frames"], 21);
+    let dir = std::env::temp_dir().join(format!("ec-roto-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tracked.ecproj").to_string_lossy().to_string();
+    s.execute_checked("file.saveAs", json!({"path": path})).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("sam2.1-hiera-tiny"), "the project file carries the tracking and the model that made it");
+    (s, clip, uid, path)
+}
+
+/// A stroke change makes the saved tracking stale: the instance is classical until the next Propagate.
+#[test]
+fn a_stroke_change_makes_the_saved_tracking_stale() {
+    let (_s, clip, _uid, path) = saved_project("stale");
+    let mut s2 = Session::default();
+    s2.execute_checked("file.open", json!({"path": path})).unwrap();
+    s2.execute_checked("roto.model.select", json!({"id": "sam2.1-hiera-tiny"})).unwrap();
+    assert_eq!(s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap()["source"], "tracker");
+    s2.execute_checked("roto.stroke", json!({"layer": clip.0, "kind": "bg", "points": line([10.0, 10.0], [60.0, 12.0]), "radius": 4})).unwrap();
+    let st = s2.execute("roto.status", json!({"layer": clip.0, "frame": 12})).unwrap();
+    assert_eq!(st["source"], "classical", "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 0, "{st}");
+    let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+}
+
+/// A tracker that emits a completed frame before failing must leave only classic results behind.
+#[test]
+fn a_partially_failing_tracker_falls_back_to_the_classic_engine() {
+    use effectcraft_segment::{ClipFrame, MaskModel, ModelInfo, ObjectTracker, Prompt, TrackRequest, TrackedFrame};
+    use std::sync::Arc;
+    struct Broken;
+    impl MaskModel for Broken {
+        fn info(&self) -> &'static ModelInfo {
+            &effectcraft_segment::SAM2_TINY
+        }
+        fn segment(&self, _: &[[f32; 3]], _: usize, _: usize, _: &Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+            Err("no weights".into())
+        }
+        fn tracker(&self) -> Option<&dyn ObjectTracker> {
+            Some(self)
+        }
+    }
+    impl ObjectTracker for Broken {
+        fn track(
+            &self,
+            req: &TrackRequest,
+            frame: &mut dyn FnMut(i64) -> Option<Arc<ClipFrame>>,
+            _: &dyn Fn() -> bool,
+            out: &mut dyn FnMut(usize, i64, TrackedFrame),
+        ) -> effectcraft_segment::Result<()> {
+            let img = frame(req.first).ok_or("missing test frame")?;
+            for object in 0..req.objects.len() {
+                out(object, req.first, TrackedFrame { prob: vec![1.0; img.w * img.h], w: img.w, h: img.h, confidence: 0.9, occluded: false });
+            }
+            Err("the tracker broke after emitting a frame".into())
+        }
+    }
+    hold_roto_cache_test_lock();
+    let (mut s, clip, uid) = painted(center, "disk-partially-broken-tracker.mov");
+    s.execute_checked("roto.stroke", json!({"layer": clip.0, "object": 1, "points": [center(0)], "radius": 4})).unwrap();
+    effectcraft_effects::roto::set_model(Some(Arc::new(Broken)));
+    let r = s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "both", "wait": true}));
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 0}));
+    let comp = s.active_comp().unwrap();
+    let layer = comp.layer(clip).unwrap();
+    let params = crate::roto::params_static(layer.props.find_group(uid).unwrap());
+    let size = crate::roto::layer_size(&s.project, comp, layer);
+    let mut chain = effectcraft_effects::roto::Chain::new(&params, size, comp.frame_rate.as_f64(), 1.0);
+    let index = layer.effects().unwrap().groups().position(|g| g.uid == uid).unwrap();
+    let mut source =
+        crate::roto::FrameSource::new(&s.project, s.footage.as_ref(), s.expr.as_deref(), &s.layer_cache, s.active_comp_id().unwrap(), comp, layer, index, size);
+    let mut get = |f: i64| source.get(f);
+    let actual: Option<Vec<_>> = (0..=20).map(|f| chain.ensure(f, &mut get, &|| false)).collect();
+    let retained_object = chain.object_seg(0, 0).is_some() || chain.object_seg(0, 1).is_some();
+    let retained_trust = chain.trust_at(0);
+    // Build the reference only after capturing the fallback, with no model or cached union.
+    effectcraft_effects::roto::forget(chain.keys.values().copied());
+    chain.model = None;
+    let expected: Option<Vec<_>> = (0..=20).map(|f| chain.ensure(f, &mut get, &|| false)).collect();
+    effectcraft_effects::roto::set_model(None);
+    let r = r.unwrap();
+    assert_eq!(r["frames"], 21, "{r}");
+    let st = st.unwrap();
+    assert_ne!(st["source"], "tracker", "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 0);
+    assert!(!retained_object, "partial per-object mattes must be discarded");
+    assert_eq!(retained_trust, None, "partial tracker confidence must be discarded");
+    for (frame, (actual, expected)) in actual.unwrap().into_iter().zip(expected.unwrap()).enumerate() {
+        assert!(actual == expected, "fallback frame {frame} differs from the classic engine");
+    }
+}
+
+/// Without a tracking model the Roto Brush chain is exactly the classic engine: every frame
+/// equals a direct call of `segment_with` / `propagate_with` (no model), bit for bit.
+#[test]
+fn without_a_tracker_the_chain_is_exactly_the_classic_engine() {
+    use effectcraft_track::roto as rb;
+    use std::sync::Arc;
+    let (s, clip, uid) = painted(center, "disk-bitexact.mov");
+    forget(&s, clip, uid);
+    let comp = s.active_comp().unwrap();
+    let l = comp.layer(clip).unwrap();
+    let g = l.props.find_group(uid).unwrap();
+    let size = crate::roto::layer_size(&s.project, comp, l);
+    let chain = effectcraft_effects::roto::Chain::new(&crate::roto::params_static(g), size, comp.frame_rate.as_f64(), 1.0);
+    assert!(!chain.has_tracker());
+    let img = |f: i64| Arc::new(draw(center(f as u32)));
+    let mut prev: Option<(Arc<Image>, rb::FrameSeg)> = None;
+    for f in 0..=5i64 {
+        let got = chain.ensure(f, &mut |g| Some(img(g)), &|| false).unwrap();
+        let cur = img(f);
+        let strokes = chain.data.strokes_at(f);
+        let want = match &prev {
+            None => rb::segment_with(&cur, &strokes, None, &chain.opts, chain.refine_radius, None),
+            Some((pi, ps)) => rb::propagate_with(pi, ps, &cur, &strokes, &chain.opts, chain.refine_radius, None),
+        };
+        assert_eq!(*got, want, "frame {f} differs from the classic engine");
+        prev = Some((cur, want));
+    }
+    forget(&s, clip, uid);
+}
+
+/// Records the windows it is asked to track, and follows the disc exactly like [`Exact`].
+#[derive(Default)]
+struct Recorder {
+    requests: std::sync::Mutex<Vec<(i64, usize, Vec<i64>)>>,
+}
+
+impl effectcraft_segment::MaskModel for Recorder {
+    fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+        &effectcraft_segment::SAM2_TINY
+    }
+    fn segment(&self, _: &[[f32; 3]], _: usize, _: usize, _: &effectcraft_segment::Prompt) -> effectcraft_segment::Result<Vec<f32>> {
+        Err("no weights".into())
+    }
+    fn tracker(&self) -> Option<&dyn effectcraft_segment::ObjectTracker> {
+        Some(self)
+    }
+}
+
+impl effectcraft_segment::ObjectTracker for Recorder {
+    fn track(
+        &self,
+        req: &effectcraft_segment::TrackRequest,
+        frame: &mut dyn FnMut(i64) -> Option<std::sync::Arc<effectcraft_segment::ClipFrame>>,
+        cancel: &dyn Fn() -> bool,
+        out: &mut dyn FnMut(usize, i64, effectcraft_segment::TrackedFrame),
+    ) -> effectcraft_segment::Result<()> {
+        let prompted = req.objects.iter().flatten().map(|(f, _)| *f).collect();
+        self.requests.lock().unwrap().push((req.first, req.count, prompted));
+        effectcraft_segment::ObjectTracker::track(&Exact, req, frame, cancel, out)
+    }
+}
+
+/// A correction stroke re-tracks only what it changes: the frames from it on, restarted at the
+/// corrected frame; the frames before it keep their tracked results.
+#[test]
+fn a_correction_re_tracks_only_the_frames_it_changes() {
+    let (mut s, clip, uid) = painted(center, "disk-retrack.mov");
+    let cid = s.active_comp_id().unwrap();
+    assert!(s.roto_trust(cid, clip, uid).is_empty(), "no tracker data before tracking");
+    let rec = std::sync::Arc::new(Recorder::default());
+    effectcraft_effects::roto::set_model(Some(rec.clone()));
+    let run = |s: &mut Session| s.execute_checked("roto.propagate", json!({"layer": clip.0, "direction": "forward", "wait": true}));
+    let first = run(&mut s);
+    assert_eq!(rec.requests.lock().unwrap().as_slice(), [(0, 21, vec![0])], "the first pass tracks the whole span");
+    first.unwrap();
+    // Nothing changed: nothing to track.
+    run(&mut s).unwrap();
+    assert_eq!(rec.requests.lock().unwrap().len(), 1, "an unchanged span is not tracked again");
+    // A correction on frame 8: the frames from 8 on are tracked again, restarting at frame 8.
+    let c = center(8);
+    s.execute_checked("roto.stroke", json!({"layer": clip.0, "frame": 8, "points": line([c[0] - 20.0, c[1]], [c[0] + 20.0, c[1]]), "radius": 6})).unwrap();
+    let again = run(&mut s);
+    let reqs = rec.requests.lock().unwrap().clone();
+    effectcraft_effects::roto::set_model(None);
+    again.unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[1], (8, 13, vec![8]), "the window runs from the corrected frame to the end of the span");
+    // The frames before the correction are still the first pass's, the rest the second's.
+    let st = s.execute("roto.status", json!({"layer": clip.0, "frame": 3})).unwrap();
+    assert_eq!(st["source"], "tracker", "{st}");
+    assert_eq!(st["tracker"]["frames"].as_object().unwrap().len(), 21, "{st}");
+    // The span bar's data: the tracker's confidence for every tracked frame.
+    let trust = s.roto_trust(cid, clip, uid);
+    assert_eq!(trust.len(), 21);
+    assert!(trust.values().all(|t| t.confidence > 0.9 && !t.occluded));
+}
+
+#[test]
+fn strokes_belong_to_the_current_object() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "frameRate": 25, "duration": 1})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"width": 64, "height": 64})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("roto.stroke", json!({"layer": layer, "points": [[10, 10]], "radius": 4})).unwrap();
+    // the current object is an option shared by the tool and the commands
+    s.execute("roto.options", json!({"object": 1})).unwrap();
+    s.execute("roto.stroke", json!({"layer": layer, "points": [[50, 50]], "radius": 4})).unwrap();
+    s.execute("roto.stroke", json!({"layer": layer, "kind": "bg", "points": [[30, 30]], "radius": 4})).unwrap();
+    // an explicit object wins over the option, and is clamped to the supported range
+    s.execute("roto.stroke", json!({"layer": layer, "points": [[20, 50]], "radius": 4, "object": 99})).unwrap();
+    let st = s.execute("roto.status", json!({"layer": layer})).unwrap();
+    assert_eq!(st["currentObject"], 1);
+    assert_eq!(st["objects"], json!([{"id": 0, "strokes": 1}, {"id": 1, "strokes": 2}, {"id": 31, "strokes": 1}]));
+    // removing one object's strokes leaves the others
+    let r = s.execute("roto.clearStrokes", json!({"layer": layer, "object": 1})).unwrap();
+    assert_eq!(r["removed"], 2);
+    let st = s.execute("roto.status", json!({"layer": layer})).unwrap();
+    assert_eq!(st["objects"], json!([{"id": 0, "strokes": 1}, {"id": 31, "strokes": 1}]));
+    // the object survives a save and a load
+    let json = s.project.to_json();
+    assert!(json.contains("\\\"object\\\":31"), "the project file carries the object");
+}
+
+#[test]
+fn clearing_one_object_keeps_shared_refine_edge_strokes() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "duration": 1})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    for (object, kind) in [(0, "fg"), (0, "bg"), (0, "refine"), (0, "refineErase"), (1, "fg")] {
+        s.execute("roto.stroke", json!({"layer": layer, "object": object, "kind": kind, "points": [[20, 20]], "radius": 4})).unwrap();
+    }
+    let before = s.project.to_json();
+    let result = s.execute("roto.clearStrokes", json!({"layer": layer, "object": 0})).unwrap();
+    assert_eq!(result["removed"], 2, "only the object's foreground/background strokes are owned by it");
+    assert_eq!(result["strokes"], 3);
+    assert!(s.undo());
+    assert_eq!(s.project.to_json(), before);
+    for kind in ["refine", "refineErase"] {
+        let result = s.execute("roto.clearStrokes", json!({"layer": layer, "kind": kind})).unwrap();
+        assert_eq!(result["removed"], 1, "explicitly clearing shared {kind} still works");
+    }
+}
+
+#[test]
+fn clearing_strokes_rejects_invalid_object_filters_without_editing() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "duration": 1})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("roto.stroke", json!({"layer": layer, "points": [[20, 20]], "radius": 4})).unwrap();
+    let before = s.project.to_json();
+    for object in [json!(-1), json!(-0.1), json!(32), json!(1e30), json!(null), json!("0")] {
+        let result = s.execute("roto.clearStrokes", json!({"layer": layer, "object": object}));
+        assert!(result.is_err(), "invalid object {object} must not delete object zero: {result:?}");
+        assert_eq!(s.project.to_json(), before);
+    }
+}

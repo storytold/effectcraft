@@ -760,7 +760,16 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             )
         }
         // File ▸ Export ▸ Adobe Premiere Pro Project…: Final Cut Pro XML (or FCPXML / OTIO / EDL).
-        "file.exportTimeline" if !has(p, &["path"]) => export_timeline_form(s),
+        "file.exportTimeline" if !has(p, &["path"]) => {
+            // Its pre-renders run as a job in Window ▸ Progress, not with the window waiting (#2269).
+            match base.as_object_mut() {
+                Some(m) => {
+                    m.insert("background".into(), json!(true));
+                }
+                None => base = json!({"background": true}),
+            }
+            export_timeline_form(s)
+        }
         "file.importPlaceholder" | "file.replaceWithPlaceholder" if p.as_object().is_none_or(|m| m.is_empty()) => (
             "New Placeholder".into(),
             vec![
@@ -1117,8 +1126,11 @@ mod tests {
         let params = app.dialog_state.form.params();
         assert!(params.get("note").is_none());
         assert_eq!(params["format"], "xml");
-        let r = app.session.execute("file.exportTimeline", params).unwrap();
-        assert_eq!(r["path"], path.as_str());
+        assert_eq!(params["background"], true, "the dialog exports in the background");
+        assert!(app.session.execute("file.exportTimeline", params).unwrap()["job"].is_string());
+        app.session.wait_jobs();
+        let done = app.session.job_log.last().unwrap();
+        assert_eq!((done.status.as_str(), &done.result["path"]), ("done", &json!(path)));
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
     }
 

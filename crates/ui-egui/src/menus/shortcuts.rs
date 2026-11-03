@@ -1,6 +1,7 @@
 use super::frontend::run_engine;
 use super::invoke::invoke;
 use super::{EffectcraftApp, PanelKind, Value, json};
+use crate::state::Tool;
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
 pub fn shortcut_text(s: &str) -> String {
@@ -179,6 +180,24 @@ pub(super) fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers>
     })
 }
 
+/// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
+/// being edited in the viewer, a paint tool or a camera tool active, a mask selected.
+pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
+    let mut out = vec![];
+    if app.session.state.text_edit.is_some() {
+        out.push("TextEditing");
+    }
+    match app.ui.tool {
+        Tool::Brush | Tool::Clone | Tool::Eraser => out.push("Paint"),
+        Tool::Orbit | Tool::PanCamera | Tool::Dolly => out.push("Camera"),
+        _ => {}
+    }
+    if app.session.selected_mask().is_some() {
+        out.push("Mask");
+    }
+    out
+}
+
 /// Only Shift held (Shift+Delete, not Ctrl/Alt+Shift+Delete).
 fn only_shift(m: egui::Modifiers) -> bool {
     m.shift && !m.alt && !m.ctrl && !m.command && !m.mac_cmd
@@ -324,6 +343,11 @@ fn numpad_star_marker(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
 }
 
+/// Panels that handle Enter themselves (rename, apply, open the row).
+fn panel_owns_enter(kind: PanelKind) -> bool {
+    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+}
+
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
     let start = modifiers_at_start(ctx);
     if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -356,6 +380,8 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     let binds = bindings(&app.session);
     for (key, mods, pressed, physical_key) in events {
+        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
+        let (focused, contexts) = (app.ui.focused.shortcut_scope(), active_contexts(app));
         // Plain Spacebar runs its shortcut (Play Current Preview) on the release: held, it is
         // the Hand tool (After Effects), and a drag with it must not start or stop playback.
         if key == egui::Key::Space && (!pressed || !mods.any()) {
@@ -378,7 +404,9 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             continue;
         }
         // Enter in the Project panel renames the selected item (handled by the panel).
-        if key == egui::Key::Enter && !mods.any() && app.ui.focused == PanelKind::Project {
+        // In Effects & Presets and the Render Queue Enter applies or opens the row (handled by the
+        // panel), not the layer rename.
+        if key == egui::Key::Enter && !mods.any() && panel_owns_enter(app.ui.focused) {
             continue;
         }
         // The Project panel has its own selection; a previously selected Timeline layer
@@ -398,26 +426,29 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             let _ = invoke(app, ctx, "edit.clear", json!({}));
             continue;
         }
-        // Explicit physical bindings distinguish keys that a layout reports with the same
-        // logical name (for example AZERTY's minus and right parenthesis).
-        let physical = physical_key.and_then(|key| {
-            app.session.shortcuts().bindings().into_iter().find_map(|(sc, b)| {
-                let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-                (k == key && mods_match(m, mods)).then(|| (b.command.clone(), b.params.clone()))
-            })
-        });
-        if let Some((id, params)) = physical {
-            if let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params }) {
-                app.ui.status = e;
-            }
-            continue;
-        }
-        if let Some((_, _, id, params)) = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).min_by_key(|(_, _, id, params)| {
-            // The focused panel wins over an application command sharing its chord.
+        // The narrowest active scope wins a chord: an active context, the focused panel, the
+        // application. A context's shortcut doesn't run outside it. Explicit physical bindings
+        // distinguish keys that a layout reports with the same logical name (for example AZERTY's
+        // minus and right parenthesis); they win over logical ones of the same scope rank.
+        let table = app.session.shortcuts();
+        let scope_of = |id: &str, params: &Value| {
             let key = effectcraft_engine::shortcuts::binding_key(id, params);
-            app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
-        }) {
-            let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
+            table.find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str())
+        };
+        let physical = table.bindings().into_iter().filter_map(|(sc, b)| {
+            let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
+            (Some(k) == physical_key && mods_match(m, mods)).then_some((b.scope.as_str(), true, (&b.command, &b.params)))
+        });
+        let logical = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).map(|(_, _, id, params)| (scope_of(id, params), false, (id, params)));
+        let chosen = match effectcraft_engine::shortcuts::pick(physical.chain(logical), &focused, &contexts) {
+            Ok(c) => c.map(|(id, params)| (id.clone(), if params.is_null() { json!({}) } else { params.clone() })),
+            Err(scopes) => {
+                let panels: Vec<String> = scopes.iter().map(|s| effectcraft_engine::shortcuts::scope_label(s)).collect();
+                app.ui.status = format!("This shortcut belongs to {}: focus one of them", panels.join(" and "));
+                None
+            }
+        };
+        if let Some((id, params)) = chosen {
             if id == "edit.paste"
                 && let Some(t) = &pasted
             {

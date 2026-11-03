@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/*"]
 
 [workspace.package]
-version = "0.18.0"
+version = "0.21.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -14,7 +14,9 @@ repository = "https://github.com/storytold/effectcraft"
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
-craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", features = ["egui"] }
+craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ca1b5e2edb8568335c6c14f390307bd5beae8238" }
+# craft-update: app-specific pretend versions apply to startup and manual checks.
+craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7", features = ["egui"] }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -27,6 +29,7 @@ effectcraft-text = { path = "crates/text" }
 effectcraft-effects = { path = "crates/effects" }
 effectcraft-track = { path = "crates/track" }
 effectcraft-segment = { path = "crates/segment" }
+effectcraft-sam2 = { path = "crates/sam2" }
 effectcraft-model = { path = "crates/model" }
 effectcraft-render = { path = "crates/render" }
 effectcraft-gpu = { path = "crates/gpu" }
@@ -75,6 +78,7 @@ harfrust = { version = "0.12", default-features = false, features = ["std"] }
 exr = "1.74"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 same-file = "1.0"
+tempfile = "3.27"
 
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.

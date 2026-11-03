@@ -352,8 +352,8 @@ fn draw_precomp(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas:
 
 /// Adjustment layer (`Renderer::draw_adjustment`): the effect stack runs on the comp below,
 /// resident on the GPU (non-GPU effects read back, run on the CPU and upload), and the result
-/// replaces the canvas inside the layer's footprint × track matte × opacity. `None` = draw it
-/// on the CPU.
+/// replaces the canvas inside the layer's footprint × track matte × opacity, or blends onto it in
+/// the layer's blend mode when that isn't Normal. `None` = draw it on the CPU.
 fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     let Some(foot) = r.adjustment_footprint(ctx, layer) else { return Some(()) };
@@ -379,7 +379,13 @@ fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canv
     if let Some(c) = pipe.to_blend() {
         adjusted = ops::convert(e, &adjusted, &c);
     }
-    *canvas = ops::adjust_mix(e, canvas, &adjusted, &matte, opacity);
+    *canvas = if layer.blend_mode == BlendMode::Normal {
+        ops::adjust_mix(e, canvas, &adjusted, &matte, opacity)
+    } else {
+        // The adjusted comp is a layer in that mode over the comp below (#2618).
+        let iso = ops::matte(e, &adjusted, &matte, effectcraft_project::MatteKind::Alpha);
+        ops::blend_full(e, canvas, &iso, layer.blend_mode, opacity, layer.id.0 as u32, None)
+    };
     Some(())
 }
 

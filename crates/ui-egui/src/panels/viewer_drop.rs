@@ -54,7 +54,11 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Pain
             }
             // New layers go above the current selection, so insert in reverse
             // to preserve the order of the dragged Project items.
-            crate::panels::project_drop_items(app, *item).into_iter().rev().map(|item| ("layer.addItem", json!({"item": item, "position": at}))).collect()
+            crate::panels::project_drop_items(app, *item, app.session.state.active_comp)
+                .into_iter()
+                .rev()
+                .map(|item| ("layer.addItem", json!({"item": item, "position": at})))
+                .collect()
         }
         DragPayload::Files(paths) => vec![("mediaBrowser.import", json!({"paths": paths, "addToComp": true, "position": at}))],
         DragPayload::Property { .. } => vec![],

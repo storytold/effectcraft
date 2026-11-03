@@ -522,7 +522,7 @@ impl<'a> Renderer<'a> {
     }
 
     /// Adjustment layer: effects applied to the comp below, limited to the layer's footprint
-    /// and its track matte.
+    /// and its track matte, and blended back in the layer's blend mode.
     fn draw_adjustment(&self, ctx: &EvalCtx, layer: &Layer, canvas: &mut Image, opacity: f32) {
         let Some(mut foot) = self.source(ctx, layer) else { return };
         let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
@@ -546,6 +546,18 @@ impl<'a> Renderer<'a> {
             color::convert(&mut adjusted.img, &c);
         }
         if adjusted.img.width != canvas.width || adjusted.img.height != canvas.height {
+            return;
+        }
+        if layer.blend_mode != BlendMode::Normal {
+            // The adjusted comp is a layer in that mode over the comp below, as in After Effects:
+            // an adjustment layer with no effects in Screen screens the comp with itself (#2618).
+            let mut iso = adjusted.img;
+            iso.data.par_iter_mut().zip(matte.data.par_iter()).for_each(|(p, m)| {
+                for c in p.iter_mut() {
+                    *c *= m[3];
+                }
+            });
+            canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
             return;
         }
         canvas.data.par_iter_mut().zip(adjusted.img.data.par_iter()).zip(matte.data.par_iter()).for_each(|((c, a), m)| {

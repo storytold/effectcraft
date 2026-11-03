@@ -25,7 +25,7 @@ pub(super) fn empty_state(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     if let Some(crate::panels::DragPayload::Item(dragged)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx).as_deref()
         && ui.rect_contains_pointer(rect)
     {
-        let items: Vec<effectcraft_engine::project::ItemId> = crate::panels::project_drop_items(app, *dragged)
+        let items: Vec<effectcraft_engine::project::ItemId> = crate::panels::project_drop_items(app, *dragged, None)
             .into_iter()
             .map(effectcraft_engine::project::ItemId)
             .filter(|id| {

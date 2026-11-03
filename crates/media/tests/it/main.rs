@@ -3,6 +3,7 @@
 mod aac_layout;
 mod downmix;
 mod exif_orientation;
+mod file_timecode;
 mod footage;
 mod open_in_place;
 mod tga;

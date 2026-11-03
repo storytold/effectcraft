@@ -257,7 +257,7 @@ pub(crate) fn modal_fit_placed(ctx: &egui::Context, title: &str, size: egui::Vec
             // The id stays keyed on the untranslated source, so switching language cannot move it.
             let head = ui.label(egui::RichText::new(tr(title)).font(Tokens::semibold(15.0)).color(t.tab_text_active));
             let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), head.rect.y_range());
-            let grip = ui.interact(row, id.with("grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+            let grip = ui.interact(row, id.with("grip"), Sense::DRAG).on_hover_cursor(egui::CursorIcon::Grab);
             if grip.dragged() {
                 let moved = (offset + grip.drag_delta()).clamp(-room, room);
                 ui.ctx().data_mut(|d| d.insert_temp(offset_id, moved));
@@ -446,7 +446,7 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     let live = existing && super::live_preview::active(app);
     let place = super::live_preview::place(app);
     let mut preview = app.dialog_state.live.on;
-    modal_placed(ctx, "Composition Settings", vec2(600.0, 470.0), t, place, |ui| {
+    modal_placed(ctx, "Composition Settings", vec2(super::comp_settings::dialog_width(ctx), 470.0), t, place, |ui| {
         result = super::comp_settings::show(ui, &mut d, t, &mut app.auto, &custom, &mut cmds, live.then_some(&mut preview));
     });
     app.dialog_state.live.on = preview;

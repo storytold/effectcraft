@@ -503,8 +503,10 @@ fn text_animate_menu_adds_an_animator_with_the_property() {
     let mut h = harness(s);
     h.state_mut().ui.timeline.open_groups.insert(text);
     open_layer(&mut h, l);
+    // The Properties panel's Position row has the same accessible name: take the menu's new entry.
+    let shown: Vec<_> = h.query_all_by_label("Position").map(|n| n.rect()).collect();
     click(&mut h, &format!("timeline.group.{text}.animate"));
-    let entry = h.get_by_label("Position").rect();
+    let entry = h.query_all_by_label("Position").map(|n| n.rect()).find(|r| !shown.contains(r)).expect("the Animate menu's Position entry");
     click_at(&mut h, entry.center());
     let animators = |h: &Harness<'_, EffectcraftApp>| {
         h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("text").unwrap().sub("animators").cloned()

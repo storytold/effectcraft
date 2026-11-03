@@ -319,6 +319,28 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  **A render never writes one file twice either:** when two outputs of the job (two items, a
+  `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
+  refused before anything is written, naming both items. Sequences clash only on frames both
+  write. A later item with Skip Existing Files leaves the earlier one's frames alone only when
+  the exporter can check the final destination. Browser/memory sinks and storage-overflow renders still report collisions.
+  Preflight compares every configured overflow destination, since available space can change during a render. Default
+  names are numbered like footage collisions when another queue item writes them
+  (`renderQueue.add`, `render.preRender`, `comp.saveFrameAs {queue}`, `file.createProxy`: a second
+  `Main` renders to `Main_1.mp4`); a name you give is kept, and `renderQueue.duplicate` copies the
+  output as it is, so change one with `renderQueue.setOutput` or turn it off.
+* **Other files written to a path you give** follow the same footage rule, with no flag and no
+  prompt: `comp.saveFrameAs` (also `…Psd`, `…Exr`), `file.exportLottie`, `file.saveCopy`,
+  `file.saveCopyAsXml`, `file.collectFiles` (every copy and the collected project; nothing is
+  written if one would land on a file the project reads), `file.exportTimeline` (and the movies it
+  pre-renders), `essential.exportTemplate`, `anim.savePreset`, `view.exportGuides`,
+  `shortcuts.export`, the control channel's `render.frame` / `ui.screenshot` with a `path`, the
+  MCP `render_frame` tool and `effectcraft-cli render-frame --out`. Footage (every frame of a
+  sequence), a proxy and the project file are refused with the reason and left untouched.
+  `file.checkOutput {path}` says beforehand (`{blocked, source, reason}`). Not covered: Save /
+  Save As / Increment and Save / auto-save (they write the project's own file), script `File`
+  writes (a script may rewrite a data file it also imports), and files the app extracts for
+  itself (template media, vector images).
 * **Essential Graphics**: controls can be addressed by name (`essential.set {"layer":"#1",
   "control":"Title","value":"John Smith"}`); a command that targets an explicit `comp` runs even
   when the active comp would disable it (`essential.exportTemplate {"comp":"Lower Third", …}`).
@@ -395,8 +417,9 @@ Face tracking's trained model works like Roto Brush's (below): `face.models` lis
 tracker and MediaPipe Face Landmarker with its authors and licence; `face.model.download {id}` /
 `face.model.install {path, id?}` install it (verified); `face.model.select {id:
 classical|mediapipe-face}` chooses it; `face.model.remove {id}` deletes it. Downloads and loading
-run in the background; `"wait": true` on download, install or select returns once the model is in
-use (or with its error), which scripts need before tracking. `track.mask` with a
+run in the background; `"wait": true` waits for the requested operation (or returns its error).
+Download/install do not change the selected model. After installing, use
+`face.model.select {id, wait:true}` to select and load it before tracking. `track.mask` with a
 face method returns `faceModel`, the engine it tries first (the classical one when the model finds
 no face in the mask).
 
@@ -453,7 +476,9 @@ undistort?, wait?}`) apply
 Effect ▸ Perspective ▸ 3D Camera Tracker (or reuse the layer's) and analyse it in the background:
 "Analyzing in background (step 1 of 2)" tracks features, "Solving camera" solves.
 `camera.analyze {layer?, effect?, wait?}` re-runs it, `camera.cancel` stops it without writing
-anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved`, `methodUsed`,
+anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved` (every frame
+solved), `partial` with `solvedFrames` of `frames` (the camera is interpolated on the other frames,
+and `camera.exportBlender` refuses such a solve), `methodUsed`,
 `averageError` (pixels), `focalLength`, `horizontalAngleOfView`, the current frame's `camera`
 (position, orientation, zoom), `groundPlane` and the solved `lensDistortion` (`k1`, `k2`, normalised by
 half the frame diagonal) when Solve Lens Distortion (`effects/#1/advanced/lensDistortion`, also on
@@ -503,11 +528,22 @@ reference. Matte settings are ordinary properties (`effects/#1/rotoBrushMatte/se
 
 Trained model (Roto Brush 2.0 / 3.0):
 - `roto.models` lists the built-in engine and every registered model, with its authors,
-  licence, size, URL, SHA-256 and whether it is installed, selected and active.
-- `roto.model.download {id}` fetches and verifies the official weights in the background;
-  `roto.model.install {path, id?}` installs a file you already have.
-- `roto.model.select {id: classical|mobilesam}` chooses which one Roto Brush uses. Loading runs
-  in the background; `"wait": true` (also on download and install) returns once it is in use.
+  licence, size, app download URL (empty for install-only models), checkpoint `source` and `sourceFile`,
+  SHA-256 and whether it is installed, selected and active.
+- `roto.model.download {id}` fetches and verifies weights when the registry provides an app download URL;
+  `roto.model.install {path, id?}` installs a file you already have. SAM 2 is Install from File only until
+  a storytold-controlled mirror is available; its size and SHA-256 are verified before installation.
+- `roto.model.select {id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large}` chooses which one Roto Brush uses (SAM 2 also tracks the object through the clip, see [roto-brush-sam2.md](roto-brush-sam2.md); `roto.status` then reports `source` and per-frame `tracker.frames` with `confidence` and `occluded`). Loading runs
+  in the background. `"wait": true` waits for the requested operation; download/install load the model
+  only if it is already selected. They do not activate an unselected model: after installation, use
+  `roto.model.select {id, wait:true}` to select and load it. Unrelated model work can return a retryable
+  busy error rather than reporting that a waiting selection has finished.
+- `roto.propagate` never falls back to the classic engine silently: a chosen model that is not installed, or failed
+  to load, is an error, and without `"wait": true` so is a model still loading. `roto.status` reports `model`
+  (`selected`, `installed`, `active`, `loading`, `error`) and a `notice` while the chosen model is not the one in use.
+  Tracked frames are saved in the project with the instance (`tracker.saved` names their model): they apply while the
+  strokes and span are unchanged, whichever model Settings choose (`notice` says when that differs), and a new
+  Propagate replaces them.
 - `roto.model.remove {id}` deletes the installed weights.
 - The `version` property (`effects/#1/version`: 0 = 1.0, 1 = 2.0, 2 = 3.0) picks between the
   classic engine (1.0) and the chosen model (2.0, 3.0).
@@ -716,6 +752,14 @@ effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","inclu
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
+
+Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
+parallel scripts don't lose edits. Each holds an OS lock on `.<name>.lock` next to the project from
+before it reads the file until it exits; the next one says so on stderr, waits, and then edits what
+the first one saved. A crash releases the lock, and the empty file left behind is harmless. Only these
+CLI runs take the lock: the desktop app, `mcp`, and a `file.save` step in a run without `--save`
+don't. OS locks can also be unreliable over network shares and synced folders. If the lock can't be
+taken, the run warns on stderr and saves anyway.
 
 A long `run` doesn't fit on a command line (Windows caps it at 32 767 characters, Linux one
 argument at 128 KiB). `run --args-file F` reads the same `<id> <json>` arguments one per line;

@@ -260,6 +260,7 @@ pub fn twirl(ui: &mut Ui, rect: Rect, open: bool, id: egui::Id, t: &Tokens) -> R
         vec![c + vec2(-0.8 * k, -1.6 * k), c + vec2(0.8 * k, 0.0), c + vec2(-0.8 * k, 1.6 * k)]
     };
     ui.painter().add(egui::Shape::line(pts, Stroke::new(1.4, col)));
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -273,6 +274,7 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
     if on || resp.hovered() {
         icons::paint(ui.painter(), rect.shrink(rect.width() * 0.18), icon, if on { t.icon } else { t.text_faint });
     }
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -297,6 +299,8 @@ pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens
         t.icon
     };
     icons::paint(ui.painter(), rect.shrink(rect.width() * 0.22), icon, col);
+    // An icon has no text: the caller names the button.
+    crate::a11y::role(&resp, egui::accesskit::Role::Button);
     focus_outline(ui, &resp, t);
     resp
 }
@@ -341,7 +345,7 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
     }
     let inner = Rect::from_min_max(pos2(rect.min.x + if search { 22.0 } else { 9.0 }, rect.min.y + 1.0), pos2(rect.max.x - 8.0, rect.max.y - 1.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    child.add(
+    let resp = child.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
@@ -350,7 +354,10 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
             .min_size(inner.size())
             .font(Tokens::ui(12.0))
             .align(egui::Align2::LEFT_CENTER),
-    )
+    );
+    // The hint is the field's visible name (the caller can give it a better one).
+    crate::a11y::name(&resp, hint);
+    resp
 }
 
 /// Dropdown-looking control ("Full ▾").
@@ -390,6 +397,10 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
     };
     ui.painter().text(pos2(rect.min.x + 7.0, rect.center().y), Align2::LEFT_CENTER, shown, Tokens::ui(11.5), t.text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.max.x - 9.0, rect.center().y), vec2(8.0, 8.0)), Icon::ChevronDown, t.text_dim);
+    // A drop-down showing `text`; the caller names what it sets.
+    crate::a11y::role(&resp, egui::accesskit::Role::ComboBox);
+    crate::a11y::value(&resp, text);
+    focus_outline(ui, &resp, t);
     if let Some(tip) = tip {
         return resp.on_hover_text(tip.to_string());
     }
@@ -412,6 +423,8 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     };
     ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, Tokens::medium(12.0), if primary { Color32::WHITE } else { t.text });
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, text);
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -589,6 +602,7 @@ pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> 
         let p = |x: f32, y: f32| pos2(b.min.x + x * b.width(), b.min.y + y * b.height());
         ui.painter().line(vec![p(0.2, 0.52), p(0.42, 0.74), p(0.8, 0.28)], Stroke::new(1.6, Color32::WHITE));
     }
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -608,7 +622,9 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::unique(key), Sense::drag());
+    // Dragged with the mouse only: a Tab stop that no key could move would be a trap. The panels
+    // scroll with their own keys (the arrows, Page Up / Page Down) and the wheel.
+    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::unique(key), Sense::DRAG);
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -631,30 +647,81 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     s
 }
 
+/// The width a scrolled panel keeps clear on its right for the [`scroll_bar`] (its track, and a
+/// little air before it).
+pub const SCROLL_GUTTER: f32 = 8.0;
+
+/// Whether a [`PanelScroll`]'s rows give up the [`SCROLL_GUTTER`], kept from frame to frame.
+#[derive(Clone, Copy, Default)]
+struct Gutter {
+    on: bool,
+    /// The rows' height at full width, until the first frame in the narrower width has measured
+    /// `shrunk`.
+    wide: Option<f32>,
+    /// How much shorter the rows got in the narrower width. Most rows only get taller, but a graph
+    /// sized by the width gets shorter: without this, rows that overflow at full width and fit
+    /// narrowed would drop the gutter and take it back every frame.
+    shrunk: f32,
+}
+
 /// Vertical scrolling for a panel that lays out its own rows: [`PanelScroll::begin`] gives the
-/// offset to draw them at (moved by the mouse wheel over `area`), [`PanelScroll::end`] takes the
-/// rows' height and draws a [`scroll_bar`] on the right edge while they overflow, so every
-/// panel can be scrolled without a wheel or touchpad (#271).
+/// offset to draw them at (moved by the mouse wheel over `area`) and the [`PanelScroll::content`]
+/// to lay them out in, which clips `ui` until [`PanelScroll::end`]; that takes the rows' height
+/// and draws a [`scroll_bar`] on the right edge while they overflow, so every panel can be
+/// scrolled without a wheel or touchpad (#271).
 pub struct PanelScroll {
     id: egui::Id,
     area: Rect,
+    /// `ui`'s clip before [`PanelScroll::begin`].
+    clip: Rect,
+    gutter: Gutter,
     /// How far the rows are scrolled up.
     pub offset: f32,
+    /// Where the rows go: the area, less the [`SCROLL_GUTTER`] while they overflow, so they are
+    /// cut off before the scroll bar rather than under it (#2867). Painters made before `begin`
+    /// keep their own clip: derive them from this.
+    pub content: Rect,
 }
 
 impl PanelScroll {
-    pub fn begin(ui: &Ui, id: egui::Id, area: Rect) -> Self {
+    pub fn begin(ui: &mut Ui, id: egui::Id, area: Rect) -> Self {
         // (Clamped to last frame's overflow: the rows' height is known once they are drawn.)
         let (mut offset, max): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // (Before the clip narrows: the wheel works over the scroll bar too.)
         if ui.rect_contains_pointer(area) {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
         }
-        Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
+        let gutter: Gutter = ui.data(|d| d.get_temp(id.with("gutter"))).unwrap_or_default();
+        let mut content = area;
+        if gutter.on {
+            content.max.x = (area.max.x - SCROLL_GUTTER).max(area.min.x);
+        }
+        // Rows scroll under whatever is around them: clip their widgets (and hit tests) too.
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(content.intersect(clip));
+        Self { id, area, clip, gutter, offset: offset.clamp(0.0, max.max(0.0)), content }
+    }
+
+    /// Scroll the panel `id` (a [`PanelScroll`] kept under that id) so the content from `top` to
+    /// `bottom` is in view of a `view` tall list, from the next pass.
+    pub fn reveal(ctx: &egui::Context, id: egui::Id, top: f32, bottom: f32, view: f32) {
+        let (offset, max): (f32, f32) = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+        let wanted = if top < offset {
+            top
+        } else if bottom > offset + view {
+            bottom - view
+        } else {
+            offset
+        }
+        .max(0.0);
+        // (`max` is last frame's overflow; the next `end` measures it again.)
+        ctx.data_mut(|d| d.insert_temp(id, (wanted, max.max(wanted))));
     }
 
     /// The rows were `content` points tall: keep the offset, with the scroll bar registered for
     /// automation as `key`.
     pub fn end(self, ui: &mut Ui, auto: &mut Registry, key: &str, content: f32, t: &Tokens) {
+        ui.set_clip_rect(self.clip);
         let max = (content - self.area.height()).max(0.0);
         let mut offset = self.offset.min(max);
         if max > 0.0 {
@@ -662,6 +729,20 @@ impl PanelScroll {
             offset = scroll_bar(ui, auto, key, track, offset, max, t);
         }
         ui.data_mut(|d| d.insert_temp(self.id, (offset, max)));
+        let mut gutter = self.gutter;
+        if gutter.on {
+            if let Some(wide) = gutter.wide.take() {
+                gutter.shrunk = (wide - content).max(0.0);
+            }
+            gutter.on = content + gutter.shrunk > self.area.height();
+        } else if max > 0.0 {
+            gutter = Gutter { on: true, wide: Some(content), shrunk: 0.0 };
+        }
+        ui.data_mut(|d| d.insert_temp(self.id.with("gutter"), gutter));
+        // The rows were laid out for the other width: lay them out again.
+        if gutter.on != self.gutter.on {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -736,6 +817,30 @@ pub fn label_popup(
     })
 }
 
+/// This pass's input has no mouse press or release: whatever just happened (a control activated,
+/// a list opened, an entry chosen) came from the keyboard or an assistive technology.
+pub fn by_keyboard(ui: &Ui) -> bool {
+    !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released())
+}
+
+/// Put the keyboard on `entry` of the popup list `id` the pass the list opens, so Up / Down and
+/// Enter work it and Escape closes it. (The pass count tells a fresh opening from a list that has
+/// been open for some passes.)
+pub fn focus_when_opened(ui: &Ui, id: egui::Id, entry: &Response) {
+    let key = id.with("focus-pass");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let previous = ui.data_mut(|d| {
+        let previous = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        previous
+    });
+    // A list opened with the mouse keeps the keyboard where it was: a widget with the focus
+    // pauses the application's shortcuts (Space, Ctrl+Z) until the focus is lost.
+    if previous.is_none_or(|p| p.saturating_add(1) < pass) && by_keyboard(ui) {
+        entry.request_focus();
+    }
+}
+
 /// Show a popup menu anchored at `pos` with string options; returns the chosen index.
 pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String], current: Option<usize>) -> Option<usize> {
     if !popup_is_open(ui, id) {
@@ -745,11 +850,20 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     popup_list(ui, id, pos, Rect::NOTHING, options.len().saturating_sub(seps), seps, |ui| {
         ui.set_min_width(160.0);
         let mut chosen = None;
+        let mut first = true;
         for (i, o) in options.iter().enumerate() {
             if o == "-" {
                 ui.separator();
-            } else if ui.selectable_label(current == Some(i), o).clicked() {
-                chosen = Some(i);
+            } else {
+                let r = ui.selectable_label(current == Some(i), o);
+                // The keyboard starts on the current entry (the first one, with none current).
+                if current == Some(i) || (current.is_none() && first) {
+                    focus_when_opened(ui, id, &r);
+                }
+                first = false;
+                if r.clicked() {
+                    chosen = Some(i);
+                }
             }
         }
         chosen
@@ -994,6 +1108,44 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
+    fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {
+        let t = Tokens::for_kind(Default::default());
+        let mut auto = Registry::default();
+        let mut width = 0.0;
+        let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 100.0));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let outer = ui.clip_rect();
+            let scroll = PanelScroll::begin(ui, egui::Id::unique("rows"), area);
+            width = scroll.content.width();
+            assert_eq!(ui.clip_rect(), scroll.content.intersect(outer), "the widgets are clipped to the rows");
+            scroll.end(ui, &mut auto, "rows.scroll", rows(width), &t);
+            assert_eq!(ui.clip_rect(), outer, "and only until the end");
+        });
+        output.textures_delta.clear();
+        width
+    }
+
+    /// Rows that fit only in the narrower width (a graph sized by the width gets shorter) keep the
+    /// gutter instead of dropping it and taking it back every frame, and give it up once they fit
+    /// at full width too (#2867).
+    #[test]
+    fn panel_scroll_gutter_settles() {
+        let (full, narrow) = (300.0, 300.0 - SCROLL_GUTTER);
+        let ctx = egui::Context::default();
+        let widths = |tall: f32, frames: usize| {
+            let rows = move |w: f32| if w < full { tall - 8.0 } else { tall };
+            (0..frames).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>()
+        };
+        assert_eq!(widths(90.0, 3), [full; 3], "rows that fit: full width");
+        assert_eq!(widths(104.0, 6), [full, narrow, narrow, narrow, narrow, narrow], "fit only narrowed: stays narrowed");
+        assert_eq!(widths(200.0, 3), [narrow; 3], "overflow: narrowed");
+        assert_eq!(widths(90.0, 3), [narrow, full, full], "fit again: full width");
+        // Rows that overflow only when narrowed stay at full width.
+        let rows = |w: f32| if w < full { 104.0 } else { 96.0 };
+        assert_eq!((0..3).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>(), [full; 3]);
+    }
 
     fn checkbox_frame(ctx: &egui::Context, values: &mut [Option<bool>; 5], events: Vec<egui::Event>) {
         let t = Tokens::for_kind(Default::default());
