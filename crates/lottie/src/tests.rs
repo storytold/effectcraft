@@ -932,3 +932,22 @@ fn per_corner_roundness_exports_equal_radii_and_warns_when_mixed() {
     assert_eq!(rc(&json)["r"]["k"], json!(5.0));
     assert!(!warnings.iter().any(|w| w.contains("per-corner")), "{warnings:?}");
 }
+
+/// A footage item called a still whose file is not an image is not embedded.
+#[test]
+fn only_image_bytes_are_embedded() {
+    let (mut p, cid) = setup();
+    let fid = p.add_item(
+        "secret.png",
+        Label::Lavender,
+        None,
+        ItemKind::Footage(Footage { path: "/virtual/secret.png".into(), kind: FootageKind::Still, width: 8, height: 8, has_video: true, ..Default::default() }),
+    );
+    let c = comp(&p, cid);
+    let l = build::layer(&mut p, &c, "secret.png", LayerSource::Footage { item: fid }, (8, 8), None);
+    push(&mut p, cid, l);
+    let read = |path: &str| (path == "/virtual/secret.png").then(|| b"root:x:0:0:root:/root:/bin/sh\n".to_vec());
+    let res = export_comp(&p, cid, &ExportOptions::default(), &read).unwrap();
+    assert!(res.json["assets"].as_array().is_none_or(|a| a.is_empty()), "{}", res.json["assets"]);
+    assert!(res.warnings.iter().any(|w| w.contains("not a PNG")), "{:?}", res.warnings);
+}
