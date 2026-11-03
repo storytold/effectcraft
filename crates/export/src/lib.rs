@@ -334,6 +334,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                             (c, a)
                         }
                         Channels::Rgb => {
+                            // The background is added to the output-encoded frame as it is, as every other output
+                            // does (`Image::to_rgba8_over`), then decoded with the frame: same colour as a PNG.
                             let k = 1.0 - p[3].clamp(0.0, 1.0);
                             (lin3([0, 1, 2].map(|i| p[i] + comp.background[i] * k)), 1.0)
                         }
