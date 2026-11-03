@@ -719,22 +719,33 @@ fn is_link(path: &std::path::Path) -> bool {
 }
 
 #[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// A save through a symlink replaces the project it points to and keeps that file's mode (#2873).
+#[cfg(unix)]
 #[test]
-fn a_save_through_a_symlink_replaces_the_file_it_points_to() {
-    use std::os::unix::fs::symlink;
-    let d = tmp("atomic-through-link");
+fn a_project_save_through_a_symlink_replaces_the_file_it_points_to() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let d = tmp("save-through-link");
     std::fs::create_dir_all(d.join("links")).unwrap();
     let real = d.join("real.ecproj");
-    std::fs::write(&real, b"before").unwrap();
+    let mut s = session_with_comp();
+    s.execute("file.saveAs", json!({"path": real.to_str().unwrap()})).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
     // relative and in another folder, then a chain with an absolute link at the end
     let relative = d.join("links/relative.ecproj");
     symlink("../real.ecproj", &relative).unwrap();
     let chained = d.join("links/chained.ecproj");
     symlink(&relative, &chained).unwrap();
-    for (link, data) in [(&relative, &b"one"[..]), (&chained, &b"two"[..])] {
-        atomic_write(link, data).unwrap();
+    for (n, link) in [&relative, &chained].into_iter().enumerate() {
+        s.execute("comp.new", json!({"name": format!("Through link {n}")})).unwrap();
+        s.execute("file.saveAs", json!({"path": link.to_str().unwrap()})).unwrap();
         assert!(is_link(&relative) && is_link(&chained), "{link:?} replaced a link");
-        assert_eq!(std::fs::read(&real).unwrap(), data, "{link:?}");
+        assert!(std::fs::read_to_string(&real).unwrap().contains(&format!("Through link {n}")), "{link:?}");
+        assert_eq!(mode(&real), 0o600, "{link:?} reset the project's mode");
     }
     assert_eq!(std::fs::read_link(&relative).unwrap(), std::path::Path::new("../real.ecproj"));
     assert_eq!(names(&d), ["links", "real.ecproj"], "no temporary file is left");
@@ -744,17 +755,18 @@ fn a_save_through_a_symlink_replaces_the_file_it_points_to() {
 
 #[cfg(unix)]
 #[test]
-fn a_save_through_a_dangling_symlink_or_a_loop_is_an_error_and_writes_nothing() {
+fn a_project_save_through_a_dangling_symlink_or_a_loop_is_an_error_and_writes_nothing() {
     use std::os::unix::fs::symlink;
-    let d = tmp("atomic-link-ends");
+    let d = tmp("save-link-ends");
+    let mut s = session_with_comp();
     let dangling = d.join("dangling.ecproj");
     symlink("new.ecproj", &dangling).unwrap();
-    assert_eq!(atomic_write(&dangling, b"new").unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert!(s.execute("file.saveAs", json!({"path": dangling.to_str().unwrap()})).is_err());
     assert!(is_link(&dangling));
     let (a, b) = (d.join("a.ecproj"), d.join("b.ecproj"));
     symlink(&b, &a).unwrap();
     symlink(&a, &b).unwrap();
-    assert!(atomic_write(&a, b"x").is_err());
+    assert!(s.execute("file.saveAs", json!({"path": a.to_str().unwrap()})).is_err());
     assert!(is_link(&a) && is_link(&b));
     assert_eq!(names(&d), ["a.ecproj", "b.ecproj", "dangling.ecproj"], "nothing is written");
     let _ = std::fs::remove_dir_all(d);
@@ -762,10 +774,11 @@ fn a_save_through_a_dangling_symlink_or_a_loop_is_an_error_and_writes_nothing() 
 
 #[cfg(unix)]
 #[test]
-fn a_save_follows_a_chain_of_forty_symlinks_and_not_forty_one() {
-    let d = tmp("atomic-link-chain");
+fn a_project_save_follows_a_chain_of_forty_symlinks_and_not_forty_one() {
+    let d = tmp("save-link-chain");
+    let mut s = session_with_comp();
     let real = d.join("real.ecproj");
-    std::fs::write(&real, b"before").unwrap();
+    s.execute("file.saveAs", json!({"path": real.to_str().unwrap()})).unwrap();
     // link-1 points to the file, and each next one to the one before
     let mut previous = real.clone();
     for n in 1..=41 {
@@ -773,11 +786,62 @@ fn a_save_follows_a_chain_of_forty_symlinks_and_not_forty_one() {
         std::os::unix::fs::symlink(&previous, &link).unwrap();
         previous = link;
     }
-    atomic_write(&d.join("link-40"), b"after").unwrap();
-    assert_eq!(std::fs::read(&real).unwrap(), b"after");
-    assert!(atomic_write(&d.join("link-41"), b"x").is_err());
-    assert_eq!(std::fs::read(&real).unwrap(), b"after");
+    s.execute("comp.new", json!({"name": "Forty"})).unwrap();
+    s.execute("file.saveAs", json!({"path": d.join("link-40").to_str().unwrap()})).unwrap();
+    assert!(std::fs::read_to_string(&real).unwrap().contains("Forty"));
+    s.execute("comp.new", json!({"name": "Forty-one"})).unwrap();
+    assert!(s.execute("file.saveAs", json!({"path": d.join("link-41").to_str().unwrap()})).is_err());
+    assert!(!std::fs::read_to_string(&real).unwrap().contains("Forty-one"));
     assert!(names(&d).iter().all(|n| !n.ends_with(".tmp")), "no temporary file is left");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// Files EffectCraft keeps for itself don't follow links: a link at a settings file is replaced,
+/// and whatever it pointed to is left alone.
+#[cfg(unix)]
+#[test]
+fn settings_writes_do_not_follow_links() {
+    let d = tmp("settings-link");
+    let outside = d.join("outside.json");
+    std::fs::write(&outside, b"keep").unwrap();
+    std::fs::create_dir_all(d.join("config")).unwrap();
+    std::os::unix::fs::symlink(&outside, d.join("config").join(PREFS_FILE)).unwrap();
+    DirConfig::new(d.join("config")).write(PREFS_FILE, "{}").unwrap();
+    assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+    assert!(!is_link(&d.join("config").join(PREFS_FILE)));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// Rows: what the file is, its mode before the save (none: a new file), and the mode the
+/// temporary file has while it is written. The saved file keeps that mode, and a private file's
+/// data is never in a more open one.
+#[cfg(unix)]
+#[test]
+fn an_atomic_write_keeps_the_mode_and_never_writes_into_a_more_open_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("atomic-modes");
+    // what a new file gets here, from the umask
+    std::fs::write(d.join("probe"), b"").unwrap();
+    let default = mode(&d.join("probe"));
+    let rows: [(&str, Option<u32>); 4] =
+        [("a private file", Some(0o600)), ("a shared file", Some(0o664)), ("a read-only file", Some(0o444)), ("a new file", None)];
+    for (what, before) in rows {
+        let f = d.join(format!("{}.ecproj", what.replace(' ', "-")));
+        if let Some(m) = before {
+            std::fs::write(&f, b"before").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(m)).unwrap();
+        }
+        let mut while_written = 0;
+        atomic_write_with(&f, b"after", |tmp, data| {
+            while_written = tmp.metadata()?.permissions().mode() & 0o777;
+            std::io::Write::write_all(tmp, data)
+        })
+        .unwrap();
+        let want = before.unwrap_or(default);
+        assert_eq!(while_written, want, "{what}: the temporary file while written");
+        assert_eq!(mode(&f), want, "{what}: the saved file");
+        assert_eq!(std::fs::read(&f).unwrap(), b"after", "{what}");
+    }
     let _ = std::fs::remove_dir_all(d);
 }
 

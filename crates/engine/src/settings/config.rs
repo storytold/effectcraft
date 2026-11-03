@@ -192,15 +192,25 @@ impl ConfigStore for DirConfig {
 /// exclusively, so two writers never share one and nothing already at that name (a file, a
 /// symbolic link) is opened or followed (#1233). It ends in `.tmp`, so a file left by a hard
 /// kill never counts as an auto-save. Its bounded name does not include the destination's name,
-/// so a valid long destination name still fits the filesystem's component limit.
-fn create_temp(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+/// so a valid long destination name still fits the filesystem's component limit. With `private`
+/// (a write over an existing file) it starts readable by its owner only, on Unix.
+fn create_temp(path: &Path, private: bool) -> std::io::Result<(std::fs::File, PathBuf)> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut last = None;
     for _ in 0..16 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let tmp = path.with_file_name(format!(".effectcraft-{}-{n}.tmp", std::process::id()));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match options.open(&tmp) {
             Ok(f) => return Ok((f, tmp)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
             Err(e) => return Err(e),
@@ -213,8 +223,10 @@ fn create_temp(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
 /// rename it over `path`. A crash at any point leaves either the old file or the new one, never a
 /// torn file, and concurrent writers each publish a whole file of their own.
 ///
-/// A symlink at `path` is followed: the file it points to is the one replaced, with the temporary
-/// file in that file's folder, and the link stays as it was (#2873). A link to nothing is an error.
+/// On Unix the file keeps its mode: an existing file's mode is set on the temporary file, which
+/// starts private (0600), before anything is written into it, so a private file's data is never in
+/// a more open one and the rename doesn't reset the mode. A new file gets the usual default. A symlink at `path` is replaced, not followed; project saves follow links first
+/// ([`follow_links`]).
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     atomic_write_with(path, data, |f, data| {
         use std::io::Write;
@@ -227,9 +239,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// given the temporary file, already created. A failed write or rename removes the temporary
 /// file and leaves `path` untouched.
 pub fn atomic_write_with(path: &Path, data: &[u8], write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
-    let target = follow_links(path)?;
-    let path = target.as_path();
-    let (mut f, tmp) = create_temp(path)?;
+    // Not following a link: `metadata` would read the mode of the file it points to.
+    let existing = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()).map(|m| m.permissions());
+    let (mut f, tmp) = create_temp(path, existing.is_some())?;
+    #[cfg(unix)]
+    let written = existing.map_or(Ok(()), |mode| f.set_permissions(mode)).and_then(|()| write(&mut f, data));
+    // Windows has only a read-only flag, and a read-only temporary file couldn't be removed if the
+    // rename failed.
+    #[cfg(not(unix))]
     let written = write(&mut f, data);
     // Closed before the rename (Windows can't rename an open file).
     drop(f);
@@ -243,11 +260,11 @@ pub fn atomic_write_with(path: &Path, data: &[u8], write: impl FnOnce(&mut std::
 /// Most symlinks followed from one path, the limit Linux uses.
 const MAX_LINKS: usize = 40;
 
-/// The file a write to `path` replaces: `path` itself, or the file at the end of the chain of
-/// symlinks that starts there. Renaming over a link would replace the link and leave the file it
-/// points to as it was. A link to nothing is an error: the save would land wherever it points, in
-/// the empty mount point of a drive that isn't plugged in, for one.
-fn follow_links(path: &Path) -> std::io::Result<PathBuf> {
+/// The file a project save to `path` replaces: `path` itself, or the file at the end of the chain
+/// of symlinks that starts there (#2873). Renaming over a link would replace the link and leave the
+/// file it points to as it was. A link to nothing is an error: the save would land wherever it
+/// points, in the empty mount point of a drive that isn't plugged in, for one.
+pub(crate) fn follow_links(path: &Path) -> std::io::Result<PathBuf> {
     let mut path = path.to_path_buf();
     let mut followed = 0;
     loop {
