@@ -65,4 +65,35 @@ Project settings have one value per project, so the settings cases are split ove
 In a fresh save After Effects 26.2.1 no longer writes the working-space profile name, only the
 profile data; the reader then takes the name from the profile's own description.
 
+## The three preset cases (963, 964, 985)
+
+Curves and Mesh Warp keep their data in an arbitrary-data parameter that no scripting call can set,
+so these three cases are made by applying an animation preset (`layer.apply_preset`) to layer `S`
+(`steps.png`) of the presets base `984` (solid `B` over `S`, no `L`). The presets are the
+contributor's own, made by hand in Adobe After Effects 2026 (Windows) on 2026-10-19: add the effect
+to a solid, set it as described, select the effect, `Animation > Save Animation Preset`, delete the
+effect. No Adobe preset, sample or asset was used or copied; each file holds only that one effect
+with the values set by hand. They are not decoded anywhere in the importer or the tests: only their
+effect on the saved project (read back from the projects) is.
+
+| preset | made by | used by |
+|---|---|---|
+| `curves-red-mid-down.ffx` | Curves, channel Red: the middle point dragged down (file: Red curve (0,0) (128,44) (255,255)) | 963 |
+| `curves-rgb-two-points.ffx` | Curves, channel RGB: a point at about 1/4 dragged down, one at 3/4 up (file: (0,0) (62,24) (194,230) (255,255)) | 964 |
+| `meshwarp-3x3-center-right.ffx` | Mesh Warp, Rows 3, Columns 3, the lower-right inner vertex dragged about 100 px to the right in the Composition panel | 985 |
+
+Three more presets were made the same way for earlier experiments (cases 961, 962, 965), whose projects are not part of the test set: `curves-default.ffx`, `curves-rgb-mid-up.ffx`, `meshwarp-default.ffx`. The three presets of the test cases and their SHA-256 sums are part of the corpus (`presets/`):
+
+```
+f6ce60a8ed0fa786625078f61995e1184ef0b016efaeeb0b4ae6337831697821  curves-red-mid-down.ffx
+e3992190150366b01859e32adcb9bbe2e0ef492bd2259a8b7e85b571afeca24f  curves-rgb-two-points.ffx
+4a0cd5a0e52d8d14ee0f895b0a3e054199d399094b410a7b2a620eb484d5cba8  meshwarp-3x3-center-right.ffx
+```
+
+Inputs that are not available outside the contributor's machine, and what replaces them: the
+presets base `984` is an intermediate project of the contributor (solid `B` over `S`, noise
+reference; it is merged into the styles project and not shipped on its own); `steps.png` is a contributor-made sRGB PNG (grey ramps, no embedded profile, see
+`../CASES.md` case 902). The presets can be applied to any project that has a layer `S`; the
+case compositions of the corpus are the reference, not a byte-exact rebuild.
+
 `fx-switch.aep` is not generated: it is the base project with two Gaussian Blurs (Blurriness 40) on `L`, added through the MCP server, the first switched off by hand in the Effect Controls (the server has no operation for the fx switch), saved once and scrubbed with `scrub.py`.
