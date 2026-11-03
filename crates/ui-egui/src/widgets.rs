@@ -903,10 +903,14 @@ pub fn popup_list<R>(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, anchor: Rect, r
         ui.ctx().data_mut(|d| d.insert_temp(pending, target));
     }
     let outside = pressed_outside(ui.ctx(), &area.response) && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| anchor.contains(p));
-    if chosen.is_some() || outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // A browse that comes up outside the list and outside its trigger cancels it without choosing,
+    // as a native menu does: the button was dragged off the list (#2686).
+    let cancelled = browse_release_pos(ui).is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p));
+    if chosen.is_some() || outside || cancelled || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.data_mut(|d| d.insert_temp(id.with("open"), false));
-        // A closed list cannot browse: the flag must not outlive the press that opened it.
-        stop_browsing(ui.ctx());
+        // A closed list cannot browse: the flag must not outlive the press that opened it — and
+        // only for this list, whose press it was (#2686).
+        stop_browsing(ui.ctx(), id);
     }
     chosen
 }
@@ -1064,6 +1068,13 @@ fn browse_trigger_id() -> egui::Id {
     egui::Id::unique("popup-browse-trigger")
 }
 
+/// The temp-data id of the popup (or control) the browse belongs to: only that list may end it.
+/// A second drop-down opened while the first is still open must not lose its browse to the first
+/// one closing (#2686).
+fn browse_owner_id() -> egui::Id {
+    egui::Id::unique("popup-browse-owner")
+}
+
 /// `resp` opens (or closes) the [`popup_menu`] `id` on the press, not on the release, as After
 /// Effects' drop-downs do: the list is up while the button is still down, the entries take the
 /// highlight as the pointer moves over them ([`browse_hover`]) and the one the button comes up
@@ -1076,14 +1087,17 @@ fn browse_trigger_id() -> egui::Id {
 /// which must not choose when the button comes up back over the trigger.
 pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     let open = popup_is_open(ui, id);
-    let pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && resp.hovered();
-    // The trigger stays under the pointer for the whole hold: the list opens below it. Its rect is
-    // the list's anchor, so a press on it is never a press outside the list.
+    // The trigger's rect is the list's anchor, so a press on it is never a press outside the list.
+    // egui withholds hover from a control a clamped list covers, so the press is tested against the
+    // rect as well: the second press must still toggle such a list shut (#2686).
+    let over_trigger = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| resp.rect.contains(p));
+    let pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (resp.hovered() || (open && over_trigger));
     ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
     if pressed {
         ui.data_mut(|d| {
             d.insert_temp(browse_id(), !open);
             d.insert_temp(browse_trigger_id(), resp.rect);
+            d.insert_temp(browse_owner_id(), id);
             d.insert_temp(id.with("open"), !open);
         });
     } else if resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary) {
@@ -1104,15 +1118,42 @@ pub fn browsing(ctx: &egui::Context) -> bool {
         return true;
     }
     // The press is over and its release pass has gone: nothing may browse any more.
-    stop_browsing(ctx);
+    end_browse(ctx);
     false
 }
 
-/// Ends an [`open_on_press`] browse: the list closed, or the press ended.
-fn stop_browsing(ctx: &egui::Context) {
+/// This pass's primary-button release, if the pass has one: the position the button comes up at,
+/// which is what a browse picks from. The pointer's position by then can be a move that arrived
+/// after the release in the same pass, over an entry the button never rested on.
+fn release_pos(ui: &Ui) -> Option<egui::Pos2> {
+    ui.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+            _ => None,
+        })
+    })
+}
+
+/// The position this pass's browse comes up at, if it comes up in this pass.
+fn browse_release_pos(ui: &Ui) -> Option<egui::Pos2> {
+    browsing(ui.ctx()).then(|| release_pos(ui)).flatten()
+}
+
+/// Ends the browse of the list `owner` ([`open_on_press`]'s popup): that list closed, or the press
+/// ended. Another list closing must not end it — a second drop-down opened while the first was
+/// still open would otherwise lose its browse to the first one closing (#2686).
+fn stop_browsing(ctx: &egui::Context, owner: egui::Id) {
+    if ctx.data(|d| d.get_temp::<egui::Id>(browse_owner_id())) == Some(owner) {
+        end_browse(ctx);
+    }
+}
+
+/// Ends any browse: the press that opened it came up.
+fn end_browse(ctx: &egui::Context) {
     ctx.data_mut(|d| {
         d.insert_temp(browse_id(), false);
         d.remove::<Rect>(browse_trigger_id());
+        d.remove::<egui::Id>(browse_owner_id());
     });
 }
 
@@ -1125,16 +1166,24 @@ pub fn browse_hover(ui: &Ui, r: Response) -> Response {
 
 /// Whether a [`open_on_press`] press that is still down comes up over row `r`, which then chooses
 /// it as a click would. egui reports no click for that release (it is far from the press), and
-/// nothing but the pressed widget is hovered while a button is down, so the row tests the pointer
-/// itself. Rows that are disabled are skipped, as in native menus, and so is a release back over
-/// the trigger: a long list is moved up to fit the window and can cover the control that opened
-/// it, and the click that opened it must not choose the entry that happens to lie under it then.
+/// nothing but the pressed widget is hovered while a button is down, so the row tests the release
+/// itself: its position, not the pointer's, which by then can be a later move in the same pass
+/// over another row. Rows that are disabled are skipped, as in native menus, and so is a release
+/// back over the trigger: a long list is moved up to fit the window and can cover the control that
+/// opened it, and the click that opened it must not choose the entry that happens to lie under it
+/// then.
 pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
-    if !(browsing(ui.ctx()) && r.enabled() && r.contains_pointer()) {
+    if !(browsing(ui.ctx()) && r.enabled()) {
+        return false;
+    }
+    let Some(pos) = release_pos(ui) else {
+        return false;
+    };
+    if !r.rect.contains(pos) {
         return false;
     }
     let trigger = ui.data(|d| d.get_temp::<Rect>(browse_trigger_id()));
-    ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) && !i.pointer.interact_pos().is_some_and(|p| trigger.is_some_and(|t| t.contains(p))))
+    !trigger.is_some_and(|t| t.contains(pos))
 }
 
 /// Linked values after component `d` of `c` became `v`: the others scale by the same ratio
@@ -1532,7 +1581,49 @@ mod tests {
         )
     }
 
-    fn pointer_button(h: &mut egui_kittest::Harness<'_, Browsing>, at: egui::Pos2, pressed: bool) {
+    /// Two drop-downs side by side, the second one drawn first: its trigger is pressed while the
+    /// first list is still open, and that list closes later in the same pass.
+    struct TwoLists {
+        first: Rect,
+        second: Rect,
+        first_open: bool,
+        second_open: bool,
+        second_current: Option<usize>,
+    }
+
+    const EMPTY_TWO: TwoLists = TwoLists { first: Rect::NOTHING, second: Rect::NOTHING, first_open: false, second_open: false, second_current: None };
+
+    fn two_lists() -> egui_kittest::Harness<'static, TwoLists> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
+            |ui, s: &mut TwoLists| {
+                let t = Tokens::for_kind(Default::default());
+                let options: Vec<String> = SIZES.iter().map(|s| (*s).to_string()).collect();
+                let second_rect = Rect::from_min_size(pos2(240.0, 20.0), vec2(120.0, 20.0));
+                let second_resp = dropdown(ui, second_rect, "Second", &t, egui::Id::unique("two-second"));
+                s.second = second_resp.rect;
+                let second_pop = egui::Id::unique("two-second-list");
+                open_on_press(ui, &second_resp, second_pop);
+                if popup_is_open(ui, second_pop)
+                    && let Some(i) = popup_menu(ui, second_pop, second_rect.left_bottom(), &options, s.second_current)
+                {
+                    s.second_current = Some(i);
+                }
+                s.second_open = popup_is_open(ui, second_pop);
+                let first_rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 20.0));
+                let first_resp = dropdown(ui, first_rect, "First", &t, egui::Id::unique("two-first"));
+                s.first = first_resp.rect;
+                let first_pop = egui::Id::unique("two-first-list");
+                open_on_press(ui, &first_resp, first_pop);
+                if popup_is_open(ui, first_pop) {
+                    let _ = popup_menu(ui, first_pop, first_rect.left_bottom(), &options, None);
+                }
+                s.first_open = popup_is_open(ui, first_pop);
+            },
+            EMPTY_TWO,
+        )
+    }
+
+    fn pointer_button<S>(h: &mut egui_kittest::Harness<'_, S>, at: egui::Pos2, pressed: bool) {
         if pressed {
             h.event(egui::Event::PointerMoved(at));
             h.step();
@@ -1638,6 +1729,144 @@ mod tests {
         h.step();
         pointer_button(&mut h, away.center(), false);
         assert_eq!(h.state().current, Some(0), "the release over an entry away from the trigger chooses it");
+        assert!(!h.state().open, "and closes the list");
+        // Opened again, the list covers the trigger, so egui withholds hover from it: the press on
+        // the control must still toggle it shut, or the list could only be closed from outside.
+        pointer_button(&mut h, trigger, true);
+        assert!(h.state().open, "the press on the trigger opens the list");
+        pointer_button(&mut h, trigger, false);
+        h.run();
+        assert!(h.state().rows.iter().any(|r| r.contains(trigger)), "the list covers the trigger");
+        pointer_button(&mut h, trigger, true);
+        assert!(!h.state().open, "the second press on the covered trigger closes it");
+    }
+
+    /// A browse that comes up outside the list and outside its trigger cancels it without choosing,
+    /// as a native menu does: the button was dragged off the list (#2686).
+    #[test]
+    fn a_browse_released_outside_the_list_closes_it_without_choosing() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        assert!(h.state().open, "the press opens the list");
+        let elsewhere = pos2(320.0, 320.0);
+        h.event(egui::Event::PointerMoved(elsewhere));
+        h.step();
+        assert!(h.state().open, "moving off the list keeps it up while the button is down");
+        pointer_button(&mut h, elsewhere, false);
+        assert!(!h.state().open, "the browse comes up outside the list and closes it");
+        assert_eq!(h.state().current, None, "and chooses nothing");
+        assert!(!browsing(&h.ctx), "and nothing browses any more");
+    }
+
+    /// Space and Enter on the focused trigger open and choose the list as a click does, and Escape
+    /// cancels it: a drop-down must not be a mouse-only control (#2686).
+    #[test]
+    fn the_keyboard_opens_the_focused_list_and_enter_chooses() {
+        let mut h = list();
+        h.run();
+        // Tab (or an assistive technology) puts the keyboard on the trigger.
+        h.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("browse-trigger")));
+        let key = |key: egui::Key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        h.event(key(egui::Key::Space));
+        h.step();
+        assert!(h.state().open, "Space opens the list the keyboard has");
+        h.event(key(egui::Key::Escape));
+        h.step();
+        assert!(!h.state().open, "Escape cancels it");
+        assert_eq!(h.state().current, None, "without choosing anything");
+        // A pass between the two openings, as a real one has: the list hands the keyboard to its
+        // first entry only when it opens fresh instead of continuing from the pass before.
+        h.run();
+        // Opened from the keyboard again, Enter works that entry (the accessibility tree is one
+        // pass behind the drawing: let the list settle first).
+        h.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("browse-trigger")));
+        h.event(key(egui::Key::Space));
+        h.step();
+        h.run();
+        h.event(key(egui::Key::Enter));
+        h.step();
+        assert_eq!(h.state().current, Some(0), "Enter on the focused entry chooses it");
+        assert!(!h.state().open, "and closes the list");
+    }
+
+    /// A tap has no hover before it and arrives as a touch event plus the pointer events egui-winit
+    /// translates it into: it must open the list once, and the tap that opened it chooses nothing
+    /// (#2686).
+    #[test]
+    fn a_touch_tap_opens_the_list_once() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        let touch = |phase| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos: trigger, force: None };
+        let button = |pressed| egui::Event::PointerButton { pos: trigger, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        // egui-winit puts the touch and the pointer events it translates it into in one frame —
+        // the pointer only appears at the tap, so there is no hover before it — and they go into
+        // one pass here too (`Harness::step` would otherwise give each its own).
+        h.input_mut().events.push(touch(egui::TouchPhase::Start));
+        h.input_mut().events.push(egui::Event::PointerMoved(trigger));
+        h.input_mut().events.push(button(true));
+        h.step();
+        assert!(h.state().open, "the tap opens the list");
+        h.input_mut().events.push(touch(egui::TouchPhase::End));
+        h.input_mut().events.push(button(false));
+        h.input_mut().events.push(egui::Event::PointerGone);
+        h.step();
+        assert!(h.state().open, "the tap leaves the list up, as a click does");
+        assert_eq!(h.state().current, None, "and chooses nothing");
+    }
+
+    /// Two drop-downs: pressing the second while the first is still open closes the first, which
+    /// must not end the second one's browse — otherwise the second list would open and then do
+    /// nothing until clicked a second time (#2686).
+    #[test]
+    fn a_second_drop_down_keeps_its_browse_while_the_first_closes() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = two_lists();
+        h.run();
+        let first = h.state().first.center();
+        pointer_button(&mut h, first, true);
+        pointer_button(&mut h, first, false);
+        assert!(h.state().first_open, "the first list is open");
+        let second = h.state().second.center();
+        pointer_button(&mut h, second, true);
+        assert!(!h.state().first_open, "pressing the second trigger closes the first list");
+        assert!(h.state().second_open, "and opens the second");
+        h.run();
+        let entry = h.query_by_label("Medium").expect("the second list is up").rect().center();
+        h.event(egui::Event::PointerMoved(entry));
+        h.step();
+        pointer_button(&mut h, entry, false);
+        assert_eq!(h.state().second_current, Some(1), "the release over its entry chooses it");
+        assert!(!h.state().second_open, "and closes the list");
+    }
+
+    /// One pass can hold a release over one entry and a move onto the next: the entry the button
+    /// came up over is the one chosen, not the one the pointer has reached by then (#2686).
+    #[test]
+    fn the_release_chooses_the_entry_it_came_up_over_when_a_move_follows_in_the_same_pass() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        h.run();
+        let first = h.query_by_label("Small").expect("the first entry").rect().center();
+        let second = h.query_by_label("Medium").expect("the second entry").rect().center();
+        h.event(egui::Event::PointerMoved(first));
+        h.step();
+        // The release and a move onto the next entry in one pass, as a fast hand produces them:
+        // `Harness::step` gives each queued event a pass of its own, so they go in together.
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: first,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.input_mut().events.push(egui::Event::PointerMoved(second));
+        h.step();
+        assert_eq!(h.state().current, Some(0), "the entry the button came up over is chosen");
         assert!(!h.state().open, "and closes the list");
     }
 }
