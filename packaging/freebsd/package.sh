@@ -62,8 +62,20 @@ if [[ "$ARCH" = aarch64 ]]; then
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-off}"
 fi
+# A cross build can't run what it builds: not the --version smoke test, nor the example below.
+case "$(uname -m)" in
+  amd64 | x86_64) HOST_TRIPLE=x86_64-unknown-freebsd ;;
+  arm64 | aarch64) HOST_TRIPLE=aarch64-unknown-freebsd ;;
+  *) HOST_TRIPLE= ;;
+esac
+# The man-and-completions example writes effectcraft-cli's man pages and shell completions below. It
+# is built in its own cargo run: built with the binaries, its dev-dependencies' features would be
+# unified into them.
 if [[ "$SKIP_BUILD" = 0 ]]; then
   (cd "$ROOT" && cargo build --release --locked ${CARGO_BUILD_TARGET:+--target "$CARGO_BUILD_TARGET"} -p effectcraft -p effectcraft-cli)
+  if [[ -z "${CARGO_BUILD_TARGET:-}" || "$CARGO_BUILD_TARGET" = "$HOST_TRIPLE" ]]; then
+    (cd "$ROOT" && cargo build --release --locked ${CARGO_BUILD_TARGET:+--target "$CARGO_BUILD_TARGET"} -p effectcraft-cli --example man-and-completions)
+  fi
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"
@@ -100,6 +112,23 @@ copy_docs "$STAGE/share/doc/effectcraft"
 for f in NOTICE ATTRIBUTION.md; do
   if [[ -f "$ROOT/$f" ]]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/effectcraft/"; fi
 done
+# effectcraft-cli's man pages and shell completions, from its clap definition, written by the
+# example built above. A dry run builds nothing, a cross build can't run it, and a --skip-build run
+# whose prebuilt binaries came without the example has none: all leave them out.
+CLI_DOCS="$BIN/examples/man-and-completions"
+if [[ "$DRY_RUN" = 0 ]] && [[ -n "${CARGO_BUILD_TARGET:-}" && "$CARGO_BUILD_TARGET" != "$HOST_TRIPLE" ]]; then
+  warn "cross-building $ARCH, so effectcraft-cli's man pages and completions are left out"
+elif [[ "$DRY_RUN" = 0 ]] && [[ ! -x "$CLI_DOCS" ]]; then
+  warn "$CLI_DOCS is not built, so effectcraft-cli's man pages and completions are left out"
+elif [[ "$DRY_RUN" = 0 ]]; then
+  "$CLI_DOCS" "$WORK/cli-docs"
+  mkdir -p "$STAGE/man/man1" "$STAGE/share/bash-completion/completions" \
+    "$STAGE/share/zsh/site-functions" "$STAGE/share/fish/vendor_completions.d"
+  install -m 644 "$WORK"/cli-docs/*.1 "$STAGE/man/man1/"
+  install -m 644 "$WORK/cli-docs/effectcraft-cli.bash" "$STAGE/share/bash-completion/completions/effectcraft-cli"
+  install -m 644 "$WORK/cli-docs/_effectcraft-cli" "$STAGE/share/zsh/site-functions/_effectcraft-cli"
+  install -m 644 "$WORK/cli-docs/effectcraft-cli.fish" "$STAGE/share/fish/vendor_completions.d/effectcraft-cli.fish"
+fi
 
 for f in bin/effectcraft bin/effectcraft-cli "share/applications/$APP_ID.desktop" \
   "share/icons/hicolor/256x256/apps/$APP_ID.png" "share/icons/hicolor/scalable/apps/$APP_ID.svg" \
@@ -112,12 +141,6 @@ mkdir -p "$OUT_DIR"
 tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
-# Run the smoke test only when the binary's target is this host's (a cross build can't run here).
-case "$(uname -m)" in
-  amd64 | x86_64) HOST_TRIPLE=x86_64-unknown-freebsd ;;
-  arm64 | aarch64) HOST_TRIPLE=aarch64-unknown-freebsd ;;
-  *) HOST_TRIPLE= ;;
-esac
 if [[ -z "${CARGO_BUILD_TARGET:-}" || "$CARGO_BUILD_TARGET" = "$HOST_TRIPLE" ]]; then
   "$STAGE/bin/effectcraft-cli" --version
 fi

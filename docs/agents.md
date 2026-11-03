@@ -14,6 +14,34 @@ limits. This guard does not change ordinary-file overwrite defaults or add anoth
 | **CLI** (`effectcraft-cli exec/get/set/...`) | one-shot scripting and CI; JSON output with `--json` | no |
 | **Control channel** (`effectcraft --control 9877`) | driving and seeing the live UI; see [control-protocol.md](control-protocol.md) | yes |
 
+## The `effectcraft-cli` command line
+
+Follows [RFC-0012](https://github.com/storytold/craft-contrib/pull/18). `effectcraft-cli --help` and
+`effectcraft-cli <subcommand> --help` are the reference for every subcommand and flag; this page does
+not repeat them. `effectcraft-cli --version` (or `-V`) prints the version.
+
+- **Exit codes:** 0 success, 1 the command failed, 2 a usage error. A usage error (an unknown or
+  repeated flag, a conflicting pair such as `--bridge` with `--demo`, a value that is not a number or valid
+  JSON, a missing argument) is reported on stderr before any work starts, so nothing is opened,
+  rendered or saved.
+- **Streams:** results go to stdout; diagnostics, progress and errors (`error: …`) to stderr. With
+  `--json` stdout holds one compact JSON document, and a failure is `{"error": …}` there as well.
+- **Project:** `--project F.ecproj`, or a `*.ecproj` argument anywhere among the positionals
+  (`exec layer.newSolid '{…}' F.ecproj --save`); naming two is a usage error.
+- **Values that start with `-`:** a flag takes the next argument as its value only if that is not
+  another flag, so write `--out=-x.png`. `set` takes a negative number as its `<value>`
+  (`set - #1 transform/rotation -5`); `--` ends the flags.
+- **Environment:** the CLI reads no `EFFECTCRAFT_*` variable for a flag. `EFFECTCRAFT_CONFIG_DIR`
+  (where the config and the MCP auto-save folders live) is read by the engine, and
+  `WGPU_ADAPTER_NAME` picks the GPU for `--gpu`.
+- **Completions and man pages:** `cargo run -p effectcraft-cli --example man-and-completions -- DIR`
+  writes the bash, zsh, fish, elvish and PowerShell completions and a man page per subcommand; the
+  Linux and FreeBSD packages install them.
+
+Not yet as RFC-0012 asks: the desktop app's launch flags (`effectcraft --control PORT`, files,
+`--demo`) are still parsed by hand, and `EFFECTCRAFT_CONTROL_PORT` is not read by the CLI's
+`--bridge`.
+
 ## MCP setup
 
 Build once with `cargo build --release -p effectcraft-cli`, then register the server. For Claude

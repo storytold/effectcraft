@@ -248,7 +248,7 @@ fn unknown_options_are_usage_errors() {
         let out = bin().args(args).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
-        assert!(err.contains(&format!("unknown option {named}")), "{args:?}: {err}");
+        assert!(err.contains(&format!("unexpected argument {}", named.replace('`', "'"))), "{args:?}: {err}");
         assert!(out.stdout.is_empty(), "{args:?}: nothing ran");
     }
     assert!(!png.exists(), "render-frame didn't render");
@@ -272,7 +272,7 @@ fn non_unicode_arguments_are_usage_errors() {
     let out = bin().args(["render-frame", "--out"]).arg(name).output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("argument `caf\u{fffd}.png` is not valid Unicode"), "{err}");
+    assert!(err.contains("invalid UTF-8"), "{err}");
     assert!(!err.contains("panicked"), "{err}");
     assert!(out.stdout.is_empty(), "nothing ran");
 }

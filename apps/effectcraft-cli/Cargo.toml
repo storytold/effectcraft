@@ -8,6 +8,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "effectcraft_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "effectcraft-cli"
 path = "src/main.rs"
@@ -24,5 +28,12 @@ effectcraft-track = { workspace = true }
 effectcraft-segment = { workspace = true }
 effectcraft-sam2 = { workspace = true }
 serde_json = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
 image = { workspace = true }
 cpu-time = "1"
+
+[dev-dependencies]
+# Shell completions and man pages (examples/man-and-completions.rs, for the packages); not in the binary.
+clap_complete = { workspace = true }
+clap_mangen = { workspace = true }

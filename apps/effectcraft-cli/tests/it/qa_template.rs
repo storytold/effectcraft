@@ -651,7 +651,7 @@ fn template_missing_output_does_not_replace_extracted_media() {
         String::from_utf8_lossy(&result.stdout),
     );
     assert_eq!(result.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("render: --out FILE is required (or --queue)"), "{stderr}");
+    assert!(stderr.contains("--out") && stderr.contains("required"), "{stderr}");
     assert_eq!(template_after, template_before);
     assert_eq!(values_after, valid_values_before);
     assert_eq!(source_after, source_before);
