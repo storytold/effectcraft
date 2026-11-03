@@ -8,6 +8,9 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::{AlphaMode, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, SourceLayer, build};
 use effectcraft_time::{FrameRate, Tick};
 
+// Each source group becomes a precomposition; match the renderer's nesting limit.
+const MAX_GROUP_DEPTH: usize = 16;
+
 pub(crate) struct Document {
     outline: Outline,
     width: u32,
@@ -21,10 +24,13 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Document, String> {
         return Err("PhotoCraft bundle exceeds the 512 MiB input limit".into());
     }
     fn count(layers: &[InputLayer], depth: usize, nodes: &mut usize, pixels: &mut usize) -> Result<(), String> {
-        if depth > 100 {
-            return Err("PhotoCraft groups exceed 100 levels".into());
+        if depth > MAX_GROUP_DEPTH {
+            return Err("PhotoCraft groups exceed 16 levels; import as Footage for the saved composite".into());
         }
         for layer in layers {
+            if depth == MAX_GROUP_DEPTH && layer.kind == "group" {
+                return Err("PhotoCraft groups exceed 16 levels; import as Footage for the saved composite".into());
+            }
             *nodes += 1;
             if *nodes > 4096 {
                 return Err("PhotoCraft composition import exceeds 4096 layers; import as Footage for the saved composite".into());
@@ -106,7 +112,7 @@ fn build_comp(project: &mut Project, ctx: &mut Context, name: &str, layers: &[In
     let mut comp = Comp::new(ctx.doc.width, ctx.doc.height, ctx.rate, ctx.duration);
     let id = project.add_item(name, Label::Sandstone, parent, ItemKind::Comp(Arc::new(comp.clone())));
     ctx.items.push(id);
-    if depth <= 100 {
+    if depth <= MAX_GROUP_DEPTH {
         for input in layers {
             let index = ctx.next;
             ctx.next = ctx.next.saturating_add(1);

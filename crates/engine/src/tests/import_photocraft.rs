@@ -257,3 +257,28 @@ fn photocraft_layer_buffers_are_bounded_before_decoding_pixels() {
     assert!(error.contains("1 GiB working-buffer budget") && error.contains("Footage"), "{error}");
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn photocraft_group_nesting_stays_within_the_composition_renderer_limit() {
+    for (depth, blend) in [(16, "Normal"), (16, "PassThrough"), (17, "Normal"), (17, "PassThrough")] {
+        let mut layers = json!([layer("Deep pixels", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("0000ffff")}))]);
+        for index in 0..depth {
+            layers = json!([layer(&format!("Group {index}"), true, 1.0, blend, json!({"kind":"group","children":layers}))]);
+        }
+        let path = fixture(&format!("nesting-{depth}-{blend}.pcraft"), layers);
+        let mut s = Session { footage: std::sync::Arc::new(effectcraft_media::MediaPool::new()), ..Default::default() };
+        let before = s.project.items.len();
+        let result = s.execute("file.import", json!({"paths":[path],"importAs":"composition"})).unwrap();
+        if depth == 16 {
+            let comp = ItemId(result["comps"][0].as_u64().unwrap());
+            assert_eq!(s.render(comp, effectcraft_time::Tick::ZERO, Default::default()).data[0], [0.0, 0.0, 1.0, 1.0]);
+        } else {
+            assert_eq!(s.project.items.len(), before, "unsupported nesting must not create a composition with disappearing artwork");
+            assert!(
+                result["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("16 levels") && e.contains("Footage"))),
+                "{result}"
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
