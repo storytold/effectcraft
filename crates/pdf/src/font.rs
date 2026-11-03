@@ -245,6 +245,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                     }
                     "bfchar" => {
                         for p in a.as_chunks::<2>().0 {
+                            if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                break;
+                            }
                             if let (Obj::Str(src), Obj::Str(dst)) = (&p[0], &p[1]) {
                                 m.unicode.insert(be(src), utf16(dst));
                             }
@@ -272,6 +275,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 }
                                 Obj::Array(list) => {
                                     for (k, s) in list.iter().enumerate() {
+                                        if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                            break;
+                                        }
                                         if let (Obj::Str(s), Some(c)) = (s, lo.checked_add(k as u32)) {
                                             m.unicode.insert(c, utf16(s));
                                         }
