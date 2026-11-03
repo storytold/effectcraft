@@ -1884,3 +1884,75 @@ fn comp_sampling_space_follows_both_layers_through_the_layer_cache() {
     assert!(at(&p, 150) > 0.99, "moving the owner keeps the matte where it sits in the comp");
     assert!(at(&p, 50) < 0.01);
 }
+
+/// A 2D layer reading a 3D layer in Comp space: panning the camera moves where the 3D layer is
+/// in the comp, so it changes the owner's key and a cached render follows it.
+#[test]
+fn comp_sampling_space_of_a_3d_layer_follows_the_camera() {
+    let scene = |pan: f64| {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        let mut matte = solid(&mut p, &comp, [0.0, 1.0, 0.0], 40, 40);
+        matte.switches.three_d = true;
+        matte.switches.video = false;
+        let mid = matte.id.0;
+        add_effect_200(
+            &mut p,
+            &mut l,
+            "ec.channel.setmatte",
+            &[
+                ("takeMatteFromLayer", Value::Layer(Some(mid))),
+                ("takeMatteFromLayerSource", Value::Enum(0)),
+                ("takeMatteFromLayerSpace", Value::Enum(1)),
+                ("compositeMatteWithOriginal", Value::Bool(false)),
+            ],
+        );
+        let mut cam = build::layer(&mut p, &comp, "Camera", LayerSource::Camera, (200, 100), None);
+        for path in ["transform/position", "transform/poi"] {
+            let pr = cam.props.prop_mut(path).unwrap();
+            let Value::Vec3(v) = pr.value else { panic!("{path}: {:?}", pr.value) };
+            pr.value = Value::Vec3([v[0] + pan, v[1], v[2]]);
+        }
+        p.comp_mut(cid).unwrap().layers = vec![cam, l, matte].into();
+        (p, cid)
+    };
+    let ((p, cid), (q, _)) = (scene(0.0), scene(40.0));
+    let key = |p: &Project| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::layer_key(&crate::EvalCtx::new(p, cid, c, Tick::ZERO), &c.layers[1], 1.0, false, false).unwrap()
+    };
+    assert_ne!(key(&p), key(&q), "panning the camera changes the owner's key");
+    let cache = crate::LayerCache::default();
+    let here = render_cached(&p, cid, Tick::ZERO, Some(&cache));
+    let panned = render_cached(&q, cid, Tick::ZERO, Some(&cache));
+    assert_eq!(panned.data, render_cached(&q, cid, Tick::ZERO, None).data, "the cached render after the pan is the fresh one");
+    assert_ne!(here.data, panned.data, "the matte moved with the camera");
+}
+
+/// A referenced layer scaled to nothing covers none of the comp: read in Comp space it is
+/// transparent, not its layer-space pixels.
+#[test]
+fn comp_sampling_space_of_a_zero_scale_layer_is_transparent() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let mut matte = solid(&mut p, &comp, [0.0, 1.0, 0.0], 200, 100);
+    matte.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([0.0, 0.0, 100.0]);
+    matte.switches.video = false;
+    let mid = matte.id.0;
+    add_effect_200(
+        &mut p,
+        &mut l,
+        "ec.channel.setmatte",
+        &[
+            ("takeMatteFromLayer", Value::Layer(Some(mid))),
+            ("takeMatteFromLayerSource", Value::Enum(0)),
+            ("takeMatteFromLayerSpace", Value::Enum(1)),
+            ("compositeMatteWithOriginal", Value::Bool(false)),
+        ],
+    );
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(l);
+    c.layers.push(matte);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(img.data.iter().all(|px| px[3] < 0.01), "no matte anywhere");
+}

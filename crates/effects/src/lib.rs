@@ -840,14 +840,17 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
                 None => g.children.push(src.into()),
             }
         }
-        // ... and a Sampling Space (Layer / Comp), likewise next to it.
-        if has_sampling_space(spec, ps) {
-            let mut space = Property::new(ids.alloc(), &layer_space_id(leaf), &format!("{} Sampling Space", ps.name), Value::Enum(0)).with_ui(ParamUi::Hidden);
-            space.hold_only = true;
-            match path.and_then(|path| nested_group(&mut g, ids, path)) {
-                Some(sub) => sub.children.push(space.into()),
-                None => g.children.push(space.into()),
-            }
+    }
+    // ... and a Sampling Space (Layer / Comp), in its parameter's group but after every
+    // parameter (where upgrading an older project adds it too): it doesn't move the parameters
+    // that follow, which expressions and scripts can address by number.
+    for ps in spec.params.iter().filter(|ps| has_sampling_space(spec, ps)) {
+        let (path, leaf) = ps.id.rsplit_once('/').map(|(g, l)| (Some(g), l)).unwrap_or((None, ps.id));
+        let mut space = Property::new(ids.alloc(), &layer_space_id(leaf), &format!("{} Sampling Space", ps.name), Value::Enum(0)).with_ui(ParamUi::Hidden);
+        space.hold_only = true;
+        match path.and_then(|path| nested_group(&mut g, ids, path)) {
+            Some(sub) => sub.children.push(space.into()),
+            None => g.children.push(space.into()),
         }
     }
     g
@@ -1710,9 +1713,20 @@ mod tests {
         let mut next = 0;
         let g = instantiate(find("ec.channel.blend").unwrap(), &mut Ids(&mut next), "Blend", [10.0, 10.0]);
         assert_eq!(g.get("blendWithLayerSpace").map(|p| (p.value.clone(), p.ui.clone())), Some((Value::Enum(0), ParamUi::Hidden)));
-        // A grouped layer parameter's companion sits next to it.
+        // A grouped layer parameter's companion sits in its group.
         let g = instantiate(find("ec.blur.cameralens").unwrap(), &mut Ids(&mut next), "Camera Lens Blur", [10.0, 10.0]);
         assert!(g.sub("blurMap").and_then(|m| m.get("blurMapLayerSpace")).is_some());
+        // Companions come after every other property of their group, so they don't renumber the
+        // parameters that follow (expressions and scripts address them by position).
+        fn after_the_rest(g: &PropGroup) -> bool {
+            use effectcraft_project::Node;
+            let space = |n: &Node| matches!(n, Node::Prop(p) if p.ui == ParamUi::Hidden && p.match_id.ends_with("Space"));
+            g.children.iter().skip_while(|n| !space(n)).all(space) && g.children.iter().all(|n| n.as_group().is_none_or(after_the_rest))
+        }
+        for spec in registry() {
+            let g = instantiate(spec, &mut Ids(&mut next), spec.name, [10.0, 10.0]);
+            assert!(after_the_rest(&g), "{}: a Sampling Space sits between parameters", spec.id);
+        }
         // Every entry of the exclusion list names a layer parameter, and gets no companion.
         for (effect, id) in NO_SAMPLING_SPACE {
             let spec = find(effect).unwrap_or_else(|| panic!("{effect} is not an effect"));
