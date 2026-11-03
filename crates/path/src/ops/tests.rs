@@ -417,3 +417,24 @@ fn normalize_and_filled_area() {
     let n = crate::boolean::normalize(&p, FillRule::EvenOdd);
     assert!(close(n.area().abs(), 10000.0, 1e-6));
 }
+
+// ---------------------------------------------------------------- operator budget
+
+#[test]
+fn stacked_expanding_operators_stay_within_the_segment_budget() {
+    // Three Zig Zags at 1000 ridges would turn a square into 4 · 1001³ segments; each output
+    // is held to the budget instead, and the last operators still pass the geometry through.
+    let mut p = vec![sq(0.0, 0.0, 100.0)];
+    for _ in 0..3 {
+        p = zigzag(&p, 1.0, 1000.0, false);
+        let n: usize = p.iter().map(|q| q.elements().len()).sum();
+        assert!(n <= 2 * MAX_OPERATOR_SEGMENTS, "{n}");
+    }
+    let w = wiggle(&p, &WiggleParams { detail: 1000.0, ..Default::default() }, 0.0);
+    let n: usize = w.iter().map(|q| q.elements().len()).sum();
+    assert!(n <= 2 * MAX_OPERATOR_SEGMENTS, "{n}");
+    let o = offset(&[sq(0.0, 0.0, 100.0)], 1.0, Join::Miter, 4.0, 1000.0, 0.0);
+    assert!(!o[0].elements().is_empty());
+    // Within the budget nothing changes: 4 segments × 11 pieces.
+    assert_eq!(vertex_count(&zigzag(&[sq(0.0, 0.0, 100.0)], 1.0, 10.0, false)[0]), 44);
+}
