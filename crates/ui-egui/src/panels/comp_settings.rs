@@ -478,15 +478,17 @@ fn tab_size(ui: &mut egui::Ui, tab: Tab, d: &CompDraft, t: &Tokens, custom: &[Co
     vec2(child.min_rect().width(), child.cursor().top() - top)
 }
 
+/// Where the width of the dialog's content, measured when it was last shown, is kept.
 fn content_width_id() -> egui::Id {
     egui::Id::unique("comp-settings-content-width")
 }
 
-/// The width the dialog's content took when it was last shown: its widest row on any tab. A
-/// translation longer than the English (French, #2841) is wider than the 600-point dialog, so the
-/// dialog grows to it rather than hiding OK past its right edge.
-pub fn content_width(ctx: &egui::Context) -> f32 {
-    ctx.data(|d| d.get_temp::<f32>(content_width_id())).unwrap_or(0.0)
+/// The dialog's width: 600 points, or more when the widest row on any of its tabs (as last shown),
+/// a scroll bar and the modal's two 18-point margins need it. A translation longer than the English (French,
+/// #2841) widens the dialog rather than hiding OK past its right edge.
+pub fn dialog_width(ctx: &egui::Context) -> f32 {
+    let content = ctx.data(|d| d.get_temp::<f32>(content_width_id())).unwrap_or(0.0);
+    (content + 36.0).max(600.0)
 }
 
 /// Draw the dialog. Returns `Some(params)` when OK is pressed, `Some(Null)` on Cancel. `custom`
@@ -501,8 +503,9 @@ pub fn show(
     preview: Option<&mut bool>,
 ) -> Option<serde_json::Value> {
     let mut out = None;
-    // The dialog's visible area, which Cancel and OK stay inside.
-    auto.add("dialog.comp.view", ui.clip_rect().intersect(ui.max_rect()), "Composition Settings");
+    // The dialog's visible area, which Cancel and OK stay inside: the scroll area's viewport,
+    // which stays put when the content scrolls.
+    auto.add("dialog.comp.view", ui.clip_rect(), "Composition Settings");
     let name_row = ui.horizontal(|ui| {
         ui.label(tr("Composition Name:"));
         let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(300.0));
@@ -529,7 +532,19 @@ pub fn show(
     ui.add_space((tallest - shown).max(0.0));
     // Every tab takes the width of the widest one too, so the dialog doesn't change size with them.
     let widest = sizes.iter().fold(name_row.response.rect.width().max(tab_row.response.rect.width()), |w, s| w.max(s.x));
-    ui.ctx().data_mut(|m| m.insert_temp(content_width_id(), widest.ceil()));
+    // Room for a vertical scroll bar too: without it, a bar shown while the dialog settles narrows
+    // the content into a horizontal bar, which takes the height back from it, and the two bars
+    // trade places every frame.
+    let needed = widest + ui.spacing().scroll.allocated_width();
+    let ctx = ui.ctx().clone();
+    let before = dialog_width(&ctx);
+    ctx.data_mut(|m| m.insert_temp(content_width_id(), needed.ceil()));
+    if dialog_width(&ctx) != before {
+        // This pass was laid out at the old width: lay it out again at the new one instead of
+        // showing it, and paint again in case egui declines the extra pass.
+        ctx.request_discard("Composition Settings width");
+        ctx.request_repaint();
+    }
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

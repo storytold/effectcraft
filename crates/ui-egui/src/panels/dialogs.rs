@@ -446,9 +446,7 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     let live = existing && super::live_preview::active(app);
     let place = super::live_preview::place(app);
     let mut preview = app.dialog_state.live.on;
-    // 600 points wide, or as wide as the content took last time (with the 18-point margins).
-    let width = (super::comp_settings::content_width(ctx) + 36.0).max(600.0);
-    modal_placed(ctx, "Composition Settings", vec2(width, 470.0), t, place, |ui| {
+    modal_placed(ctx, "Composition Settings", vec2(super::comp_settings::dialog_width(ctx), 470.0), t, place, |ui| {
         result = super::comp_settings::show(ui, &mut d, t, &mut app.auto, &custom, &mut cmds, live.then_some(&mut preview));
     });
     app.dialog_state.live.on = preview;
