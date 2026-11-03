@@ -1168,8 +1168,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
             t if t.is_shape() => Some(Gesture::Create { tool: t, start: map.to_comp(press) }),
             Tool::ObjectMatte => Some(Gesture::ObjectMatteBox { start: press }),
             t if t.puppet_kind().is_some() && super::puppet_tool::hit(&pin_hits, press).is_none() => {
-                // Off the pins: Alt or a press outside the art drags a marquee that selects pins.
-                (mods.alt || puppet_layer(app, cpt).is_none()).then_some(Gesture::PinMarquee { start: press })
+                // Off the pins: Alt or a press outside the art drags a marquee that selects pins. Asked
+                // of where the button went down: the pointer may be over the art by the time this is a drag.
+                (mods.alt || puppet_layer(app, map.to_comp(press)).is_none()).then_some(Gesture::PinMarquee { start: press })
             }
             t if t.puppet_kind().is_some() => super::puppet_tool::hit(&pin_hits, press).and_then(|(h, part)| {
                 use super::puppet_tool::PinPart;
