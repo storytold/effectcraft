@@ -7,6 +7,9 @@ use effectcraft_svg::{Affine, BezPath, FillRule, Geom, Group, Node, Paint, Shape
 /// PostScript program, or the PDF content stream.
 pub(crate) const MAX_PATH: usize = 1 << 20;
 
+/// The deepest the open groups nest (the render tree and its consumers recurse through them).
+const MAX_DEPTH: usize = 256;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Plain,
@@ -62,23 +65,33 @@ impl Builder {
         }
     }
 
+    /// Open `g` as the group drawn into from now on; past [`MAX_DEPTH`] the group is dropped
+    /// (what would have been drawn inside it goes to the open group) and noted as skipped.
+    fn push_group(&mut self, g: Group, kind: Kind) {
+        if self.stack.len() >= MAX_DEPTH {
+            self.skip("group nesting limit");
+            return;
+        }
+        self.stack.push((g, kind));
+    }
+
     /// Children drawn from now on are clipped by `path` (page space) until the group closes.
     pub fn clip(&mut self, path: BezPath, rule: FillRule) {
         let mut g = group("Clip Group");
         g.clip.push((path, rule));
         // Clipping is not a transparency group: blend modes inside reach the backdrop.
         g.isolated = false;
-        self.stack.push((g, Kind::Clip));
+        self.push_group(g, Kind::Clip);
     }
 
     /// Open an optional-content layer (or a named group).
     pub fn open(&mut self, name: &str, layer: bool) {
-        self.stack.push((group(name), if layer { Kind::Layer } else { Kind::Plain }));
+        self.push_group(group(name), if layer { Kind::Layer } else { Kind::Plain });
     }
 
     /// Open a group (blend mode, soft mask) closed with the graphics state.
     pub fn open_group(&mut self, g: Group) {
-        self.stack.push((g, Kind::Plain));
+        self.push_group(g, Kind::Plain);
     }
 
     /// Add a finished node (an image, pattern tiles).
