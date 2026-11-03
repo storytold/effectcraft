@@ -829,4 +829,22 @@ fn propagate_survives_empty_frames() {
         assert_eq!((next.w, next.h), (w as usize, h as usize));
         assert!(next.matte.is_empty());
     }
+
+#[test]
+fn saved_spans_stay_around_the_base_frame_within_the_limit() {
+    let mut d = RotoData::default();
+    for s in base_strokes(5) {
+        d.add(s, 20, [0, 30]);
+    }
+    d.span = [i64::MIN, i64::MAX];
+    let r = RotoData::from_json(&d.to_json());
+    assert_eq!(r.span, [5 - MAX_SPAN_FRAMES, 5 + MAX_SPAN_FRAMES]);
+    assert_eq!(r.chain_keys(1).len() as i64, 2 * MAX_SPAN_FRAMES + 1);
+    // A span that leaves out its base frame is widened to hold it.
+    d.span = [10, 20];
+    assert_eq!(RotoData::from_json(&d.to_json()).span, [5, 20]);
+    // A stroke far away extends the span only up to the limit.
+    let mut e = RotoData::from_json(&RotoData { span: [0, 25], ..d.clone() }.to_json());
+    e.add(line(StrokeKind::Fg, i64::MAX, [0.0, 0.0], [1.0, 1.0], 3.0), 20, [0, 30]);
+    assert_eq!(e.span, [0, 5 + MAX_SPAN_FRAMES]);
 }
