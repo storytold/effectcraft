@@ -690,7 +690,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                     if let Some(e) = p.get("expression").and_then(Value::as_str) {
                         extra += &format!("  expr: {e}");
                     }
-                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), p["value"]);
+                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), value_text(p));
                 }
             }
         }
@@ -1537,6 +1537,16 @@ fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// A flat property's value for the text listing: an enum's number with the label `options` gives it
+/// (#2928), since the numbers are 0-based where After Effects scripting counts from 1.
+fn value_text(p: &Value) -> String {
+    let label = p["options"].as_array().and_then(|o| o.iter().find(|o| o["value"] == p["value"])).and_then(|o| o["label"].as_str());
+    match label {
+        Some(l) => format!("{} ({l})", p["value"]),
+        None => p["value"].to_string(),
+    }
 }
 
 #[cfg(test)]

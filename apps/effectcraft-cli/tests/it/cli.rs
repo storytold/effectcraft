@@ -110,6 +110,36 @@ fn exec_set_get_with_saved_project() {
     assert_eq!(v[1]["result"]["time"], v[0]["result"]["time"], "{v}");
 }
 
+/// #2928: the text listing gives an enum's label next to its number (0-based, unlike After
+/// Effects scripting), the way `props --json` lists its `options`.
+#[test]
+fn props_lists_enum_labels() {
+    let proj = tmp("enum-labels.ecproj");
+    let p = proj.to_str().unwrap();
+    let anim = r#"{"layer":"t","properties":["opacity"]}"#;
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36}"#,
+        "layer.newText",
+        r#"{"text":"AB","name":"t"}"#,
+        "layer.addTextAnimator",
+        anim,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    ok_json(&["set", "T", "t", "text/animators/animator/selectors/rangeSelector/advanced/shape", "1", p, "--save"]);
+    let out = bin().args(["props", "T", "t", p]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let shape = text.lines().find(|l| l.contains("advanced/shape")).unwrap_or_else(|| panic!("no shape line in:\n{text}"));
+    assert!(shape.trim_end().ends_with("enum     1 (Ramp Up)"), "{shape}");
+    let units = text.lines().find(|l| l.contains("advanced/units")).unwrap_or_default();
+    assert!(units.trim_end().ends_with("0 (Percentage)"), "{units}");
+    let size = text.lines().find(|l| l.contains("transform/opacity")).unwrap_or_default();
+    assert!(size.trim_end().ends_with("100.0"), "a number without options stays bare: {size}");
+}
+
 /// `run --args-file` reads its command / params pairs from a file, one per line: a batch longer
 /// than a Windows command line (32 767 characters, os error 206) still runs.
 #[test]
