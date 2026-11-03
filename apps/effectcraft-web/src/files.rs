@@ -114,8 +114,13 @@ pub struct WebServices;
 impl Services for WebServices {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         get(path)
-            .map(|d| d.to_vec())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))
+            .and_then(|data| {
+                if (data.starts_with(b"PK\x03\x04") || path.to_ascii_lowercase().ends_with(".pcraft")) && data.len() as u64 > 512 << 20 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle exceeds the 512 MiB input limit"));
+                }
+                Ok(data.to_vec())
+            })
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         put(path, data.into());

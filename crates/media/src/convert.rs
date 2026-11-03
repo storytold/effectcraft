@@ -37,6 +37,21 @@ impl AlphaOp {
     pub(crate) fn float_curve(self) -> FloatCurve {
         self.float
     }
+    /// A source sample, with float RGB encoded the same way as a floating-point image.
+    pub(crate) fn rgba(self, rgb: [f32; 3], alpha: f32, floating: bool, coverage: f32) -> Px {
+        let rgb = if floating && self.mode == AlphaMode::Premultiplied {
+            let inv = if alpha > 0.0 { 1.0 / alpha } else { 0.0 };
+            rgb.map(|v| self.float(v * inv) * alpha)
+        } else if floating {
+            rgb.map(|v| self.float(v))
+        } else {
+            rgb
+        };
+        let pixel = self.apply(rgb, alpha);
+        // Interpret the source against its original alpha and matte before applying the
+        // mask. Ignore Alpha deliberately ignores both source and mask coverage.
+        if self.mode == AlphaMode::Ignore { pixel } else { pixel.map(|v| v * coverage) }
+    }
     /// A linear float value as the compositor takes it.
     #[inline(always)]
     fn float(self, v: f32) -> f32 {

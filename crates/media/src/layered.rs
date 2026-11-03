@@ -43,11 +43,14 @@ fn is_pdf_like(path: &str, bytes: &[u8]) -> bool {
 /// Whether `bytes` (the first 64 KiB suffice) are a Photoshop or vector file [`probe`] handles.
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub(crate) fn sniff(path: &str, bytes: &[u8]) -> bool {
-    effectcraft_psd::is_psd(bytes) || is_svg(path, bytes) || is_pdf_like(path, bytes)
+    effectcraft_psd::is_psd(bytes) || crate::pcraft::sniff(path, bytes) || is_svg(path, bytes) || is_pdf_like(path, bytes)
 }
 
 /// Footage for a Photoshop or vector file (`None` for other formats).
 pub(crate) fn probe(path: &str, bytes: &[u8]) -> Result<Option<Footage>> {
+    if crate::pcraft::sniff(path, bytes) {
+        return crate::pcraft::probe(path, bytes).map(Some);
+    }
     if effectcraft_psd::is_psd(bytes) {
         let psd = effectcraft_psd::Psd::parse(bytes.to_vec()).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
         let mut f = crate::probe::still_footage(path, psd.width, psd.height, image::ImageFormat::Png, true);
@@ -76,6 +79,9 @@ pub(crate) fn probe(path: &str, bytes: &[u8]) -> Result<Option<Footage>> {
 
 /// Decode a Photoshop or SVG still (`None` for other formats).
 pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -> Result<Option<Image>> {
+    if crate::pcraft::sniff(path, bytes) {
+        return crate::pcraft::decode(path, bytes, footage, op).map(Some);
+    }
     if effectcraft_psd::is_psd(bytes) {
         let psd = effectcraft_psd::Psd::parse(bytes.to_vec()).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
         // A smart object's embedded file: an embedded document's merged image, or an image.

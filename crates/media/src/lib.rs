@@ -11,7 +11,8 @@
 //! AV1, ProRes, DNxHD, MPEG-2, MJPEG; AAC, Opus, PCM, MP3/FLAC/Vorbis) come from FilmCraft's pure-Rust crates (git dependency,
 //! pinned; `plan/adr/0001`). FilmCraft types never leave this crate. Stills use the `image` crate
 //! (PNG, JPEG, GIF, WebP, TIFF, BMP, OpenEXR, Targa, Radiance HDR); Photoshop documents (merged image or one layer) come
-//! from `effectcraft-psd` and SVG from `effectcraft-svg` (rasterised at any scale).
+//! from `effectcraft-psd`, PhotoCraft composites and saved layer pixels from `craft-doc`, and SVG
+//! from `effectcraft-svg` (rasterised at any scale).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -22,6 +23,7 @@ mod dpx;
 pub mod exr_channels;
 mod gif_anim;
 mod layered;
+mod pcraft;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
@@ -62,7 +64,7 @@ impl From<filmcraft_media::MediaError> for MediaError {
 
 /// File extensions recognised as stills.
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "pcraft", "svg", "pdf", "ai", "eps"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
 pub use effectcraft_project::VIDEO_EXTENSIONS;
@@ -83,16 +85,32 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 /// A whole file's bytes, refusing anything that isn't a regular file: a project can name
 /// `/dev/zero` or a FIFO as footage, and reading those never ends (#2134).
 pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
+    use std::io::{Read, Seek};
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
     }
+    let mut head = [0u8; 4];
+    if meta.len() >= 4 {
+        file.read_exact(&mut head)?;
+        file.rewind()?;
+    }
+    let pcraft = ext_of(path) == "pcraft" || head == *b"PK\x03\x04";
+    if pcraft && meta.len() > pcraft::MAX_INPUT_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle exceeds the 512 MiB input limit"));
+    }
     let mut bytes = Vec::new();
     // A sparse file can claim far more than memory: an error, not an abort.
     bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-    file.read_to_end(&mut bytes)?;
+    if pcraft {
+        file.take(pcraft::MAX_INPUT_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > pcraft::MAX_INPUT_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle grew beyond the 512 MiB input limit"));
+        }
+    } else {
+        file.read_to_end(&mut bytes)?;
+    }
     Ok(bytes)
 }
 

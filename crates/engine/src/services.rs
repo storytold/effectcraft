@@ -53,16 +53,35 @@ impl Services for FsServices {
     /// Refuses what isn't a regular file: a project can name `/dev/zero` or a FIFO, and reading
     /// those never ends (#2134).
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
+        use std::io::{Read, Seek};
         let mut file = std::fs::File::open(path)?;
         let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
         }
+        // A renamed PhotoCraft bundle must be bounded before allocating its whole input.
+        // Bound ZIP containers by their signature even when manifest.json is a later entry.
+        let mut head = [0u8; 4];
+        if meta.len() >= 4 {
+            file.read_exact(&mut head)?;
+            file.rewind()?;
+        }
+        let limited = head == *b"PK\x03\x04" || path.to_ascii_lowercase().ends_with(".pcraft");
+        const MAX_BUNDLE: u64 = 512 << 20;
+        if limited && meta.len() > MAX_BUNDLE {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle exceeds the 512 MiB input limit"));
+        }
         let mut bytes = Vec::new();
         // A sparse file can claim far more than memory: an error, not an abort.
         bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-        file.read_to_end(&mut bytes)?;
+        if limited {
+            file.take(MAX_BUNDLE + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_BUNDLE {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle grew beyond the 512 MiB input limit"));
+            }
+        } else {
+            file.read_to_end(&mut bytes)?;
+        }
         Ok(bytes)
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
