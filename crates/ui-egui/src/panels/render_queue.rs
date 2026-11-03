@@ -850,6 +850,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---------------------------------------------------------- column header
     let head = Rect::from_min_size(pos2(rect.min.x, top.max.y), vec2(rect.width(), HEAD_H));
+    // (The scroll begins here for the columns: they line up with the items, clear of its bar.)
+    let list = Rect::from_min_max(pos2(rect.min.x, head.max.y), pos2(rect.max.x, rect.max.y - FOOT_H));
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("rq-scroll"), list);
+    let list = scroll.content;
     p.rect_filled(head, 0.0, t.panel_bg);
     p.line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, t.separator));
     // Columns: twirl | Render | label | # | Comp Name | Status | Started | Render Time
@@ -861,7 +865,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let w_time = 92.0;
     let w_started = 156.0;
     let w_status = 112.0;
-    let cx_time = (rect.max.x - w_time).max(cx_name + 120.0);
+    let cx_time = (list.max.x - w_time).max(cx_name + 120.0);
     let cx_started = cx_time - w_started;
     let cx_status = cx_started - w_status;
     let hy = head.center().y;
@@ -873,12 +877,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // ---------------------------------------------------------- items
-    let list = Rect::from_min_max(pos2(rect.min.x, head.max.y), pos2(rect.max.x, rect.max.y - FOOT_H));
     let lp = p.with_clip_rect(list);
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("rq-scroll"), list);
-    // Items scroll under the header and footer: clip their widgets (and hit tests) to the list.
-    let panel_clip = ui.clip_rect();
-    ui.set_clip_rect(list.intersect(panel_clip));
     let mut y = list.min.y - scroll.offset;
     if queue.is_empty() {
         lp.text(pos2(list.center().x, list.min.y + 30.0), Align2::CENTER_CENTER, tr("The render queue is empty."), Tokens::ui(12.0), t.text_faint);
@@ -1015,7 +1014,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             output_to(app, ui, &ItemRow { lp: &lp, list, r, n, rendering }, it, dd.max.x, &mut editing, &mut actions);
         }
     }
-    ui.set_clip_rect(panel_clip);
     let content = y + scroll.offset - list.min.y;
     scroll.end(ui, &mut app.auto, "renderQueue.scroll", content, &t);
     ui.data_mut(|d| match &editing {
