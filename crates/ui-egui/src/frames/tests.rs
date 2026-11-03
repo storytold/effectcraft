@@ -1822,3 +1822,44 @@ fn a_keyframe_edit_reaches_only_the_keys_around_it() {
         }
     }
 }
+
+/// Music's Audio Levels keep every frame, in RAM and on disk, while the project's expressions
+/// can't read audio (a wiggle); an expression naming the music's Audio Levels re-renders its layer.
+#[test]
+fn music_volume_keeps_the_frames_with_expressions_that_dont_read_audio() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Expression, Footage, FootageKind, LayerId, Value, build};
+    use effectcraft_engine::render::disk_cache::comp_content_key_with;
+    use serde_json::json;
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let solid = LayerId(s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap());
+    let mut p = (*s.project).clone();
+    let song = p.add_item(
+        "song.wav",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+    );
+    let comp = p.comp(cid).unwrap().clone();
+    let music = build::layer(&mut p, &comp, "Music", LayerSource::Footage { item: song }, (8, 8), None);
+    let music_id = music.id;
+    p.comp_mut(cid).unwrap().layers.push(music);
+    let kept = |text: &str| {
+        let mut p0 = p.clone();
+        p0.comp_mut(cid).unwrap().layer_mut(solid).unwrap().props.prop_mut("transform/position").unwrap().expr =
+            Some(Expression { text: text.into(), enabled: true });
+        let p0 = Arc::new(p0);
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..120).for_each(|n| insert(&f, k(id0, n)));
+        let mut p1 = p0.clone();
+        Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(music_id).unwrap().props.prop_mut("audio/levels").unwrap().value = Value::Vec2([-6.0, -6.0]);
+        let id1 = f.content_of(&p1, 2, cid);
+        (f.cached_frames(&k(id1, 0)).len(), comp_content_key_with(&p0, cid, None) == comp_content_key_with(&p1, cid, None))
+    };
+    assert_eq!(kept("wiggle(2, 20)"), (120, true), "a wiggle reads no audio");
+    let (frames, disk) = kept("value + thisComp.layer(\"Music\")(\"Audio\")(\"Audio Levels\")[0]");
+    assert!(frames < 120 && !disk, "the expression reads the music's levels: {frames} frames kept, disk kept {disk}");
+}

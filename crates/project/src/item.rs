@@ -154,7 +154,25 @@ impl Project {
                 stack.extend(c.layers.iter().map(|l| (inner, l.id)));
             }
         }
-        Heard { expressions: self.reads_markers(), layers }
+        Heard { expressions: self.reads_markers(), audio_exprs: self.reads_audio(), layers }
+    }
+
+    /// Some expression may read a layer's audio: its text names it (`audio`, `"Audio Levels"`,
+    /// `"ADBE Audio Group"`) or walks properties by index (`layer(1)(3)`).
+    // ponytail: text heuristic; misses an index walk through a variable (`g = layer(1); g(3)`).
+    // Upgrade: record audio reads in the expression host.
+    fn reads_audio(&self) -> bool {
+        fn reads(text: &str) -> bool {
+            let t: String = text.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
+            t.contains("audio") || t.match_indices(")(").any(|(i, _)| t.get(i + 2..).and_then(|r| r.chars().next()).is_some_and(|c| c.is_ascii_digit()))
+        }
+        fn any(g: &crate::PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                crate::Node::Prop(p) => p.expr.as_ref().is_some_and(|e| reads(&e.text)),
+                crate::Node::Group(sub) => any(sub),
+            })
+        }
+        self.comps().any(|(_, c)| c.layers.iter().any(|l| any(&l.props)))
     }
 
     /// Layers of `comp` (item `id`) that can't change its pixels: footage layers of files without
@@ -383,8 +401,10 @@ impl Project {
 /// group and audio effects change pixels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Heard {
-    /// Some layer has an expression (it can read any layer's Audio Levels).
+    /// Some layer has an expression (it can read anything).
     pub expressions: bool,
+    /// Some expression may read a layer's audio ([`Project::reads_audio`]).
+    audio_exprs: bool,
     layers: std::collections::BTreeSet<(ItemId, LayerId)>,
 }
 
@@ -392,7 +412,7 @@ impl Heard {
     /// Something may draw the audio of layer `layer` of comp `comp`: a layer picks it
     /// ([`Self::picked`]) or an expression may read it.
     pub fn contains(&self, comp: ItemId, layer: LayerId) -> bool {
-        self.expressions || self.picked(comp, layer)
+        self.audio_exprs || self.picked(comp, layer)
     }
 
     /// A layer picks layer `layer` of comp `comp` in an effect (or a precomp of it), so draws its
@@ -404,6 +424,7 @@ impl Heard {
     /// Heard in `self` or in `o` (the states before and after an edit).
     pub fn union(mut self, o: &Heard) -> Heard {
         self.expressions |= o.expressions;
+        self.audio_exprs |= o.audio_exprs;
         self.layers.extend(o.layers.iter().copied());
         self
     }

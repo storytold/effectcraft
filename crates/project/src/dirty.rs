@@ -57,7 +57,7 @@ impl Project {
             c
         };
         let (a, b) = (picture(old, &old_c), picture(self, &new_c));
-        let elsewhere = heard.expressions && (outside || old_c != new_c || !touched.is_empty());
+        let elsewhere = heard.expressions && (outside || !new_c.same_pixels_with(&old_c, true, &|l| heard.contains(comp, l)) || !touched.is_empty());
         let mut spans = b.changed_spans(&a, false, &|l| heard.picked(comp, l), elsewhere, &touched)?;
         spans.extend(nested);
         Some(spans)
