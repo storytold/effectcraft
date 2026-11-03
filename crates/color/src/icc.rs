@@ -337,17 +337,24 @@ impl Clut {
         let mut s = self.outputs;
         for i in (0..n).rev() {
             stride[i] = s;
-            s *= self.grid[i].max(1);
+            // Saturating: a table with enough axes to overflow cannot hold its data anyway, and a
+            // saturated offset reads nothing (zero) instead of panicking.
+            s = s.saturating_mul(self.grid[i].max(1));
         }
         let mut frac = vec![0.0; n];
         let mut step = vec![0usize; n];
         for i in 0..n {
             let g = self.grid[i].max(1);
             let f = x.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0) * (g - 1) as f64;
-            let k = (f.floor() as usize).min(g.saturating_sub(2));
+            let mut k = (f.floor() as usize).min(g.saturating_sub(2));
             frac[i] = if g > 1 { f - k as f64 } else { 0.0 };
             step[i] = if g > 1 { stride[i] } else { 0 };
-            base += k * stride[i];
+            // The last grid point is a corner of its own, not an interpolation toward the next.
+            if frac[i] >= 1.0 {
+                k += 1;
+                frac[i] = 0.0;
+            }
+            base = base.saturating_add(k.saturating_mul(stride[i]));
         }
         let mut out = vec![0.0; self.outputs];
         // Only the axes that interpolate have two corners: a singleton axis, or one sampled on a
@@ -363,7 +370,7 @@ impl Clut {
             for (bit, &i) in active.iter().enumerate() {
                 if corner >> bit & 1 == 1 {
                     w *= frac[i];
-                    off += step[i];
+                    off = off.saturating_add(step[i]);
                 } else {
                     w *= 1.0 - frac[i];
                 }
@@ -372,7 +379,7 @@ impl Clut {
                 continue;
             }
             for (o, v) in out.iter_mut().enumerate() {
-                *v += w * self.data.get(off + o).copied().unwrap_or(0.0) as f64;
+                *v += w * self.data.get(off.saturating_add(o)).copied().unwrap_or(0.0) as f64;
             }
         }
         out
@@ -1076,6 +1083,15 @@ mod tests {
         assert_eq!(c.eval(&[1.0; 40]), vec![0.0]);
         // More interpolating axes than ICC allows: zero, at once.
         assert_eq!(c.eval(&[0.5; 40]), vec![0.0]);
+        // The last grid point of every axis is that table entry, however many axes there are.
+        let mut data = vec![0.0; 1 << 17];
+        data[(1 << 17) - 1] = 0.75;
+        let c = Clut { grid: vec![2; 17], outputs: 1, data };
+        assert!((c.eval(&[1.0; 17])[0] - 0.75).abs() < 1e-9);
+        // Strides that overflow usize (64 two-point axes) read nothing instead of panicking.
+        let c = Clut { grid: vec![2; 64], outputs: 1, data: vec![] };
+        assert_eq!(c.eval(&[1.0; 64]), vec![0.0]);
+        assert_eq!(c.eval(&[0.5; 64]), vec![0.0]);
     }
 
     #[test]
