@@ -124,7 +124,11 @@ fn box_row(src: &[f32], dst: &mut [f32], r: usize) {
     // The first window, -r..=r: the edge pixels it repeats are counted, not visited, so the
     // work depends on the row length and not on the radius.
     let inside = r.min(last);
-    let mut acc = (r as f64 + 1.0) * src[0] as f64 + src[1..=inside].iter().map(|v| *v as f64).sum::<f64>() + (r - inside) as f64 * src[last] as f64;
+    let mut acc = (r as f64 + 1.0) * src[0] as f64 + src[1..=inside].iter().map(|v| *v as f64).sum::<f64>();
+    // Only when the window actually repeats the last pixel: 0 * inf would be NaN otherwise.
+    if r > inside {
+        acc += (r - inside) as f64 * src[last] as f64;
+    }
     for x in 0..n {
         dst[x] = (acc * norm) as f32;
         let xi = x as i64;
@@ -870,6 +874,10 @@ mod tests {
                 assert!((d - want).abs() < 1e-5, "r={r} x={x}: {d} vs {want}");
             }
         }
+        // An infinite last pixel inside the window still yields a finite first mean.
+        let mut inf = [0.0f32; 3];
+        box_row(&[1.0, 2.0, f32::INFINITY], &mut inf, 1);
+        assert!((inf[0] - 4.0 / 3.0).abs() < 1e-6, "{inf:?}");
         let mut one = [0.0f32];
         box_row(&[0.25], &mut one, usize::MAX);
         assert!((one[0] - 0.25).abs() < 1e-6);
