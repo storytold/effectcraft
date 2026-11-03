@@ -1084,3 +1084,23 @@ fn timing_markers_and_expressions_still_change_the_frames() {
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
     assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }
+
+#[test]
+fn effect_detection_answers_each_comp_once() {
+    // Sixteen levels, each comp holding eight layers of the one below and no effects: 8^16 walks
+    // without a memo. Answered at once.
+    use effectcraft_engine::project::{Comp, ItemKind, LayerSource, build};
+    use effectcraft_engine::time::{FrameRate, Tick};
+    let mut p = Project::default();
+    let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+    let mut below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(base.clone().into()));
+    for _ in 0..16 {
+        let layers: Vec<_> = (0..8).map(|_| build::layer(&mut p, &base, "a", LayerSource::Comp { item: below }, (0, 0), None)).collect();
+        let mut c = base.clone();
+        c.layers = layers.into();
+        below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(c.into()));
+    }
+    let start = std::time::Instant::now();
+    assert!(!comp_has_effects(&p, below));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}

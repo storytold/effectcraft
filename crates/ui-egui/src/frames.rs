@@ -438,14 +438,22 @@ pub trait RemoteFrames: Send + Sync {
 
 /// Whether a comp (or a comp it nests) has a layer with enabled effects.
 pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
-    fn walk(p: &Project, comp: ItemId, depth: usize) -> bool {
+    // Each comp is answered once: a comp nested by many layers at each of several levels was
+    // walked again for every path to it.
+    fn walk(p: &Project, comp: ItemId, depth: usize, seen: &mut std::collections::HashMap<ItemId, bool>) -> bool {
+        if let Some(&r) = seen.get(&comp) {
+            return r;
+        }
+        seen.insert(comp, false);
         let Some(c) = p.comp(comp) else { return false };
-        c.layers.iter().any(|l| {
+        let r = c.layers.iter().any(|l| {
             l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled))
-                || depth < 16 && matches!(l.source, effectcraft_engine::project::LayerSource::Comp { item } if walk(p, item, depth + 1))
-        })
+                || depth < 16 && matches!(l.source, effectcraft_engine::project::LayerSource::Comp { item } if walk(p, item, depth + 1, seen))
+        });
+        seen.insert(comp, r);
+        r
     }
-    walk(project, comp, 0)
+    walk(project, comp, 0, &mut std::collections::HashMap::new())
 }
 
 pub struct Frames {
