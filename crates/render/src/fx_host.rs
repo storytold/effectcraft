@@ -107,7 +107,6 @@ impl EffectHost for FxHost<'_, '_, '_> {
         };
         // A 3D model or primitive is read as the comp's pixels already (`Renderer::solo_3d`).
         let other_to_comp = if other.source.is_model() { Mat3::default() } else { self.ctx.effect_to_comp(other) };
-        let Some(to_other) = other_to_comp.inverse().map(|inv| inv * own_to_comp) else { return px };
         // The result is the size of the running layer's own buffer, which the renderer already
         // holds: past the largest side a comp can have, keep the layer-space read.
         let scale = px.buf.scale;
@@ -117,6 +116,10 @@ impl EffectHost for FxHost<'_, '_, '_> {
             return px;
         }
         let mut img = Image::new(w.ceil() as u32, h.ceil() as u32);
+        // A layer with no extent in the comp (a zero scale) covers none of it: transparent.
+        let Some(to_other) = other_to_comp.inverse().map(|inv| inv * own_to_comp) else {
+            return LayerPixels { buf: Buf { img, offset: [0.0; 2], scale }, size };
+        };
         let src = &px.buf;
         img.rows_mut().for_each(|(y, row)| {
             for (x, out) in row.iter_mut().enumerate() {
