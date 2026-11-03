@@ -57,7 +57,7 @@ pub fn parse_spi1d(text: &str) -> Option<Lut> {
         }
     }
     // A 1D table is interpolated by index, so cap it like the lattices (2²⁴ entries).
-    if !(2..=1 << 24).contains(&len)
+    if !(2..=MAX_1D).contains(&len)
         || !matches!(comps, 1 | 3)
         || values.len() != len.checked_mul(comps)?
         || from[1] <= from[0]
@@ -79,7 +79,7 @@ pub fn parse_spi3d(text: &str) -> Option<Lut> {
     lines.next()?;
     let size: Vec<usize> = lines.next()?.split_whitespace().map(|t| t.parse().ok()).collect::<Option<_>>()?;
     let n = *size.first()?;
-    if size.len() != 3 || size.iter().any(|s| *s != n) || !(2..=129).contains(&n) {
+    if size.len() != 3 || size.iter().any(|s| *s != n) || !(2..=MAX_LATTICE).contains(&n) {
         return None;
     }
     let mut d3 = vec![[0.0f32; 3]; n * n * n];
@@ -154,6 +154,11 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
     Some(Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] })
 }
 
+/// Largest lattice side the lattice readers accept (`.spi3d`, `.csp`).
+const MAX_LATTICE: usize = 129;
+/// Most entries of a 1D table (interpolated by index, so capped like the lattices: 2²⁴).
+const MAX_1D: usize = 1 << 24;
+
 /// Parse a cineSpace `.csp` LUT (1D or 3D, with its three pre-LUT shapers).
 pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
@@ -185,8 +190,15 @@ pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
         if sz.len() != 3 || sz[0] != sz[1] || sz[1] != sz[2] {
             return None;
         }
-        let n = sz[0] as usize;
-        let mut d3 = Vec::with_capacity(n * n * n);
+        // The size comes from the file: an integer lattice size the other lattice readers accept
+        // (2..=129), checked before anything is allocated. Rows are read before they are stored,
+        // so a short file never reserves the table it claims.
+        let n = sz[0];
+        if n.fract() != 0.0 || !(2.0..=MAX_LATTICE as f32).contains(&n) {
+            return None;
+        }
+        let n = n as usize;
+        let mut d3 = Vec::new();
         for _ in 0..n * n * n {
             let v = nums(lines.next()?)?;
             if v.len() != 3 {
@@ -194,10 +206,13 @@ pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
             }
             d3.push([v[0], v[1], v[2]]);
         }
-        (n >= 2).then_some((Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] }, shaper))
+        Some((Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] }, shaper))
     } else {
         let n: usize = lines.next()?.parse().ok()?;
-        let mut d1 = Vec::with_capacity(n);
+        if !(2..=MAX_1D).contains(&n) {
+            return None;
+        }
+        let mut d1 = Vec::new();
         for _ in 0..n {
             let v = nums(lines.next()?)?;
             if v.len() != 3 {
@@ -205,7 +220,7 @@ pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
             }
             d1.push([v[0], v[1], v[2]]);
         }
-        (n >= 2).then_some((Lut { n1: n, d1, n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] }, shaper))
+        Some((Lut { n1: n, d1, n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] }, shaper))
     }
 }
 
