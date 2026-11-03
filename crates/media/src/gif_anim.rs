@@ -94,6 +94,12 @@ impl Anim {
             return crate::webp_anim::load(bytes);
         }
         let dec = GifDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
+        // The decoder allocates the full logical canvas for the first frame, however small the
+        // frames themselves are: check it before decoding any.
+        let (w, h) = image::ImageDecoder::dimensions(&dec);
+        if u64::from(w) * u64::from(h) * 4 > MAX_BYTES as u64 {
+            return Err(MediaError::Unsupported(format!("GIF canvas of {w}×{h} is too large to hold in memory")));
+        }
         let (mut frames, mut starts) = (Vec::new(), Vec::new());
         let (mut at, mut size) = (0i64, 0usize);
         for frame in dec.into_frames() {
@@ -211,5 +217,19 @@ mod tests {
         };
         assert!(pool.frame_at(&f, Tick::ZERO).is_err());
         let _ = probe_bytes("a.gif", bytes.into());
+    }
+
+    #[test]
+    fn a_huge_canvas_is_refused_before_decoding() {
+        // A 65535×65535 logical screen (16 GiB of RGBA) holding one 1×1 frame.
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, u16::MAX, u16::MAX, &[]).unwrap();
+            for _ in 0..2 {
+                enc.write_frame(&gif::Frame::from_rgb(1, 1, &RED)).unwrap();
+            }
+        }
+        let e = super::Anim::load(&out).err().unwrap();
+        assert!(e.to_string().contains("too large"), "{e}");
     }
 }

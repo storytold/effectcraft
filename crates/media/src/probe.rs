@@ -9,6 +9,10 @@ use image::metadata::Orientation;
 
 use crate::{MediaError, Result, ext_of, rate_from_fc};
 
+/// Most pixels a still may decode to: 2 GiB as the renderer's float RGBA (16384 × 8192, beyond
+/// any camera's still).
+pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 27;
+
 /// Frame rate given to image sequences on import (After Effects' default preference).
 pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;
 
@@ -286,6 +290,12 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
         None => image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?,
     };
     let mut dec = reader.into_decoder()?;
+    // `from_decoder` skips the reader's allocation limit, and some decoders (BMP) allocate
+    // whatever size their header claims: refuse a still the renderer could not hold as floats.
+    let (w, h) = dec.dimensions();
+    if u64::from(w) * u64::from(h) > MAX_STILL_PIXELS {
+        return Err(image::ImageError::Limits(image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError)));
+    }
     let orientation = dec.orientation().unwrap_or(Orientation::NoTransforms);
     let mut img = image::DynamicImage::from_decoder(dec)?;
     img.apply_orientation(orientation);
@@ -358,6 +368,23 @@ fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_still_larger_than_the_renderer_holds_is_refused_before_decoding() {
+        // A 24-bit BMP header claiming 20000×20000 pixels (within the BMP decoder's own limit)
+        // over no pixel data.
+        let mut bmp = b"BM".to_vec();
+        bmp.extend(54u32.to_le_bytes());
+        bmp.extend([0u8; 4]);
+        bmp.extend(54u32.to_le_bytes());
+        bmp.extend(40u32.to_le_bytes());
+        bmp.extend(20_000i32.to_le_bytes());
+        bmp.extend(20_000i32.to_le_bytes());
+        bmp.extend(1u16.to_le_bytes());
+        bmp.extend(24u16.to_le_bytes());
+        bmp.extend([0u8; 24]);
+        assert!(matches!(load_oriented(&bmp, Some(image::ImageFormat::Bmp)), Err(image::ImageError::Limits(_))));
+    }
 
     /// #2592: an encoder-delayed H.264 track's edit list shows 75 frames at 25 fps (3 s at a
     /// 1000 timescale), though its media runs a frame longer; empty edits and no edits leave it.

@@ -16,6 +16,13 @@ use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, split_channel};
 /// The largest display window decoded (16384²; vector footage and Continuously Rasterize
 /// stop at the same size).
 const MAX_DISPLAY_PIXELS: usize = 1 << 28;
+/// Samples all of a file's display-window planes may hold together (4 GiB of f32; 256 MiB in a
+/// browser tab's wasm32 heap): each channel is expanded to the display window, so many channels
+/// of a small data window would otherwise multiply into far more than the file holds.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PLANE_SAMPLES: usize = 1 << 30;
+#[cfg(target_arch = "wasm32")]
+const MAX_PLANE_SAMPLES: usize = 1 << 26;
 
 fn is_depth(name: &str) -> bool {
     let last = name.rsplit('.').next().unwrap_or(name);
@@ -55,6 +62,11 @@ pub fn unsupported_compression(bytes: &[u8]) -> Option<&'static str> {
 
 /// Read all channels of an EXR file's bytes. `None` when it is not a readable EXR.
 pub fn read_exr_channels(bytes: &[u8]) -> Option<AuxChannels> {
+    read_exr_channels_within(bytes, MAX_PLANE_SAMPLES)
+}
+
+/// [`read_exr_channels`] keeping at most `samples_left` samples of planes.
+fn read_exr_channels_within(bytes: &[u8], mut samples_left: usize) -> Option<AuxChannels> {
     use exr::prelude::*;
     let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_buffered(std::io::Cursor::new(bytes)).ok()?;
     let dw = img.attributes.display_window;
@@ -93,6 +105,11 @@ pub fn read_exr_channels(bytes: &[u8]) -> Option<AuxChannels> {
         for ch in layer.channel_data.list {
             let name = channel_name(prefix.as_deref(), &ch.name.to_string());
             let fill = if is_depth(&name) { BACKGROUND_DEPTH } else { 0.0 };
+            let Some(left) = samples_left.checked_sub(n) else {
+                log::warn!("media: EXR channel `{name}` skipped: the channels would hold more than {MAX_PLANE_SAMPLES} samples");
+                continue;
+            };
+            samples_left = left;
             if let Some(plane) = place(ch.sample_data, size, offset, (w, h), n, fill) {
                 aux.channels.push((name, plane));
             }
@@ -292,6 +309,26 @@ mod tests {
         assert_eq!(aux.object_id().unwrap(), id.as_slice());
         assert_eq!(aux.manifests, vec![("CryptoObject".to_string(), vec![("bunny".to_string(), 0x1385_1a76), ("floor".to_string(), 0x0a1b_2c3d)])]);
         assert!(read_exr_channels(b"not an exr").is_none());
+    }
+
+    #[test]
+    fn channel_planes_share_one_sample_budget() {
+        use exr::prelude::*;
+        let (w, h) = (4usize, 2usize);
+        let channels = AnyChannels::sort(
+            vec![
+                AnyChannel::new("A", FlatSamples::F32(vec![1.0; w * h])),
+                AnyChannel::new("B", FlatSamples::F32(vec![2.0; w * h])),
+                AnyChannel::new("C", FlatSamples::F32(vec![3.0; w * h])),
+            ]
+            .into(),
+        );
+        let image = Image::from_layer(Layer::new((w, h), LayerAttributes::named("l"), Encoding::FAST_LOSSLESS, channels));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write().to_buffered(&mut bytes).unwrap();
+        assert_eq!(read_exr_channels_within(bytes.get_ref(), 3 * w * h).unwrap().channels.len(), 3);
+        // Room for two planes: the third channel is skipped, not allocated.
+        assert_eq!(read_exr_channels_within(bytes.get_ref(), 3 * w * h - 1).unwrap().channels.len(), 2);
     }
 
     /// #474: a full-window f32 channel (Cryptomatte ranks, …) becomes its plane without a copy,
