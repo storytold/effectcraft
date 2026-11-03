@@ -36,6 +36,13 @@ impl Session {
         commands::crypto_probe_job(self, p)
     }
 
+    /// The coverage of Cryptomatte ID `hash` (as `effect.cryptomatteAt` reports it, parsed) over
+    /// the layer of params `p`, at most `max_side` samples on the long side, from the kept probe:
+    /// `None` until [`Session::crypto_probe_job`] has built it.
+    pub fn crypto_coverage(&self, p: &Value, hash: u32, max_side: usize) -> Option<commands::CryptoCoverage> {
+        commands::crypto_coverage(self, p, hash, max_side)
+    }
+
     /// Let go of the kept Cryptomatte probe (and its aux channels), and cancel a build in
     /// flight: the eyedropper was disarmed. Edits, footage changes and Open / New do it too.
     pub fn drop_crypto_probe(&self) {

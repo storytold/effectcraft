@@ -129,6 +129,10 @@ stay whatever their size. Several frames asking for the same file at once wait f
 decode. Once no enabled effect reads the item any more, its frames go back to the picture's
 channels alone.
 
+The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
+file's manifest. Pick them with the eyedropper next to its Selection, then click in the
+Composition viewer (Shift adds, Alt or Ctrl removes).
+
 ## Replacing and reloading
 
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
