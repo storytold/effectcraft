@@ -977,7 +977,8 @@ impl TextDoc {
             if r.start >= r.end && n > 0 {
                 return Ok(true);
             }
-            let range = r.start..r.end.max(r.start + usize::from(n == 0));
+            // Empty text: apply_style ignores the bounds, so a fixed range avoids `start + 1` overflow.
+            let range = if n == 0 { 0..1 } else { r.start..r.end };
             // Check every affected run first, so a value one run refuses changes none of them.
             let mut err = None;
             self.apply_style(range.clone(), |s| {
@@ -1375,6 +1376,12 @@ mod tests {
         assert!(doc.set_attr("variations", &serde_json::json!({"x1": 1, "x2": 1, "x3": 1}), None).is_err());
         assert_eq!(doc.style_at(3).variations.len(), 0);
         assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+    }
+
+    #[test]
+    fn empty_document_accepts_an_extreme_range_without_overflow() {
+        let mut doc = TextDoc::plain("");
+        assert!(doc.set_attr("size", &J::from(20), Some(usize::MAX..usize::MAX)).unwrap());
     }
 
     #[test]
