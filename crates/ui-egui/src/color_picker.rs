@@ -32,10 +32,24 @@ pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
 /// trigger's [`open_on_press`]. Returns true when the colour changed (Cancel, Escape and the
 /// original swatch change it back; the eyedropper changes it to the colour it samples).
 pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3]) -> bool {
+    let orig_id = id.with("original");
+    let pass_id = id.with("open-pass");
     if !popup_is_open(ui, id) {
+        // The trigger can close the picker from outside — a press on the swatch toggles it shut —
+        // and that path returns here before the open state below is cleared. Leaving the
+        // first-draw marker behind would make the next press read it, take that press for one
+        // outside the picker and close the picker it just opened (#2686).
+        if ui.data(|d| d.get_temp::<u64>(pass_id)).is_some() {
+            disarm(ui.ctx(), id);
+            ui.data_mut(|d| {
+                d.remove::<[f32; 3]>(orig_id);
+                d.remove::<u64>(pass_id);
+                // Closed: the next Escape is the dialog's again.
+                d.remove::<u64>(open_pass_id());
+            });
+        }
         return false;
     }
-    let orig_id = id.with("original");
     let original = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(orig_id, || *c));
     // Read before a sample is taken: the press that samples the viewer lands outside the picker, and
     // must not close it.
@@ -66,7 +80,6 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
     // at its requested position from its second pass on (the first pass reports it at the
     // origin), so the click that just opened the picker would be read as a press outside it and
     // the picker would flash and close in that one frame (#1476).
-    let pass_id = id.with("open-pass");
     let drawn_before = ui.data(|d| d.get_temp::<u64>(pass_id)).is_some_and(|p| p < ui.ctx().cumulative_pass_nr());
     if drawn_before && pressed_outside(ui.ctx(), &area.response) && !on_viewer {
         out.close.get_or_insert(true);

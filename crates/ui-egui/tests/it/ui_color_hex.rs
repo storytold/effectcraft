@@ -140,6 +140,20 @@ fn a_click_that_opens_the_picker_does_not_close_it_in_the_same_frame() {
     assert!(is_open(&h), "the click that opens the picker must not close it");
 }
 
+/// The swatch toggles the picker from outside, and that close returns before the open state is
+/// cleared: the first-draw marker it leaves behind would make the next press read it, take that
+/// press for one outside the picker and close the picker it just opened (#2686).
+#[test]
+fn pressing_the_swatch_again_reopens_the_picker_and_leaves_it_open() {
+    let mut h = picker([0.2, 0.4, 0.6]);
+    assert!(is_open(&h));
+    let button = h.get_by_role(Role::ColorWell).rect().center();
+    click(&mut h, button);
+    assert!(!is_open(&h), "the press on the swatch closes the open picker");
+    click(&mut h, button);
+    assert!(is_open(&h), "the next press opens it again and leaves it open");
+}
+
 #[test]
 fn the_dialog_colour_button_stores_srgb() {
     let mut h = picker([1.0, 1.0, 1.0]);
