@@ -512,8 +512,29 @@ fn native_eval_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     r
 }
 
+/// Host hooks: code a script compiles at run time (`eval`, `new Function`, …) passes the same
+/// nesting check as the script itself, since the parser recurses per level and a deep string
+/// built at run time would overflow the stack.
+struct Hooks;
+
+impl boa_engine::context::HostHooks for Hooks {
+    fn ensure_can_compile_strings(
+        &self,
+        _realm: boa_engine::realm::Realm,
+        parameters: &[JsString],
+        body: &JsString,
+        _direct: bool,
+        _context: &mut Context,
+    ) -> JsResult<()> {
+        let mut code: String = parameters.iter().map(|p| p.to_std_string_escaped()).collect::<Vec<_>>().join(",");
+        code.push('\n');
+        code.push_str(&body.to_std_string_escaped());
+        check_nesting(&code).map_err(|e| JsNativeError::syntax().with_message(e).into())
+    }
+}
+
 pub(crate) fn new_context() -> Result<Context, String> {
-    let mut ctx = Context::default();
+    let mut ctx = boa_engine::context::ContextBuilder::new().host_hooks(std::rc::Rc::new(Hooks)).build().map_err(|e| e.to_string())?;
     let limits = ctx.runtime_limits_mut();
     limits.set_loop_iteration_limit(200_000_000);
     limits.set_recursion_limit(2000);

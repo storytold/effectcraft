@@ -1911,3 +1911,27 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
     let (_, c) = comp_named(&s, "w");
     assert_eq!(layer(c, "s").props.prop("transform/position").unwrap().value, KV::Vec3([100.0, 100.0, 0.0]));
 }
+
+#[test]
+fn code_compiled_at_run_time_passes_the_nesting_check() {
+    // `eval` and `new Function` of a string nested past the limit are refused with a catchable
+    // error instead of overflowing the parser's stack; shallow code still compiles.
+    let mut s = session();
+    for call in ["eval(deep)", "new Function(deep)", "Function('a', deep)"] {
+        let code = format!(
+            "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; try {{ {call}; r = 'ran'; }} catch (e) {{ r = 'refused'; }} r"
+        );
+        assert_eq!(ok(&mut s, &code).result.as_str(), Some("refused"), "{call}");
+    }
+    assert_eq!(ok(&mut s, "eval('1 + (2 * 3)') + new Function('return 4')()").result.as_f64(), Some(11.0));
+}
+
+#[test]
+fn file_masks_match_without_backtracking() {
+    let mut s = session();
+    let r = ok(
+        &mut s,
+        "[__globMatch('*.JSX', 'a.jsx'), __globMatch('a?c*', 'abcdef'), __globMatch('*a*b', 'xaxb'), __globMatch('*.png', 'a.jsx'), __globMatch('*a*a*a*a*a*a*a*a*a*a*a*b', new Array(60).join('a'))].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,true,false,false"));
+}
