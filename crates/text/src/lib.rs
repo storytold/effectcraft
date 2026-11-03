@@ -276,12 +276,20 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out.chars_no_space = nospace;
     out.words = words;
     let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
-    // Paragraph text is clipped by its box: lines that end below it are not drawn (the first stays).
+    // Paragraph text is clipped by its box: lines that end below it are not drawn. The first
+    // stays, cut at the box's far edge (bottom; left in vertical type) when it overflows.
     let depth = doc.box_size.map(|b| if doc.vertical { b[0] } else { b[1] } as f32);
+    let far_edge = match (doc.vertical, doc.box_size) {
+        (false, Some(b)) => Some((kurbo::Vec2::new(0.0, 1.0), doc.box_pos[1] + b[1])),
+        (true, Some(_)) => Some((kurbo::Vec2::new(-1.0, 0.0), -doc.box_pos[0])),
+        (_, None) => None,
+    };
     for (li, line) in lay.lines.iter().enumerate() {
-        if li > 0 && depth.is_some_and(|d| line.baseline + line.descent > d + 0.5) {
+        let overflows = depth.is_some_and(|d| line.baseline + line.descent > d + 0.5);
+        if li > 0 && overflows {
             break;
         }
+        let clip = far_edge.filter(|_| overflows);
         let o = to_layer * Point::new(line.x as f64, line.baseline as f64);
         out.line_boxes.push([o.x, o.y, line.width as f64, (line.ascent + line.descent) as f64]);
         // Vertical type: Tate-Chu-Yoko groups (consecutive glyphs of tcy runs) take one em of
@@ -341,6 +349,9 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
                     outline_xf = ROT90 * outline_xf;
                 }
             }
+            if let Some((n, c)) = clip {
+                path = clip_half_plane(&path, n, c - n.dot(origin.to_vec2()));
+            }
             if let Some(r) = (!path.elements().is_empty()).then(|| kurbo::Shape::bounding_box(&path)) {
                 b[0] = b[0].min(origin.x + r.x0);
                 b[1] = b[1].min(origin.y + r.y0);
@@ -373,6 +384,45 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out.styles = styles;
     out.byte_of_char = byte_of_char;
     out.layout = lay;
+    out
+}
+
+/// `path` cut to the half-plane `n · p <= c`; contours crossing the edge are flattened.
+fn clip_half_plane(path: &BezPath, n: kurbo::Vec2, c: f64) -> BezPath {
+    let d = |p: Point| n.dot(p.to_vec2()) - c;
+    let r = kurbo::Shape::bounding_box(path);
+    let corners = [Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x0, r.y1), Point::new(r.x1, r.y1)];
+    if corners.iter().all(|p| d(*p) <= 0.0) {
+        return path.clone();
+    }
+    let mut out = BezPath::new();
+    if corners.iter().all(|p| d(*p) > 0.0) {
+        return out;
+    }
+    let mut contours: Vec<Vec<Point>> = Vec::new();
+    kurbo::flatten(path, 0.01, |el| match el {
+        kurbo::PathEl::MoveTo(p) => contours.push(vec![p]),
+        kurbo::PathEl::LineTo(p) => contours.last_mut().into_iter().for_each(|v| v.push(p)),
+        _ => {}
+    });
+    // Sutherland–Hodgman against one edge: a convex clip keeps every contour's winding.
+    for poly in contours {
+        let mut kept = Vec::with_capacity(poly.len() + 2);
+        for (&a, &b) in poly.iter().zip(poly.iter().cycle().skip(1)) {
+            let (da, db) = (d(a), d(b));
+            if da <= 0.0 {
+                kept.push(a);
+            }
+            if (da <= 0.0) != (db <= 0.0) {
+                kept.push(a.lerp(b, da / (da - db)));
+            }
+        }
+        if let Some((first, rest)) = kept.split_first() {
+            out.move_to(*first);
+            rest.iter().for_each(|p| out.line_to(*p));
+            out.close_path();
+        }
+    }
     out
 }
 
@@ -677,6 +727,26 @@ mod tests {
         let short = layout_doc(&TextDoc { text, size: 20.0, box_size: Some([80.0, 50.0]), ..Default::default() });
         assert!(short.glyphs.len() < tall.glyphs.len() && !short.glyphs.is_empty(), "{} vs {}", short.glyphs.len(), tall.glyphs.len());
         assert!(short.line_boxes.iter().all(|b| b[1] < 50.0 + 20.0), "{:?}", short.line_boxes);
+    }
+
+    /// Review of #2840: a box shorter than the first line keeps it, cut at the box's bottom
+    /// (left edge in vertical type).
+    #[test]
+    fn first_line_is_cut_at_a_short_box() {
+        for vertical in [false, true] {
+            let doc = TextDoc { text: "Hgj".into(), size: 40.0, vertical, box_size: Some([20.0, 20.0]), ..Default::default() };
+            let l = layout_doc(&doc);
+            assert_eq!(l.line_boxes.len(), 1);
+            let ink: Vec<kurbo::Rect> =
+                l.glyphs.iter().filter(|g| !g.path.elements().is_empty()).map(|g| kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).collect();
+            assert!(!ink.is_empty(), "vertical={vertical}");
+            if vertical {
+                assert!(ink.iter().all(|r| r.x0 >= -1e-6), "{ink:?}");
+            } else {
+                assert!(ink.iter().all(|r| r.y1 <= 20.0 + 1e-6), "{ink:?}");
+                assert!(ink.iter().any(|r| r.y1 > 19.0), "ink reaches the box bottom: {ink:?}");
+            }
+        }
     }
 
     /// Review of #2840: a wide word never splits a combining sequence across lines.
