@@ -122,10 +122,12 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 
 Footage on its own keeps only the channels of its picture (a single-part file still
 decompresses all of its pixels to read them). Once an effect reads an item's channels
-(EXtractoR, Cryptomatte, the 3D Channel effects), each later frame is decoded once for the
-picture and the effects together, and kept for a while: about 1 GB of decoded channels (512 MB
-in the browser), a soft bound, as the newest file and files still in use stay whatever their
-size. Several frames asking for the same file at once wait for one decode.
+(EXtractoR, Cryptomatte, the 3D Channel effects), each frame, the first included, is decoded
+once for the picture and the effects together, and kept for a while: about 1 GB of decoded
+channels (512 MB in the browser), a soft bound, as the newest file and files still in use
+stay whatever their size. Several frames asking for the same file at once wait for one
+decode. Once no enabled effect reads the item any more, its frames go back to the picture's
+channels alone.
 
 ## Replacing and reloading
 

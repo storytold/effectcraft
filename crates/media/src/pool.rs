@@ -245,9 +245,25 @@ struct Inner {
     /// Movies that failed to open or decode (path to a readable reason; see
     /// [`FootageSource::problem`]). The first failure of a file is logged, later ones are not.
     problems: Mutex<HashMap<Arc<str>, String>>,
-    /// OpenEXR footage (by path) whose channels an effect has read (EXtractoR, Cryptomatte, the 3D
+    /// OpenEXR footage (by path) whose channels effects read (EXtractoR, Cryptomatte, the 3D
     /// Channel effects): its pictures come from the same cached decode (#474).
-    aux_footage: Mutex<HashSet<String>>,
+    aux_footage: Mutex<AuxFootage>,
+}
+
+/// Footage whose channels effects read ([`Inner::aux_footage`]), by [`Footage::path`].
+#[derive(Default)]
+struct AuxFootage {
+    /// What the project says ([`FootageSource::set_aux_footage`]).
+    given: HashSet<String>,
+    /// Read through [`FootageSource::aux`] but not given (a reader the project doesn't name, or
+    /// a source that never gives a set). Cleared with each new set.
+    learned: HashSet<String>,
+}
+
+impl AuxFootage {
+    fn contains(&self, path: &str) -> bool {
+        self.given.contains(path) || self.learned.contains(path)
+    }
 }
 
 /// Decodes footage for the renderer: stills, image sequences and movies (FilmCraft codecs), plus
@@ -868,6 +884,8 @@ impl Inner {
         {
             return Ok(img);
         }
+        #[cfg(test)]
+        crate::exr_channels::count_decode();
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
@@ -964,6 +982,16 @@ impl FootageSource for MediaPool {
         crate::layered::rasterize_vector(&footage.path, &bytes, footage.layer.as_ref(), footage.page, scale).map(Arc::new)
     }
 
+    fn set_aux_footage(&self, paths: &[String]) {
+        let given: HashSet<String> = paths.iter().cloned().collect();
+        let mut wanted = lock(&self.inner.aux_footage);
+        if given != wanted.given || !wanted.learned.is_empty() {
+            crate::exr_channels::release_held();
+        }
+        wanted.given = given;
+        wanted.learned.clear();
+    }
+
     fn aux(&self, _item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         if footage.missing || !footage.has_video {
             return None;
@@ -975,11 +1003,13 @@ impl FootageSource for MediaPool {
         let path = loc.key.path.clone();
         {
             let mut wanted = lock(&self.inner.aux_footage);
-            // (a bound: names of footage items, never cleared otherwise)
-            if wanted.len() >= 4096 {
-                wanted.clear();
+            if !wanted.contains(&footage.path) {
+                // (a bound: names of footage items, cleared otherwise only by a new set)
+                if wanted.learned.len() >= 4096 {
+                    wanted.learned.clear();
+                }
+                wanted.learned.insert(footage.path.clone());
             }
-            wanted.insert(footage.path.clone());
         }
         crate::exr_channels::cached(&path, || self.inner.read(&path).ok())
     }

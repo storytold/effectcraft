@@ -652,6 +652,8 @@ impl ChannelCache {
             .get_or_init(|| {
                 decoded_here = true;
                 self.decodes.fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                count_decode();
                 let _abandon = Abandon { cache: self, slot: &slot };
                 let bytes = read()?;
                 // The planes it will allocate count against the budget while it decodes.
@@ -726,9 +728,35 @@ pub(crate) fn forget(path: &str) {
     cache().forget(path);
 }
 
+/// Stop keeping the decodes of the last pictures for their effects ([`HELD_FILES`]): which
+/// footage effects read changed, so they may wait for effects that are gone. Their entries stay
+/// cached as any other, least recently used out first.
+pub(crate) fn release_held() {
+    cache().lock().held.clear();
+}
+
 /// Read (and cache, see [`CACHE_BUDGET`]) the channels of the EXR at `path` via `read`.
 pub(crate) fn cached(path: &str, read: impl FnOnce() -> Option<Arc<[u8]>>) -> Option<Arc<AuxChannels>> {
     cache().get(path, Use::Channels, read).map(|d| d.aux.clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Decodes of a still's pixels on this thread: the channel cache's and the `image` crate's
+    /// ([`count_decode`]).
+    static DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a decode of a file's pixels on this thread (tests).
+#[cfg(test)]
+pub(crate) fn count_decode() {
+    DECODES.with(|d| d.set(d.get() + 1));
+}
+
+/// The decodes [`count_decode`] counted on this thread since the last call.
+#[cfg(test)]
+pub(crate) fn take_decodes() -> u64 {
+    DECODES.with(|d| d.replace(0))
 }
 
 #[cfg(test)]
@@ -1033,6 +1061,69 @@ mod tests {
         let aux = cached(paths[1], || panic!("the frame's decode is reused, the file is not read again")).unwrap();
         assert_eq!(aux.get("GlossDir.R").and_then(|p| p.first()).copied(), Some(0.75));
         assert_eq!(px, pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap().get(0, 0), "the same picture");
+    }
+
+    /// An EXR file with an unnamed RGB layer and a named `GlossDir.R` of `v` (2×2).
+    fn rgb_and_gloss(v: f32) -> Arc<[u8]> {
+        flat(&["R", "G", "B", "GlossDir.R"], (2, 2), v).into()
+    }
+
+    /// #474: footage the project says effects read the channels of
+    /// ([`FootageSource::set_aux_footage`]) costs one decode from its first frame on: a single
+    /// still with EXtractoR decodes once. Without it the first frame decodes twice (the picture,
+    /// then the channels once `aux()` asks).
+    #[test]
+    fn given_aux_footage_decodes_once_from_the_first_frame() {
+        use effectcraft_render::FootageSource;
+        let (given, learned) = ("/474-given-still.exr", "/474-learned-still.exr");
+        let pool = crate::MediaPool::new();
+        let mut f = std::collections::HashMap::new();
+        for p in [given, learned] {
+            pool.add_bytes(p, rgb_and_gloss(0.25));
+            f.insert(p, crate::probe_bytes(p, rgb_and_gloss(0.25)).unwrap());
+        }
+        pool.set_aux_footage(&[given.to_string()]);
+        take_decodes();
+        let t = effectcraft_time::Tick::ZERO;
+        pool.frame_at(&f[given], t).unwrap();
+        let aux = pool.aux(effectcraft_project::ItemId(1), &f[given], t).unwrap();
+        assert_eq!(aux.get("GlossDir.R").and_then(|p| p.first()).copied(), Some(0.25));
+        assert_eq!(take_decodes(), 1, "the picture and the channels share one decode");
+        // Learned only at the first `aux()`: the picture was decoded on its own before.
+        pool.frame_at(&f[learned], t).unwrap();
+        pool.aux(effectcraft_project::ItemId(2), &f[learned], t).unwrap();
+        assert_eq!(take_decodes(), 2);
+    }
+
+    /// #474: once the project no longer names footage (its effect removed), later frames decode
+    /// only their picture again; what `aux()` learned is dropped with each new set too.
+    #[test]
+    fn a_new_aux_footage_set_returns_to_picture_only() {
+        use effectcraft_render::FootageSource;
+        let paths: Vec<String> = (1..=4).map(|i| format!("/474-unset_{i:04}.exr")).collect();
+        let pool = crate::MediaPool::new();
+        for p in &paths {
+            pool.add_bytes(p, rgb_and_gloss(0.5));
+        }
+        let mut f = crate::probe_bytes(&paths[0], rgb_and_gloss(0.5)).unwrap();
+        f.kind = effectcraft_project::FootageKind::Sequence;
+        f.sequence = paths.clone();
+        let at = |i: i64| f.frame_rate.tick_of(i);
+        let in_cache = |p: &str| cache().cached().iter().any(|c| c == p);
+        pool.set_aux_footage(std::slice::from_ref(&f.path));
+        pool.frame_at(&f, at(0)).unwrap();
+        assert!(in_cache(&paths[0]), "given: the picture comes from the channel decode");
+        pool.set_aux_footage(&[]);
+        assert!(!cache().lock().held.iter().any(|(p, _)| *p == paths[0]), "no longer kept once no effect reads it");
+        pool.frame_at(&f, at(1)).unwrap();
+        assert!(!in_cache(&paths[1]), "no longer given: the picture alone");
+        // Learned by `aux()`, then a new set without it: picture only again.
+        pool.aux(effectcraft_project::ItemId(1), &f, at(1)).unwrap();
+        pool.frame_at(&f, at(2)).unwrap();
+        assert!(in_cache(&paths[2]), "learned");
+        pool.set_aux_footage(&[]);
+        pool.frame_at(&f, at(3)).unwrap();
+        assert!(!in_cache(&paths[3]), "a new set drops what was learned");
     }
 
     /// #474: the picture made of the cached planes of a file with exact R, G, B channels is the
