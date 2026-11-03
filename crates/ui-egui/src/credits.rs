@@ -284,12 +284,14 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
     let list = sorted(CONTRIBUTORS, v.names, v.key, v.ascending);
     ui.label(RichText::new(tr_args("{} contributors · {} commits", &[&(list.len()), &(group(TOTAL_COMMITS))])).small().weak());
     ui.separator();
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        if list.is_empty() {
-            ui.label(tr("No contributor data was built into this copy."));
-        } else if v.table {
-            table(ui, &list, &mut v, auto);
-        } else {
+    if list.is_empty() {
+        ui.label(tr("No contributor data was built into this copy."));
+    } else if v.table {
+        // The table scrolls vertically itself, under a fixed header; it only scrolls sideways once
+        // its columns are dragged wider than the window.
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| table(ui, &list, &mut v, auto));
+    } else {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (i, c) in list.iter().enumerate() {
                     if i > 0 {
@@ -299,42 +301,136 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
                     auto.add(&format!("about.credits.contributor.{}", c.login), r.rect, &c.name(v.names));
                 }
             });
-        }
-    });
+        });
+    }
     ui.data_mut(|d| d.insert_temp(id, v));
 }
 
-fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View, auto: &mut Registry) {
-    egui::Grid::new("credits_table").striped(true).num_columns(SortKey::ALL.len()).show(ui, |ui| {
-        for k in SortKey::ALL {
-            let arrow = if v.key == k { if v.ascending { " ▲" } else { " ▼" } } else { "" };
-            let r = ui.button(RichText::new(format!("{}{arrow}", k.label().1)).strong()).on_hover_text(tr(k.label().0));
-            auto.add(&format!("about.credits.header.{}", k.id()), r.rect, k.label().0);
-            if r.clicked() {
-                if v.key == k {
-                    v.ascending = !v.ascending;
-                } else {
-                    v.key = k;
-                    v.ascending = k.default_ascending();
-                }
-            }
-        }
-        ui.end_row();
-        for c in list {
-            let r = ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
-            auto.add(&format!("about.credits.contributor.{}", c.login), r.rect, &c.name(v.names));
-            ui.label(group(c.prs));
-            ui.label(group(c.commits));
-            ui.label(group(c.lines_added));
-            ui.label(group(c.lines_deleted));
-            ui.label(signed(c.lines_delta()));
-            ui.label(group(c.binary_added));
-            ui.label(group(c.binary_deleted));
-            ui.label(day(c.first_commit));
-            ui.label(day(c.last_commit));
-            ui.end_row();
+/// How the contributor table's spare width is shared out: all of it to Name.
+const CONTRIBUTOR_GROW: [f32; 10] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// How the model table's spare width is shared out: to Company and Model, the text columns.
+const MODEL_GROW: [f32; 6] = [1.0, 2.0, 0.0, 0.0, 0.0, 0.0];
+
+/// The narrowest a column can be dragged.
+const MIN_COLUMN: f32 = 28.0;
+
+/// The width a column needs for its header and its widest cell.
+fn natural(ui: &egui::Ui, header: RichText, cells: impl Iterator<Item = String>) -> f32 {
+    let measure = |text: egui::WidgetText| text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x;
+    let widest = cells.map(|c| measure(c.into())).fold(measure(header.into()), f32::max);
+    widest + 2.0 * ui.spacing().button_padding.x
+}
+
+/// A striped table whose columns open at their natural widths, with the room left over shared out
+/// by `grow`, so the table fills the width and nothing scrolls sideways. A table too narrow for
+/// that shrinks the growing columns first. Each column can be dragged wider or narrower at its
+/// edge. The last column fills whatever width is left but never shrinks below its own opening
+/// width, so widening a column grows the table, as in a spreadsheet, instead of crushing the last
+/// one: only a table dragged wider than the window scrolls sideways. Text too long for its column
+/// is clipped.
+fn fitted_table<'a>(ui: &'a mut egui::Ui, id: &str, natural: &[f32], grow: &[f32]) -> egui_extras::TableBuilder<'a> {
+    // Every cell is followed by the item gap, and the vertical scrollbar keeps its margins.
+    let s = ui.spacing();
+    let gaps = s.item_spacing.x * natural.len() as f32;
+    let bar = s.scroll.bar_width + s.scroll.bar_inner_margin + s.scroll.bar_outer_margin;
+    let width = (ui.available_width() - gaps - bar).max(0.0);
+    let spare = width - natural.iter().sum::<f32>();
+    let weight = grow.iter().sum::<f32>();
+    let flexible: f32 = natural.iter().zip(grow).filter(|(_, g)| **g > 0.0).map(|(w, _)| *w).sum();
+    let widths = natural.iter().zip(grow).map(|(w, g)| {
+        if spare >= 0.0 && weight > 0.0 {
+            w + spare * g / weight
+        } else if *g > 0.0 && flexible > 0.0 {
+            (w + spare * w / flexible).max(MIN_COLUMN)
+        } else {
+            *w
         }
     });
+    let mut t = egui_extras::TableBuilder::new(ui).id_salt(id).striped(true).resizable(true).auto_shrink([false, false]).max_scroll_height(f32::INFINITY);
+    let last = natural.len().saturating_sub(1);
+    for (i, w) in widths.enumerate() {
+        let c = if i == last { egui_extras::Column::remainder().at_least(w.max(MIN_COLUMN)) } else { egui_extras::Column::initial(w).at_least(MIN_COLUMN) };
+        t = t.column(c.clip(true));
+    }
+    t
+}
+
+/// Add a cell's widget right-aligned (counts, dates) or left-aligned (names), vertically centred.
+fn aligned<R>(ui: &mut egui::Ui, right: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+    ui.with_layout(layout, add).inner
+}
+
+/// A contributor-table header. The sorted column is highlighted; its direction shows on the
+/// toolbar's ▲/▼ button, so no arrow widens the column.
+fn header_text(k: SortKey) -> RichText {
+    RichText::new(k.label().1).strong()
+}
+
+fn row_height(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 6.0
+}
+
+/// One contributor's table cells after the name, in `SortKey::ALL` order.
+fn cells(c: &Contributor) -> [String; 9] {
+    [
+        group(c.prs),
+        group(c.commits),
+        group(c.lines_added),
+        group(c.lines_deleted),
+        signed(c.lines_delta()),
+        group(c.binary_added),
+        group(c.binary_deleted),
+        day(c.first_commit).to_string(),
+        day(c.last_commit).to_string(),
+    ]
+}
+
+fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View, auto: &mut Registry) {
+    let h = row_height(ui);
+    let rows: Vec<[String; 9]> = list.iter().map(|c| cells(c)).collect();
+    let widths: Vec<f32> = SortKey::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| match i.checked_sub(1) {
+            None => natural(ui, header_text(k), list.iter().map(|c| c.name(v.names))),
+            Some(col) => natural(ui, header_text(k), rows.iter().filter_map(|r| r.get(col).cloned())),
+        })
+        .collect();
+    fitted_table(ui, "credits_table", &widths, &CONTRIBUTOR_GROW)
+        .header(h + 4.0, |mut header| {
+            for k in SortKey::ALL {
+                header.col(|ui| {
+                    let text = header_text(k);
+                    let r = aligned(ui, k != SortKey::Name, |ui| ui.selectable_label(v.key == k, text)).on_hover_text(tr(k.label().0));
+                    auto.add(&format!("about.credits.header.{}", k.id()), r.rect, k.label().0);
+                    if r.clicked() {
+                        if v.key == k {
+                            v.ascending = !v.ascending;
+                        } else {
+                            v.key = k;
+                            v.ascending = k.default_ascending();
+                        }
+                    }
+                });
+            }
+        })
+        .body(|mut body| {
+            for (c, cells) in list.iter().zip(rows) {
+                body.row(h, |mut row| {
+                    row.col(|ui| {
+                        let r = aligned(ui, false, |ui| ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login))).on_hover_text(c.summary());
+                        auto.add(&format!("about.credits.contributor.{}", c.login), r.rect, &c.name(v.names));
+                    });
+                    for text in cells {
+                        row.col(|ui| {
+                            aligned(ui, true, |ui| ui.label(text));
+                        });
+                    }
+                });
+            }
+        });
 }
 
 /// About ▸ Models: AI models credited in Co-Authored-By trailers.
@@ -344,22 +440,45 @@ pub fn models_ui(ui: &mut egui::Ui) {
         return;
     }
     let assisted: u64 = MODELS.iter().map(|m| m.commits).max().unwrap_or(0).max(1);
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
-            for h in ["Company", "Model", "Version", "Commits", "% of all commits", "Lines +/−"] {
-                ui.label(RichText::new(h).strong());
-            }
-            ui.end_row();
-            for m in MODELS {
-                ui.label(m.company);
-                ui.label(m.model);
-                ui.label(m.version);
-                ui.label(group(m.commits));
-                ui.label(format!("{:.0}%", 100.0 * m.commits as f64 / TOTAL_COMMITS.max(assisted) as f64));
-                ui.label(format!("+{} / −{}", group(m.lines_added), group(m.lines_deleted)));
-                ui.end_row();
-            }
-        });
+    let h = row_height(ui);
+    let titles = ["Company", "Model", "Version", "Commits", "% of all commits", "Lines +/−"];
+    // Company, Model and Version read as text; the counts line up on the right.
+    let right = [false, false, false, true, true, true];
+    let rows: Vec<[String; 6]> = MODELS
+        .iter()
+        .map(|m| {
+            [
+                m.company.to_string(),
+                m.model.to_string(),
+                m.version.to_string(),
+                group(m.commits),
+                format!("{:.0}%", 100.0 * m.commits as f64 / TOTAL_COMMITS.max(assisted) as f64),
+                format!("+{} / −{}", group(m.lines_added), group(m.lines_deleted)),
+            ]
+        })
+        .collect();
+    let widths: Vec<f32> =
+        titles.iter().enumerate().map(|(i, title)| natural(ui, RichText::new(*title).strong(), rows.iter().filter_map(|r| r.get(i).cloned()))).collect();
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+        fitted_table(ui, "credits_models", &widths, &MODEL_GROW)
+            .header(h + 4.0, |mut header| {
+                for (title, r) in titles.into_iter().zip(right) {
+                    header.col(|ui| {
+                        aligned(ui, r, |ui| ui.label(RichText::new(title).strong()));
+                    });
+                }
+            })
+            .body(|mut body| {
+                for cells in rows {
+                    body.row(h, |mut row| {
+                        for (text, r) in cells.into_iter().zip(right) {
+                            row.col(|ui| {
+                                aligned(ui, r, |ui| ui.label(text));
+                            });
+                        }
+                    });
+                }
+            });
     });
 }
 
