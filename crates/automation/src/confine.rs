@@ -185,6 +185,31 @@ impl Confinement {
         if self.roots(access).any(|r| real.starts_with(r)) { Ok(real) } else { Err(denied("it is outside the automation roots")) }
     }
 
+    /// A render output's folder holds no symbolic link that leads outside the write roots. An
+    /// image sequence is written to numbered names (`out_[#####].png` → `out_00001.png`, and a
+    /// sequence output without `#` gets `_00001` too) that the check of its template never
+    /// resolved, and each frame file is created through whatever link already sits at its name,
+    /// truncating the file it points to. A link that can't be resolved counts as outside: the
+    /// render would create its target.
+    fn check_render_folder(&self, output: &str) -> Result<()> {
+        let real = self.check(output, Access::Write)?;
+        let Some(dir) = real.parent() else { return Ok(()) };
+        let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
+        for e in entries.flatten() {
+            if !e.file_type().is_ok_and(|t| t.is_symlink()) {
+                continue;
+            }
+            let link = e.path();
+            if !link.canonicalize().is_ok_and(|r| self.write.iter().any(|w| r.starts_with(w))) {
+                return Err(Error::BadArgs(format!(
+                    "cannot render to `{output}`: its folder holds `{}`, a link that leads outside the automation write roots, where a numbered frame could be written",
+                    link.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Check engine command `id` with `params` before it runs. Returns what must still be looked
     /// up and passed to [`Confinement::check_lookup`] for commands that write implicitly.
     pub fn check_command(&self, id: &str, params: &Value) -> Result<Vec<Lookup>> {
@@ -204,6 +229,12 @@ impl Confinement {
             for step in params.get("steps").and_then(Value::as_array).into_iter().flatten() {
                 let Some(inner) = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str) else { continue };
                 let inner_params = step.get("params").cloned().unwrap_or(Value::Null);
+                // A whole `params` given as a `$N` reference becomes an earlier step's result
+                // only as the batch runs, so none of its file paths would have been checked
+                // (`essential.templateInfo` returns a manifest naming any file at all).
+                if !matches!(inner_params, Value::Null | Value::Object(_)) {
+                    return Err(Error::BadArgs(format!("`{inner}` in a batch: `params` must be an object while file access is confined")));
+                }
                 let named = keys_of(READS, inner).or_else(|| keys_of(WRITES, inner)).unwrap_or(&[]);
                 let mixed = keys_of(MIXED_WRITES, inner).unwrap_or(&[]);
                 // A step's `$N` reference is resolved only as the batch runs: never for a file.
@@ -241,6 +272,9 @@ impl Confinement {
                     Some(s) => {
                         gave_a_file |= v.is_string();
                         self.check(s, access)?;
+                        if QUEUES_AN_OUTPUT.contains(&id) || id.starts_with("renderQueue.") {
+                            self.check_render_folder(s)?;
+                        }
                     }
                     None => return Err(Error::BadArgs(format!("`{id}`: `{key}` must be a path"))),
                 }
@@ -299,10 +333,14 @@ impl Confinement {
                 let items = found.get("items").or(Some(found)).and_then(Value::as_array).cloned().unwrap_or_default();
                 for it in items.iter().filter(|it| it.get("render").and_then(Value::as_bool) != Some(false)) {
                     let extra = it.get("extraOutputs").and_then(Value::as_array).into_iter().flatten().map(|o| o.get("outputPath"));
-                    for p in std::iter::once(it.get("outputPath")).chain(extra).chain([it.get("logPath")]).flatten() {
+                    for p in std::iter::once(it.get("outputPath")).chain(extra).flatten() {
                         if let Some(p) = p.as_str() {
                             self.check(p, Access::Write)?;
+                            self.check_render_folder(p)?;
                         }
+                    }
+                    if let Some(p) = it.get("logPath").and_then(Value::as_str) {
+                        self.check(p, Access::Write)?;
                     }
                 }
                 Ok(())
@@ -616,6 +654,62 @@ mod tests {
         assert!(c.check_command("templates.create", &create(p(&write, "new.ecproj"))).is_ok());
         assert!(c.check_command("file.createProxy", &serde_json::json!({"output": "[compName]_proxy"})).is_ok(), "a template name");
         assert!(c.check_command("file.createProxy", &serde_json::json!({"output": p(&outside, "proxy.mov")})).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_batch_step_whose_params_are_a_reference_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-batch-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (read, write) = (base.join("in"), base.join("out"));
+        for d in [&read, &write] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+        let info = read.join("t.ectemplate").to_string_lossy().into_owned();
+        // Step 2's params are step 1's result, which can name any `path`.
+        let steps = serde_json::json!({"steps": [
+            {"command": "essential.templateInfo", "params": {"path": info}},
+            {"command": "file.saveAs", "params": "$1"},
+        ]});
+        let e = c.check_command("engine.batch", &steps).unwrap_err().to_string();
+        assert!(e.contains("must be an object"), "{e}");
+        for params in [serde_json::json!("$1.manifest"), serde_json::json!(["$1"]), serde_json::json!(7)] {
+            let steps = serde_json::json!({"steps": [{"command": "file.saveAs", "params": params}]});
+            assert!(c.check_command("engine.batch", &steps).is_err(), "{params}");
+        }
+        // Object params (or none) are checked as before.
+        let saved = write.join("p.ecproj").to_string_lossy().into_owned();
+        let steps = serde_json::json!({"steps": [{"command": "file.saveAs", "params": {"path": saved}}, {"command": "edit.undo"}]});
+        assert!(c.check_command("engine.batch", &steps).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_render_folder_with_a_link_out_of_the_write_roots_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+        for d in [&read, &write, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+        let template = write.join("frames_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        let queue = serde_json::json!({"items": [{"outputPath": template}]});
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
+        assert!(c.check_lookup(&Lookup::RenderOutputs, &queue).is_ok());
+        // A link inside the write root is fine.
+        std::os::unix::fs::symlink(write.join("kept.png"), write.join("frames_00002.png")).unwrap();
+        std::fs::write(write.join("kept.png"), b"x").unwrap();
+        assert!(c.check_lookup(&Lookup::RenderOutputs, &queue).is_ok());
+        // Frame 1's name leads outside: rendering would truncate that file.
+        std::os::unix::fs::symlink(outside.join("victim"), write.join("frames_00001.png")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_err());
+        assert!(c.check_command("render.preRender", &add).is_err());
+        let e = c.check_lookup(&Lookup::RenderOutputs, &queue).unwrap_err().to_string();
+        assert!(e.contains("frames_00001.png"), "{e}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
