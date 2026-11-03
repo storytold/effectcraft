@@ -53,7 +53,12 @@ single-case files some cases are merged from, and the contributor's own animatio
 5. Scrub: `python -I scrub.py <saved>.aep <fixture>.aep <base project>.aep` (and
    `layers-comps-scrub-aepx.py` for the `.aepx`). Set `SCRUB_FORBID` to the local folder and
    machine names that must not remain; the script fails if one does.
-6. Check: every case composition must import like the earlier single-case file (the tests in
+6. Strip the colour profiles: `cargo run -p effectcraft-aep --example stubicc -- <fixture>.aep <fixture>.aep.new`
+   (and the `.aepx`) replaces the working-space profile (and the profile of imported images) by a
+   stub with the same description and no colour data. Do not save the projects with working space
+   None instead: the importer reads the working space's name from the profile, and the settings
+   cases (sRGB, Rec.709 Gamma 2.4, gamma) test exactly that.
+7. Check: every case composition must import like the earlier single-case file (the tests in
    `../../` are that check; `../CASES.md` lists the cases).
 
 Project settings have one value per project, so the settings cases are split over three files.

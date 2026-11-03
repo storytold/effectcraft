@@ -73,3 +73,9 @@ changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and nee
   Effects; its README says how).
 - `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
   `cargo run -p effectcraft-aep --example aepdump -- file.aep`.
+- `examples/stubicc.rs`: replaces every embedded ICC profile of a saved project by a stub that keeps
+  only the profile's description (the JSON `colorProfileData` of the working space, the `.aepx` text,
+  a raw profile chunk of an imported image):
+  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. The importer reads the working
+  space's name from the description only, so the project imports the same; no vendor colour data
+  stays in the test project.
