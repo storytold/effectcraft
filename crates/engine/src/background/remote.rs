@@ -417,6 +417,10 @@ impl FrameServer {
                             auto = Some((key, gpu));
                         }
                     }
+                    // A frame still waiting for readbacks is replaced: end it, so every `frame_begin` has its `frame_end`.
+                    if self.pending.take().is_some() {
+                        a.frame_end();
+                    }
                     a.frame_begin();
                 }
                 self.pending = Some(Pending { id, project: p, comp, time, opts, t0: web_time::Instant::now(), passes: 0, auto });
@@ -456,6 +460,10 @@ impl FrameServer {
             && let Some(pick) = a.auto_pick()
         {
             pick.record(key, chose, ms);
+        }
+        // The frame is done (its `frame_begin` ran in `handle`): the GPU pool ages its sizes.
+        if let Some(a) = &self.accel {
+            a.frame_end();
         }
         vec![(
             FrameReply::Frame { id: pr.id, width: img.width, height: img.height, ms, passes: pr.passes, gpu, layer_misses, layer_hits },
