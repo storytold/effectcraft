@@ -827,8 +827,8 @@ mod tests {
             0.0,
         );
         assert_eq!((out.img.width, out.img.height), (10, 8));
-        for (x, mirrored) in [(2u32, 0u32), (7, 9)] {
-            for y in 0..out.img.height {
+        for (x, mirrored) in [(2i64, 0i64), (7, 9)] {
+            for y in 0..i64::from(out.img.height) {
                 let a = out.img.get(x, y);
                 assert!((a[3] - 1.0).abs() < 1e-5, "fold x={x},y={y} faded to alpha {}", a[3]);
                 let b = img.get(mirrored, y);

@@ -409,13 +409,13 @@ fn panel_rows_stop_before_their_scroll_bar() {
         assert!(scrolled(&h, bar).1 > 0.0, "{bar}: the rows overflow");
         let track = rect(&h, bar);
         if let Some(right) = rightmost(&h, prefix, bar, Some(track)) {
-            if right > track.min.x { eprintln!("MUT {}", format!("{bar}: the rows end at {right}, on the track {track:?}")); }
+            assert!(right <= track.min.x, "{bar}: the rows end at {right}, on the track {track:?}");
         } else {
             assert!(matches!(bar, "info.scroll" | "markers.scroll"), "{bar}: no rows beside the track");
         }
         let lane = Rect::from_x_y_ranges(track.min.x..=track.max.x, track.y_range());
         for (text, at) in painted_text(&h) {
-            if at.intersects(lane) { eprintln!("MUT {}", format!("{bar}: {text:?} shows at {at:?}, on the track {track:?}")); }
+            assert!(!at.intersects(lane), "{bar}: {text:?} shows at {at:?}, on the track {track:?}");
         }
     }
     let _ = std::fs::remove_dir_all(&folder);

@@ -185,6 +185,9 @@ pub fn import(
 const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media time";
 
 /// An EDL's source times are its source timecodes, which FilmCraft's reader keeps as media time.
+/// The largest start timecode, in frames, a file may have: a day at 1000 fps.
+const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
+
 /// Put the clips of each file that has a start timecode on the file's own time, as FilmCraft does
 /// when it links the media of an imported EDL. Returns the names of the media that stay on
 /// timecode though their clips use an hour or more of it (the file is missing or has none).
@@ -212,7 +215,9 @@ fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str
     let mut left = Vec::new();
     for (id, name, path, offline) in files {
         match if offline { None } else { probe(&path) } {
-            Some(Footage { file_timecode: Some(tc), native_rate, frame_rate, .. }) => {
+            // A corrupt timecode past a day of frames (at up to 1000 fps) would overflow the tick
+            // arithmetic; such a file stays on timecode.
+            Some(Footage { file_timecode: Some(tc), native_rate, frame_rate, .. }) if (0..=MAX_FILE_TIMECODE).contains(&tc) => {
                 filmcraft_interchange::rebase_source_timecode(project, id, tc, crate::rate_out(native_rate.unwrap_or(frame_rate)));
             }
             _ if on_timecode.contains(&id) => left.push(name),

@@ -245,7 +245,7 @@ fn apply_material(l: &mut Layer, p: &Value, t: Tick, cmd: &str) -> Result<Vec<&'
 fn material_mismatch(l: Option<&Layer>, missing: &[&str]) -> EngineError {
     let names = missing.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
     let Some(l) = l else { return bad("material.set", format!("no layer has {names}")) };
-    let Some(g) = l.props.sub("materialOptions") else { return bad("material.set", format!("`{}` has no Material Options", l.name)) };
+    let Some(g) = l.props.sub("materialOptions") else { return bad("material.set", format!("`{}` has no Material Options, so it has no {names}", l.name)) };
     let has: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
     let why = if matches!(l.source, LayerSource::Model { .. }) { ": a 3D model layer keeps its model file's materials" } else { "" };
     bad(

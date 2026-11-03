@@ -12,7 +12,7 @@ pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String 
     let head = base.trim_end_matches(|c: char| c.is_ascii_digit());
     let stem = match head.strip_suffix(' ') {
         Some(stem) if head.len() < base.len() && !stem.trim_end().is_empty() => stem.trim_end(),
-        _ => base,
+        _ => base.trim_end(),
     };
     (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
 }
