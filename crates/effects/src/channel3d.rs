@@ -390,7 +390,51 @@ pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u3
     out
 }
 
+/// The Cryptomatte layers every renderer names, and the Layer popup's options when the footage
+/// has no Cryptomatte metadata. The stored Layer value is an index: 0-2 are these (an exact
+/// match or a suffix such as `ViewLayer.CryptoObject`), 3 and up are the file's other Cryptomatte
+/// layers in name order, so a project saved before the popup followed the footage loads unchanged.
 pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoAsset"];
+
+/// The Layer popup's entries for Cryptomatte `layers` (sorted, as [`AuxChannels::crypto_layers`]
+/// returns them): the stored value and the layer's name, in value order. Of several layers
+/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one is listed, as it
+/// is the one rendered.
+fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
+    let mut out: Vec<(usize, &str)> = vec![];
+    let mut custom = CRYPTO_LAYERS.len();
+    for l in layers {
+        match CRYPTO_LAYERS.iter().position(|w| l == w || l.ends_with(w)) {
+            Some(i) if out.iter().any(|(j, _)| *j == i) => {}
+            Some(i) => out.push((i, l)),
+            None => {
+                out.push((custom, l));
+                custom += 1;
+            }
+        }
+    }
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// What the Layer popup lists for the footage `aux`: the Cryptomatte layers the file has, as
+/// (stored value, name), or the three standard ones when there is none (no footage, not an
+/// OpenEXR, no Cryptomatte channels).
+pub fn crypto_layer_choices(aux: Option<&AuxChannels>) -> Vec<(usize, String)> {
+    let layers = aux.map(AuxChannels::crypto_layers).unwrap_or_default();
+    if layers.is_empty() {
+        return CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+    }
+    crypto_layer_slots(&layers).into_iter().map(|(i, n)| (i, n.to_string())).collect()
+}
+
+/// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
+/// the first layer (what a file without that layer has always shown). `None` without any.
+pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
+    let layers = aux.crypto_layers();
+    let by_slot = crypto_layer_slots(&layers).into_iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string());
+    by_slot.or_else(|| layers.into_iter().next())
+}
 
 /// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
 type RankPlanes<'a> = [(&'a [f32], &'a [f32])];
@@ -493,12 +537,7 @@ pub fn crypto_aux_image_with(a: &AuxChannels, layer: &str, sel: &[u32], what: Cr
 
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
-    let layers = a.crypto_layers();
-    if layers.is_empty() {
-        return b;
-    }
-    let want = CRYPTO_LAYERS[(ctx.params.e("layer") as usize).min(2)];
-    let layer = layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).unwrap_or(&layers[0]).clone();
+    let Some(layer) = crypto_layer_name(&a, ctx.params.e("layer") as usize) else { return b };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);

@@ -122,7 +122,10 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 
 The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the
-Composition viewer (Shift adds, Alt or Ctrl removes).
+Composition viewer (Shift adds, Alt or Ctrl removes). Its Layer popup lists the Cryptomatte
+layers the footage has (a file with only `CryptoMaterial` shows just that), and the standard
+`CryptoObject`, `CryptoMaterial` and `CryptoAsset` when the layer has no Cryptomatte footage. The
+stored Layer value is unchanged for those three, so older projects load as they were.
 
 ## Replacing and reloading
 

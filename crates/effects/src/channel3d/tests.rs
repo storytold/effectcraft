@@ -399,3 +399,84 @@ fn instance3d_replaces_the_pixels_with_the_referenced_layer() {
     let out = run_fx("ec.3d.instance3d", &[], solid(), 0.0, EffectEnv::default());
     assert_eq!(out.img.data, solid().data);
 }
+
+/// A 20×10 layer of one Cryptomatte layer `name` that holds "left" on its left half and
+/// "right" on its right half, as [`scene`] does for `CryptoObject`.
+fn crypto_only(names: &[&str]) -> AuxHost {
+    let (w, h) = (20usize, 10usize);
+    let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
+    let (hl, hr) = (crypto_hash("left"), crypto_hash("right"));
+    for name in names {
+        let ids: Vec<f32> = (0..w * h).map(|i| crypto_float(if i % w < 10 { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; w * h]));
+        a.manifests.push((name.to_string(), vec![("left".into(), hl), ("right".into(), hr)]));
+    }
+    AuxHost(Arc::new(a))
+}
+
+fn choices(names: &[&str]) -> Vec<(usize, String)> {
+    crypto_layer_choices(Some(&crypto_only(names).0))
+}
+
+/// #473: the Layer popup lists the Cryptomatte layers the footage has, and the three standard
+/// ones when there is no footage, no OpenEXR or no Cryptomatte in it.
+#[test]
+fn crypto_layer_popup_lists_the_layers_of_the_footage() {
+    let standard: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+    assert_eq!(crypto_layer_choices(None), standard);
+    assert_eq!(crypto_layer_choices(Some(&AuxChannels::new(1, 1, 1.0))), standard, "an EXR without Cryptomatte");
+    assert_eq!(crypto_layer_choices(Some(&scene().0)), vec![(0, "CryptoObject".to_string())]);
+    // Only CryptoMaterial: it, not CryptoObject, with its own stored value.
+    assert_eq!(choices(&["CryptoMaterial"]), vec![(1, "CryptoMaterial".to_string())]);
+    // Standard layers come in slot order whatever the names sort like; prefixed ones fill their slot.
+    assert_eq!(choices(&["CryptoAsset", "ViewLayer.CryptoObject"]), vec![(0, "ViewLayer.CryptoObject".to_string()), (2, "CryptoAsset".to_string())]);
+    // A layer under another name gets a value after the standard ones, in name order.
+    assert_eq!(choices(&["Zed", "CryptoMaterial", "Alpha"]), vec![(1, "CryptoMaterial".to_string()), (3, "Alpha".to_string()), (4, "Zed".to_string())]);
+    // Two layers for one slot: the first, which the effect renders.
+    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string())]);
+}
+
+/// A project saved with Layer = CryptoObject / CryptoMaterial / CryptoAsset renders the same layer
+/// as before: the stored value's own layer, else the file's first; and the custom layers are read
+/// by their value.
+#[test]
+fn crypto_layer_values_keep_their_meaning() {
+    let all = crypto_only(&["CryptoAsset", "CryptoMaterial", "CryptoObject", "Mine"]).0;
+    let name = |i| crypto_layer_name(&all, i);
+    assert_eq!([0, 1, 2, 3].map(name), ["CryptoObject", "CryptoMaterial", "CryptoAsset", "Mine"].map(|n| Some(n.to_string())));
+    // A value the file has no layer for reads its first layer, as the effect always did.
+    assert_eq!(name(4).as_deref(), Some("CryptoAsset"));
+    let only = crypto_only(&["CryptoMaterial"]).0;
+    assert_eq!(
+        [0, 1, 2].map(|i| crypto_layer_name(&only, i)),
+        [Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string())]
+    );
+    assert_eq!(crypto_layer_name(&AuxChannels::new(1, 1, 1.0), 0), None);
+}
+
+/// The effect keys the layer the Layer value names: a Material-only file renders its matte
+/// whether Layer says Object (a saved project) or Material (what the popup now stores), and a
+/// custom layer by its own value.
+#[test]
+fn cryptomatte_renders_the_layer_the_value_names() {
+    let sel = ("selection", Value::Str("left".into()));
+    let matte = |layer: u32, host: &AuxHost| run("ec.3d.cryptomatte", &[("layer", Value::Enum(layer)), sel.clone(), ("display", Value::Enum(1))], host);
+    let only = crypto_only(&["CryptoMaterial"]);
+    let (old, new) = (matte(0, &only), matte(1, &only));
+    assert_eq!(old.data, new.data);
+    assert_eq!((new.get(2, 5)[3], new.get(12, 5)[3]), (1.0, 0.0));
+    // Two layers: "left" is in both, under hashes the manifests share, so tell them apart by
+    // which has it on the right half.
+    let (hl, hr) = (crypto_hash("left"), crypto_hash("right"));
+    let mut a = AuxChannels::new(20, 10, 1.0);
+    for (name, flip) in [("CryptoObject", false), ("Mine", true)] {
+        let ids: Vec<f32> = (0..200).map(|i| crypto_float(if (i % 20 < 10) != flip { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; 200]));
+    }
+    let two = AuxHost(Arc::new(a));
+    let (object, mine) = (matte(0, &two), matte(3, &two));
+    assert_eq!((object.get(2, 5)[3], object.get(12, 5)[3]), (1.0, 0.0));
+    assert_eq!((mine.get(2, 5)[3], mine.get(12, 5)[3]), (0.0, 1.0), "Layer 3 is the custom layer");
+}
