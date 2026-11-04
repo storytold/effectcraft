@@ -387,7 +387,12 @@ pub fn twist(paths: &[BezPath], angle_deg: f64, center: [f64; 2]) -> Vec<BezPath
         return paths.to_vec();
     }
     let k = a / rmax;
-    let most = pieces_within_budget(paths, 64);
+    // The pieces a segment asks for; the uniform cap applies only when the requests together
+    // would pass the budget (long segments keep their detail next to many short ones otherwise).
+    let want = |len: f64| ((a.abs() * len / rmax) / 0.15 + len / 50.0).ceil().clamp(1.0, 64.0) as usize;
+    let requested =
+        paths.iter().flat_map(subs).fold(0usize, |n, sub| sub.segs.iter().fold(n.saturating_add(2), |n, seg| n.saturating_add(want(seg.arclen(ACC)))));
+    let most = if requested <= MAX_OPERATOR_SEGMENTS { 64 } else { pieces_within_budget(paths, 64) };
     let rot = |v: Vec2, th: f64| {
         let (s, co) = th.sin_cos();
         Vec2::new(v.x * co - v.y * s, v.x * s + v.y * co)
@@ -415,7 +420,7 @@ pub fn twist(paths: &[BezPath], angle_deg: f64, center: [f64; 2]) -> Vec<BezPath
                 for seg in &sub.segs {
                     let cb = seg.to_cubic();
                     let len = seg.arclen(ACC);
-                    let m = ((a.abs() * len / rmax) / 0.15 + len / 50.0).ceil().clamp(1.0, most as f64) as usize;
+                    let m = want(len).min(most);
                     for i in 0..m {
                         let q = cb.subsegment(i as f64 / m as f64..(i + 1) as f64 / m as f64);
                         let (p0, p3) = (map(q.p0), map(q.p3));

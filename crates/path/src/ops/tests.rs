@@ -246,6 +246,22 @@ fn twist_of_centred_circle_keeps_it_round() {
     assert_eq!(id[0], sq(0.0, 0.0, 5.0));
 }
 
+#[test]
+fn twist_keeps_requested_detail_when_the_whole_request_fits_the_budget() {
+    // One long segment asks for 64 pieces; 20,000 tiny ones ask for one each. Together that is
+    // far under the budget, so the long one is not cut to what a uniform 64 per segment would allow.
+    let mut long = BezPath::new();
+    long.move_to((0.0, 0.0));
+    long.line_to((5000.0, 0.0));
+    let mut tiny = BezPath::new();
+    tiny.move_to((0.0, 1.0));
+    for i in 1..=20_000 {
+        tiny.line_to((i as f64 * 1e-3, 1.0));
+    }
+    let t = twist(&[long, tiny], 90.0, [0.0, 0.0]);
+    assert_eq!(t[0].elements().len(), 1 + 64);
+}
+
 // ---------------------------------------------------------------- zig zag
 
 #[test]
