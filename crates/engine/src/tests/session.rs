@@ -8,6 +8,69 @@ fn demo() -> Session {
     s
 }
 
+/// Importing footage and making its composition is one user action (#2573).
+fn import_new_comp_undo(background: bool) {
+    use effectcraft_project::{Footage, FootageKind};
+    use effectcraft_time::{FrameRate, Tick};
+    struct Clip;
+    impl crate::Importer for Clip {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            if path.ends_with(".bad") {
+                return Err("unreadable footage".into());
+            }
+            Ok(Footage {
+                path: path.into(),
+                kind: FootageKind::Video,
+                width: 720,
+                height: 576,
+                pixel_aspect: 1.25,
+                frame_rate: FrameRate::FPS_25,
+                duration: Tick::from_seconds_f64(3.0),
+                has_video: true,
+                ..Default::default()
+            })
+        }
+    }
+    let mut s = Session { importer: Some(std::sync::Arc::new(Clip)), ..Default::default() };
+    s.execute("file.importPlaceholder", json!({"name": "Unrelated"})).unwrap();
+    let mut before = serde_json::to_value(&s.project).unwrap();
+    let mut undo = s.history.undo.len();
+    s.execute_checked("file.import", json!({"paths": ["clip.mov", "other.mov", "broken.bad"], "newComp": true, "background": background})).unwrap();
+    if background {
+        // A user can keep editing while the probe runs. Its undo must stay separate.
+        s.execute("file.importPlaceholder", json!({"name": "During probe"})).unwrap();
+        before = serde_json::to_value(&s.project).unwrap();
+        undo = s.history.undo.len();
+    }
+    s.wait_jobs();
+    let c = s.active_comp().unwrap();
+    assert_eq!((c.width, c.height, c.pixel_aspect), (720, 576, 1.25));
+    assert_eq!(c.frame_rate, FrameRate::FPS_25);
+    assert_eq!(c.duration, Tick::from_seconds_f64(3.0));
+    assert_eq!(c.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["clip.mov", "other.mov"]);
+    let after = serde_json::to_value(&s.project).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
+    let undo = s.history.undo.len();
+    s.execute_checked("file.import", json!({"paths": ["broken.bad"], "newComp": true, "background": background})).unwrap();
+    s.wait_jobs();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
+    assert_eq!(s.history.undo.len(), undo, "an all-failed import adds no undo step");
+}
+
+#[test]
+fn import_new_comp_undo_together() {
+    import_new_comp_undo(false);
+}
+
+#[test]
+fn import_new_comp_undo_together_after_background_probe() {
+    import_new_comp_undo(true);
+}
+
 #[test]
 fn demo_opens_and_renders() {
     let s = demo();
