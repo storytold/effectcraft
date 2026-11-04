@@ -1063,19 +1063,26 @@ impl Frames {
                     break;
                 }
                 for c in todo {
-                    let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { continue };
-                    let comp = ItemId(c.comp);
-                    let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
-                    let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
-                    let (a, b) = (key(&c.from), key(&c.to));
-                    if a == b {
-                        continue;
-                    }
-                    for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
-                        for (scale, view) in &series {
-                            linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                    // (a panicking carry is skipped: the others still carry, and the flag is
+                    // still cleared below)
+                    let carry = || {
+                        let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { return false };
+                        let comp = ItemId(c.comp);
+                        let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
+                        let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
+                        let (a, b) = (key(&c.from), key(&c.to));
+                        if a == b {
+                            return false;
                         }
-                    }
+                        let mut linked = false;
+                        for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
+                            for (scale, view) in &series {
+                                linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                            }
+                        }
+                        linked
+                    };
+                    linked |= std::panic::catch_unwind(std::panic::AssertUnwindSafe(carry)).unwrap_or(false);
                 }
             }
             if linked && let Some(ctx) = &ctx {
