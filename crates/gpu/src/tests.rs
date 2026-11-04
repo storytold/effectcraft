@@ -137,7 +137,7 @@ fn numerical_effects_remain_resident_on_vulkan() {
         return;
     }
     for entry in ["fxs_point", "fxt_point", "ftr_grid", "fp2_hextile"] {
-        assert!(!g.ctx.unavailable_kernels().iter().any(|(name, _)| *name == entry), "{entry}: {:?}", g.ctx.unavailable_kernels());
+        assert!(g.ctx.has_kernel(entry), "{entry}: {:?}", g.ctx.unavailable_kernels());
     }
     for (id, vals) in [
         ("ec.stylize.posterize", vec![("level", n(4.0))]),
@@ -1107,7 +1107,7 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
     ctx.drop_kernel("pointwise");
     ctx.drop_kernel("box_h");
     let names: Vec<&str> = ctx.unavailable_kernels().iter().map(|(e, _)| *e).collect();
-    assert_eq!(names, ["pointwise", "box_h"]);
+    assert_eq!(names, ["box_h", "pointwise"]);
     let g = Gpu::from_context(ctx);
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         let mut s = Scene::new(depth);
@@ -1125,6 +1125,24 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
         d.quantized = depth != BitDepth::Bpc32;
         check(&format!("missing kernels {depth:?}"), Some(d), 0.0);
     }
+}
+
+/// #1590: effect kernels are built on first use, not with the context (building all of them
+/// up front kept Chrome's GPU process busy past its watchdog). Once asked for, every one of
+/// them builds on this device: a kernel no test dispatches still can't break unnoticed.
+#[test]
+fn effect_kernels_build_on_first_use() {
+    if gpu().is_none() {
+        return;
+    }
+    let Ok(ctx) = pollster::block_on(crate::context::GpuContext::request()) else { return };
+    let built = |ctx: &crate::context::GpuContext| ctx.effect_pipelines_built();
+    assert_eq!(built(&ctx), 0, "no effect kernel is built with the context");
+    let started = std::time::Instant::now();
+    ctx.build_all_kernels();
+    eprintln!("{}: built {} effect kernels in {:.2?}", ctx.name, built(&ctx), started.elapsed());
+    assert_eq!(ctx.unavailable_kernels(), vec![], "every effect kernel builds on {}", ctx.name);
+    assert!(ctx.has_kernel("classic3d") && ctx.has_kernel("math_probe"), "the up-front kernels build on {}", ctx.name);
 }
 
 /// WGSL cannot read the CPU's constants, so Glow's bright pass repeats them as literals; this
