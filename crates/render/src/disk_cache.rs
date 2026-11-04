@@ -316,7 +316,9 @@ fn make_private(folder: &Path) -> std::io::Result<()> {
     let tmp_real = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
     let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
     let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
-    if ![&given, &real].iter().any(|p| p.starts_with(&tmp) || p.starts_with(&tmp_real)) {
+    // The shared folder itself is not ours to change: only folders inside it.
+    let inside = |p: &PathBuf, t: &PathBuf| p.starts_with(t) && p != t;
+    if ![&given, &real].iter().any(|p| inside(p, &tmp) || inside(p, &tmp_real)) {
         return Ok(());
     }
     if std::fs::symlink_metadata(folder)?.file_type().is_symlink() {
@@ -1059,7 +1061,7 @@ mod tests {
         let link = std::env::current_dir().unwrap().join(format!("effectcraft-alias-link-{}", std::process::id()));
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        let dc = DiskCache::open(link.join("cache"), 1 << 20);
+        let dc = DiskCache::open(link.join("cache"), 1 << 20).unwrap();
         let mode = std::fs::metadata(real.join("cache")).map(|m| m.permissions().mode() & 0o777);
         drop(dc);
         let _ = std::fs::remove_file(&link);
