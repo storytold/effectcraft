@@ -291,3 +291,50 @@ fn collapsed_instance_merges_text_and_font_overrides() {
         o => panic!("{o:?}"),
     }
 }
+
+#[test]
+fn instance_keys_stay_out_of_a_layer_that_blends_frames() {
+    let (mut s, scene, inner, [a, _], inst) = keyed_instance([(0.0, 100.0), (0.0, 100.0)]);
+    {
+        let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(scene).unwrap();
+        comp.enable_frame_blending = true;
+        comp.layer_mut(effectcraft_project::LayerId(inst)).unwrap().switches.frame_blend = effectcraft_project::FrameBlend::FrameMix;
+    }
+    // Frame Mix renders the nested comp at two other times, so only the instance's current value goes in.
+    let (v, pr) = rendered(&s, scene, inner, inst, a, 0.25);
+    assert!((v - 25.0).abs() < 1e-6, "rendered {v}");
+    assert!(pr.keys.is_empty());
+}
+
+/// An override from a collapsed parent reaches the nested instance as a value only: the keys the
+/// nested instance property carries itself must not be copied onto its own target.
+#[test]
+fn collapsed_parent_override_replaces_the_nested_instance_keys() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let a = s.execute("layer.newSolid", json!({"name": "A", "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("essential.addProperty", json!({"layer": a, "path": "transform/opacity"})).unwrap();
+    s.execute("comp.new", json!({"name": "Mid", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let mid = s.active_comp_id().unwrap();
+    let inner = s.project.find_by_name("Inner").unwrap().id;
+    let nested = s.execute("layer.addItem", json!({"item": inner.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap();
+    let path = s.execute("essential.instance", json!({"layer": nested})).unwrap()["controls"][0]["path"].as_str().unwrap().to_string();
+    s.execute("prop.addKey", json!({"layer": nested, "path": path, "time": 0.0, "value": 0.0})).unwrap();
+    s.execute("prop.addKey", json!({"layer": nested, "path": path, "time": 1.0, "value": 100.0})).unwrap();
+    let ctl = s.execute("essential.addProperty", json!({"layer": nested, "path": path})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Top", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let top = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": mid.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [inst], "switch": "collapse", "value": true})).unwrap();
+    s.execute("essential.set", json!({"layer": inst, "control": ctl, "value": 80.0})).unwrap();
+    let r = effectcraft_render::Renderer::new(&s.project, &*s.footage, crate::render::RenderOpts::default());
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, top, s.project.comp(top).unwrap(), Tick::from_seconds_f64(0.25));
+    let layer = ctx.comp.layer(effectcraft_project::LayerId(inst)).unwrap();
+    let collapsed = r.collapsed(&ctx, layer).expect("the instance collapses");
+    let (_, nctx) = r.collapse_into(&ctx, layer, &collapsed, 1.0).expect("a nested context");
+    let nl = nctx.comp.layer(effectcraft_project::LayerId(nested)).unwrap();
+    let over = effectcraft_render::essential_overrides(&nctx, nl);
+    assert_eq!(over.len(), 1);
+    assert!((over[0].value.as_f64() - 80.0).abs() < 1e-6, "value {:?}", over[0].value);
+    assert!(over[0].keys.is_empty(), "the nested instance's own keys are stale");
+}
