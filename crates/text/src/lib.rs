@@ -800,7 +800,7 @@ mod tests {
         let l = layout_doc(&doc);
         assert!(l.line_boxes.len() > 1);
         // No line starts at a combining mark, and every base character still has a glyph.
-        assert!(l.layout.lines.iter().all(|line| doc.text[line.range.start..].chars().next() != Some('\u{301}')), "a line begins at a mark");
+        assert!(l.layout.lines.iter().all(|line| !doc.text[line.range.start..].starts_with('\u{301}')), "a line begins at a mark");
         assert!((0..doc.char_len()).step_by(2).all(|ci| l.glyphs.iter().any(|g| g.char_index == ci)), "a base character lost its glyph");
     }
 
