@@ -1906,3 +1906,67 @@ fn a_two_key_edit_beside_a_wiggle_keeps_the_other_frames() {
         }
     }
 }
+
+/// An expression that reads its own layer's markers (no other layer or comp named) re-renders
+/// that layer when one of its markers changes. Every frame kept renders as before.
+#[test]
+fn a_marker_read_by_its_own_layer_re_renders_it() {
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let l = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": "marker.numKeys > 0 ? 0 : 100"})).unwrap();
+    let p0 = s.project.clone();
+    s.execute("markers.set", json!({"comp": cid.0, "layer": l, "new": true, "time": 3.0})).unwrap();
+    let p1 = s.project.clone();
+    let host = s.expr.clone().unwrap();
+    let fr = p0.comp(cid).unwrap().frame_rate;
+    let render = |p: &Project, i: i64| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&*host);
+        r.comp_frame(cid, fr.tick_of(i))
+    };
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, cid);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+    assert!(!kept.contains(&0), "the layer's frames must go: {kept:?}");
+    for i in kept {
+        assert_eq!(render(&p0, i), render(&p1, i), "kept frame {i} draws other pixels now");
+    }
+}
+
+/// An expression that reads its own layer's audio re-renders that layer when its volume
+/// changes.
+#[test]
+fn a_volume_read_by_its_own_layer_re_renders_it() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Expression, Footage, FootageKind, Value, build};
+    use serde_json::json;
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let mut p = (*s.project).clone();
+    let clip = p.add_item(
+        "clip.mp4",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(Footage { kind: FootageKind::Video, has_video: true, has_audio: true, width: 8, height: 8, ..Default::default() }),
+    );
+    let comp = p.comp(cid).unwrap().clone();
+    let mut layer = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item: clip }, (8, 8), None);
+    layer.props.prop_mut("transform/opacity").unwrap().expr =
+        Some(Expression { text: "100 + thisLayer(\"Audio\")(\"Audio Levels\")[0]".into(), enabled: true });
+    let id = layer.id;
+    p.comp_mut(cid).unwrap().layers.push(layer);
+    let p0 = Arc::new(p);
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, cid);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let mut p1 = p0.clone();
+    Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(id).unwrap().props.prop_mut("audio/levels").unwrap().value = Value::Vec2([-6.0, -6.0]);
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+    assert!(!kept.contains(&0), "the clip's frames must go: {kept:?}");
+}

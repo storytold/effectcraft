@@ -366,7 +366,7 @@ impl Comp {
     /// changed: here or, `elsewhere`, outside these layers (markers, layers that draw nothing,
     /// other comps and items). `None` when the edit can reach any frame: a comp setting, a layer
     /// reorder, Solo turning on or off, an environment layer. A layer's audio counts when `heard`
-    /// says something draws it. `touched` layers draw differently in spans the caller adds (a
+    /// says something draws it, a layer's markers when `with_markers`. `touched` layers draw differently in spans the caller adds (a
     /// precomp whose comp changed): they reach the layers that read them, not their own frames.
     pub fn changed_spans(
         &self,
@@ -390,8 +390,9 @@ impl Comp {
                 Node::Group(g) => reads_outside(g),
             })
         }
-        // Solo hides every other layer at every frame.
-        if !self.same_settings(o, with_markers) || self.any_solo() != o.any_solo() {
+        // Solo hides every other layer at every frame. (Comp markers count through `elsewhere`:
+        // an expression reading them names `thisComp`.)
+        if !self.same_settings(o, false) || self.any_solo() != o.any_solo() {
             return None;
         }
         let common = |a: &Comp, b: &Comp| a.layers.iter().map(|l| l.id).filter(|id| b.layer(*id).is_some()).collect::<Vec<_>>();
