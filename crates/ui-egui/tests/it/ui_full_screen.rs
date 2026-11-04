@@ -459,6 +459,36 @@ fn a_set_view_follows_the_window_to_the_screen() {
 /// The scale keeps to the viewer's zoom range, and a window with no area leaves the view alone
 /// until there is one to scale to.
 #[test]
+fn resizing_in_steps_lands_where_one_step_does() {
+    let finish = |sizes: &[[f32; 2]]| {
+        let mut h = harness();
+        h.state_mut().ui.viewer.zoom = Some(0.5);
+        h.state_mut().ui.viewer.pan = [30.0, 12.0];
+        h.run_steps(2);
+        invoke(&mut h, "view.fullScreen");
+        for [w, ht] in sizes {
+            h.set_size(vec2(*w, *ht));
+            h.run_steps(2);
+        }
+        (h.state().ui.viewer.zoom, h.state().ui.viewer.pan)
+    };
+    assert_eq!(finish(&[[2000.0, 500.0], [2000.0, 1400.0]]), finish(&[[2000.0, 1400.0]]));
+}
+
+#[test]
+fn a_zoom_out_of_range_keeps_the_pan_on_the_same_part_of_the_comp() {
+    let mut h = harness();
+    h.state_mut().ui.viewer.zoom = Some(0.005);
+    h.state_mut().ui.viewer.pan = [30.0, 12.0];
+    h.run_steps(2);
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(2);
+    assert_eq!(h.state().ui.viewer.zoom, Some(0.01));
+    let pan = h.state().ui.viewer.pan;
+    assert!((pan[0] - 60.0).abs() < 1e-3 && (pan[1] - 24.0).abs() < 1e-3, "{pan:?}");
+}
+
+#[test]
 fn a_zoom_out_of_range_from_a_script_leaves_the_full_screen_pan_finite() {
     for zoom in [0.0, 1e-40] {
         let mut h = harness();

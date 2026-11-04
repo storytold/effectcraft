@@ -175,6 +175,8 @@ pub struct FullScreen {
     /// The viewer's zoom and pan to go back to: `None` is Fit.
     pub saved_zoom: Option<f32>,
     pub saved_pan: [f32; 2],
+    /// The size of the viewer's panel those were set in, once Full Screen shows.
+    pub panel: Option<egui::Vec2>,
     pub saved_focus: PanelKind,
     /// A preview's Full Screen option started it, so that preview's end ends it.
     pub from_preview: bool,

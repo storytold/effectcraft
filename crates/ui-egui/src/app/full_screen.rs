@@ -38,7 +38,8 @@ impl EffectcraftApp {
         {
             self.ui.status = e.to_string();
         }
-        self.full_screen = Some(FullScreen { saved_zoom: self.ui.viewer.zoom, saved_pan: self.ui.viewer.pan, saved_focus: self.ui.focused, from_preview });
+        self.full_screen =
+            Some(FullScreen { saved_zoom: self.ui.viewer.zoom, saved_pan: self.ui.viewer.pan, panel: None, saved_focus: self.ui.focused, from_preview });
         self.ui.focused = panels::viewers::active_panel(self);
     }
 

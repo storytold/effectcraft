@@ -311,18 +311,24 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     // the way to the screen when the window only gets there after the video first shows. A window
     // with no area has nothing to scale to: the view and the map wait for one that has.
     let sized = area.is_finite() && area.is_positive();
-    if app.full_screen_shown()
+    let shown = app.full_screen_shown();
+    if shown
         && sized
-        && let Some(panel) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area).filter(|a| a.size() != area.size())
+        && let Some(last) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area.size()).filter(|s| *s != area.size())
+        && let Some(f) = app.full_screen.as_mut()
     {
-        let s = (area.width() / panel.width()).min(area.height() / panel.height());
+        // From the panel's view each time, so a window that gets there in steps ends the same.
+        let panel = *f.panel.get_or_insert(last);
+        let s = (area.width() / panel.x).min(area.height() / panel.y);
         // The pan follows the zoom actually set, or a clamped zoom would show another part of the comp.
-        let (s, zoom) = app.ui.viewer.zoom.map_or((s, None), |z| {
+        let (ratio, zoom) = f.saved_zoom.map_or((s, None), |z| {
             let scaled = (z * s).clamp(0.01, 32.0);
-            (scaled / z.clamp(0.01, 32.0), Some(scaled))
+            (scaled / z, Some(scaled))
         });
+        let ratio = if ratio.is_finite() { ratio } else { s };
+        let pan = f.saved_pan.map(|p| p * ratio);
         app.ui.viewer.zoom = zoom;
-        app.ui.viewer.pan = app.ui.viewer.pan.map(|p| p * s);
+        app.ui.viewer.pan = if pan.iter().all(|p| p.is_finite()) { pan } else { f.saved_pan };
     }
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
