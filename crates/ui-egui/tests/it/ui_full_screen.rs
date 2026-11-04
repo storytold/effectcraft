@@ -462,10 +462,13 @@ fn a_set_view_follows_the_window_to_the_screen() {
 fn the_full_screen_scale_stays_in_the_zoom_range_and_waits_for_a_window_with_area() {
     let mut h = harness();
     h.state_mut().ui.viewer.zoom = Some(30.0);
+    h.state_mut().ui.viewer.pan = [300.0, 120.0];
     h.run_steps(2);
     invoke(&mut h, "view.fullScreen");
     h.run_steps(2);
     assert_eq!(h.state().ui.viewer.zoom, Some(32.0));
+    let pan = h.state().ui.viewer.pan;
+    assert!((pan[0] - 320.0).abs() < 1e-3 && (pan[1] - 128.0).abs() < 1e-3, "the pan follows the zoom it got: {pan:?}");
     invoke(&mut h, "view.fullScreen");
     h.run_steps(2);
 
