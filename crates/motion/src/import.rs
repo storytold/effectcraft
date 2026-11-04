@@ -6,7 +6,7 @@ use std::sync::Arc;
 use effectcraft_color::Label;
 use effectcraft_keyframe::{TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerSource, Node as PropNode, ParamUi, Project, Property, Solid};
+use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerSource, Node as PropNode, ParamUi, Project, PropGroup, Property, Solid};
 use effectcraft_time::{FrameRate, Tick};
 use roxmltree::{Document, Node};
 
@@ -42,8 +42,30 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
 }
 
+/// Largest document read: Motion projects are at most a few megabytes, and this bounds the
+/// memory a hostile file can make the parser use.
+const MAX_BYTES: usize = 256 << 20;
+/// Most XML nodes parsed from one document.
+const MAX_NODES: u32 = 20_000_000;
+
+/// Whether the document type declaration has an internal subset (`<!DOCTYPE x [ … ]>`), the
+/// only place XML can declare entities. Motion writes a bare `<!DOCTYPE ozxmlscene>`.
+fn has_internal_subset(text: &str) -> bool {
+    let Some(at) = text.find("<!DOCTYPE") else { return false };
+    let decl = text.get(at..).unwrap_or_default();
+    let end = decl.find('>').unwrap_or(decl.len());
+    decl.get(..end).is_some_and(|d| d.contains('['))
+}
+
+/// Parse untrusted OZML. External entities are never fetched (roxmltree does no I/O), and
+/// documents declaring their own entities are refused, so nothing expands (no "billion laughs").
 fn document(text: &str) -> Result<Document<'_>, MotionError> {
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    if has_internal_subset(text) {
+        return Err(MotionError::Parse("documents that declare a DTD internal subset (entities) are not supported".into()));
+    }
+    // `allow_dtd` only admits the bare DOCTYPE line Motion writes; no `entity_resolver`, so an
+    // external entity is never loaded.
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_NODES, ..Default::default() };
     let doc = Document::parse_with_options(text, opts).map_err(|e| MotionError::Parse(e.to_string()))?;
     if doc.root_element().tag_name().name() != "ozml" {
         return Err(MotionError::Parse(format!("root element is <{}>, not <ozml>", doc.root_element().tag_name().name())));
@@ -52,6 +74,9 @@ fn document(text: &str) -> Result<Document<'_>, MotionError> {
 }
 
 fn utf8(bytes: &[u8]) -> Result<&str, MotionError> {
+    if bytes.len() > MAX_BYTES {
+        return Err(MotionError::Parse(format!("document is {} MB; the limit is {} MB", bytes.len() >> 20, MAX_BYTES >> 20)));
+    }
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     std::str::from_utf8(bytes).map_err(|e| MotionError::Parse(format!("not UTF-8 text: {e}")))
 }
@@ -321,92 +346,129 @@ fn vec3(v: &[f64]) -> Value {
     Value::Vec3([v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)])
 }
 
+/// The Motion channels of an object's or group's transform and opacity.
+struct Channels {
+    pos: [Channel; 3],
+    rot: [Channel; 3],
+    scale: [Channel; 3],
+    anchor: [Channel; 3],
+    opacity: Channel,
+}
+
+impl Channels {
+    /// Read from `props` (the `Properties` parameter), warning about what is not imported.
+    fn read(cx: &mut Cx, props: Node, name: &str) -> Channels {
+        let tr = param(props, "Transform");
+        let pos = xyz(cx, tr.and_then(|t| param(t, "Position")), 0.0);
+        let rot = xyz(cx, tr.and_then(|t| param(t, "Rotation")), 0.0);
+        let scale = xyz(cx, tr.and_then(|t| param(t, "Scale")), 1.0);
+        let anchor = xyz(cx, tr.and_then(|t| param(t, "Anchor Point")), 0.0);
+        let sheared = |s: Node| ["X", "Y"].iter().any(|c| param(s, c).and_then(|p| attr_f64(p, "value")).is_some_and(|v| v != 0.0));
+        if tr.and_then(|t| param(t, "Shear")).is_some_and(sheared) {
+            cx.warn(format!("{name}: shear is not imported"));
+        }
+        let rate = cx.rate;
+        let opacity = param_path(props, &["Blending", "Opacity"])
+            .or_else(|| param(props, "Opacity"))
+            .map(|o| read_channel(o, rate, 1.0, &mut |w| cx.warn(w)))
+            .unwrap_or(Channel::constant(1.0));
+        // Motion's blend mode numbers are not documented; 0 is Normal and a group's default 34
+        // passes its layers' own modes through.
+        if let Some(bm) = param_path(props, &["Blending", "Blend Mode"]).and_then(|b| attr_f64(b, "value"))
+            && bm != 0.0
+            && bm != 34.0
+        {
+            cx.warn(format!("{name}: Motion blend mode {bm} is not imported (Normal is used)"));
+        }
+        Channels { pos, rot, scale, anchor, opacity }
+    }
+
+    /// Depth in position or a tilt (X/Y rotation) makes a 3D layer.
+    fn three_d(&self) -> bool {
+        let used = |c: &Channel| c.animated() || c.value != 0.0;
+        used(&self.pos[2]) || self.rot[..2].iter().any(used)
+    }
+}
+
+/// Behaviors and masks of `n`: not imported, so each is a warning.
+fn warn_unimported(cx: &mut Cx, n: Node, name: &str) {
+    for b in children(n, "behavior") {
+        let behavior = b.attribute("name").unwrap_or("Behavior");
+        cx.warn(format!("{name}: behavior `{behavior}` is not imported (behaviors are procedural; convert them to keyframes in Motion first)"));
+    }
+    if children(n, "mask").next().is_some() {
+        cx.warn(format!("{name}: masks are not imported"));
+    }
+}
+
 /// Transform and opacity of an object or group onto `l`. `anchor_center` is the layer-space
 /// point Motion's anchor (0, 0) refers to.
 fn read_transform(cx: &mut Cx, project: &mut Project, n: Node, l: &mut Layer, anchor_center: [f64; 2]) {
-    for b in children(n, "behavior") {
-        let name = b.attribute("name").unwrap_or("Behavior");
-        cx.warn(format!("{}: behavior `{name}` is not imported (behaviors are procedural; convert them to keyframes in Motion first)", l.name));
-    }
-    if children(n, "mask").next().is_some() {
-        cx.warn(format!("{}: masks are not imported", l.name));
-    }
+    warn_unimported(cx, n, &l.name);
     let Some(props) = param(n, "Properties") else { return };
-    let tr = param(props, "Transform");
-    let (pw, ph) = (cx.size.0 as f64 / 2.0, cx.size.1 as f64 / 2.0);
-    let deg = 180.0 / std::f64::consts::PI;
-    let pos = xyz(cx, tr.and_then(|t| param(t, "Position")), 0.0);
-    let rot = xyz(cx, tr.and_then(|t| param(t, "Rotation")), 0.0);
-    let scale = xyz(cx, tr.and_then(|t| param(t, "Scale")), 1.0);
-    let anchor = xyz(cx, tr.and_then(|t| param(t, "Anchor Point")), 0.0);
-    if tr.and_then(|t| param(t, "Shear")).is_some_and(|s| ["X", "Y"].iter().any(|c| param(s, c).and_then(|p| attr_f64(p, "value")).is_some_and(|v| v != 0.0))) {
-        cx.warn(format!("{}: shear is not imported", l.name));
-    }
-    let opacity = param_path(props, &["Blending", "Opacity"]).or_else(|| param(props, "Opacity"));
-    let mut warns = vec![];
-    let opacity = opacity.map(|o| read_channel(o, cx.rate, 1.0, &mut |w| warns.push(w))).unwrap_or(Channel::constant(1.0));
-    // Motion's blend mode numbers are not documented; 0 is Normal and a group's default 34
-    // passes its layers' own modes through.
-    if let Some(bm) = param_path(props, &["Blending", "Blend Mode"]).and_then(|b| attr_f64(b, "value"))
-        && bm != 0.0
-        && bm != 34.0
-    {
-        warns.push(format!("{}: Motion blend mode {bm} is not imported (Normal is used)", l.name));
-    }
-    let three_d = pos[2].animated() || pos[2].value != 0.0 || rot[..2].iter().any(|c| c.animated() || c.value != 0.0);
-    if three_d {
+    let ch = Channels::read(cx, props, &l.name);
+    if ch.three_d() {
         l.switches.three_d = true;
     }
-    let mut next = project.next_id;
-    let mut warn = |w: String| warns.push(w);
+    let half = (cx.size.0 as f64 / 2.0, cx.size.1 as f64 / 2.0);
+    let mut warns = vec![];
     if let Some(t) = l.props.sub_mut("transform") {
-        let pmap = [(1.0, pw), (-1.0, ph), (-1.0, 0.0)];
-        if pos.iter().any(Channel::animated) {
-            // Separate dimensions keep each channel's own keyframes.
-            let base: Vec<f64> = pos.iter().zip(pmap).map(|(c, (s, o))| s * c.value + o).collect();
-            if let Some(p) = t.get_mut("position") {
-                p.value = vec3(&base);
-            }
-            let at = t.children.iter().position(|c| c.match_id() == "position").map(|i| i + 1).unwrap_or(t.children.len());
-            let dims = [("positionX", "X Position"), ("positionY", "Y Position"), ("positionZ", "Z Position")];
-            for (d, ((m, name), (s, o))) in dims.iter().zip(pmap).enumerate().rev() {
-                let mut pr = Property::new(next, m, name, Value::Scalar(0.0)).with_ui(ParamUi::Number);
-                next += 1;
-                pr.three_d_only = d == 2;
-                if let Some(ch) = pos.get(d) {
-                    scalar_prop(&mut pr, ch, s, o, &mut warn);
-                }
-                t.children.insert(at, PropNode::Prop(pr));
-            }
-        } else if let Some(p) = t.get_mut("position") {
-            p.value = vec3(&pos.iter().zip(pmap).map(|(c, (s, o))| s * c.value + o).collect::<Vec<_>>());
-        }
-        if let Some(p) = t.get_mut("anchor") {
-            let [ax, ay, az] = &anchor;
-            let chs = [
-                Mapped { ch: ax, scale: 1.0, offset: anchor_center[0] },
-                Mapped { ch: ay, scale: -1.0, offset: anchor_center[1] },
-                Mapped { ch: az, scale: -1.0, offset: 0.0 },
-            ];
-            (p.value, p.keys) = merge(&chs, &vec3, true, &mut warn);
-        }
-        if let Some(p) = t.get_mut("scale") {
-            let chs: Vec<Mapped> = scale.iter().map(|ch| Mapped { ch, scale: 100.0, offset: 0.0 }).collect();
-            (p.value, p.keys) = merge(&chs, &vec3, false, &mut warn);
-        }
-        // Y up → Y down keeps X rotations and mirrors Y and Z rotations.
-        for (m, ch, s) in [("rotationX", &rot[0], deg), ("rotationY", &rot[1], -deg), ("rotation", &rot[2], -deg)] {
-            if let Some(p) = t.get_mut(m) {
-                scalar_prop(p, ch, s, 0.0, &mut warn);
-            }
-        }
-        if let Some(p) = t.get_mut("opacity") {
-            scalar_prop(p, &opacity, 100.0, 0.0, &mut warn);
-        }
+        apply_channels(t, &ch, half, anchor_center, &mut project.next_id, &mut |w| warns.push(w));
     }
-    project.next_id = next;
     for w in warns {
         cx.warn(w);
+    }
+}
+
+/// Write `ch` onto a transform group: Motion's centre origin with Y up becomes top-left pixels
+/// with Y down (`half` is half the scene size), radians become degrees, fractions percentages.
+fn apply_channels(t: &mut PropGroup, ch: &Channels, half: (f64, f64), anchor_center: [f64; 2], next: &mut u64, warn: &mut dyn FnMut(String)) {
+    apply_position(t, &ch.pos, [(1.0, half.0), (-1.0, half.1), (-1.0, 0.0)], next, warn);
+    if let Some(p) = t.get_mut("anchor") {
+        let [ax, ay, az] = &ch.anchor;
+        let chs = [
+            Mapped { ch: ax, scale: 1.0, offset: anchor_center[0] },
+            Mapped { ch: ay, scale: -1.0, offset: anchor_center[1] },
+            Mapped { ch: az, scale: -1.0, offset: 0.0 },
+        ];
+        (p.value, p.keys) = merge(&chs, &vec3, true, warn);
+    }
+    if let Some(p) = t.get_mut("scale") {
+        let chs: Vec<Mapped> = ch.scale.iter().map(|ch| Mapped { ch, scale: 100.0, offset: 0.0 }).collect();
+        (p.value, p.keys) = merge(&chs, &vec3, false, warn);
+    }
+    // Y up → Y down keeps X rotations and mirrors Y and Z rotations.
+    let deg = 180.0 / std::f64::consts::PI;
+    for (m, c, s) in [("rotationX", &ch.rot[0], deg), ("rotationY", &ch.rot[1], -deg), ("rotation", &ch.rot[2], -deg)] {
+        if let Some(p) = t.get_mut(m) {
+            scalar_prop(p, c, s, 0.0, warn);
+        }
+    }
+    if let Some(p) = t.get_mut("opacity") {
+        scalar_prop(p, &ch.opacity, 100.0, 0.0, warn);
+    }
+}
+
+/// Position, with `pmap` the (scale, offset) of each dimension. Animated, it becomes separate
+/// X/Y/Z Position properties so each channel keeps its own keyframes.
+fn apply_position(t: &mut PropGroup, pos: &[Channel; 3], pmap: [(f64, f64); 3], next: &mut u64, warn: &mut dyn FnMut(String)) {
+    let base: Vec<f64> = pos.iter().zip(pmap).map(|(c, (s, o))| s * c.value + o).collect();
+    if let Some(p) = t.get_mut("position") {
+        p.value = vec3(&base);
+    }
+    if !pos.iter().any(Channel::animated) {
+        return;
+    }
+    let at = t.children.iter().position(|c| c.match_id() == "position").map(|i| i + 1).unwrap_or(t.children.len());
+    let dims = [("positionX", "X Position"), ("positionY", "Y Position"), ("positionZ", "Z Position")];
+    for (d, ((m, name), (s, o))) in dims.iter().zip(pmap).enumerate().rev() {
+        let mut pr = Property::new(*next, m, name, Value::Scalar(0.0)).with_ui(ParamUi::Number);
+        *next += 1;
+        pr.three_d_only = d == 2;
+        if let Some(c) = pos.get(d) {
+            scalar_prop(&mut pr, c, s, o, warn);
+        }
+        t.children.insert(at, PropNode::Prop(pr));
     }
 }
 
@@ -493,28 +555,30 @@ fn build_group(cx: &mut Cx, project: &mut Project, n: Node, depth: usize) -> Com
     let mut comp = cx.comp();
     let mut layers = vec![];
     for c in n.children().filter(|c| c.is_element()) {
-        match c.tag_name().name() {
-            "layer" | "group" if !empty_group(c) => {
-                if depth + 1 >= MAX_DEPTH {
-                    cx.warn("groups nested too deeply are not imported");
-                    continue;
-                }
-                if let Some(l) = group_layer(cx, project, &comp, c, depth + 1) {
-                    layers.push(l);
-                }
-            }
-            "scenenode" => {
-                if let Some(l) = object_layer(cx, project, &comp, c) {
-                    layers.push(l);
-                }
-            }
-            _ => {}
+        if let Some(l) = child_layer(cx, project, &comp, c, depth) {
+            layers.push(l);
         }
     }
     let mut all = filter_layers(cx, project, &comp, n);
     all.extend(layers);
     comp.layers = all.into();
     comp
+}
+
+/// The layer one child of a group at `depth` makes: a nested group (a precomposition layer)
+/// or an object. Filters are not children here ([`filter_layers`]).
+fn child_layer(cx: &mut Cx, project: &mut Project, comp: &Comp, c: Node, depth: usize) -> Option<Layer> {
+    match c.tag_name().name() {
+        "layer" | "group" if !empty_group(c) => {
+            if depth + 1 >= MAX_DEPTH {
+                cx.warn("groups nested too deeply are not imported");
+                return None;
+            }
+            group_layer(cx, project, comp, c, depth + 1)
+        }
+        "scenenode" => object_layer(cx, project, comp, c),
+        _ => None,
+    }
 }
 
 /// A group as a precomposition layer.

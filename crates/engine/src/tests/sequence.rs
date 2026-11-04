@@ -296,12 +296,13 @@ fn edits_keep_the_disk_salt_and_reload_stamps_the_files_again() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
-/// An Apple Motion document using `shot_0001.png` and `shot_0002.png` as two separate stills.
-fn motion_two_stills(dir: &str) -> String {
+/// An Apple Motion document using `shot_0001.png` and `shot_0002.png` (next to it) as two
+/// separate stills. `relativeURL` keeps it portable: a `file://` URL of a Windows path is not a
+/// Motion URL.
+fn motion_two_stills() -> String {
     let clip = |id: u32, n: u32| {
         format!(
-            r#"<clip name="Shot {n}" id="{id}"><pathURL>file://{}</pathURL><missingWidth>64</missingWidth><missingHeight>32</missingHeight><missingDuration>0.0333</missingDuration><creationDuration>1</creationDuration></clip>"#,
-            at(dir, &format!("shot_000{n}.png"))
+            r#"<clip name="Shot {n}" id="{id}"><relativeURL>shot_000{n}.png</relativeURL><missingWidth>64</missingWidth><missingHeight>32</missingHeight><missingDuration>0.0333</missingDuration><creationDuration>1</creationDuration></clip>"#
         )
     };
     let node = |id: u32, clip: u32| {
@@ -334,7 +335,7 @@ fn motion_stills_with_numbered_siblings_stay_single_images() {
     // Different byte lengths, so the probed widths tell the two files apart.
     std::fs::write(at(&dir, "shot_0002.png"), b"xx").unwrap();
     let doc = at(&dir, "two.motn");
-    std::fs::write(&doc, motion_two_stills(&dir)).unwrap();
+    std::fs::write(&doc, motion_two_stills()).unwrap();
     let mut s = session();
     let r = s.execute("file.importMotion", json!({"path": doc})).unwrap();
     let mut stills: Vec<(String, FootageKind, usize, u32)> = r["items"]

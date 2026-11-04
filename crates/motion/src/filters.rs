@@ -22,9 +22,6 @@ pub(crate) const ADD_NOISE_UUID: &str = "C423A28F-C016-4133-B120-22FF2E9A7862";
 const BY_UUID: &[(&str, &str)] =
     &[(ADD_NOISE_UUID, "Add Noise"), ("32AB5EE1-BACB-4B81-B44E-6D1E643C8D00", "Bad TV"), ("6EFE2B74-1702-4829-B98E-E619501D1F16", "Sharpen")];
 
-/// The id of a filter's generic Mix parameter (blend of the filtered and unfiltered image).
-pub(crate) const MIX_ID: u32 = 10001;
-
 /// Add Noise `Amount` 1 (Motion's default) is a noise amount of 25 %.
 const NOISE_SCALE: f64 = 25.0;
 
@@ -160,40 +157,4 @@ pub(crate) fn import_filter(f: &FilterIn, ids: &mut Ids, warn: &mut dyn FnMut(St
         }
     }
     out
-}
-
-/// A filter to write: plug-in identity and its parameters (name, id, channel).
-pub(crate) struct FilterOut {
-    pub name: String,
-    /// Mix (from the adjustment layer's opacity), when not a constant 1.
-    pub mix: Option<Channel>,
-    pub plugin: &'static str,
-    pub uuid: &'static str,
-    pub enabled: bool,
-    pub params: Vec<(&'static str, u32, Channel)>,
-}
-
-/// The Motion filter for an EffectCraft effect, if Motion has one we can name.
-pub(crate) fn export_effect(g: &PropGroup) -> Option<FilterOut> {
-    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return None };
-    match effect.as_str() {
-        "ec.noise.noise" => {
-            let amount = g.get("amount").map(|p| crate::curve::channel_of(p, 0, NOISE_SCALE, 0.0)).unwrap_or_default();
-            let color = g.get("color").map(|p| matches!(p.value, Value::Bool(true))).unwrap_or(true);
-            Some(FilterOut {
-                name: g.name.clone(),
-                mix: None,
-                plugin: "Add Noise",
-                uuid: ADD_NOISE_UUID,
-                enabled: g.enabled,
-                params: vec![
-                    ("Amount", 1, amount),
-                    ("Type", 2, Channel::constant(0.0)),
-                    ("Monochrome", 3, Channel::constant(if color { 0.0 } else { 1.0 })),
-                    ("Random Seed", 6, Channel::constant(25.0)),
-                ],
-            })
-        }
-        _ => None,
-    }
 }

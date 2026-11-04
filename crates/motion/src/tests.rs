@@ -1,14 +1,11 @@
-//! Import of synthetic Motion documents, keypoint/keyframe conversion, export → import round
-//! trips and hostile input.
+//! Import of synthetic Motion documents, keypoint/keyframe conversion and hostile input.
 
-use effectcraft_color::Label;
-use effectcraft_keyframe::{Ease, Interp, Keyframe, Value};
-use effectcraft_project::build;
-use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerSource, Project, Property, Solid};
+use effectcraft_keyframe::{Interp, Value};
+use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerSource, Project, Property};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
-use crate::curve::{Channel, MKey, Mapped, channel_of, merge};
-use crate::{ClipRef, clip_refs, export_comp, fmt_time, import, parse_time, scene_rate};
+use crate::curve::{Channel, MKey, Mapped, merge};
+use crate::{ClipRef, clip_refs, import, parse_time, scene_rate};
 
 fn none(_: &ClipRef) -> Option<Footage> {
     None
@@ -102,7 +99,6 @@ fn times_parse_in_both_formats() {
     assert_eq!(parse_time("1 0 1 0", r), None);
     assert_eq!(parse_time("x", r), None);
     assert_eq!(parse_time("99999999999999999999999999 1 1 0", r), None);
-    assert_eq!(fmt_time(r.frame_duration()), "4004 120000 1 0");
     assert_eq!(scene_rate(30.0, true), FrameRate::FPS_29_97);
     assert_eq!(scene_rate(24.0, true), FrameRate::FPS_23_976);
     assert_eq!(scene_rate(25.0, false), FrameRate::FPS_25);
@@ -237,12 +233,6 @@ fn bezier_handles_become_matching_eases() {
             let got = p.value_at(s(t)).as_f64();
             assert!(close(got, want, 1e-3 * scale.abs().max(1.0)), "t={t}: {got} vs {want}");
         }
-        // And back: the exported channel evaluates the same again.
-        let back = channel_of(&p, 0, scale, offset);
-        for i in 0..=60 {
-            let t = i as f64 * 0.05;
-            assert!(close(back.eval(t), ch.eval(t), 1e-3), "t={t}: {} vs {}", back.eval(t), ch.eval(t));
-        }
     }
 }
 
@@ -332,158 +322,6 @@ fn hostile_documents_are_errors_not_panics() {
     assert!(r.warnings.iter().any(|w| w.contains("too deeply")), "{:?}", r.warnings);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Export
-
-fn setup() -> (Project, ItemId) {
-    let mut p = Project::default();
-    let comp = Comp::new(1280, 720, FrameRate::FPS_25, s(4.0));
-    let cid = p.add_item("Main", Label::Sandstone, None, ItemKind::Comp(comp.into()));
-    (p, cid)
-}
-
-fn solid_layer(p: &mut Project, cid: ItemId, name: &str) -> Layer {
-    let c = main_comp(p, cid);
-    let sid = p.add_item(name, Label::Red, None, ItemKind::Solid(Solid { color: [0.2, 0.4, 0.6], width: c.width, height: c.height, pixel_aspect: 1.0 }));
-    build::layer(p, &c, name, LayerSource::Solid { item: sid }, (c.width, c.height), None)
-}
-
-fn reimport(p: &Project, cid: ItemId) -> (Project, Comp, Vec<String>) {
-    let out = export_comp(p, cid, "/work").unwrap();
-    let mut q = Project::default();
-    let r = import(&mut q, out.xml.as_bytes(), "Back", &none).unwrap();
-    let c = main_comp(&q, r.comp);
-    (q, c, out.warnings)
-}
-
-#[test]
-fn export_round_trips_layers_timing_and_keyframes() {
-    let (mut p, cid) = setup();
-    let mut a = solid_layer(&mut p, cid, "Back");
-    a.in_point = s(0.4);
-    a.out_point = s(2.0);
-    a.start_time = s(0.4);
-    {
-        let t = a.props.sub_mut("transform").unwrap();
-        let pos = t.get_mut("position").unwrap();
-        pos.keys = vec![Keyframe::new(s(0.0), Value::Vec3([100.0, 200.0, 0.0])).eased(), Keyframe::new(s(1.0), Value::Vec3([700.0, 500.0, 0.0])).eased()];
-        let sc = t.get_mut("scale").unwrap();
-        sc.value = Value::Vec3([50.0, 75.0, 100.0]);
-        let rot = t.get_mut("rotation").unwrap();
-        let mut k0 = Keyframe::new(s(0.0), Value::Scalar(0.0));
-        k0.out_interp = Interp::Bezier;
-        k0.out_ease = vec![Ease { speed: 40.0, influence: 0.5 }];
-        let mut k1 = Keyframe::new(s(1.5), Value::Scalar(45.0));
-        k1.in_interp = Interp::Bezier;
-        k1.in_ease = vec![Ease { speed: 10.0, influence: 0.25 }];
-        k1.out_interp = Interp::Hold;
-        rot.keys = vec![k0, k1, Keyframe::new(s(2.0), Value::Scalar(90.0))];
-        t.get_mut("opacity").unwrap().value = Value::Scalar(60.0);
-    }
-    let b = solid_layer(&mut p, cid, "Front");
-    {
-        let c = p.comp_mut(cid).unwrap();
-        c.layers.push(b);
-        c.layers.push(a.clone());
-    }
-    let (_, c, warnings) = reimport(&p, cid);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!((c.width, c.height, c.frame_rate, c.duration), (1280, 720, FrameRate::FPS_25, s(4.0)));
-    let names: Vec<&str> = c.layers.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["Front", "Back"]);
-    let back = &c.layers[1];
-    assert_eq!((back.in_point, back.out_point, back.start_time), (a.in_point, a.out_point, a.start_time));
-    let (ta, tb) = (tr(&a), tr(back));
-    // Values agree at every sampled time (position comes back separated).
-    let pos_a = ta.get("position").unwrap();
-    for i in 0..=40 {
-        let t = s(i as f64 * 0.05);
-        let pa = pos_a.value_at(t).components();
-        let px = tb.get("positionX").unwrap().value_at(t).as_f64();
-        let py = tb.get("positionY").unwrap().value_at(t).as_f64();
-        assert!(close(pa[0], px, 0.05) && close(pa[1], py, 0.05), "t={t:?}: {pa:?} vs {px}, {py}");
-        for m in ["rotation", "opacity"] {
-            let (x, y) = (ta.get(m).unwrap().value_at(t).as_f64(), tb.get(m).unwrap().value_at(t).as_f64());
-            assert!(close(x, y, 0.01), "{m} at {t:?}: {x} vs {y}");
-        }
-    }
-    assert_eq!(vec(&tb.get("scale").unwrap().value), [50.0, 75.0, 100.0]);
-    assert_eq!(tb.get("rotation").unwrap().keys[1].out_interp, Interp::Hold);
-    let LayerSource::Solid { item } = back.source else { panic!() };
-    let back_proj = reimport(&p, cid).0;
-    let Some(ItemKind::Solid(sol)) = back_proj
-        .item(item)
-        .map(|i| &i.kind)
-        .or_else(|| back_proj.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_)) && i.name == "Back").map(|i| &i.kind))
-    else {
-        panic!()
-    };
-    assert_eq!(sol.color, [0.2, 0.4, 0.6]);
-}
-
-#[test]
-fn export_nested_comps_footage_and_noise() {
-    let (mut p, cid) = setup();
-    let inner = Comp::new(1280, 720, FrameRate::FPS_25, s(4.0));
-    let inner_id = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
-    let l = solid_layer(&mut p, inner_id, "Inside");
-    p.comp_mut(inner_id).unwrap().layers.push(l);
-    let fid = p.add_item(
-        "Shot & Co",
-        Label::Lavender,
-        None,
-        ItemKind::Footage(Footage {
-            path: "/work/media/shot 1.png".into(),
-            kind: FootageKind::Still,
-            width: 640,
-            height: 360,
-            has_video: true,
-            ..Default::default()
-        }),
-    );
-    let c = main_comp(&p, cid);
-    let mut img = build::layer(&mut p, &c, "Shot", LayerSource::Footage { item: fid }, (640, 360), None);
-    let mut ids = build::Ids(&mut p.next_id);
-    let spec = effectcraft_effects::find("ec.noise.noise").unwrap();
-    let mut noise = effectcraft_effects::instantiate(spec, &mut ids, "Noise", [640.0, 360.0]);
-    noise.get_mut("amount").unwrap().value = Value::Scalar(50.0);
-    let blur = effectcraft_effects::instantiate(effectcraft_effects::find("ec.blur.gaussian").unwrap(), &mut ids, "Blur", [640.0, 360.0]);
-    let fx = img.props.sub_mut("effects").unwrap();
-    fx.children.push(noise.into());
-    fx.children.push(blur.into());
-    let pre = build::layer(&mut p, &c, "Inner", LayerSource::Comp { item: inner_id }, (1280, 720), None);
-    {
-        let c = p.comp_mut(cid).unwrap();
-        c.layers.push(img);
-        c.layers.push(pre);
-    }
-    let out = export_comp(&p, cid, "/work").unwrap();
-    assert!(out.xml.contains("<relativeURL>media/shot%201.png</relativeURL>"), "{}", out.xml);
-    assert!(out.xml.contains("file://localhost/work/media/shot%201.png"));
-    assert!(out.xml.contains(r#"name="Shot &amp; Co""#));
-    assert!(out.warnings.iter().any(|w| w.contains("Blur")), "{:?}", out.warnings);
-    let (q, c, _) = reimport(&p, cid);
-    let names: Vec<&str> = c.layers.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["Shot", "Inner"]);
-    let LayerSource::Comp { item } = c.layers[1].source else { panic!("group expected") };
-    assert_eq!(main_comp(&q, item).layers[0].name, "Inside");
-    let fx = c.layers[0].props.sub("effects").unwrap();
-    let noise = fx.children.iter().find_map(|n| if let effectcraft_project::Node::Group(g) = n { Some(g) } else { None }).unwrap();
-    assert_eq!(noise.get("amount").unwrap().value, Value::Scalar(50.0));
-    assert_eq!(vec(&tr(&c.layers[0]).get("anchor").unwrap().value), [320.0, 180.0, 0.0]);
-}
-
-#[test]
-fn export_cyclic_comps_does_not_recurse_forever() {
-    let (mut p, cid) = setup();
-    let c = main_comp(&p, cid);
-    let me = build::layer(&mut p, &c, "Me", LayerSource::Comp { item: cid }, (1280, 720), None);
-    p.comp_mut(cid).unwrap().layers.push(me);
-    let out = export_comp(&p, cid, "").unwrap();
-    assert!(out.warnings.iter().any(|w| w.contains("cyclic")), "{:?}", out.warnings);
-    assert!(export_comp(&p, ItemId(9999), "").is_err());
-}
-
 /// Templates rename filter instances ("Static", "Roll"): the plug-in UUID identifies them, and
 /// the filter's Mix becomes the adjustment layer's opacity.
 #[test]
@@ -521,7 +359,6 @@ fn renamed_filters_are_identified_by_uuid_and_mix_is_opacity() {
     let op = tr(adj).get("opacity").unwrap();
     assert_eq!(op.value_at(s(0.0)), Value::Scalar(0.0));
     assert_eq!(op.value_at(s(0.5)), Value::Scalar(50.0));
-    // Export writes the opacity back as the filter's Mix (for filters Motion can take).
     assert!(!r.warnings.iter().any(|w| w.contains("has no EffectCraft equivalent")), "{:?}", r.warnings);
 }
 
@@ -569,4 +406,74 @@ fn long_curves_import_in_linear_time() {
     let elapsed = start.elapsed();
     assert_eq!(tr(&main_comp(&p, r.comp).layers[0]).get("scale").unwrap().keys.len(), n);
     assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+}
+
+/// `doc` with the Text and Shape factories Motion declares for those objects.
+fn doc_with_text_and_shapes(body: &str) -> String {
+    doc(body).replace(
+        "<scene>",
+        r#"<factory id="20" uuid="00000000000000000000000000000020"><description>Text</description><manufacturer>Apple</manufacturer><version>1</version></factory>
+<factory id="21" uuid="00000000000000000000000000000021"><description>Shape</description><manufacturer>Apple</manufacturer><version>1</version></factory>
+<scene>"#,
+    )
+}
+
+/// A text object, a shape, a behavior and nested groups: the text and groups import, the shape
+/// and the behavior are named in the warnings.
+#[test]
+fn text_shape_behavior_and_nested_groups() {
+    let body = format!(
+        r#"<layer name="Titles" id="3">
+  <scenenode name="Title" id="13" factoryID="20"><text>Hello
+Motion</text><style><font>Helvetica Neue</font><parameter name="Size" id="1" value="72"/></style>
+    <behavior name="Throw" id="30" factoryID="7"/>
+  </scenenode>
+  <scenenode name="Circle" id="14" factoryID="21"/>
+</layer>
+<layer name="Outer" id="4"><layer name="Inner" id="5">{}</layer></layer>"#,
+        solid_node("Fill", "", "")
+    );
+    let mut p = Project::default();
+    let r = import(&mut p, doc_with_text_and_shapes(&body).as_bytes(), "Test", &none).unwrap();
+    let w = &r.warnings;
+    assert!(w.iter().any(|w| w.contains("Circle") && w.contains("shape objects are not imported")), "{w:?}");
+    assert!(w.iter().any(|w| w.contains("Title") && w.contains("behavior `Throw` is not imported")), "{w:?}");
+    // Two top-level groups: each a precomposition layer.
+    let c = main_comp(&p, r.comp);
+    let names: Vec<&str> = c.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Titles", "Outer"]);
+    let precomp = |l: &Layer| {
+        let LayerSource::Comp { item } = l.source else { panic!("{} is not a precomp", l.name) };
+        main_comp(&p, item)
+    };
+    // The text layer keeps its characters (line breaks as AE's \r), font and size.
+    let titles = precomp(&c.layers[0]);
+    assert_eq!(titles.layers.len(), 1, "the shape is skipped");
+    let text = &titles.layers[0];
+    assert_eq!(text.source, LayerSource::Text);
+    let Value::Text(d) = &text.props.sub("text").unwrap().get("sourceText").unwrap().value else { panic!("text value") };
+    assert_eq!((d.text.as_str(), d.font.as_str(), d.size), ("Hello\rMotion", "Helvetica Neue", 72.0));
+    // Outer ▸ Inner ▸ Fill: a precomp inside a precomp.
+    let inner = precomp(&precomp(&c.layers[1]).layers[0]);
+    assert_eq!(inner.layers[0].name, "Fill");
+}
+
+/// Untrusted XML: entity declarations (the "billion laughs" bomb, external entities pointing at
+/// local files) are refused before parsing; the bare DOCTYPE Motion writes is accepted.
+#[test]
+fn entity_declarations_are_refused() {
+    let mut p = Project::default();
+    let laughs = (1..10).map(|i| format!(r#"<!ENTITY l{i} "&l{0};&l{0};&l{0};&l{0};&l{0};&l{0};&l{0};&l{0};&l{0};&l{0};">"#, i - 1)).collect::<String>();
+    let bomb = format!(r#"<?xml version="1.0"?><!DOCTYPE ozml [<!ENTITY l0 "lol">{laughs}]><ozml><scene><sceneSettings/><layer name="&l9;"/></scene></ozml>"#);
+    let external =
+        r#"<?xml version="1.0"?><!DOCTYPE ozml [<!ENTITY x SYSTEM "file:///etc/passwd">]><ozml><scene><sceneSettings/><layer name="&x;"/></scene></ozml>"#;
+    for bad in [bomb.as_str(), external] {
+        let e = import(&mut p, bad.as_bytes(), "X", &none).unwrap_err();
+        assert!(e.to_string().contains("internal subset"), "{e}");
+        assert!(clip_refs(bad.as_bytes()).is_err());
+    }
+    // An external DTD is never fetched: the document parses as if the DOCTYPE were bare.
+    let system = doc("").replace("<!DOCTYPE ozxmlscene>", r#"<!DOCTYPE ozxmlscene SYSTEM "http://example.invalid/ozml.dtd">"#);
+    assert!(import(&mut p, system.as_bytes(), "X", &none).is_ok());
+    assert!(import(&mut p, doc("").as_bytes(), "X", &none).is_ok());
 }

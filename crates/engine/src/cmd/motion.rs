@@ -1,4 +1,4 @@
-//! File ▸ Import ▸ Apple Motion… and File ▸ Export ▸ Apple Motion Project… (`effectcraft-motion`).
+//! File ▸ Import ▸ Apple Motion… (`effectcraft-motion`).
 
 use std::collections::HashMap;
 
@@ -6,24 +6,8 @@ use effectcraft_motion::ClipRef;
 use effectcraft_project::Footage;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, always, bad, comp_id, has_comp, str_p};
+use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session, cmd};
-
-fn export_motion(s: &mut Session, p: &Value) -> Result<Value> {
-    let path = str_p(p, "path").ok_or_else(|| bad("file.exportMotion", "missing `path`"))?.to_string();
-    let cid = comp_id(s, p)?;
-    let dir = std::path::Path::new(&path).parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
-    let res = effectcraft_motion::export_comp(&s.project, cid, &dir).map_err(|e| EngineError::Other(e.to_string()))?;
-    let bytes = res.xml.into_bytes();
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
-    let n = res.warnings.len();
-    s.toast(if n == 0 {
-        format!("Exported Motion project to {path}")
-    } else {
-        format!("Exported Motion project to {path} ({n} warning{})", if n == 1 { "" } else { "s" })
-    });
-    Ok(json!({"path": path, "bytes": bytes.len(), "warnings": res.warnings}))
-}
 
 /// The files a clip may be: next to the Motion document (`relativeURL`), then its absolute path.
 fn candidates(c: &ClipRef, dir: &str) -> Vec<String> {
@@ -69,8 +53,5 @@ fn import_motion(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![
-        cmd!("file.exportMotion", "Apple Motion Project...", ["File", "Export"], None, "{comp?, path (.motn)}", has_comp, export_motion),
-        cmd!("file.importMotion", "Apple Motion...", ["File", "Import"], None, "{path (.motn, .motr, .moti, .moef or .mogn)}", always, import_motion),
-    ]
+    vec![cmd!("file.importMotion", "Apple Motion...", ["File", "Import"], None, "{path (.motn, .motr, .moti, .moef or .mogn)}", always, import_motion)]
 }

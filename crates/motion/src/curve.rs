@@ -1,4 +1,4 @@
-//! Motion channels (one curve per scalar channel) ↔ EffectCraft keyframes.
+//! Motion channels (one curve per scalar channel) → EffectCraft keyframes.
 //!
 //! A Motion keypoint holds its time, value, interpolation and Bezier handles: input and output
 //! tangents as (time offset in seconds, value offset). An EffectCraft keyframe side holds a
@@ -11,7 +11,6 @@
 //! a key at one of those times gets the value its own curve has there.
 
 use effectcraft_keyframe::{Ease, Interp, Keyframe, Value};
-use effectcraft_project::Property;
 use effectcraft_time::{FrameRate, Tick};
 use roxmltree::Node;
 
@@ -268,68 +267,4 @@ pub(crate) fn merge(chs: &[Mapped], make: &dyn Fn(&[f64]) -> Value, spatial: boo
     }
     let first = keys.first().map(|k| k.value.clone()).unwrap_or_else(|| make(&static_v));
     (first, keys)
-}
-
-/// One dimension of an EffectCraft property as a Motion channel: `motion = (ec − offset) / scale`.
-pub(crate) fn channel_of(p: &Property, d: usize, scale: f64, offset: f64) -> Channel {
-    let s = if scale.abs() < 1e-12 { 1.0 } else { scale };
-    let comp = |v: &Value| v.components().get(d).copied().unwrap_or(0.0);
-    let to_m = |x: f64| (x - offset) / s;
-    let mut ch = Channel::constant(to_m(comp(&p.value)));
-    let keys = &p.keys;
-    let spatial = p.spatial;
-    for (i, k) in keys.iter().enumerate() {
-        let t = k.time.seconds();
-        let v = comp(&k.value);
-        let code = match k.out_interp {
-            Interp::Hold => Some(0),
-            Interp::Linear => Some(1),
-            Interp::Bezier => None,
-        };
-        // Per-dimension share of a spatial (path) speed.
-        let share = |a: &Keyframe, b: &Keyframe| -> f64 {
-            if !spatial {
-                return 1.0;
-            }
-            let (ca, cb) = (a.value.components(), b.value.components());
-            let len = ca.iter().zip(&cb).map(|(x, y)| (y - x) * (y - x)).sum::<f64>().sqrt();
-            let dd = cb.get(d).copied().unwrap_or(0.0) - ca.get(d).copied().unwrap_or(0.0);
-            if len > 1e-12 { dd / len } else { 0.0 }
-        };
-        let ease = |list: &[Ease]| -> Ease {
-            let i = if spatial { 0 } else { d };
-            list.get(i).or_else(|| list.first()).copied().unwrap_or_default()
-        };
-        let tout = keys.get(i + 1).map(|b| {
-            let seg = (b.time.seconds() - t).max(1e-9);
-            let dv = comp(&b.value) - v;
-            match k.out_interp {
-                Interp::Bezier => {
-                    let e = ease(&k.out_ease);
-                    let dt = e.influence.clamp(0.0, 1.0) * seg;
-                    (dt, e.speed * share(k, b) * dt / s)
-                }
-                Interp::Linear => (seg / 3.0, dv / 3.0 / s),
-                Interp::Hold => (seg / 3.0, 0.0),
-            }
-        });
-        let tin = i.checked_sub(1).and_then(|j| keys.get(j)).map(|a| {
-            let seg = (t - a.time.seconds()).max(1e-9);
-            let dv = v - comp(&a.value);
-            match (a.out_interp, k.in_interp) {
-                (Interp::Hold, _) => (-seg / 3.0, 0.0),
-                (_, Interp::Bezier) => {
-                    let e = ease(&k.in_ease);
-                    let dt = -e.influence.clamp(0.0, 1.0) * seg;
-                    (dt, e.speed * share(a, k) * dt / s)
-                }
-                _ => (-seg / 3.0, -dv / 3.0 / s),
-            }
-        });
-        ch.keys.push(MKey { t, v: to_m(v), code, tin, tout });
-    }
-    if let Some(k) = ch.keys.first() {
-        ch.value = k.v;
-    }
-    ch
 }
