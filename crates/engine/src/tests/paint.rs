@@ -332,7 +332,8 @@ fn a_pin_added_just_off_a_turned_mesh_moves_nothing() {
             n = [-n[0], -n[1]];
         }
         let click = [mid[0] + n[0] * 5.0, mid[1] + n[1] * 5.0];
-        s.execute("puppet.addPin", json!({"layer": id, "position": click})).unwrap();
+        let added = s.execute("puppet.addPin", json!({"layer": id, "position": click})).unwrap();
+        assert!(added["pin"].is_u64(), "no pin at {click:?}: {added}");
         let after = deformed(&mut s);
         let moved = def.iter().zip(&after).map(|(u, v)| (u[0] - v[0]).hypot(u[1] - v[1])).fold(0.0, f64::max);
         assert!(moved < 0.5, "a pin at {click:?} moved the mesh by {moved} px");
