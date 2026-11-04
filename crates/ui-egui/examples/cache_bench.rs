@@ -66,7 +66,12 @@ fn main() {
     s.footage = pool.clone();
     if std::env::args().any(|a| a == "--disk") {
         let disk = dir.join("disk");
-        let _ = std::fs::remove_dir_all(&disk);
+        if let Err(e) = std::fs::remove_dir_all(&disk)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("can't clear the disk cache at {}: {e}", disk.display());
+            std::process::exit(2);
+        }
         s.prefs.disk.disk_cache_enabled = true;
         s.prefs.disk.disk_cache_folder = disk.to_string_lossy().to_string();
         s.configure_disk_cache();
