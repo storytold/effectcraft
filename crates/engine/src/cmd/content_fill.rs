@@ -237,7 +237,10 @@ fn scratch_need(frames: usize, w: u32, h: u32) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn scratch_shortfall(frames: usize, w: u32, h: u32, dir: &std::path::Path) -> Option<String> {
     let need = scratch_need(frames, w, h);
-    let mut probe = dir;
+    // Resolve a relative output folder against the process directory; `parent()` of a bare
+    // name is empty, which would otherwise skip the check.
+    let base = if dir.is_absolute() { dir.to_path_buf() } else { std::env::current_dir().ok()?.join(dir) };
+    let mut probe = base.as_path();
     while !probe.exists() {
         probe = probe.parent()?;
     }
@@ -645,6 +648,8 @@ mod tests {
         let tmp = std::env::temp_dir();
         // A range that cannot possibly fit on the volume is refused up front.
         assert!(scratch_shortfall(usize::MAX, u32::MAX, u32::MAX, &tmp).is_some());
+        // A relative folder that does not exist is resolved against the process directory.
+        assert!(scratch_shortfall(usize::MAX, u32::MAX, u32::MAX, std::path::Path::new("effectcraft-missing-fill-folder")).is_some());
         // A tiny fill fits.
         assert_eq!(scratch_shortfall(1, 16, 16, &tmp), None);
     }
