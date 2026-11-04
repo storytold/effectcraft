@@ -293,15 +293,25 @@ function Folder(path) {
   this.__path = path === undefined ? "" : __str(path);
 }
 
+// ECMAScript's legacy case canonicalisation (what a `/i` regular expression compares with): the
+// upper case form when it is one code unit, and not an ASCII letter for a non-ASCII one.
+function __canon(ch) {
+  var u = ch.toUpperCase();
+  if (u.length !== 1) return ch;
+  if (ch.charCodeAt(0) >= 128 && u.charCodeAt(0) < 128) return ch;
+  return u;
+}
+
 // A case-insensitive `*` / `?` file mask match in time bounded by mask × name length (a
 // regular expression of `.*` runs backtracks combinatorially on overlapping wildcards).
 function __globMatch(mask, name) {
   // Wildcards run over the original name (lowercasing it can change its length: "İ" becomes
-  // two code units); literal characters compare case-insensitively one at a time.
+  // two code units); literal characters compare one at a time, case-insensitively as `/i` does
+  // ("ς" and "σ" and "Σ" match each other).
   var p = mask, s = name;
   var i = 0, j = 0, star = -1, mark = 0;
   while (j < s.length) {
-    if (i < p.length && (p[i] === "?" || p[i] === s[j] || p[i].toLowerCase() === s[j].toLowerCase())) { i++; j++; }
+    if (i < p.length && (p[i] === "?" || p[i] === s[j] || __canon(p[i]) === __canon(s[j]))) { i++; j++; }
     else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
     else if (star !== -1) { i = star + 1; j = ++mark; }
     else return false;

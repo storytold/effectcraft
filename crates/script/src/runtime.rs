@@ -788,11 +788,51 @@ fn skip_template_text(b: &[u8], i: &mut usize) -> bool {
     false
 }
 
-/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, template literal
-/// text and comments are skipped; the code inside `${…}` interpolations is checked).
+/// Whether a `/` after the last significant byte `prev` (at `at` in `b`) starts a regular
+/// expression literal rather than dividing: after an operator, an opening bracket, a separator,
+/// a keyword that takes an expression, or at the start. After a name, a number, a string or a
+/// closing bracket it divides (a regular expression after `)` is the one case this misreads).
+fn regex_may_start(b: &[u8], prev: u8, at: usize) -> bool {
+    match prev {
+        0 => true,
+        b'(' | b',' | b'=' | b':' | b'[' | b'!' | b'&' | b'|' | b'?' | b'{' | b';' | b'+' | b'-' | b'*' | b'%' | b'<' | b'>' | b'~' | b'^' => true,
+        c if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' => {
+            let start = (0..=at).rev().find(|&k| !b.get(k).is_some_and(|d| d.is_ascii_alphanumeric() || *d == b'_' || *d == b'$')).map_or(0, |k| k + 1);
+            let word = b.get(start..=at).unwrap_or_default();
+            [&b"return"[..], b"typeof", b"instanceof", b"in", b"of", b"new", b"delete", b"void", b"throw", b"case", b"do", b"else", b"yield", b"await"]
+                .contains(&word)
+        }
+        _ => false,
+    }
+}
+
+/// Skip a regular expression literal that starts at `b[*i]` (a `/`), to its closing `/` (flags
+/// follow as ordinary letters). A `/` inside a class `[…]` or after a backslash does not end it,
+/// and neither a quote nor a backtick inside it starts a string; a line break ends it.
+fn skip_regex(b: &[u8], i: &mut usize) {
+    *i += 1;
+    let mut class = false;
+    while let Some(&d) = b.get(*i) {
+        match d {
+            b'\\' => *i += 1,
+            b'[' => class = true,
+            b']' => class = false,
+            b'/' if !class => return,
+            b'\n' => return,
+            _ => {}
+        }
+        *i += 1;
+    }
+}
+
+/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, regular expression
+/// literals, template literal text and comments are skipped; the code inside `${…}`
+/// interpolations is checked).
 pub fn check_nesting(code: &str) -> Result<(), String> {
     let b = code.as_bytes();
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
+    // The last significant byte (not space or comment), and where it is.
+    let (mut prev, mut prev_at) = (0u8, 0usize);
     // The bracket depth of each open `${`, to tell its closing `}` from an inner one.
     let mut interpolations: Vec<usize> = vec![];
     while let Some(&c) = b.get(i) {
@@ -803,6 +843,9 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
                     depth += 1;
                     max = max.max(depth);
                     interpolations.push(depth);
+                    (prev, prev_at) = (b'{', i - 1);
+                } else {
+                    (prev, prev_at) = (b'`', i.saturating_sub(1));
                 }
                 continue;
             }
@@ -814,6 +857,9 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
                     depth += 1;
                     max = max.max(depth);
                     interpolations.push(depth);
+                    (prev, prev_at) = (b'{', i - 1);
+                } else {
+                    (prev, prev_at) = (b'`', i.saturating_sub(1));
                 }
                 continue;
             }
@@ -838,15 +884,21 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
                 while b.get(i).is_some_and(|d| *d != b'\n') {
                     i += 1;
                 }
+                continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 i += 2;
                 while i < b.len() && !(b.get(i) == Some(&b'*') && b.get(i + 1) == Some(&b'/')) {
                     i += 1;
                 }
-                i += 1;
+                i += 2;
+                continue;
             }
+            b'/' if regex_may_start(b, prev, prev_at) => skip_regex(b, &mut i),
             _ => {}
+        }
+        if !c.is_ascii_whitespace() {
+            (prev, prev_at) = (c, i);
         }
         i += 1;
     }
@@ -919,6 +971,23 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    #[test]
+    fn regular_expression_literals_are_skipped_not_read_as_strings_or_templates() {
+        let deep = |n: usize| format!("{}1{}", "(".repeat(n), ")".repeat(n));
+        // A backtick, a quote or a slash inside a class in a regular expression opens nothing, so
+        // the deep expression after it is still counted.
+        for re in ["/`/", "/\"/", "/'/", "/[/]/", "/\\//"] {
+            assert!(check_nesting(&format!("`x${{ {re}.test('x') ? {} : 0 }}`", deep(5000))).is_err(), "{re} in an interpolation");
+            assert!(check_nesting(&format!("x = {re}.test(y) ? {} : 0", deep(5000))).is_err(), "{re}");
+            assert!(check_nesting(&format!("x = {re}.test(y) ? {} : 0", deep(10))).is_ok(), "{re} shallow");
+        }
+        // Division is not a regular expression: what follows it is still scanned.
+        assert!(check_nesting(&format!("a = 4 / 2; b = {}", deep(5000))).is_err());
+        assert!(check_nesting(&format!("a = (4) / 2 / 3; b = {}", deep(5000))).is_err());
+        // After a keyword that takes an expression a slash starts a regular expression.
+        assert!(check_nesting(&format!("typeof /`/ ; {}", deep(5000))).is_err());
     }
 
     #[test]

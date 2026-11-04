@@ -1937,4 +1937,10 @@ fn file_masks_match_without_backtracking() {
     // `?` still matches one character that lowercases to two.
     let r = ok(&mut s, "[__globMatch('?.txt', '\\u0130.txt'), __globMatch('\\u0130*', '\\u0130x')].join()");
     assert_eq!(r.result.as_str(), Some("true,true"));
+    // Greek sigma matches in every case form, as the case-insensitive regular expression did.
+    let r = ok(
+        &mut s,
+        "[__globMatch('\\u03bf\\u03c2.txt', '\\u039f\\u03a3.txt'), __globMatch('\\u03a3*', '\\u03c2x'), __globMatch('k', '\\u212a'), __globMatch('a', 'b')].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,false,false"));
 }
