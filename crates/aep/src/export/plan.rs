@@ -410,6 +410,11 @@ pub(crate) fn plan(project: &Project, col: &mut Collector) -> ProjectPlan {
     }
     let cx = PlanCx { project, by_parent: &by_parent, ok: &ok };
     let root = plan_children(&cx, None, col);
+    // The base writes an empty render queue.
+    for job in &project.render_queue {
+        let comp = project.items.get(&job.comp).map_or("a missing composition", |i| i.name.as_str());
+        col.lose(LossCategory::RenderQueue, format!("the render queue item of '{comp}' is not written"));
+    }
     ProjectPlan { root, settings: crate::export::settings::plan(&project.settings, col) }
 }
 
@@ -568,6 +573,19 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     }
     if comp.essential.is_some() {
         col.lose(LossCategory::CompositionOptions, format!("'{name}': Essential Graphics"));
+    }
+    // Advanced settings that change rendered frames, which the base does not decode: written at
+    // After Effects' defaults (the samples per frame and adaptive limit are the 16 and 128 every
+    // sample holds at cdta 200 and 196, base.rs), so any other value is reported. Viewer state
+    // (Hide Shy, Draft 3D, the viewer resolution, the poster time) is a listed limitation.
+    let unwritten = [
+        (comp.preserve_frame_rate, "Preserve Frame Rate switched on"),
+        (comp.preserve_resolution, "Preserve Resolution switched on"),
+        (comp.motion_blur_samples != 16, "motion blur samples per frame other than 16"),
+        (comp.motion_blur_adaptive_limit != 128, "adaptive sample limit other than 128"),
+    ];
+    for (_, what) in unwritten.iter().filter(|(lost, _)| *lost) {
+        col.lose(LossCategory::CompositionOptions, format!("'{name}': {what} (written as the default)"));
     }
     let (ds, inexact) = tb.units(comp.display_start);
     let display_start = u32::try_from(ds).unwrap_or(0);

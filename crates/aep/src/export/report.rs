@@ -64,7 +64,10 @@ pub enum LossCategory {
     ParentLinks,
     /// Times rounded to the composition's time base.
     RoundedTimes,
-    /// Composition options that are not exported (guides, essential graphics, advanced renderer).
+    /// Composition options that are not exported (guides, essential graphics, advanced renderer),
+    /// and settings that change rendered frames but are written at After Effects' defaults:
+    /// Preserve Frame Rate or Preserve Resolution switched on, motion blur samples per frame and
+    /// adaptive sample limit other than 16 and 128.
     CompositionOptions,
     /// Names longer than the format's name field (the name is kept in full where verified), and
     /// item comments (not written).
@@ -86,6 +89,8 @@ pub enum LossCategory {
     /// (theirs is reported as [`Cameras`](Self::Cameras) / [`Lights`](Self::Lights)), an
     /// environment layer, locked markers.
     LayerSwitches,
+    /// Render queue items (the render queue is not written).
+    RenderQueue,
 }
 
 impl LossCategory {
@@ -120,6 +125,7 @@ impl LossCategory {
             LossCategory::TimeRemapping => "time remapping",
             LossCategory::LayerStyles => "layer styles",
             LossCategory::LayerSwitches => "layer switches",
+            LossCategory::RenderQueue => "render queue",
         }
     }
 }
@@ -195,8 +201,8 @@ pub struct Exported {
 
 /// Standing limitations of the exporter (what it cannot write at all), listed in every report.
 pub const LIMITATIONS: &[&str] = &[
-    "The render queue, render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
-    "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter and display start are not exported (draft 3D, preserve frame rate/resolution, hide shy, frame blending, resolution). The background is stored with 8 bits per channel.",
+    "The render queue (its items are reported), render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
+    "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter, motion blur switch and display start are written at After Effects' defaults: other values of preserve frame rate, preserve resolution, motion blur samples and adaptive sample limit are reported; draft 3D, hide shy, the viewer resolution, the poster time and the composition's frame blending switch (layer frame blending is reported, and no layer blends without it) are not exported. The background is stored with 8 bits per channel.",
     "Footage is linked, not embedded: png, jpeg, OpenEXR, TIFF, Targa, Photoshop, Illustrator and EPS stills, png, OpenEXR and jpeg sequences, mp4 and mov clips and WAV audio are written with their path, size, duration and frame rate (a conformed clip rate too); the rest of their interpretation (alpha, colour management, fields, loops) is the default.",
     "Layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",
     "Mask colours are not written: After Effects shows its own colour for every exported mask.",

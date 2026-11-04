@@ -92,8 +92,11 @@ pub fn export(project: &Project, options: &ExportOptions) -> Result<ExportResult
     export_with(project, options, &|_| None)
 }
 
-/// [`export`] with the modification times of the image-sequence folders: `folder_time` answers a
-/// folder path with its modification time in whole seconds since 1970 (UTC), or `None`.
+/// [`export`] with the modification times of the image-sequence folders: `folder_time` is asked
+/// with a sequence's first file path as the project stores it and answers with the modification
+/// time of the folder that holds it, in whole seconds since 1970 (UTC), or `None`. The caller
+/// decides whether that path may be followed (the engine applies its document-path policy) before
+/// it looks at the folder.
 ///
 /// After Effects keeps a sequence's stored numbering only while the stored folder time
 /// (`sspc@118`) equals the folder's; otherwise it scans the folder again when the project opens

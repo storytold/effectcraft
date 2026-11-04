@@ -231,7 +231,9 @@ fn a_sequence_stores_its_folder_time() {
     let opts = effectcraft_aep::export::ExportOptions { allow_losses: true };
     let r = effectcraft_aep::export::export_with(&p, &opts, &time).expect("export");
     assert_eq!(sequence_folder_time(&r.bytes), 0xe6fb_443a);
-    assert_eq!(*asked.borrow(), [r"C:\media\sparse"], "only the sequence's folder is asked for");
+    // The caller is asked with the sequence's first file as stored (it checks that path before it
+    // looks at the folder), and only for the sequence.
+    assert_eq!(*asked.borrow(), [r"C:\media\sparse\sp_0001.png"], "only the sequence is asked for");
     // Without a time (plain `export`, or an unknown folder) the template's value stays.
     let plain = export_all(&p);
     let unknown = effectcraft_aep::export::export_with(&p, &opts, &|_| None).expect("export");

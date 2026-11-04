@@ -346,3 +346,37 @@ fn a_repeaters_order_is_written_not_reported() {
     first_layer(&mut p, c, |l| l.props.sub_mut("contents").expect("contents").children.push(group.into()));
     lossless(&p);
 }
+
+#[test]
+fn composition_options_and_the_render_queue_that_are_not_written_are_reported() {
+    // The base writes these at After Effects' defaults (cdta 196 and 200 hold 128 and 16 in every
+    // sample, the switches are not decoded) and writes an empty render queue: each non-default
+    // value is reported, and a strict export refuses.
+    let (p, c, _) = simple();
+    lossless(&p);
+    let cases: [(&dyn Fn(&mut effectcraft_project::Comp), &str); 4] = [
+        (&|comp| comp.preserve_frame_rate = true, "Preserve Frame Rate"),
+        (&|comp| comp.preserve_resolution = true, "Preserve Resolution"),
+        (&|comp| comp.motion_blur_samples = 32, "motion blur samples per frame"),
+        (&|comp| comp.motion_blur_adaptive_limit = 256, "adaptive sample limit"),
+    ];
+    for (set, needle) in cases {
+        let mut q = p.clone();
+        with_comp(&mut q, c, set);
+        reported(&q, LossCategory::CompositionOptions, needle);
+        assert_eq!(analyze(&q).count(LossCategory::CompositionOptions), 1, "{needle}");
+    }
+    // Viewer state is a listed limitation, not a loss (the Home templates set a poster time).
+    let mut q = p.clone();
+    with_comp(&mut q, c, |comp| {
+        comp.hide_shy = true;
+        comp.draft_3d = true;
+        comp.poster_time = secs(1.5);
+        comp.resolution = effectcraft_project::Resolution::Half;
+    });
+    lossless(&q);
+    // A render queue item is not written.
+    let mut q = p;
+    q.render_queue.push(effectcraft_project::render_queue::RenderQueueItem::new(1, c));
+    reported(&q, LossCategory::RenderQueue, "render queue item of 'C'");
+}

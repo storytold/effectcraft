@@ -98,9 +98,18 @@ fn export_aep(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"dryRun": true, "report": effectcraft_aep::export::analyze(&s.project)}));
     }
     // Image-sequence folders keep their stored numbering in After Effects only with their actual
-    // modification time (otherwise it rescans them and warns about every gap on open).
+    // modification time (otherwise it rescans them and warns about every gap on open). The folder
+    // is looked at only when the sequence's file passes the document-path policy (a path that came
+    // from a document is followed as import followed it; a refused one leaves the time unset).
     let services = s.services.clone();
-    let folder_time = move |dir: &str| services.stamp(dir).and_then(|(_, ns)| u64::try_from(ns / 1_000_000_000).ok());
+    let stored = s.stored_paths.clone();
+    let folder_time = move |file: &str| {
+        let file = stored.follow(file).ok()?;
+        let file = file.to_str()?;
+        // Either separator, as the exporter splits the alias (a Windows path on another system).
+        let dir = file.get(..file.rfind(['/', '\\'])?).filter(|d| !d.is_empty())?;
+        services.stamp(dir).and_then(|(_, ns)| u64::try_from(ns / 1_000_000_000).ok())
+    };
     let res = effectcraft_aep::export::export_with(&s.project, &ExportOptions { allow_losses }, &folder_time).map_err(|e| match e {
         AepExportError::Refused(_) => {
             EngineError::Other(format!("{e} (nothing was written: pass `allowLosses` to export anyway, or `dryRun` for the full report)"))

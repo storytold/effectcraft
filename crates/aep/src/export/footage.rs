@@ -90,6 +90,9 @@ pub(crate) struct FootagePlan {
     pub kind: FtKind,
     /// The alias target: the file, or a sequence's folder.
     pub alias: String,
+    /// The (first) file's path as the project stores it: what the caller of
+    /// [`crate::export::export_with`] checks before it reads the sequence folder's time.
+    pub source: String,
     /// The (first) file's name.
     pub file_name: String,
     pub width: u32,
@@ -113,7 +116,8 @@ pub(crate) struct FootagePlan {
 const SECONDS_1904_TO_1970: u64 = 2_082_844_800;
 
 /// Fills in the folder time of every image sequence in `root` (folders included) from
-/// `folder_time` (seconds since 1970); a time that does not fit the stored field is left out.
+/// `folder_time`, asked with the sequence's first file as the project stores it (seconds since
+/// 1970); a time that does not fit the stored field is left out.
 pub(crate) fn stamp_sequences(root: &mut [crate::export::plan::Entry], folder_time: &dyn Fn(&str) -> Option<u64>) {
     use crate::export::plan::ItemPlan;
     // Folders were planned with a bounded depth; walk them with an explicit stack anyway.
@@ -123,7 +127,7 @@ pub(crate) fn stamp_sequences(root: &mut [crate::export::plan::Entry], folder_ti
             match &mut e.plan {
                 ItemPlan::Folder(kids) => stack.push(kids),
                 ItemPlan::Footage(fp) if fp.kind.is_sequence() => {
-                    fp.folder_time = folder_time(&fp.alias).and_then(|t| u32::try_from(t.checked_add(SECONDS_1904_TO_1970)?).ok());
+                    fp.folder_time = folder_time(&fp.source).and_then(|t| u32::try_from(t.checked_add(SECONDS_1904_TO_1970)?).ok());
                 }
                 _ => {}
             }
@@ -227,6 +231,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
     let mut plan = FootagePlan {
         kind,
         alias: f.path.clone(),
+        source: f.path.clone(),
         file_name: file.to_string(),
         width,
         height,

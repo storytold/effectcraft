@@ -96,3 +96,88 @@ fn a_project_made_with_commands_exports_without_false_losses() {
     assert_eq!(r["report"]["exported"]["effects"], 4);
     assert_eq!(r["report"]["exported"]["masks"], 2);
 }
+
+/// File access that records the folders it is asked the time of and gives each the same time.
+#[derive(Default)]
+struct Stamps(std::sync::Mutex<Vec<String>>);
+
+/// The time `Stamps` gives: 2026-10-19 03:51:22 UTC, stored as 0xe6fb443a (seconds since 1904).
+const FOLDER_SECONDS: u64 = 1_792_381_882;
+
+impl crate::Services for Stamps {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        std::fs::write(path, data)
+    }
+    fn stamp(&self, path: &str) -> Option<(u64, u128)> {
+        self.0.lock().unwrap().push(path.to_string());
+        Some((0, u128::from(FOLDER_SECONDS) * 1_000_000_000))
+    }
+}
+
+/// The stored folder time (`sspc@118`) of the sequence item of an exported project.
+fn sequence_folder_time(bytes: &[u8]) -> u32 {
+    let file = effectcraft_aep::parse(bytes).unwrap();
+    let view = effectcraft_aep::Project::new(&file).unwrap();
+    let item = view.all_items().into_iter().find(|i| i.footage().is_some_and(|f| f.is_sequence)).expect("sequence");
+    let sspc = item.chunk().child_list(b"Pin ").and_then(|pin| pin.child(b"sspc")).and_then(|c| c.bytes()).expect("sspc");
+    u32::from_be_bytes(sspc[118..122].try_into().unwrap())
+}
+
+/// A session whose project has one png sequence of three frames in `dir` (as `sep` joins them),
+/// recorded as stored in the document `document`.
+fn with_sequence(dir: &str, sep: &str, document: &str) -> (Session, std::sync::Arc<Stamps>) {
+    use effectcraft_project::{Footage, FootageKind, ItemKind};
+    let stamps = std::sync::Arc::new(Stamps::default());
+    let mut s = Session { services: stamps.clone(), ..Default::default() };
+    let files: Vec<String> = (1..=3).map(|k| format!("{dir}{sep}a_{k:04}.png")).collect();
+    let mut f = Footage {
+        path: files[0].clone(),
+        kind: FootageKind::Sequence,
+        frame_rate: effectcraft_time::FrameRate::new(25, 1),
+        sequence: files,
+        width: 64,
+        height: 48,
+        has_video: true,
+        ..Default::default()
+    };
+    f.sync_sequence_duration();
+    std::sync::Arc::make_mut(&mut s.project).add_item("a_[0001-0003].png", Default::default(), None, ItemKind::Footage(f));
+    s.stored_paths.add(&s.project, Some(document));
+    (s, stamps)
+}
+
+#[test]
+fn a_sequence_folder_is_looked_at_only_through_the_document_path_policy() {
+    let root = std::env::temp_dir().join(format!("ec-aep-export-folder-time-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("seq")).unwrap();
+    let document = root.join("job.aep").to_string_lossy().into_owned();
+    let out = root.join("out.aep").to_string_lossy().into_owned();
+    // A sequence on another computer, stored in an imported project: refused by the policy, so its
+    // folder is never asked about and the time stays unset (0).
+    let (mut s, stamps) = with_sequence(r"\\192.0.2.1\share\seq", r"\", &document);
+    let first = r"\\192.0.2.1\share\seq\a_0001.png";
+    assert!(matches!(s.stored_path(first), Err(crate::doc_path::NotFollowed::Refused(_))));
+    s.execute_checked("file.exportAep", json!({"path": out, "allowLosses": true})).unwrap();
+    assert_eq!(*stamps.0.lock().unwrap(), Vec::<String>::new());
+    assert_eq!(sequence_folder_time(&std::fs::read(&out).unwrap()), 0);
+    // Chosen in this session (imported or relinked by the user), the same path is followed as
+    // given, like every other footage access.
+    let f = s.project.items.values().find_map(|i| match &i.kind {
+        effectcraft_project::ItemKind::Footage(f) => Some(f.clone()),
+        _ => None,
+    });
+    s.stored_paths.allow(&f.unwrap());
+    s.execute_checked("file.exportAep", json!({"path": out, "allowLosses": true})).unwrap();
+    assert_eq!(stamps.0.lock().unwrap().len(), 1);
+    // A local sequence beside the document: its folder's time is written.
+    let local = root.join("seq").to_string_lossy().into_owned();
+    let (mut s, stamps) = with_sequence(&local, std::path::MAIN_SEPARATOR_STR, &document);
+    s.execute_checked("file.exportAep", json!({"path": out, "allowLosses": true})).unwrap();
+    assert_eq!(*stamps.0.lock().unwrap(), [local]);
+    assert_eq!(sequence_folder_time(&std::fs::read(&out).unwrap()), 0xe6fb_443a);
+    let _ = std::fs::remove_dir_all(&root);
+}
