@@ -777,7 +777,11 @@ mod tests {
     fn glyph_wider_than_the_box_is_cut_at_its_right_edge() {
         let doc = TextDoc { text: "Hgj".into(), size: 40.0, box_size: Some([20.0, 400.0]), box_pos: [10.0, 0.0], ..Default::default() };
         let right = |l: &TextLayout| {
-            l.glyphs.iter().filter(|g| !g.path.elements().is_empty()).map(|g| (kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).x1).fold(f64::MIN, f64::max)
+            l.glyphs
+                .iter()
+                .filter(|g| !g.path.elements().is_empty())
+                .map(|g| (kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).x1)
+                .fold(f64::MIN, f64::max)
         };
         let clipped = layout_doc(&doc);
         assert!(right(&clipped) > 29.0 && right(&clipped) <= 30.0 + 1e-6, "{}", right(&clipped));
