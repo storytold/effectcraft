@@ -199,6 +199,9 @@ impl ImageRef {
 pub const MAX_FILL_EDGES: usize = 2048;
 /// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings).
 pub const MAX_FILL_BANDS: usize = 8192;
+/// Most triangles a ScriptUI fill produces (edges × bands can each pass their limit and still
+/// multiply into millions); a fill past it paints nothing.
+pub const MAX_FILL_TRIANGLES: usize = 1 << 19;
 
 impl PathSeg {
     /// The subpaths of `path` as polylines (ellipses flattened to `n` segments), each with
@@ -254,7 +257,8 @@ impl PathSeg {
     /// convex-only). Exact trapezoid decomposition: the plane is cut into horizontal bands at
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
     /// trapezoid (two triangles). A path of more than [`MAX_FILL_EDGES`] edges, or cut into more
-    /// than [`MAX_FILL_BANDS`] bands, fills nothing: edges are compared pairwise and every band
+    /// than [`MAX_FILL_BANDS`] bands, or that would make more than [`MAX_FILL_TRIANGLES`]
+    /// triangles, fills nothing: edges are compared pairwise and every band
     /// looks at every edge, on the UI thread, for geometry a script chooses.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
         // Non-horizontal edges, top to bottom, with their winding direction.
@@ -309,6 +313,9 @@ impl PathSeg {
                     out.push([[l.1, ya], [r.1, ya], [r.2, yb]]);
                     out.push([[l.1, ya], [r.2, yb], [l.2, yb]]);
                 }
+            }
+            if out.len() > MAX_FILL_TRIANGLES {
+                return vec![];
             }
         }
         out
@@ -956,5 +963,8 @@ mod tests {
             })
             .collect();
         assert!(PathSeg::fill_triangles(&poly(&star), 48, false).is_empty());
+        // Each limit holds (2,048 edges, 2,048 bands) but together they make 2 million triangles.
+        let rects: Vec<PathSeg> = (0..1024).map(|i| PathSeg::R { x: 2.0 * i as f64, y: i as f64, w: 1.0, h: 2048.0 }).collect();
+        assert!(PathSeg::fill_triangles(&rects, 48, false).is_empty());
     }
 }
