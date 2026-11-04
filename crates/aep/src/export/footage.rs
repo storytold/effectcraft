@@ -462,7 +462,8 @@ fn clrs(kind: Clrs) -> Chunk<'static> {
 
 /// The item of a kind with zero ids and an empty alias (`build_footage` fills them), and the
 /// f-records after it. `sspc` holds the tag, the bits per pixel, the time base of a still (600:
-/// a clip's is its rate, written per item) and the bytes every sample of its kind has (125, 129,
+/// a clip's is its rate, written per item) and the bytes that have the same value in every
+/// generated test file of the kind (125, 129,
 /// 139, 143, 188..195; a sequence also 168, 184, 186, 187; a WAV its sample rate at 160); the bytes
 /// left zero were zero in read-backs v-fN-zsspc1..3. `mnfo` is left out (v-fN-nomnfo).
 fn kind_item(kind: FtKind) -> Vec<Chunk<'static>> {

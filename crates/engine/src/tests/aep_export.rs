@@ -76,3 +76,23 @@ fn aep_export_menu_entry_exists() {
     let find = |cmd: &str| entries.iter().find(|(_, e)| e.command == cmd).map(|(p, e)| (p.join(" > "), e.label.clone()));
     assert_eq!(find("file.exportAep"), Some(("File > Export".into(), "After Effects Project...".into())));
 }
+
+#[test]
+fn a_project_made_with_commands_exports_without_false_losses() {
+    // The export reports values it changes. What the commands make by default (effects added at
+    // the layer's bounds, masks with the cycled colours, also after one is removed) is not such a
+    // value.
+    let mut s = session();
+    for effect in ["ec.blur.fastbox", "ec.time.timewarp", "ec.color.tint", "ec.perspective.dropshadow"] {
+        s.execute_checked("effect.apply", json!({"layers": ["#1"], "effect": effect})).unwrap();
+    }
+    for _ in 0..3 {
+        s.execute_checked("mask.new", json!({"layer": "#1", "vertices": [[0, 0], [50, 0], [50, 40]]})).unwrap();
+    }
+    s.execute_checked("mask.remove", json!({"layer": "#1", "mask": "Mask 1"})).unwrap();
+    let path = tmp("commands.aep");
+    let r = s.execute_checked("file.exportAep", json!({"path": path, "dryRun": true})).unwrap();
+    assert_eq!(r["report"]["losses"], json!([]));
+    assert_eq!(r["report"]["exported"]["effects"], 4);
+    assert_eq!(r["report"]["exported"]["masks"], 2);
+}

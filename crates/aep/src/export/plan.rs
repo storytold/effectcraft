@@ -426,6 +426,12 @@ fn plan_children(cx: &PlanCx<'_>, parent: Option<ItemId>, col: &mut Collector) -
         let Some(item) = project.item(*id) else { continue };
         let label = label_index(item.label);
         let item_name = cut_name(&item.name, 255, "item", col);
+        if !item.comment.is_empty() {
+            col.lose(LossCategory::Names, format!("'{}': the item comment is not written", item.name));
+        }
+        if item.proxy.is_some() {
+            col.lose(LossCategory::FootageItems, format!("'{}': the proxy is not written", item.name));
+        }
         match &item.kind {
             ItemKind::Folder => {
                 col.exported.folders += 1;
@@ -443,11 +449,20 @@ fn plan_children(cx: &PlanCx<'_>, parent: Option<ItemId>, col: &mut Collector) -
                 let mut color = [0f32; 3];
                 for (c, v) in color.iter_mut().zip(s.color) {
                     *c = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+                    if c.to_bits() != v.to_bits() {
+                        col.lose(LossCategory::InvalidValues, format!("solid '{}': colour channel {v} written as {c}", item.name));
+                    }
+                }
+                if s.pixel_aspect.to_bits() != 1f64.to_bits() {
+                    col.lose(LossCategory::FootageItems, format!("solid '{}': pixel aspect {} is not written (written as 1)", item.name, s.pixel_aspect));
                 }
                 col.exported.solids += 1;
                 out.push(Entry { ec: *id, name: item_name, label, plan: ItemPlan::Solid(SolidPlan { color, width, height }) });
             }
             ItemKind::Footage(f) => {
+                if !f.markers.is_empty() {
+                    col.lose(LossCategory::Markers, format!("footage '{}': {} footage marker(s) are not written", item.name, f.markers.len()));
+                }
                 if let Some(fp) = crate::export::footage::plan_footage(&item.name, f, col) {
                     out.push(Entry { ec: *id, name: item_name, label, plan: ItemPlan::Footage(Box::new(fp)) });
                 }
@@ -511,13 +526,19 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     let height = clamp_side(comp.height, name, col);
     let max_frames = MAX_SECONDS.saturating_mul(rate.num) / rate.den.max(1);
     let mut frames = tb.frames(comp.duration, rate);
+    if (1..=max_frames).contains(&frames) && rate.tick_of(frames) != comp.duration {
+        col.lose(LossCategory::RoundedTimes, format!("'{name}': duration moved to whole frames ({frames})"));
+    }
     if frames < 1 || frames > max_frames {
         let fixed = frames.clamp(1, max_frames.max(1));
         col.lose(LossCategory::CompositionSettings, format!("'{name}': duration of {frames} frames is outside 1 frame to 3 hours, written as {fixed} frames"));
         frames = fixed;
     }
     let fd = i64::from(tb.frame_duration);
-    let duration_units = u32::try_from(frames.saturating_mul(fd)).unwrap_or(u32::MAX);
+    let duration_units = u32::try_from(frames.saturating_mul(fd)).unwrap_or_else(|_| {
+        col.lose(LossCategory::CompositionSettings, format!("'{name}': the duration does not fit the time base of {} fps, written shorter", rate.label()));
+        u32::MAX
+    });
     let ws = tb.frames(comp.work_area.0, rate).clamp(0, frames - 1);
     let we = tb.frames(comp.work_area.1, rate).clamp(ws + 1, frames);
     let whole = ws == 0 && we == frames;
@@ -527,10 +548,15 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     let mut background = [0u8; 3];
     for (b, v) in background.iter_mut().zip(comp.background) {
         *b = if v.is_finite() { (v.clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 };
+        // Eight bits per channel is what the format holds (the nearest level is written); a
+        // channel outside 0 to 1 is reported.
+        if !(0.0..=1.0).contains(&v) {
+            col.lose(LossCategory::CompositionSettings, format!("'{name}': background channel {v} written as {b}/255"));
+        }
     }
     let pa = sane(comp.pixel_aspect).filter(|v| *v > 0.0).unwrap_or(1.0);
     let (pn, pd) = rational(pa);
-    if (f64::from(pn) / f64::from(pd) - pa).abs() > 1e-4 {
+    if (f64::from(pn) / f64::from(pd) - pa).abs() > 1e-9 || pa.to_bits() != comp.pixel_aspect.to_bits() {
         col.lose(LossCategory::CompositionSettings, format!("'{name}': pixel aspect {pa} written as {pn}/{pd}"));
     }
     if matches!(comp.renderer, Renderer::Advanced3D) {
@@ -543,10 +569,20 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     if comp.essential.is_some() {
         col.lose(LossCategory::CompositionOptions, format!("'{name}': Essential Graphics"));
     }
-    let (ds, _) = tb.units(comp.display_start);
-    let display_start = u32::try_from(ds.max(0)).unwrap_or(0);
-    let shutter_angle = sane(comp.shutter_angle).map_or(180, |v| v.round().clamp(0.0, 720.0) as u32);
-    let shutter_phase = sane(comp.shutter_phase).map_or(0, |v| v.round().clamp(-720.0, 720.0) as i32);
+    let (ds, inexact) = tb.units(comp.display_start);
+    let display_start = u32::try_from(ds).unwrap_or(0);
+    if inexact || i64::from(display_start) != ds {
+        col.lose(LossCategory::CompositionSettings, format!("'{name}': start timecode written as {} frames", i64::from(display_start) / fd.max(1)));
+    }
+    let shutter = |v: f64, (lo, hi): (f64, f64), default: f64, what: &str, col: &mut Collector| {
+        let out = sane(v).map_or(default, |v| v.round().clamp(lo, hi));
+        if out.to_bits() != v.to_bits() {
+            col.lose(LossCategory::CompositionSettings, format!("'{name}': shutter {what} {v} written as {out}"));
+        }
+        out
+    };
+    let shutter_angle = shutter(comp.shutter_angle, (0.0, 720.0), 180.0, "angle", col) as u32;
+    let shutter_phase = shutter(comp.shutter_phase, (-720.0, 720.0), 0.0, "phase", col) as i32;
 
     let mut cp = CompPlan {
         width: u16::try_from(width).unwrap_or(u16::MAX),
@@ -555,6 +591,7 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
         rate,
         duration_units,
         work_start: u32::try_from(ws.saturating_mul(fd)).unwrap_or(0),
+        // Both fit when the duration does (`ws < we <= frames`); a duration that does not is reported above.
         work_end: if whole { None } else { u32::try_from(we.saturating_mul(fd)).ok() },
         background,
         pixel_aspect: (pn, pd),
@@ -812,6 +849,51 @@ struct CompAt<'a> {
     ids: &'a HashSet<LayerId>,
 }
 
+/// A time relative to the layer start (composition units) in source time: divided by the
+/// stretch `n / d`. A result between two units is rounded, one beyond the format's range is
+/// written as the nearest limit; both are reported.
+fn unstretch(rel: i64, stretch: (i32, u32), what: &str, col: &mut Collector) -> i32 {
+    let v = if stretch == (1, 1) { rel as f64 } else { (rel as f64) * f64::from(stretch.1) / f64::from(stretch.0) };
+    let r = v.round();
+    if r != v {
+        col.lose(LossCategory::RoundedTimes, format!("{what}: rounded to the time base after the time stretch"));
+    }
+    let lim = r.clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+    if lim != r {
+        col.lose(LossCategory::LayerTiming, format!("{what}: beyond the range the format holds, written as the nearest limit"));
+    }
+    lim as i32
+}
+
+/// The ease written for slot `i` of a key side: the slot's, else the last one. A side without an
+/// ease is the first key's incoming or the last key's outgoing side, which no interpolation uses
+/// (the importer clears them); After Effects' 33.33 % is written there.
+pub(crate) fn key_ease(eases: &[Ease], i: usize) -> Ease {
+    eases.get(i).or(eases.last()).copied().unwrap_or(Ease { speed: 0.0, influence: 1.0 / 3.0 })
+}
+
+/// Reports a key speed or spatial tangent beyond the format's range (written as 0).
+pub(crate) fn report_beyond(beyond: bool, what: &str, col: &mut Collector) {
+    if beyond {
+        col.lose(LossCategory::InvalidValues, format!("{what}: a key speed or spatial tangent beyond {LIMIT} is written as 0"));
+    }
+}
+
+/// Reports keys whose evaluation the format does not keep: muted keys (written as active keys) and
+/// auto-Bezier keys (written with their stored ease, not the slope EffectCraft computes).
+fn report_key_flags(layer: &Layer, what: &str, col: &mut Collector) {
+    layer.props.walk("", &mut |_, p| {
+        if p.keys.iter().any(|k| k.muted) {
+            col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: '{}': a muted key is written as an active key", p.name));
+        }
+        let n = p.keys.len();
+        let bezier = |k: &Keyframe| k.in_interp == Interp::Bezier || k.out_interp == Interp::Bezier;
+        if p.keys.iter().enumerate().any(|(i, k)| k.auto_bezier && bezier(k) && i > 0 && i + 1 < n) {
+            col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: '{}': an auto-Bezier key is written with its stored ease", p.name));
+        }
+    });
+}
+
 fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col: &mut Collector) -> Option<LayerPlan> {
     let CompAt { id: comp_id, name: comp_name, comp, ids } = at;
     let what = |s: &str| format!("{comp_name}: {s} '{}'", layer.name);
@@ -824,6 +906,7 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     }
     let remapped = remap_prop.is_some() && remappable;
     let (mut src, source_size) = plan_source(cx, comp_id, comp_name, comp, layer, remapped, col)?;
+    report_key_flags(layer, &format!("{comp_name}: '{}'", layer.name), col);
     let tb = cp.tb;
     let mut rounded = false;
     let mut units = |t: Tick, col: &mut Collector, what: &str| -> i32 {
@@ -849,14 +932,11 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     // 51 200 / 25 600; 643: the same with the layer starting at 1 s), which is EffectCraft's layer
     // time in the layer's time scale.
     let (stretch, time_scale) = plan_stretch(layer, cp.tb.timescale, comp_name, col);
-    // Relative times in source time.
-    let unstretch = |rel: i32| -> i32 {
-        if stretch == (1, 1) {
-            return rel;
-        }
-        let v = (i64::from(rel) * i64::from(stretch.1)) as f64 / f64::from(stretch.0);
-        v.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
-    };
+    // In and out points relative to the start, in source time (reversed, 981: After Effects' in
+    // point is the later end, source 0 at the start).
+    let (first, last) = if stretch.0 < 0 { (out_abs, in_abs) } else { (in_abs, out_abs) };
+    let in_rel = unstretch(i64::from(first) - i64::from(start), stretch, &what("in point; layer"), col);
+    let out_rel = unstretch(i64::from(last) - i64::from(start), stretch, &what("out point; layer"), col);
 
     // The layer's properties count in its own time scale (keys in source time units).
     let layer_cp;
@@ -966,9 +1046,8 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         label: label_index(layer.label),
         quality: if layer.switches.quality == Quality::Draft { 1 } else { 2 },
         start,
-        // Reversed (981): After Effects' in point is the later end (source 0 at the start).
-        in_rel: unstretch(if stretch.0 < 0 { out_abs } else { in_abs }.saturating_sub(start)),
-        out_rel: unstretch(if stretch.0 < 0 { in_abs } else { out_abs }.saturating_sub(start)),
+        in_rel,
+        out_rel,
         stretch,
         time_scale,
         blend,
@@ -1127,6 +1206,7 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
     let anchor = kind == PropKind::Anchor;
     let mut plans = Vec::with_capacity(keys.len());
     let all: Vec<Keyframe> = keys.iter().map(|(_, k)| (*k).clone()).collect();
+    let beyond = std::cell::Cell::new(false);
     for (i, (u, k)) in keys.iter().enumerate() {
         let Ok(time) = i32::try_from(*u) else {
             col.lose(LossCategory::InvalidValues, format!("{what}: key time out of range, key dropped"));
@@ -1144,11 +1224,14 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         let out_i = side(k.out_interp);
         let slots = if kind.spatial() || dims == 1 { 1 } else { dims };
         let ease_of = |eases: &[Ease], i: usize| -> EaseSlot {
-            let e = eases.get(i).or_else(|| eases.last()).copied().unwrap_or(Ease { speed: 0.0, influence: 1.0 / 3.0 });
+            let e = key_ease(eases, i);
             // An Anchor Point stored as a fraction of the source has its spatial speed in pixels
             // per second over the source height (597, 730), as the importer reads it.
             let per = if anchor { sh } else { 1.0 };
-            let speed = sane(e.speed / kind.unit() / per).unwrap_or(0.0);
+            let speed = sane(e.speed / kind.unit() / per).unwrap_or_else(|| {
+                beyond.set(true);
+                0.0
+            });
             let influence = if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 };
             EaseSlot { speed, influence }
         };
@@ -1157,6 +1240,7 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         let (mut tin, mut tout) = if kind.spatial() { effectcraft_keyframe::spatial_tangents(&all, i) } else { ([0.0; 3], [0.0; 3]) };
         for t in tin.iter_mut().chain(tout.iter_mut()) {
             if sane(*t).is_none() {
+                beyond.set(true);
                 *t = 0.0;
             }
         }
@@ -1181,6 +1265,7 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         });
         col.exported.keyframes += 1;
     }
+    report_beyond(beyond.get(), &what, col);
     if plans.is_empty() {
         return None;
     }

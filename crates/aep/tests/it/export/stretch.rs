@@ -70,6 +70,15 @@ fn a_comp_time_survives_any_stretch() {
         let pos = l.props.prop_mut("transform/position").expect("pos");
         pos.keys = vec![key(1.0, Value::Vec3([0.0, 0.0, 0.0])), key(2.0, Value::Vec3([100.0, 0.0, 0.0]))];
     });
+    // The in point (comp 0 s) is 0.4 s before the start: -10 240 units, -6 826.67 in source time
+    // at 150 %, which the format cannot hold. It is rounded, and the rounding is reported.
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::RoundedTimes), 1, "{:?}", r.report.losses);
+    let in_point = |p: &Project| p.comps().next().map(|(_, c)| c.layers[0].in_point.seconds()).expect("layer");
+    let moved = (in_point(&reimport(&r.bytes)) - in_point(&p)).abs();
+    assert!(moved > 0.0 && moved < 1.5 / 25_600.0, "{moved}");
+    // With the in point at the start, nothing is rounded.
+    with_layer(&mut p, c, 0, |l| l.in_point = l.start_time);
     let r = export_all(&p);
     assert!(r.report.is_lossless(), "{:?}", r.report.losses);
     let (n, d, _, ts, times) = position_keys(&r.bytes);

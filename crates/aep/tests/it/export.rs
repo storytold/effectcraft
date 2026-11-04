@@ -11,6 +11,7 @@ mod masks;
 mod objects;
 mod precomp;
 mod remap;
+mod repairs;
 mod robustness;
 mod roundtrip;
 mod settings;

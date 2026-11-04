@@ -28,9 +28,10 @@ pub enum LossCategory {
     TextLayers,
     /// Shape layer contents that are not written.
     ShapeLayers,
-    /// Camera settings that are not written.
+    /// Camera settings that are not written, Auto-Orient Along Path or Towards Camera included.
     Cameras,
-    /// Light settings that are not written.
+    /// Light settings that are not written, a spot light not oriented towards its point of
+    /// interest included.
     Lights,
     /// 3D model and primitive layers (skipped as a whole).
     ModelLayers,
@@ -65,7 +66,8 @@ pub enum LossCategory {
     RoundedTimes,
     /// Composition options that are not exported (guides, essential graphics, advanced renderer).
     CompositionOptions,
-    /// Names longer than the format's name field (the name is kept in full where verified).
+    /// Names longer than the format's name field (the name is kept in full where verified), and
+    /// item comments (not written).
     Names,
     /// Layer timing After Effects does not keep: a layer of a clip, sequence or sound that runs
     /// past the end of its source (After Effects ends it there).
@@ -80,8 +82,9 @@ pub enum LossCategory {
     /// gradients, keys on colours, points, popups and checkboxes, Knockout.
     LayerStyles,
     /// Layer switches and options that are not written: Wireframe quality, Bicubic sampling,
-    /// frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light,
-    /// an environment layer, locked markers.
+    /// frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light
+    /// (theirs is reported as [`Cameras`](Self::Cameras) / [`Lights`](Self::Lights)), an
+    /// environment layer, locked markers.
     LayerSwitches,
 }
 
@@ -193,7 +196,7 @@ pub struct Exported {
 /// Standing limitations of the exporter (what it cannot write at all), listed in every report.
 pub const LIMITATIONS: &[&str] = &[
     "The render queue, render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
-    "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter and display start are not exported (draft 3D, preserve frame rate/resolution, hide shy, frame blending, resolution).",
+    "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter and display start are not exported (draft 3D, preserve frame rate/resolution, hide shy, frame blending, resolution). The background is stored with 8 bits per channel.",
     "Footage is linked, not embedded: png, jpeg, OpenEXR, TIFF, Targa, Photoshop, Illustrator and EPS stills, png, OpenEXR and jpeg sequences, mp4 and mov clips and WAV audio are written with their path, size, duration and frame rate (a conformed clip rate too); the rest of their interpretation (alpha, colour management, fields, loops) is the default.",
     "Layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",
     "Mask colours are not written: After Effects shows its own colour for every exported mask.",

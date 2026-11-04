@@ -315,6 +315,30 @@ fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi, de
     })
 }
 
+/// [`stored`], reporting what it changes in a value it can store: a colour channel outside 0 to 1
+/// (written as the nearest limit) and a fraction on an integer parameter (rounded).
+fn stored_reported(conv: Conv, kind: PKind, v: &Value, (size, ui, def): ((f64, f64), &ParamUi, &ParDef), what: &str, col: &mut Collector) -> Option<Vec<f64>> {
+    let s = stored(conv, kind, v, size, ui, def)?;
+    if matches!(conv, Conv::Color) {
+        let c = v.components();
+        if c.iter().take(3).any(|x| !(0.0..=1.0).contains(x)) {
+            col.lose(LossCategory::InvalidValues, format!("{what}: a colour channel outside 0 to 1 is written as the nearest limit"));
+        }
+        // After Effects' colour parameters have no opacity (written as 255); Drop Shadow, for
+        // one, uses EffectCraft's.
+        if c.get(3).is_some_and(|a| a.to_bits() != 1f64.to_bits()) {
+            col.lose(LossCategory::Effects, format!("{what}: the colour's opacity is not written"));
+        }
+    }
+    if kind == PKind::Int
+        && let Some(raw) = stored(conv, PKind::Fixed, v, size, ui, def)
+        && raw.iter().zip(&s).any(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        col.lose(LossCategory::Effects, format!("{what}: {raw:?} is written as the whole number {s:?}"));
+    }
+    Some(s)
+}
+
 fn is_default(kind: PKind, s: &[f64], def: &ParDef) -> bool {
     let tol = |a: f64, b: f64| {
         let t = match kind {
@@ -347,6 +371,9 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
             col.lose(LossCategory::Effects, format!("{comp_name}: '{}' has the effect '{}' ({effect})", layer.name, g.name));
             continue;
         };
+        if g.label.is_some() {
+            col.lose(LossCategory::Effects, format!("{here}: the effect's label colour is not written"));
+        }
         let mut params = Vec::new();
         let mut layers = Vec::new();
         for pm in spec.params {
@@ -375,7 +402,7 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
             Extra::MeshWarp => plan_mesh(g, pdefs, size, &here, col),
             _ => plan_extra(spec, g, pdefs, &here, col),
         };
-        report_unmapped(g, spec, &here, col);
+        report_unmapped(g, (effect, spec), size, &here, col);
         col.exported.effects = col.exported.effects.saturating_add(1);
         out.push(EffectPlan {
             match_name: spec.match_name,
@@ -438,7 +465,11 @@ fn plan_extra(spec: &EffectMap, g: &PropGroup, pdefs: &HashMap<u16, ParDef>, her
                     format!("{here}: keys or an expression on '{}' are not written (arbitrary data, the static value is written)", p.name),
                 );
             }
-            p.value.components().first().copied().and_then(sane)
+            let v = p.value.components().first().copied();
+            if v.is_some_and(|v| sane(v).is_none()) {
+                col.lose(LossCategory::InvalidValues, format!("{here}: '{}' is beyond the format's range, the default is written", p.name));
+            }
+            v.and_then(sane)
         });
         values.push(v);
     }
@@ -496,14 +527,23 @@ fn plan_curves(g: &PropGroup, pdefs: &HashMap<u16, ParDef>, here: &str, col: &mu
     for (slot, id) in curves.iter_mut().zip(["rgb", "red", "green", "blue", "alpha"]) {
         let pts = static_str(g, id, here, col).map(pairs_of).unwrap_or_default();
         let mut ints: Vec<(u8, u8)> = Vec::with_capacity(pts.len());
-        let mut rounded = false;
+        let (mut rounded, mut clipped) = (false, false);
         for (x, y) in pts {
-            let (xs, ys) = ((x * 255.0).clamp(0.0, 255.0), (y * 255.0).clamp(0.0, 255.0));
+            let (x, y) = (x * 255.0, y * 255.0);
+            let (xs, ys) = (x.clamp(0.0, 255.0), y.clamp(0.0, 255.0));
+            clipped |= xs.to_bits() != x.to_bits() || ys.to_bits() != y.to_bits();
             rounded |= (xs - xs.round()).abs() > 1e-3 || (ys - ys.round()).abs() > 1e-3;
             ints.push((xs.round() as u8, ys.round() as u8));
         }
         ints.sort_by_key(|p| p.0);
+        let before = ints.len();
         ints.dedup_by_key(|p| p.0);
+        if clipped {
+            col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points outside 0 to 1 are written as the nearest limit"));
+        }
+        if ints.len() != before && !rounded {
+            col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points with the same input are merged"));
+        }
         if rounded {
             col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points rounded to whole levels (After Effects keeps 0..255)"));
         }
@@ -582,7 +622,16 @@ fn plan_mesh(g: &PropGroup, pdefs: &HashMap<u16, ParDef>, size: (f64, f64), here
 }
 
 /// EffectCraft parameters the table does not map are lost when they carry anything.
-fn report_unmapped(g: &PropGroup, spec: &EffectMap, here: &str, col: &mut Collector) {
+/// Reports the parameters of `g` the table has no record for: with keys or an expression, or at
+/// a value other than the one a new instance of the effect has.
+fn report_unmapped(g: &PropGroup, (effect, spec): (&str, &EffectMap), size: (f64, f64), here: &str, col: &mut Collector) {
+    let mut next = 1;
+    let fresh = |size: [f64; 2], next: &mut u64| {
+        effectcraft_effects::find(effect).map(|s| effectcraft_effects::instantiate(s, &mut effectcraft_project::build::Ids(next), &g.name, size))
+    };
+    // A default that depends on the layer size (a centre point) is not compared: the size an
+    // effect was added at is not known here.
+    let (fresh, other) = (fresh([size.0, size.1], &mut next), fresh([size.0 * 2.0 + 7.0, size.1 * 3.0 + 5.0], &mut next));
     let extra: &[&str] = match spec.extra {
         Extra::None => &[],
         Extra::HueSaturation => &HUE_SATURATION_MASTER,
@@ -602,11 +651,18 @@ fn report_unmapped(g: &PropGroup, spec: &EffectMap, here: &str, col: &mut Collec
                 Node::Group(sub) => stack.push((sub, format!("{prefix}{}/", sub.match_id))),
                 Node::Prop(p) => {
                     let path = format!("{prefix}{}", p.match_id);
-                    if spec.params.iter().any(|s| s.target == path) || extra.contains(&path.as_str()) {
+                    // A layer parameter's source companion is checked with the parameter (`plan_layer_param`).
+                    let companion = spec.params.iter().any(|s| matches!(s.conv, Conv::LayerRef { .. }) && path == format!("{}Source", s.target));
+                    if spec.params.iter().any(|s| s.target == path) || extra.contains(&path.as_str()) || companion {
                         continue;
                     }
                     if !p.keys.is_empty() || p.has_expression() {
                         col.lose(LossCategory::Effects, format!("{here}: parameter '{}' has no After Effects counterpart", p.name));
+                    } else if let Some(d) = fresh.as_ref().and_then(|f| f.prop(&path))
+                        && other.as_ref().and_then(|f| f.prop(&path)).is_some_and(|o| o.value == d.value)
+                        && d.value != p.value
+                    {
+                        col.lose(LossCategory::Effects, format!("{here}: parameter '{}' has no After Effects counterpart, its value is not written", p.name));
                     }
                 }
             }
@@ -644,7 +700,7 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
         col.exported.expressions = col.exported.expressions.saturating_add(1);
     }
     if prop.keys.is_empty() {
-        let Some(s) = stored(conv, kind, &prop.value, size, &prop.ui, def) else {
+        let Some(s) = stored_reported(conv, kind, &prop.value, (size, &prop.ui, def), &what, col) else {
             if matches!(conv, Conv::Popup { .. }) {
                 col.lose(LossCategory::Effects, format!("{what}: the popup item has no After Effects counterpart, the default was written"));
             } else {
@@ -664,7 +720,7 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
             format!("{what}: keys on a popup, checkbox, angle or integer slider are not written (not sampled), the first key's value was written"),
         );
         let first = prop.keys.first().map(|k| &k.value).unwrap_or(&prop.value);
-        let s = stored(conv, kind, first, size, &prop.ui, def)?;
+        let s = stored_reported(conv, kind, first, (size, &prop.ui, def), &what, col)?;
         return (!is_default(kind, &s, def) || expr.is_some()).then_some(ParamPlan { index, kind, value: ParamValue::Static(s), expr });
     }
     let keys = plan_keys(pin, cp, &what, col);
@@ -704,12 +760,13 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
         _ => 1.0,
     };
     let mut out = Vec::with_capacity(timed.len());
+    let beyond = std::cell::Cell::new(false);
     for (u, k) in timed {
         let Ok(time) = i32::try_from(u) else {
             col.lose(LossCategory::InvalidValues, format!("{what}: key time out of range, key dropped"));
             continue;
         };
-        let Some(value) = stored(conv, kind, &k.value, size, &prop.ui, def) else {
+        let Some(value) = stored_reported(conv, kind, &k.value, (size, &prop.ui, def), what, col) else {
             col.lose(LossCategory::InvalidValues, format!("{what}: a key value that cannot be stored, key dropped"));
             continue;
         };
@@ -732,16 +789,23 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
             if !on {
                 return vec![EaseSlot::default()];
             }
-            let e = eases.first().copied().unwrap_or(effectcraft_keyframe::Ease { speed: 0.0, influence: 1.0 / 3.0 });
-            let speed = sane(e.speed / factor).unwrap_or(0.0);
+            let e = crate::export::plan::key_ease(eases, 0);
+            let speed = sane(e.speed / factor).unwrap_or_else(|| {
+                beyond.set(true);
+                0.0
+            });
             let influence = if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 };
             vec![EaseSlot { speed, influence }]
         };
         let (mut tin, mut tout) = ([0.0; 3], [0.0; 3]);
         if kind == PKind::Point {
             for (t, s) in [(&mut tin, k.spatial_in), (&mut tout, k.spatial_out)] {
-                t[0] = sane(s[0] / size.0).unwrap_or(0.0);
-                t[1] = sane(s[1] / size.1).unwrap_or(0.0);
+                for (o, v) in t.iter_mut().zip([s[0] / size.0, s[1] / size.1]) {
+                    *o = sane(v).unwrap_or_else(|| {
+                        beyond.set(true);
+                        0.0
+                    });
+                }
             }
         }
         out.push(KeyPlan {
@@ -761,6 +825,7 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
             col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: a roving key is written as a normal key"));
         }
     }
+    crate::export::plan::report_beyond(beyond.get(), what, col);
     out
 }
 

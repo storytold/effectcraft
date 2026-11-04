@@ -265,6 +265,7 @@ fn plan_keys(p: &Property, conv: Conv, layout: Layout, what: &str, cx: &mut ShCx
     }
     let all: Vec<Keyframe> = timed.iter().map(|(_, k)| (*k).clone()).collect();
     let mut out = Vec::with_capacity(timed.len());
+    let beyond = std::cell::Cell::new(false);
     for (i, (u, k)) in timed.iter().enumerate() {
         let Ok(time) = i32::try_from(*u) else {
             cx.col.lose(LossCategory::InvalidValues, format!("{what}: key time out of range, key dropped"));
@@ -294,8 +295,13 @@ fn plan_keys(p: &Property, conv: Conv, layout: Layout, what: &str, cx: &mut ShCx
                     if !on {
                         return EaseSlot::default();
                     }
-                    let e = eases.get(s).or(eases.last()).copied().unwrap_or(effectcraft_keyframe::Ease { speed: 0.0, influence: 1.0 / 3.0 });
-                    let speed = if e.speed.is_finite() && e.speed.abs() <= 1e9 { e.speed } else { 0.0 };
+                    let e = crate::export::plan::key_ease(eases, s);
+                    let speed = if e.speed.is_finite() && e.speed.abs() <= 1e9 {
+                        e.speed
+                    } else {
+                        beyond.set(true);
+                        0.0
+                    };
                     let influence = if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 };
                     EaseSlot { speed, influence }
                 })
@@ -304,6 +310,7 @@ fn plan_keys(p: &Property, conv: Conv, layout: Layout, what: &str, cx: &mut ShCx
         let (mut tin, mut tout) = if layout == Layout::Point { effectcraft_keyframe::spatial_tangents(&all, i) } else { ([0.0; 3], [0.0; 3]) };
         for t in tin.iter_mut().chain(tout.iter_mut()) {
             if !t.is_finite() || t.abs() > 1e9 {
+                beyond.set(true);
                 *t = 0.0;
             }
         }
@@ -325,6 +332,7 @@ fn plan_keys(p: &Property, conv: Conv, layout: Layout, what: &str, cx: &mut ShCx
         });
     }
     cx.col.exported.keyframes = cx.col.exported.keyframes.saturating_add(out.len());
+    crate::export::plan::report_beyond(beyond.get(), what, cx.col);
     out
 }
 
@@ -475,6 +483,9 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
                 rec(&mut r, g, ("ADBE Vector Rect Size", "size"), c_point, &[100.0, 100.0], &w, cx);
                 rec(&mut r, g, ("ADBE Vector Rect Position", "position"), c_point, &[0.0, 0.0], &w, cx);
                 rec(&mut r, g, ("ADBE Vector Rect Roundness", "roundness"), c_scalar, &[0.0], &w, cx);
+                if g.get("perCorner").is_some_and(|p| p.value == Value::Bool(true) || !p.keys.is_empty() || p.has_expression()) {
+                    cx.col.lose(LossCategory::ShapeLayers, format!("{w}: per-corner roundness is not written (the uniform Roundness is)"));
+                }
                 "ADBE Vector Shape - Rect"
             }
             "ellipse" => {

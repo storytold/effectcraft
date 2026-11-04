@@ -302,6 +302,7 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
         col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: feather keys at the same time were merged"));
     }
     let mut out = Vec::with_capacity(keys.len());
+    let beyond = std::cell::Cell::new(false);
     for (u, k) in &keys {
         let Ok(time) = i32::try_from(*u) else {
             col.lose(LossCategory::InvalidValues, format!("{what}: feather key time out of range, key dropped"));
@@ -330,8 +331,12 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
             if !on {
                 return EaseSlot::default();
             }
-            let e = eases.get(i).or_else(|| eases.last()).copied().unwrap_or(Ease { speed: 0.0, influence: 1.0 / 3.0 });
-            EaseSlot { speed: finite(e.speed).unwrap_or(0.0), influence: if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 } }
+            let e = crate::export::plan::key_ease(eases, i);
+            let speed = finite(e.speed).filter(|v| v.abs() <= 1e9).unwrap_or_else(|| {
+                beyond.set(true);
+                0.0
+            });
+            EaseSlot { speed, influence: if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 } }
         };
         out.push(KeyPlan {
             time,
@@ -351,6 +356,7 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
         }
         col.exported.keyframes = col.exported.keyframes.saturating_add(1);
     }
+    crate::export::plan::report_beyond(beyond.get(), what, col);
     out
 }
 

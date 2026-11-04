@@ -177,6 +177,12 @@ pub(crate) fn plan(layer: &Layer, cp: &CompPlan, what: &str, col: &mut Collector
                     cx.col.lose(LossCategory::TextLayers, format!("{here}: the selector '{}' ({}) is not written (only range selectors)", s.name, s.match_id));
                     continue;
                 }
+                if !s.enabled {
+                    cx.col.lose(
+                        LossCategory::TextLayers,
+                        format!("{here}: the switched-off selector '{}' is written switched on (the switch is not decoded)", s.name),
+                    );
+                }
                 selectors.push(plan_selector(s, &here, &mut cx));
             }
         }

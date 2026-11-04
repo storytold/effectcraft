@@ -51,6 +51,9 @@ fn has_keys_or_expr(layer: &Layer, path: &str) -> bool {
 /// The camera's options; keys and expressions on them are reported (the static value is written).
 pub(crate) fn plan_camera(layer: &Layer, comp_width: u32, what: &str, col: &mut Collector) -> CameraPlan {
     let default_zoom = f64::from(comp_width) * 50.0 / 36.0;
+    if matches!(layer.auto_orient, effectcraft_project::AutoOrient::AlongPath | effectcraft_project::AutoOrient::TowardsCamera) {
+        col.lose(LossCategory::Cameras, format!("{what}: the camera's Auto-Orient {:?} is not written (written as a one-node camera)", layer.auto_orient));
+    }
     for id in ["zoom", "dof", "focusDistance", "aperture", "blurLevel"] {
         if has_keys_or_expr(layer, &format!("cameraOptions/{id}")) {
             col.lose(LossCategory::Cameras, format!("{what}: keys or an expression on the camera's {id} (the static value is written)"));
@@ -97,6 +100,11 @@ pub(crate) fn plan_light(layer: &Layer, kind: LightKind, what: &str, col: &mut C
             return None;
         }
     };
+    // A spot light is written oriented towards its point of interest (a point light has no
+    // orientation that shows).
+    if code == 1 && layer.auto_orient != effectcraft_project::AutoOrient::TowardsPointOfInterest {
+        col.lose(LossCategory::Lights, format!("{what}: the light's Auto-Orient {:?} is written as towards the point of interest", layer.auto_orient));
+    }
     for id in ["intensity", "color", "coneAngle", "coneFeather"] {
         if has_keys_or_expr(layer, &format!("lightOptions/{id}")) {
             col.lose(LossCategory::Lights, format!("{what}: keys or an expression on the light's {id} (the static value is written)"));
@@ -115,7 +123,13 @@ pub(crate) fn plan_light(layer: &Layer, kind: LightKind, what: &str, col: &mut C
         col.lose(LossCategory::Lights, format!("{what}: Casts Shadows is not written (not sampled)"));
     }
     let color = match layer.props.prop("lightOptions/color").map(|p| &p.value) {
-        Some(Value::Color(c)) => [255.0, c[0] * 255.0, c[1] * 255.0, c[2] * 255.0].map(|v| if v.is_finite() { v.clamp(0.0, 255.0) } else { 255.0 }),
+        Some(Value::Color(c)) => {
+            let out = [255.0, c[0] * 255.0, c[1] * 255.0, c[2] * 255.0].map(|v| if v.is_finite() { v.clamp(0.0, 255.0) } else { 255.0 });
+            if c.iter().take(3).zip(&out[1..]).any(|(v, o)| (v * 255.0).to_bits() != o.to_bits()) {
+                col.lose(LossCategory::Lights, format!("{what}: a light colour channel outside 0 to 1 is written as the nearest limit"));
+            }
+            out
+        }
         _ => [255.0; 4],
     };
     Some(LightPlan {

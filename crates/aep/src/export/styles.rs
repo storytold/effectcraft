@@ -125,6 +125,7 @@ fn plan_number_keys(prop: &Property, cp: &CompPlan, what: &str, col: &mut Collec
         col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: keys at the same time were merged"));
     }
     let mut out = Vec::with_capacity(timed.len());
+    let beyond = std::cell::Cell::new(false);
     for (u, k) in timed {
         let (Ok(time), Some(v)) = (
             i32::try_from(u),
@@ -148,9 +149,13 @@ fn plan_number_keys(prop: &Property, cp: &CompPlan, what: &str, col: &mut Collec
             if !on {
                 return vec![EaseSlot::default()];
             }
-            let e = eases.first().copied().unwrap_or(effectcraft_keyframe::Ease { speed: 0.0, influence: 1.0 / 3.0 });
+            let e = crate::export::plan::key_ease(eases, 0);
             let influence = if e.influence.is_finite() { e.influence.clamp(0.001, 1.0) } else { 1.0 / 3.0 };
-            vec![EaseSlot { speed: sane(e.speed).unwrap_or(0.0), influence }]
+            let speed = sane(e.speed).unwrap_or_else(|| {
+                beyond.set(true);
+                0.0
+            });
+            vec![EaseSlot { speed, influence }]
         };
         out.push(KeyPlan {
             time,
@@ -169,6 +174,7 @@ fn plan_number_keys(prop: &Property, cp: &CompPlan, what: &str, col: &mut Collec
             col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: a roving key is written as a normal key"));
         }
     }
+    crate::export::plan::report_beyond(beyond.get(), what, col);
     out
 }
 

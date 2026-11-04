@@ -1,8 +1,8 @@
 //! The project skeleton built in code (aep-format.md 3.1-3.3, 3.12a): the top-level chunks, the
 //! composition shell with its view layers, the `Solids` folder, a solid item and the records that
 //! follow a composition. Fields the exporter sets per item are left zero here; the bytes that are
-//! not decoded are named constants, each one seen with the same value in every sample of its kind
-//! (000, 022, 211, 259, 620-634) and kept because After Effects refuses the file without them
+//! not decoded are named constants, each with the value it has in every generated test file of
+//! that kind (cases 000, 022, 211, 259, 620-634) and kept because After Effects refuses the file without them
 //! (read-backs t-no<id>, t-zcdta, u-zsspc, u-noclrs, u-noftgi, u-nofrec, u-nocdrp).
 
 use crate::Chunk;

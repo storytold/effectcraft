@@ -91,13 +91,32 @@ pub(crate) struct TextPlan {
     pub animators: Vec<crate::export::textanim::AnimPlan>,
 }
 
-fn rgb(c: [f32; 4]) -> [f64; 3] {
-    let f = |v: f32| if v.is_finite() { f64::from(v.clamp(0.0, 1.0)) } else { 0.0 };
-    [f(c[0]), f(c[1]), f(c[2])]
+/// Where a text value is written, for the loss report.
+struct At<'a, 'c> {
+    what: &'a str,
+    col: &'c mut Collector,
 }
 
-fn sane(v: f64, lo: f64, hi: f64, default: f64) -> f64 {
-    if v.is_finite() { v.clamp(lo, hi) } else { default }
+impl At<'_, '_> {
+    /// `v` limited to `lo..=hi` (a value that is not a number becomes `default`); a change is reported.
+    fn fit(&mut self, v: f64, (lo, hi): (f64, f64), default: f64, field: &str) -> f64 {
+        let out = if v.is_finite() { v.clamp(lo, hi) } else { default };
+        if out.to_bits() != v.to_bits() {
+            self.col.lose(LossCategory::TextLayers, format!("{}: {field} {v} is outside {lo} to {hi}, written as {out}", self.what));
+        }
+        out
+    }
+
+    /// The colour channels limited to 0..1, without alpha (a text colour in After Effects has none);
+    /// a change is reported.
+    fn rgb(&mut self, c: [f32; 4], field: &str) -> [f64; 3] {
+        let [r, g, b, a] = c.map(f64::from);
+        if a.to_bits() != 1f64.to_bits() {
+            self.col.lose(LossCategory::TextLayers, format!("{}: the {field} opacity {a} is not written (text colours have no alpha)", self.what));
+        }
+        let name = format!("{field} channel");
+        [self.fit(r, (0.0, 1.0), 0.0, &name), self.fit(g, (0.0, 1.0), 0.0, &name), self.fit(b, (0.0, 1.0), 0.0, &name)]
+    }
 }
 
 /// Plans the text of a text layer and reports what the document cannot hold.
@@ -222,7 +241,6 @@ fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
 
     let paras_in = doc.paras();
     let mut paras = Vec::new();
-    let mut at = 0usize;
     for (pi, part) in text.split_inclusive('\r').enumerate() {
         let len = part.chars().count();
         // A paragraph without its own settings takes the document's (every-line composer by
@@ -246,23 +264,30 @@ fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
             Justify::JustifyLastCenter => 5,
             Justify::JustifyAll => 6,
         };
-        let px = |v: f64| sane(v, -100_000.0, 100_000.0, 0.0);
-        let po = ParaOut {
-            justify: j,
-            indents: [px(p.indent_first), px(p.indent_left), px(p.indent_right), px(p.space_before), px(p.space_after)],
-            hanging: p.hanging_punctuation,
-            every_line: p.composer == Composer::EveryLine,
-            direction: i64::from(rtl),
-        };
+        let mut at = At { what, col: &mut *col };
+        let mut px = |v: f64, field: &str| at.fit(v, (-100_000.0, 100_000.0), 0.0, field);
+        let indents = [
+            px(p.indent_first, "first-line indent"),
+            px(p.indent_left, "left indent"),
+            px(p.indent_right, "right indent"),
+            px(p.space_before, "space before"),
+            px(p.space_after, "space after"),
+        ];
+        let po = ParaOut { justify: j, indents, hanging: p.hanging_punctuation, every_line: p.composer == Composer::EveryLine, direction: i64::from(rtl) };
         paras.push((len, po));
-        at += len;
     }
-    let _ = at;
     if doc.vertical {
         col.lose(LossCategory::TextLayers, format!("{what}: vertical text is written horizontally"));
     }
-    let frame =
-        doc.box_size.map(|[w, h]| [sane(doc.box_pos[0], -1e6, 1e6, 0.0), sane(doc.box_pos[1], -1e6, 1e6, 0.0), sane(w, 1.0, 1e6, 1.0), sane(h, 1.0, 1e6, 1.0)]);
+    let mut at = At { what, col };
+    let frame = doc.box_size.map(|[w, h]| {
+        [
+            at.fit(doc.box_pos[0], (-1e6, 1e6), 0.0, "box left"),
+            at.fit(doc.box_pos[1], (-1e6, 1e6), 0.0, "box top"),
+            at.fit(w, (1.0, 1e6), 1.0, "box width"),
+            at.fit(h, (1.0, 1e6), 1.0, "box height"),
+        ]
+    });
     TextPlan { text, runs: out_runs, paras, frame, animators: Vec::new() }
 }
 
@@ -284,13 +309,17 @@ fn style_out(s: &effectcraft_keyframe::text_doc::CharStyle, what: &str, col: &mu
     if s.style != "Regular" && !s.style.is_empty() {
         col.lose(LossCategory::TextLayers, format!("{what}: the font style '{}' is not written (the font is named by its PostScript name)", s.style));
     }
+    if s.font.is_empty() {
+        col.lose(LossCategory::TextLayers, format!("{what}: a run without a font name is written in {PROTO_FONT}"));
+    }
+    let mut at = At { what, col };
     StyleOut {
         font: if s.font.is_empty() { PROTO_FONT.to_string() } else { s.font.clone() },
-        size: sane(s.size, 0.1, 10_000.0, 100.0),
-        fill: rgb(s.fill),
-        stroke: rgb(s.stroke),
-        tracking: sane(s.tracking, -100_000.0, 100_000.0, 0.0),
-        leading: s.leading.map(|l| sane(l, 0.0, 100_000.0, 0.0)),
+        size: at.fit(s.size, (0.1, 10_000.0), 100.0, "font size"),
+        fill: at.rgb(s.fill, "fill colour"),
+        stroke: at.rgb(s.stroke, "stroke colour"),
+        tracking: at.fit(s.tracking, (-100_000.0, 100_000.0), 0.0, "tracking"),
+        leading: s.leading.map(|l| at.fit(l, (0.0, 100_000.0), 0.0, "leading")),
         faux_bold: s.faux_bold,
         faux_italic: s.faux_italic,
         caps: if s.all_caps {
@@ -305,15 +334,15 @@ fn style_out(s: &effectcraft_keyframe::text_doc::CharStyle, what: &str, col: &mu
             BaselineOption::Superscript => 1,
             BaselineOption::Subscript => 2,
         },
-        h_scale: sane(s.h_scale, 1.0, 10_000.0, 100.0) / 100.0,
-        v_scale: sane(s.v_scale, 1.0, 10_000.0, 100.0) / 100.0,
-        baseline_shift: sane(s.baseline_shift, -100_000.0, 100_000.0, 0.0),
+        h_scale: at.fit(s.h_scale, (1.0, 10_000.0), 100.0, "horizontal scale") / 100.0,
+        v_scale: at.fit(s.v_scale, (1.0, 10_000.0), 100.0, "vertical scale") / 100.0,
+        baseline_shift: at.fit(s.baseline_shift, (-100_000.0, 100_000.0), 0.0, "baseline shift"),
         auto_kern,
         ligatures: s.ligatures,
-        tsume: sane(s.tsume, 0.0, 100.0, 0.0) / 100.0,
+        tsume: at.fit(s.tsume, (0.0, 100.0), 0.0, "tsume") / 100.0,
         apply_fill: s.apply_fill,
         apply_stroke: s.apply_stroke,
-        stroke_width: (s.apply_stroke || s.stroke_width > 0.0).then(|| sane(s.stroke_width, 0.0, 10_000.0, 1.0)),
+        stroke_width: (s.apply_stroke || s.stroke_width > 0.0).then(|| at.fit(s.stroke_width, (0.0, 10_000.0), 1.0, "stroke width")),
         stroke_over_fill: true,
     }
 }
