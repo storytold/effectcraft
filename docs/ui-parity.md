@@ -54,4 +54,5 @@ Effects running; most of the rest parallelises.
 | 2026-10-13 | patch | Layer bounds are suppressed during path-point editing (#1220); shape/mask interaction regressions |
 | 2026-10-12 | minor | Closed issues (#302, #320, #491, #511, #553 and others) marked as closed instead of open; panels in their own windows (#486) |
 | 2026-10-12 | minor | Percentage guides and effect colour labels (26.5) added; rows updated |
+| 2026-10-30 | trivial | Native window geometry uses the existing window.json/Tracker store only. Control sessions skip saved geometry; native GNOME Wayland windows get standard caption controls through storytold/egui#3. Scores and estimates unchanged. |
 | 2026-10-10 | major | First UI parity checklist |

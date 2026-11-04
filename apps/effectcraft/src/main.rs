@@ -195,6 +195,8 @@ fn main() -> eframe::Result {
     let on_gl = launch.backends == Some(eframe::wgpu::Backends::GL);
     let notice = launch.notice.take();
     let options = eframe::NativeOptions {
+        // window.json in the selected config directory is the only window-state store.
+        persist_window: false,
         viewport: egui::ViewportBuilder::default()
             .with_title("EffectCraft")
             .with_inner_size(window::DEFAULT_SIZE)
@@ -261,7 +263,7 @@ fn main() -> eframe::Result {
             }
             session.load_settings();
             // Fit the window to its monitor, or put it back where it was (still hidden).
-            let saved_window = session.config.as_deref().and_then(window::load);
+            let saved_window = control_port.is_none().then(|| session.config.as_deref().and_then(window::load)).flatten();
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));
             // Scripts in Scripts/Startup run before a project opens (a failing one is reported in
             // a toast).
