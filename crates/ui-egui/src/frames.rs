@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
@@ -46,6 +46,46 @@ const GPU_BUDGET: usize = 1 << 30;
 const MIN_GPU_BUDGET: usize = 64 << 20;
 const GPU_PRESSURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 const GPU_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// GPU frames that render at once, however many frame threads there are. Each one holds its own
+/// working textures, so 16 at once ran an RTX 3090 out of video memory (#3028).
+const MAX_GPU_RENDERS: usize = 2;
+
+/// Counts the GPU renders in flight; the rest of the frame threads wait their turn.
+struct GpuSlots {
+    busy: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// One GPU render slot, given back on drop.
+struct GpuSlot<'a>(&'a GpuSlots);
+
+static GPU_SLOTS: GpuSlots = GpuSlots::new();
+
+impl GpuSlots {
+    const fn new() -> Self {
+        Self { busy: Mutex::new(0), freed: Condvar::new() }
+    }
+
+    /// Wait until fewer than `max` renders are in flight, then take a slot. The browser has no
+    /// threads to wait on: it never blocks.
+    fn acquire(&self, max: usize) -> GpuSlot<'_> {
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        while !cfg!(target_arch = "wasm32") && *busy >= max {
+            busy = self.freed.wait(busy).unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy += 1;
+        GpuSlot(self)
+    }
+}
+
+impl Drop for GpuSlot<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.0.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        *busy = busy.saturating_sub(1);
+        self.0.freed.notify_one();
+    }
+}
 
 /// A rendered viewer frame: CPU pixels or a GPU texture.
 #[derive(Clone)]
@@ -1458,7 +1498,10 @@ impl Worker {
         r.cache = Some(&job.src.layer_cache);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
-        let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
+        let f = {
+            let _slot = GPU_SLOTS.acquire(MAX_GPU_RENDERS);
+            g.within_memory(|| g.render_display(&r, job.comp, job.t))
+        };
         effectcraft_engine::render::Accelerator::frame_end(g);
         match f {
             Ok(f) => {
@@ -1497,7 +1540,11 @@ impl Worker {
             let auto = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true) };
             if auto.is_none_or(|(p, key)| p.choose(key)) {
                 let t0 = web_time::Instant::now();
-                match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
+                let shown = {
+                    let _slot = GPU_SLOTS.acquire(MAX_GPU_RENDERS);
+                    g.within_memory(|| g.render_display(&r, job.comp, job.t))
+                };
+                match shown {
                     Ok(Some(f)) => {
                         self.gpu_succeeded();
                         if let Some((p, key)) = auto {
@@ -1530,7 +1577,11 @@ impl Worker {
         }
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
-            return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
+            let composited = {
+                let _slot = GPU_SLOTS.acquire(MAX_GPU_RENDERS);
+                g.within_memory(|| r.comp_frame(job.comp, job.t))
+            };
+            return match composited {
                 Ok(img) => {
                     self.gpu_succeeded();
                     FrameImage::Cpu(Arc::new(to_color_image(&img)))
