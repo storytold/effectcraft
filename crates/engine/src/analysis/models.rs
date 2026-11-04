@@ -612,7 +612,7 @@ fn select(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
     }
     s.save_prefs();
     s.prefs_changed();
-    Ok(json!({"model": id, "active": s.models.status(task).active}))
+    Ok(json!({"model": id, "active": s.models.status(task).active.as_deref().unwrap_or(seg::CLASSICAL)}))
 }
 
 fn install(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
@@ -755,6 +755,27 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod availability_tests {
     use super::*;
+
+    #[test]
+    fn classical_selection_reports_the_active_model_consistently() {
+        crate::tests::roto::hold_roto_cache_test_lock();
+        for wait in [false, true] {
+            let mut session = Session::default();
+            session.choose_model(Task::Mask, "mobilesam");
+            set(session.models.lane(Task::Mask), |status| status.active = Some("mobilesam".into()));
+
+            let selected = session.execute("roto.model.select", json!({"id": seg::CLASSICAL, "wait": wait})).unwrap();
+            assert_eq!(selected["model"], seg::CLASSICAL);
+            assert_eq!(selected["active"], seg::CLASSICAL);
+            assert!(session.models.status(Task::Mask).active.is_none());
+            let listed = session.execute("roto.models", json!({})).unwrap();
+            let models = listed["models"].as_array().unwrap();
+            let classical = models.iter().find(|row| row["id"] == selected["active"]).unwrap();
+            assert_eq!(classical["active"], true);
+            assert_eq!(classical["selected"], true);
+            assert_eq!(models.iter().filter(|row| row["active"] == true).count(), 1);
+        }
+    }
 
     /// SAM 2 cannot start a network operation; file installation still verifies the published hash.
     #[cfg(not(target_arch = "wasm32"))]
