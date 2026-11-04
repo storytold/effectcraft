@@ -16,6 +16,13 @@ use crate::{Pixels, SmartObject};
 /// from the file's transform, which is untrusted.
 pub const MAX_BAKE_PIXELS: u64 = 1 << 24;
 
+/// The bake's rasterising budget, in bounding-box pixels visited over all mesh triangles, as a
+/// multiple of the output pixel count. A sane warp visits about 2× the output; a hostile mesh
+/// that makes every triangle cover the whole output would visit thousands of times more.
+const BAKE_WORK_FACTOR: u64 = 8;
+/// The smallest budget, so tiny outputs are never refused for rounding at the triangle edges.
+const MIN_BAKE_WORK: u64 = 1 << 20;
+
 /// A placed layer's warp.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Warp {
@@ -305,7 +312,8 @@ impl SmartObject {
     /// Bake the content (straight RGBA) as placed: warped and mapped by the quad, rendered at
     /// `k` pixels per document pixel (into `size` pixels when given; see [`Self::placed_size`]).
     /// Returns the pixels and their document-space origin. `None` when the content is empty or
-    /// the baked image would exceed [`MAX_BAKE_PIXELS`].
+    /// the baked image would exceed [`MAX_BAKE_PIXELS`] or the mesh needs more rasterising work than
+    /// the budget allows (see [`BAKE_WORK_FACTOR`]).
     pub fn render_placed(&self, content: &Pixels, k: f64, size: Option<(u32, u32)>) -> Option<(Pixels, [f64; 2])> {
         let (cw, ch) = (content.width as f64, content.height as f64);
         if content.width == 0 || content.height == 0 {
@@ -352,6 +360,12 @@ impl SmartObject {
             o
         };
         let idx = |i: usize, j: usize| j * (n + 1) + i;
+        // A sane mesh's triangles each span about one grid cell (ow/n by oh/n), rounded out to
+        // whole pixels. A thin output (16384×1) stacks every grid row onto the same pixel row, so
+        // allow each of the 2n² triangles about two cells' extent along each axis, with margin.
+        let rounding = (4 * n as u64).saturating_mul((ow as u64).saturating_add(oh as u64).saturating_add(n as u64));
+        let budget = (count as u64).saturating_mul(BAKE_WORK_FACTOR).max(MIN_BAKE_WORK).saturating_add(rounding);
+        let mut work = 0u64;
         for j in 0..n {
             for i in 0..n {
                 for tri in [[idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)], [idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)]] {
@@ -368,6 +382,10 @@ impl SmartObject {
                     let x1 = (a[0].max(b[0]).max(c[0]).ceil() as usize).min(ow);
                     let y0 = a[1].min(b[1]).min(c[1]).floor().max(0.0) as usize;
                     let y1 = (a[1].max(b[1]).max(c[1]).ceil() as usize).min(oh);
+                    work = work.saturating_add((x1.saturating_sub(x0) as u64).saturating_mul(y1.saturating_sub(y0) as u64));
+                    if work > budget {
+                        return None;
+                    }
                     for y in y0..y1 {
                         for x in x0..x1 {
                             let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
@@ -509,5 +527,38 @@ mod tests {
         let s = SmartObject { uuid: "x".into(), quad: [[0.0, 0.0], [40.0, 5.0], [40.0, 15.0], [0.0, 20.0]], size: None, warp: None };
         assert!(s.render_placed(&content, 1.0, Some((16384, 16384))).is_none());
         assert!(s.render_placed(&content, 1.0, Some((u32::MAX, u32::MAX))).is_none());
+    }
+
+    #[test]
+    fn a_mesh_that_makes_every_triangle_cover_the_output_is_refused() {
+        // A 48×48 custom mesh whose patch corners scatter over the four corners of the
+        // content, so most of the 4608 triangles span the whole 2048² output.
+        let (cols, rows) = (48usize, 48usize);
+        let stride = cols * 3 + 1;
+        let mut mesh = vec![[0.0, 0.0]; stride * (rows * 3 + 1)];
+        for j in 0..=rows {
+            for i in 0..=cols {
+                if let Some(p) = mesh.get_mut(j * 3 * stride + i * 3) {
+                    let h = (i * 7 + j * 13 + i * j * 5) % 4;
+                    *p = [if h & 1 == 0 { 0.0 } else { 16.0 }, if h & 2 == 0 { 0.0 } else { 16.0 }];
+                }
+            }
+        }
+        let warp = Warp { style: "warpCustom".into(), bounds: [0.0, 0.0, 16.0, 16.0], cols, rows, mesh, ..Default::default() };
+        let s = SmartObject { uuid: "x".into(), quad: [[0.0, 0.0], [2048.0, 0.0], [2048.0, 2048.0], [0.0, 2048.0]], size: None, warp: Some(warp) };
+        let content = Pixels { width: 16, height: 16, data: vec![[1.0, 0.0, 0.0, 1.0]; 256] };
+        assert!(s.render_placed(&content, 1.0, Some((2048, 2048))).is_none());
+    }
+
+    #[test]
+    fn a_thin_output_is_not_refused_for_rounding() {
+        let s = SmartObject {
+            uuid: "x".into(),
+            quad: [[0.0, 0.0], [16384.0, 0.0], [16384.0, 1.0], [0.0, 1.0]],
+            size: None,
+            warp: Some(Warp { style: "warpArc".into(), bounds: [0.0, 0.0, 16.0, 16.0], bend: 20.0, ..Default::default() }),
+        };
+        let content = Pixels { width: 16, height: 16, data: vec![[1.0, 0.0, 0.0, 1.0]; 256] };
+        assert!(s.render_placed(&content, 1.0, Some((16384, 1))).is_some());
     }
 }

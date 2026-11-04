@@ -189,7 +189,12 @@ BridgeTalk.pump = function () { return false; };
 
 // ------------------------------------------------------------------ File / Folder
 
-function __join(a, b) { return a.replace(/[\/\\]+$/, "") + "/" + b; }
+function __trimPathSeparators(path) {
+  var end = path.length;
+  while (end > 0 && (path.charAt(end - 1) === "/" || path.charAt(end - 1) === "\\")) end--;
+  return path.slice(0, end);
+}
+function __join(a, b) { return __trimPathSeparators(a) + "/" + b; }
 
 function File(path) {
   if (!(this instanceof File)) return new File(path);
@@ -292,9 +297,9 @@ Folder.prototype = {
   get fsName() { return this.__path; },
   get fullName() { return this.__path; },
   get absoluteURI() { return this.__path; },
-  get name() { return this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/).pop(); },
+  get name() { return __trimPathSeparators(this.__path).split(/[\/\\]/).pop(); },
   get displayName() { return this.name; },
-  get path() { var p = this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/); p.pop(); return p.join("/"); },
+  get path() { var p = __trimPathSeparators(this.__path).split(/[\/\\]/); p.pop(); return p.join("/"); },
   get parent() { return new Folder(this.path); },
   get exists() { return JSON.parse(__file("isDir", this.__path)) === true; },
   toString: function () { return this.__path; },
@@ -729,9 +734,8 @@ PropertyGroup.prototype.addProperty = function (name) {
   } else if (r.kind === "animator") {
     uid = __call("layer.addTextAnimator", { comp: L.__comp, layer: L.__id, properties: [] }).animator;
   } else if (r.kind === "animatorProperty") {
-    var before = this.numProperties;
-    __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
-    return this.property(before + 1);
+    var added = __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
+    return this.property(added.index);
   } else if (r.kind === "selector") {
     var n0 = this.numProperties;
     __call("layer.addTextSelector", { comp: L.__comp, layer: L.__id, animator: r.animator, kind: r.selector });
@@ -1702,7 +1706,8 @@ Object.defineProperty(FootageItem.prototype, "mainSource", {
     return this.__mainSource;
   },
 });
-FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
+// replace() swaps in one file, even a numbered still (replaceWithSequence brings a run), as in After Effects.
+FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: false }); };
 FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
   __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
 };

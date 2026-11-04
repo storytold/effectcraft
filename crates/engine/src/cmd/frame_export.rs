@@ -195,6 +195,7 @@ pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
 
 fn frame_args(s: &Session, p: &Value, cmd: &str, ext: &str) -> Result<(String, ItemId, Tick, f64)> {
     let path = str_p(p, "path").ok_or_else(|| bad(cmd, format!("missing `path` (.{ext})")))?.to_string();
+    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let t = f_p(p, "time").map(Tick::from_seconds_f64).unwrap_or(s.time());
     let scale = f_p(p, "scale").unwrap_or(1.0).clamp(0.01, 4.0);
@@ -204,7 +205,7 @@ fn frame_args(s: &Session, p: &Value, cmd: &str, ext: &str) -> Result<(String, I
 fn save_psd(s: &mut Session, p: &Value) -> Result<Value> {
     let (path, cid, t, scale) = frame_args(s, p, "comp.saveFrameAsPsd", "psd")?;
     let (bytes, n, w, h) = layered_psd(s, cid, t, scale)?;
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &bytes)?;
     s.toast(format!("Saved {n} layers to {path}"));
     Ok(json!({"path": path, "layers": n, "width": w, "height": h, "time": t.seconds()}))
 }
@@ -212,7 +213,7 @@ fn save_psd(s: &mut Session, p: &Value) -> Result<Value> {
 fn save_exr(s: &mut Session, p: &Value) -> Result<Value> {
     let (path, cid, t, scale) = frame_args(s, p, "comp.saveFrameAsExr", "exr")?;
     let (bytes, channels, w, h) = layered_exr(s, cid, t, scale)?;
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &bytes)?;
     s.toast(format!("Saved a multi-layer EXR to {path}"));
     Ok(json!({"path": path, "channels": channels, "width": w, "height": h, "time": t.seconds()}))
 }

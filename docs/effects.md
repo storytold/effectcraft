@@ -3,11 +3,11 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 307 effects with 3032 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 308 effects with 2987 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
 - **GPU**: 280 effects also run on the GPU compositor with identical results.
-- **32**: 307 effects process 32-bit float (HDR, overbright) pixels without clamping.
-- **Status**: 307 implemented in full, 0 partial (what is missing is listed).
+- **32**: 308 effects process 32-bit float (HDR, overbright) pixels without clamping.
+- **Status**: 308 implemented in full, 0 partial (what is missing is listed).
 
 Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`).
 
@@ -16,6 +16,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Effect | Id | Params | GPU | 32 | Status |
 |---|---|---:|:-:|:-:|---|
 | 3D Channel Extract | `ec.3d.channelextract` | 6 | GPU | 32 | Implemented |
+| 3D Layer Instance | `ec.3d.instance3d` | 1 |  | 32 | Implemented |
 | Cryptomatte | `ec.3d.cryptomatte` | 4 | GPU | 32 | Implemented |
 | Depth Matte | `ec.3d.depthmatte` | 3 | GPU | 32 | Implemented |
 | Depth of Field | `ec.3d.depthoffield` | 4 | GPU | 32 | Implemented |
@@ -258,7 +259,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Object Matte | `ec.matte.objectmatte` | 13 |  | 32 | Implemented |
 | Refine Hard Matte | `ec.matte.refinehard` | 16 | GPU | 32 | Implemented |
 | Refine Soft Matte | `ec.matte.refinesoft` | 18 | GPU | 32 | Implemented |
-| Roto Brush & Refine Edge | `ec.matte.rotobrush` | 24 |  | 32 | Implemented |
+| Roto Brush & Refine Edge | `ec.matte.rotobrush` | 25 |  | 32 | Implemented |
 | Simple Choker | `ec.matte.simplechoker` | 2 | GPU | 32 | Implemented |
 
 ## Noise & Grain
@@ -324,7 +325,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | CC Hair | `ec.sim.cchair` | 20 | GPU | 32 | Implemented |
 | CC Mr. Mercury | `ec.sim.ccmrmercury` | 23 | GPU | 32 | Implemented |
 | CC Particle Systems II | `ec.sim.ccparticlesystems2` | 21 | GPU | 32 | Implemented |
-| CC Particle World | `ec.sim.ccparticleworld` | 35 | GPU | 32 | Implemented |
+| CC Particle World | `ec.sim.ccparticleworld` | 36 | GPU | 32 | Implemented |
 | CC Pixel Polly | `ec.sim.ccpixelpolly` | 10 | GPU | 32 | Implemented |
 | CC Rainfall | `ec.sim.ccrainfall` | 14 | GPU | 32 | Implemented |
 | CC Scatterize | `ec.sim.ccscatterize` | 4 | GPU | 32 | Implemented |

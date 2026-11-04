@@ -1,6 +1,6 @@
 use super::item::{ItemId, LayerId};
 use super::settings::Marker;
-use super::*;
+use super::{BlendMode, Deserialize, Label, ParamUi, PropGroup, Property, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightKind {
@@ -195,6 +195,12 @@ impl Switches {
 impl Layer {
     /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
     pub fn same_pixels(&self, o: &Layer) -> bool {
+        self.same_pixels_with(o, true)
+    }
+
+    /// [`Self::same_pixels`], with the markers counting only when `with_markers` (they are read by
+    /// expressions alone, so a project without any can edit them freely).
+    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
             id,
@@ -232,7 +238,7 @@ impl Layer {
             && *preserve_transparency == o.preserve_transparency
             && *track_matte == o.track_matte
             && *parent == o.parent
-            && *markers == o.markers
+            && (!with_markers || *markers == o.markers)
             && *markers_locked == o.markers_locked
             && *auto_orient == o.auto_orient
             && *environment == o.environment
@@ -349,6 +355,20 @@ impl Layer {
 
     pub fn masks(&self) -> Option<&PropGroup> {
         self.props.sub("masks")
+    }
+
+    /// The labels popup property `p` of this layer offers: Text Path Options ▸ Path lists None and
+    /// the layer's masks (value k = mask k), every other popup its own options. `None` when `p` is
+    /// not a popup.
+    pub fn popup_options<'a>(&'a self, p: &'a Property) -> Option<std::borrow::Cow<'a, [String]>> {
+        if self.props.prop("text/pathOptions/path").is_some_and(|q| q.uid == p.uid) {
+            let masks = self.masks().into_iter().flat_map(|m| m.groups().map(|g| g.name.clone()));
+            return Some(std::iter::once("None".to_string()).chain(masks).collect::<Vec<_>>().into());
+        }
+        match &p.ui {
+            ParamUi::Popup { options } => Some(options.as_slice().into()),
+            _ => None,
+        }
     }
 
     pub fn is_camera(&self) -> bool {

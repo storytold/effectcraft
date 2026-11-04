@@ -29,7 +29,7 @@ fn project(three_d: bool) -> (Project, effectcraft_project::ItemId) {
         }
         layers.push(l);
     }
-    p.comp_mut(cid).unwrap().layers = layers;
+    p.comp_mut(cid).unwrap().layers = layers.into();
     (p, cid)
 }
 

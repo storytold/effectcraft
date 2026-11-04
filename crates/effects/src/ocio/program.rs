@@ -2,7 +2,7 @@ use super::cdl::Cdl;
 use super::effects::{DISPLAYS, cdl_from_params, custom_xf, looks, parse_looks, profile, space_at};
 use super::lut::{FileXform, load_file};
 use super::space::{ACES_CCT, D65, IDENTITY, Space, Tf, Xform, matrix};
-use super::*;
+use super::{Arc, EffectCtx, Lut, invert, mul};
 
 // ---- Colour programs (the GPU compositor's colour-management kernels)
 

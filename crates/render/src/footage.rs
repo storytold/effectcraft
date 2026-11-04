@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, AtomicBool, Footage, Image, ItemId, ItemKind, Ordering, Tick};
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
 /// linear light: encoded with a curve, as the compositor takes footage, or as stored. Other
@@ -92,6 +92,18 @@ pub trait FootageSource: Send + Sync {
     /// decodes, and for sources that don't track failures. Stays set until the file is forgotten.
     fn problem(&self, _footage: &Footage) -> Option<String> {
         None
+    }
+    /// [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
+    /// instead (the reason then says it is the proxy's), else the footage item's own. A
+    /// composition has one only through its proxy.
+    fn item_problem(&self, item: &effectcraft_project::Item) -> Option<String> {
+        match item.proxy.as_deref().filter(|px| px.enabled && px.footage.has_video) {
+            Some(px) => self.problem(&px.footage).map(|why| format!("Proxy: {why}")),
+            None => match &item.kind {
+                ItemKind::Footage(f) => self.problem(f),
+                _ => None,
+            },
+        }
     }
 }
 

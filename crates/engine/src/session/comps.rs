@@ -1,4 +1,4 @@
-use super::*;
+use super::{Comp, CompSelection, Event, ItemId, LayerId, Result, Session, Tick, Value, commands};
 
 /// `t` as a current time of `comp`: a frame within its duration.
 fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {
@@ -28,6 +28,9 @@ impl Session {
 
     /// Drop selections that no longer exist. Each comp keeps its own selection (#1001); a layer id
     /// counts only inside the comp that owns it, so the active comp never sees another comp's layers.
+    /// Validate property UIDs too: undo can remove a control and rewind the allocator, so keeping
+    /// its selection could silently select a different property when the UID is reused. Group
+    /// selections remain valid even though groups are not leaf properties.
     pub fn sanitize_state(&mut self) {
         let p = self.project.clone();
         self.state.open_comps.retain(|c| p.comp(*c).is_some());
@@ -35,8 +38,8 @@ impl Session {
             let Some(c) = p.comp(*cid) else { return false };
             let ids: Vec<LayerId> = c.layers.iter().map(|l| l.id).collect();
             sel.layers.retain(|l| ids.contains(l));
-            sel.props.retain(|(l, _)| ids.contains(l));
-            sel.keys.retain(|k| ids.contains(&k.layer));
+            sel.props.retain(|(lid, uid)| c.layer(*lid).is_some_and(|l| l.props.find(*uid).is_some() || l.props.find_group(*uid).is_some()));
+            sel.keys.retain(|k| c.layer(k.layer).is_some_and(|l| l.props.find(k.prop).is_some()));
             sel.vertices.retain(|v| ids.contains(&v.layer));
             !sel.is_empty()
         });
@@ -49,11 +52,11 @@ impl Session {
                 self.recall_selection(id);
             }
         }
-        if let Some(c) = self.active_comp() {
+        if let Some(c) = self.state.active_comp.and_then(|cid| p.comp(cid)) {
             let ids: Vec<LayerId> = c.layers.iter().map(|l| l.id).collect();
             self.state.selected_layers.retain(|l| ids.contains(l));
-            self.state.selected_props.retain(|(l, _)| ids.contains(l));
-            self.state.selected_keys.retain(|k| ids.contains(&k.layer));
+            self.state.selected_props.retain(|(lid, uid)| c.layer(*lid).is_some_and(|l| l.props.find(*uid).is_some() || l.props.find_group(*uid).is_some()));
+            self.state.selected_keys.retain(|k| c.layer(k.layer).is_some_and(|l| l.props.find(k.prop).is_some()));
             self.state.selected_vertices.retain(|v| ids.contains(&v.layer));
         }
         if let Some((l, t)) = self.state.current_track

@@ -1,5 +1,5 @@
 use super::raster::{Seg, mask_px, over, poly_segs, raster_segs};
-use super::*;
+use super::{Buf, EffectCtx, IndexedParallelIterator, IntoParallelRefMutIterator, PI, ParallelIterator, poly_length, premul};
 
 // ---------------------------------------------------------------- Audio Spectrum / Waveform
 

@@ -1,9 +1,11 @@
 //! Panel bodies.
 
+pub mod aep_losses;
 pub mod anim_tools;
 pub mod camera_tracker_ui;
 pub mod comp_settings;
 pub mod content_fill_panel;
+pub mod crypto_pick;
 pub mod delete_items;
 pub mod dialogs;
 pub mod dialogs_3d;
@@ -27,6 +29,7 @@ pub mod key_dialogs;
 pub mod layer_panel;
 pub mod layer_styles_dialog;
 pub mod learn;
+pub mod live_preview;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;
@@ -35,6 +38,7 @@ pub mod paint_panels;
 pub mod panel_kit;
 pub mod path_vr_panels;
 pub mod precomp;
+pub(crate) mod preview_merge;
 pub mod primitive_dialog;
 pub mod project;
 pub mod properties;
@@ -122,8 +126,10 @@ impl PresetRef {
 
 /// Layers carried by a Project item drag. Dragging a selected item uses the
 /// complete selection, while dragging an unselected item uses only that item.
-/// Folders and data files are not composition layers.
-pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64) -> Vec<u64> {
+/// Folders and data files are not composition layers, and the composition the
+/// drop lands in is left out of a selection: it cannot contain itself, and one
+/// such item would make the engine refuse the whole drop (#2589).
+pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64, target: Option<effectcraft_engine::project::ItemId>) -> Vec<u64> {
     use effectcraft_engine::project::{FootageKind, ItemId, ItemKind};
 
     let selected = &app.session.state.project_selection;
@@ -131,12 +137,16 @@ pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64) -> Vec<u64>
         selected.iter().map(|id| id.0).collect()
     } else {
         // One unselected item goes through as is, so a folder or data file still gets the
-        // engine's error instead of a silent no-op.
-        return vec![dragged];
+        // engine's error instead of a silent no-op. The composition the drop lands in is the
+        // one case that never reaches it, selected or not (#2589).
+        return if Some(ItemId(dragged)) == target { Vec::new() } else { vec![dragged] };
     };
     candidates
         .into_iter()
         .filter(|id| {
+            if Some(ItemId(*id)) == target {
+                return false;
+            }
             app.session.project.item(ItemId(*id)).is_some_and(|item| match &item.kind {
                 ItemKind::Comp(_) | ItemKind::Solid(_) => true,
                 ItemKind::Footage(f) => f.kind != FootageKind::Data,
@@ -173,6 +183,82 @@ pub(crate) fn toggle_time_display(app: &mut EffectcraftApp, resp: &egui::Respons
 /// Timeline).
 pub(crate) fn space_hand(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.key_down(egui::Key::Space)) && !ctx.egui_wants_keyboard_input()
+}
+
+/// What a scroll gesture over a viewer (Composition, Layer) does this frame.
+pub(crate) struct ViewerScroll {
+    /// Points to pan by: a two-finger trackpad scroll.
+    pub pan: egui::Vec2,
+    /// Factor to zoom by around the pointer: a pinch, Ctrl/Cmd+scroll, a mouse wheel, or
+    /// Alt + a trackpad scroll.
+    pub zoom: f32,
+    /// The gesture came from a trackpad (or is still the smoothed tail of one).
+    pub trackpad: bool,
+    /// Unmodified mouse-wheel lines this frame. Zero for a trackpad, a point-unit wheel, or
+    /// Ctrl/Cmd/Alt+wheel.
+    pub wheel_lines: f32,
+    /// This frame has a Ctrl/Cmd/Alt mouse-wheel event, which keeps zooming.
+    pub wheel_modified: bool,
+}
+
+/// Splits the frame's scroll input into a viewer pan and a zoom: a mouse wheel zooms and a
+/// trackpad's two-finger scroll pans.
+///
+/// Where the platform names the device (`MouseWheelSource`, macOS), that decides. Elsewhere a
+/// wheel scrolls in lines, but in a browser and with some high-resolution wheels it scrolls in
+/// points like a trackpad does, so the unit alone doesn't tell them apart. A scroll in points is
+/// a trackpad's once it has shown what a wheel can't do: a touch phase, movement on both axes at
+/// once, or a pinch. That holds until a wheel scrolls in lines. Until then the vertical part
+/// zooms; the horizontal part always pans.
+pub(crate) fn viewer_scroll(ctx: &egui::Context) -> ViewerScroll {
+    let id = egui::Id::unique("viewer-scroll-trackpad");
+    // The scroll is smoothed over the frames after its event, so the device is remembered.
+    let was: bool = ctx.data(|d| d.get_temp(id)).unwrap_or(false);
+    let trackpad = ctx.input(|i| {
+        i.events.iter().fold(was, |t, e| match e {
+            egui::Event::MouseWheel { source: egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum, .. } => true,
+            egui::Event::MouseWheel { source: egui::MouseWheelSource::Wheel, .. } => false,
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, phase, modifiers, .. } => {
+                // Shift turns a wheel's scroll sideways, which is still one axis.
+                t || *phase == egui::TouchPhase::Start || (delta.x != 0.0 && delta.y != 0.0 && !modifiers.shift)
+            }
+            egui::Event::MouseWheel { .. } => false,
+            egui::Event::Zoom(_) => true,
+            _ => t,
+        })
+    });
+    if trackpad != was {
+        ctx.data_mut(|d| d.insert_temp(id, trackpad));
+    }
+    let (scroll, pinch, alt) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt));
+    let pinch = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
+    let scroll = if scroll.x.is_finite() && scroll.y.is_finite() { scroll } else { egui::Vec2::ZERO };
+    let (wheel_lines, wheel_modified) = ctx.input(|i| {
+        let mut lines = 0.0;
+        let mut modified = false;
+        if !trackpad {
+            for event in &i.events {
+                if let egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, modifiers, source, .. } = event
+                    && !matches!(source, egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum)
+                {
+                    if modifiers.command || modifiers.ctrl || modifiers.alt {
+                        modified = true;
+                    } else {
+                        lines += delta.y;
+                    }
+                }
+            }
+        }
+        (lines, modified)
+    });
+    let (pan, zoom) = if trackpad && !alt {
+        (scroll, pinch)
+    } else if alt {
+        (egui::Vec2::ZERO, pinch * (scroll.y / 300.0).exp())
+    } else {
+        (egui::vec2(scroll.x, 0.0), pinch * (scroll.y / 300.0).exp())
+    };
+    ViewerScroll { pan, zoom, trackpad, wheel_lines, wheel_modified }
 }
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
@@ -216,14 +302,45 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
     }
 }
 
-/// The ≡ panel menu (opened from a tab).
+/// The open ≡ panel menu: the panel, where it opens and the viewport that owns the click.
+pub(crate) type OpenPanelMenu = (PanelKind, egui::Pos2, egui::ViewportId);
+
+/// The main window's pass of the ≡ panel menu (opened from a tab).
 pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+    panel_menu_area(app, ui);
+}
+
+/// The ≡ panel menu, drawn in the viewport that owns the click that opened it: a panel in its own
+/// OS window opens its menu in that window, at that window's coordinates, instead of in the main
+/// window.
+pub(crate) fn panel_menu_area(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let id = egui::Id::unique("panel-menu");
-    let Some((panel, pos)) = ui.ctx().data(|d| d.get_temp::<(PanelKind, egui::Pos2)>(id)) else { return };
+    let viewport = ui.ctx().viewport_id();
+    let Some((panel, pos, owner)) = ui.ctx().data(|d| d.get_temp::<OpenPanelMenu>(id)) else { return };
+    if owner != viewport {
+        // a press in another window dismisses the menu, as a press elsewhere in its own does
+        if ui.ctx().input(|i| i.pointer.any_pressed()) {
+            ui.ctx().data_mut(|d| d.remove::<OpenPanelMenu>(id));
+        }
+        return;
+    }
     let mut close = false;
-    let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+    let area_id = id.with("area");
+    // a small window (a floated panel can be narrower than the menu) gets the menu at its width
+    let width = (ui.ctx().content_rect().width() - 16.0).max(0.0);
+    let grew = ui.ctx().data_mut(|d| {
+        let last = d.get_temp::<f32>(area_id);
+        d.insert_temp(area_id, width);
+        last.is_some_and(|last| width > last)
+    });
+    // measured afresh on each opening, as egui's popups are: its items and its window change between
+    // openings. A window that grows under it gives back the width a narrower one took.
+    let opening = ui.ctx().read_response(area_id).is_none() || grew;
+    let area = egui::Area::new(area_id).order(egui::Order::Foreground).fixed_pos(pos).sizing_pass(opening).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_min_width(200.0);
+            ui.set_min_width(200.0_f32.min(width));
+            // only ever narrows what the area measured: the separator fills whatever width it is given
+            ui.set_max_width(ui.max_rect().width().min(width));
             if ui.button(tr("Close Panel")).clicked() {
                 let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Close { panel });
                 close = true;
@@ -281,13 +398,13 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     }
                 }
                 _ => {
-                    ui.label(egui::RichText::new(panel.title()).weak());
+                    ui.label(egui::RichText::new(crate::i18n::label(app, "window.panel", panel.title())).weak());
                 }
             }
         });
     });
     if close || crate::widgets::pressed_outside(ui.ctx(), &area.response) {
-        ui.ctx().data_mut(|d| d.remove::<(PanelKind, egui::Pos2)>(id));
+        ui.ctx().data_mut(|d| d.remove::<OpenPanelMenu>(id));
     }
 }
 
@@ -303,5 +420,178 @@ mod preset_drop_tests {
         assert_eq!(PresetRef::File("/p/a.ecpreset".into()).apply_to(7), ("anim.applyPreset", json!({"path": "/p/a.ecpreset", "layers": [7]})));
         // Double-click applies to the selection: no layer given.
         assert_eq!(PresetRef::Text("typewriter".into()).command(), ("layer.applyTextPreset", json!({"preset": "typewriter"})));
+    }
+}
+
+#[cfg(test)]
+mod panel_menu_viewport_tests {
+    use super::*;
+    use effectcraft_engine::Session;
+
+    fn menu_id() -> egui::Id {
+        egui::Id::unique("panel-menu")
+    }
+
+    fn open(ctx: &egui::Context, owner: egui::ViewportId) {
+        ctx.data_mut(|d| d.insert_temp::<OpenPanelMenu>(menu_id(), (PanelKind::Timeline, egui::pos2(20.0, 20.0), owner)));
+    }
+
+    fn is_open(ctx: &egui::Context) -> bool {
+        ctx.data(|d| d.get_temp::<OpenPanelMenu>(menu_id())).is_some()
+    }
+
+    /// One pass of `viewport` (a window `width` wide) that draws the menu as the app does: the
+    /// main window through `panel_menu_popup`, a panel's own window through `panel_menu_area`.
+    /// Returns where the menu was drawn in that pass.
+    fn pass(app: &mut EffectcraftApp, ctx: &egui::Context, viewport: egui::ViewportId, width: f32, events: Vec<egui::Event>) -> Option<egui::Rect> {
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(viewport, egui::ViewportInfo::default());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0));
+        let raw = egui::RawInput { viewport_id: viewport, viewports, screen_rect: Some(screen), events, ..Default::default() };
+        let mut drawn = None;
+        let mut out = ctx.run_ui(raw, |ui| {
+            if viewport == egui::ViewportId::ROOT {
+                panel_menu_popup(app, ui);
+            } else {
+                panel_menu_area(app, ui);
+            }
+            drawn = ui.ctx().memory(|m| m.area_rect(menu_id().with("area")));
+        });
+        out.textures_delta.clear();
+        drawn
+    }
+
+    fn window() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("panel-window")
+    }
+
+    fn press(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        ]
+    }
+
+    #[test]
+    fn a_floating_panels_menu_is_drawn_in_its_own_window_not_the_main_one() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        assert_eq!(pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, vec![]), None, "the main window does not draw it");
+        assert!(is_open(&ctx), "and does not drop it");
+        let rect = pass(&mut app, &ctx, window(), 1000.0, vec![]).expect("the panel's window draws it");
+        assert!((rect.min.x - 20.0).abs() < 1.0, "it opens at the window-local position: {rect:?}");
+    }
+
+    #[test]
+    fn a_main_window_panels_menu_stays_in_the_main_window() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, egui::ViewportId::ROOT);
+        assert!(pass(&mut app, &ctx, window(), 1000.0, vec![]).is_none());
+        assert!(pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, vec![]).is_some());
+    }
+
+    #[test]
+    fn a_floating_panels_menu_fits_a_window_narrower_than_the_menu() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        let rect = pass(&mut app, &ctx, window(), 160.0, vec![]).unwrap();
+        assert!(rect.max.x <= 160.5, "the menu fits the 160 pt window: {rect:?}");
+        for _ in 0..4 {
+            let rect = pass(&mut app, &ctx, window(), 160.0, vec![]).unwrap();
+            assert!(rect.min.x >= -0.5 && rect.max.x <= 160.5, "and keeps fitting it: {rect:?}");
+        }
+    }
+
+    #[test]
+    fn the_menu_is_as_wide_as_its_contents_not_the_window() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, egui::ViewportId::ROOT);
+        let first = pass(&mut app, &ctx, egui::ViewportId::ROOT, 1200.0, vec![]).unwrap();
+        assert!(first.width() < 400.0, "measured to its contents: {first:?}");
+        for _ in 0..4 {
+            let rect = pass(&mut app, &ctx, egui::ViewportId::ROOT, 1200.0, vec![]).unwrap();
+            assert!((rect.width() - first.width()).abs() < 1.0, "and stays there, pass after pass: {rect:?}, first {first:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_narrowed_under_the_open_menu_narrows_the_menu() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        for _ in 0..3 {
+            pass(&mut app, &ctx, window(), 1000.0, vec![]);
+        }
+        for _ in 0..3 {
+            pass(&mut app, &ctx, window(), 160.0, vec![]);
+        }
+        let rect = pass(&mut app, &ctx, window(), 160.0, vec![]).unwrap();
+        assert!(rect.min.x >= -0.5 && rect.max.x <= 160.5, "the menu follows the window: {rect:?}");
+    }
+
+    /// A long translation (here French) makes the menu wider than its minimum.
+    #[test]
+    fn a_window_widened_under_the_open_menu_gives_the_labels_their_room_back() {
+        crate::i18n::set_current("fr");
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        open(&ctx, window());
+        let wide = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        let narrow = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 160.0, vec![])).last().unwrap();
+        let again = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        crate::i18n::set_current("en");
+        assert!(narrow.width() < wide.width(), "it fits the narrow window: {narrow:?}, wide {wide:?}");
+        assert!((again.width() - wide.width()).abs() < 1.0, "back to its own width: {again:?}, first {wide:?}");
+    }
+
+    #[test]
+    fn each_opening_measures_the_menu_afresh() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        let wide = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        // the same menu, opened while the window is narrow, wraps to fit...
+        ctx.data_mut(|d| d.remove::<OpenPanelMenu>(menu_id()));
+        pass(&mut app, &ctx, window(), 160.0, vec![]);
+        open(&ctx, window());
+        let narrow = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 160.0, vec![])).last().unwrap();
+        assert!(narrow.width() < wide.width(), "it fits the narrow window: {narrow:?}, wide {wide:?}");
+        // ...and doesn't keep that size when it next opens with room
+        ctx.data_mut(|d| d.remove::<OpenPanelMenu>(menu_id()));
+        pass(&mut app, &ctx, window(), 1000.0, vec![]);
+        open(&ctx, window());
+        let again = (0..3).filter_map(|_| pass(&mut app, &ctx, window(), 1000.0, vec![])).last().unwrap();
+        assert!((again.width() - wide.width()).abs() < 1.0, "back to its own width: {again:?}, first {wide:?}");
+    }
+
+    #[test]
+    fn a_press_in_another_window_closes_a_floating_panels_menu() {
+        let mut app = EffectcraftApp::new(Session::default());
+        let ctx = egui::Context::default();
+        open(&ctx, window());
+        pass(&mut app, &ctx, window(), 1000.0, vec![]);
+        assert!(is_open(&ctx));
+        pass(&mut app, &ctx, egui::ViewportId::ROOT, 1000.0, press(egui::pos2(600.0, 300.0)));
+        assert!(!is_open(&ctx), "a click in the main window dismisses it");
+    }
+
+    #[test]
+    fn a_menu_left_in_a_closed_window_is_dropped() {
+        let ctx = egui::Context::default();
+        let other = egui::ViewportId::from_hash_of("other-window");
+        open(&ctx, window());
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[other]);
+        assert!(!is_open(&ctx), "its window is gone");
+        open(&ctx, window());
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[window()]);
+        assert!(is_open(&ctx), "its window is still there");
+        open(&ctx, egui::ViewportId::ROOT);
+        crate::dock_ui::drop_menu_of_closed_window(&ctx, &[]);
+        assert!(is_open(&ctx), "the main window is always there");
     }
 }

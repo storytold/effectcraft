@@ -1,4 +1,4 @@
-use super::*;
+use super::{Buf, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSliceMut, Px, unpremul};
 
 // ------------------------------------------------------------------ band rasteriser
 
@@ -225,7 +225,7 @@ impl Post {
     }
 }
 
-fn sprite_bbox(s: &Sprite) -> Option<[f32; 4]> {
+pub(super) fn sprite_bbox(s: &Sprite) -> Option<[f32; 4]> {
     if s.c[3] <= 1e-5 || s.r <= 0.0 {
         return None;
     }

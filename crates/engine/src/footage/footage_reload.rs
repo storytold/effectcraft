@@ -9,31 +9,35 @@
 //! render reads the new pixels.
 //!
 //! The automatic part compares each footage file's size and modification time with what they
-//! were when the file was last seen. The desktop app takes those stamps every two seconds (and
-//! when its window comes back to the front) on a worker thread, so a file on a slow network share
-//! never holds up the interface ([`start_scan`], [`poll_scan`]); `footage.reloadChanged` takes them
-//! on the spot (CLI, agents, tests). Like the footage check after File ▸ Open, an automatic reload
-//! records the state of the disk: it is not an undo step and doesn't modify the project.
+//! were when the file was last seen. The desktop app keeps a [`Watcher`]: a worker thread that
+//! stamps the files every two seconds while the window is in front (every ten seconds while it
+//! is not, and at once when it comes back to the front) and wakes the interface only when a stamp
+//! changed, so a file on a slow network share never holds up the interface and an idle app never
+//! redraws for footage that didn't change; `footage.reloadChanged` takes the stamps on the spot
+//! (CLI, agents, tests). Like the footage check after File ▸ Open, an automatic reload records
+//! the state of the disk: it is not an undo step and doesn't modify the project.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, SourceLayer};
 use serde_json::{Value, json};
 
-use crate::Session;
+use crate::{Services, Session};
 
 /// A file's size and modification time (see [`crate::Services::stamp`]).
 pub type Stamp = (u64, u128);
 
-/// Stamps taken on a worker thread, waiting for [`poll_scan`].
-pub type Scan = Arc<Mutex<Option<Vec<(String, Option<Stamp>)>>>>;
+/// The stamps of a set of files, in path order.
+pub type Stamps = Vec<(String, Option<Stamp>)>;
 
 /// The files footage items read: each item's file and every frame of an image sequence. Image
 /// sequences count only with Automatically Reload Footage set to All Footage (After Effects'
 /// default, Non-Sequence Footage, leaves them alone: thousands of frames on a share add up).
 /// Items with a stored path that is not followed ([`crate::doc_path`]) are not watched.
-fn watched(s: &Session) -> BTreeSet<String> {
+pub fn watched(s: &Session) -> BTreeSet<String> {
     let sequences = s.prefs.import.auto_reload_footage == "all";
     let mut paths = BTreeSet::new();
     for it in s.project.items.values() {
@@ -81,6 +85,8 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     nf.codec = probed.codec;
     nf.has_video = probed.has_video;
     nf.has_audio = probed.has_audio;
+    // The markers the file carries now (a WAV's cue points), for Update Markers From Source.
+    nf.markers = probed.markers;
     if matches!(f.kind, FootageKind::Video | FootageKind::Audio) {
         nf.duration = probed.duration;
         // Interpret Footage ▸ Conform to frame rate stays; the file's own rate is refreshed.
@@ -265,31 +271,253 @@ pub(crate) fn command(s: &mut Session, _: &Value) -> crate::Result<Value> {
     apply_stamps(s, now)
 }
 
-/// Start stamping the watched files on a worker thread, unless a scan is still running (or the
-/// build has no threads: the web app, whose footage lives in browser storage).
-pub fn start_scan(s: &mut Session) {
-    if s.footage_scan.is_some() || cfg!(target_arch = "wasm32") {
-        return;
+/// How often the watched files are stamped while the window is in front.
+pub const FOCUSED_INTERVAL: Duration = Duration::from_secs(2);
+/// How often they are stamped while another app has the front: a file saved there is noticed
+/// as soon as the window comes back, so this only covers a second screen.
+pub const UNFOCUSED_INTERVAL: Duration = Duration::from_secs(10);
+
+enum Watch {
+    Paths(BTreeSet<String>),
+    Focused(bool),
+}
+
+/// The desktop app's footage watcher: a worker thread that stamps the watched files and hands
+/// the stamps over ([`Watcher::take`]) only when one of them changed since it last looked,
+/// waking the interface through the callback given to [`Watcher::start`]. The interface tells it
+/// what to watch and whether the window is in front; nothing watched means the thread sleeps.
+/// Dropping the watcher ends the thread.
+pub struct Watcher {
+    tx: Sender<Watch>,
+    result: Arc<Mutex<Option<Stamps>>>,
+    paths: BTreeSet<String>,
+    focused: Option<bool>,
+}
+
+impl Watcher {
+    /// Start the worker, stamping through `services`; `wake` runs on the worker whenever new
+    /// stamps are ready to [`Watcher::take`]. `None` where there are no threads (the web app,
+    /// whose footage lives in browser storage) or one couldn't be started.
+    pub fn start(services: Arc<dyn Services>, wake: impl Fn() + Send + Sync + 'static) -> Option<Watcher> {
+        Self::start_with(services, wake, FOCUSED_INTERVAL, UNFOCUSED_INTERVAL)
     }
-    let paths = watched(s);
-    if paths.is_empty() {
-        return;
+
+    /// [`Watcher::start`] with its own stamping intervals (tests).
+    pub fn start_with(services: Arc<dyn Services>, wake: impl Fn() + Send + Sync + 'static, focused: Duration, unfocused: Duration) -> Option<Watcher> {
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result: Arc<Mutex<Option<Stamps>>> = Arc::default();
+        let out = Arc::clone(&result);
+        std::thread::Builder::new().name("footage-watch".into()).spawn(move || watch(&rx, &*services, &out, &wake, focused, unfocused)).ok()?;
+        Some(Watcher { tx, result, paths: BTreeSet::new(), focused: None })
     }
-    let services = s.services.clone();
-    let slot: Scan = Arc::default();
-    let out = slot.clone();
-    let spawned = std::thread::Builder::new().name("footage-watch".into()).spawn(move || {
-        let stamps = paths.into_iter().map(|p| (p.clone(), services.stamp(&p))).collect();
-        *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stamps);
-    });
-    if spawned.is_ok() {
-        s.footage_scan = Some(slot);
+
+    /// The files to watch ([`watched`]); a changed set is stamped at once.
+    pub fn set_watched(&mut self, paths: BTreeSet<String>) {
+        if paths != self.paths {
+            self.paths = paths.clone();
+            let _ = self.tx.send(Watch::Paths(paths));
+        }
+    }
+
+    /// Whether the window is in front; coming back to the front stamps the files at once.
+    pub fn set_focused(&mut self, focused: bool) {
+        if self.focused != Some(focused) {
+            self.focused = Some(focused);
+            let _ = self.tx.send(Watch::Focused(focused));
+        }
+    }
+
+    /// Stamps the worker found changed (or the first ones for a new set of files), once; for
+    /// [`apply_stamps`]. `None` while nothing changed.
+    pub fn take(&self) -> Option<Stamps> {
+        self.result.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 }
 
-/// Apply a finished scan (`None` while there is none, or it is still running).
-pub fn poll_scan(s: &mut Session) -> Option<crate::Result<Value>> {
-    let stamps = s.footage_scan.as_ref()?.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
-    s.footage_scan = None;
-    Some(apply_stamps(s, stamps))
+/// The watcher's worker: wait for a message or the interval, stamp, report only changes.
+fn watch(
+    rx: &Receiver<Watch>,
+    services: &dyn Services,
+    out: &Mutex<Option<Stamps>>,
+    wake: &(dyn Fn() + Send + Sync),
+    focused_every: Duration,
+    unfocused_every: Duration,
+) {
+    let mut paths = BTreeSet::new();
+    let mut focused = true;
+    let mut last: Option<Stamps> = None;
+    loop {
+        let msg = if paths.is_empty() {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(if focused { focused_every } else { unfocused_every })
+        };
+        match msg {
+            Ok(Watch::Paths(p)) => {
+                paths = p;
+                // A new set is reported whole, so the session forgets files no longer watched.
+                last = None;
+            }
+            Ok(Watch::Focused(f)) => {
+                let regained = f && !focused;
+                focused = f;
+                if !regained {
+                    continue;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if paths.is_empty() {
+            continue;
+        }
+        let stamps: Stamps = paths.iter().map(|p| (p.clone(), services.stamp(p))).collect();
+        if last.as_ref() != Some(&stamps) {
+            last = Some(stamps.clone());
+            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(stamps);
+            wake();
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod watcher_tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Files whose stamps the test sets; counts how often they were stamped.
+    #[derive(Default)]
+    struct Disk {
+        stamps: Mutex<HashMap<String, Stamp>>,
+        looks: AtomicUsize,
+    }
+    impl Disk {
+        fn set(&self, path: &str, stamp: Stamp) {
+            self.stamps.lock().unwrap_or_else(PoisonError::into_inner).insert(path.into(), stamp);
+        }
+    }
+    impl Services for Disk {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("read-only"))
+        }
+        fn stamp(&self, path: &str) -> Option<Stamp> {
+            self.looks.fetch_add(1, Ordering::SeqCst);
+            self.stamps.lock().unwrap_or_else(PoisonError::into_inner).get(path).copied()
+        }
+    }
+
+    const TICK: Duration = Duration::from_millis(20);
+    const LONG: Duration = Duration::from_secs(60);
+
+    fn wait_for(w: &Watcher, wakes: &AtomicUsize, n: usize) -> Stamps {
+        let t0 = std::time::Instant::now();
+        loop {
+            if wakes.load(Ordering::SeqCst) >= n
+                && let Some(s) = w.take()
+            {
+                return s;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "no report {n} within 10 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Wait (at most 10 s) until `ready`: a slow machine's worker gets there late, never early.
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !ready() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "{what} within 10 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn start(disk: &Arc<Disk>, focused: Duration, unfocused: Duration) -> Option<(Watcher, Arc<AtomicUsize>)> {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let w = Watcher::start_with(
+            Arc::clone(disk) as Arc<dyn Services>,
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+            focused,
+            unfocused,
+        )?;
+        Some((w, wakes))
+    }
+
+    /// The interface is woken for the first stamps of a set and for every change, and for
+    /// nothing else: an unchanged file polled many times is no wakeup at all.
+    #[test]
+    fn the_watcher_wakes_the_interface_only_when_a_stamp_changes() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/a.psd", (10, 1));
+        let (mut w, wakes) = start(&disk, TICK, LONG).unwrap();
+        w.set_focused(true);
+        w.set_watched(["/a.psd".to_string()].into());
+        assert_eq!(wait_for(&w, &wakes, 1), vec![("/a.psd".to_string(), Some((10, 1)))]);
+        let looked = disk.looks.load(Ordering::SeqCst);
+        wait_until("it keeps stamping while the window is in front", || disk.looks.load(Ordering::SeqCst) > looked + 3);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1, "an unchanged file is no wakeup");
+        assert!(w.take().is_none());
+        disk.set("/a.psd", (12, 2));
+        assert_eq!(wait_for(&w, &wakes, 2), vec![("/a.psd".to_string(), Some((12, 2)))]);
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    }
+
+    /// Behind another app the files are stamped only at the slow interval; the window coming
+    /// back to the front stamps them at once.
+    #[test]
+    fn behind_another_app_the_watcher_rests_until_the_window_is_back() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/b.psd", (1, 1));
+        let (mut w, wakes) = start(&disk, TICK, LONG).unwrap();
+        w.set_focused(false);
+        w.set_watched(["/b.psd".to_string()].into());
+        wait_for(&w, &wakes, 1);
+        let looked = disk.looks.load(Ordering::SeqCst);
+        disk.set("/b.psd", (2, 2));
+        std::thread::sleep(TICK * 15);
+        assert_eq!(disk.looks.load(Ordering::SeqCst), looked, "no stamping at the front interval while behind");
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        w.set_focused(true);
+        assert_eq!(wait_for(&w, &wakes, 2), vec![("/b.psd".to_string(), Some((2, 2)))]);
+    }
+
+    /// Nothing to watch: the worker sleeps, stamping nothing; a new set is stamped at once and
+    /// reported whole, and dropping the watcher ends the worker.
+    #[test]
+    fn nothing_watched_is_nothing_stamped_and_a_new_set_is_reported_whole() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/c.psd", (1, 1));
+        disk.set("/d.psd", (2, 2));
+        let (mut w, wakes) = start(&disk, TICK, TICK).unwrap();
+        w.set_focused(true);
+        std::thread::sleep(TICK * 10);
+        assert_eq!(disk.looks.load(Ordering::SeqCst), 0);
+        w.set_watched(["/c.psd".to_string(), "/d.psd".to_string()].into());
+        assert_eq!(wait_for(&w, &wakes, 1), vec![("/c.psd".to_string(), Some((1, 1))), ("/d.psd".to_string(), Some((2, 2)))]);
+        w.set_watched(["/d.psd".to_string()].into());
+        assert_eq!(wait_for(&w, &wakes, 2), vec![("/d.psd".to_string(), Some((2, 2)))], "the set is reported whole, so the session forgets /c.psd");
+        w.set_watched(BTreeSet::new());
+        // The worker may already be past its wait with the old set: that one round of stamps
+        // (one file) can still come, and nothing after it.
+        let looked = disk.looks.load(Ordering::SeqCst);
+        std::thread::sleep(TICK * 10);
+        assert!(disk.looks.load(Ordering::SeqCst) <= looked + 1, "nothing watched, nothing stamped");
+        let result = Arc::downgrade(&w.result);
+        drop(w);
+        let t0 = std::time::Instant::now();
+        while result.upgrade().is_some() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the worker is still running");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }

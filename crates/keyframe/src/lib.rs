@@ -15,7 +15,8 @@ pub mod value;
 
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 use serde::{Deserialize, Serialize};
-pub use text_doc::{BaselineOption, CharStyle, Composer, Direction, FigureStyle, FigureWidth, Kerning, OpenType, ParaStyle, StyleRun};
+use std::borrow::Borrow;
+pub use text_doc::{BaselineOption, CharStyle, Composer, Direction, FigureStyle, FigureWidth, Kerning, LineJoin, OpenType, ParaStyle, StyleRun};
 pub use value::{FeatherPoint, Gradient, Justify, ShapePath, TextDoc, Value};
 
 /// Temporal interpolation on one side of a keyframe.
@@ -89,10 +90,17 @@ pub struct Keyframe {
     /// Keyframe color label: index into the label list (0 = None).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub label: u8,
+    /// Muted keys stay in the list (and the UI) but evaluation skips them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
 }
 
 fn is_zero(v: &u8) -> bool {
     *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn yes() -> bool {
@@ -116,6 +124,7 @@ impl Keyframe {
             spatial_continuous: false,
             roving: false,
             label: 0,
+            muted: false,
         }
     }
     pub fn hold(mut self) -> Keyframe {
@@ -320,16 +329,16 @@ fn v3(v: &Value) -> [f64; 3] {
 /// tangent is a sixth of the way from the previous key to the next, the in tangent its mirror, and
 /// key times play no part. An end key uses its one neighbour, so the path leaves the first key
 /// and enters the last one toward the neighbouring key instead of with no tangent.
-fn auto_spatial(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
+fn auto_spatial<K: Borrow<Keyframe>>(keys: &[K], i: usize) -> ([f64; 3], [f64; 3]) {
     if i >= keys.len() || keys.len() < 2 {
         return ([0.0; 3], [0.0; 3]);
     }
-    let a = v3(&keys[i.saturating_sub(1)].value);
-    let c = v3(&keys[(i + 1).min(keys.len() - 1)].value);
+    let a = v3(&keys[i.saturating_sub(1)].borrow().value);
+    let c = v3(&keys[(i + 1).min(keys.len() - 1)].borrow().value);
     let tout = [(c[0] - a[0]) / 6.0, (c[1] - a[1]) / 6.0, (c[2] - a[2]) / 6.0];
     // A side facing a key at the same position gets no tangent, so the segment between two
     // identical keys has zero length and the layer holds still (#1675).
-    let p = v3(&keys[i].value);
+    let p = v3(&keys[i].borrow().value);
     let tin = if i > 0 && a == p { [0.0; 3] } else { [-tout[0], -tout[1], -tout[2]] };
     let tout = if i + 1 < keys.len() && c == p { [0.0; 3] } else { tout };
     (tin, tout)
@@ -337,7 +346,12 @@ fn auto_spatial(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
 
 /// Effective spatial tangents of key `i` (auto or stored).
 pub fn spatial_tangents(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
-    let Some(key) = keys.get(i) else { return ([0.0; 3], [0.0; 3]) };
+    tangents_of(keys, i)
+}
+
+/// [`spatial_tangents`] over stored keys or a filtered list of them (see [`evaluate`]).
+fn tangents_of<K: Borrow<Keyframe>>(keys: &[K], i: usize) -> ([f64; 3], [f64; 3]) {
+    let Some(key) = keys.get(i).map(Borrow::borrow) else { return ([0.0; 3], [0.0; 3]) };
     if key.spatial_auto { auto_spatial(keys, i) } else { (key.spatial_in, key.spatial_out) }
 }
 
@@ -373,18 +387,18 @@ pub fn spatial_handles(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
 }
 
 /// Effective temporal ease of key `i` for dimension `d` (auto-Bezier keys get the neighbour slope).
-fn effective_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool) -> Ease {
-    let k = &keys[i];
+fn effective_ease<K: Borrow<Keyframe>>(keys: &[K], i: usize, d: usize, spatial: bool, out: bool) -> Ease {
+    let k = keys[i].borrow();
     let list = if out { &k.out_ease } else { &k.in_ease };
     if k.auto_bezier && i > 0 && i + 1 < keys.len() {
-        let dt = secs(keys[i + 1].time) - secs(keys[i - 1].time);
+        let dt = secs(keys[i + 1].borrow().time) - secs(keys[i - 1].borrow().time);
         let slope = if spatial {
-            let a = v3(&keys[i - 1].value);
-            let c = v3(&keys[i + 1].value);
+            let a = v3(&keys[i - 1].borrow().value);
+            let c = v3(&keys[i + 1].borrow().value);
             ((c[0] - a[0]).powi(2) + (c[1] - a[1]).powi(2) + (c[2] - a[2]).powi(2)).sqrt() / dt.max(1e-12)
         } else {
-            let a = keys[i - 1].value.components();
-            let c = keys[i + 1].value.components();
+            let a = keys[i - 1].borrow().value.components();
+            let c = keys[i + 1].borrow().value.components();
             (c.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0)) / dt.max(1e-12)
         };
         return Ease { speed: slope, influence: 1.0 / 6.0 };
@@ -508,23 +522,39 @@ pub fn time_reverse(keys: &mut [Keyframe]) {
 }
 
 /// Evaluate a keyframed property at `t`. `spatial` selects motion-path semantics for 2D/3D values.
+/// Muted keys are skipped, so the active neighbours interpolate as if they were not there; `None`
+/// means every key is muted (the property's static value applies).
 pub fn evaluate(keys: &[Keyframe], t: Tick, spatial: bool) -> Option<Value> {
-    let first = keys.first()?;
+    if !keys.iter().any(|k| k.muted) {
+        return evaluate_active(keys, t, spatial);
+    }
+    // Muting is rare: skip the muted keys by reference rather than copying every key and value.
+    let active: Vec<&Keyframe> = keys.iter().filter(|k| !k.muted).collect();
+    evaluate_active(&active, t, spatial)
+}
+
+fn evaluate_active<K: Borrow<Keyframe>>(keys: &[K], t: Tick, spatial: bool) -> Option<Value> {
+    let first = keys.first()?.borrow();
     if keys.len() == 1 || t <= first.time {
         return Some(first.value.clone());
     }
-    let last = keys.last()?;
+    let last = keys.last()?.borrow();
     if t >= last.time {
         return Some(last.value.clone());
     }
-    let i = keys.partition_point(|k| k.time <= t) - 1;
-    Some(segment_value(keys, i, t, spatial))
+    let i = keys.partition_point(|k| k.borrow().time <= t) - 1;
+    Some(segment_value_of(keys, i, t, spatial))
 }
 
 /// Value inside segment `i` → `i+1` at time `t`.
 pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Value {
-    let a = &keys[i];
-    let b = &keys[i + 1];
+    segment_value_of(keys, i, t, spatial)
+}
+
+/// [`segment_value`] over stored keys or a filtered list of them (see [`evaluate`]).
+fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial: bool) -> Value {
+    let a = keys[i].borrow();
+    let b = keys[i + 1].borrow();
     if a.out_interp == Interp::Hold || !a.value.interpolates() {
         return a.value.clone();
     }
@@ -539,8 +569,8 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
     if is_spatial {
         let p0 = v3(&a.value);
         let p3 = v3(&b.value);
-        let (_, out_t) = spatial_tangents(keys, i);
-        let (in_t, _) = spatial_tangents(keys, i + 1);
+        let (_, out_t) = tangents_of(keys, i);
+        let (in_t, _) = tangents_of(keys, i + 1);
         let seg = SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]);
         let len = seg.length();
         let f = if lin_out && lin_in || len <= 1e-12 {
@@ -617,6 +647,7 @@ pub fn set_key(keys: &mut Vec<Keyframe>, key: Keyframe) -> usize {
             k.spatial_continuous = old.spatial_continuous;
             k.roving = old.roving;
             k.label = old.label;
+            k.muted = old.muted;
             keys[i] = k;
             i
         }

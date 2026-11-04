@@ -83,10 +83,11 @@ fn clear_guides(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn export_guides(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("view.exportGuides", "missing `path`"))?;
+    s.refuse_export(path)?;
     let comp = s.project.comp(comp_id(s, p)?).ok_or(EngineError::NoComp)?;
     let doc = json!({"effectcraftGuides": 1, "width": comp.width, "height": comp.height, "guides": comp.guides});
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-    s.services.write_file(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(path, text.as_bytes())?;
     Ok(json!({"path": path, "guides": comp.guides.len()}))
 }
 

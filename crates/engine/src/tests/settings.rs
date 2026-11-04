@@ -40,6 +40,22 @@ fn prefs_round_trip_through_json() {
     assert_eq!(Prefs::from_json(&Prefs::default().to_json()), Prefs::default());
 }
 
+/// A document with one bad page and many unknown keys recovers its good pages in one pass per
+/// page, not one full parse per key.
+#[test]
+fn prefs_recovery_tries_only_the_settings_pages() {
+    let mut doc = serde_json::Map::new();
+    doc.insert("general".into(), json!({"undoLevels": "not a number"}));
+    doc.insert("labels".into(), serde_json::to_value(Prefs::default()).unwrap()["labels"].clone());
+    for i in 0..20_000 {
+        doc.insert(format!("unknown{i}"), json!({"x": i}));
+    }
+    let t = std::time::Instant::now();
+    let p = Prefs::from_json(&serde_json::Value::Object(doc).to_string());
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert_eq!(p.general, Prefs::default().general);
+}
+
 #[test]
 fn prefs_migrate_old_layout_and_keep_unknown_keys() {
     let old = r#"{
@@ -69,6 +85,23 @@ fn prefs_migrate_old_layout_and_keep_unknown_keys() {
     assert!(again.get("undoLevels").is_none(), "migrated keys leave the top level");
     // Garbage is defaults.
     assert_eq!(Prefs::from_json("not json"), Prefs::default());
+}
+
+#[test]
+fn prefs_migrate_old_disk_cache_default() {
+    // The old 100 GB default becomes 20 GB; a size the user chose stays (#2551).
+    assert_eq!(Prefs::from_json(r#"{"version": 2, "disk": {"diskCacheMaxGb": 100}}"#).disk.disk_cache_max_gb, 20);
+    assert_eq!(Prefs::from_json(r#"{"version": 2, "disk": {"diskCacheMaxGb": 50}}"#).disk.disk_cache_max_gb, 50);
+    assert_eq!(Prefs::from_json(r#"{"version": 3, "disk": {"diskCacheMaxGb": 100}}"#).disk.disk_cache_max_gb, 100);
+}
+
+#[test]
+fn prefs_migrate_old_split_layers_default() {
+    // Settings saved before #2083 kept "below"; they move to After Effects' "above" once (#2545).
+    let above = |doc: &str| Prefs::from_json(doc).general.create_split_layers_above;
+    assert!(above(r#"{"version": 3, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(above(r#"{"version": 2, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(!above(r#"{"version": 4, "general": {"createSplitLayersAbove": false}}"#), "a choice made since stays");
 }
 
 #[test]
@@ -381,6 +414,23 @@ fn new_project_template_and_default_renderer() {
     let _ = std::fs::remove_dir_all(d);
 }
 
+#[test]
+fn project_files_are_indented_unless_compact_is_on() {
+    let d = tmp("compact-project-files");
+    let path = d.join("p.ecproj");
+    let mut s = session_with_comp();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let pretty = std::fs::read_to_string(&path).unwrap();
+    assert!(pretty.starts_with("{\n  \"savedBy\""), "indented by default");
+    s.execute("prefs.set", json!({"key": "project.compactProjectFiles", "value": true})).unwrap();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let compact = std::fs::read_to_string(&path).unwrap();
+    assert!(!compact.contains('\n'), "one line when Save Compact Project Files is on");
+    let open = |text: &str| effectcraft_project::Project::from_json(text).unwrap();
+    assert_eq!(open(&compact), open(&pretty), "both read back as the same project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
 // ---------------------------------------------------------------- shortcuts
 
 #[test]
@@ -563,8 +613,8 @@ fn shortcut_presets_duplicate_rename_delete_export_import() {
 fn frontend_commands_are_bindable_with_panel_scope() {
     let mut s = Session::default();
     s.set_ui_commands(vec![
-        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()) },
-        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()) },
+        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()), scope: None },
+        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()), scope: None },
     ]);
     let b = s.shortcuts().find("timeline.zoomIn").unwrap().clone();
     assert_eq!(b.scope, "Timeline");
@@ -572,6 +622,49 @@ fn frontend_commands_are_bindable_with_panel_scope() {
     // A panel shortcut conflicts with an application shortcut on the same keys.
     let c = s.shortcuts().conflicts(&b, "H");
     assert!(c.iter().any(|c| c.key == "tool.hand"));
+    // A registry command that only the Project panel runs is scoped to it.
+    assert_eq!(s.shortcuts().find("project.deleteWithoutConfirmation").unwrap().scope, "Project");
+}
+
+/// The binding that runs a key press: the narrowest scope; a physical binding at the same rank;
+/// nothing when two other panels (or two active contexts) claim it at the same rank.
+#[test]
+fn shortcut_dispatch_picks_the_narrowest_scope_deterministically() {
+    use crate::shortcuts::pick;
+    // Two unrelated panels, neither focused: neither runs, in either order.
+    let both = [("Project", false, "delete"), ("RenderQueue", false, "duplicate")];
+    assert_eq!(pick(both, "Timeline", &[]), Err(vec!["Project".to_string(), "RenderQueue".into()]));
+    assert_eq!(pick([both[1], both[0]], "Timeline", &[]), Err(vec!["RenderQueue".to_string(), "Project".into()]));
+    // The focused one of them wins.
+    assert_eq!(pick(both, "RenderQueue", &[]), Ok(Some("duplicate")));
+    // A single other panel's shortcut runs when nothing nearer claims the chord.
+    assert_eq!(pick([("Project", false, "delete")], "Timeline", &[]), Ok(Some("delete")));
+    // An application binding beats an unrelated panel's binding, also a physical one.
+    assert_eq!(pick([("RenderQueue", true, "duplicate"), ("Application", false, "app")], "Timeline", &[]), Ok(Some("app")));
+    // At the same rank a physical binding wins, in either order.
+    assert_eq!(pick([("Application", false, "logical"), ("Application", true, "physical")], "Timeline", &[]), Ok(Some("physical")));
+    assert_eq!(pick([("Application", true, "physical"), ("Application", false, "logical")], "Timeline", &[]), Ok(Some("physical")));
+    // A Composition binding runs in the Composition panel over the application's.
+    assert_eq!(pick([("Application", false, "app"), ("Composition", false, "comp")], "Composition", &[]), Ok(Some("comp")));
+    // Two active contexts tie; an inactive one doesn't run.
+    assert_eq!(pick([("Mask", false, "mask"), ("Paint", false, "paint")], "Composition", &["Paint", "Mask"]), Err(vec!["Mask".to_string(), "Paint".into()]));
+    assert_eq!(pick([("Mask", false, "mask"), ("Paint", false, "paint")], "Composition", &["Paint"]), Ok(Some("paint")));
+    // The same scope twice (a reported conflict): the first one.
+    assert_eq!(pick([("Timeline", false, "a"), ("Timeline", false, "b")], "Timeline", &[]), Ok(Some("a")));
+}
+
+/// Two contexts can be active at once, so their shortcuts on the same keys conflict.
+#[test]
+fn context_shortcuts_on_the_same_keys_conflict() {
+    let mut s = Session::default();
+    s.set_ui_commands(vec![
+        crate::shortcuts::UiCommand { id: "test.mask".into(), label: "Mask".into(), shortcut: Some("F9".into()), scope: Some("Mask".into()) },
+        crate::shortcuts::UiCommand { id: "test.paint".into(), label: "Paint".into(), shortcut: Some("F9".into()), scope: Some("Paint".into()) },
+    ]);
+    let t = s.shortcuts();
+    assert!(t.all_conflicts().iter().any(|(a, c)| a == "test.mask" && c.key == "test.paint" && !c.overrides), "{:?}", t.all_conflicts());
+    let b = t.find("test.mask").unwrap();
+    assert!(t.conflicts(b, "F9").iter().any(|c| c.key == "test.paint" && !c.overrides));
 }
 
 // ---------------------------------------------------------------- auto-save / recovery
@@ -1064,6 +1157,14 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     cs.load_settings();
     assert_eq!(cs.prefs.general.language, "cs");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"cs"}}"#).general.language, "cs");
+    // Polish, likewise.
+    assert!(crate::prefs::LANGUAGES.contains(&("Polski", "pl")));
+    s.execute("prefs.set", json!({"key": "general.language", "value": "pl"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("pl"));
+    let mut pl = Session { config: Some(store.clone()), ..Default::default() };
+    pl.load_settings();
+    assert_eq!(pl.prefs.general.language, "pl");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"pl"}}"#).general.language, "pl");
     // Georgian too.
     assert!(crate::prefs::LANGUAGES.contains(&("ქართული", "ka")));
     s.execute("prefs.set", json!({"key": "general.language", "value": "ka"})).unwrap();
@@ -1079,6 +1180,23 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     assert_eq!(Prefs::from_json(r#"{"general":{"undoLevels":17}}"#).general.language, "system");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"unknown"}}"#).general.language, "system");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"en"}}"#).general.language, "en", "a chosen language stays");
+}
+
+/// Swedish is stored as `sv` rather than a locale tag, and persists like every other catalog.
+#[test]
+fn swedish_interface_language_is_validated_and_persisted() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(crate::prefs::LANGUAGES.contains(&("Svenska", "sv")));
+    for value in ["sv-SE", "sv_SE", "SV"] {
+        assert!(s.execute("prefs.set", json!({"key": "general.language", "value": value})).is_err(), "{value}");
+    }
+    s.execute("prefs.set", json!({"key": "general.language", "value": "sv"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("sv"));
+    let mut sv = Session { config: Some(store), ..Default::default() };
+    sv.load_settings();
+    assert_eq!(sv.prefs.general.language, "sv");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"sv"}}"#).general.language, "sv");
 }
 
 #[test]

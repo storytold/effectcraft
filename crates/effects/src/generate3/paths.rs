@@ -1,5 +1,8 @@
 use super::raster::{Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_segs, scan_runs, stroke_outline, trim_poly};
-use super::*;
+use super::{
+    Buf, EffectCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, Params, Plane, gauss_plane, hash1,
+    layer_or_self, luminance, poly_length, smoothstep, unpremul,
+};
 
 /// How painted coverage meets the layer: 0 On Original Image, 1 On Transparent, 2 Reveal
 /// Original Image.
@@ -384,6 +387,15 @@ pub(super) fn vegas(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Sub-samples per Vegas segment: at least 12 (opacity ramp), more for long segments so each straight piece stays
+/// short compared with the stroke width and the segment follows rounded corners smoothly. Always even.
+pub(super) fn vegas_substeps(each: f64, width: f64) -> usize {
+    let step = width.max(2.0);
+    let n = ((each / step).ceil().max(12.0) as usize).min(512);
+    // Even, so the segment's midpoint (0.5) is always one of the samples.
+    n + (n & 1)
+}
+
 fn vegas_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let pr = ctx.params;
     let (w, h) = (b.img.width as usize, b.img.height as usize);
@@ -456,7 +468,7 @@ fn vegas_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
             let base = if bunched { (i as f64 + (hash1(ci as u32, i as u32 + 7, seed) as f64 - 0.5) * 0.8) / nseg as f64 } else { i as f64 / nseg as f64 };
             let s0 = (base + phase).rem_euclid(1.0) * len;
             // Sub-sample the segment so opacity can ramp along it.
-            let sub = 12usize;
+            let sub = vegas_substeps(each, width);
             let mut prev: Option<[f64; 2]> = None;
             for k in 0..=sub {
                 let f = k as f64 / sub as f64;

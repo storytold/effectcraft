@@ -222,7 +222,16 @@ fn position_now(s: &Session, layer: u64) -> [f64; 2] {
     let cid = s.active_comp_id().unwrap();
     let comp = s.project.comp(cid).unwrap();
     let l = comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap();
-    let ctx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_engine::render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let v = ctx.value(l, l.props.prop("transform/position").unwrap()).components();
     [v[0], v[1]]
 }

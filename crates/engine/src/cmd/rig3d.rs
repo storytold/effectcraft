@@ -48,7 +48,16 @@ impl Env {
         Env { time: s.time_of(cid), expr: s.expr.clone(), footage: s.footage.clone() }
     }
     fn ctx<'a>(&'a self, proj: &'a Project, cid: ItemId, comp: &'a Comp) -> EvalCtx<'a> {
-        EvalCtx { project: proj, comp_id: cid, comp, time: self.time, expr: self.expr.as_deref(), footage: Some(self.footage.as_ref()) }
+        EvalCtx {
+            project: proj,
+            comp_id: cid,
+            comp,
+            time: self.time,
+            expr: self.expr.as_deref(),
+            footage: Some(self.footage.as_ref()),
+            property_overrides: &[],
+            media_overrides: &[],
+        }
     }
 }
 
@@ -268,7 +277,7 @@ fn stereo_rig(s: &mut Session, p: &Value) -> Result<Value> {
             set_expr(&mut cam, "cameraOptions/zoom", ze);
             cam.auto_orient = AutoOrient::TowardsPointOfInterest;
             let comp = proj.comp_mut(eid).ok_or(EngineError::NoComp)?;
-            comp.layers = vec![cam, nest];
+            comp.layers = vec![cam, nest].into();
             eye_comps.push(eid);
         }
         // The output comp: both eyes through 3D Glasses.
@@ -291,7 +300,7 @@ fn stereo_rig(s: &mut Session, p: &Value) -> Result<Value> {
             fxg.children.push(g.into());
         }
         let (lid, rid) = (left.id, right.id);
-        proj.comp_mut(oid).ok_or(EngineError::NoComp)?.layers = vec![left, right];
+        proj.comp_mut(oid).ok_or(EngineError::NoComp)?.layers = vec![left, right].into();
         st.project_selection = vec![oid];
         Ok(json!({
             "controls": ctl_id.0,

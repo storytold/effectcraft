@@ -76,7 +76,7 @@ fn body(app: &mut EffectcraftApp, ui: &mut egui::Ui) -> (Actions, Actions) {
     // ---- Primary + Solo.
     ui.horizontal(|ui| {
         ui.label(RichText::new(tr("Primary:")).color(t.text_dim));
-        let r = egui::ComboBox::from_id_salt("eg-primary").selected_text(&comp_name).width(150.0).show_ui(ui, |ui| {
+        let r = craft_ui::ComboBox::from_id_salt("eg-primary").selected_text(&comp_name).width(150.0).show_ui(ui, |ui| {
             for (id, _) in project.comps() {
                 let name = project.item(*id).map(|i| i.name.clone()).unwrap_or_default();
                 if ui.selectable_label(*id == cid, name).clicked() {
@@ -362,7 +362,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
         }
         ControlType::Checkbox => {
             let mut on = v.as_bool();
-            let r = ui.checkbox(&mut on, "");
+            let r = crate::widgets::labelled_checkbox(ui, &mut on, "");
             if r.changed() {
                 out = Some(json!(on));
             }
@@ -374,7 +374,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
                 _ => vec![],
             };
             let cur = v.as_enum() as usize;
-            let r = egui::ComboBox::from_id_salt(("eg-dd", auto)).selected_text(opts.get(cur).cloned().unwrap_or_default()).show_ui(ui, |ui| {
+            let r = craft_ui::ComboBox::from_id_salt(("eg-dd", auto)).selected_text(opts.get(cur).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                 for (i, o) in opts.iter().enumerate() {
                     if ui.selectable_label(i == cur, o).clicked() {
                         out = Some(json!(i));
@@ -437,7 +437,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
             let fams = effectcraft_engine::text::fonts::families();
             let mut d = (**doc).clone();
             let mut changed = false;
-            let r1 = egui::ComboBox::from_id_salt(("eg-font", auto)).selected_text(&d.font).width(110.0).show_ui(ui, |ui| {
+            let r1 = craft_ui::ComboBox::from_id_salt(("eg-font", auto)).selected_text(&d.font).width(110.0).show_ui(ui, |ui| {
                 for (f, _) in &fams {
                     if ui.selectable_label(*f == d.font, f).clicked() {
                         d.font = f.clone();
@@ -446,7 +446,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
                 }
             });
             let styles: Vec<String> = fams.iter().find(|(f, _)| *f == d.font).map(|(_, st)| st.clone()).unwrap_or_default();
-            let r2 = egui::ComboBox::from_id_salt(("eg-style", auto)).selected_text(&d.style).width(70.0).show_ui(ui, |ui| {
+            let r2 = craft_ui::ComboBox::from_id_salt(("eg-style", auto)).selected_text(&d.style).width(70.0).show_ui(ui, |ui| {
                 for st in &styles {
                     if ui.selectable_label(*st == d.style, st).clicked() {
                         d.style = st.clone();
@@ -532,7 +532,7 @@ fn instance(app: &mut EffectcraftApp, ui: &mut egui::Ui, actions: &mut Actions) 
                         .filter(|i| matches!(&i.kind, ItemKind::Footage(f) if f.has_video))
                         .map(|i| (i.id, i.name.clone()))
                         .collect();
-                    let r = egui::ComboBox::from_id_salt(("eg-media", layer.id.0, c.id)).selected_text(cur_name).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt(("eg-media", layer.id.0, c.id)).selected_text(cur_name).show_ui(ui, |ui| {
                         for (id, name) in &items {
                             if ui.selectable_label(*id == cur, name).clicked() {
                                 actions.push(("essential.set".into(), json!({"layer": layer.id.0, "control": c.id, "item": id.0})));

@@ -64,6 +64,12 @@ fn comp_renderer(s: &mut Session, p: &Value) -> Result<Value> {
     if r == Renderer::Classic3D && s.project.comp(cid).is_some_and(|c| c.layers.iter().any(|l| l.source.is_model())) {
         s.toast("Classic 3D doesn't draw 3D model layers: they show with the Advanced 3D renderer");
     }
+    if r == Renderer::Classic3D {
+        let env = |l: &Layer| matches!(l.source, LayerSource::Light { kind: effectcraft_project::LightKind::Environment });
+        if s.project.comp(cid).is_some_and(|c| c.layers.iter().any(env)) {
+            s.toast("Classic 3D doesn't light Environment light layers: they light with the Advanced 3D renderer");
+        }
+    }
     Ok(json!({"renderer": renderer_id(r)}))
 }
 
@@ -77,7 +83,7 @@ fn renderer_id(r: Renderer) -> &'static str {
 /// Only the Advanced 3D renderer draws model and primitive layers, so adding one switches a
 /// Classic 3D comp to it, like After Effects (inside the adding edit: one undo step). Whether
 /// the renderer changed.
-fn use_advanced_3d(proj: &mut effectcraft_project::Project, cid: ItemId) -> Result<bool> {
+pub(crate) fn use_advanced_3d(proj: &mut effectcraft_project::Project, cid: ItemId) -> Result<bool> {
     let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
     let switched = c.renderer != Renderer::Advanced3D;
     c.renderer = Renderer::Advanced3D;
@@ -86,10 +92,10 @@ fn use_advanced_3d(proj: &mut effectcraft_project::Project, cid: ItemId) -> Resu
 }
 
 /// Tell the user when [`use_advanced_3d`] changed the comp's renderer.
-fn report_switch(s: &mut Session, cid: ItemId, switched: bool) {
+pub(crate) fn report_switch(s: &mut Session, cid: ItemId, switched: bool, why: &str) {
     if switched {
         let name = s.project.item(cid).map_or("the composition", |i| i.name.as_str()).to_string();
-        s.toast(format!("\"{name}\" now uses the Advanced 3D renderer, which draws 3D models"));
+        s.toast(format!("\"{name}\" now uses the Advanced 3D renderer, {why}"));
     }
 }
 
@@ -156,7 +162,7 @@ pub(crate) fn new_model(s: &mut Session, p: &Value) -> Result<Value> {
         let id = insert_layer_at(proj, st, cid, l, index)?;
         Ok((id, use_advanced_3d(proj, cid)?))
     })?;
-    report_switch(s, cid, switched);
+    report_switch(s, cid, switched, "which draws 3D models");
     Ok(json!({"layer": id.0, "item": item.0, "advanced3d": true}))
 }
 
@@ -165,9 +171,29 @@ fn kind_p(p: &Value, cmd: &str) -> Result<PrimitiveKind> {
     PrimitiveKind::parse(k).ok_or_else(|| bad(cmd, format!("kind: cube|sphere|plane|torus|cone|cylinder, not `{k}`")))
 }
 
-/// Parse Material Options parameters onto a layer at comp time `t`.
-fn apply_material(l: &mut Layer, p: &Value, t: Tick, cmd: &str) -> Result<usize> {
-    let mut n = 0;
+/// The Material Options parameters [`apply_material`] reads. Which ones a layer has depends on
+/// its kind (see [`material_mismatch`]).
+const MATERIAL_PARAMS: [&str; 14] = [
+    "castsShadows",
+    "acceptsShadows",
+    "acceptsLights",
+    "appearsInReflections",
+    "baseColor",
+    "metallic",
+    "roughness",
+    "emissive",
+    "lightTransmission",
+    "ambient",
+    "diffuse",
+    "specularIntensity",
+    "specularShininess",
+    "metal",
+];
+
+/// Parse Material Options parameters onto a layer at comp time `t`. The parameters the layer
+/// had a property for.
+fn apply_material(l: &mut Layer, p: &Value, t: Tick, cmd: &str) -> Result<Vec<&'static str>> {
+    let mut set = Vec::new();
     let tri = |v: &Value| -> Option<u32> {
         match v {
             Value::Bool(b) => Some(*b as u32),
@@ -181,28 +207,55 @@ fn apply_material(l: &mut Layer, p: &Value, t: Tick, cmd: &str) -> Result<usize>
             _ => None,
         }
     };
+    let mut put = |l: &mut Layer, k: &'static str, v: KV| {
+        if set_at(l, &format!("materialOptions/{k}"), t, v) {
+            set.push(k);
+        }
+    };
     for k in ["castsShadows", "acceptsShadows"] {
         if let Some(v) = p.get(k) {
             let e = tri(v).ok_or_else(|| bad(cmd, format!("{k}: off|on|only")))?;
-            n += set_at(l, &format!("materialOptions/{k}"), t, KV::Enum(e)) as usize;
+            put(l, k, KV::Enum(e));
         }
     }
+    // A value of the wrong type is an error, not a parameter left out.
     for k in ["acceptsLights", "appearsInReflections"] {
-        if let Some(v) = b_p(p, k) {
-            n += set_at(l, &format!("materialOptions/{k}"), t, KV::Bool(v)) as usize;
+        if p.get(k).is_some() {
+            let v = b_p(p, k).ok_or_else(|| bad(cmd, format!("{k}: true|false")))?;
+            put(l, k, KV::Bool(v));
         }
     }
     for k in ["lightTransmission", "ambient", "diffuse", "specularIntensity", "specularShininess", "metal", "metallic", "roughness"] {
-        if let Some(v) = f_p(p, k) {
-            n += set_at(l, &format!("materialOptions/{k}"), t, KV::Scalar(v)) as usize;
+        if p.get(k).is_some() {
+            let v = f_p(p, k).ok_or_else(|| bad(cmd, format!("{k}: a number")))?;
+            put(l, k, KV::Scalar(v));
         }
     }
     for k in ["baseColor", "emissive"] {
-        if let Some(c) = color_p(p, k) {
-            n += set_at(l, &format!("materialOptions/{k}"), t, KV::Color([c[0] as f64, c[1] as f64, c[2] as f64, 1.0])) as usize;
+        if p.get(k).is_some() {
+            let c = color_p(p, k).ok_or_else(|| bad(cmd, format!("{k}: \"#rrggbb\" or [r, g, b]")))?;
+            put(l, k, KV::Color([c[0] as f64, c[1] as f64, c[2] as f64, 1.0]));
         }
     }
-    Ok(n)
+    Ok(set)
+}
+
+/// The error for Material Options parameters `missing` that none of the layers has: what the
+/// first layer has instead, and which layers the missing ones belong to.
+fn material_mismatch(l: Option<&Layer>, missing: &[&str]) -> EngineError {
+    let names = missing.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+    let Some(l) = l else { return bad("material.set", format!("no layer has {names}")) };
+    let Some(g) = l.props.sub("materialOptions") else { return bad("material.set", format!("`{}` has no Material Options, so it has no {names}", l.name)) };
+    let has: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
+    let why = if matches!(l.source, LayerSource::Model { .. }) { ": a 3D model layer keeps its model file's materials" } else { "" };
+    bad(
+        "material.set",
+        format!(
+            "`{}` has no {names}{why}. Its Material Options: {}. baseColor, metallic, roughness and emissive are for 3D primitive layers; lightTransmission, ambient, diffuse, specularIntensity, specularShininess and metal for footage, solid, text, shape and precomp layers",
+            l.name,
+            has.join(", ")
+        ),
+    )
 }
 
 fn new_primitive(s: &mut Session, p: &Value) -> Result<Value> {
@@ -226,7 +279,7 @@ fn new_primitive(s: &mut Session, p: &Value) -> Result<Value> {
         let id = insert_layer(proj, st, cid, l)?;
         Ok((id, use_advanced_3d(proj, cid)?))
     })?;
-    report_switch(s, cid, switched);
+    report_switch(s, cid, switched, "which draws 3D models");
     Ok(json!({"layer": id.0, "kind": kind.label(), "advanced3d": true}))
 }
 
@@ -267,19 +320,22 @@ fn material_set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let t = super::time_p(s, p, Some(&comp));
-    let n = s.edit("Material Options", None, |proj, _| {
-        let mut n = 0;
-        for id in &ids {
-            n += apply_material(layer_mut(proj, cid, *id)?, p, t, "material.set")?;
-        }
-        Ok(n)
-    })?;
-    if n == 0 {
-        return Err(bad(
-            "material.set",
-            "no Material Options property matched (castsShadows, acceptsShadows, acceptsLights, baseColor, metallic, roughness, …)",
-        ));
+    if !MATERIAL_PARAMS.iter().any(|k| p.get(*k).is_some()) {
+        return Err(bad("material.set", format!("no Material Options parameter given ({})", MATERIAL_PARAMS.join(", "))));
     }
+    // A parameter none of the layers has fails the whole command (the edit is dropped), so
+    // it is never skipped without a word.
+    let n = s.edit("Material Options", None, |proj, _| {
+        let mut set = Vec::new();
+        for id in &ids {
+            set.extend(apply_material(layer_mut(proj, cid, *id)?, p, t, "material.set")?);
+        }
+        let missing: Vec<&str> = MATERIAL_PARAMS.into_iter().filter(|k| p.get(*k).is_some() && !set.contains(k)).collect();
+        if !missing.is_empty() {
+            return Err(material_mismatch(ids.first().and_then(|id| proj.comp(cid)?.layer(*id)), &missing));
+        }
+        Ok(set.len())
+    })?;
     Ok(json!({"set": n}))
 }
 
@@ -405,7 +461,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Material Options",
             [],
             None,
-            "{layers?, castsShadows?: off|on|only, acceptsShadows?: off|on|only, acceptsLights?, appearsInReflections?, lightTransmission?, ambient?, diffuse?, specularIntensity?, specularShininess?, metal?, baseColor?, metallic?, roughness?, emissive?, time?}",
+            "{layers?, time?, castsShadows?: off|on|only, acceptsShadows?: off|on|only, acceptsLights?, appearsInReflections? (model and primitive layers), baseColor?, metallic?, roughness?, emissive? (primitive layers; a model layer keeps its file's materials), lightTransmission?, ambient?, diffuse?, specularIntensity?, specularShininess?, metal? (footage, solid, text, shape and precomp layers)}; a parameter none of the layers has is an error",
             has_layers,
             material_set
         ),

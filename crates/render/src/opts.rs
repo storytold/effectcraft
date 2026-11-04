@@ -1,5 +1,5 @@
 use super::accel::Backend;
-use super::*;
+use super::{Comp, EvalCtx, ItemId, Layer, Mat4, Tick, three_d};
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]

@@ -79,10 +79,13 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod inpaint;
+mod memcap;
 mod ops;
 mod particles;
 mod readback;
 mod walk;
+mod yuv;
 
 use std::sync::Arc;
 
@@ -95,6 +98,29 @@ use effectcraft_time::Tick;
 pub use wgpu;
 
 use crate::context::Enc;
+
+/// Why [`Gpu::within_memory`] discarded a frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    /// The GPU context is retired (device lost, a readback timed out, an uncaptured error).
+    Retired(String),
+    /// Out of video memory (or a driver reporting a failed allocation as an internal error),
+    /// with any validation errors it went on to cause.
+    Memory(String),
+    /// The device rejected a command with no allocation failure before it (an invalid texture
+    /// or parameters, #1319): a compositor bug, not memory pressure.
+    Validation(String),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::Retired(e) | FrameError::Memory(e) | FrameError::Validation(e) => f.write_str(e),
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
 
 /// The GPU compositor (cheap to clone; one device shared by all clones).
 #[derive(Clone)]
@@ -264,33 +290,42 @@ impl Gpu {
         }
     }
 
-    /// Run work in native thread-local out-of-memory and internal-error scopes. A failed
-    /// result is discarded and cached allocations are released; callers can retry with a fresh
-    /// CPU renderer. Some drivers report a failed allocation as an internal error rather than
-    /// out-of-memory (Adreno's `ERROR_INITIALIZATION_FAILED`, #591), so both count.
+    /// Run work in native thread-local out-of-memory, internal-error and validation scopes. A
+    /// failed result is discarded and the textures and buffers kept for reuse are released;
+    /// callers can retry with a fresh CPU renderer. Some drivers report a failed allocation as an
+    /// internal error rather than out-of-memory (Adreno's `ERROR_INITIALIZATION_FAILED`, #591),
+    /// so both count. A failed allocation leaves an invalid texture whose use is then a
+    /// validation error (`Texture::create_view`, #1319): caught here, it fails this frame only
+    /// instead of retiring the GPU compositor for the session as an uncaptured error.
     /// Browser callers use the host/owned-device failure bridge and bounded readbacks instead
     /// of blocking their event loop on an error-scope future.
-    pub fn within_memory<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
-        self.ctx.check_health()?;
+    pub fn within_memory<T>(&self, f: impl FnOnce() -> T) -> Result<T, FrameError> {
+        self.ctx.check_health().map_err(FrameError::Retired)?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let oom = self.ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             let internal = self.ctx.device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let validation = self.ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let out = f();
+            let validation = pollster::block_on(validation.pop());
             let internal = pollster::block_on(internal.pop());
             let oom = pollster::block_on(oom.pop());
-            match internal.or(oom) {
-                Some(e) => {
-                    self.ctx.clear_uploads();
-                    Err(e.to_string())
-                }
-                None => self.ctx.check_health().map(|()| out),
+            let memory = oom.is_some() || internal.is_some();
+            // The allocation failure first: a validation error is often its consequence.
+            let errors: Vec<String> = [oom, internal, validation].into_iter().flatten().map(|e| e.to_string()).collect();
+            if errors.is_empty() {
+                return self.ctx.check_health().map(|()| out).map_err(FrameError::Retired);
             }
+            // Its textures go back to the pool when dropped: drop them before emptying it.
+            drop(out);
+            self.ctx.discard_kept();
+            let errors = errors.join("; then: ");
+            Err(if memory { FrameError::Memory(errors) } else { FrameError::Validation(errors) })
         }
         #[cfg(target_arch = "wasm32")]
         {
             let out = f();
-            self.ctx.check_health().map(|()| out)
+            self.ctx.check_health().map(|()| out).map_err(FrameError::Retired)
         }
     }
 
@@ -339,13 +374,32 @@ impl Accelerator for Gpu {
         img
     }
 
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+        self.ctx.check_health().ok()?;
+        if !self.ctx.can_readback() || self.ctx.deferred.is_some() {
+            return None;
+        }
+        // Sizes the kernel can't take fall back before any GPU work, not after a render.
+        let (w, h) = walk::frame_size(r, comp, t)?;
+        if !yuv::supported(w, h) || !yuv::fits_limits(w, h, &self.ctx.device.limits()) {
+            return None;
+        }
+        let yp = self.ctx.yuv_pipe()?;
+        let mut e = Enc::new(&self.ctx);
+        let img = walk::render(&mut e, r, comp, t)?;
+        let planes = yuv::convert(&mut e, yp, &img, bg)?;
+        // A device fault seen while the frame recorded makes the planes untrustworthy.
+        self.ctx.check_health().ok()?;
+        Some(planes)
+    }
+
     fn supports_effect(&self, id: &str) -> bool {
         self.ctx.check_health().is_ok() && self.ctx.can_readback() && effects::supports(id)
     }
 
     fn effects(&self, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<Buf> {
         self.ctx.check_health().ok()?;
-        effects::run_chain(&mut Enc::new(&self.ctx), chain, buf, levels)
+        effects::run_chain(&mut Enc::lent(&self.ctx), chain, buf, levels)
     }
 
     fn raster_3d(&self, scene: &effectcraft_render::three_d::adv::Scene) -> Option<effectcraft_render::three_d::adv::Target> {
@@ -363,14 +417,39 @@ impl Accelerator for Gpu {
         self.ctx.can_readback().then_some(self as &dyn effectcraft_effects::psim::ParticleSim)
     }
 
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        self.ctx.check_health().ok()?;
+        // Readback is synchronous-only, and a kernel that failed to build would make every stage
+        // fall back to the CPU *after* paying the upload and a failed dispatch (and the fill
+        // would still report the GPU path). Neither is a backend at all.
+        if !self.ctx.can_wait() || !crate::inpaint::KERNELS.iter().all(|e| self.ctx.has_kernel(e)) {
+            return None;
+        }
+        Some(self as &dyn effectcraft_raster::inpaint::FillBackend)
+    }
+
     fn auto_pick(&self) -> Option<&effectcraft_render::AutoPick> {
         Some(&self.auto)
+    }
+
+    fn render_end(&self) {
+        let (hits, misses) = self.ctx.pool_stats();
+        let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);
+        log::debug!(
+            target: "effectcraft_gpu",
+            "gpu pool: {hits} working textures reused, {misses} allocated ({pct}% reuse) so far"
+        );
+        self.ctx.trim_pool();
     }
 
     fn frame_begin(&self) {
         if let Some(d) = self.ctx.deferred() {
             d.frame_begin();
         }
+    }
+
+    fn frame_end(&self) {
+        self.ctx.pool_frame_end();
     }
 
     fn pass_begin(&self) {

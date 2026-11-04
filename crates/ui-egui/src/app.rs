@@ -15,10 +15,18 @@ mod screenshot;
 mod viewer_frames;
 mod window;
 
+pub use gpu::{GPU_PREPARING, GpuBuild};
 #[cfg(test)]
 pub(crate) use screenshot::{MAX_PENDING_SHOTS, SCREENSHOT_SETTLE_PASSES, SCREENSHOT_SETTLE_S, SCREENSHOT_TIMEOUT_S};
 
 impl EffectcraftApp {
+    /// The window title as of the last tick (`EffectCraft - <project>`, ` *` while modified). The
+    /// app sends it as `ViewportCommand::Title`, which eframe on the web ignores: that host writes
+    /// it to `document.title`.
+    pub fn window_title(&self) -> &str {
+        &self.window_title
+    }
+
     /// Build the app around `session`.
     /// Loads and applies the workspaces saved in the session's config directory (a failed load is reported in
     /// `ui.status`), initializes the default UI, playback and render state, and registers the frontend's commands as
@@ -69,13 +77,18 @@ impl EffectcraftApp {
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,
             viewer_shown: None,
+            crypto_probe_busy: Default::default(),
             viewer_image: None,
             viewer_readback: Default::default(),
             wgpu: None,
             gpu: None,
             gpu_checked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_build: None,
             gpu_failures: None,
             gpu_failure_applied: None,
+            footage_watcher: None,
+            footage_watch_key: None,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),
@@ -109,7 +122,7 @@ impl EffectcraftApp {
     fn with_ui_commands(mut self) -> Self {
         let cmds = menus::UI_COMMANDS
             .iter()
-            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string) })
+            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string), scope: None })
             .collect();
         self.session.set_ui_commands(cmds);
         self
@@ -150,13 +163,15 @@ impl eframe::App for EffectcraftApp {
         }
     }
 
-    /// The logic-only tick: run `tick` and close the IME pass with `finish_ime_logic`. It does not read pass-time
+    /// The logic-only tick: run `tick`, close the IME pass with `finish_ime_logic` and, last, hand a close to the
+    /// platform quit (`panels::unsaved::quit_on_close`). It does not read pass-time
     /// input state (events, pointer and time are stale here), only the viewport information eframe refreshed.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
         // time at the previous full pass's values (only the viewport information is refreshed).
         self.tick(ctx, frame);
         self.finish_ime_logic(ctx);
+        crate::panels::unsaved::quit_on_close(ctx);
     }
 
     /// Draw one UI pass through `draw`.

@@ -35,7 +35,7 @@ fn disk_cache_settings_persistence_and_invalidation() {
     let mut s = session(&dir);
     let st = s.execute_checked("cache.diskStats", json!({})).unwrap();
     assert_eq!(st["enabled"], json!(true));
-    assert_eq!(st["maxBytes"], json!(100u64 << 30));
+    assert_eq!(st["maxBytes"], json!(20u64 << 30));
     let cid = project(&mut s);
     let t = s.time();
     let first = s.render(cid, t, RenderOpts::default());
@@ -135,4 +135,63 @@ fn footage_changes_change_the_salt() {
     let k3 = set_proxy(&mut s, true);
     assert_ne!(k3, k2);
     assert_ne!(set_proxy(&mut s, false), k3);
+}
+
+/// Marker edits keep the disk key (the sound of a playing preview must not wait for frames to
+/// render again, #1083); an expression that reads markers makes them count.
+#[test]
+fn markers_keep_the_content_key_unless_an_expression_reads_them() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "M", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let l = s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, cid);
+    let k0 = key(&s);
+    s.execute("comp.addMarker", json!({"time": 0.5, "comment": "beat"})).unwrap();
+    s.execute("markers.set", json!({"layer": l, "new": true, "time": 0.25})).unwrap();
+    assert_eq!(key(&s), k0, "markers");
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": "thisComp.marker.numKeys"})).unwrap();
+    let k1 = key(&s);
+    assert_ne!(k1, k0);
+    s.execute("comp.addMarker", json!({"time": 1.0})).unwrap();
+    assert_ne!(key(&s), k1, "a marker read by an expression");
+}
+
+/// A comp marker alone (no layer marker beside it) keeps the key too.
+#[test]
+fn a_lone_comp_marker_keeps_the_content_key() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "M", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    let key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, cid);
+    let k0 = key(&s);
+    s.execute("comp.addMarker", json!({"time": 0.5, "comment": "beat"})).unwrap();
+    assert_eq!(key(&s), k0);
+}
+
+/// A protected marker with a duration retimes a stretched precomp layer (Responsive Design), so
+/// changing it changes the key of the comp that nests it; a plain marker beside it does not.
+#[test]
+fn protected_markers_with_a_duration_change_the_content_key() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "frameRate": 30, "duration": 4})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "frameRate": 30, "duration": 10})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    let l = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    s.execute("layer.timeStretch", json!({"percent": 200})).unwrap();
+    let key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, outer);
+    let k0 = key(&s);
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 2.0, "comment": "beat"})).unwrap();
+    assert_eq!(key(&s), k0, "a plain marker");
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 1.0})).unwrap();
+    let index = s.project.comp(inner).unwrap().markers.iter().position(|m| m.time.seconds() == 1.0).unwrap();
+    s.execute("markers.set", json!({"comp": inner.0, "index": index, "duration": 1.0, "protected": true})).unwrap();
+    let k1 = key(&s);
+    assert_ne!(k1, k0, "a protected marker with a duration");
+    s.execute("markers.set", json!({"comp": inner.0, "index": index, "duration": 2.0})).unwrap();
+    assert_ne!(key(&s), k1, "its duration");
 }

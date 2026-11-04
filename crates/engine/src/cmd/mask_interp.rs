@@ -289,6 +289,7 @@ fn extract_face(s: &mut Session, p: &Value) -> Result<Value> {
         clip.push(crate::KeyClip { layer: lid, path, keys });
     }
     s.state.key_clipboard = clip;
+    s.state.keyframe_text = None;
     s.state.clip_is_keys = true;
     // The same data as text (tab-separated, one row per frame) for other applications.
     let mut text = String::from("EffectCraft Face Measurements\n\nFrame\tTime");
@@ -437,20 +438,22 @@ fn interpolate(s: &mut Session, p: &Value) -> Result<Value> {
     // The layer: given, else the layer of selected Mask Path keys, else the selection.
     let cid = super::comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let selected = super::prop::editable_keys(comp, &s.state.selected_keys);
     let lid = match p.get("layer") {
         Some(v) => super::resolve_layer(comp, v).ok_or_else(|| bad(CMD, format!("no layer {v}")))?,
-        None => match s.state.selected_keys.iter().find(|k| comp.layer(k.layer).is_some_and(|l| l.masks().is_some_and(|m| m.find(k.prop).is_some()))) {
+        None => match selected.iter().find(|k| comp.layer(k.layer).is_some_and(|l| l.masks().is_some_and(|m| m.find(k.prop).is_some()))) {
             Some(k) => k.layer,
             None => layer_p(s, p, CMD)?.1,
         },
     };
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    if !super::prop::key_layer_editable(comp, lid) {
+        return Err(bad(CMD, "the layer is locked"));
+    }
     let masks = layer.masks().ok_or_else(|| bad(CMD, "the layer has no masks"))?;
     let uid = match p.get("mask") {
         Some(_) => mask_uid(s, layer, p),
-        None => s
-            .state
-            .selected_keys
+        None => selected
             .iter()
             .filter(|k| k.layer == lid)
             .find_map(|k| masks.groups().find(|g| g.get("path").is_some_and(|pr| pr.uid == k.prop)).map(|g| g.uid))
@@ -465,7 +468,7 @@ fn interpolate(s: &mut Session, p: &Value) -> Result<Value> {
             let ts: Vec<Tick> = a.iter().filter_map(Value::as_f64).map(|t| layer.layer_time(comp.frame_rate.snap_nearest(Tick::from_seconds_f64(t)))).collect();
             ts.into_iter().filter_map(|t| path_prop.keys.iter().find(|k| (k.time.0 - t.0).abs() <= comp.frame_duration().0 / 2).map(|k| k.time)).collect()
         }
-        None => s.state.selected_keys.iter().filter(|k| k.layer == lid && k.prop == path_prop.uid).map(|k| k.time).collect(),
+        None => selected.iter().filter(|k| k.layer == lid && k.prop == path_prop.uid).map(|k| k.time).collect(),
     };
     times.sort();
     times.dedup();

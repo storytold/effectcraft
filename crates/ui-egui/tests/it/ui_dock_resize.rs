@@ -1,5 +1,6 @@
 //! Shared pane resizing in the full application, including application shortcut ownership.
 
+use crate::gpu_test::RenderSerial;
 use craft_ui::docking::{Divider, DockArea, Hit};
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -16,7 +17,7 @@ fn snapshots(h: &mut Harness<'_, EffectcraftApp>, directory: Option<&std::path::
         let ctx = h.ctx.clone();
         h.state_mut().set_theme(&ctx, theme);
         h.run_steps(3);
-        h.render().unwrap().save(directory.join(format!("effectcraft-{phase}-{name}.png"))).unwrap();
+        h.render_serialized().unwrap().save(directory.join(format!("effectcraft-{phase}-{name}.png"))).unwrap();
     }
     let ctx = h.ctx.clone();
     h.state_mut().set_theme(&ctx, ThemeKind::Dark);
@@ -32,6 +33,7 @@ fn first_size(h: &Harness<'_, EffectcraftApp>) -> f32 {
 
 #[test]
 fn focused_dock_resize_owns_arrows_and_keeps_pointer_dragging() {
+    let _device = crate::gpu_test::lock();
     let mut session = Session::default();
     session.execute("comp.new", json!({"name": "Split test", "width": 160, "height": 90, "duration": 1})).unwrap();
     session.execute("layer.newSolid", json!({"name": "Selected", "color": [1.0, 0.0, 0.0, 1.0]})).unwrap();

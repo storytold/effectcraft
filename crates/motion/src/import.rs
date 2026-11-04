@@ -513,7 +513,7 @@ fn build_group(cx: &mut Cx, project: &mut Project, n: Node, depth: usize) -> Com
     }
     let mut all = filter_layers(cx, project, &comp, n);
     all.extend(layers);
-    comp.layers = all;
+    comp.layers = all.into();
     comp
 }
 

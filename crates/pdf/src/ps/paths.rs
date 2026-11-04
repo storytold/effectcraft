@@ -1,5 +1,5 @@
 use super::value::{Flow, V};
-use super::*;
+use super::{Affine, BezPath, FillRule, Interp, MAX_PATH, Paint, PathEl, Point, Stroke};
 
 /// The angle from `a` counterclockwise to `b` (degrees, 0 to 360), worked out from what is left
 /// of each after whole turns.

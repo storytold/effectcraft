@@ -66,6 +66,29 @@ fn corrupt_future_or_unknown_workspace_keeps_defaults_and_original_file() {
 const V1: &str = include_str!("../../tests/fixtures/workspaces-v1.json");
 
 #[test]
+fn explicit_save_reports_pending_migration_and_can_be_retried() {
+    let config = MemoryConfig::default();
+    config.write(FILE, V1).unwrap();
+    let mut ui = UiState::default();
+    let mut store = WorkspaceStore::load(Some(&config), &mut ui);
+    assert!(!ui.native_outer.is_empty());
+    assert!(!store.save(Some(&config), &ui).unwrap(), "background saves defer quietly");
+    let error = store.save_now(Some(&config), &ui).unwrap_err();
+    assert!(error.contains("positions") && error.contains("try saving again"), "{error}");
+    assert_eq!(config.read(FILE).as_deref(), Some(V1));
+    assert_eq!(config.read(BACKUP), None);
+    assert!(store.has_changes(&ui));
+
+    crate::dock_ui::native_outer_to_content(&mut ui, None, None, 3.0);
+    store.save_now(Some(&config), &ui).unwrap();
+    assert_eq!(config.read(BACKUP).as_deref(), Some(V1));
+    let mut restored = UiState::default();
+    let loaded = WorkspaceStore::load(Some(&config), &mut restored);
+    assert_eq!(loaded.error, None);
+    assert_eq!(Snapshot::capture(&restored), Snapshot::capture(&ui));
+}
+
+#[test]
 fn version_one_file_loads_with_every_panel_in_place() {
     let config = MemoryConfig::default();
     config.write(FILE, V1).unwrap();

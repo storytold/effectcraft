@@ -180,16 +180,17 @@ fn rgba(c: [f32; 3]) -> [f64; 4] {
     [c[0] as f64, c[1] as f64, c[2] as f64, 1.0]
 }
 
-/// The Rounded Rectangle tool's corner roundness for `size`.
-fn roundness(size: [f64; 2]) -> f64 {
-    size[0].min(size[1]) * 0.15
+/// The Rounded Rectangle tool's corner roundness: a fixed default, as in After Effects
+/// (it does not grow with the drawn size).
+fn roundness() -> f64 {
+    20.0
 }
 
 /// The Polygon and Star tools' Polystar for `size`: (star, points, outer radius, inner radius).
 fn polystar_of(kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
     match kind {
         "star" => Some((true, 5.0, size[0] / 2.0, size[0] / 4.0)),
-        "polygon" => Some((false, 6.0, size[0] / 2.0, 0.0)),
+        "polygon" => Some((false, 5.0, size[0] / 2.0, 0.0)),
         _ => None,
     }
 }
@@ -199,7 +200,7 @@ fn polystar_of(kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
 pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &ShapeTool) -> Option<PropGroup> {
     let (path, gname) = match kind {
         "rect" | "rectangle" => (build::shape_rect(ids, size, [0.0, 0.0], 0.0), "Rectangle 1"),
-        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], roundness(size)), "Rectangle 1"),
+        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], roundness()), "Rectangle 1"),
         "ellipse" => (build::shape_ellipse(ids, size, [0.0, 0.0]), "Ellipse 1"),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
@@ -218,10 +219,19 @@ pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2]) -> Option<ShapePa
     let bez = match kind {
         "rect" | "rectangle" => return Some(ShapePath::rect(centre, size[0], size[1])),
         "ellipse" => return Some(ShapePath::ellipse(centre, size[0], size[1])),
-        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness(size)),
+        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness()),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
-            effectcraft_path::polystar(star, points, centre, 0.0, inner, outer, 0.0, 0.0)
+            effectcraft_path::polystar(effectcraft_path::Polystar {
+                star,
+                points,
+                pos: centre,
+                rotation: 0.0,
+                inner,
+                outer,
+                inner_round: 0.0,
+                outer_round: 0.0,
+            })
         }
     };
     effectcraft_path::from_kurbo(&bez).into_iter().next()
