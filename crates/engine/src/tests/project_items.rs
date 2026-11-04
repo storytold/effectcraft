@@ -211,3 +211,45 @@ fn used_in_counts_layers_across_comps() {
     assert_eq!(r["comps"], json!([]));
     assert!(s.execute("project.usedIn", json!({"item": "Nope"})).is_err());
 }
+
+#[test]
+fn a_new_layer_takes_the_interfaces_word_for_its_type() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "A", "width": 64, "height": 64, "frameRate": 24, "duration": 1})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    let top = |s: &Session| s.project.comp(comp).unwrap().layers[0].name.clone();
+
+    // The interface passes the noun it shows; the engine numbers it, as the reference app does.
+    s.execute("layer.newSolid", json!({"base": "平面"})).unwrap();
+    assert_eq!(top(&s), "平面 1");
+    s.execute("layer.newSolid", json!({"base": "平面"})).unwrap();
+    assert_eq!(top(&s), "平面 2");
+    s.execute("layer.newNull", json!({"base": "ヌル"})).unwrap();
+    assert_eq!(top(&s), "ヌル 1");
+    s.execute("layer.newAdjustment", json!({"base": "調整レイヤー"})).unwrap();
+    assert_eq!(top(&s), "調整レイヤー 1");
+    s.execute("layer.newCamera", json!({"base": "カメラ"})).unwrap();
+    assert_eq!(top(&s), "カメラ 1");
+    s.execute("layer.newLight", json!({"base": "ライト", "kind": "Spot"})).unwrap();
+    assert_eq!(top(&s), "ライト 1");
+
+    // Headless callers keep the English default, and an explicit name still wins.
+    s.execute("layer.newSolid", json!({})).unwrap();
+    assert_eq!(top(&s), "Solid 1");
+    s.execute("layer.newSolid", json!({"name": "Plate", "base": "平面"})).unwrap();
+    assert_eq!(top(&s), "Plate");
+
+    // The same noun reaches a new composition.
+    s.execute("comp.new", json!({"base": "コンポ", "open": false})).unwrap();
+    let names: Vec<&str> = s.project.items.values().map(|i| i.name.as_str()).collect();
+    assert!(names.contains(&"コンポ 1"), "{names:?}");
+
+    // Unnamed English creations number, and an empty `base` falls back to English.
+    s.execute("comp.new", json!({"name": "B", "width": 64, "height": 64, "frameRate": 24, "duration": 1})).unwrap();
+    let b = s.active_comp_id().unwrap();
+    s.execute("layer.newNull", json!({})).unwrap();
+    s.execute("layer.newNull", json!({})).unwrap();
+    s.execute("layer.newNull", json!({"base": ""})).unwrap();
+    let names: Vec<String> = s.project.comp(b).unwrap().layers.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(names, ["Null 3", "Null 2", "Null 1"], "{names:?}");
+}

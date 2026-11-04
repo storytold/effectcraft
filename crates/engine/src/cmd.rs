@@ -265,6 +265,19 @@ pub(crate) fn proxy_set(s: &mut Session, item: ItemId, footage: effectcraft_proj
     proxy::set_proxy_footage(s, &[item], footage)
 }
 
+/// The name of a layer a command creates: `name` when given, else the interface's word for that
+/// layer type (`base`), numbered from 1 — `カメラ 1` — which is how the interface names it. The
+/// engine does not translate: the English default stays for the CLI and the control channel, and
+/// a language leaves `base` out until its catalog has a word for it.
+pub(crate) fn new_layer_name(comp: &Comp, p: &Value, english: &str) -> String {
+    // An empty `name` is still a name, as it was before this helper; only `base` falls back.
+    if let Some(name) = p.get("name").and_then(Value::as_str) {
+        return name.to_string();
+    }
+    let base = p.get("base").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(english);
+    comp.unique_layer_name(&format!("{base} 1"))
+}
+
 /// (id, name) of the text animation presets.
 pub fn text_preset_list() -> Vec<(String, String)> {
     text_anim::preset_names()

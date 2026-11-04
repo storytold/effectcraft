@@ -87,8 +87,7 @@ fn new_solid_like(s: &mut Session, p: &Value, adjustment: bool) -> Result<Value>
     let w = p.get("width").and_then(Value::as_u64).map(limits::size).unwrap_or(comp.width);
     let h = p.get("height").and_then(Value::as_u64).map(limits::size).unwrap_or(comp.height);
     let pixel_aspect = pixel_aspect_p(p)?.unwrap_or(comp.pixel_aspect);
-    let default_name = if adjustment { "Adjustment Layer 1".to_string() } else { "Solid 1".to_string() };
-    let name = str_p(p, "name").map(str::to_string).unwrap_or(default_name);
+    let name = crate::cmd::new_layer_name(&comp, p, if adjustment { "Adjustment Layer" } else { "Solid" });
     let id = s.edit(if adjustment { "New Adjustment Layer" } else { "New Solid" }, None, |proj, st| {
         let folder = solids_folder(proj);
         let sid = proj.add_item(&name, Label::Red, Some(folder), ItemKind::Solid(Solid { color, width: w, height: h, pixel_aspect }));
@@ -229,7 +228,7 @@ pub(super) fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         .get("position")
         .and_then(|v| v.as_array())
         .map(|a| [a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0)]);
-    let name = str_p(p, "name").unwrap_or("Shape Layer 1").to_string();
+    let name = crate::cmd::new_layer_name(&comp, p, "Shape Layer");
     let id = s.edit("New Shape Layer", None, |proj, st| {
         let lid = crate::cmd::shape_tool::new_shape_layer(proj, st, &comp, cid, Some(&name), pos)?;
         let mut next = proj.next_id;
@@ -243,10 +242,10 @@ pub(super) fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": id.0}))
 }
 
-fn new_simple(s: &mut Session, p: &Value, src: LayerSource, name: &str, label: &str) -> Result<Value> {
+fn new_simple(s: &mut Session, p: &Value, src: LayerSource, english: &str, label: &str) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
-    let name = str_p(p, "name").unwrap_or(name).to_string();
+    let name = crate::cmd::new_layer_name(&comp, p, english);
     let id = s.edit(label, None, |proj, st| {
         let l = build::layer(proj, &comp, &name, src, (comp.width, comp.height), None);
         insert_layer(proj, st, cid, l)
@@ -255,7 +254,7 @@ fn new_simple(s: &mut Session, p: &Value, src: LayerSource, name: &str, label: &
 }
 
 pub(super) fn new_null(s: &mut Session, p: &Value) -> Result<Value> {
-    new_simple(s, p, LayerSource::Null, "Null 1", "New Null Object")
+    new_simple(s, p, LayerSource::Null, "Null", "New Null Object")
 }
 
 /// Largest `in` / `out` (s) and `anchor` coordinate (px) a command accepts.
