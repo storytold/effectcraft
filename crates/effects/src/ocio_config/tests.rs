@@ -94,6 +94,24 @@ fn yaml_nesting_is_bounded() {
     assert!(Config::parse(&flow, Path::new(".")).is_err());
 }
 
+/// A closing bracket of the wrong kind ends the collection instead of being read forever, and a
+/// flow collection spread over many lines is assembled in linear time.
+#[test]
+fn yaml_malformed_flow_is_bounded() {
+    for text in ["a: {x: ]\nb: 1\n", "a: [x, }\nb: 1\n", "a: [{k: ], 1]\n", "a: {[}: ]}\n"] {
+        let _ = parse_yaml(text);
+    }
+    assert!(matches!(parse_yaml("a: {x: ]\n"), Yaml::Map(_)));
+    let mut many = String::from("a: [\n");
+    for _ in 0..200_000 {
+        many.push_str("  1,\n");
+    }
+    many.push_str("]\nb: 2\n");
+    let y = parse_yaml(&many);
+    assert_eq!(y.get("a").map(|a| a.seq().len()), Some(200_000));
+    assert_eq!(y.get("b").and_then(Yaml::str), Some("2"));
+}
+
 #[test]
 fn parses_spaces_roles_displays_and_converts() {
     let dir = temp_dir("basic");
