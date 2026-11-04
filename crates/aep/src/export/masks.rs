@@ -258,7 +258,7 @@ fn plan_mask(g: &PropGroup, size: (u32, u32), cp: &CompPlan, what: &str, col: &m
         _ => [0.0, 0.0],
     };
     let feather = match (finite(feather_value[0]), finite(feather_value[1])) {
-        (Some(x), Some(y)) if x >= 0.0 && y >= 0.0 => ([x, y] != [0.0, 0.0]).then_some([x, y]),
+        (Some(x), Some(y)) if (0.0..=MASK_LIMIT).contains(&x) && (0.0..=MASK_LIMIT).contains(&y) => ([x, y] != [0.0, 0.0]).then_some([x, y]),
         _ => {
             col.lose(LossCategory::InvalidValues, format!("{what}: feather {feather_value:?} is not valid, the default was written"));
             None
@@ -280,7 +280,8 @@ fn plan_mask(g: &PropGroup, size: (u32, u32), cp: &CompPlan, what: &str, col: &m
         }
     };
     let opacity = scalar("opacity", 100.0, 0.0, 100.0, col).map(|v| v / 100.0);
-    let expansion = scalar("expansion", 0.0, -LIMIT, LIMIT, col);
+    // The record holds -32 000 to 32 000, as for the feather (`tduM`, 091).
+    let expansion = scalar("expansion", 0.0, -MASK_LIMIT, MASK_LIMIT, col);
     let name = cut_name(&g.name, 255, what, col);
     Some(MaskPlan { name, mode: mode_id(mode), inverted, shape, path_keys, feather, feather_keys, opacity, expansion })
 }
@@ -310,7 +311,7 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
         };
         let value = match &k.value {
             Value::Vec2([x, y]) => match (finite(*x), finite(*y)) {
-                (Some(x), Some(y)) if x >= 0.0 && y >= 0.0 => vec![x, y],
+                (Some(x), Some(y)) if (0.0..=MASK_LIMIT).contains(&x) && (0.0..=MASK_LIMIT).contains(&y) => vec![x, y],
                 _ => {
                     col.lose(LossCategory::InvalidValues, format!("{what}: a feather key that is not valid was dropped"));
                     continue;

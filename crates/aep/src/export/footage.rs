@@ -173,6 +173,23 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         col.lose(LossCategory::FootageItems, what("one layer of a layered file is not exported"));
         return None;
     }
+    // Interpret Footage settings other than the defaults are not written (After Effects
+    // interprets the file itself).
+    let d = Footage::default();
+    let unwritten = [
+        ((f.pixel_aspect - d.pixel_aspect).abs() > 1e-9, "pixel aspect"),
+        (f.alpha != d.alpha || f.premul_color != d.premul_color, "alpha interpretation"),
+        (f.invert_alpha, "Invert Alpha"),
+        (f.loop_count != d.loop_count, "loop count"),
+        (f.color_profile.is_some(), "colour profile"),
+        (f.fields != d.fields, "field order"),
+        (f.linear_light != d.linear_light, "Interpret As Linear Light"),
+        (f.preserve_rgb != d.preserve_rgb, "Preserve RGB"),
+        (f.cineon != d.cineon, "Cineon settings"),
+    ];
+    for (_, setting) in unwritten.iter().filter(|(on, _)| *on) {
+        col.lose(LossCategory::FootageItems, what(&format!("the Interpret Footage {setting} is not written (the default is)")));
+    }
     let e = ext(&f.path);
     let kind = match (f.kind, e.as_str()) {
         (FootageKind::Still, "png") => FtKind::Png,
@@ -277,7 +294,12 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
                 _ => None,
             };
             let frames = (f.duration.seconds() * f64::from(fps)).round();
-            let frames = if frames.is_finite() && frames >= 1.0 && frames < f64::from(u32::MAX) { frames as u32 } else { 1 };
+            let frames = if frames.is_finite() && frames >= 1.0 && frames < f64::from(u32::MAX) {
+                frames as u32
+            } else {
+                col.lose(LossCategory::FootageItems, what("a duration that cannot be stored, written as 1 frame"));
+                1
+            };
             plan.seconds = f64::from(frames) / f64::from(fps.max(1));
             match native {
                 Some(n) => {
@@ -295,7 +317,12 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
             // The sample rate is the denominator (351: 48 000 / 48 000 for 1 s).
             let secs = f.duration.seconds();
             let samples = (secs * 48_000.0).round();
-            let samples = if samples.is_finite() && samples >= 1.0 && samples < f64::from(u32::MAX) { samples as u32 } else { 48_000 };
+            let samples = if samples.is_finite() && samples >= 1.0 && samples < f64::from(u32::MAX) {
+                samples as u32
+            } else {
+                col.lose(LossCategory::FootageItems, what("a duration that cannot be stored, written as 1 second"));
+                48_000
+            };
             plan.duration = (samples, 48_000);
             plan.seconds = f64::from(samples) / 48_000.0;
         }

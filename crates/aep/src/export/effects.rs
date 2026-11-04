@@ -516,7 +516,10 @@ fn static_str<'p>(g: &'p PropGroup, id: &str, here: &str, col: &mut Collector) -
     }
     match &p.value {
         Value::Str(s) => Some(s.as_str()),
-        _ => None,
+        _ => {
+            col.lose(LossCategory::InvalidValues, format!("{here}: '{}' is not text, the default is written", p.name));
+            None
+        }
     }
 }
 
@@ -535,14 +538,12 @@ fn plan_curves(g: &PropGroup, pdefs: &HashMap<u16, ParDef>, here: &str, col: &mu
             rounded |= (xs - xs.round()).abs() > 1e-3 || (ys - ys.round()).abs() > 1e-3;
             ints.push((xs.round() as u8, ys.round() as u8));
         }
+        // Points with the same input are merged as EffectCraft's own curve merges them (the
+        // first is kept), and fewer than two points are the identity there too.
         ints.sort_by_key(|p| p.0);
-        let before = ints.len();
         ints.dedup_by_key(|p| p.0);
         if clipped {
             col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points outside 0 to 1 are written as the nearest limit"));
-        }
-        if ints.len() != before && !rounded {
-            col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points with the same input are merged"));
         }
         if rounded {
             col.lose(LossCategory::Effects, format!("{here}: curve '{id}' points rounded to whole levels (After Effects keeps 0..255)"));
@@ -698,6 +699,18 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
     let expr = prop.expr.as_ref().filter(|e| !e.text.is_empty()).map(|e| (e.text.clone(), e.enabled));
     if expr.is_some() {
         col.exported.expressions = col.exported.expressions.saturating_add(1);
+        // The expression is written as it is; where the stored value is scaled (a popup counts
+        // from 1, a percent or factor parameter has other units) its result means something else
+        // in After Effects.
+        let other_units = match conv {
+            Conv::Popup { .. } => true,
+            Conv::Percent { valid_max } => (valid_max - 100.0).abs() > 1e-9,
+            Conv::Factor { factor, .. } => (factor - 1.0).abs() > 1e-9,
+            _ => false,
+        };
+        if other_units {
+            col.lose(LossCategory::Expressions, format!("{what}: the expression is written, but After Effects reads its result in other units"));
+        }
     }
     if prop.keys.is_empty() {
         let Some(s) = stored_reported(conv, kind, &prop.value, (size, &prop.ui, def), &what, col) else {

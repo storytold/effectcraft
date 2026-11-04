@@ -444,7 +444,9 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
         if en(g, "direction").is_some_and(|d| d != 0) {
             cx.col.lose(LossCategory::ShapeLayers, format!("{w}: the path direction is not written"));
         }
-        if en(g, "blend").is_some_and(|d| d != 0) || en(g, "composite").is_some_and(|d| d != 0) {
+        // A repeater writes its `composite` as Repeater Order.
+        let composite_lost = g.match_id != "repeater" && en(g, "composite").is_some_and(|d| d != 0);
+        if en(g, "blend").is_some_and(|d| d != 0) || composite_lost {
             cx.col.lose(LossCategory::ShapeLayers, format!("{w}: blend mode and composite order are not written"));
         }
         let mut r = Vec::new();

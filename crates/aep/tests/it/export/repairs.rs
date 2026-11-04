@@ -265,3 +265,84 @@ fn per_corner_roundness_is_reported() {
     first_layer(&mut p, c, |l| l.props.sub_mut("contents").expect("contents").children.push(group.into()));
     reported(&p, LossCategory::ShapeLayers, "per-corner roundness");
 }
+
+#[test]
+fn footage_interpretation_and_durations_that_are_not_written_are_reported() {
+    let still = Footage { path: "C:/x/a.png".into(), kind: FootageKind::Still, width: 64, height: 64, has_video: true, ..Footage::default() };
+    let with = |f: Footage| {
+        let (mut p, _, _) = simple();
+        p.add_item("a", Label::None, None, ItemKind::Footage(f));
+        p
+    };
+    lossless(&with(still.clone()));
+    reported(&with(Footage { alpha: effectcraft_project::AlphaMode::Premultiplied, ..still.clone() }), LossCategory::FootageItems, "alpha interpretation");
+    reported(&with(Footage { pixel_aspect: 2.0, ..still.clone() }), LossCategory::FootageItems, "pixel aspect");
+    reported(&with(Footage { loop_count: 3, ..still.clone() }), LossCategory::FootageItems, "loop count");
+    let clip = Footage { path: "C:/x/a.mp4".into(), kind: FootageKind::Video, frame_rate: FrameRate::new(25, 1), duration: secs(0.0), ..still };
+    reported(&with(clip), LossCategory::FootageItems, "written as 1 frame");
+}
+
+#[test]
+fn mask_values_beyond_the_record_limits_are_reported() {
+    let (mut p, c, _) = simple();
+    let mut next = p.next_id;
+    let mut g = build::mask(
+        &mut build::Ids(&mut next),
+        "Mask 1",
+        effectcraft_keyframe::ShapePath::rect([960.0, 540.0], 400.0, 200.0),
+        effectcraft_project::MaskMode::Add,
+        build::MASK_COLORS[0],
+    );
+    p.next_id = next;
+    set(&mut g, "feather", Value::Vec2([40_000.0, 10.0]));
+    let mut q = p.clone();
+    let h = g.clone();
+    first_layer(&mut q, c, |l| l.props.sub_mut("masks").expect("masks").children.push(h.into()));
+    reported(&q, LossCategory::InvalidValues, "feather");
+    set(&mut g, "feather", Value::Vec2([10.0, 10.0]));
+    set(&mut g, "expansion", Value::Scalar(-50_000.0));
+    first_layer(&mut p, c, |l| l.props.sub_mut("masks").expect("masks").children.push(g.into()));
+    reported(&p, LossCategory::InvalidValues, "Mask expansion");
+}
+
+#[test]
+fn camera_options_stretch_curves_and_expressions_that_change_are_reported() {
+    // A camera option that is not a number.
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 1920, 1080, FrameRate::new(25, 1), 5.0, None);
+    add_layer(&mut p, c, "Cam", LayerSource::Camera, (1920, 1080));
+    first_layer(&mut p, c, |l| {
+        if let Some(z) = l.props.prop_mut("cameraOptions/zoom") {
+            z.value = Value::Bool(true);
+        }
+    });
+    reported(&p, LossCategory::InvalidValues, "cameraOptions/zoom");
+    // A stretch that is not a number is reported, not taken as 100 %.
+    let (mut p, c, _) = simple();
+    first_layer(&mut p, c, |l| l.stretch = f64::NAN);
+    reported(&p, LossCategory::TimeStretch, "");
+    // A curve that is not text.
+    reported(&with_effect("ec.color.curves", |g| set(g, "rgb", Value::Scalar(1.0))), LossCategory::InvalidValues, "not text");
+    // An expression on a popup: After Effects counts from 1.
+    let p = with_effect("ec.blur.fastbox", |g| {
+        g.prop_mut("dimensions").expect("dimensions").expr = Some(effectcraft_project::Expression { text: "1".into(), enabled: true });
+    });
+    reported(&p, LossCategory::Expressions, "other units");
+}
+
+#[test]
+fn a_repeaters_order_is_written_not_reported() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 1920, 1080, FrameRate::new(25, 1), 2.0, None);
+    add_layer(&mut p, c, "S", LayerSource::Shape, (1920, 1080));
+    let mut next = p.next_id;
+    let mut ids = build::Ids(&mut next);
+    let rect = build::shape_rect(&mut ids, [100.0, 100.0], [0.0, 0.0], 0.0);
+    let fill = build::shape_fill(&mut ids, [0.0, 1.0, 0.0, 1.0]);
+    let mut rep = build::shape_repeater(&mut ids, 3.0, [120.0, 0.0]);
+    set(&mut rep, "composite", Value::Enum(1));
+    let group = build::shape_group(&mut ids, "Group 1", vec![rect, fill, rep]);
+    p.next_id = next;
+    first_layer(&mut p, c, |l| l.props.sub_mut("contents").expect("contents").children.push(group.into()));
+    lossless(&p);
+}

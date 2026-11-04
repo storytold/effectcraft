@@ -37,10 +37,16 @@ pub(crate) struct LightPlan {
     pub cone_feather: f64,
 }
 
-fn scalar(layer: &Layer, path: &str) -> Option<f64> {
+/// The finite scalar at `path`; a property there that is not one is reported (its default is
+/// written), an absent one is not.
+fn scalar(layer: &Layer, path: &str, what: &str, col: &mut Collector) -> Option<f64> {
     match layer.props.prop(path).map(|p| &p.value) {
         Some(Value::Scalar(v)) if v.is_finite() => Some(*v),
-        _ => None,
+        None => None,
+        Some(_) => {
+            col.lose(LossCategory::InvalidValues, format!("{what}: {path} is not a number, the default is written"));
+            None
+        }
     }
 }
 
@@ -82,11 +88,11 @@ pub(crate) fn plan_camera(layer: &Layer, comp_width: u32, what: &str, col: &mut 
     let dof = matches!(layer.props.prop("cameraOptions/dof").map(|p| &p.value), Some(Value::Bool(true)));
     CameraPlan {
         two_node: layer.auto_orient == effectcraft_project::AutoOrient::TowardsPointOfInterest,
-        zoom: scalar(layer, "cameraOptions/zoom").unwrap_or(default_zoom),
+        zoom: scalar(layer, "cameraOptions/zoom", what, col).unwrap_or(default_zoom),
         dof,
-        focus: scalar(layer, "cameraOptions/focusDistance").unwrap_or(default_zoom),
-        aperture: scalar(layer, "cameraOptions/aperture").unwrap_or(25.3 * f64::from(comp_width) / 1920.0),
-        blur: scalar(layer, "cameraOptions/blurLevel").unwrap_or(100.0),
+        focus: scalar(layer, "cameraOptions/focusDistance", what, col).unwrap_or(default_zoom),
+        aperture: scalar(layer, "cameraOptions/aperture", what, col).unwrap_or(25.3 * f64::from(comp_width) / 1920.0),
+        blur: scalar(layer, "cameraOptions/blurLevel", what, col).unwrap_or(100.0),
     }
 }
 
@@ -112,7 +118,7 @@ pub(crate) fn plan_light(layer: &Layer, kind: LightKind, what: &str, col: &mut C
     }
     let defaults = [("radius", 500.0), ("falloffDistance", 500.0), ("shadowDarkness", 100.0), ("shadowDiffusion", 0.0)];
     for (id, d) in defaults {
-        if scalar(layer, &format!("lightOptions/{id}")).is_some_and(|v| (v - d).abs() > 1e-9) {
+        if scalar(layer, &format!("lightOptions/{id}"), what, col).is_some_and(|v| (v - d).abs() > 1e-9) {
             col.lose(LossCategory::Lights, format!("{what}: the light's {id} is not written (not sampled)"));
         }
     }
@@ -134,10 +140,10 @@ pub(crate) fn plan_light(layer: &Layer, kind: LightKind, what: &str, col: &mut C
     };
     Some(LightPlan {
         kind: code,
-        intensity: scalar(layer, "lightOptions/intensity").unwrap_or(100.0),
+        intensity: scalar(layer, "lightOptions/intensity", what, col).unwrap_or(100.0),
         color,
-        cone_angle: scalar(layer, "lightOptions/coneAngle").unwrap_or(90.0),
-        cone_feather: scalar(layer, "lightOptions/coneFeather").unwrap_or(50.0),
+        cone_angle: scalar(layer, "lightOptions/coneAngle", what, col).unwrap_or(90.0),
+        cone_feather: scalar(layer, "lightOptions/coneFeather", what, col).unwrap_or(50.0),
     })
 }
 

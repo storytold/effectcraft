@@ -1145,6 +1145,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
     ("file.importAep", "After Effects Project...", "After Effects-projekt..."),
+    ("file.exportAep", "After Effects Project...", "After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -6905,6 +6906,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
     ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
+    ("file.exportAep", "After Effects Project...", "Projekt After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -9167,7 +9169,7 @@ mod tests {
 
     /// File ▸ Import ▸ After Effects Project… has its row in every menu catalog.
     #[test]
-    fn the_aep_import_entry_is_in_every_menu_catalog() {
+    fn the_aep_import_and_export_entries_are_in_every_menu_catalog() {
         for (code, catalog) in [
             ("zh-hans", SIMPLIFIED_CHINESE),
             ("zh-hant", TRADITIONAL_CHINESE),
@@ -9183,7 +9185,9 @@ mod tests {
             ("ka", GEORGIAN),
             ("sv", SWEDISH),
         ] {
-            assert!(catalog.iter().any(|(command, _, _)| *command == "file.importAep"), "{code} has no file.importAep row");
+            for id in ["file.importAep", "file.exportAep"] {
+                assert!(catalog.iter().any(|(command, _, _)| *command == id), "{code} has no {id} row");
+            }
         }
     }
 

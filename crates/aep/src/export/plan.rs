@@ -763,7 +763,7 @@ fn plan_stretch(layer: &Layer, comp_timescale: u32, comp_name: &str, col: &mut C
     let what = |s: &str| format!("{comp_name}: {s} '{}'", layer.name);
     let mut stretch = (1i32, 1u32);
     let mut time_scale = comp_timescale;
-    if (layer.stretch - 100.0).abs() >= 1e-9 {
+    if layer.stretch.is_nan() || (layer.stretch - 100.0).abs() >= 1e-9 {
         // A negative stretch is a time-reversed layer: the numerator is negative (981-983) and the
         // properties count in the composition's time scale, as below 100 % (982, 983).
         let r = layer.stretch / 100.0;
