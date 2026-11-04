@@ -13,9 +13,10 @@ use crate::{EffectcraftApp, widgets};
 /// property, time and value. Read-only: it draws and scrolls but changes no document state.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("info-scroll"), rect);
+    let rect = scroll.content;
     let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 12.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("info-scroll"), rect);
     let mut y = rect.min.y + 14.0 - scroll.offset;
     if app.pointer_comp.is_some() {
         // GPU frames: read the shown frame back for sampling.

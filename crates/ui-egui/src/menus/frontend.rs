@@ -546,39 +546,52 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         Folder,
         Import,
         OpenProject,
-        Save(&'static str),
+        Save(std::borrow::Cow<'static, str>),
         Open(&'static [&'static str]),
         /// A movie, or a file with one of these extensions.
         OpenFootage(&'static [&'static str]),
     }
+    // Save As, Save a Copy and Save a Copy As XML start from the open project's file, in its
+    // folder, as After Effects does (#2788); an untitled project starts from Untitled Project.
+    // Save a Copy adds ` copy` (`suffix`): it never writes over the open project's file.
+    let project_as = |suffix: &str, ext: &str| -> std::borrow::Cow<'static, str> {
+        let Some(path) = app.session.path.as_deref().map(std::path::Path::new) else { return format!("Untitled Project{suffix}.{ext}").into() };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled Project".into());
+        path.with_file_name(format!("{stem}{suffix}.{ext}")).to_string_lossy().into_owned().into()
+    };
     let (key, ask) = match id {
         "file.import" | "file.importMultiple" => ("paths", Ask::Import),
         "file.open" => ("path", Ask::OpenProject),
-        "file.save" if app.session.path.is_none() => ("path", Ask::Save("Untitled Project.ecproj")),
-        "file.saveAs" | "file.saveCopy" => ("path", Ask::Save("Untitled Project.ecproj")),
-        "comp.saveFrameAs" => ("path", Ask::Save("Frame.png")),
-        "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd")),
-        "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr")),
-        "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder")),
-        "anim.savePreset" => ("path", Ask::Save("Preset.ecpreset")),
+        "file.save" if app.session.path.is_none() => ("path", Ask::Save(project_as("", "ecproj"))),
+        "file.saveAs" => ("path", Ask::Save(project_as("", "ecproj"))),
+        "file.saveCopy" => ("path", Ask::Save(project_as(" copy", "ecproj"))),
+        "comp.saveFrameAs" => ("path", Ask::Save("Frame.png".into())),
+        "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd".into())),
+        "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
+        "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder".into())),
+        "anim.savePreset" => ("path", Ask::Save("Preset.ecpreset".into())),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
-        "view.exportGuides" => ("path", Ask::Save("Guides.json")),
+        "view.exportGuides" => ("path", Ask::Save("Guides.json".into())),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
-        "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py")),
-        "file.exportLottie" => ("path", Ask::Save("Animation.json")),
+        "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py".into())),
+        "file.exportLottie" => ("path", Ask::Save("Animation.json".into())),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
         "file.importTimeline" => ("path", Ask::Open(&["xml", "fcpxml", "otio", "edl", "aaf", "omf"])),
-        "render.saveCurrentPreview" => ("path", Ask::Save("Preview.mp4")),
+        "render.saveCurrentPreview" => ("path", Ask::Save("Preview.mp4".into())),
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
-        "file.collectFiles" => ("folder", Ask::Save("Collected Files")),
-        "file.saveCopyAsXml" => ("path", Ask::Save("Untitled Project.ecprojx")),
+        "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
+        // An open XML project gets ` copy` too: the copy never writes over the open file.
+        "file.saveCopyAsXml" => {
+            let xml = app.session.path.as_deref().and_then(|p| std::path::Path::new(p).extension()).is_some_and(|e| e.eq_ignore_ascii_case("ecprojx"));
+            ("path", Ask::Save(project_as(if xml { " copy" } else { "" }, "ecprojx")))
+        }
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
-        "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate")),
+        "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate".into())),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),
         "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"])),
         _ => return None,
@@ -609,7 +622,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
             Ask::OpenProject => crate::FileDialog::OpenProject,
             Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
             Ask::OpenFootage(more) => crate::FileDialog::Open { exts: footage(more).iter().map(|e| e.to_string()).collect(), many: false },
-            Ask::Save(default) => crate::FileDialog::save(default),
+            Ask::Save(default) => crate::FileDialog::save(&default),
         };
         let tx = app.dialog_answers.0.clone();
         let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Vec::new() };
@@ -644,7 +657,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
             f(&footage(more)).first().map(|s| json!(s))
         }
         Ask::Save(default) => {
-            let Some(picked) = app.hooks.save_dialog(default) else { return Some(Err("no file dialog available (pass `path`)".into())) };
+            let Some(picked) = app.hooks.save_dialog(&default) else { return Some(Err("no file dialog available (pass `path`)".into())) };
             picked.map(|s| json!(s))
         }
     };

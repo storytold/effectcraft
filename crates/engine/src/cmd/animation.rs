@@ -555,7 +555,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_keys,
             exponential_scale
         ),
-        cmd!("text.addSelector", "Add Text Selector", [], None, "{layer?, animator?: uid|index, kind: range|wiggly|expression}", has_text_layer, add_selector),
+        cmd!(
+            "text.addSelector",
+            "Add Text Selector",
+            [],
+            None,
+            "{layer?, animator?: uid|index (1-based; a uid match wins over an index), kind: range|wiggly|expression}",
+            has_text_layer,
+            add_selector
+        ),
         cmd!("text.removeAllAnimators", "Remove All Text Animators", ["Animation"], None, "{layers?}", has_text_layer, remove_all_animators),
         cmd!("anim.reveal", "Reveal Properties", [], None, "{kind: keyframes|animation|modified}", has_comp, reveal),
     ]

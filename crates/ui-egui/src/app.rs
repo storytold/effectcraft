@@ -77,6 +77,7 @@ impl EffectcraftApp {
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,
             viewer_shown: None,
+            crypto_probe_busy: Default::default(),
             viewer_image: None,
             viewer_readback: Default::default(),
             wgpu: None,
@@ -121,7 +122,7 @@ impl EffectcraftApp {
     fn with_ui_commands(mut self) -> Self {
         let cmds = menus::UI_COMMANDS
             .iter()
-            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string) })
+            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string), scope: None })
             .collect();
         self.session.set_ui_commands(cmds);
         self
