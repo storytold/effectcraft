@@ -2089,9 +2089,10 @@ fn group_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCt
     group_switches(app, ui, g, rc);
     group_name(app, ui, g, rc, &shown);
     group_popups(app, ui, g, rc);
-    group_reset(app, ui, g, rc);
     group_mask_mode(ui, g, rc);
     group_row_click(app, ui, g, rc);
+    // Last, so it is on top of the row's own hit areas when hidden columns leave it over the name.
+    group_reset(app, ui, g, rc, &shown);
 }
 
 /// An expression row: its controls and the editor.
@@ -3561,7 +3562,7 @@ fn group_popups(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Ro
 }
 
 /// Reset the layer Transform or this effect, without changing the current selection.
-fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>) {
+fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, shown: &str) {
     let RowKind::Group { uid, .. } = &rc.row.kind else { return };
     let layer = rc.layer;
     let Some(group) = layer.props.find_group(*uid) else { return };
@@ -3588,8 +3589,9 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
     let x = x.min(g.tl.graph_x0 - width - 8.0).max(rc.r.min.x);
     let rect = Rect::from_min_size(pos2(x, rc.r.min.y + 1.0), vec2(width + 4.0, rc.r.height() - 2.0));
     let enabled = !layer.switches.locked;
-    // Screen readers hear what is reset and on which layer; the link itself only says Reset.
-    let spoken = format!("{label} ({})", layer.name);
+    // Screen readers hear what is reset and on which layer, in the interface language; the link
+    // itself only says Reset.
+    let spoken = format!("{text} {shown} ({})", layer.name);
     let response = ui.add_enabled_ui(enabled, |ui| {
         let r = ui.interact(rect, egui::Id::unique(("tl-group-reset", uid)), Sense::click());
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));

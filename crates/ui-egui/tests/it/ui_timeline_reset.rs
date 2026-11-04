@@ -120,3 +120,16 @@ fn a_long_translation_does_not_cover_the_fx_switch() {
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.effect));
     assert_eq!(num(&h, x.layer, "effects/#1/blurriness"), 0.0, "the moved link still resets");
 }
+
+/// With every optional column hidden the link ends up over the group's name; it is still on top
+/// of the row's own click areas and resets (the click must not just select the row).
+#[test]
+fn reset_still_works_with_every_optional_column_hidden() {
+    let (mut h, x) = harness();
+    h.state_mut().ui.timeline.columns.clear();
+    h.state_mut().ui.timeline.show_modes = false;
+    h.run_steps(4);
+    click_auto(&mut h, &format!("timeline.group.{}.reset", x.transform));
+    assert_eq!(num(&h, x.layer, "transform/opacity"), 100.0);
+    assert_eq!(selected(&h), vec![x.other], "the click was the link's, not the row's");
+}
