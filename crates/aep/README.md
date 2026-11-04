@@ -58,8 +58,13 @@ Everything here comes from our own observations: project files that we generated
 After Effects, one change per file, compared byte by byte. No source code or format
 documentation of another `.aep` reader or writer was used, and no Adobe asset is used. The test fixtures are such generated files
 (own test data): a few combined projects, one composition per case (`tests/fixtures/CASES.md`;
-the generator is in `tests/fixtures/tools/`). They are not in this repository; the tests read
-them from the folder named by the `EFFECTCRAFT_AEP_FIXTURES` environment variable (opt-in). The
+the generator is in `tests/fixtures/tools/`). They are not in this repository but in
+[storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus), with their
+attribution, the generation notes and the inspection of their embedded content.
+`cargo xtask aep-corpus` fetches them at the commit pinned in `tests/fixtures/corpus.lock`, checks
+every file against the SHA-256 listed there and only then installs them in `corpus/aep` (ignored by
+git). The tests read them from the folder named by the `EFFECTCRAFT_AEP_FIXTURES` environment
+variable (opt-in; set `EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` too, so that a missing project fails). The
 tests reach them only through `tests/it/common/mod.rs`, which hands a test its case as a project
 of its own cut from the combined file; a test whose fixture is missing (or with the variable not
 set) prints `SKIPPED: fixture <name> missing` and passes.
