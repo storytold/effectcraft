@@ -459,12 +459,17 @@ pub fn shape_stroke(ids: &mut Ids, color: [f64; 4], width: f64) -> PropGroup {
         .with(stroke_wave(ids))
 }
 
+/// Taper Start/End Length: a number that cannot go below 0 (a negative length does nothing).
+fn taper_length_ui() -> ParamUi {
+    slider(0.0, 1e6, 0.0, 300.0, 1)
+}
+
 /// Stroke ▸ Taper (After Effects 17.1+): width ramps at the start and end of each path.
 pub fn stroke_taper(ids: &mut Ids) -> PropGroup {
     ids.group("taper", "Taper")
         .with(ids.prop("units", "Length Units", Value::Enum(0)).with_ui(popup(&["Pixels", "Percent"])))
-        .with(ids.prop("startLength", "Start Length", Value::Scalar(0.0)).with_ui(slider(0.0, 1e6, 0.0, 300.0, 1)))
-        .with(ids.prop("endLength", "End Length", Value::Scalar(0.0)).with_ui(slider(0.0, 1e6, 0.0, 300.0, 1)))
+        .with(ids.prop("startLength", "Start Length", Value::Scalar(0.0)).with_ui(taper_length_ui()))
+        .with(ids.prop("endLength", "End Length", Value::Scalar(0.0)).with_ui(taper_length_ui()))
         .with(ids.prop("startWidth", "Start Width", Value::Scalar(100.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
         .with(ids.prop("endWidth", "End Width", Value::Scalar(100.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
         .with(ids.prop("startEase", "Start Ease", Value::Scalar(0.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
@@ -636,10 +641,11 @@ fn wiggle_spatial_phase(ids: &mut Ids) -> Property {
     ids.prop("spatialPhase", "Spatial Phase", Value::Scalar(0.0)).with_ui(ParamUi::Angle)
 }
 
-/// Adds the properties that shape path operations have gained since a project was saved (Wiggle
-/// Paths' Spatial Phase), at their defaults, to the operations in `contents` and its nested
-/// groups. Returns whether anything was added. It walks the nested groups with a work list and
-/// does not recurse.
+/// Brings shape path operations up to date with what they have gained since a project was saved:
+/// adds Wiggle Paths' Spatial Phase at its default, and gives a stroke Taper's Start/End Length
+/// (saved with the unbounded Pixels editor) the nonnegative one, keeping each property's value,
+/// keys and expression. Covers `contents` and its nested groups. Returns whether anything
+/// changed. It walks the nested groups with a work list and does not recurse.
 pub fn upgrade_shape_contents(ids: &mut Ids, contents: &mut PropGroup) -> bool {
     let mut changed = false;
     let mut todo = vec![contents];
@@ -650,6 +656,15 @@ pub fn upgrade_shape_contents(ids: &mut Ids, contents: &mut PropGroup) -> bool {
                 let at = g.children.iter().position(|c| c.match_id() == "phase").map_or(g.children.len(), |i| i + 1);
                 g.children.insert(at, wiggle_spatial_phase(ids).into());
                 changed = true;
+            }
+            if g.match_id == "taper" {
+                for c in &mut g.children {
+                    let Node::Prop(p) = c else { continue };
+                    if matches!(p.match_id.as_str(), "startLength" | "endLength") && p.ui == ParamUi::Pixels {
+                        p.ui = taper_length_ui();
+                        changed = true;
+                    }
+                }
             }
             todo.push(g);
         }
