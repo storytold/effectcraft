@@ -726,6 +726,21 @@ mod tests {
         let c = corrections(&a, &s);
         assert_eq!(c.len(), 3000);
         assert!(c.iter().all(|h| h.0.iter().flatten().all(|v| v.is_finite())));
+        // A jump at frame 2900 is outside frame 0's window (frames 0..=1024): its correction is
+        // unchanged. Smoothing over the whole clip would move it.
+        let (mut jumped, _) = shaky(3000);
+        let f = &mut jumped.frames[2900];
+        f.t[0] += 80.0;
+        f.s[2] += 80.0;
+        f.h[2] += 80.0;
+        let c2 = corrections(&jumped, &s);
+        for (x, y) in c[0].0.iter().flatten().zip(c2[0].0.iter().flatten()) {
+            assert!((x - y).abs() < 1e-9, "{x} vs {y}");
+        }
+        assert!(
+            c[2999].0.iter().flatten().zip(c2[2999].0.iter().flatten()).any(|(x, y)| (x - y).abs() > 1e-6),
+            "the jump does move frames whose window holds it"
+        );
     }
 
     #[test]
