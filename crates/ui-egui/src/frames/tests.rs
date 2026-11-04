@@ -2017,3 +2017,46 @@ fn a_keyframe_edit_read_at_other_times_by_its_layer_re_renders_it() {
         assert_eq!(render(&p0, i), render(&p1, i), "kept frame {i} draws other pixels now");
     }
 }
+
+/// An edit two precomps down (Outer → Mid → Inner) re-renders Outer where it shows, although
+/// Mid's own comp didn't change. Every frame kept renders as before.
+#[test]
+fn an_edit_two_precomps_down_reaches_the_outer_comp() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::LayerId;
+    use effectcraft_engine::render::render_frame;
+    use serde_json::json;
+    let mut s = Session::default();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let comp = |s: &mut Session, name: &str| {
+        ItemId(id(s.execute("comp.new", json!({"name": name, "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"))
+    };
+    let inner = comp(&mut s, "Inner");
+    let solid = |s: &mut Session, color: &str| {
+        LayerId(id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": color, "width": 6, "height": 6})).unwrap(), "layer"))
+    };
+    let (a, b) = (solid(&mut s, "#ff0000"), solid(&mut s, "#00ff00"));
+    let mid = comp(&mut s, "Mid");
+    s.execute("layer.addItem", json!({"comp": mid.0, "item": inner.0})).unwrap();
+    let outer = comp(&mut s, "Outer");
+    s.execute("layer.addItem", json!({"comp": outer.0, "item": mid.0})).unwrap();
+    let fr = s.project.comp(outer).unwrap().frame_rate;
+    let t = |f: i64| fr.tick_of(f);
+    let mut p0 = (*s.project).clone();
+    for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
+        let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
+    }
+    let p0 = Arc::new(p0);
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: outer.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, outer);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let mut p1 = p0.clone();
+    Arc::make_mut(&mut p1).comp_mut(inner).unwrap().layer_mut(b).unwrap().out_point = t(45);
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, outer), 0));
+    assert!(kept.contains(&10) && kept.contains(&100) && !kept.contains(&50), "{kept:?}");
+    for i in kept {
+        assert!(render_frame(&p0, outer, t(i), 1.0).data == render_frame(&p1, outer, t(i), 1.0).data, "kept frame {i} renders differently after the edit");
+    }
+}

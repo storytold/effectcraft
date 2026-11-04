@@ -8,6 +8,8 @@ use super::{Arc, Project, Tick};
 /// Precomps nested deeper than this count as changed wherever they show.
 const MAX_DEPTH: usize = 32;
 
+type Seen = std::collections::HashMap<ItemId, Option<Vec<(Tick, Tick)>>>;
+
 impl Project {
     /// The comp-time spans of `comp` where `self` may draw other pixels than `old` (the project
     /// before an edit): [`Comp::changed_spans`] of its layers, and for a precomp whose comp
@@ -17,13 +19,24 @@ impl Project {
     /// anything, so any change (`outside` these comps too: another comp, an item's name) reaches
     /// the layers that have one. `None` when the edit can reach any frame.
     pub fn dirty_spans(&self, old: &Project, comp: ItemId, heard: &Heard, outside: bool) -> Option<Vec<(Tick, Tick)>> {
-        self.dirty_spans_at(old, comp, heard, outside, 0)
+        self.dirty_spans_at(old, comp, heard, outside, 0, &mut std::collections::HashMap::new())
     }
 
-    fn dirty_spans_at(&self, old: &Project, comp: ItemId, heard: &Heard, outside: bool, depth: usize) -> Option<Vec<(Tick, Tick)>> {
+    /// `seen`: the spans of the comps already walked in this call, so a precomp shared by many
+    /// layers is walked once.
+    fn dirty_spans_at(&self, old: &Project, comp: ItemId, heard: &Heard, outside: bool, depth: usize, seen: &mut Seen) -> Option<Vec<(Tick, Tick)>> {
         if depth > MAX_DEPTH {
             return None;
         }
+        if let Some(spans) = seen.get(&comp) {
+            return spans.clone();
+        }
+        let spans = self.comp_dirty_spans(old, comp, heard, outside, depth, seen);
+        seen.insert(comp, spans.clone());
+        spans
+    }
+
+    fn comp_dirty_spans(&self, old: &Project, comp: ItemId, heard: &Heard, outside: bool, depth: usize, seen: &mut Seen) -> Option<Vec<(Tick, Tick)>> {
         let (new_c, old_c) = (self.comp_arc(comp)?, old.comp_arc(comp)?);
         // Expressions may read what changed elsewhere, even from comps that didn't change.
         let reads_elsewhere = heard.expressions && outside;
@@ -36,11 +49,9 @@ impl Project {
             if old_c.layer(l.id).is_none_or(|before| before.source != l.source) {
                 continue;
             }
-            let (Some(n), Some(o)) = (self.comp_arc(item), old.comp_arc(item)) else { continue };
-            if Arc::ptr_eq(&n, &o) && !reads_elsewhere {
-                continue;
-            }
-            let inner = self.dirty_spans_at(old, item, heard, outside, depth + 1);
+            // (an unchanged `Arc` says nothing of the comps nested in it: walk it anyway)
+            let (Some(n), Some(_)) = (self.comp_arc(item), old.comp_arc(item)) else { continue };
+            let inner = self.dirty_spans_at(old, item, heard, outside, depth + 1, seen);
             if inner.as_ref().is_some_and(Vec::is_empty) {
                 continue;
             }
