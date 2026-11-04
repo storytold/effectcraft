@@ -506,6 +506,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "文件..."),
     ("file.importMultiple", "Multiple Files...", "多个文件..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 项目..."),
+    ("file.importAep", "After Effects Project...", "After Effects 项目..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 项目..."),
     ("file.importPlaceholder", "Placeholder...", "占位符..."),
     ("file.importSolid", "Solid...", "纯色..."),
@@ -1142,6 +1143,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fil..."),
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
+    ("file.importAep", "After Effects Project...", "After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -1780,6 +1782,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "檔案..."),
     ("file.importMultiple", "Multiple Files...", "多個檔案..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 專案..."),
+    ("file.importAep", "After Effects Project...", "After Effects 專案..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 專案..."),
     ("file.importPlaceholder", "Placeholder...", "預留位置..."),
     ("file.importSolid", "Solid...", "純色..."),
@@ -2415,6 +2418,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ファイル..."),
     ("file.importMultiple", "Multiple Files...", "複数のファイル..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Proプロジェクト..."),
+    ("file.importAep", "After Effects Project...", "After Effectsプロジェクト..."),
     ("file.importPlaceholder", "Placeholder...", "プレースホルダー..."),
     ("file.importSolid", "Solid...", "平面..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -3053,6 +3057,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Кілька файлів..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проєкт Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Проєкт After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проєкт EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заповнювач..."),
     ("file.importSolid", "Solid...", "Суцільний колір..."),
@@ -3692,6 +3697,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Archivo..."),
     ("file.importMultiple", "Multiple Files...", "Varios archivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Proyecto de Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Proyecto de After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Proyecto de EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Marcador de posición..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4329,6 +4335,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Arquivo..."),
     ("file.importMultiple", "Multiple Files...", "Vários arquivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projeto do Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Projeto do After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projeto do EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espaço reservado..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4974,6 +4981,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Несколько файлов..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проект Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Проект After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проект EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заполнитель..."),
     ("file.importSolid", "Solid...", "Сплошной цвет..."),
@@ -5611,6 +5619,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fichier..."),
     ("file.importMultiple", "Multiple Files...", "Plusieurs fichiers..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projet Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Projet After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projet EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espace réservé..."),
     ("file.importSolid", "Solid...", "Solide..."),
@@ -6248,6 +6257,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Datei..."),
     ("file.importMultiple", "Multiple Files...", "Mehrere Dateien..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-Projekt..."),
+    ("file.importAep", "After Effects Project...", "After Effects-Projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-Projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platzhalter..."),
     ("file.importSolid", "Solid...", "Farbfläche..."),
@@ -6885,6 +6895,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Plik..."),
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -7519,6 +7530,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Soubor..."),
     ("file.importMultiple", "Multiple Files...", "Více souborů..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Zástupný záznam..."),
     ("file.importSolid", "Solid...", "Plná vrstva..."),
@@ -8153,6 +8165,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ფაილი..."),
     ("file.importMultiple", "Multiple Files...", "რამდენიმე ფაილი..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
+    ("file.importAep", "After Effects Project...", "After Effects-ის პროექტი..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-ის პროექტი..."),
     ("file.importPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
     ("file.importSolid", "Solid...", "სოლიდი..."),
@@ -9139,6 +9152,28 @@ mod tests {
         assert!(!traditional(&app));
         assert!(!simplified(&app));
         assert!(!japanese(&app));
+    }
+
+    /// File ▸ Import ▸ After Effects Project… has its row in every menu catalog.
+    #[test]
+    fn the_aep_import_entry_is_in_every_menu_catalog() {
+        for (code, catalog) in [
+            ("zh-hans", SIMPLIFIED_CHINESE),
+            ("zh-hant", TRADITIONAL_CHINESE),
+            ("ja", JAPANESE),
+            ("uk", UKRAINIAN),
+            ("es", SPANISH),
+            ("pt-br", PORTUGUESE),
+            ("ru", RUSSIAN),
+            ("fr", FRENCH),
+            ("de", GERMAN),
+            ("cs", CZECH),
+            ("pl", POLISH),
+            ("ka", GEORGIAN),
+            ("sv", SWEDISH),
+        ] {
+            assert!(catalog.iter().any(|(command, _, _)| *command == "file.importAep"), "{code} has no file.importAep row");
+        }
     }
 
     #[test]
