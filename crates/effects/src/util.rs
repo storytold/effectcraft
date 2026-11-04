@@ -636,13 +636,13 @@ impl<S: Clone> SimCache<S> {
         if e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
             e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0 && *s != target);
             e.checkpoints.sort_by_key(|(s, _)| *s);
-            while e.checkpoints.len() + 1 > MAX_SIM_CHECKPOINTS {
-                let mut k = 0;
-                e.checkpoints.retain(|_| {
-                    k += 1;
-                    k % 2 == 1
-                });
-            }
+            // Drop only the excess, evenly spaced, so the rest keep their seek distance.
+            let (len, excess) = (e.checkpoints.len(), (e.checkpoints.len() + 1).saturating_sub(MAX_SIM_CHECKPOINTS));
+            let mut i = 0;
+            e.checkpoints.retain(|_| {
+                i += 1;
+                (i * excess) / len == ((i - 1) * excess) / len
+            });
             e.checkpoints.push((target, out.clone()));
         }
         out
@@ -855,6 +855,9 @@ mod tests {
         steps.set(0);
         assert_eq!(*c.run(1, target, || 0, count), target);
         assert_eq!(steps.get(), 0, "the second request is answered from the cache");
+        // Only the excess is dropped: the other aligned checkpoints stay.
+        let kept = c.inner.lock().map(|g| g[0].checkpoints.len()).unwrap_or(0);
+        assert_eq!(kept, MAX_SIM_CHECKPOINTS, "trimmed to the cap, not halved");
     }
 
     #[test]
