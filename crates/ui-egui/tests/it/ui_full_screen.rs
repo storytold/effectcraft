@@ -284,6 +284,7 @@ fn leaving_on_the_next_pass_still_un_maximizes_first() {
 }
 
 /// An element the pass just run drew (`auto.find` also reads the pass before).
+#[cfg(windows)]
 fn drawn(h: &Harness<'_, EffectcraftApp>, id: &str) -> Option<[f32; 4]> {
     h.state().auto.elements.iter().find(|e| e.id == id).map(|e| e.rect)
 }
@@ -430,4 +431,56 @@ fn floating_windows_close_in_full_screen_and_reopen_where_they_were() {
     let reopened: Vec<[f32; 2]> = shown.borrow().values().copied().collect();
     assert_eq!(reopened, [[moved[0], moved[1]]], "it reopens where it was");
     assert_eq!(h.state().ui.dock.layout.floating.first().and_then(|w| w.native), Some(moved), "and the layout keeps its place");
+}
+
+/// A window that reaches the screen after the video first shows (off Windows, where no pass waits
+/// for it): a set view follows it there instead of staying scaled for the old window.
+#[test]
+fn a_set_view_follows_the_window_to_the_screen() {
+    let mut h = harness();
+    h.state_mut().ui.viewer.zoom = Some(0.5);
+    h.state_mut().ui.viewer.pan = [30.0, 12.0];
+    h.run_steps(2);
+    invoke(&mut h, "view.fullScreen");
+    h.step();
+    let zoom = h.state().ui.viewer.zoom.unwrap();
+    let pan = h.state().ui.viewer.pan;
+    assert!(zoom > 0.5, "scaled for the old window: {zoom}");
+    h.set_size(vec2(1920.0, 1200.0));
+    h.step();
+    let followed = h.state().ui.viewer.zoom.unwrap();
+    assert!((followed - zoom * 1.2).abs() < 1e-4, "{followed} from {zoom}");
+    let moved = h.state().ui.viewer.pan;
+    assert!((moved[0] - pan[0] * 1.2).abs() < 1e-3 && (moved[1] - pan[1] * 1.2).abs() < 1e-3, "{moved:?} from {pan:?}");
+    h.step();
+    assert_eq!(h.state().ui.viewer.zoom, Some(followed), "once");
+}
+
+/// The scale keeps to the viewer's zoom range, and a window with no area leaves the view alone
+/// until there is one to scale to.
+#[test]
+fn the_full_screen_scale_stays_in_the_zoom_range_and_waits_for_a_window_with_area() {
+    let mut h = harness();
+    h.state_mut().ui.viewer.zoom = Some(30.0);
+    h.run_steps(2);
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(2);
+    assert_eq!(h.state().ui.viewer.zoom, Some(32.0));
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(2);
+
+    h.state_mut().ui.viewer.zoom = Some(0.5);
+    h.state_mut().ui.viewer.pan = [30.0, 12.0];
+    h.run_steps(2);
+    let panel = h.state().auto.find("viewer.area").unwrap().rect;
+    invoke(&mut h, "view.fullScreen");
+    h.set_size(vec2(0.0, 0.0));
+    h.step();
+    assert_eq!(h.state().ui.viewer.zoom, Some(0.5));
+    assert_eq!(h.state().ui.viewer.pan, [30.0, 12.0]);
+    h.set_size(vec2(1600.0, 1000.0));
+    h.step();
+    let s = (1600.0 / panel[2]).min(1000.0 / panel[3]);
+    let zoom = h.state().ui.viewer.zoom.unwrap();
+    assert!((zoom - 0.5 * s).abs() < 1e-4, "{zoom} at {s}");
 }

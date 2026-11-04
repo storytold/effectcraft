@@ -307,16 +307,17 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let outer = area;
     let area = if v.chrome { vt::inset(app, area) } else { area };
 
-    // Full Screen blows the panel up: the view keeps its place in it (Fit stays Fit, below).
+    // Full Screen blows the panel up: the view keeps its place in it (Fit stays Fit, below), all
+    // the way to the screen when the window only gets there after the video first shows. A window
+    // with no area has nothing to scale to: the view and the map wait for one that has.
+    let sized = area.is_finite() && area.is_positive();
     if app.full_screen_shown()
-        && let Some(f) = app.full_screen.as_mut().filter(|f| !f.scaled)
+        && sized
+        && let Some(panel) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area).filter(|a| a.size() != area.size())
     {
-        f.scaled = true;
-        if let Some(panel) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area).filter(|a| a.width() > 0.0 && a.height() > 0.0) {
-            let s = (area.width() / panel.width()).min(area.height() / panel.height());
-            app.ui.viewer.zoom = app.ui.viewer.zoom.map(|z| z * s);
-            app.ui.viewer.pan = app.ui.viewer.pan.map(|p| p * s);
-        }
+        let s = (area.width() / panel.width()).min(area.height() / panel.height());
+        app.ui.viewer.zoom = app.ui.viewer.zoom.map(|z| (z * s).clamp(0.01, 32.0));
+        app.ui.viewer.pan = app.ui.viewer.pan.map(|p| p * s);
     }
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
@@ -330,7 +331,9 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let ppp = ctx.pixels_per_point();
     let origin = snap_to_pixels(center - vec2(cw * zoom / 2.0, ch * zoom / 2.0), ppp);
     let map = ViewerMap { origin, zoom, comp: [cw, ch], area };
-    ctx.data_mut(|d| d.insert_temp(map_id(), map));
+    if sized {
+        ctx.data_mut(|d| d.insert_temp(map_id(), map));
+    }
     let comp_rect = Rect::from_min_size(origin, vec2(cw * zoom, ch * zoom));
     let painter = p.with_clip_rect(area);
     // Settings ▸ 3D ▸ Extended Viewer: custom 3D views (and Draft 3D) render the visible

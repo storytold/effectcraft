@@ -175,8 +175,6 @@ pub struct FullScreen {
     /// The viewer's zoom and pan to go back to: `None` is Fit.
     pub saved_zoom: Option<f32>,
     pub saved_pan: [f32; 2],
-    /// The viewer's view has been blown up from its panel to the screen.
-    pub scaled: bool,
     pub saved_focus: PanelKind,
     /// A preview's Full Screen option started it, so that preview's end ends it.
     pub from_preview: bool,
