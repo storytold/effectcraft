@@ -627,11 +627,12 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
                             let mut dir = pinv.apply_vec(w.apply_vec(axis));
                             let mut drag_s = s;
                             // Under perspective the drawn arrow is a secant of the projection; the drag
-                            // follows its slope at the anchor (the projected unit axis) instead.
-                            if !stub && let Some([uo, ue]) = project_segment(&pc, a3, a3 + unit) {
+                            // follows its slope at the anchor (the first 1% of the arrow) instead.
+                            let tip = axis * 0.01;
+                            if !stub && let Some([uo, ue]) = project_segment(&pc, a3, a3 + tip) {
                                 let su = [ue[0] - uo[0], ue[1] - uo[1]];
                                 if su[0].is_finite() && su[1].is_finite() && su[0].hypot(su[1]) > 1e-12 {
-                                    dir = pinv.apply_vec(w.apply_vec(unit));
+                                    dir = pinv.apply_vec(w.apply_vec(tip));
                                     drag_s = su;
                                 }
                             }
