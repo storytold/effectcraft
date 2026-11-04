@@ -2110,6 +2110,13 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Layer Name", "图层名称"),
     ("Source Name", "源名称"),
     ("Parent & Link", "父级和链接"),
+    ("Keys", "关键帧"),
+    ("Comment", "注释"),
+    ("Mode", "模式"),
+    ("Track Matte", "跟踪遮罩"),
+    ("In", "入点"),
+    ("Out", "出点"),
+    ("Duration", "持续时间"),
     ("per second", "每秒"),
     ("Waveform", "波形"),
     ("steps", "步"),
@@ -4425,6 +4432,13 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Layer Name", "圖層名稱"),
     ("Source Name", "來源名稱"),
     ("Parent & Link", "父層和連結"),
+    ("Keys", "關鍵影格"),
+    ("Comment", "註解"),
+    ("Mode", "模式"),
+    ("Track Matte", "追蹤遮罩"),
+    ("In", "入點"),
+    ("Out", "出點"),
+    ("Duration", "持續時間"),
     ("per second", "每秒"),
     ("Waveform", "波形"),
     ("steps", "步驟"),
@@ -10359,7 +10373,18 @@ mod tests {
             ("Source Name", "源名称"),
             ("Parent & Link", "父级和链接"),
             ("None", "无"),
+            ("Keys", "关键帧"),
+            ("Comment", "注释"),
+            ("Mode", "模式"),
+            ("Track Matte", "跟踪遮罩"),
+            ("In", "入点"),
+            ("Out", "出点"),
+            ("Duration", "持续时间"),
         ] {
+            assert_eq!(tr(en), zh);
+        }
+        set_current("zh-hant");
+        for (en, zh) in [("Source Name", "來源名稱"), ("Parent & Link", "父層和連結"), ("Track Matte", "追蹤遮罩"), ("Duration", "持續時間")] {
             assert_eq!(tr(en), zh);
         }
         set_current("en");
