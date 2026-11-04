@@ -127,3 +127,8 @@ sync_github_name = false
 [people.JonRC]
 real_name = "Jonathan Cardoso"
 display_name = "Jonathan Cardoso"
+
+[people.lia-xim]
+real_name = "Matthias Ramahi"
+display_name = "Matthias Ramahi"
+sync_github_name = false
