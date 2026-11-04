@@ -1403,7 +1403,8 @@ fn disk_keys_survive_save_and_reopen() {
 }
 
 /// Frames in RAM that the disk lacks (an edit kept them; a write was dropped) are written
-/// when idle, so the reopened project shows them all as the blue bar.
+/// when idle, so the reopened project shows them all as the blue bar. The RAM series carries a
+/// Roto Brush model stamp in its opts; the disk keys are the worker's, without it.
 #[test]
 fn ram_frames_missing_on_disk_are_written() {
     use effectcraft_engine::Session;
@@ -1424,20 +1425,28 @@ fn ram_frames_missing_on_disk_are_written() {
         disk: Some(disk.clone()),
     };
     let f = Frames::default();
-    let series = FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()), ..key(0, 0, 0) };
+    let series =
+        FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
     for fr in 0..10 {
         insert(&f, FrameKey { frame: fr, ..series });
     }
     let on_disk = |fr: i64| {
         disk.contains(
             disk_cache::Kind::Frame,
-            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, series.opts, f.virtual_epoch.load(Ordering::Relaxed), None),
+            frame_disk_key(
+                &f.content_keys,
+                &src.project,
+                &FrameKey { frame: fr, ..series },
+                opts_hash(&RenderOpts::default()),
+                f.virtual_epoch.load(Ordering::Relaxed),
+                None,
+            ),
         )
     };
     let persist = || {
         // The content key is computed on the frame pool first.
         for _ in 0..1000 {
-            f.persist_missing(&src, &series);
+            f.persist_missing(&src, &series, &RenderOpts::default());
             disk.flush();
             // (`flush` waits for the disk writes, not for the conversion to forget its keys)
             if (0..10).all(on_disk) && f.persisted.lock().unwrap().is_empty() {
@@ -1453,7 +1462,7 @@ fn ram_frames_missing_on_disk_are_written() {
         assert!(!(0..10).any(on_disk));
     };
     assert!(persist(), "every RAM frame written");
-    assert!(!f.persist_missing(&src, &series), "nothing left to write: no more idle passes");
+    assert!(!f.persist_missing(&src, &series, &RenderOpts::default()), "nothing left to write: no more idle passes");
     // Evicted from disk: the RAM frames are written again, once.
     evict();
     assert!(persist(), "evicted frames written again");
@@ -1471,7 +1480,7 @@ fn ram_frames_missing_on_disk_are_written() {
     assert_eq!(blue, (0..10).collect::<Vec<_>>());
     // Evicted again (a disk cache too small for them): not rewritten on every idle pass.
     evict();
-    assert!(!f.persist_missing(&src, &series), "evicted twice: no more idle passes");
+    assert!(!f.persist_missing(&src, &series, &RenderOpts::default()), "evicted twice: no more idle passes");
     disk.flush();
     assert!(!(0..10).any(on_disk));
     let _ = std::fs::remove_dir_all(&dir);
