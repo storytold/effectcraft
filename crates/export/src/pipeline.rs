@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn layer_cache_budget_is_the_default_unless_a_sensible_number_of_mib() {
         assert_eq!(layer_cache_budget(None), None);
-        assert_eq!(layer_cache_budget(Some("8192")), Some(8192 << 20));
+        assert_eq!(layer_cache_budget(Some("8192")), 8192usize.checked_mul(1 << 20));
         assert_eq!(layer_cache_budget(Some(" 64 ")), Some(64 << 20));
         for bad in ["", "  ", "0", "63", "-1", "4GB", "1.5", "1048577", "99999999999999999999999"] {
             assert_eq!(layer_cache_budget(Some(bad)), None, "{bad:?}");

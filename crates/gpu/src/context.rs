@@ -2142,7 +2142,7 @@ mod upload_budget_tests {
     #[test]
     fn upload_budget_is_the_default_unless_a_number_of_mib() {
         assert_eq!(upload_budget_from(None), UPLOAD_BUDGET);
-        assert_eq!(upload_budget_from(Some("12288")), 12288 << 20);
+        assert_eq!(upload_budget_from(Some("12288")), 12288usize.checked_mul(1 << 20).unwrap_or(UPLOAD_BUDGET));
         assert_eq!(upload_budget_from(Some(" 1 ")), 1 << 20);
         for bad in ["", "0", "-5", "lots", "2.5", "1048577"] {
             assert_eq!(upload_budget_from(Some(bad)), UPLOAD_BUDGET, "{bad:?}");
