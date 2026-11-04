@@ -274,6 +274,12 @@ pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, li
     v
 }
 
+/// Whether `times` (from [`analysis_times`]) stopped at the cap with layer frames left over, so
+/// the analysis would cover only the start of the layer.
+pub(crate) fn analysis_truncated(comp: &effectcraft_project::Comp, layer: &Layer, times: &[Tick]) -> bool {
+    times.len() >= MAX_ANALYSIS_FRAMES && times.last().is_some_and(|&t| t + comp.frame_duration() < layer.out_point.min(comp.duration))
+}
+
 impl Session {
     pub fn is_warp_analyzing(&self) -> bool {
         self.warp_job.as_ref().is_some_and(|j| !j.is_finished()) || self.offloaded(JobKind::Warp).is_some()
@@ -327,6 +333,9 @@ impl Session {
         let times = analysis_times(c, l, MAX_ANALYSIS_FRAMES);
         if times.len() < 2 {
             return Err("the layer must be at least two frames long".into());
+        }
+        if analysis_truncated(c, l, &times) {
+            return Err(format!("the layer is longer than {MAX_ANALYSIS_FRAMES} frames: trim it before analysing"));
         }
         let size = effectcraft_render::effect_bounds(&self.project, c, l).0;
         let detailed = g.prop("advanced/detailedAnalysis").is_some_and(|p| p.value.as_bool());
@@ -440,7 +449,7 @@ mod schedule_tests {
     use effectcraft_project::{Comp, LayerSource, Project, build};
     use effectcraft_time::{FrameRate, Tick};
 
-    use super::{MAX_ANALYSIS_FRAMES, analysis_times};
+    use super::{MAX_ANALYSIS_FRAMES, analysis_times, analysis_truncated};
 
     #[test]
     fn a_long_layer_schedules_at_most_the_limit() {
@@ -450,5 +459,11 @@ mod schedule_tests {
         let l = build::layer(&mut p, &c, "N", LayerSource::Null, (4, 4), None);
         assert_eq!(analysis_times(&c, &l, usize::MAX).len(), MAX_ANALYSIS_FRAMES);
         assert_eq!(analysis_times(&c, &l, 10).len(), 10);
+        assert!(analysis_truncated(&c, &l, &analysis_times(&c, &l, usize::MAX)));
+        // A short layer, or a short schedule from a limit, is not a capped analysis.
+        let short = Comp::new(4, 4, FrameRate::new(1000, 1), Tick::from_seconds_f64(1.0));
+        let sl = build::layer(&mut p, &short, "S", LayerSource::Null, (4, 4), None);
+        assert!(!analysis_truncated(&short, &sl, &analysis_times(&short, &sl, usize::MAX)));
+        assert!(!analysis_truncated(&c, &l, &analysis_times(&c, &l, 10)));
     }
 }

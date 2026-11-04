@@ -461,6 +461,8 @@ fn analyze(s: &mut Session, p: &V) -> Result<V> {
     let prog = s.track_progress();
     Ok(json!({
         "frames": times.len() - 1,
+        // Hit the frame cap: track again from the last frame to go further.
+        "truncated": times.len() >= crate::warp::MAX_ANALYSIS_FRAMES,
         "start": times[0].seconds(),
         "end": times.last().map(|t| t.seconds()),
         "running": s.is_tracking(),

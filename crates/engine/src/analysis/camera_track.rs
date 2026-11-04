@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::offload::JobKind;
 use crate::tracking::lock;
-use crate::warp::{analysis_times, signature};
+use crate::warp::{analysis_times, analysis_truncated, signature};
 use crate::{Event, Session};
 
 /// Live analysis progress (serde for agents / the control channel).
@@ -319,6 +319,9 @@ impl Session {
         let times = analysis_times(c, l, crate::warp::MAX_ANALYSIS_FRAMES);
         if times.len() < 2 {
             return Err("the layer must be at least two frames long".into());
+        }
+        if analysis_truncated(c, l, &times) {
+            return Err(format!("the layer is longer than {} frames: trim it before analysing", crate::warp::MAX_ANALYSIS_FRAMES));
         }
         let size = effectcraft_render::effect_bounds(&self.project, c, l).0;
         let params = static_params(g);
