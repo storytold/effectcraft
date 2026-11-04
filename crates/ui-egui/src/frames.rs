@@ -438,22 +438,30 @@ pub trait RemoteFrames: Send + Sync {
 
 /// Whether a comp (or a comp it nests) has a layer with enabled effects.
 pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
-    // Each comp is answered once: a comp nested by many layers at each of several levels was
-    // walked again for every path to it.
-    fn walk(p: &Project, comp: ItemId, depth: usize, seen: &mut std::collections::HashMap<ItemId, bool>) -> bool {
-        if let Some(&r) = seen.get(&comp) {
-            return r;
+    // Breadth first with a visited set: each comp is looked at once, at its shallowest level, so a
+    // comp first met deep in one chain is still found by a shorter route (a result memoised by
+    // comp alone would depend on the depth it was first reached at).
+    let mut seen = std::collections::HashSet::from([comp]);
+    let mut level = vec![comp];
+    // Comps nested up to 16 levels below the first are searched.
+    for _ in 0..=16 {
+        let mut next = vec![];
+        for id in level {
+            let Some(c) = project.comp(id) else { continue };
+            for l in &c.layers {
+                if l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled)) {
+                    return true;
+                }
+                if let effectcraft_engine::project::LayerSource::Comp { item } = l.source
+                    && seen.insert(item)
+                {
+                    next.push(item);
+                }
+            }
         }
-        seen.insert(comp, false);
-        let Some(c) = p.comp(comp) else { return false };
-        let r = c.layers.iter().any(|l| {
-            l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled))
-                || depth < 16 && matches!(l.source, effectcraft_engine::project::LayerSource::Comp { item } if walk(p, item, depth + 1, seen))
-        });
-        seen.insert(comp, r);
-        r
+        level = next;
     }
-    walk(project, comp, 0, &mut std::collections::HashMap::new())
+    false
 }
 
 pub struct Frames {
