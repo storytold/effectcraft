@@ -68,6 +68,22 @@ focused control into view. Active composition breadcrumbs use the selected-row t
 The `viewer_geometry` tests inspect actual painted contrast, scroll geometry and pointer/keyboard
 reachability across the three themes.
 
+Two Android gaps in winit 0.30.13 (the last 0.30 release, pinned by the egui 0.37 workspace) make a
+physical keyboard and mouse unusable on a tablet. It reports no modifier state — it ignores the meta state
+the OS carries on every key event and never emits the `ModifiersChanged` egui-winit learns
+`Ctrl`/`Shift`/`Alt` from, so a chord's letter arrives unmodified and fires whatever that plain key
+is bound to, the Zoom tool for `Z` — and it drops every motion action that is not a touch, so a
+mouse has no hover, no wheel and no right or middle button. Both are filled in the windowing layer
+rather than vendored or stamped in-app: the `[patch.crates-io]` winit line points at the head of
+`Kaedo17/winit android-pointer-input`, which is the pinned `storytold/winit` rev plus one
+Android-only file that reports wheel, button state and hover, and dispatches `ModifiersChanged`
+*before* the key event carrying it — a change dispatched after the key is too late for it, because
+egui stamps a key as it converts it. That file is submitted upstream as
+[storytold/winit#25](https://github.com/storytold/winit/pull/25) and repinned to `storytold/winit`
+once it merges. Every other target compiles the pinned code byte-for-byte, and touch and
+touch-dragged stylus input is untouched. The pointer half was validated first on FilmCraft's
+Android port (filmcraft `47f202cb`, `ecea29d6`, `685c9cc3`).
+
 ## 2. Time
 
 All time is an integer `Tick`, 254 016 000 000 per second, the least common multiple of every
