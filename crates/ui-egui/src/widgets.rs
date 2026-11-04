@@ -63,6 +63,7 @@ pub struct HotSpec<'a> {
 
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
+/// Leaving the text unchanged, including after text Undo, preserves the stored precision.
 /// Returns (response, Some(new value) when changed, drag finished).
 pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64, spec: &HotSpec, t: &Tokens) -> (Rect, Option<f64>, bool) {
     let HotSpec { speed, range, decimals, suffix } = *spec;
