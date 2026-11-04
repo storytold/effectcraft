@@ -35,6 +35,16 @@ fn value_edit_on_a_selected_key_offsets_all_selected_keys() {
 }
 
 #[test]
+fn one_undo_restores_every_offset_key() {
+    let (mut s, layer, prop) = setup();
+    select_all(&mut s, layer, prop);
+    s.execute_checked("time.set", json!({"time": 1.0})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": layer, "path": "transform/opacity", "value": 40})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(values(&s, layer, prop), vec![0.0, 25.0, 50.0]);
+}
+
+#[test]
 fn offset_selected_keys_stay_in_the_slider_range() {
     let (mut s, layer, prop) = setup();
     select_all(&mut s, layer, prop);
