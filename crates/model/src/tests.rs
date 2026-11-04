@@ -453,6 +453,23 @@ fn a_contour_inside_a_hole_takes_the_innermost_outline_not_the_hole() {
 }
 
 #[test]
+fn a_hole_whose_outline_is_deeper_than_it_is_still_attached() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // D is three deep and its innermost outline A four deep: A's slot must exist before D is attached.
+    let a = rect(0.0, 0.0, 10.0, 10.0);
+    let g = group_contours(vec![
+        a.clone(),
+        rect(-1.0, -1.0, 20.0, 20.0),
+        rect(-2.0, -2.0, 25.0, 25.0),
+        rect(5.0, 5.0, 6.0, 6.0),
+        rect(-100.0, -100.0, 3.0, 3.0),
+        rect(-0.5, -1000.0, 0.5, 1000.0),
+    ]);
+    let o = g.iter().find(|o| o.outer == a).expect("A is an outline");
+    assert_eq!(o.holes.len(), 1, "D is a hole of A");
+}
+
+#[test]
 fn gltf_images_naming_one_file_share_their_wrap_variants() {
     let png = {
         let img = image::RgbaImage::from_fn(2, 2, |x, y| if (x + y) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });

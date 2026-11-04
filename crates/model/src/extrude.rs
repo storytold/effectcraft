@@ -157,12 +157,17 @@ pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
     let mut slot = vec![usize::MAX; n];
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| depth[i]);
-    for i in order {
+    // Every outline gets its slot before any hole is attached: with overlapping paths a hole's
+    // parent can be deeper than the hole itself.
+    for &i in &order {
         if depth[i].is_multiple_of(2) {
             slot[i] = outlines.len();
             outlines.push(Outline { outer: cs[i].clone(), holes: vec![] });
-        } else if let Some(p) = parent[i]
-            && slot[p] != usize::MAX
+        }
+    }
+    for &i in &order {
+        if !depth[i].is_multiple_of(2)
+            && let Some(p) = parent[i]
         {
             outlines[slot[p]].holes.push(cs[i].clone());
         }
