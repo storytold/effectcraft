@@ -463,8 +463,8 @@ pub fn shape_stroke(ids: &mut Ids, color: [f64; 4], width: f64) -> PropGroup {
 pub fn stroke_taper(ids: &mut Ids) -> PropGroup {
     ids.group("taper", "Taper")
         .with(ids.prop("units", "Length Units", Value::Enum(0)).with_ui(popup(&["Pixels", "Percent"])))
-        .with(ids.prop("startLength", "Start Length", Value::Scalar(0.0)).with_ui(ParamUi::Pixels))
-        .with(ids.prop("endLength", "End Length", Value::Scalar(0.0)).with_ui(ParamUi::Pixels))
+        .with(ids.prop("startLength", "Start Length", Value::Scalar(0.0)).with_ui(slider(0.0, 1e6, 0.0, 300.0, 1)))
+        .with(ids.prop("endLength", "End Length", Value::Scalar(0.0)).with_ui(slider(0.0, 1e6, 0.0, 300.0, 1)))
         .with(ids.prop("startWidth", "Start Width", Value::Scalar(100.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
         .with(ids.prop("endWidth", "End Width", Value::Scalar(100.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
         .with(ids.prop("startEase", "Start Ease", Value::Scalar(0.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 1)))
