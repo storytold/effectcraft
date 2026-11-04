@@ -392,7 +392,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
             // Toggle first, so the chain is painted in its new state in the same frame.
             let linked = app.ui.timeline.click_link(p.uid, true, link.clicked());
             crate::icons::paint(ui.painter(), lr, crate::icons::Icon::Link, if linked { t.accent } else { t.text_faint });
-            let link = link.on_hover_text(tr("Constrain Proportions"));
+            link.on_hover_text(tr("Constrain Proportions"));
             app.auto.add(&format!("{auto}.link"), lr, "Constrain Proportions");
             let mut rect = lr;
             for (d, &old) in comps.iter().enumerate() {
