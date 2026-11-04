@@ -813,7 +813,6 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
             (img, left)
         })
         .collect();
-    drop(trace_context);
     drop(refs);
     drop(frames);
     if !progress(2, total) {
@@ -827,17 +826,20 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
     };
     // Frames before t0 are complete already.
     for (t, slot) in out.iter_mut().enumerate().take(t0) {
-        *slot = Some(propagated[t].0.clone());
+        *slot = Some(std::mem::take(&mut propagated[t].0));
     }
     let mut done = 2;
-    out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
-    propagated[t0] = (Image::default(), Vec::new());
+    let (img0, left0) = std::mem::take(&mut propagated[t0]);
+    out[t0] = Some(backend.patch(&img0, &left0, None, o.patch, o.seed));
+    drop((img0, left0));
     done += 1;
     if !progress(done, total) {
         return None;
     }
     for t in t0 + 1..n {
-        let (img, left) = &propagated[t];
+        // Taken, not cloned: each propagated frame is freed once its output exists.
+        let (img, left) = std::mem::take(&mut propagated[t]);
+        let (img, left) = (&img, &left);
         if !left.iter().any(|b| *b) {
             out[t] = Some(img.clone());
         } else {
@@ -860,7 +862,6 @@ pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn Fill
                 _ => backend.patch(img, left, Some(&warped), o.patch, o.seed),
             });
         }
-        propagated[t] = (Image::default(), Vec::new());
         done += 1;
         if !progress(done, total) {
             return None;
