@@ -240,7 +240,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Browser Storage", "ブラウザーストレージ"),
     ("Browse…", "参照…"),
     ("Brush Dynamics", "ブラシのダイナミクス"),
-    ("Caching frames…", "フレームをキャッシュ中…"),
+    ("Caching frames", "フレームをキャッシュ中"),
     ("Cancel", "キャンセル"),
     ("Import After Effects Project", "After Effectsプロジェクトを読み込み"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "このプロジェクトの一部は正確に読み込めません（省略または変更されます）:"),
@@ -1371,7 +1371,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Browser Storage", "浏览器存储"),
     ("Browse…", "浏览…"),
     ("Brush Dynamics", "画笔动态"),
-    ("Caching frames…", "正在缓存帧…"),
+    ("Caching frames", "正在缓存帧"),
     ("Cancel", "取消"),
     ("Import After Effects Project", "导入 After Effects 项目"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此项目的某些部分无法准确导入（将被省略或更改）："),
@@ -2481,7 +2481,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Browser Storage", "Webbläsarlagring"),
     ("Browse…", "Bläddra…"),
     ("Brush Dynamics", "Penseldynamik"),
-    ("Caching frames…", "Cachelagrar bildrutor…"),
+    ("Caching frames", "Cachelagrar bildrutor"),
     ("Cancel", "Avbryt"),
     ("Import After Effects Project", "Importera After Effects-projekt"),
     (
@@ -3745,7 +3745,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Browser Storage", "瀏覽器儲存"),
     ("Browse…", "瀏覽…"),
     ("Brush Dynamics", "筆刷動態"),
-    ("Caching frames…", "正在快取幀…"),
+    ("Caching frames", "正在快取幀"),
     ("Cancel", "取消"),
     ("Import After Effects Project", "匯入 After Effects 專案"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此專案的部分內容無法準確匯入（將被省略或變更）："),
@@ -4803,7 +4803,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Browser Storage", "Сховище браузера"),
     ("Browse…", "Огляд…"),
     ("Brush Dynamics", "Динаміка пензля"),
-    ("Caching frames…", "Кешування кадрів…"),
+    ("Caching frames", "Кешування кадрів"),
     ("Cancel", "Скасувати"),
     ("Import After Effects Project", "Імпортувати проєкт After Effects"),
     (
@@ -5378,7 +5378,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Browser Storage", "Armazenamento do navegador"),
     ("Browse…", "Procurar…"),
     ("Brush Dynamics", "Dinâmica do pincel"),
-    ("Caching frames…", "Armazenando quadros em cache…"),
+    ("Caching frames", "Armazenando quadros em cache"),
     ("Cancel", "Cancelar"),
     ("Import After Effects Project", "Importar projeto do After Effects"),
     (
@@ -6144,7 +6144,7 @@ const POLISH: &[(&str, &str)] = &[
     ("Browser Storage", "Pamięć przeglądarki"),
     ("Browse…", "Przeglądaj…"),
     ("Brush Dynamics", "Dynamika pędzla"),
-    ("Caching frames…", "Buforowanie klatek…"),
+    ("Caching frames", "Buforowanie klatek"),
     ("Cancel", "Anuluj"),
     ("Import After Effects Project", "Importuj projekt After Effects"),
     (
@@ -6894,7 +6894,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Browser Storage", "Úložiště prohlížeče"),
     ("Browse…", "Procházet…"),
     ("Brush Dynamics", "Dynamika štětce"),
-    ("Caching frames…", "Ukládání snímků do mezipaměti…"),
+    ("Caching frames", "Ukládání snímků do mezipaměti"),
     ("Cancel", "Zrušit"),
     ("Import After Effects Project", "Importovat projekt After Effects"),
     (
@@ -7463,7 +7463,7 @@ const SPANISH: &[(&str, &str)] = &[
     ("Browser Storage", "Almacenamiento del navegador"),
     ("Browse…", "Examinar…"),
     ("Brush Dynamics", "Dinámica del pincel"),
-    ("Caching frames…", "Almacenando fotogramas en caché…"),
+    ("Caching frames", "Almacenando fotogramas en caché"),
     ("Cancel", "Cancelar"),
     ("Import After Effects Project", "Importar proyecto de After Effects"),
     (
@@ -8023,7 +8023,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Browser Storage", "ბრაუზერის მეხსიერება"),
     ("Browse…", "არჩევა…"),
     ("Brush Dynamics", "ფუნჯის დინამიკა"),
-    ("Caching frames…", "კადრების ქეშირება…"),
+    ("Caching frames", "კადრების ქეშირება"),
     ("Cancel", "გაუქმება"),
     ("Import After Effects Project", "After Effects-ის პროექტის იმპორტი"),
     (
@@ -8991,7 +8991,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Browser Storage", "Stockage du navigateur"),
     ("Browse…", "Parcourir…"),
     ("Brush Dynamics", "Dynamique du pinceau"),
-    ("Caching frames…", "Mise en cache des images…"),
+    ("Caching frames", "Mise en cache des images"),
     ("Cancel", "Annuler"),
     ("Import After Effects Project", "Importer un projet After Effects"),
     (
