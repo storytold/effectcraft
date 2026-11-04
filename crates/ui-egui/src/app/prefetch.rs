@@ -70,6 +70,7 @@ impl EffectcraftApp {
         let step = plan.map_or(1, |p| p.step);
         let fit_ahead = self.frames_that_fit(&c, scale) - 1;
         self.prefetch_playback(&pass, fit_ahead);
+        self.wake_silent_preview();
         self.pump_meters(ctx, now);
         if !self.playback.playing {
             self.cache_when_idle(ctx, &c, &series, now, input_active, (wa, wb));
@@ -252,6 +253,21 @@ impl EffectcraftApp {
             self.start_audio(fr.tick_of(cur));
         }
         false
+    }
+
+    /// A silent preview whose project was edited so that it has sound now (a layer unmuted while
+    /// playing, #2104): hold the sound for [`Self::start_held_audio`], which starts it from the
+    /// current frame once the frames ahead are cached. Checked once per project edit.
+    fn wake_silent_preview(&mut self) {
+        let pb = &self.playback;
+        if self.audio.is_some() || !pb.playing || pb.caching || pb.starting || pb.audio_held || !pb.plan.is_some_and(|p| p.video) {
+            return;
+        }
+        if pb.silent_project.as_ref().is_some_and(|p| std::sync::Arc::ptr_eq(p, &self.session.project)) {
+            return;
+        }
+        self.playback.silent_project = Some(self.session.project.clone());
+        self.playback.audio_held = self.audio_plays();
     }
 
     /// Held sound starts once the frames ahead are cached again after a stall (see

@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use effectcraft_engine::project::{ItemId, ItemKind, LayerSource, Project};
+use effectcraft_engine::project::{GroupKind, ItemId, ItemKind, Layer, LayerSource, Project, PropGroup};
 use effectcraft_engine::time::{FrameRate, Tick};
 
 use crate::frames::RenderSource;
@@ -342,13 +342,19 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
                     || x.switches.solo != y.switches.solo
                     || x.switches.effects != y.switches.effects
                     || x.props.sub("audio") != y.props.sub("audio")
-                    || x.effects() != y.effects()
+                    || audio_effects(x) != audio_effects(y)
                     || match &x.source {
                         LayerSource::Footage { item } => footage_differs(old, new, *item),
                         LayerSource::Comp { item } => comps_differ(old, new, *item, depth + 1),
                         _ => false,
                     }
             })
+    }
+    /// The layer's audio effects (Effect > Audio), the only effects the mixer applies; a video effect
+    /// edit leaves them as they were.
+    fn audio_effects(l: &Layer) -> Vec<&PropGroup> {
+        let is_audio = |g: &&PropGroup| matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_engine::effects::audio_fx::is_audio_effect(effect));
+        l.effects().into_iter().flat_map(|fx| fx.groups()).filter(is_audio).collect()
     }
     /// The footage item's audio availability changed (relinked, missing, no audio).
     fn footage_differs(old: &Project, new: &Project, item: ItemId) -> bool {
@@ -761,6 +767,36 @@ mod tests {
             }
             assert!(audio_changed(&old, &edited, cid), "audible edit {edit} must be followed");
         }
+    }
+
+    /// #2104: a video effect edit leaves the mix alone, an audio effect changes it.
+    #[test]
+    fn only_audio_effects_change_the_audio() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::project::build::{self, Ids};
+        use effectcraft_engine::project::{Comp, Footage, FootageKind};
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "tone.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(60.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("tone.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
+        let layer = build::layer(&mut p, &comp, "tone.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let with_effect = |id: &str| {
+            let mut edited = p.clone();
+            let spec = effectcraft_engine::effects::find(id).expect("the effect exists");
+            let mut next = edited.next_id;
+            let g = effectcraft_engine::effects::instantiate(spec, &mut Ids(&mut next), spec.name, [64.0, 36.0]);
+            edited.next_id = next;
+            if let Some(fx) = edited.comp_mut(cid).and_then(|c| c.layers.first_mut()).and_then(|l| l.props.sub_mut("effects")) {
+                fx.children.push(g.into());
+            }
+            edited
+        };
+        assert!(!audio_changed(&p, &with_effect("ec.blur.gaussian"), cid), "a video effect must not drop the sound");
+        assert!(audio_changed(&p, &with_effect("ec.audio.backwards"), cid), "an audio effect must be followed");
     }
 
     #[test]

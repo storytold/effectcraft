@@ -196,6 +196,8 @@ pub struct Playback {
     /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
     /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
     pub audio_held: bool,
+    /// The project last checked for a silent preview that became audible (#2104).
+    pub silent_project: Option<Arc<effectcraft_engine::project::Project>>,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
