@@ -1144,7 +1144,7 @@ function __global(name, get) {
 __global('thisComp', function () { return __S.comp || (__S.comp = new Comp(__S.c)); });
 __global('thisLayer', function () { return __S.layer || (__S.layer = __layer(__S.c, __S.l)); });
 __global('thisProperty', function () { return __S.prop || (__S.prop = __mkProp(__S.c, __S.l, __S.path)); });
-['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active',
+['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active', 'source',
   'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'marker'].forEach(function (k) {
   __global(k, function () { return thisLayer[k]; });
 });

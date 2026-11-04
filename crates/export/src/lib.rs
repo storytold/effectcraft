@@ -175,7 +175,9 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
     let t0 = Instant::now();
     let cx = Cx::new(job);
+    let render = RenderEnd(job.accel);
     let mut r = export_with(&cx, progress, t0).await;
+    drop(render);
     if matches!(r, Err(ExportError::Cancelled)) {
         cx.remove_cancelled_outputs()?;
         return r;
@@ -186,6 +188,18 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
         rep.overflow = cx.overflowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
     }
     r
+}
+
+/// Calls [`effectcraft_render::Accelerator::render_end`] when dropped: after the export, and
+/// also when it panics or its future is dropped (a browser worker aborting it).
+struct RenderEnd<'a>(Option<&'a dyn effectcraft_render::Accelerator>);
+
+impl Drop for RenderEnd<'_> {
+    fn drop(&mut self) {
+        if let Some(a) = self.0 {
+            a.render_end();
+        }
+    }
 }
 
 async fn export_with(cx: &Cx<'_>, progress: &mut dyn FnMut(&Progress) -> bool, t0: Instant) -> Result<Report> {
@@ -297,7 +311,7 @@ struct StillOutput {
 
 fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &Image, comp: &Comp, output: StillOutput) -> Result<()> {
     let StillOutput { format: fmt, channels, size: (w, h), quality } = output;
-    use image::{ExtendedColorType, ImageEncoder, ImageFormat};
+    use image::{ExtendedColorType, ImageEncoder};
     match fmt {
         OutputFormat::ExrSequence => {
             // Linear light, premultiplied (the EXR convention); RGB keeps alpha = 1 over the background.
@@ -326,8 +340,16 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                     data.extend_from_slice(&[c[0], c[1], c[2], a]);
                 }
             }
-            let buf = image::Rgba32FImage::from_raw(w, h, data).ok_or_else(|| ExportError::Encode("exr buffer".into()))?;
-            image::DynamicImage::ImageRgba32F(buf).write_to(file, ImageFormat::OpenExr).map_err(|e| ExportError::Encode(e.to_string()))
+            // Scan lines with ZIP like `comp.saveFrameAsExr`: `image`'s encoder writes 64×64 RLE tiles,
+            // which FilmCraft and other scan-line readers refuse (#2805).
+            use exr::prelude::{Encoding, Layer, LayerAttributes, SpecificChannels, Vec2, WritableImage};
+            let row = w as usize * 4;
+            let pixels = SpecificChannels::rgba(|p: Vec2<usize>| {
+                let o = p.y() * row + p.x() * 4;
+                (data[o], data[o + 1], data[o + 2], data[o + 3])
+            });
+            let layer = Layer::new((w as usize, h as usize), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, pixels);
+            exr::image::Image::from_layer(layer).write().to_buffered(file).map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
             let px = cx.pixels(img, comp, if channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb }, w, h);
