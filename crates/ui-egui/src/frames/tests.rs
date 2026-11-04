@@ -1113,3 +1113,25 @@ fn timing_markers_and_expressions_still_change_the_frames() {
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
     assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_renders_in_flight_stay_within_the_cap() {
+    use std::sync::atomic::AtomicUsize;
+    let slots = GpuSlots::new();
+    let now = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..16 {
+            s.spawn(|| {
+                let _slot = slots.acquire(2);
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                now.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    assert!(peak.load(Ordering::SeqCst) <= 2);
+    assert_eq!(*slots.busy.lock().unwrap_or_else(PoisonError::into_inner), 0);
+}
