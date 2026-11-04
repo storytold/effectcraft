@@ -532,9 +532,9 @@ pub struct Frames {
     /// ([`Frames::carry_disk`]), oldest first.
     #[cfg(not(target_arch = "wasm32"))]
     disk_carries: Arc<Mutex<VecDeque<DiskCarry>>>,
-    /// Held while carrying, so chained edits carry in order.
+    /// A carry job is scheduled or running: at most one at a time, draining the edits in order.
     #[cfg(not(target_arch = "wasm32"))]
-    carrying: Arc<Mutex<()>>,
+    carry_scheduled: Arc<AtomicBool>,
     /// The disk series (scale, view and options hash) each comp's frames are cached in.
     #[cfg(not(target_arch = "wasm32"))]
     disk_series: Arc<Mutex<HashMap<u64, Vec<(u32, u64)>>>>,
@@ -608,7 +608,7 @@ impl Default for Frames {
             #[cfg(not(target_arch = "wasm32"))]
             disk_carries: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            carrying: Arc::default(),
+            carry_scheduled: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             disk_series: Arc::default(),
         }
@@ -1043,28 +1043,38 @@ impl Frames {
     #[cfg(not(target_arch = "wasm32"))]
     fn carry_disk(&self, src: &RenderSource) {
         let Some(dc) = src.disk.clone() else { return };
-        if self.disk_carries.lock().map_or(true, |q| q.is_empty()) {
+        let pending = |q: &Mutex<VecDeque<DiskCarry>>| q.lock().is_ok_and(|q| !q.is_empty());
+        // (called on every paint: one job drains every carry queued meanwhile)
+        if !pending(&self.disk_carries) || self.carry_scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
-        let (carries, carrying, series, ctx) = (self.disk_carries.clone(), self.carrying.clone(), self.disk_series.clone(), self.ctx.clone());
+        let (carries, scheduled, series, ctx) = (self.disk_carries.clone(), self.carry_scheduled.clone(), self.disk_series.clone(), self.ctx.clone());
         let virtual_id = self.virtual_id.clone();
         let work = move || {
-            // (taken under the lock, so a later edit's carry waits for this one's)
-            let _order = carrying.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let todo: Vec<DiskCarry> = carries.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
             let mut linked = false;
-            for c in todo {
-                let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { continue };
-                let comp = ItemId(c.comp);
-                let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
-                let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
-                let (a, b) = (key(&c.from), key(&c.to));
-                if a == b {
-                    continue;
+            loop {
+                let todo: Vec<DiskCarry> = carries.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+                if todo.is_empty() {
+                    scheduled.store(false, Ordering::Release);
+                    // (a carry queued after the drain and before the store: keep it, unless a new job took it)
+                    if pending(&carries) && !scheduled.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    break;
                 }
-                for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
-                    for (scale, view) in &series {
-                        linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                for c in todo {
+                    let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { continue };
+                    let comp = ItemId(c.comp);
+                    let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
+                    let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
+                    let (a, b) = (key(&c.from), key(&c.to));
+                    if a == b {
+                        continue;
+                    }
+                    for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
+                        for (scale, view) in &series {
+                            linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                        }
                     }
                 }
             }

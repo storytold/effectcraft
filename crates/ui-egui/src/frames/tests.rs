@@ -1775,6 +1775,21 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
         edit(Arc::make_mut(&mut p1), cid, layer);
         assert_eq!(blue(&p1, 2, &kept), kept, "{name}: after");
         assert_eq!(blue(&p0, 3, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: undo");
+        // A drag: an edit per paint, each paint asking for the blue bar. One carry job drains
+        // them in order, and none is left scheduled.
+        let mut p = p0.clone();
+        for rev in 4..20 {
+            Arc::make_mut(&mut p).comp_mut(cid).unwrap().layer_mut(a).unwrap().name = format!("Drag {rev}");
+            let _ = f.disk_frames(&src(&p), &series(&p, rev), 0..30, &opts);
+        }
+        assert_eq!(blue(&p, 19, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: dragged");
+        for _ in 0..1000 {
+            if !f.carry_scheduled.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!f.carry_scheduled.load(Ordering::Acquire) && f.disk_carries.lock().unwrap().is_empty(), "{name}: carry job finished");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
