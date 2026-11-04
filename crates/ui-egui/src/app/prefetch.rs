@@ -405,11 +405,12 @@ impl EffectcraftApp {
             return;
         }
         let cur = comp.frame_rate.frame_at(self.session.time()).clamp(wa, wb);
-        let fit = self.frames_that_fit(comp, series.scale as f64 / 1000.0).min(n);
+        // The viewer's exact factor (1/3, not the key's 0.333): it shows these frames.
+        let scale = frames::render_scale(series.scale, comp.resolution.factor());
+        let fit = self.frames_that_fit(comp, scale).min(n);
         // One thread each (`Frames::request_background`), so every frame thread takes one.
         let slots = self.frames_parallelism().max(1);
         let mut queued = self.frames.inflight();
-        let scale = series.scale as f64 / 1000.0;
         let mut pending = false;
         for k in 0..fit {
             let f = wa + (cur - wa + k).rem_euclid(n);

@@ -451,9 +451,74 @@ fn time_displacement(ctx: &EffectCtx, b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- Timewarp
 
-/// Source layer time Timewarp shows at layer time `t`.
+/// Source layer time Timewarp shows at layer time `t` when Speed is the same at every time:
+/// Source Frame maps directly, Speed (a rate in %) gives `t × speed / 100`. An animated Speed
+/// is integrated instead (see [`timewarp_integrate_speed`]).
 pub fn timewarp_source_time(t: f64, by_frame: bool, speed: f64, source_frame: f64, fps: f64) -> f64 {
     if by_frame { source_frame / fps } else { t * speed / 100.0 }
+}
+
+/// Speed samples per composition frame when integrating an animated Speed.
+const TW_SPEED_SAMPLES_PER_FRAME: f64 = 2.0;
+/// Most Speed samples one integration takes (longer spans widen the step instead).
+const TW_SPEED_MAX_SAMPLES: f64 = 50_000.0;
+
+/// Source layer time of Adjust Time By = Speed at layer time `t` with an animated Speed: Speed
+/// is a rate (100 % = real time), so the source time is the integral of `speed / 100` over layer
+/// time from 0 to `t` (toward 0 with the sign for negative `t`). `speed_at(lt)` is Speed at layer
+/// time `lt`; a missing or non-finite sample counts as `now` (the current Speed), or 0 when that
+/// is not finite either. Midpoint rule on a fixed grid from 0, [`TW_SPEED_SAMPLES_PER_FRAME`]
+/// samples per frame at `fps`, at most [`TW_SPEED_MAX_SAMPLES`] samples. A non-finite result falls back to
+/// `t × now / 100`, then to 0.
+pub fn timewarp_integrate_speed(t: f64, fps: f64, now: f64, speed_at: impl Fn(f64) -> Option<f64>) -> f64 {
+    let flat = t * now / 100.0;
+    let fallback = |v: f64| {
+        if v.is_finite() {
+            v
+        } else if flat.is_finite() {
+            flat
+        } else {
+            0.0
+        }
+    };
+    if !t.is_finite() || t == 0.0 {
+        return fallback(flat);
+    }
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let span = t.abs();
+    // Cells of a fixed step anchored at 0 (whole cells plus a partial last one), so successive
+    // frames share their samples and a Hold key's jump lands the same way on every frame; only a
+    // span past the sample budget widens the step.
+    let mut h = 1.0 / (fps * TW_SPEED_SAMPLES_PER_FRAME);
+    if !(span / h).is_finite() || span / h >= TW_SPEED_MAX_SAMPLES {
+        h = span / TW_SPEED_MAX_SAMPLES;
+    }
+    if !h.is_finite() || h <= 0.0 {
+        return fallback(flat);
+    }
+    let whole = (span / h).floor().clamp(0.0, TW_SPEED_MAX_SAMPLES);
+    let rest = (span - whole * h).max(0.0);
+    let sign = t.signum();
+    let held = if now.is_finite() { now } else { 0.0 };
+    let sample = |lt: f64| speed_at(sign * lt).filter(|v| v.is_finite()).unwrap_or(held);
+    // `whole` is a whole number in 0..=TW_SPEED_MAX_SAMPLES, so the count is exact.
+    let full: f64 = (0..whole as u64).map(|i| sample((i as f64 + 0.5) * h)).sum::<f64>() * h;
+    let part = if rest > 0.0 { sample(whole * h + rest * 0.5) * rest } else { 0.0 };
+    fallback(sign * (full + part) / 100.0)
+}
+
+/// Source layer time Timewarp shows at the frame: [`timewarp_source_time`], except that an
+/// animated Speed (keyframes or an expression, read through the effect host) is integrated
+/// from layer time 0 ([`timewarp_integrate_speed`]), so a speed ramp plays on from where the
+/// footage is instead of jumping to another segment.
+fn timewarp_source(ctx: &EffectCtx, by_frame: bool, speed: f64, fps: f64) -> f64 {
+    let direct = timewarp_source_time(ctx.time, by_frame, speed, ctx.params.f("sourceFrame"), fps);
+    if by_frame {
+        return direct;
+    }
+    let idx = ctx.env.effect_index;
+    let Some(host) = ctx.env.host.filter(|h| !h.param_is_static(idx, "speed")) else { return direct };
+    timewarp_integrate_speed(ctx.time, fps, speed, |lt| host.param_at(idx, "speed", lt).map(|v| v.as_f64()))
 }
 
 /// Timewarp's Pixel Motion settings (the Tuning group and Source Crops).
@@ -747,7 +812,7 @@ fn timewarp_instants(ctx: &EffectCtx) -> (Vec<(f64, f32)>, Vec<f64>, f64) {
     let fps = ctx.fps();
     let by_frame = ctx.params.e("adjustTimeBy") == 1;
     let speed = ctx.params.f("speed");
-    let src = timewarp_source_time(ctx.time, by_frame, speed, ctx.params.f("sourceFrame"), fps);
+    let src = timewarp_source(ctx, by_frame, speed, fps);
     let mut instants: Vec<(f64, f32)> = vec![];
     if ctx.params.b("motionBlur/enableMotionBlur") {
         let angle = if ctx.params.e("motionBlur/shutterControl") == 1 { ctx.params.f("motionBlur/shutterAngle") } else { 180.0 };
@@ -879,7 +944,8 @@ pub fn timewarp_plan(ctx: &EffectCtx) -> Option<TimewarpPlan> {
 /// vectors (block-matching optical flow, [`effectcraft_raster::flow`]) tuned by the Tuning
 /// group. A Matte Layer splits foreground and background so each moves on its own vectors; a
 /// Warp Layer supplies the motion instead of the layer itself. Motion Blur averages Shutter
-/// Samples instants across the shutter.
+/// Samples instants across the shutter. Adjust Time By = Speed treats Speed as a rate
+/// integrated from layer time 0 (keyframing it ramps the playback speed).
 fn timewarp(ctx: &EffectCtx, b: Buf) -> Buf {
     match timewarp_plan(ctx) {
         Some(plan) => plan.render_cpu(),
@@ -1186,6 +1252,88 @@ mod tests {
         // Force Motion Blur looks forward over the shutter.
         let out = run("ec.time.ccforcemotionblur", &[], 1.0, &h);
         assert!(out.img.data[0][0] > 1.0);
+    }
+
+    /// [`Clock`] whose Timewarp (effect 2) Speed is animated: `speed(lt)` at layer time `lt`.
+    struct Ramp {
+        speed: fn(f64) -> f64,
+    }
+    impl EffectHost for Ramp {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let v = t as f32;
+            Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
+        }
+        /// Timewarp's (effect 2) Speed follows `speed`; every other parameter is unknown.
+        fn param_at(&self, effect_index: usize, id: &str, lt: f64) -> Option<Value> {
+            (effect_index == 2 && id == "speed").then(|| num((self.speed)(lt)))
+        }
+        /// Only Timewarp's (effect 2) Speed is animated.
+        fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
+            !(effect_index == 2 && id == "speed")
+        }
+    }
+
+    fn run_ramp(vals: &[(&str, Value)], t: f64, host: &Ramp) -> Buf {
+        let env = EffectEnv { host: Some(host), frame_rate: 10.0, comp_time: t, effect_index: 2, ..Default::default() };
+        run_fx("ec.time.timewarp", vals, Image::filled(6, 4, [0.9, 0.0, 0.0, 1.0]), t, env)
+    }
+
+    /// #2803: an animated Speed is a rate integrated from layer time 0, so a speed ramp plays on
+    /// from where the footage is instead of jumping to another segment.
+    #[test]
+    fn timewarp_integrates_animated_speed() {
+        // Speed 100 % for the first second, then 50 %: at t = 2 s the source is 1 + 0.5 = 1.5 s
+        // (`t × speed` would jump back to 1.0 s).
+        let h = Ramp { speed: |lt| if lt < 1.0 { 100.0 } else { 50.0 } };
+        let vals = [("method", Value::Enum(0)), ("speed", num(50.0))];
+        let out = run_ramp(&vals, 2.0, &h);
+        assert!((out.img.data[0][0] - 1.5).abs() < 1e-4, "{}", out.img.data[0][0]);
+        // Continuous across the change: just past 1 s the source is just past 1 s.
+        let out = run_ramp(&vals, 1.2, &h);
+        assert!((out.img.data[0][0] - 1.1).abs() < 1e-4, "{}", out.img.data[0][0]);
+        // Negative layer time integrates toward 0.
+        let src = timewarp_integrate_speed(-2.0, 10.0, 50.0, |lt| Some(if lt > -1.0 { 100.0 } else { 50.0 }));
+        assert!((src + 1.5).abs() < 1e-9, "{src}");
+        // A Hold key between samples (1.03 s) lands the same way on every frame: past it, each
+        // 0.1 s frame advances the source by exactly 50 % of a frame.
+        let hold = |lt: f64| Some(if lt < 1.03 { 100.0 } else { 50.0 });
+        let at = |t: f64| timewarp_integrate_speed(t, 10.0, 50.0, hold);
+        for k in 12..40 {
+            let (a, b) = (at((k - 1) as f64 / 10.0), at(k as f64 / 10.0));
+            assert!((b - a - 0.05).abs() < 1e-9, "k={k}: {}", b - a);
+        }
+        // A static Speed keeps `t × speed / 100` exactly.
+        assert_eq!(timewarp_source_time(2.0, false, 37.0, 0.0, 10.0), 2.0 * 37.0 / 100.0);
+        // Source Frame mode ignores Speed.
+        let out = run_ramp(&[("method", Value::Enum(0)), ("adjustTimeBy", Value::Enum(1)), ("sourceFrame", num(3.0))], 2.0, &h);
+        assert!((out.img.data[0][0] - 0.3).abs() < 1e-5);
+    }
+
+    /// Never crash: non-finite or huge Speeds, times and frame rates give finite source times
+    /// and pixels.
+    #[test]
+    fn timewarp_animated_speed_survives_bad_values() {
+        // Non-finite samples count as the current Speed (or 0); the result is always finite.
+        for t in [0.0, 1.0, -3.0, 1e9, f64::MAX, f64::INFINITY, f64::NAN] {
+            for now in [50.0, f64::NAN, f64::INFINITY, 1e308] {
+                let src = timewarp_integrate_speed(t, 10.0, now, |lt| Some(if lt < 0.5 { f64::NAN } else { 1e308 }));
+                assert!(src.is_finite(), "t={t} now={now}: {src}");
+                let src = timewarp_integrate_speed(t, f64::NAN, now, |_| None);
+                assert!(src.is_finite(), "t={t} now={now}: {src}");
+            }
+        }
+        let h = Ramp { speed: |lt| if lt < 1.0 { f64::NAN } else { f64::INFINITY } };
+        let out = run_ramp(&[("method", Value::Enum(2)), ("speed", num(50.0)), ("motionBlur/enableMotionBlur", Value::Bool(true))], 2.0, &h);
+        assert!(out.img.data.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        let h = Ramp { speed: |_| 1e308 };
+        let out = run_ramp(&[("method", Value::Enum(1)), ("speed", num(1e308))], 2.0, &h);
+        assert!(out.img.data.iter().all(|p| p.iter().all(|c| c.is_finite())));
     }
 
     #[test]

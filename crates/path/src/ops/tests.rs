@@ -293,6 +293,18 @@ fn wiggle_is_deterministic_and_time_varying() {
 }
 
 #[test]
+fn wiggle_survives_an_absurd_speed_or_time() {
+    // `t` far past i64 saturates the lattice index at i64::MAX, and the neighbours' `+ 1`, `+ 2` used to overflow.
+    let s = [sq(0.0, 0.0, 100.0)];
+    for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::MAX, f64::MIN, 1e300, 9.3e18] {
+        let by_speed = wiggle(&s, &WiggleParams { speed: v, ..Default::default() }, 1.0);
+        let by_time = wiggle(&s, &WiggleParams::default(), v);
+        let by_phase = wiggle(&s, &WiggleParams { phase_deg: v, ..Default::default() }, 0.0);
+        assert_eq!((by_speed.len(), by_time.len(), by_phase.len()), (1, 1, 1), "wiggle with {v}");
+    }
+}
+
+#[test]
 fn wiggle_displacement_is_bounded() {
     let mut l = BezPath::new();
     l.move_to((0.0, 0.0));

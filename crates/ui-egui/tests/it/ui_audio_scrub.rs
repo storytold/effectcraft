@@ -553,8 +553,10 @@ fn a_device_that_fails_to_start_plays_the_picture() {
 }
 
 /// An output that plays: a thread takes the feed's samples in real time, as a sound card would.
+/// It holds off pulling until `.1` is set, so a test can read the clock before any sample is
+/// taken however loaded the machine is (the thread otherwise races the test's first check).
 #[derive(Clone, Default)]
-struct Playing(Arc<Mutex<bool>>);
+struct Playing(Arc<Mutex<bool>>, Arc<std::sync::atomic::AtomicBool>);
 
 impl AudioDevice for Playing {
     fn sample_rate(&self) -> u32 {
@@ -562,9 +564,14 @@ impl AudioDevice for Playing {
     }
     fn start(&mut self, feed: Arc<AudioFeed>) -> Result<(), String> {
         let stop = self.0.clone();
+        let go = self.1.clone();
         std::thread::spawn(move || {
             let mut buf = vec![0.0f32; 480 * 2];
             while !*stop.lock().unwrap() {
+                if !go.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
                 feed.pull(&mut buf);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -590,6 +597,7 @@ fn a_started_preview_follows_its_sound() {
     h.run_steps(2);
     assert!(until_started(&mut h) && h.state().audio.is_some(), "the sound started");
     assert_eq!(audio_frame(&h, cid), Some(0), "from the first frame");
+    device.1.store(true, std::sync::atomic::Ordering::Release);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while frame(&h, cid) < 5 && std::time::Instant::now() < deadline && h.state().audio.is_some() {
         step(&mut h);
