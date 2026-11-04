@@ -232,9 +232,9 @@ fn stroke_order_field(
         Some(i @ (3 | 4)) => Some(i as u32 - 2),
         Some(i) => {
             actions.push(json!({"strokeOverFill": i == 1}));
-            // A per-character order puts the layer back on the Per Character Palette, or it
-            // would have no visible effect.
-            (fill_stroke != 0).then_some(0)
+            // A per-character order puts the layers back on the Per Character Palette, or it
+            // would have no visible effect (on another selected layer too, whatever this one's).
+            Some(0)
         }
         None => None,
     }
@@ -263,9 +263,8 @@ fn apply_layer_fill_stroke(app: &mut EffectcraftApp, ctx: &egui::Context, tt: &T
         // `prop.set` writes the layer it names, locked or not: name one `selected` may change.
         let comp = app.session.active_comp();
         let mut selected = app.session.state.selected_layers.iter().filter_map(|id| comp?.layer(*id));
-        if let Some(l) = selected.find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text) && !l.switches.locked) {
-            params["layer"] = json!(l.id.0);
-        }
+        let Some(l) = selected.find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text) && !l.switches.locked) else { return };
+        params["layer"] = json!(l.id.0);
     }
     let set = json!({"command": "prop.set", "params": params});
     let steps: Vec<serde_json::Value> =

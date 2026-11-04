@@ -1461,6 +1461,26 @@ fn set_text_selected_skips_locked_layers_and_changes_nothing_on_an_error() {
     assert_eq!((doc(&s, a).size, doc(&s, b).size), (24.0, 24.0));
 }
 
+/// `selected` with nothing to change is a no-op, not a write to the named layer (#2862).
+#[test]
+fn set_text_selected_changes_nothing_when_no_selected_layer_qualifies() {
+    let (mut s, a, _, solid) = two_selected();
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
+    let recent = s.prefs.recent_fonts.clone();
+    let steps = undo_steps(&s);
+    // A lone locked layer, named or not, and a selection without text.
+    for (select, mut p) in [(a, json!({"layer": a})), (a, json!({})), (solid, json!({"layer": solid}))] {
+        s.execute("layer.select", json!({"layers": [select]})).unwrap();
+        p["selected"] = json!(true);
+        p["size"] = json!(24);
+        p["font"] = json!("No Such Font");
+        assert_eq!(s.execute_checked("layer.setText", p).unwrap(), serde_json::Value::Null);
+        assert_eq!(doc(&s, a).size, 60.0);
+        assert_eq!(undo_steps(&s), steps, "no undo step");
+        assert_eq!(s.prefs.recent_fonts, recent);
+    }
+}
+
 #[test]
 fn set_text_with_a_range_stays_on_the_edited_layer() {
     let (mut s, a, b, _) = two_selected();

@@ -116,6 +116,48 @@ fn a_layer_wide_stroke_order_leaves_a_locked_shown_layer_alone() {
     assert_eq!(fill_stroke(&mut h, a), json!(0), "the locked layer keeps its order");
 }
 
+/// A lone locked text layer stays as it is, and no error shows: nothing qualifies, so the panel's
+/// changes, the stroke order's `prop.set` among them, do nothing.
+#[test]
+fn character_changes_leave_a_lone_locked_layer_alone_quietly() {
+    let (mut h, a, b) = two_text_layers(false);
+    h.state_mut().session.execute("layer.select", json!({"layers": [a]})).unwrap();
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
+    h.run_steps(2);
+    let steps = h.state().session.history.undo.len();
+    let bold = center(&h, "character.fauxBold");
+    click(&mut h, bold);
+    let order = center(&h, "character.strokeOverFill");
+    click(&mut h, order);
+    h.get_by_role_and_label(Role::Button, "All Fills Over All Strokes").click();
+    h.run_steps(3);
+    assert!(!doc(&h, a).faux_bold && !doc(&h, b).faux_bold);
+    for l in [a, b] {
+        assert_eq!(h.state_mut().session.execute("prop.get", json!({"layer": l, "path": "text/moreOptions/fillStroke"})).unwrap()["value"], json!(0));
+    }
+    assert_eq!(h.state().session.history.undo.len(), steps, "no undo step");
+    assert!(h.state().ui.status.is_empty(), "{}", h.state().ui.status);
+}
+
+/// A per-character stroke order puts every selected text layer back on the Per Character Palette,
+/// though the layer the panel shows already is on it.
+#[test]
+fn a_per_character_stroke_order_resets_the_other_selected_layers() {
+    let (mut h, a, b) = two_text_layers(false);
+    h.state_mut().session.execute("prop.set", json!({"layer": b, "path": "text/moreOptions/fillStroke", "value": 2})).unwrap();
+    h.run_steps(2);
+    let steps = h.state().session.history.undo.len();
+    let order = center(&h, "character.strokeOverFill");
+    click(&mut h, order);
+    h.get_by_role_and_label(Role::Button, "Stroke Over Fill").click();
+    h.run_steps(3);
+    for l in [a, b] {
+        assert_eq!(h.state_mut().session.execute("prop.get", json!({"layer": l, "path": "text/moreOptions/fillStroke"})).unwrap()["value"], json!(0));
+        assert!(doc(&h, l).stroke_over_fill);
+    }
+    assert_eq!(h.state().session.history.undo.len(), steps + 1, "one undo step");
+}
+
 /// While one layer's text is edited, the panel changes its selected characters only.
 #[test]
 fn character_changes_stay_on_the_edited_layer_while_editing() {

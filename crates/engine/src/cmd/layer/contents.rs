@@ -147,15 +147,15 @@ fn shape_item_target(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: O
 
 /// The layers `layer.setText` changes: `layer` (or the first selected layer). With `selected` (the
 /// Character, Paragraph and Properties panels pass it) and that layer selected, every selected,
-/// unlocked text layer instead, as in After Effects (#2862). A `range` belongs to one layer's text,
-/// so it never reaches the others.
+/// unlocked text layer instead, as in After Effects (#2862), and none when no layer qualifies. A
+/// `range` belongs to one layer's text, so it never reaches the others.
 fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
     let (cid, lid) = layer_p(s, p, "layer.setText")?;
     if b_p(p, "selected") != Some(true) || p.get("range").is_some() || !s.state.selected_layers.contains(&lid) {
         return Ok((cid, vec![lid]));
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let ids: Vec<LayerId> = s
+    let ids = s
         .state
         .selected_layers
         .iter()
@@ -163,8 +163,7 @@ fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
         .filter(|l| matches!(l.source, LayerSource::Text) && !l.switches.locked)
         .map(|l| l.id)
         .collect();
-    // (nothing else qualifies: the named layer answers for itself, as without `selected`)
-    Ok((cid, if ids.is_empty() { vec![lid] } else { ids }))
+    Ok((cid, ids))
 }
 
 /// `layer.setText`: sets the Source Text and/or character attributes at the CTI of the layers
@@ -177,8 +176,12 @@ fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
 /// the session is bumped whenever this branch runs. Document changes use [`Session::edit`],
 /// merged by `merge_p`. With `text` given, a layer whose name is empty or starts with `Text`
 /// takes the new first line (up to 40 characters) when that line is non-empty. Replies `null`.
+/// With no layer to change it does nothing: the panels stay quiet over a locked selection.
 pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lids) = set_text_layers(s, p)?;
+    if lids.is_empty() {
+        return Ok(Value::Null);
+    }
     // The Character panel's recent fonts (Settings ▸ Type ▸ Number of Recent Fonts to Display).
     if let Some(f) = str_p(p, "font") {
         s.prefs.push_recent_font(f);
