@@ -131,7 +131,8 @@ impl RotoData {
         d.bound_span();
         d
     }
-    fn bound_span(&mut self) {
+    /// Keep the span around the base frame and within [`MAX_SPAN_FRAMES`] of it on each side.
+    pub fn bound_span(&mut self) {
         let Some(base) = self.base else { return };
         let [a, b] = self.span;
         self.span = [a.min(base).max(base.saturating_sub(MAX_SPAN_FRAMES)), b.max(base).min(base.saturating_add(MAX_SPAN_FRAMES))];
