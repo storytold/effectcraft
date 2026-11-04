@@ -172,14 +172,36 @@ pub struct FillPlan {
     pub dir: String,
 }
 
+/// Transient full frames one parallel stage holds per worker: the membrane reads a frame and
+/// returns a copy, the flow stage holds the neighbouring pair, and Lighting Correction adds the
+/// mismatch ring (`diff`, its mask) on top.
+fn per_worker_frames(lighting: bool) -> u64 {
+    if lighting { 4 } else { 2 }
+}
+
+/// The sequential synthesis stage: the stored frame, the PatchMatch pyramid and its
+/// coarse-to-fine copies, the warped previous frame, and the sink's prepared copy.
+const SYNTH_FRAMES: u64 = 6;
+
+/// Workers a range of `frames` can keep busy (rayon never runs more tasks than frames).
+fn fill_workers(frames: usize) -> u64 {
+    let hw = std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(4);
+    hw.min(frames.max(1) as u64)
+}
+
 /// Native builds spill the input, the membrane-filled neighbours and the propagated copies, and
 /// pack the holes to one bit per pixel, so only the two packed masks and the two flow fields
-/// (~1/2 byte a pixel a frame) plus a small per-thread working set stay resident (#2570). wasm
-/// has no spill and keeps the
-/// input and the working copies in RAM (~32 bytes a pixel a frame). When even that peak is more
-/// than `available`, report it up front instead of running out of memory partway through
-/// (#1789, #2570 review).
+/// (~1/2 byte a pixel a frame) plus the workers' scratch stay resident (#2570). wasm has no
+/// spill and keeps the input and the working copies in RAM (~32 bytes a pixel a frame). When
+/// even that peak is more than `available`, report it up front instead of running out of memory
+/// partway through (#1789, #2570 review).
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
+    memory_shortfall_with(frames, w, h, available, fill_workers(frames), false)
+}
+
+/// `workers` and `lighting` are parameters so the budget is testable: the scratch term used to
+/// be a fixed 8 frames, which under-counted a wide machine by several times (#2570 review).
+fn memory_shortfall_with(frames: usize, w: u32, h: u32, available: u64, workers: u64, lighting: bool) -> Option<String> {
     let px = u64::from(w).saturating_mul(u64::from(h));
     let per_frame = (frames as u64).saturating_mul(px);
     // `holes` and the leftover propagation masks, packed to a bit a pixel each.
@@ -188,8 +210,9 @@ fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<Str
     let flows = per_frame / 4;
     // wasm keeps the input and one working copy in RAM at every stage.
     let resident = if cfg!(target_arch = "wasm32") { per_frame.saturating_mul(32) } else { 0 };
-    // A few full frames per rayon thread (membrane, flow, lighting scratch).
-    let scratch = px.saturating_mul(128);
+    // The synthesis stage is sequential; every parallel stage holds a few frames a worker.
+    let scratch_frames = SYNTH_FRAMES.saturating_add(per_worker_frames(lighting).saturating_mul(workers));
+    let scratch = px.saturating_mul(16).saturating_mul(scratch_frames);
     let need = masks.saturating_add(flows).saturating_add(resident).saturating_add(scratch);
     (need > available).then(|| {
         let gb = |b: u64| b as f64 / 1e9;
@@ -197,6 +220,34 @@ fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<Str
             "Content-Aware Fill of {frames} frames at {w}×{h} needs at least {:.1} GB of memory, and {:.1} GB is free: fill a shorter range (set the work area and choose Work Area) or close other applications",
             gb(need),
             gb(available)
+        )
+    })
+}
+
+/// Scratch floor for a native fill: the input, membrane-filled and propagated frames are each
+/// spilled as f32 RGBA (3 × 16 bytes a pixel a frame), plus a tenth for the PNG output.
+fn scratch_need(frames: usize, w: u32, h: u32) -> u64 {
+    let bytes = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(48);
+    bytes.saturating_add(bytes / 10)
+}
+
+/// Refuse up front when the output volume cannot hold the fill's scratch. The folder may not
+/// exist yet (the spill creates it), so query the nearest existing ancestor. `None` when the
+/// volume cannot be read; the write itself still reports a real error then (#2570 review).
+#[cfg(not(target_arch = "wasm32"))]
+fn scratch_shortfall(frames: usize, w: u32, h: u32, dir: &std::path::Path) -> Option<String> {
+    let need = scratch_need(frames, w, h);
+    let mut probe = dir;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let (_, free) = crate::sysinfo::disk_space(probe)?;
+    (need > free).then(|| {
+        let gb = |b: u64| b as f64 / 1e9;
+        format!(
+            "Content-Aware Fill of {frames} frames at {w}×{h} needs up to {:.1} GB of scratch space beside the output, and {:.1} GB is free there: fill a shorter range (set the work area and choose Work Area) or choose an output folder on a larger disk",
+            gb(need),
+            gb(free)
         )
     })
 }
@@ -380,17 +431,25 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let (fa, fb) = (fr.frame_at(fr.snap_nearest(a)), fr.frame_at(b - Tick(1)));
     let times: Vec<Tick> = (fa..=fb).map(|f| fr.tick_of(f)).collect();
-    if let Some(e) = crate::sysinfo::memory().and_then(|m| memory_shortfall(times.len(), w, h, m.available)) {
-        return Err(bad(c, e));
-    }
     let opts = FillOpts {
         method: FillMethod::from_name(&st.method).unwrap_or_default(),
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
         ..Default::default()
     };
+    if let Some(e) =
+        crate::sysinfo::memory().and_then(|m| memory_shortfall_with(times.len(), w, h, m.available, fill_workers(times.len()), opts.lighting > 0.0))
+    {
+        return Err(bad(c, e));
+    }
     let expand = st.alpha_expansion.round().max(0.0) as usize;
     let reference = st.reference_layer.filter(|r| comp.layer(*r).is_some()).map(|r| (r, Tick::from_seconds_f64(st.reference_time.unwrap_or(0.0))));
     let dir = str_p(p, "outputDir").map(str::to_string).unwrap_or_else(|| default_dir(s, &layer.name));
+    // Native fills write three f32 copies of the range to scratch beside the output; a volume
+    // that cannot hold them is refused before any frame is rendered (#2570 review).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(e) = scratch_shortfall(times.len(), w, h, std::path::Path::new(&dir)) {
+        return Err(bad(c, e));
+    }
     let plan = FillPlan {
         comp: cid,
         layer: lid,
@@ -541,7 +600,11 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{filling_status, memory_shortfall};
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::scratch_need;
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::scratch_shortfall;
+    use super::{filling_status, memory_shortfall, memory_shortfall_with};
 
     /// Edge Blend fills with the membrane, which the device backend leaves to the CPU reference:
     /// it must not claim a GPU fill just because a backend is available.
@@ -554,17 +617,35 @@ mod tests {
         assert_eq!(filling_status(false, FillMethod::Object), "Filling");
     }
 
-    /// #1789 / #2570: a range that cannot fit is refused up front instead of OOM-ing.
+    /// #1789 / #2570: a range that cannot fit is refused up front instead of OOM-ing. The
+    /// scratch term scales with the workers and Lighting Correction, not a fixed frame count.
     #[test]
     fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
-        let e = memory_shortfall(300, 1920, 1080, 1_000_000).expect("refused");
+        let e = memory_shortfall_with(300, 1920, 1080, 1_000_000, 8, false).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
-        assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a short range fits");
-        // The two packed masks still grow with the range: a very long 1080p range cannot fit in
-        // half a gigabyte, while spilling lets a moderate one fit in a gigabyte (#2570 review).
-        assert!(memory_shortfall(1000, 1920, 1080, 500_000_000).is_some());
-        assert_eq!(memory_shortfall(300, 1920, 1080, 1_000_000_000), None);
+        // Four workers, no lighting: the packed masks and flows plus ~14 scratch frames fit.
+        assert_eq!(memory_shortfall_with(30, 1920, 1080, 4_000_000_000, 4, false), None);
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 4, false), None);
+        // A wide machine with Lighting Correction holds ~4 frames a worker: 300 frames no longer
+        // fit in 1 GB, which the old fixed 8-frame scratch term missed (#2570 review).
+        assert!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 16, true).is_some());
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 4_000_000_000, 16, true), None);
+        // The two packed masks still grow with the range: a very long 1080p range cannot fit.
+        assert!(memory_shortfall_with(1000, 1920, 1080, 500_000_000, 8, false).is_some());
         // Hostile sizes saturate instead of overflowing.
         assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
+    }
+
+    /// The native spill holds three f32 copies of the range beside the output, plus the PNGs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn scratch_space_is_checked_before_a_fill() {
+        let per_copy = 300u64 * 1920 * 1080 * 48;
+        assert_eq!(scratch_need(300, 1920, 1080), per_copy + per_copy / 10);
+        let tmp = std::env::temp_dir();
+        // A range that cannot possibly fit on the volume is refused up front.
+        assert!(scratch_shortfall(usize::MAX, u32::MAX, u32::MAX, &tmp).is_some());
+        // A tiny fill fits.
+        assert_eq!(scratch_shortfall(1, 16, 16, &tmp), None);
     }
 }

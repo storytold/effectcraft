@@ -147,7 +147,11 @@ fn object_fill_recovers_background_and_is_stable() {
             holes.push(hole);
             gts.push(gt);
         }
-        let input = FillInput { frames: effectcraft_raster::inpaint::Frames::Memory(frames), holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(), references: vec![] };
+        let input = FillInput {
+            frames: effectcraft_raster::inpaint::Frames::Memory(frames),
+            holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(),
+            references: vec![],
+        };
         let out = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true, None).expect("fill");
         for t in 0..out.len() {
             let db = psnr(&out[t], &gts[t], Some(&input.holes[t].to_vec()));
@@ -172,7 +176,11 @@ fn edge_blend_takes_the_cpu_membrane() {
     let (w, h) = (80u32, 60u32);
     let gt = background(w, h, 0.0);
     let hole = rect_hole(w, h, 30, 20, 14);
-    let input = FillInput { frames: effectcraft_raster::inpaint::Frames::Memory(vec![cut(&gt, &hole); 4]), holes: vec![effectcraft_raster::inpaint::HoleMask::from_vec(&hole); 4], references: vec![] };
+    let input = FillInput {
+        frames: effectcraft_raster::inpaint::Frames::Memory(vec![cut(&gt, &hole); 4]),
+        holes: vec![effectcraft_raster::inpaint::HoleMask::from_vec(&hole); 4],
+        references: vec![],
+    };
     let opts = FillOpts { method: effectcraft_raster::inpaint::FillMethod::EdgeBlend, ..Default::default() };
     let edge = fill_sequence_with(input.clone(), &opts, g, &mut |_, _| true, None).expect("fill");
     for t in 1..4 {
@@ -299,7 +307,11 @@ fn sequence_fill_with_the_device_flow_matches_the_cpu() {
             frames.push(cut(&gt, &hole));
             holes.push(hole);
         }
-        let input = FillInput { frames: effectcraft_raster::inpaint::Frames::Memory(frames), holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(), references: vec![] };
+        let input = FillInput {
+            frames: effectcraft_raster::inpaint::Frames::Memory(frames),
+            holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(),
+            references: vec![],
+        };
         let dev = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true, None).expect("gpu fill");
         let ref_cpu = fill_sequence_with(input.clone(), &FillOpts::default(), &cpu, &mut |_, _| true, None).expect("cpu fill");
         for t in 0..dev.len() {

@@ -1748,4 +1748,25 @@ mod tests {
             assert!(!spilled.has_error(), "sampling a valid spill records no error");
         }
     }
+
+    /// The input's error slot is shared with the membrane and propagation spills, so one probe
+    /// reports any scratch failure (#2570 review).
+    #[test]
+    fn a_secondary_spill_reports_through_the_input_error_slot() {
+        let input = SpillHandle::create(4, 4, 2, 32).expect("input spill");
+        let prop = SpillHandle::create_in_with_error(None, 4, 4, 2, 32, Some(input.error_cell())).expect("prop spill");
+        prop.record_error("spill: No space left on device".into());
+        assert!(input.has_error());
+        assert_eq!(input.take_error().as_deref(), Some("spill: No space left on device"));
+        assert!(!prop.has_error(), "take clears the shared slot");
+    }
+
+    /// A spill whose scratch folder cannot be created is an error, not a silent fallback.
+    #[test]
+    fn a_spill_that_cannot_create_its_folder_is_an_error() {
+        let dir = tempfile::tempdir().expect("temp");
+        let file = dir.path().join("not-a-folder");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(SpillHandle::create_in(Some(&file), 4, 4, 1, 32).is_err());
+    }
 }
