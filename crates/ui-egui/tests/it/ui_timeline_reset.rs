@@ -87,3 +87,36 @@ fn locked_layers_do_not_reset() {
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.transform));
     assert_eq!(num(&h, x.layer, "transform/opacity"), 40.0);
 }
+
+#[test]
+fn an_animated_property_takes_the_default_at_the_current_time_and_keeps_its_other_keys() {
+    let (mut h, x) = harness();
+    let s = &mut h.state_mut().session;
+    for (t, v) in [(0.0, 20.0), (3.0, 60.0)] {
+        s.execute("prop.addKey", json!({"layer": x.layer, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    s.execute("time.set", json!({"time": 1.5})).unwrap();
+    h.run_steps(3);
+    click_auto(&mut h, &format!("timeline.group.{}.reset", x.transform));
+    let comp = h.state().session.active_comp().unwrap();
+    let opacity = comp.layer(LayerId(x.layer)).unwrap().props.prop("transform/opacity").unwrap();
+    let keys: Vec<(f64, f64)> = opacity.keys.iter().map(|k| ((k.time.seconds() * 24.0).round() / 24.0, k.value.as_f64())).collect();
+    assert_eq!(keys, [(0.0, 20.0), (1.5, 100.0), (3.0, 60.0)], "the default is keyed at 1.5 s and the other keys stay");
+}
+
+/// A translation too long to end before an effect's fx switch moves the link after the switches:
+/// Spanish "Restablecer" would otherwise cover the switch.
+#[test]
+fn a_long_translation_does_not_cover_the_fx_switch() {
+    let (mut h, x) = harness();
+    h.state_mut().session.prefs.general.language = "es".into();
+    h.run_steps(4);
+    let rect = |id: String| {
+        let r = h.state().auto.find(&id).unwrap_or_else(|| panic!("missing {id}")).rect;
+        egui::Rect::from_min_size(pos2(r[0], r[1]), egui::vec2(r[2], r[3]))
+    };
+    let (reset, fx) = (rect(format!("timeline.group.{}.reset", x.effect)), rect(format!("timeline.group.{}.fx", x.effect)));
+    assert!(!reset.intersects(fx), "Reset {reset:?} overlaps fx {fx:?}");
+    click_auto(&mut h, &format!("timeline.group.{}.reset", x.effect));
+    assert_eq!(num(&h, x.layer, "effects/#1/blurriness"), 0.0, "the moved link still resets");
+}

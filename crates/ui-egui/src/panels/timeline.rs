@@ -3577,19 +3577,30 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
     let font = Tokens::ui(11.5);
     let width = g.lp.layout_no_wrap(text.to_string(), font.clone(), t.accent).size().x;
     // A link at the left edge of the values (as in After Effects), so it lines up with the values
-    // and dropdowns of the rows below it.
-    let x = g.tl.cw.switches + 2.0;
+    // and dropdowns of the rows below it. On an effect row a translation too long to end before
+    // the fx switch goes after the switches instead, and it always stays inside the outline (which
+    // ends at the graph), whichever columns are hidden.
+    let fx_left = g.tl.cw.switches + SW * 3.5 - 8.0;
+    let mut x = g.tl.cw.switches + 2.0;
+    if matches!(group.kind, GroupKind::Effect { .. }) && x + width + 4.0 > fx_left - 2.0 {
+        x = g.tl.cw.switches + SW * 4.0 + 6.0;
+    }
+    let x = x.min(g.tl.graph_x0 - width - 8.0).max(rc.r.min.x);
     let rect = Rect::from_min_size(pos2(x, rc.r.min.y + 1.0), vec2(width + 4.0, rc.r.height() - 2.0));
     let enabled = !layer.switches.locked;
+    // Screen readers hear what is reset and on which layer; the link itself only says Reset.
+    let spoken = format!("{label} ({})", layer.name);
     let response = ui.add_enabled_ui(enabled, |ui| {
         let r = ui.interact(rect, egui::Id::unique(("tl-group-reset", uid)), Sense::click());
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
-        crate::a11y::role_name(&r, egui::accesskit::Role::Button, text);
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));
+        crate::a11y::role_name(&r, egui::accesskit::Role::Button, &spoken);
         let color = if enabled { t.accent } else { t.text_dim };
         let at = pos2(rect.min.x + 2.0, rect.center().y);
         g.lp.text(at, Align2::LEFT_CENTER, text, font.clone(), color);
         if enabled && r.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if enabled && (r.hovered() || r.has_focus()) {
             let y = rect.center().y + 7.0;
             g.lp.line_segment([pos2(at.x, y), pos2(at.x + width, y)], Stroke::new(1.0, color));
         }
