@@ -13,7 +13,7 @@ use effectcraft_engine::project::{
 };
 use effectcraft_engine::render::EvalCtx;
 use effectcraft_engine::time::Tick;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -76,6 +76,17 @@ pub(crate) fn bar_color(label: Color32, selected: bool) -> Color32 {
 /// zones straddle each end, so the pointer needn't land inside the bar.
 const TRIM_OUTSIDE: f32 = 4.0;
 const TRIM_INSIDE: f32 = 5.0;
+
+/// A middle-drag in the timeline pans it (`hand_tool_pan`, #2854): a middle press here starts no
+/// drag, so it can't move a bar or a key. A widget that takes a drag on press was given it this frame,
+/// before anything here ran. Handing that drag to an id nothing uses and ending it means no
+/// widget sees it start or stop.
+fn ignore_middle_press(ui: &egui::Ui, rect: Rect) {
+    if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle) && !i.pointer.primary_down()) {
+        ui.ctx().set_dragged_id(egui::Id::unique("tl-middle-press"));
+        ui.ctx().stop_dragging();
+    }
+}
 
 /// A layer bar's body (drag to move) and its In/Out trim zones. Short bars keep their middle
 /// third as body; a bar too short for that is all trim zones (the Out one on top).
@@ -1809,12 +1820,17 @@ fn begin_rows(app: &mut EffectcraftApp, ui: &mut egui::Ui, tl: Tl) -> Rw {
     let graph_x0 = tl.graph_x0;
     let rect = tl.rect;
     let lp = tl.p.with_clip_rect(rows_rect.intersect(Rect::from_min_max(rows_rect.min, pos2(graph_x0 - 1.0, rows_rect.max.y))));
-    let gp = tl.p.with_clip_rect(rows_rect.intersect(Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max)));
+    // The rows reach through the gutter right of the time graph, but stop before the scroll bar.
+    let graph_rows = Rect::from_min_max(
+        pos2(graph_x0, rows_rect.min.y),
+        pos2(if tl.max_scroll > 0.0 { rect.max.x - widgets::SCROLL_GUTTER } else { rect.max.x }, rows_rect.max.y),
+    );
+    let gp = tl.p.with_clip_rect(rows_rect.intersect(graph_rows));
     let graph_on = app.ui.timeline.graph_editor;
     super::graph::track_open(ui.ctx(), graph_on);
     let full_clip = ui.clip_rect();
     let left_clip = full_clip.intersect(Rect::from_min_max(pos2(rect.min.x, rows_rect.min.y), pos2(graph_x0 - 1.0, rows_rect.max.y)));
-    let right_clip = full_clip.intersect(Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max));
+    let right_clip = full_clip.intersect(graph_rows);
     // Registered before the rows so keys, bars and editors on top of it get the pointer first.
     let empty_rect = if graph_on { Rect::NOTHING } else { Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max) };
     let empty = ui.interact(empty_rect, egui::Id::unique("tl-graph-bg"), Sense::click_and_drag());
@@ -1850,6 +1866,7 @@ fn begin_rows(app: &mut EffectcraftApp, ui: &mut egui::Ui, tl: Tl) -> Rw {
 /// open rows and the drags in progress) lives in
 /// `app.ui.timeline` and egui's temp data.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    ignore_middle_press(ui, rect);
     let Some(cid) = app.session.active_comp_id() else {
         empty_timeline(app, ui, rect);
         return;
@@ -4215,6 +4232,20 @@ fn key_drag_begin(app: &mut EffectcraftApp, g: &Rw, kh: &KeyHit<'_>) {
     }
 }
 
+/// The size of a keyframe glyph and the radius of a roving key's dot.
+const KEY_GLYPH_SIZE: f32 = 11.0;
+const ROVING_KEY_RADIUS: f32 = 2.5;
+
+/// The rect a key's marker covers on screen (its hit rect is larger).
+fn key_glyph_rect(k: &effectcraft_engine::keyframe::Keyframe, center: Pos2) -> Rect {
+    if k.roving {
+        Rect::from_center_size(center, Vec2::splat(ROVING_KEY_RADIUS * 2.0))
+    } else {
+        let icon = k.icon();
+        icons::keyframe_bounds(center, KEY_GLYPH_SIZE, icon.left, icon.right)
+    }
+}
+
 /// Paints one keyframe marker; returns its hit rect.
 fn key_paint(g: &Rw, rc: &RowCtx<'_>, k: &effectcraft_engine::keyframe::Keyframe, x: f32, ks: bool) -> Rect {
     let t = g.tl.t;
@@ -4235,9 +4266,9 @@ fn key_paint(g: &Rw, rc: &RowCtx<'_>, k: &effectcraft_engine::keyframe::Keyframe
     let kcol = if k.muted { kcol.gamma_multiply(0.35) } else { kcol };
     if k.roving {
         // Roving keys: a small dot (their time follows their neighbours).
-        gp.circle_filled(c, 2.5, kcol);
+        gp.circle_filled(c, ROVING_KEY_RADIUS, kcol);
     } else {
-        icons::keyframe(&gp, c, 11.0, icon.left, icon.right, kcol);
+        icons::keyframe(&gp, c, KEY_GLYPH_SIZE, icon.left, icon.right, kcol);
     }
     Rect::from_center_size(c, vec2(12.0, 14.0))
 }
@@ -4661,7 +4692,33 @@ fn key_drag_follow(app: &mut EffectcraftApp, g: &mut Rw) {
     }
 }
 
-/// Releasing the key marquee selects the keys inside it.
+/// The keys whose markers touch box `br`, in row order (the comp's). `top` is the y of the first
+/// row, scrolled.
+fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect) -> Vec<effectcraft_engine::KeyRef> {
+    let mut keys = vec![];
+    let mut yy = top;
+    for row in rows {
+        let cy = yy + rh / 2.0;
+        yy += row_height(row, rh);
+        // No marker reaches a whole glyph from its row's center.
+        if let RowKind::Prop { uid } = row.kind
+            && cy >= br.min.y - KEY_GLYPH_SIZE
+            && cy <= br.max.y + KEY_GLYPH_SIZE
+            && let Some(l) = comp.layer(row.layer)
+            && let Some(pr) = l.props.find(uid)
+        {
+            for k in &pr.keys {
+                let x = tm.x(l.comp_time(k.time).seconds());
+                if key_glyph_rect(k, pos2(x, cy)).intersects(br) {
+                    keys.push(effectcraft_engine::KeyRef { layer: l.id, prop: uid, time: k.time });
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Releasing the key marquee selects the keys it touches.
 fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     let tm = g.tl.tm;
     let rows_rect = g.tl.rows_rect;
@@ -4675,25 +4732,8 @@ fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
         && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(egui::Id::unique("tl-box")))
     {
         ctx.data_mut(|d| d.remove::<Rect>(egui::Id::unique("tl-box")));
-        let mut keys = vec![];
-        let mut yy = rows_rect.min.y - app.ui.timeline.scroll_y;
-        for row in rows.iter() {
-            let cy = yy + rh / 2.0;
-            yy += row_height(row, rh);
-            if let RowKind::Prop { uid } = row.kind
-                && cy >= br.min.y
-                && cy <= br.max.y
-                && let Some(l) = comp.layer(row.layer)
-                && let Some(pr) = l.props.find(uid)
-            {
-                for k in &pr.keys {
-                    let x = tm.x(l.comp_time(k.time).seconds());
-                    if x >= br.min.x && x <= br.max.x {
-                        keys.push(json!({"layer": l.id.0, "prop": uid, "time": k.time.seconds()}));
-                    }
-                }
-            }
-        }
+        let touched = keys_in_box(&comp, rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, br);
+        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
         let mods = ui.input(|i| i.modifiers);
         if keys.is_empty() && !(mods.shift || mods.command) {
             // A marquee that catches nothing leaves nothing selected (layers included).
@@ -4835,7 +4875,7 @@ fn comp_markers_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     super::markers_ui::marker_bin(app, ui, &comp, tm, bin, mstrip);
 }
 
-/// Spacebar held: the Hand tool.
+/// Spacebar held: the Hand tool. A middle-drag begun in the rows, layer list included, pans too.
 fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     let rect = g.tl.rect;
     let graph_x0 = g.tl.graph_x0;
@@ -4847,6 +4887,7 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     let max_scroll = g.tl.max_scroll;
     let ctx = g.tl.ctx.clone();
     let comp = g.tl.comp.clone();
+    let mut pan = ui.input(|i| i.pointer.middle_down() && !i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|p| rows_rect.contains(p)));
     if super::space_hand(&ctx) {
         let area = Rect::from_min_max(pos2(graph_x0, ruler.min.y), pos2(rect.max.x, rows_rect.max.y));
         let hand = ui.interact(area, egui::Id::unique("tl-hand"), Sense::drag());
@@ -4854,14 +4895,15 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
         if hand.hovered() || hand.dragged() {
             ctx.set_cursor_icon(if hand.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
         }
-        if hand.dragged() {
-            let dy = ui.input(|i| i.pointer.delta().y);
-            app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - dy).clamp(0.0, max_scroll);
-            if app.ui.timeline.pps.is_some() {
-                let start = app.ui.timeline.start;
-                let last = (comp.duration.seconds() - (tm.t(graph_x1) - tm.start)).max(start).max(0.0);
-                app.ui.timeline.start = (start - hand.drag_delta().x as f64 / pps).clamp(0.0, last);
-            }
+        pan |= hand.dragged();
+    }
+    if pan {
+        let delta = ui.input(|i| i.pointer.delta());
+        app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - delta.y).clamp(0.0, max_scroll);
+        if app.ui.timeline.pps.is_some() {
+            let start = app.ui.timeline.start;
+            let last = (comp.duration.seconds() - (tm.t(graph_x1) - tm.start)).max(start).max(0.0);
+            app.ui.timeline.start = (start - delta.x as f64 / pps).clamp(0.0, last);
         }
     }
 }

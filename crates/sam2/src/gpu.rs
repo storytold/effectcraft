@@ -99,12 +99,37 @@ pub fn half_weights() -> bool {
 /// The process's one GPU device, once something has asked for it.
 static DEVICE: std::sync::OnceLock<std::result::Result<Arc<Gpu>, String>> = std::sync::OnceLock::new();
 
+/// The adapter SAM 2 refused and its instance, kept for the life of the process, as the device made on it used to be.
+/// Dropping them crashed the tests with a segmentation fault on WSL2's OpenGL driver (Mesa 23.2 on D3D12). At most one:
+/// [`Gpu::new`] runs once.
+static REFUSED: std::sync::OnceLock<(wgpu::Instance, wgpu::Adapter)> = std::sync::OnceLock::new();
+
+/// SAM 2's wgpu instance reads wgpu's environment variables (`WGPU_BACKEND`, `WGPU_VALIDATION`,
+/// `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER`…), as the render context's does, so both choose among the same adapters.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    wgpu::InstanceDescriptor::new_without_display_handle().with_env()
+}
+
+/// Why SAM 2 does not use an adapter, if it does not: a software one (the CPU path is faster), or one without compute
+/// shaders (OpenGL ES 3.0, for one), where every kernel would fail validation. Checked before a device is made there.
+fn refusal(name: &str, backend: wgpu::Backend, device_type: wgpu::DeviceType, downlevel: wgpu::DownlevelFlags) -> Option<String> {
+    if device_type == wgpu::DeviceType::Cpu {
+        return Some(format!("only a software adapter ({name}) is available"));
+    }
+    (!downlevel.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)).then(|| format!("the GPU adapter {name} ({backend:?}) has no compute shaders"))
+}
+
 impl Gpu {
     /// The process's one GPU device, created on first use. Several devices at once upset some Vulkan loaders
     /// (a crash when two threads create or drop them together), and one is all SAM 2 needs: models come and go,
     /// the device stays. An error (no GPU) is remembered too.
     pub fn shared() -> Result<Arc<Gpu>> {
-        DEVICE.get_or_init(|| Gpu::new().map(Arc::new).map_err(|e| e.to_string())).clone().map_err(Error::Compute)
+        // The message alone is kept, so the error says "SAM 2 compute:" once.
+        let keep = |e: Error| match e {
+            Error::Compute(m) => m,
+            e => e.to_string(),
+        };
+        DEVICE.get_or_init(|| Gpu::new().map(Arc::new).map_err(keep)).clone().map_err(Error::Compute)
     }
 
     /// Whether the shared device has been looked for yet, and found: `None` before anything has asked
@@ -114,16 +139,17 @@ impl Gpu {
         DEVICE.get().map(|d| d.is_ok())
     }
 
-    /// A device on the best real GPU (a software adapter is refused: the CPU path is faster).
+    /// A device on the best real GPU (high performance unless `WGPU_POWER_PREF` says otherwise; see [`refusal`] for the
+    /// adapters the CPU path runs instead of).
     fn new() -> Result<Gpu> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }),
-        )
-        .map_err(|e| Error::Compute(format!("no GPU adapter: {e}")))?;
+        let instance = wgpu::Instance::new(instance_descriptor());
+        let power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference, ..Default::default() }))
+            .map_err(|e| Error::Compute(format!("no GPU adapter: {e}")))?;
         let info = adapter.get_info();
-        if info.device_type == wgpu::DeviceType::Cpu {
-            return Err(Error::Compute(format!("only a software adapter ({}) is available", info.name)));
+        if let Some(why) = refusal(&info.name, info.backend, info.device_type, adapter.get_downlevel_capabilities().flags) {
+            let _ = REFUSED.set((instance, adapter));
+            return Err(Error::Compute(why));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("effectcraft sam2"),
