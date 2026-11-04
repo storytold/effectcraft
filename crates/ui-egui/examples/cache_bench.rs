@@ -97,7 +97,7 @@ fn main() {
                 let fr = c.frame_rate;
                 let l = c.layer_mut(effectcraft_engine::project::LayerId(l)).expect("layer");
                 let at = fr.tick_of(i as i64 * 1275 / 10);
-                (l.start_time, l.in_point, l.out_point) = (at, at, at + fr.tick_of(1275 / 10));
+                (l.start_time, l.in_point, l.out_point) = (at, at, fr.tick_of((i as i64 + 1) * 1275 / 10));
             }
             if !std::env::args().any(|a| a == "--no-adjustment") {
                 let adj = run(&mut s, "layer.newAdjustment", json!({}))["layer"].clone();
