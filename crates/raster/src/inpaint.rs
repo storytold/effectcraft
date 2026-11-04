@@ -606,6 +606,7 @@ pub fn complete_flow(mut f: Flow, hole_a: &[bool], hole_b: &[bool], w: usize, h:
 }
 
 /// The input of a sequence fill.
+#[derive(Clone)]
 pub struct FillInput {
     /// Frames (premultiplied RGBA, all the same size).
     pub frames: Vec<Image>,
@@ -711,11 +712,11 @@ impl FillBackend for CpuFill {}
 /// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
 /// (→ `None`).
 pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
-    fill_sequence_with(input, o, &CpuFill, progress)
+    fill_sequence_with(input.clone(), o, &CpuFill, progress)
 }
 
 /// [`fill_sequence`] with a hardware backend for the stages it can take (see [`FillBackend`]).
-pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
+pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
     let n = input.frames.len();
     if n == 0 {
         return Some(vec![]);
@@ -734,10 +735,11 @@ pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBac
         return Some(out);
     }
     // Reference frames make their frame fully known.
-    let mut frames: Vec<Image> = input.frames.clone();
-    let mut holes: Vec<Vec<bool>> = input.holes.clone();
+    let mut frames: Vec<Image> = std::mem::take(&mut input.frames);
+    let mut holes: Vec<Vec<bool>> = std::mem::take(&mut input.holes);
+    let references = std::mem::take(&mut input.references);
     let mut is_ref = vec![false; n];
-    for (k, img) in &input.references {
+    for (k, img) in &references {
         if *k < n && img.width as usize == w && img.height as usize == h {
             frames[*k] = img.clone();
             holes[*k] = vec![false; w * h];
@@ -751,6 +753,7 @@ pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBac
         .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
         .collect();
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
+    drop(pre);
     if !progress(1, total) {
         return None;
     }
@@ -759,7 +762,7 @@ pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBac
     let known = |k: usize, x: i64, y: i64| !holes[k][y as usize * w + x as usize];
     let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &refs, max: n };
     let ring_r = 2usize;
-    let propagated: Vec<(Image, Vec<bool>)> = (0..n)
+    let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
         .map(|t| {
             let mut img = frames[t].clone();
@@ -810,6 +813,8 @@ pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBac
             (img, left)
         })
         .collect();
+    drop(refs);
+    drop(frames);
     if !progress(2, total) {
         return None;
     }
@@ -821,16 +826,20 @@ pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBac
     };
     // Frames before t0 are complete already.
     for (t, slot) in out.iter_mut().enumerate().take(t0) {
-        *slot = Some(propagated[t].0.clone());
+        *slot = Some(std::mem::take(&mut propagated[t].0));
     }
     let mut done = 2;
-    out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
+    let (img0, left0) = std::mem::take(&mut propagated[t0]);
+    out[t0] = Some(backend.patch(&img0, &left0, None, o.patch, o.seed));
+    drop((img0, left0));
     done += 1;
     if !progress(done, total) {
         return None;
     }
     for t in t0 + 1..n {
-        let (img, left) = &propagated[t];
+        // Taken, not cloned: each propagated frame is freed once its output exists.
+        let (img, left) = std::mem::take(&mut propagated[t]);
+        let (img, left) = (&img, &left);
         if !left.iter().any(|b| *b) {
             out[t] = Some(img.clone());
         } else {
