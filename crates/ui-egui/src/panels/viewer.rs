@@ -602,27 +602,40 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
                     let w = ectx.world_matrix(l);
                     let pc = cam_state(ectx).projection(cw as f64, ch as f64) * w;
                     let a3 = effectcraft_engine::geom::vec3(a[0], a[1], a[2]);
-                    let lens = gizmo_axis_lengths(&w, zoom as f64);
+                    let lens = gizmo_axis_lengths(&w, &pc, a3, zoom as f64);
                     let pinv = parent_world_inverse(ectx, l);
-                    for (axis, col, name) in [
-                        (effectcraft_engine::geom::vec3(lens[0], 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
-                        (effectcraft_engine::geom::vec3(0.0, lens[1], 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
-                        (effectcraft_engine::geom::vec3(0.0, 0.0, lens[2]), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
+                    for (unit, len, col, name) in [
+                        (effectcraft_engine::geom::vec3(1.0, 0.0, 0.0), lens[0], Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
+                        (effectcraft_engine::geom::vec3(0.0, 1.0, 0.0), lens[1], Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
+                        (effectcraft_engine::geom::vec3(0.0, 0.0, 1.0), lens[2], Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
                     ] {
+                        let axis = unit * len;
                         // (clipped at the camera's near plane, #572)
                         let Some([o, e]) = project_segment(&pc, a3, a3 + axis) else { continue };
                         // An axis pointing at the camera (Z in the default front view) projects to
                         // a dot: draw it as a short diagonal stub so it can still be grabbed.
                         let mut s = [e[0] - o[0], e[1] - o[1]];
+                        let mut stub = false;
                         if (s[0] * s[0] + s[1] * s[1]).sqrt() * (zoom as f64) < 12.0 {
                             let k = 24.0 / zoom as f64;
                             s = [k, -k];
+                            stub = true;
                         }
                         let (so, se) = (map.to_screen(o), map.to_screen([o[0] + s[0], o[1] + s[1]]));
                         painter.arrow(so, se - so, Stroke::new(2.0, col));
                         if !l.switches.locked {
-                            let dir = pinv.apply_vec(w.apply_vec(axis));
-                            let (ax, ay) = axis_drag([dir.x, dir.y, dir.z], s);
+                            let mut dir = pinv.apply_vec(w.apply_vec(axis));
+                            let mut drag_s = s;
+                            // Under perspective the drawn arrow is a secant of the projection; the drag
+                            // follows its slope at the anchor (the projected unit axis) instead.
+                            if !stub && let Some([uo, ue]) = project_segment(&pc, a3, a3 + unit) {
+                                let su = [ue[0] - uo[0], ue[1] - uo[1]];
+                                if su[0].is_finite() && su[1].is_finite() && su[0].hypot(su[1]) > 1e-12 {
+                                    dir = pinv.apply_vec(w.apply_vec(unit));
+                                    drag_s = su;
+                                }
+                            }
+                            let (ax, ay) = axis_drag([dir.x, dir.y, dir.z], drag_s);
                             // The inner part stays on the anchor point, which drags the layer freely.
                             axis_hits.push((l.id, [so + (se - so) * 0.35, se], ax, ay));
                             app.auto.add(&format!("viewer.gizmo.{}.{name}", l.id.0), Rect::from_center_size(se, vec2(12.0, 12.0)), "3D axis");

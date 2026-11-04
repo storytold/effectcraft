@@ -134,14 +134,23 @@ fn axis_drag_follows_the_arrow_and_ignores_drag_across_it() {
 #[test]
 fn gizmo_arrows_keep_their_length_when_the_layer_is_scaled() {
     let scaled = |k: f64| Mat4([[k, 0.0, 0.0, 0.0], [0.0, k, 0.0, 0.0], [0.0, 0.0, k, 0.0], [0.0, 0.0, 0.0, 1.0]]);
-    let l = gizmo_axis_lengths(&scaled(0.1), 1.0);
+    let o = vec3(0.0, 0.0, 0.0);
+    let gl = |m: &Mat4, zoom: f64| gizmo_axis_lengths(m, m, o, zoom);
+    let l = gl(&scaled(0.1), 1.0);
     for v in l {
         assert!((v * 0.1 - 60.0).abs() < 1e-9, "{l:?}");
     }
-    assert_eq!(gizmo_axis_lengths(&scaled(1.0), 2.0), [30.0; 3]);
-    assert_eq!(gizmo_axis_lengths(&scaled(0.0), 1.0), [60.0; 3]);
+    assert_eq!(gl(&scaled(1.0), 2.0), [30.0; 3]);
+    assert_eq!(gl(&scaled(0.0), 1.0), [60.0; 3]);
     let uneven = Mat4([[2.0, 0.0, 0.0, 0.0], [0.0, 0.5, 0.0, 0.0], [0.0, 0.0, 4.0, 0.0], [0.0, 0.0, 0.0, 1.0]]);
-    assert_eq!(gizmo_axis_lengths(&uneven, 1.0), [30.0, 120.0, 15.0]);
+    assert_eq!(gl(&uneven, 1.0), [30.0, 120.0, 15.0]);
+    // A turned child under a (2, 1, 1) parent in the front view: local X becomes (sqrt 2, 0, -sqrt 2 / 2), which covers
+    // sqrt 2 px on screen but is longer in the world; the arrow still spans 60 px there.
+    let r = std::f64::consts::SQRT_2;
+    let skewed = Mat4([[r, 0.0, 0.7, 0.0], [0.0, 1.0, 0.0, 0.0], [-r / 2.0, 0.0, 1.4, 0.0], [0.0, 0.0, 0.0, 1.0]]);
+    let l = gl(&skewed, 1.0);
+    assert!((l[0] * r - 60.0).abs() < 1e-9, "{l:?}");
+    assert!((l[1] - 60.0).abs() < 1e-9, "{l:?}");
 }
 
 #[test]
