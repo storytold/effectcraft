@@ -79,6 +79,8 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod inpaint;
+mod memcap;
 mod ops;
 mod particles;
 mod readback;
@@ -397,7 +399,7 @@ impl Accelerator for Gpu {
 
     fn effects(&self, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<Buf> {
         self.ctx.check_health().ok()?;
-        effects::run_chain(&mut Enc::new(&self.ctx), chain, buf, levels)
+        effects::run_chain(&mut Enc::lent(&self.ctx), chain, buf, levels)
     }
 
     fn raster_3d(&self, scene: &effectcraft_render::three_d::adv::Scene) -> Option<effectcraft_render::three_d::adv::Target> {
@@ -415,14 +417,39 @@ impl Accelerator for Gpu {
         self.ctx.can_readback().then_some(self as &dyn effectcraft_effects::psim::ParticleSim)
     }
 
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        self.ctx.check_health().ok()?;
+        // Readback is synchronous-only, and a kernel that failed to build would make every stage
+        // fall back to the CPU *after* paying the upload and a failed dispatch (and the fill
+        // would still report the GPU path). Neither is a backend at all.
+        if !self.ctx.can_wait() || !crate::inpaint::KERNELS.iter().all(|e| self.ctx.has_kernel(e)) {
+            return None;
+        }
+        Some(self as &dyn effectcraft_raster::inpaint::FillBackend)
+    }
+
     fn auto_pick(&self) -> Option<&effectcraft_render::AutoPick> {
         Some(&self.auto)
+    }
+
+    fn render_end(&self) {
+        let (hits, misses) = self.ctx.pool_stats();
+        let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);
+        log::debug!(
+            target: "effectcraft_gpu",
+            "gpu pool: {hits} working textures reused, {misses} allocated ({pct}% reuse) so far"
+        );
+        self.ctx.trim_pool();
     }
 
     fn frame_begin(&self) {
         if let Some(d) = self.ctx.deferred() {
             d.frame_begin();
         }
+    }
+
+    fn frame_end(&self) {
+        self.ctx.pool_frame_end();
     }
 
     fn pass_begin(&self) {
