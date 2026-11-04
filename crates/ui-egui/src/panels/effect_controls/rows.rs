@@ -1,7 +1,7 @@
 use super::common::{Actions, DIAL_ROW, PARAM_NAME_X, ROW, TREE_INDENT, gesture_key};
 use super::{
-    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw, icons, json,
-    pos2, vec2, widgets,
+    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, GroupKind, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw,
+    icons, json, pos2, vec2, widgets,
 };
 
 fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
@@ -65,6 +65,9 @@ pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, p
         app.ui.text_color_pick = None;
         app.ui.status = if kind == "point" {
             format!("Click in the Composition panel to set {}", prop.name)
+        } else if kind == crate::panels::crypto_pick::KIND {
+            let keys = crate::panels::crypto_pick::remove_keys(egui::os::OperatingSystem::from_target_os());
+            crate::i18n::tr_args("Click IDs in the Composition panel: Shift adds, {} removes, Esc ends", &[&keys])
         } else {
             format!("Click in the Composition panel to sample {}", prop.name)
         };
@@ -485,11 +488,27 @@ fn value_text(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     let Value::Str(s) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, r, layer, prop, .. } = *cx;
-    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - 12.0).clamp(80.0, 320.0), 18.0));
+    let PropCx { t, uid, cy, vx, r, layer, group, prop, .. } = *cx;
+    // Cryptomatte's Selection also has an eyedropper that picks IDs in the viewer (#473).
+    let crypto = matches!(&group.kind, GroupKind::Effect { effect } if effect == "ec.3d.cryptomatte") && prop.match_id == "selection";
+    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - if crypto { 36.0 } else { 12.0 }).clamp(80.0, 320.0), 18.0));
+    if crypto {
+        let er = Rect::from_center_size(pos2(fr.max.x + 14.0, cy), vec2(18.0, 18.0));
+        let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == crate::panels::crypto_pick::KIND);
+        if fw::eyedropper_button(ui, er, active, egui::Id::unique(("ec-eye", uid)), &t)
+            .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
+            .clicked()
+        {
+            toggle_pick(app, crate::panels::crypto_pick::KIND, layer, prop);
+        }
+        app.auto.add(&format!("effectControls.prop.{uid}.eyedropper"), er, &prop.name);
+    }
     let bid = egui::Id::unique(("ec-text", uid));
     let mut buf: String = ui.data(|d| d.get_temp(bid)).unwrap_or_else(|| s.to_owned());
     let resp = widgets::text_field(ui, fr, &mut buf, "", &t);
+    // Cut off by a narrow panel (a long Selection): the whole text on hover.
+    let cut = !resp.has_focus() && ui.painter().layout_no_wrap(buf.clone(), egui::TextStyle::Body.resolve(ui.style()), t.text).size().x > fr.width() - 17.0;
+    let resp = if cut { resp.on_hover_text(buf.clone()) } else { resp };
     // The field has no visible hint: give the screen reader the parameter's name.
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, ui.is_enabled(), &prop.name));
     app.auto.add(&format!("effectControls.prop.{uid}.value"), fr, &prop.name);

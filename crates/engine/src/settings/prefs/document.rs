@@ -76,7 +76,15 @@ impl Prefs {
             Err(_) => {
                 let mut base = serde_json::to_value(Prefs::default()).unwrap_or_default();
                 if let (Some(b), Some(o)) = (base.as_object_mut(), v.as_object()) {
+                    // Only the settings' own pages are tried one by one (each trial parses the
+                    // whole document): any other key is kept as it is, so a document of many
+                    // unknown keys costs one pass, not one parse per key.
+                    let pages: Vec<String> = b.keys().cloned().collect();
                     for (k, x) in o {
+                        if !pages.contains(k) {
+                            b.insert(k.clone(), x.clone());
+                            continue;
+                        }
                         let mut trial = b.clone();
                         trial.insert(k.clone(), x.clone());
                         if serde_json::from_value::<Prefs>(Value::Object(trial)).is_ok() {

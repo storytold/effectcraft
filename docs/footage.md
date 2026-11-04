@@ -120,6 +120,10 @@ Nuke's `beauty`) show the beauty pass: the layer named Combined, Beauty, Image, 
 Color, else the first colour layer that isn't a data pass. Cryptomatte, depth, mist, normals,
 vectors, positions and IDs are never the picture. EXtractoR reads every other layer and channel.
 
+The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
+file's manifest. Pick them with the eyedropper next to its Selection, then click in the
+Composition viewer (Shift adds, Alt or Ctrl removes).
+
 ## Replacing and reloading
 
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
