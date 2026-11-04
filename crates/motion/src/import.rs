@@ -51,6 +51,11 @@ const MAX_NODES: u32 = 20_000_000;
 /// Whether the document type declaration has an internal subset (`<!DOCTYPE x [ … ]>`), the
 /// only place XML can declare entities. Motion writes a bare `<!DOCTYPE ozxmlscene>`.
 fn has_internal_subset(text: &str) -> bool {
+    // Motion never declares entities; refuse any declaration, wherever it sits (a comment or a
+    // quoted `>` must not hide one from the DOCTYPE scan below).
+    if text.contains("<!ENTITY") {
+        return true;
+    }
     let Some(at) = text.find("<!DOCTYPE") else { return false };
     let decl = text.get(at..).unwrap_or_default();
     let end = decl.find('>').unwrap_or(decl.len());
