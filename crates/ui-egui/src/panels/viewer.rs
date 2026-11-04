@@ -319,7 +319,7 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
         // The pan follows the zoom actually set, or a clamped zoom would show another part of the comp.
         let (s, zoom) = app.ui.viewer.zoom.map_or((s, None), |z| {
             let scaled = (z * s).clamp(0.01, 32.0);
-            (if z > 0.0 { scaled / z } else { s }, Some(scaled))
+            (scaled / z.clamp(0.01, 32.0), Some(scaled))
         });
         app.ui.viewer.zoom = zoom;
         app.ui.viewer.pan = app.ui.viewer.pan.map(|p| p * s);

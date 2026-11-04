@@ -459,16 +459,18 @@ fn a_set_view_follows_the_window_to_the_screen() {
 /// The scale keeps to the viewer's zoom range, and a window with no area leaves the view alone
 /// until there is one to scale to.
 #[test]
-fn a_zero_zoom_from_a_script_leaves_the_full_screen_pan_finite() {
-    let mut h = harness();
-    h.state_mut().ui.viewer.zoom = Some(0.0);
-    h.state_mut().ui.viewer.pan = [30.0, 0.0];
-    h.run_steps(2);
-    invoke(&mut h, "view.fullScreen");
-    h.run_steps(2);
-    assert_eq!(h.state().ui.viewer.zoom, Some(0.01));
-    let pan = h.state().ui.viewer.pan;
-    assert!(pan[0].is_finite() && pan[1].is_finite(), "{pan:?}");
+fn a_zoom_out_of_range_from_a_script_leaves_the_full_screen_pan_finite() {
+    for zoom in [0.0, 1e-40] {
+        let mut h = harness();
+        h.state_mut().ui.viewer.zoom = Some(zoom);
+        h.state_mut().ui.viewer.pan = [30.0, 0.0];
+        h.run_steps(2);
+        invoke(&mut h, "view.fullScreen");
+        h.run_steps(2);
+        assert_eq!(h.state().ui.viewer.zoom, Some(0.01));
+        let pan = h.state().ui.viewer.pan;
+        assert!(pan[0].is_finite() && pan[1].is_finite(), "{zoom}: {pan:?}");
+    }
 }
 
 #[test]
