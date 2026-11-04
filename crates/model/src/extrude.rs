@@ -132,20 +132,27 @@ pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
         .collect();
     // The containers of each contour: the larger contours holding a vertex of it (nested contours
     // do not cross); the bounding box must hold the vertex first. Depth is their count, so
-    // overlapping (non-nested) paths keep every container they sit inside; the innermost
-    // container (smallest area) takes a hole.
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    let mut depth = vec![0usize; n];
-    for i in 0..n {
+    // overlapping (non-nested) paths keep every container they sit inside.
+    let containers = |i: usize, only: &dyn Fn(usize) -> bool| -> Vec<usize> {
         let p = cs[i][0];
-        let containers: Vec<usize> = (0..n)
-            .filter(|&j| j != i && area[j] > area[i])
+        (0..n)
+            .filter(|&j| j != i && area[j] > area[i] && only(j))
             .filter(|&j| (bounds[j][0][0]..=bounds[j][1][0]).contains(&p[0]) && (bounds[j][0][1]..=bounds[j][1][1]).contains(&p[1]))
             .filter(|&j| point_in(p, &cs[j]))
-            .collect();
-        depth[i] = containers.len();
-        parent[i] = containers.into_iter().min_by(|&a, &b| area[a].total_cmp(&area[b]));
-    }
+            .collect()
+    };
+    let depth: Vec<usize> = (0..n).map(|i| containers(i, &|_| true).len()).collect();
+    // A hole belongs to the innermost containing contour that is itself an outline: with
+    // overlapping paths the smallest container can be a hole, which has no outline to take it.
+    let parent: Vec<Option<usize>> = (0..n)
+        .map(|i| {
+            if depth[i].is_multiple_of(2) {
+                None
+            } else {
+                containers(i, &|j| depth[j].is_multiple_of(2)).into_iter().min_by(|&a, &b| area[a].total_cmp(&area[b]))
+            }
+        })
+        .collect();
     let mut outlines: Vec<Outline> = vec![];
     let mut slot = vec![usize::MAX; n];
     let mut order: Vec<usize> = (0..n).collect();

@@ -443,6 +443,31 @@ fn overlapping_contours_keep_every_container_in_their_depth() {
 }
 
 #[test]
+fn a_contour_inside_a_hole_takes_the_innermost_outline_not_the_hole() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // A and B overlap; C lies in A only (a hole of A); D lies in A, B and C (three deep, a hole).
+    // The smallest container of D is the hole C, which has no outline of its own: D goes to B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(1.0, 1.0, 9.0, 9.0), rect(6.0, 2.0, 7.0, 3.0)]);
+    assert_eq!(g.len(), 2);
+    assert_eq!(g.iter().map(|o| o.holes.len()).collect::<Vec<_>>(), [1, 1], "C is a hole of A, D a hole of B (not dropped)");
+}
+
+#[test]
+fn gltf_images_naming_one_file_share_their_wrap_variants() {
+    let png = {
+        let img = image::RgbaImage::from_fn(2, 2, |x, y| if (x + y) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    // Two image entries with one URI share a decode; two textures clamp it, so they share one copy.
+    let doc = br#"{"asset":{"version":"2.0"},"images":[{"uri":"t.png"},{"uri":"t.png"}],
+        "samplers":[{"wrapS":33071,"wrapT":33071}],"textures":[{"source":0,"sampler":0},{"source":1,"sampler":0}]}"#;
+    let m = gltf::parse(doc, &|u| (u == "t.png").then(|| png.clone())).unwrap();
+    assert_eq!(m.textures.len(), 1, "one clamped copy for both textures");
+}
+
+#[test]
 fn gltf_cameras_and_punctual_lights() {
     let doc = r#"{
         "asset": {"version": "2.0"},

@@ -388,14 +388,16 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
     };
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut tex_map: Vec<Option<usize>> = vec![];
-    // One texture per image and wrapping: repeated references share it instead of copying
-    // the pixels.
+    // One texture per decoded image and wrapping: repeated references share it instead of copying
+    // the pixels. The image is keyed by its allocation, so image entries naming the same file
+    // (which share one decode) also share their wrap variants.
     let mut texture_of: HashMap<(usize, [Wrap; 2]), usize> = HashMap::new();
     for t in arr(&j, "textures") {
-        let Some((src, img)) = idx(t, "source").and_then(|s| Some((s, images.get(s).cloned().flatten()?))) else {
+        let Some(img) = idx(t, "source").and_then(|s| images.get(s).cloned().flatten()) else {
             tex_map.push(None);
             continue;
         };
+        let src = Arc::as_ptr(&img) as usize;
         let samp = idx(t, "sampler").and_then(|s| arr(&j, "samplers").get(s));
         let ws = samp.and_then(|s| s.get("wrapS")).and_then(Value::as_u64).unwrap_or(10497);
         let wt = samp.and_then(|s| s.get("wrapT")).and_then(Value::as_u64).unwrap_or(10497);
