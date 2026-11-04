@@ -708,10 +708,10 @@ fn layer_switches_are_drawn_with_their_tooltip() {
     for name in ["video", "audio", "solo", "lock", "shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"] {
         let mut actions = vec![];
         let br = Rect::from_min_size(pos2(10.0, 10.0), vec2(16.0, 16.0));
-        let spec = SwitchSpec { row: br, br, icon: Icon::Shy, on: true, id: egui::Id::new(("sw", name)), layer: 1, name, others: false };
+        let spec = SwitchSpec { row: br, br, icon: Icon::Shy, on: true, id: egui::Id::unique(("sw", name)), layer: 1, name, others: false };
         let mut h = Harness::new_ui(|ui| layer_switch(ui, &t, &spec, &comp, &project, &[], &mut actions));
         h.run();
         let tip = tr(switch_tip(name));
-        assert!(h.query_by_label(&tip).is_some(), "the {name} switch is named by its tooltip {tip:?}");
+        assert!(h.query_by_label(tip.as_ref()).is_some(), "the {name} switch is named by its tooltip {tip:?}");
     }
 }
