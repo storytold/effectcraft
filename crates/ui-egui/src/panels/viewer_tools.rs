@@ -85,6 +85,27 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
     }
 }
 
+/// A drag that doesn't take the whole correction, like a Shift-dragged handle sliding along its
+/// line, lands its feature at `at` (comp pixels): this frame's feedback keeps to the targets it
+/// reached, and is gone if there are none.
+pub(crate) fn snap_landed(ctx: &egui::Context, at: [f64; 2]) {
+    let Some(mut s) = ctx.data(|d| d.get_temp::<Snap>(snap_id())) else { return };
+    s.hits.retain(|h| {
+        let on = |k: usize| (at[k] - h.pos[k]).abs() < 1e-6;
+        match h.kind {
+            SnapKind::Point => on(0) || on(1),
+            SnapKind::VLine => on(0),
+            SnapKind::HLine => on(1),
+        }
+    });
+    s.at = at;
+    if s.hits.is_empty() {
+        ctx.data_mut(|d| d.remove::<Snap>(snap_id()));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(snap_id(), s));
+    }
+}
+
 /// The snap handle: the dragged layer's feature that snaps (the one nearest where it was
 /// grabbed), boxed while snapping is on.
 pub(crate) fn draw_handle(painter: &egui::Painter, at: Pos2) {

@@ -3142,3 +3142,68 @@ fn unselected_null_keeps_its_outline() {
     h.run_steps(2);
     assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
 }
+
+/// #2860: the snap feedback of a Shift-dragged handle shows what the handle took: nothing for a
+/// correction out of its reach, only the line it reached when two are near. A plain drag still
+/// shows its snap.
+#[test]
+fn a_handle_drag_only_shows_the_snap_it_took() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    // The handle's lever from the anchor point: 2 px in x, 70 px in y, with its corner at (320, 100).
+    for (path, value) in [("transform/anchor", json!([78, 10, 0])), ("transform/position", json!([318, 30, 0]))] {
+        h.state_mut().session.execute("prop.set", json!({"layer": box_id.0, "path": path, "value": value})).unwrap();
+    }
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.run_steps(2);
+    // The feedback's line segments: the cross where the handle landed, and any snapped line.
+    fn segments(h: &Harness<'_, EffectcraftApp>) -> Vec<[Pos2; 2]> {
+        fn walk(s: &egui::Shape, out: &mut Vec<[Pos2; 2]>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::LineSegment { points, stroke } if stroke.color == egui::Color32::from_rgb(0xff, 0xd2, 0x3c) => out.push(*points),
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        h.output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+    let move_to = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+    };
+    let shift = egui::Modifiers::SHIFT;
+    let corner = rect(&h, &format!("viewer.handle.{}.2", box_id.0)).center();
+    h.input_mut().events.push(Event::ModifiersChanged(shift));
+    h.input_mut().events.push(Event::PointerMoved(corner));
+    h.input_mut().events.push(Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: shift });
+    h.step();
+    // Near the comp's centre line in x, whose correction would throw the handle along y.
+    let p = screen(&h, [320.0, 115.0]);
+    move_to(&mut h, p);
+    assert!(segments(&h).is_empty(), "the handle didn't snap: {:?}", segments(&h));
+    // Near the centre line in y too, which it can reach: that line shows, the other doesn't.
+    let p = screen(&h, [320.0, 178.0]);
+    move_to(&mut h, p);
+    let shown = segments(&h);
+    let y = screen(&h, [0.0, 180.0]).y;
+    let x = screen(&h, [320.0, 0.0]).x;
+    assert!(shown.iter().any(|[a, b]| (a.y - y).abs() < 0.5 && (b.y - y).abs() < 0.5), "the line it reached: {shown:?}");
+    assert!(!shown.iter().any(|[a, b]| (a.x - x).abs() < 0.5 && (b.x - x).abs() < 0.5), "not the other: {shown:?}");
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: shift });
+    h.run_steps(2);
+    h.input_mut().events.push(Event::ModifiersChanged(Default::default()));
+    h.step();
+    // Without Shift the handle takes the correction, and the feedback stays.
+    let corner = rect(&h, &format!("viewer.handle.{}.2", box_id.0)).center();
+    h.input_mut().events.push(Event::PointerMoved(corner));
+    h.input_mut().events.push(Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let p = screen(&h, [321.0, 250.0]);
+    move_to(&mut h, p);
+    let shown = segments(&h);
+    assert!(shown.iter().any(|[a, b]| (a.x - x).abs() < 0.5 && (b.x - x).abs() < 0.5), "{shown:?}");
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
