@@ -166,9 +166,11 @@ fn nodes(o: &Obj, budget: usize) -> usize {
     let kids: Vec<&Obj> = match o {
         Obj::Tuple(v) | Obj::List(v) => v.iter().collect(),
         Obj::Dict(v) => v.iter().flat_map(|(k, x)| [k, x]).collect(),
-        // A string counts one node per 64 bytes it holds: copies of a long one are charged for
-        // what they keep, not as one object.
-        Obj::Str(s) | Obj::Global(s, _) | Obj::Storage(s, _) => return 1 + s.len() / 64,
+        // A string counts one node per 64 bytes it holds (a vector one per 8 elements): copies
+        // are charged for everything they own, not as one object.
+        Obj::Str(s) => return 1 + s.len() / 64,
+        Obj::Global(a, b) | Obj::Storage(a, b) => return 1 + (a.len() + b.len()) / 64,
+        Obj::Tensor { dtype, key, size, stride, .. } => return 1 + (dtype.len() + key.len()) / 64 + (size.len() + stride.len()) / 8,
         _ => return 1,
     };
     let mut n = 1;
@@ -637,6 +639,19 @@ mod tests {
         p.extend(std::iter::repeat_n(0x94, 300));
         p.push(b'.');
         assert!(unpickle(&p).is_err_and(|e| e.contains("object limit")));
+    }
+
+    #[test]
+    fn every_owned_field_is_charged_to_the_clone_budget() {
+        let long = || "a".repeat(1 << 20);
+        let budget = MAX_PICKLE_NODES;
+        // A one-byte module with a 1 MiB name (and the same for storages and tensors).
+        assert!(nodes(&Obj::Global("m".into(), long()), budget) >= (1 << 20) / 64);
+        assert!(nodes(&Obj::Storage("m".into(), long()), budget) >= (1 << 20) / 64);
+        let t = Obj::Tensor { dtype: "m".into(), key: long(), offset: 0, size: vec![1; 4096], stride: vec![1; 4096] };
+        assert!(nodes(&t, budget) >= (1 << 20) / 64 + 1024);
+        // Small ones stay cheap.
+        assert_eq!(nodes(&Obj::Global("a".into(), "b".into()), budget), 1);
     }
 
     #[test]
