@@ -1879,6 +1879,9 @@ fn add_merge_paths_gradient_runs_across_its_inputs() {
     // Paths with no paint yet.
     let (l, _) = with_added_merge(&mut s, &["rect"]);
     assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+    // A Repeater below the merge repeats the gradient with each copy: it spans one.
+    let (l, _) = with_added_merge(&mut s, &["rect", "repeater"]);
+    assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
 }
 
 /// Pasted with nothing selected, Merge Paths goes below the groups too, not above them where it

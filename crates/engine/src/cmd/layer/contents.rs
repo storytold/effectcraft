@@ -157,8 +157,10 @@ fn merge_paints(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: Option
     if target.children.get(at..).is_some_and(|below| below.iter().any(crate::cmd::prop_groups::is_paint)) {
         return Ok(vec![]);
     }
-    // (bounds cover painted paths only: a stand-in Fill below them counts those with no paint yet)
-    target.children.insert(at, build::shape_fill(ids, [1.0; 4]).into());
+    // (bounds cover painted paths only: a stand-in Fill below them counts those with no paint yet,
+    // and what's below the merge, a Repeater say, doesn't reach what it takes in)
+    target.children.truncate(at);
+    target.children.push(build::shape_fill(ids, [1.0; 4]).into());
     let comp = proj.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let ctx = effectcraft_render::EvalCtx::new(proj, cid, comp, time);
