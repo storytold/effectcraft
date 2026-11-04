@@ -3573,11 +3573,29 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
         return;
     };
     let text = tr("Reset");
-    let width = g.lp.layout_no_wrap(text.to_string(), Tokens::medium(12.0), g.tl.t.text).size().x + 14.0;
-    // Leave the effect's fx switch clear, including when the Reset label is translated.
-    let rect = Rect::from_min_size(pos2(g.tl.cw.switches + SW * 4.0 + 6.0, rc.r.min.y + 1.0), vec2(width, rc.r.height() - 2.0));
-    let response =
-        ui.add_enabled_ui(!layer.switches.locked, |ui| widgets::text_button(ui, rect, text, false, &g.tl.t, egui::Id::unique(("tl-group-reset", uid)))).inner;
+    let t = g.tl.t;
+    let font = Tokens::ui(11.5);
+    let width = g.lp.layout_no_wrap(text.to_string(), font.clone(), t.accent).size().x;
+    // A link at the left of the Mode column, as in After Effects; without that column it sits
+    // after the switches, clear of the effect's fx switch.
+    let x = if g.tl.cw.vis.modes { g.tl.cw.mode + 4.0 } else { g.tl.cw.switches + SW * 4.0 + 6.0 };
+    let rect = Rect::from_min_size(pos2(x, rc.r.min.y + 1.0), vec2(width + 4.0, rc.r.height() - 2.0));
+    let enabled = !layer.switches.locked;
+    let response = ui.add_enabled_ui(enabled, |ui| {
+        let r = ui.interact(rect, egui::Id::unique(("tl-group-reset", uid)), Sense::click());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+        crate::a11y::role_name(&r, egui::accesskit::Role::Button, text);
+        let color = if enabled { t.accent } else { t.text_dim };
+        let at = pos2(rect.min.x + 2.0, rect.center().y);
+        g.lp.text(at, Align2::LEFT_CENTER, text, font.clone(), color);
+        if enabled && r.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            let y = rect.center().y + 7.0;
+            g.lp.line_segment([pos2(at.x, y), pos2(at.x + width, y)], Stroke::new(1.0, color));
+        }
+        r
+    });
+    let response = response.inner;
     app.auto.add(&format!("timeline.group.{uid}.reset"), rect, &label);
     if response.clicked() {
         g.tl.actions.push((command.into(), params));
