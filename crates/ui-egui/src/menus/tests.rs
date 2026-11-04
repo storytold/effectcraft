@@ -853,3 +853,25 @@ fn a_picked_project_with_losses_asks_and_the_next_waits() {
     assert!(app.session.project.items.is_empty(), "nothing imported before the answer");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #2689: a menu-created layer is named in the interface's language, a language with no row keeps
+/// English, and the dialogs still open with a localized prefill.
+#[test]
+fn a_menu_created_layer_takes_the_interface_language() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "A", "width": 64, "height": 64, "frameRate": 24, "duration": 1})).expect("comp.new");
+    crate::i18n::set_current("ja");
+    invoke(&mut app, &ctx, "layer.newNull", json!({})).expect("layer.newNull");
+    assert_eq!(app.session.active_comp().expect("comp").layers[0].name, "ヌル 1");
+
+    crate::i18n::set_current("xx");
+    invoke(&mut app, &ctx, "layer.newNull", json!({})).expect("layer.newNull");
+    assert_eq!(app.session.active_comp().expect("comp").layers[0].name, "Null 1");
+
+    crate::i18n::set_current("ja");
+    invoke(&mut app, &ctx, "layer.newSolid", json!({})).expect("layer.newSolid");
+    assert_eq!(app.dialog, Some(crate::Dialog::SolidSettings));
+    assert_eq!(app.dialog_state.solid_name, "平面 1");
+    crate::i18n::set_current("en");
+}

@@ -249,7 +249,13 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
     }
     // Into the selected shape layer's Contents as a new group (as in After Effects), else a new
     // shape layer; painted with the Tools bar's Fill and Stroke.
-    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy]})) {
+    let p = json!({
+        "kind": kind,
+        "size": [w, h],
+        "position": [cx, cy],
+        "base": crate::i18n::names::noun("Shape Layer"),
+    });
+    if let Err(e) = app.session.execute("shape.newShape", p) {
         app.ui.status = e.to_string();
     }
 }

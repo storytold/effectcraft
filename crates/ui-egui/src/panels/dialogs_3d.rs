@@ -84,11 +84,10 @@ pub fn open_camera(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), S
             }
         }
         None => {
-            let n = comp.layers.iter().filter(|l| l.is_camera()).count() + 1;
             let zoom = zoom_for_focal(w, 50.0);
             CameraDraft {
                 layer: None,
-                name: format!("Camera {n}"),
+                name: comp.unique_layer_name(&format!("{} 1", crate::i18n::names::noun("Camera"))),
                 two_node: true,
                 zoom,
                 dof: false,
@@ -136,24 +135,21 @@ pub fn open_light(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), St
                 shadow_diffusion: f("shadowDiffusion", 0.0),
             }
         }
-        None => {
-            let n = comp.layers.iter().filter(|l| l.is_light()).count() + 1;
-            LightDraft {
-                layer: None,
-                name: format!("Light {n}"),
-                kind: LightKind::Spot,
-                color: [1.0, 1.0, 1.0],
-                intensity: 100.0,
-                cone_angle: 90.0,
-                cone_feather: 50.0,
-                falloff: 0,
-                radius: 500.0,
-                falloff_distance: 500.0,
-                casts_shadows: false,
-                shadow_darkness: 100.0,
-                shadow_diffusion: 0.0,
-            }
-        }
+        None => LightDraft {
+            layer: None,
+            name: comp.unique_layer_name(&format!("{} 1", crate::i18n::names::noun("Light"))),
+            kind: LightKind::Spot,
+            color: [1.0, 1.0, 1.0],
+            intensity: 100.0,
+            cone_angle: 90.0,
+            cone_feather: 50.0,
+            falloff: 0,
+            radius: 500.0,
+            falloff_distance: 500.0,
+            casts_shadows: false,
+            shadow_darkness: 100.0,
+            shadow_diffusion: 0.0,
+        },
     };
     let editing = d.layer.is_some();
     app.dialog_state.light = d;
