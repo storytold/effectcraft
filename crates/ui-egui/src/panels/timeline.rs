@@ -2089,6 +2089,7 @@ fn group_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCt
     group_switches(app, ui, g, rc);
     group_name(app, ui, g, rc, &shown);
     group_popups(app, ui, g, rc);
+    group_reset(app, ui, g, rc);
     group_mask_mode(ui, g, rc);
     group_row_click(app, ui, g, rc);
 }
@@ -3557,6 +3558,30 @@ fn group_popups(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Ro
         }
     }
     dash_buttons(app, ui, &lp, layer, *uid, pos2(cw.switches, cy), &mut *actions);
+}
+
+/// Reset the layer Transform or this effect, without changing the current selection.
+fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>) {
+    let RowKind::Group { uid, .. } = &rc.row.kind else { return };
+    let layer = rc.layer;
+    let Some(group) = layer.props.find_group(*uid) else { return };
+    let (command, params, label) = if layer.transform().is_some_and(|tr| tr.uid == *uid) {
+        ("layer.transform", json!({"layers": [layer.id.0], "op": "reset"}), "Reset Transform".to_string())
+    } else if matches!(group.kind, GroupKind::Effect { .. }) {
+        ("effect.reset", json!({"layer": layer.id.0, "effect": uid}), format!("Reset {}", group.name))
+    } else {
+        return;
+    };
+    let text = tr("Reset");
+    let width = g.lp.layout_no_wrap(text.to_string(), Tokens::medium(12.0), g.tl.t.text).size().x + 14.0;
+    // Leave the effect's fx switch clear, including when the Reset label is translated.
+    let rect = Rect::from_min_size(pos2(g.tl.cw.switches + SW * 4.0 + 6.0, rc.r.min.y + 1.0), vec2(width, rc.r.height() - 2.0));
+    let response =
+        ui.add_enabled_ui(!layer.switches.locked, |ui| widgets::text_button(ui, rect, text, false, &g.tl.t, egui::Id::unique(("tl-group-reset", uid)))).inner;
+    app.auto.add(&format!("timeline.group.{uid}.reset"), rect, &label);
+    if response.clicked() {
+        g.tl.actions.push((command.into(), params));
+    }
 }
 
 /// Mask mode and inverted, inline.
