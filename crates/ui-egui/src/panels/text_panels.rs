@@ -34,7 +34,8 @@ impl TextTarget {
     }
 }
 
-/// The edited text layer's selection, else the selected text layer's Source Text at the CTI.
+/// The edited text layer's selection, else the Source Text at the CTI of the first selected text
+/// layer that isn't locked (the first one a change reaches), or of the first when all are.
 pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
     let comp = app.session.active_comp()?;
     let cid = app.session.active_comp_id()?;
@@ -58,7 +59,8 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         .selected_layers
         .iter()
         .filter_map(|id| comp.layer(*id))
-        .find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))?;
+        .filter(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))
+        .min_by_key(|l| l.switches.locked)?;
     let ectx = EvalCtx {
         project: &app.session.project,
         comp_id: cid,

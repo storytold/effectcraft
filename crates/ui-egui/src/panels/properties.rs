@@ -123,8 +123,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---------------------------------------------------------------- Text / Paragraph / Animation
     // While the layer's text is edited in the viewer, the text sections show and change the
-    // selected characters.
-    let text_target = crate::panels::text_panels::text_target(app).filter(|tt| tt.layer == layer.id.0);
+    // selected characters; otherwise they show and change the selected text layers, like the
+    // Character panel.
+    let text_target = crate::panels::text_panels::text_target(app).filter(|tt| tt.range.is_none() || tt.layer == layer.id.0);
     if matches!(layer.source, LayerSource::Text)
         && let Some(doc) = text_target.as_ref().map(|tt| tt.doc.clone()).or_else(|| effectcraft_engine::render::text::source_text(&ectx, &layer))
     {

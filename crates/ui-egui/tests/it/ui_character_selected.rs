@@ -98,10 +98,10 @@ fn character_and_paragraph_changes_reach_every_selected_text_layer() {
     assert_eq!((doc(&h, a).justify, doc(&h, b).justify), (Justify::Right, Justify::Right));
 }
 
-/// A locked layer that the panel shows stays as it is: the stroke order's layer-wide Fill & Stroke
-/// goes to the other selected text layers, as every other Character change does.
+/// A locked selected layer stays as it is: the stroke order's layer-wide Fill & Stroke goes to the
+/// other selected text layers, as every other Character change does.
 #[test]
-fn a_layer_wide_stroke_order_leaves_a_locked_shown_layer_alone() {
+fn a_layer_wide_stroke_order_leaves_a_locked_selected_layer_alone() {
     let (mut h, a, b) = two_text_layers(false);
     h.state_mut().session.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
     h.run_steps(2);
@@ -114,6 +114,28 @@ fn a_layer_wide_stroke_order_leaves_a_locked_shown_layer_alone() {
     };
     assert_eq!(fill_stroke(&mut h, b), json!(1));
     assert_eq!(fill_stroke(&mut h, a), json!(0), "the locked layer keeps its order");
+}
+
+/// The panels show the first layer their changes reach, not a locked one above it: a toggle sets
+/// what it looks like it sets, and a scrub starts from the value it changes.
+#[test]
+fn the_panels_show_the_first_unlocked_selected_layer() {
+    let (mut h, a, b) = two_text_layers(false);
+    let s = &mut h.state_mut().session;
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
+    s.execute("layer.setText", json!({"layer": b, "fauxBold": true, "size": 90})).unwrap();
+    h.run_steps(2);
+    let bold = center(&h, "character.fauxBold");
+    click(&mut h, bold);
+    assert!(!doc(&h, b).faux_bold, "the lit toggle turns Faux Bold off");
+    assert!(!doc(&h, a).faux_bold);
+
+    h.state_mut().show_panel(PanelKind::Properties);
+    h.run_steps(4);
+    let from = center(&h, "properties.text.size");
+    drag(&mut h, from, from + vec2(40.0, 0.0));
+    assert!(doc(&h, b).size > 90.0, "the scrub starts from the unlocked layer's size");
+    assert_eq!(doc(&h, a).size, 60.0, "the locked layer keeps its size");
 }
 
 /// A lone locked text layer stays as it is, and no error shows: nothing qualifies, so the panel's
