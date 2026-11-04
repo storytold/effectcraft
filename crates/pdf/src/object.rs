@@ -275,19 +275,26 @@ fn hexv(c: u8) -> u8 {
     }
 }
 
-fn decode_name(w: &[u8]) -> String {
-    let mut out = vec![];
+/// The bytes of a name token (after its `/`), with `#xx` escapes decoded.
+pub(crate) fn name_bytes(w: &[u8]) -> impl Iterator<Item = u8> {
     let mut i = 0;
-    while i < w.len() {
-        if w[i] == b'#' && w.get(i + 1).is_some_and(u8::is_ascii_hexdigit) && w.get(i + 2).is_some_and(u8::is_ascii_hexdigit) {
-            out.push((hexv(w[i + 1]) << 4) | hexv(w[i + 2]));
-            i += 3;
-        } else {
-            out.push(w[i]);
-            i += 1;
+    std::iter::from_fn(move || {
+        let c = *w.get(i)?;
+        match (c, w.get(i + 1), w.get(i + 2)) {
+            (b'#', Some(&hi), Some(&lo)) if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() => {
+                i += 3;
+                Some((hexv(hi) << 4) | hexv(lo))
+            }
+            _ => {
+                i += 1;
+                Some(c)
+            }
         }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    })
+}
+
+fn decode_name(w: &[u8]) -> String {
+    String::from_utf8_lossy(&name_bytes(w).collect::<Vec<_>>()).into_owned()
 }
 
 pub fn parse_num(w: &[u8]) -> Option<f64> {

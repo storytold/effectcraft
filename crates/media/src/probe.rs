@@ -198,16 +198,21 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         missing: false,
         sequence: Vec::new(),
         color_profile: v.and_then(|v| profile_of(&v.color)),
+        // counted in video frames, so only with a video stream
+        file_timecode: v.and(info.start_timecode),
         ..Default::default()
     }
 }
 
 /// The colour profile a video stream declares (H.273 primaries / transfer from the bitstream or
-/// container). `None` (interpreted as sRGB) for Rec. 709 primaries with an sRGB curve.
+/// container). `None` (interpreted as sRGB) for Rec. 709 primaries with an sRGB curve. BT.2020
+/// with a PQ or HLG curve is Rec. 2100 (HDR10, HLG), not Rec. 2020's 2.4 gamma (#2849).
 fn profile_of(c: &filmcraft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
     use effectcraft_project::ColorSpace;
     use filmcraft_color::{Primaries, Transfer};
     match (c.primaries, c.transfer) {
+        (Primaries::Bt2020, Transfer::Pq) => Some(ColorSpace::Rec2100Pq),
+        (Primaries::Bt2020, Transfer::Hlg) => Some(ColorSpace::Rec2100Hlg),
         (Primaries::Bt2020, _) => Some(ColorSpace::Rec2020),
         (Primaries::P3D65, _) => Some(ColorSpace::DisplayP3),
         (_, Transfer::Bt709) => Some(ColorSpace::Rec709),
@@ -381,6 +386,25 @@ mod tests {
     fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {
         let at = |k: i64| (2 * k * timescale * rate.den + rate.num) / (2 * rate.num);
         (0..n).map(|k| (at(k + 1) - at(k)) as u32).collect()
+    }
+
+    /// #2849: a stream's primaries and curve pick its profile; BT.2020 with PQ or HLG is Rec. 2100.
+    #[test]
+    fn stream_colour_picks_the_profile() {
+        use effectcraft_project::ColorSpace;
+        use filmcraft_color::{Primaries, Transfer};
+        let rows = [
+            (Primaries::Bt2020, Transfer::Pq, Some(ColorSpace::Rec2100Pq)),
+            (Primaries::Bt2020, Transfer::Hlg, Some(ColorSpace::Rec2100Hlg)),
+            (Primaries::Bt2020, Transfer::Bt709, Some(ColorSpace::Rec2020)),
+            (Primaries::P3D65, Transfer::Srgb, Some(ColorSpace::DisplayP3)),
+            (Primaries::Bt709, Transfer::Bt709, Some(ColorSpace::Rec709)),
+            (Primaries::Bt709, Transfer::Srgb, None),
+        ];
+        for (primaries, transfer, want) in rows {
+            let c = filmcraft_color::ColorInfo { primaries, transfer, ..filmcraft_color::ColorInfo::REC709 };
+            assert_eq!(profile_of(&c), want, "{primaries:?} + {transfer:?}");
+        }
     }
 
     /// A model's side files are read from beside it; a URI to another computer is not followed.

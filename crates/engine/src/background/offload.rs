@@ -558,6 +558,7 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
         true
     };
     let accel = job_accel();
+    let fill = accel.as_deref().and_then(|a| a.inpaint());
     let files = crate::commands::content_fill::run_plan(
         &plan,
         &s.project,
@@ -566,6 +567,7 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
         &s.layer_cache,
         s.services.as_ref(),
         accel.as_deref(),
+        fill,
         &mut progress,
         &mut |_| {},
     )
