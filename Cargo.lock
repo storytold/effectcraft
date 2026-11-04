@@ -1972,12 +1972,14 @@ dependencies = [
  "kurbo",
  "log",
  "pollster 1.0.1",
+ "raw-window-handle",
  "rayon",
  "serde",
  "serde_json",
  "sys-locale",
  "toml",
  "web-time",
+ "winsafe",
 ]
 
 [[package]]

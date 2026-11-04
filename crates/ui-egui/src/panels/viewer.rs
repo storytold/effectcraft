@@ -99,6 +99,8 @@ thread_local! {
 /// composition it draws `empty_state` and returns.
 /// What the passes of one viewer frame share (see [`show`]).
 struct Vw<'a> {
+    /// Off in Full Screen: the video alone, without the viewer's bars, rulers or overlays.
+    chrome: bool,
     t: Tokens,
     cid: effectcraft_engine::project::ItemId,
     nav: Rect,
@@ -155,6 +157,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().clone();
     VIEW_CAM.with(|c| c.set(app.session.view_camera(cid)));
     let mut v = Vw {
+        chrome: !app.full_screen_shown(),
         t,
         cid,
         nav: Rect::NOTHING,
@@ -214,6 +217,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         media_overrides: &[],
     };
     phase_guides(app, &ectx, &mut v);
+    if !v.chrome {
+        return;
+    }
     phase_layers(app, ui, &ectx, &mut v);
     phase_scene(app, &ectx, &mut v);
     phase_rigs(app, ui, &ectx, &mut v);
@@ -234,6 +240,10 @@ fn phase_nav(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut Vw
     let t = v.t;
     let cid = v.cid;
     let p = v.p.clone();
+    if !v.chrome {
+        v.nav = Rect::from_min_size(rect.min, vec2(rect.width(), 0.0));
+        return;
+    }
     // Navigator bar (open comps as breadcrumbs). After Effects shows a single breadcrumb row:
     // when the Composition Navigator (nested comp flow) is above the viewer, this row is left
     // out.
@@ -277,22 +287,37 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let p = v.p.clone();
     let comp = v.comp;
     // Bottom control bar.
-    let bar_h = 36.0;
+    let bar_h = if v.chrome { 36.0 } else { 0.0 };
     let bar = Rect::from_min_max(pos2(rect.min.x, rect.max.y - bar_h), rect.max);
     // The expression error bar sits above the control bar while expressions fail.
-    let err_h = super::expr_bar::height(app, &ctx, cid);
+    let err_h = if v.chrome { super::expr_bar::height(app, &ctx, cid) } else { 0.0 };
     let err_bar = Rect::from_min_max(pos2(rect.min.x, bar.min.y - err_h), pos2(rect.max.x, bar.min.y));
     let full = Rect::from_min_max(pos2(rect.min.x, nav.max.y), pos2(rect.max.x, err_bar.min.y));
-    let pasteboard = app.ui.viewer.pasteboard.map(|[r, g, b]| Color32::from_rgb(r, g, b)).unwrap_or(t.pasteboard);
+    let pasteboard = if v.chrome { app.ui.viewer.pasteboard.map(|[r, g, b]| Color32::from_rgb(r, g, b)).unwrap_or(t.pasteboard) } else { Color32::BLACK };
     // View ▸ Switch View Layout: extra views (Top / Front / Right) beside the main view, which
     // keeps the overlays and the interaction.
-    let full = locked_pane(app, ui, full, pasteboard);
-    let area = aux_views(app, ui, comp, cid, full, pasteboard);
+    let area = if v.chrome {
+        let full = locked_pane(app, ui, full, pasteboard);
+        aux_views(app, ui, comp, cid, full, pasteboard)
+    } else {
+        full
+    };
     p.rect_filled(area, 0.0, pasteboard);
     // View ▸ Show Rulers takes a strip on the top and left.
     let outer = area;
-    let area = vt::inset(app, area);
+    let area = if v.chrome { vt::inset(app, area) } else { area };
 
+    // Full Screen blows the panel up: the view keeps its place in it (Fit stays Fit, below).
+    if app.full_screen_shown()
+        && let Some(f) = app.full_screen.as_mut().filter(|f| !f.scaled)
+    {
+        f.scaled = true;
+        if let Some(panel) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area).filter(|a| a.width() > 0.0 && a.height() > 0.0) {
+            let s = (area.width() / panel.width()).min(area.height() / panel.height());
+            app.ui.viewer.zoom = app.ui.viewer.zoom.map(|z| z * s);
+            app.ui.viewer.pan = app.ui.viewer.pan.map(|p| p * s);
+        }
+    }
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
     // Fit up to 100% follows the panel's size like Fit does, and stops at 100%.
@@ -438,7 +463,9 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
         }
     }
 
-    vt::proportional_grid(app, &painter, comp_rect);
+    if v.chrome {
+        vt::proportional_grid(app, &painter, comp_rect);
+    }
 
     // Comp guides (View ▸ Show Guides) and the region of interest.
     if overlays && app.ui.viewer.guides {
@@ -456,7 +483,7 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
             }
         }
     }
-    if let Some([rx, ry, rw, rh]) = app.session.state.region_of_interest {
+    if let Some([rx, ry, rw, rh]) = app.session.state.region_of_interest.filter(|_| v.chrome) {
         let r = Rect::from_min_size(comp_rect.min + vec2(rx as f32 * zoom, ry as f32 * zoom), vec2(rw as f32 * zoom, rh as f32 * zoom));
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Middle);
         // Resize handles: corners and edge midpoints (drag with any tool).

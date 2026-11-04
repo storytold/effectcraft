@@ -527,7 +527,10 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
 
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
+    // Full Screen hides a script's palettes; its modal dialogs still need an answer.
+    let full_screen = app.full_screen_shown();
+    let windows: Vec<ScriptWindow> =
+        app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel && (w.modal || !full_screen)).cloned().collect();
     if windows.is_empty() {
         return;
     }
