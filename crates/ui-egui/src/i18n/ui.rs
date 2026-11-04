@@ -22,7 +22,7 @@ use std::fmt::Display;
 use std::sync::OnceLock;
 
 thread_local! {
-    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es", "pl", "ka", "sv", "fr"); "en" until the first
+    /// The resolved interface language ("en", "de", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es", "pl", "ka", "sv", "fr"); "en" until the first
     /// frame sets it.
     static CURRENT: Cell<&'static str> = const { Cell::new("en") };
 }
@@ -49,6 +49,7 @@ const ROWS: &[(&str, &[(&str, &str)])] = &[
     ("uk", UKRAINIAN),
     ("pt-br", PORTUGUESE),
     ("cs", CZECH),
+    ("de", super::de::UI),
     ("es", SPANISH),
     ("pl", POLISH),
     ("ka", GEORGIAN),
@@ -66,6 +67,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static UK: OnceLock<Index> = OnceLock::new();
     static PT_BR: OnceLock<Index> = OnceLock::new();
     static CS: OnceLock<Index> = OnceLock::new();
+    static DE: OnceLock<Index> = OnceLock::new();
     static ES: OnceLock<Index> = OnceLock::new();
     static PL: OnceLock<Index> = OnceLock::new();
     static KA: OnceLock<Index> = OnceLock::new();
@@ -78,6 +80,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
         "uk" => (&UK, UKRAINIAN),
         "pt-br" => (&PT_BR, PORTUGUESE),
         "cs" => (&CS, CZECH),
+        "de" => (&DE, super::de::UI),
         "es" => (&ES, SPANISH),
         "pl" => (&PL, POLISH),
         "fr" => (&FR, FRENCH),
@@ -10437,6 +10440,27 @@ mod tests {
     /// `en`'s row in `rows`, else `en`: what `tr` should return without pinning one wording.
     fn row(rows: &[(&'static str, &'static str)], en: &'static str) -> &'static str {
         rows.iter().find(|(source, _)| *source == en).map_or(en, |(_, translated)| *translated)
+    }
+
+    /// German rows match the Chinese source keys, translate values and retain unknown user text.
+    #[test]
+    fn german_panels_translate_and_keep_project_content() {
+        for (source, _) in super::super::de::UI {
+            assert!(SIMPLIFIED_CHINESE.iter().chain(TRADITIONAL_CHINESE).any(|(key, _)| key == source), "German row {source:?} is not a shared catalog source");
+        }
+        set_current("de");
+        assert_eq!(tr("Composition Name:"), "Kompositionsname:");
+        assert_eq!(tr("Cancel"), "Abbrechen");
+        assert_eq!(tr("Label"), "Beschriftung");
+        assert_eq!(tr("Light"), "Hell");
+        assert_eq!(tr("Light Type"), "Lichttyp");
+        assert_eq!(tr("Footage"), "Footage");
+        assert_eq!(tr("Enable Expression"), "Expression aktivieren");
+        assert_eq!(tr("The render queue is empty."), "Die Renderliste ist leer.");
+        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
+        assert_eq!(tr("unknown future label"), "unknown future label");
+        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Import"]), "Schritt 1 von 3: Import");
+        set_current("en");
     }
 
     #[test]
