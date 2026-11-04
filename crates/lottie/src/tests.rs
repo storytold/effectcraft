@@ -672,7 +672,7 @@ fn effects_expressions_and_warnings() {
 #[test]
 fn images_embed_as_base64_and_come_back() {
     let (mut p, cid) = setup();
-    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5];
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5];
     let fid = p.add_item(
         "pic.png",
         Label::Lavender,
@@ -720,6 +720,17 @@ fn images_embed_as_base64_and_come_back() {
     let ItemKind::Footage(f) = &q.item(item).unwrap().kind else { panic!() };
     assert_eq!((f.width, f.height), (64, 32));
     assert!(f.path.starts_with("/tmp/image_") && f.path.ends_with(".png"), "{}", f.path);
+}
+
+#[test]
+fn image_signatures_are_matched_in_full() {
+    use crate::export::image_mime;
+    assert_eq!(image_mime(b"\x89PNG\r\n\x1a\n\0"), Some("image/png"));
+    assert_eq!(image_mime(b"GIF89a\0"), Some("image/gif"));
+    assert_eq!(image_mime(b"GIF87a\0"), Some("image/gif"));
+    // Near matches (a prefix of the signature, or text that starts with it) are not images.
+    assert_eq!(image_mime(b"\x89PNG\x01\x02\x03\x04"), None);
+    assert_eq!(image_mime(b"GIF8 is a text file"), None);
 }
 
 #[test]
