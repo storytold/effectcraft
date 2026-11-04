@@ -255,17 +255,15 @@ fn photocraft_bad_metadata_and_missing_layer_pixels_report_errors() {
 #[test]
 #[cfg(unix)] // Sparse length checks exercise the guard without writing half a GiB.
 fn photocraft_large_files_are_rejected_before_reading() {
-    for name in ["large-sparse.pcraft", "renamed-sparse.zip"] {
-        let path = fixture_bytes(name, b"PK\x03\x04".to_vec());
-        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len((512 << 20) + 1).unwrap();
-        assert!(effectcraft_media::probe(&path).unwrap_err().to_string().contains("512 MiB input limit"));
-        let mut s = Session::default();
-        let before = s.project.items.len();
-        let r = s.execute("file.import", json!({"paths":[path],"importAs":"composition"})).unwrap();
-        assert_eq!(s.project.items.len(), before);
-        assert!(r["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("512 MiB input limit"))), "{r}");
-        std::fs::remove_file(path).unwrap();
-    }
+    let path = fixture_bytes("large-sparse.pcraft", b"PK\x03\x04".to_vec());
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len((512 << 20) + 1).unwrap();
+    assert!(effectcraft_media::probe(&path).unwrap_err().to_string().contains("512 MiB input limit"));
+    let mut s = Session::default();
+    let before = s.project.items.len();
+    let r = s.execute("file.import", json!({"paths":[path],"importAs":"composition"})).unwrap();
+    assert_eq!(s.project.items.len(), before);
+    assert!(r["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("512 MiB input limit"))), "{r}");
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

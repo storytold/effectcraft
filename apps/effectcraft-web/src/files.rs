@@ -114,13 +114,17 @@ pub struct WebServices;
 impl Services for WebServices {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         get(path)
+            .map(|d| d.to_vec())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))
-            .and_then(|data| {
-                if (data.starts_with(b"PK\x03\x04") || path.to_ascii_lowercase().ends_with(".pcraft")) && data.len() as u64 > 512 << 20 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle exceeds the 512 MiB input limit"));
-                }
-                Ok(data.to_vec())
-            })
+    }
+    /// Checks the size before copying the stored bytes.
+    fn read_pcraft(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let data =
+            get(path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))?;
+        if data.len() as u64 > effectcraft_engine::PCRAFT_MAX_INPUT {
+            return Err(effectcraft_engine::pcraft_too_large());
+        }
+        Ok(data.to_vec())
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         put(path, data.into());

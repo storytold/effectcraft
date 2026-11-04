@@ -85,20 +85,17 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 /// A whole file's bytes, refusing anything that isn't a regular file: a project can name
 /// `/dev/zero` or a FIFO as footage, and reading those never ends (#2134).
 pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::{Read, Seek};
+    use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
     }
-    let mut head = [0u8; 4];
-    if meta.len() >= 4 {
-        file.read_exact(&mut head)?;
-        file.rewind()?;
-    }
-    let pcraft = ext_of(path) == "pcraft" || head == *b"PK\x03\x04";
+    // Only `.pcraft` files are limited before the read; other ZIP-based files are not.
+    // A renamed bundle is checked after its read, before it is parsed.
+    let pcraft = ext_of(path) == "pcraft";
     if pcraft && meta.len() > pcraft::MAX_INPUT_BYTES {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ZIP/PhotoCraft bundle exceeds the 512 MiB input limit"));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle exceeds the 512 MiB input limit"));
     }
     let mut bytes = Vec::new();
     // A sparse file can claim far more than memory: an error, not an abort.
@@ -148,6 +145,20 @@ mod read_tests {
         let f = dir.join(format!("ec-read-regular-{}.bin", std::process::id()));
         std::fs::write(&f, b"abc").unwrap();
         assert_eq!(super::read_regular_file(&f).unwrap(), b"abc");
+        let _ = std::fs::remove_file(f);
+    }
+
+    /// Templates and dotLottie files are ZIP archives too: only `.pcraft` files have the
+    /// 512 MiB input limit. The length is set without writing the data.
+    #[test]
+    fn large_zip_files_other_than_photocraft_are_read_whole() {
+        let f = std::env::temp_dir().join(format!("ec-read-large-{}.zip", std::process::id()));
+        std::fs::write(&f, b"PK\x03\x04").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(crate::pcraft::MAX_INPUT_BYTES + 1).unwrap();
+        let bytes = super::read_regular_file(&f).unwrap();
+        assert_eq!(bytes.len() as u64, crate::pcraft::MAX_INPUT_BYTES + 1);
+        assert!(bytes.starts_with(b"PK\x03\x04"));
+        drop(bytes);
         let _ = std::fs::remove_file(f);
     }
 }

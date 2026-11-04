@@ -324,7 +324,7 @@ impl Prober {
         // The composite has already probed successfully. Optional canvas metadata must
         // not prevent Footage import when its read or outline exceeds another limit.
         if f.codec == "PhotoCraft"
-            && let Ok(bytes) = self.services.read_file(path)
+            && let Ok(bytes) = self.services.read_pcraft(path)
             && let Ok(outline) = craft_doc::outline(&bytes, &craft_doc::Limits::default())
             && let Some(canvas) = outline.canvas
             && (canvas.width, canvas.height) != (f.width, f.height)
@@ -427,12 +427,12 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     if let Some(retain) = retain {
         let mut rest = vec![];
         for path in paths {
-            if path.to_ascii_lowercase().ends_with(".pcraft") && s.services.stamp(&path).is_some_and(|(bytes, _)| bytes > 512 << 20) {
-                errors.push(format!("{path}: PhotoCraft bundle exceeds the 512 MiB input limit"));
-                continue;
-            }
-            let bytes = match s.services.read_file(&path) {
-                Ok(b) if path.to_ascii_lowercase().ends_with(".pcraft") || craft_doc::sniff(&b) == Some(craft_doc::Kind::PhotoCraft) => {
+            // Only PhotoCraft reads have the input limit; a renamed bundle is checked after its
+            // read, before it is parsed.
+            let pcraft = path.to_ascii_lowercase().ends_with(".pcraft");
+            let read = if pcraft { s.services.read_pcraft(&path) } else { s.services.read_file(&path) };
+            let bytes = match read {
+                Ok(b) if pcraft || craft_doc::sniff(&b) == Some(craft_doc::Kind::PhotoCraft) => {
                     match import_pcraft_comp(s, &path, &b, retain) {
                         Ok((comp, made, warnings)) => {
                             comps.push(comp);
@@ -455,7 +455,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
                     }
                     continue;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData || path.to_ascii_lowercase().ends_with(".pcraft") => {
+                Err(e) if pcraft => {
                     errors.push(format!("{path}: {e}"));
                     continue;
                 }
