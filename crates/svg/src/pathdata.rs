@@ -107,16 +107,25 @@ pub fn parse_path_data(d: &str) -> BezPath {
     parse_path_data_bounded(d, MAX_PATH_ELEMENTS).0
 }
 
+/// Pen position and reflection state while parsing path commands.
 struct PathState {
+    /// Current point.
     current: Point,
+    /// Start of the current subpath.
     start: Point,
+    /// Last cubic control point, for smooth curves.
     last_cubic: Option<Point>,
+    /// Last quadratic control point, for smooth curves.
     last_quad: Option<Point>,
+    /// Whether a subpath is open.
     open: bool,
 }
 
+/// Cap on path elements and whether it has been hit.
 struct PathLimit {
+    /// Maximum number of path elements.
     max_elements: usize,
+    /// Set when the cap or a non-finite coordinate stopped output.
     exceeded: bool,
 }
 
@@ -200,6 +209,7 @@ pub(crate) fn parse_path_data_bounded(d: &str, max_elements: usize) -> (BezPath,
     (strip_trailing_moves(p), limit.exceeded)
 }
 
+/// Push an element if finite and under the cap; otherwise mark the limit exceeded and return false.
 fn push_element(p: &mut BezPath, element: PathEl, limit: &mut PathLimit) -> bool {
     let finite = match element {
         PathEl::MoveTo(point) | PathEl::LineTo(point) => point.x.is_finite() && point.y.is_finite(),
@@ -215,6 +225,7 @@ fn push_element(p: &mut BezPath, element: PathEl, limit: &mut PathLimit) -> bool
     true
 }
 
+/// Parse one path command's arguments into `p`, returning `None` on malformed or over-limit input.
 fn segment(l: &mut Lex, c: u8, base: Vec2, p: &mut BezPath, state: &mut PathState, limit: &mut PathLimit) -> Option<()> {
     let num = |l: &mut Lex| l.number();
     let pt = |l: &mut Lex| -> Option<Point> { Some(Point::new(l.number()?, l.number()?) + base) };
@@ -346,6 +357,7 @@ mod tests {
     use kurbo::PathEl;
 
     #[test]
+    /// Huge arc radii stay bounded.
     fn huge_arc_radius_stays_bounded() {
         let p = parse_path_data("M0 0A1e36 1e36 0 1 1 1e30 0");
         assert!(p.elements().len() < 1000, "got {} elements", p.elements().len());
@@ -385,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    /// Huge-radius arcs still reach their end point.
     fn huge_radius_arc_still_reaches_end_point() {
         for d in ["M0 0 A1e20 1e20 0 0 1 10 0 L10 10", "M0 0 A1e20 1e20 0 1 1 10 0 L10 10", "M0 0 a1e20 1e20 0 0 1 10 0 L10 10"] {
             let p = parse_path_data(d);
@@ -404,6 +417,7 @@ mod tests {
     }
 
     #[test]
+    /// The element cap stops expansion and reports truncation.
     fn path_element_limit_stops_expansion_and_reports_truncation() {
         let data = format!("M0 0{}", "h1".repeat(MAX_PATH_ELEMENTS + 1));
         let (path, exceeded) = parse_path_data_bounded(&data, 32);
@@ -412,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    /// The number list cap stops retaining values.
     fn number_list_limit_stops_retaining_values() {
         let (values, exceeded) = numbers_bounded("1 2 3 4", 3);
         assert_eq!(values, [1.0, 2.0, 3.0]);

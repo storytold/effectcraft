@@ -8,6 +8,7 @@ use effectcraft_project::{Comp, ItemId, Layer, LayerSource, MaskMode, Project, P
 use effectcraft_svg::{Affine, Doc, Geom, GradientKind, Node, Paint};
 use kurbo::{BezPath, Point};
 
+/// Convert a kurbo path into shape path property groups.
 fn shape_paths(ids: &mut Ids, path: &BezPath) -> Vec<PropGroup> {
     effectcraft_path::from_kurbo(path)
         .into_iter()
@@ -20,6 +21,7 @@ fn shape_paths(ids: &mut Ids, path: &BezPath) -> Vec<PropGroup> {
         .collect()
 }
 
+/// Uniform scale factor of a transform (square root of its determinant magnitude).
 fn det_scale(m: Affine) -> f64 {
     let c = m.as_coeffs();
     (c[0] * c[3] - c[1] * c[2]).abs().sqrt()
@@ -31,6 +33,7 @@ fn axis_aligned(m: Affine) -> Option<(f64, f64, f64, f64)> {
     (c[1].abs() < 1e-9 && c[2].abs() < 1e-9 && c[0] > 0.0 && c[3] > 0.0).then_some((c[0], c[3], c[4], c[5]))
 }
 
+/// Convert an SVG gradient into the engine's gradient value.
 fn gradient_value(g: &effectcraft_svg::Gradient) -> Gradient {
     Gradient {
         colors: g.stops.iter().map(|(o, c)| (*o, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0])).collect(),
@@ -52,6 +55,7 @@ fn gradient_points(g: &effectcraft_svg::Gradient, m: Affine, bbox: kurbo::Rect) 
     }
 }
 
+/// Convert one SVG shape under transform `m` into shape-layer items.
 fn shape_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine) -> Vec<PropGroup> {
     use kurbo::Shape as _;
     let mut items = vec![];
@@ -118,12 +122,14 @@ fn shape_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine) -> Vec<Prop
     items
 }
 
+/// Set a child property's value if present.
 fn set(g: &mut PropGroup, k: &str, v: Value) {
     if let Some(p) = g.get_mut(k) {
         p.value = v;
     }
 }
 
+/// Wrap items in a named shape group with the given opacity (0..1).
 fn group(ids: &mut Ids, name: &str, items: Vec<PropGroup>, opacity: f64) -> PropGroup {
     let mut g = build::shape_group(ids, name, items);
     if let Some(p) = g.prop_mut("transform/opacity") {
@@ -175,6 +181,7 @@ fn clipped_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine, clips: &[
 /// [`shapes_from_vector`]). Images are skipped (Layer ▸ Create makes them footage layers, see
 /// [`split_at_images`]); soft masks are not converted.
 pub fn svg_contents(ids: &mut Ids, doc: &Doc) -> Vec<PropGroup> {
+    /// Convert nodes to property groups, applying transform `m` and clip paths.
     fn walk(ids: &mut Ids, nodes: &[Node], m: Affine, clips: &[BezPath]) -> Vec<PropGroup> {
         let mut out = vec![];
         for n in nodes.iter().rev() {
@@ -358,6 +365,7 @@ fn copy_transform(proj: &mut Project, src: &Layer, dst: &mut Layer) {
     }
 }
 
+/// Copy timing and parenting from `src` to `dst`.
 fn like_source(dst: &mut Layer, src: &Layer) {
     dst.start_time = src.start_time;
     dst.in_point = src.in_point;
@@ -370,13 +378,17 @@ fn like_source(dst: &mut Layer, src: &Layer) {
 /// A raster image of a vector document (Create Shapes from Vector Layer makes it a footage
 /// layer: shape layers have no images).
 pub struct VectorImage {
+    /// Image name.
     pub name: String,
+    /// Pixel width.
     pub width: u32,
+    /// Pixel height.
     pub height: u32,
     /// Straight RGBA8.
     pub rgba: std::sync::Arc<Vec<u8>>,
     /// Image pixels → document pixels.
     pub transform: Affine,
+    /// Opacity, 0..1.
     pub opacity: f64,
     /// Inside a clipping group or under a soft mask (not carried over).
     pub clipped: bool,
@@ -384,6 +396,7 @@ pub struct VectorImage {
 
 /// The document's images, bottom first, and how many soft-masked groups it has.
 pub fn vector_images(doc: &Doc) -> (Vec<VectorImage>, usize) {
+    /// Collect images from a group tree, counting soft-masked groups.
     fn walk(g: &effectcraft_svg::Group, m: Affine, opacity: f64, clipped: bool, out: &mut Vec<VectorImage>, masks: &mut usize) {
         let m = m * g.transform;
         let opacity = opacity * g.opacity;
@@ -419,6 +432,7 @@ pub fn vector_images(doc: &Doc) -> (Vec<VectorImage>, usize) {
 /// layers and image footage layers can stack in the document's order. One more segment than
 /// images.
 pub fn split_at_images(doc: &Doc) -> Vec<Doc> {
+    /// Count the images in a group tree.
     fn count(g: &effectcraft_svg::Group) -> usize {
         g.children
             .iter()

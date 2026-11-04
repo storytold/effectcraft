@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 pub use color::parse_color;
 pub use kurbo::{Affine, BezPath};
 pub use pathdata::parse_path_data;
-pub use raster::{blend_pixel, rasterize, rasterize_with};
+pub use raster::{RasterError, blend_pixel, rasterize, rasterize_with, try_rasterize, try_rasterize_with};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -74,6 +74,7 @@ pub enum Spread {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How pattern tile coordinates are interpreted.
 pub enum PatternUnits {
     /// Coordinates are fractions of the painted shape's bounding box.
     ObjectBoundingBox,
@@ -100,11 +101,15 @@ pub struct Gradient {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// A resolved `<pattern>` paint: tile geometry, coordinate units and shared content.
 pub struct Pattern {
     /// Tile origin and size in `pattern_units` coordinates.
     pub x: f64,
+    /// Tile origin y in `pattern_units` coordinates.
     pub y: f64,
+    /// Tile width in `pattern_units` coordinates.
     pub width: f64,
+    /// Tile height in `pattern_units` coordinates.
     pub height: f64,
     /// Coordinate system used for the tile origin and size.
     pub pattern_units: PatternUnits,
@@ -448,17 +453,24 @@ struct Rule {
 /// must have (id, else first class, else type) so an element only checks rules that can match.
 #[derive(Default, Debug)]
 struct StyleSheet {
+    /// Distinct selector rules in source order.
     rules: Vec<Rule>,
+    /// Declaration blocks; comma-list selectors share one block.
     blocks: Vec<Vec<(String, String)>>,
     /// Declarations over all blocks.
     decls: usize,
+    /// Rules keyed by their id selector.
     by_id: HashMap<String, Vec<usize>>,
+    /// Rules keyed by their first class selector.
     by_class: HashMap<String, Vec<usize>>,
+    /// Rules keyed by their type selector.
     by_tag: HashMap<String, Vec<usize>>,
+    /// Rules with no id, class or type to index on.
     universal: Vec<usize>,
 }
 
 impl StyleSheet {
+    /// Build the id, class, tag and universal lookup buckets from `rules`.
     fn index(&mut self) {
         for (i, r) in self.rules.iter().enumerate() {
             let bucket = if let Some(id) = &r.id {
@@ -621,6 +633,7 @@ const PROPS: &[&str] = &[
 
 struct Parser<'a, 'i> {
     ids: HashMap<String, roxmltree::Node<'a, 'i>>,
+    /// The parsed `<style>` sheets.
     css: StyleSheet,
     /// CSS matching work done so far; past [`MAX_CSS_WORK`] rules stop applying and the import errs.
     css_work: std::cell::Cell<usize>,
@@ -635,20 +648,29 @@ struct Parser<'a, 'i> {
     using: Vec<roxmltree::NodeId>,
     /// Pattern contents may use only solid paints; nested paint servers invalidate that pattern.
     in_pattern_content: bool,
+    /// Set once pattern content uses a paint server, invalidating that pattern.
     invalid_pattern_content: bool,
     /// Work revisited while resolving patterns, bounded across all references.
     pattern_work: usize,
+    /// Maximum pattern resolution work allowed for this import.
     pattern_work_budget: usize,
+    /// Set when pattern resolution work passed its budget.
     pattern_work_exceeded: bool,
+    /// Path data bytes (weighted) parsed so far.
     path_data_work: usize,
+    /// Path elements produced so far across all shapes.
     path_element_work: usize,
+    /// Maximum weighted path data work allowed for this import.
     path_work_budget: usize,
+    /// Set when path data or element work passed its budget.
     path_work_exceeded: bool,
     /// Parsed pattern content is viewport-dependent because lengths may be percentages; the cache is bounded.
     pattern_cache: HashMap<(roxmltree::NodeId, u64, u64), Option<Pattern>>,
     /// Resolved gradients share their stop arrays across repeated paint references.
     gradient_cache: HashMap<(roxmltree::NodeId, u64, u64), Gradient>,
+    /// Gradient resolution work done so far.
     gradient_work: usize,
+    /// Set when gradient work passed [`MAX_GRADIENT_WORK`].
     gradient_work_exceeded: bool,
 }
 
@@ -693,6 +715,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         true
     }
 
+    /// Charge gradient resolution work; false once the budget is exceeded.
     fn charge_gradient_work(&mut self, work: usize) -> bool {
         self.gradient_work = self.gradient_work.saturating_add(work);
         if self.gradient_work > MAX_GRADIENT_WORK {
@@ -702,6 +725,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         true
     }
 
+    /// Charge path data bytes against the path work budget; false once exceeded.
     fn charge_path_data(&mut self, bytes: usize) -> bool {
         self.path_data_work = self.path_data_work.saturating_add(bytes.saturating_mul(PATH_DATA_WORK_FACTOR));
         if self.path_data_work > self.path_work_budget {
@@ -711,6 +735,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         true
     }
 
+    /// Charge produced path elements against the per-import cap; false once exceeded.
     fn charge_path_elements(&mut self, elements: usize) -> bool {
         self.path_element_work = self.path_element_work.saturating_add(elements);
         if self.path_element_work > MAX_PATH_ELEMENTS_PER_IMPORT {
@@ -931,6 +956,7 @@ impl<'a, 'i> Parser<'a, 'i> {
 
     /// Read a local `href` or namespaced `xlink:href` value from an SVG element.
     fn href_value(n: roxmltree::Node<'a, 'i>) -> Option<String> {
+        /// XML namespace of `xlink:href`.
         const XLINK: &str = "http://www.w3.org/1999/xlink";
         let href = n
             .attributes()
@@ -1108,6 +1134,7 @@ impl<'a, 'i> Parser<'a, 'i> {
 
     /// Parse one pattern and account for all work done while resolving its inheritance chain.
     fn parse_pattern(&mut self, id: &str) -> Option<Pattern> {
+        /// Longest `href` inheritance chain followed when resolving a pattern.
         const MAX_PATTERN_HREF_DEPTH: usize = 16;
         let first = *self.ids.get(id)?;
         if first.tag_name().name() != "pattern" {
@@ -1205,6 +1232,23 @@ impl<'a, 'i> Parser<'a, 'i> {
         });
         if self.pattern_work_exceeded {
             return None;
+        }
+        // Content inherits from the element that actually owns it, which differs from `first`
+        // when the content comes through an `href` chain.
+        if let Some(source) = source.filter(|s| s.id() != first.id()) {
+            let mut inherited = Style::default();
+            let owners: Vec<_> = source.ancestors().filter(|node| node.is_element()).collect();
+            for owner in owners.into_iter().rev() {
+                if !self.charge_pattern_attributes(owner) {
+                    self.in_pattern_content = old_pattern_content;
+                    self.invalid_pattern_content = old_invalid;
+                    self.vw = old_vw;
+                    self.vh = old_vh;
+                    return None;
+                }
+                self.cascade(owner, &mut inherited);
+            }
+            content_style = inherited;
         }
         let mut children = Vec::new();
         if let Some(source) = source {
@@ -1460,6 +1504,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
     }
 
+    /// Resolve an element's geometry from its attributes, or from pre-parsed path data / points.
     fn geometry(&self, n: roxmltree::Node, st: &Style, path_data: Option<BezPath>, points: Option<Vec<f64>>) -> Option<Geom> {
         let l = |name: &str, axis: char| self.attr_len(n, name, axis, st);
         Some(match n.tag_name().name() {
@@ -1648,10 +1693,12 @@ const MAX_GRADIENT_WORK: usize = 64 * 1024 * 1024;
 const MAX_GRADIENT_CACHE_ENTRIES: usize = 256;
 /// Bound ellipse expansion before kurbo approximates it with tolerance-dependent path segments.
 const MAX_ELLIPSE_RADIUS: f64 = 1.0e9;
+/// Weight applied to each path data byte when charging path work.
 const PATH_DATA_WORK_FACTOR: usize = 8;
 /// Aggregate work that pattern references may revisit, including attributes and scanned children,
 /// even when many shapes share one large pattern definition.
 const MAX_PATTERN_WORK_BYTES: usize = 256 * 1024 * 1024;
+/// Lower bound of the pattern work budget regardless of document size.
 const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 /// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
 const MAX_PATTERN_CACHE_ENTRIES: usize = 256;

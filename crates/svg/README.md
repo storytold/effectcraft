@@ -33,7 +33,16 @@ rasterised in SVG footage; editable shape layers retain geometry and convert onl
 Path expansion and gradient resolution have per-import work limits. The rasterizer also caps live
 surface memory and cumulative pattern, clip-coverage, and source-image work. Over-budget imports
 return an error; over-budget raster operations are skipped, using a paint fallback where available.
-Other unsupported content (ignored): text, images, filters, clip paths, masks, markers and
-animation, including pattern animation.
+
+`rasterize`/`rasterize_with` drop content refused by a budget and return the image drawn so far
+(an empty image if the canvas itself is refused). `try_rasterize`/`try_rasterize_with` return
+`Err(RasterError)` instead (`SurfaceLimit` for memory, `WorkLimit` for work). Budgets per render:
+512 MiB of live offscreen surfaces, 512 MiB of pattern tiles, 256 Mi units each of pattern
+render work, clip-path rasterisation work and image sampling work, and 2^31 pixels touched across
+all passes.
+
+For SVG input, text, images, filters, clip paths, masks, markers and animation (including pattern
+animation) are unsupported and ignored. The PDF importers' documents do use clip, mask, blend and
+image nodes, which the rasterizer renders under the same budgets.
 XML parsing uses `roxmltree` (MIT/Apache-2.0). Test fixtures are original work (see
 `tests/fixtures/*.attribution`).

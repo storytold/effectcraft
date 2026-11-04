@@ -118,7 +118,7 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
         if u64::from(w) * u64::from(h) > u64::from(MAX_VECTOR_SIDE) * u64::from(MAX_VECTOR_SIDE) {
             return Err(MediaError::Decode(format!("{path}: {w}×{h} pixels is larger than vector footage can be drawn ({MAX_VECTOR_SIDE}×{MAX_VECTOR_SIDE})")));
         }
-        let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+        let img = effectcraft_svg::try_rasterize(&doc, w, h, 1.0).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
         // The rasteriser produces premultiplied pixels already.
         let _ = op;
         return Ok(Some(img));
@@ -134,6 +134,8 @@ pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], layer: Option<&effectcr
     let doc = vector_doc(path, bytes, layer, page)?.ok()?;
     let (w, h) = doc.pixel_size();
     let (sw, sh) = (((w as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE), ((h as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE));
+    // This path cannot report an error: content refused by a render budget is dropped and the
+    // partial image is kept, so a hostile file degrades instead of making the footage vanish.
     Some(effectcraft_svg::rasterize(&doc, sw, sh, scale))
 }
 
