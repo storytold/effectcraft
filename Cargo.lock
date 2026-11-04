@@ -1970,7 +1970,6 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "exr",
- "filmcraft-codecs",
  "image",
  "kurbo",
  "log",

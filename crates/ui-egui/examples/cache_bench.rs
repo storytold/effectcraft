@@ -138,7 +138,7 @@ fn main() {
     };
 
     eprintln!("caching {n} frames of {}×{} at scale {scale} with {slots} in flight…", comp.width, comp.height);
-    let (gop0, t0) = (filmcraft_codecs::gop_stats(), Instant::now());
+    let (gop0, t0) = (effectcraft_media::gop_stats(), Instant::now());
     let mut next = 0;
     loop {
         while next < n && frames.inflight() < slots {
@@ -151,7 +151,7 @@ fn main() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let secs = t0.elapsed().as_secs_f64();
-    let gop = filmcraft_codecs::gop_stats();
+    let gop = effectcraft_media::gop_stats();
     let cached = frames.cached_frames(&series).len();
     println!("frames cached     {cached}/{n} in {secs:.2} s: {:.1} frames/s, {:.1} ms each", cached as f64 / secs, secs * 1000.0 / cached.max(1) as f64);
     println!(
