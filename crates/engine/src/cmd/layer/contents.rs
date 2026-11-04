@@ -157,9 +157,12 @@ fn merge_paints(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: Option
     if target.children.get(at..).is_some_and(|below| below.iter().any(crate::cmd::prop_groups::is_paint)) {
         return Ok(vec![]);
     }
-    // (bounds cover painted paths only: a stand-in Fill below them counts those with no paint yet,
-    // and what's below the merge, a Repeater say, doesn't reach what it takes in)
+    // (bounds cover painted paths only: a stand-in merge drops the paints among them, a stand-in Fill
+    // below it counts those with no paint yet, and what's below the merge, a Repeater say, doesn't
+    // reach what it takes in)
     target.children.truncate(at);
+    let merge = build::shape_simple_op(ids, "merge").ok_or_else(|| bad("layer.addShapeItem", "unknown kind `merge`"))?;
+    target.children.push(merge.into());
     target.children.push(build::shape_fill(ids, [1.0; 4]).into());
     let comp = proj.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
