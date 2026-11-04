@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|wasm|web|ico|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|aep-corpus|wasm|web|ico|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -8,12 +8,15 @@
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
+//! - `aep-corpus [--dir DIR]`: fetch the After Effects test corpus at the commit pinned in
+//!   `crates/aep/tests/fixtures/corpus.lock`, verify every file's SHA-256, install into `corpus/aep`.
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
 //! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
 //!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
 
+mod aep_corpus;
 mod bench;
 mod ico;
 mod pdf_deps;
@@ -37,6 +40,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("keyframe", 1),
     ("path", 1),
     ("psd", 1),
+    ("aep", 3),
     ("segment", 1),
     ("project", 2),
     ("text", 2),
@@ -162,7 +166,7 @@ fn layers() -> Result<(), String> {
 const ASSET_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "bmp", "tif", "tiff", "heic", "avif", "exr", "ttf", "otf", "ttc", "woff", "woff2", "cube",
     "3dl", "lut", "look", "wav", "mp3", "aac", "flac", "ogg", "opus", "m4a", "aif", "aiff", "mp4", "mov", "m4v", "mkv", "webm", "avi", "mxf", "psd", "ai",
-    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep",
+    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep", "aepx",
 ];
 
 /// Sidecar fields that must be present and non-empty.
@@ -479,16 +483,50 @@ fn tests() -> Result<(), String> {
     let mut runs = Vec::new();
     if nextest {
         runs.push(run(Command::new(cargo).args(["nextest", "run"]).args(targets).args(["-E", "not package(effectcraft-gpu)"])));
-        runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-gpu", "--lib", "--no-fail-fast"])));
+        // effectcraft-gpu's tests share one device, so they run in one libtest process: the
+        // binary nextest just built (`cargo test -p effectcraft-gpu` would rebuild ~2 minutes).
+        runs.push(lib_test_binary("effectcraft-gpu").and_then(|mut c| run(&mut c)));
     } else {
         println!("cargo-nextest not found, running cargo test (install: cargo install cargo-nextest --locked)");
         runs.push(run(Command::new(cargo).arg("test").args(targets)));
     }
-    // The test runs above hide a passing test's output, so the always-passing report runs again with --nocapture.
-    runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-ui-egui", "--lib", "missing_translations_report", "--", "--nocapture"])));
+    // The test runs above hide a passing test's output, so the always-passing report runs again
+    // with --nocapture, from the binary already built.
+    runs.push(lib_test_binary("effectcraft-ui-egui").and_then(|mut c| run(c.args(["missing_translations_report", "--nocapture"]))));
     runs.push(run(Command::new(cargo).args(["test", "--workspace", "--doc", "--no-fail-fast"])));
     let failed: Vec<String> = runs.into_iter().filter_map(Result::err).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+}
+
+/// A command running `package`'s lib test binary from the test build above, the way `cargo test`
+/// runs it (from the package directory), found with `--no-run` and the same workspace selection
+/// so nothing rebuilds: `cargo test -p <package>` resolves features for that package alone and
+/// recompiles much of the workspace.
+fn lib_test_binary(package: &str) -> Result<Command, String> {
+    let out = Command::new(env!("CARGO"))
+        .args(["test", "--workspace", "--lib", "--bins", "--tests", "--no-run", "--message-format=json-render-diagnostics"])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("cargo test --no-run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("cargo test --no-run: exited with {}", out.status));
+    }
+    let lib = package.replace('-', "_");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|m| {
+            m["reason"] == "compiler-artifact"
+                && m["profile"]["test"] == true
+                && m["target"]["name"] == lib.as_str()
+                && m["target"]["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "lib"))
+        })
+        .and_then(|m| {
+            let mut c = Command::new(m["executable"].as_str()?);
+            c.current_dir(std::path::Path::new(m["manifest_path"].as_str()?).parent()?);
+            Some(c)
+        })
+        .ok_or_else(|| format!("no {package} lib test binary in the test build"))
 }
 
 type Stage = fn() -> Result<(), String>;
@@ -516,6 +554,7 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
+        "aep-corpus" => aep_corpus::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ci" => ci(),
         "audio-backend" => audio_backend(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -528,7 +567,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

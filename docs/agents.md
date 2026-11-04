@@ -476,7 +476,9 @@ undistort?, wait?}`) apply
 Effect ▸ Perspective ▸ 3D Camera Tracker (or reuse the layer's) and analyse it in the background:
 "Analyzing in background (step 1 of 2)" tracks features, "Solving camera" solves.
 `camera.analyze {layer?, effect?, wait?}` re-runs it, `camera.cancel` stops it without writing
-anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved`, `methodUsed`,
+anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved` (every frame
+solved), `partial` with `solvedFrames` of `frames` (the camera is interpolated on the other frames,
+and `camera.exportBlender` refuses such a solve), `methodUsed`,
 `averageError` (pixels), `focalLength`, `horizontalAngleOfView`, the current frame's `camera`
 (position, orientation, zoom), `groundPlane` and the solved `lensDistortion` (`k1`, `k2`, normalised by
 half the frame diagonal) when Solve Lens Distortion (`effects/#1/advanced/lensDistortion`, also on
@@ -751,6 +753,14 @@ effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
+Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
+parallel scripts don't lose edits. Each holds an OS lock on `.<name>.lock` next to the project from
+before it reads the file until it exits; the next one says so on stderr, waits, and then edits what
+the first one saved. A crash releases the lock, and the empty file left behind is harmless. Only these
+CLI runs take the lock: the desktop app, `mcp`, and a `file.save` step in a run without `--save`
+don't. OS locks can also be unreliable over network shares and synced folders. If the lock can't be
+taken, the run warns on stderr and saves anyway.
+
 A long `run` doesn't fit on a command line (Windows caps it at 32 767 characters, Linux one
 argument at 128 KiB). `run --args-file F` reads the same `<id> <json>` arguments one per line;
 `run --commands FILE` reads steps as a JSON array of `{"command": ID, "params": {…}}` objects, or one
@@ -781,6 +791,8 @@ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network.
 cannot express (most effects, cameras and lights, layer styles, audio, video footage…), so an
 agent can check what a player will not show. A `.lottie` path writes a dotLottie archive.
 `file.importLottie` returns `{comp, items, warnings}` and opens the new composition.
+
+`file.importAep {path, allowLosses?, dryRun?, applySettings?}` imports an After Effects project (`.aep` or `.aepx`) into a folder named after the file and returns `{folder, comps, items, report}`. The report counts what arrived and lists, per category, what did not (effects outside the importer's table, undecoded text or style settings, simplified keyframes…); without `allowLosses` an import that would lose anything is refused and changes nothing, and `dryRun` returns just the report ([aep-import.md](aep-import.md)).
 
 Premiere Pro interop goes through timeline interchange (MCP: the `execute_command` tool; control channel: `engine.execute`
 with the same ids):

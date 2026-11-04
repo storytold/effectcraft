@@ -80,9 +80,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         property_overrides: &[],
         media_overrides: &[],
     };
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
+    let rect = scroll.content;
+    let p = p.with_clip_rect(rect);
     let x0 = rect.min.x + PAD;
     let w = rect.width() - 2.0 * PAD;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
     let top = rect.min.y + 8.0 - scroll.offset;
     let mut y = top;
     let mut actions: Actions = vec![];

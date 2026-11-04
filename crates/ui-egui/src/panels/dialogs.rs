@@ -64,6 +64,7 @@ pub struct DialogState {
     pub unsaved: super::unsaved::Pending,
     /// Deleting Project items in use: the deletion waiting on the prompt.
     pub delete_items: super::delete_items::Pending,
+    pub aep_losses: super::aep_losses::Pending,
     /// The Gradient Editor's draft and the property it edits.
     pub gradient: super::gradient_editor::Draft,
     /// Preview of the settings dialog being edited (Solid, Camera, Light, Composition Settings).
@@ -315,6 +316,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::RenderTemplates => super::rq_templates::show(app, ctx, &t),
         Dialog::UnsavedChanges => super::unsaved::show(app, ctx, &t),
         Dialog::DeleteItems => super::delete_items::show(app, ctx, &t),
+        Dialog::AepLosses => super::aep_losses::show(app, ctx, &t),
         Dialog::GradientEditor => super::gradient_editor::show(app, ctx, &t),
         Dialog::DeleteTemplate => super::templates::show_delete(app, ctx, &t),
     }
@@ -446,7 +448,7 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     let live = existing && super::live_preview::active(app);
     let place = super::live_preview::place(app);
     let mut preview = app.dialog_state.live.on;
-    modal_placed(ctx, "Composition Settings", vec2(600.0, 470.0), t, place, |ui| {
+    modal_placed(ctx, "Composition Settings", vec2(super::comp_settings::dialog_width(ctx), 470.0), t, place, |ui| {
         result = super::comp_settings::show(ui, &mut d, t, &mut app.auto, &custom, &mut cmds, live.then_some(&mut preview));
     });
     app.dialog_state.live.on = preview;

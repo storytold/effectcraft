@@ -143,6 +143,16 @@ fn compact_control_row_scrolls_and_preserves_interactions() {
     h.run_steps(3);
     assert!(!h.state().session.state.viewer.show_snapshot, "releasing the snapshot control must return to the current frame");
 
+    // Fast Previews sits beside the resolution control, so the row that scrolled to the timecode has
+    // to scroll back before its menu is reachable.
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(1500.0, 0.0),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(30);
     click_control(&mut h, "viewer.fastPreviews");
     click_control(&mut h, "viewer.fastPreviewsItem.1");
     assert_eq!(h.state().session.state.viewer.fast_previews.id(), "adaptive", "a scrolled dropdown must retain its menu command");
