@@ -1970,3 +1970,41 @@ fn a_volume_read_by_its_own_layer_re_renders_it() {
     let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
     assert!(!kept.contains(&0), "the clip's frames must go: {kept:?}");
 }
+
+/// An expression on the keyed layer can read the keyed property at other times (Rotation
+/// reading Position a second earlier): a key edit re-renders the layer's whole length. Every
+/// frame kept renders as before.
+#[test]
+fn a_keyframe_edit_read_at_other_times_by_its_layer_re_renders_it() {
+    use effectcraft_engine::project::{LayerId, Value};
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+    let l = LayerId(s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap());
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    for (f, x) in [(20, 2.0), (80, 14.0)] {
+        s.execute("prop.addKey", json!({"layer": l.0, "path": "transform/position", "time": fr.tick_of(f).seconds(), "value": [x, 8.0, 0.0]})).unwrap();
+    }
+    s.execute("prop.setExpression", json!({"layer": l.0, "path": "transform/rotation", "expression": "transform.position.valueAtTime(time - 1)[0] * 3"}))
+        .unwrap();
+    let p0 = s.project.clone();
+    let host = s.expr.clone().unwrap();
+    let render = |p: &Project, i: i64| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&*host);
+        r.comp_frame(cid, fr.tick_of(i))
+    };
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, cid);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let mut p1 = p0.clone();
+    Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/position").unwrap().keys[0].value =
+        Value::Vec3([8.0, 2.0, 0.0]);
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+    assert!(!kept.contains(&100), "Rotation at frame 100 reads Position at frame 70: {kept:?}");
+    for i in kept {
+        assert_eq!(render(&p0, i), render(&p1, i), "kept frame {i} draws other pixels now");
+    }
+}

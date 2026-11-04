@@ -315,8 +315,9 @@ impl Layer {
     /// Timeline or Graph Editor): from two keys before the first changed key to two after the
     /// last (auto-Bezier and continuous tangents reach the neighbouring segments), to the
     /// layer's in or out point past the first or last key (values hold there). `None` for any
-    /// other difference, a static value, an expression, roving keys, a time remap or a time
-    /// effect (it reads other times): those reach the layer's whole span.
+    /// other difference, a static value, an expression on the layer (it can read the keyed
+    /// property at other times), roving keys, a time remap or a time effect (it reads other
+    /// times): those reach the layer's whole span.
     pub fn keyframe_spans(&self, o: &Layer, with_markers: bool, heard: bool) -> Option<Vec<(Tick, Tick)>> {
         let transform = |l: &Layer| l.props.group("transform").cloned();
         let (t1, t0) = (transform(self)?, transform(o)?);
@@ -326,7 +327,12 @@ impl Layer {
                     e.children.iter().any(|n| matches!(n, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if effect.starts_with("ec.time."))))
                 })
         };
-        if reads_time(self) || reads_time(o) {
+        let has_expr = |l: &Layer| {
+            let mut any = false;
+            l.props.walk("", &mut |_, p| any |= p.has_expression());
+            any
+        };
+        if reads_time(self) || reads_time(o) || has_expr(self) || has_expr(o) {
             return None;
         }
         // Everything but the Transform group draws the same.
@@ -346,13 +352,7 @@ impl Layer {
             }
             let (Node::Prop(p1), Node::Prop(p0)) = (n1, n0) else { return None };
             let bare = |p: &Property| Property { keys: vec![], value: Value::Scalar(0.0), ..p.clone() };
-            if p1.expr.is_some()
-                || p0.expr.is_some()
-                || bare(p1) != bare(p0)
-                || p1.keys.is_empty()
-                || p0.keys.is_empty()
-                || p1.keys.iter().chain(&p0.keys).any(|k| k.roving)
-            {
+            if bare(p1) != bare(p0) || p1.keys.is_empty() || p0.keys.is_empty() || p1.keys.iter().chain(&p0.keys).any(|k| k.roving) {
                 return None;
             }
             // Keys only one side has as they are (added, removed, edited, moved).
