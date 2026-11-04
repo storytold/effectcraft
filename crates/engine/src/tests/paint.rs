@@ -218,9 +218,9 @@ fn a_pin_added_to_a_bent_mesh_moves_nothing() {
         s.execute("puppet.addPin", json!({"layer": id, "position": at})).unwrap();
         let after = s.render(cid, t, RenderOpts::default());
         let moved = after.data.iter().zip(&before.data).filter(|(a, b)| (a[3] - b[3]).abs() > 0.25).count();
-        // (Before #318 the pin at [50, 54] moved about 250 edge pixels; the solver's round-off
-        // still touches a few.)
-        assert!(moved <= 16, "a pin at {at:?} moved {moved} pixels");
+        // (Before #318 the pin at [50, 54] moved about 250 edge pixels. A few still change: the
+        // mesh settles towards the pins' rigid fit, and a new pin changes that fit a little.)
+        assert!(moved <= 24, "a pin at {at:?} moved {moved} pixels");
         s.undo();
     }
 }

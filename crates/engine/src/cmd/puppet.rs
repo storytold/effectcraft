@@ -122,12 +122,13 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if on_mesh(mesh, def, at) || want_mesh.is_some() {
                 let rest = puppet::unmap(mesh, def, at);
-                // A moving pin holds its nearest mesh vertex at `position + (vertex - rest)`
-                // (puppet::solve). Choose the position that keeps that vertex where it is now, so
-                // adding a pin to a bent mesh moves nothing (After Effects, #318); on an unbent
-                // mesh that is the click itself.
+                // A moving pin holds the point under it at `position`, so on the mesh the click
+                // itself keeps everything where it is: adding a pin to a bent mesh moves nothing
+                // (After Effects, #318). Off the mesh it holds its nearest vertex at
+                // `position + (vertex - rest)` (puppet::solve): choose the position that keeps that
+                // vertex where it is now.
                 let now = (0..mesh.verts.len().min(def.len()))
-                    .filter(|_| kind.moves())
+                    .filter(|_| kind.moves() && !puppet::contains(mesh, def, at))
                     .min_by(|a, b| dist2(mesh.verts[*a], rest).total_cmp(&dist2(mesh.verts[*b], rest)))
                     .and_then(|v| {
                         let (r, d) = (mesh.verts.get(v)?, def.get(v)?);
