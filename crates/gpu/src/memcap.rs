@@ -177,17 +177,22 @@ fn vram(info: &wgpu::AdapterInfo) -> Option<u64> {
     if !cfg!(target_os = "linux") || info.device_type != wgpu::DeviceType::DiscreteGpu {
         return None;
     }
-    let bytes = vram_in_sysfs(Path::new("/sys/class/drm"), info.vendor, info.device);
+    let bytes = vram_in_sysfs(Path::new("/sys/class/drm"), info.vendor, info.device, &info.device_pci_bus_id);
     if let Some(b) = bytes {
         log::info!(target: "effectcraft_gpu", "gpu {}: {} MiB of video memory (sysfs)", info.name, b >> 20);
     }
     bytes
 }
 
-/// `mem_info_vram_total` (amdgpu) of the first DRM card under `drm` whose PCI vendor and device
-/// ids are `vendor` and `device`. Connector entries (`card1-DP-1`) are skipped.
-fn vram_in_sysfs(drm: &Path, vendor: u32, device: u32) -> Option<u64> {
+/// `mem_info_vram_total` (amdgpu) of the DRM card under `drm` whose PCI vendor and device ids are
+/// `vendor` and `device`. Connector entries (`card1-DP-1`) are skipped. Variants of one model share
+/// those ids (the RX 550 ships with 2 and 4 GB), so the card at PCI address `bus` (`uevent`'s
+/// `PCI_SLOT_NAME`, wgpu's `device_pci_bus_id`) wins; without one, the smallest matching card.
+fn vram_in_sysfs(drm: &Path, vendor: u32, device: u32, bus: &str) -> Option<u64> {
     let id = |path: &Path| std::fs::read_to_string(path).ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+    let slot = |dev: &Path| {
+        std::fs::read_to_string(dev.join("uevent")).ok()?.lines().find_map(|l| l.strip_prefix("PCI_SLOT_NAME=").map(|s| s.trim().to_ascii_lowercase()))
+    };
     let mut cards: Vec<_> = std::fs::read_dir(drm)
         .ok()?
         .flatten()
@@ -195,13 +200,19 @@ fn vram_in_sysfs(drm: &Path, vendor: u32, device: u32) -> Option<u64> {
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("card") && !n.contains('-')))
         .collect();
     cards.sort();
-    cards.iter().find_map(|card| {
-        let dev = card.join("device");
-        if id(&dev.join("vendor")) != Some(vendor) || id(&dev.join("device")) != Some(device) {
-            return None;
-        }
-        std::fs::read_to_string(dev.join("mem_info_vram_total")).ok()?.trim().parse::<u64>().ok().filter(|&b| b > 0)
-    })
+    let found: Vec<(Option<String>, u64)> = cards
+        .iter()
+        .filter_map(|card| {
+            let dev = card.join("device");
+            if id(&dev.join("vendor")) != Some(vendor) || id(&dev.join("device")) != Some(device) {
+                return None;
+            }
+            let bytes = std::fs::read_to_string(dev.join("mem_info_vram_total")).ok()?.trim().parse::<u64>().ok().filter(|&b| b > 0)?;
+            Some((slot(&dev), bytes))
+        })
+        .collect();
+    let bus = bus.trim().to_ascii_lowercase();
+    found.iter().find(|(s, _)| !bus.is_empty() && s.as_deref() == Some(bus.as_str())).map(|&(_, b)| b).or_else(|| found.iter().map(|&(_, b)| b).min())
 }
 
 /// Minimum reclaimable bytes before a wait is worth draining an encoder (1/8 of the cap,
@@ -300,10 +311,18 @@ mod tests {
         card("card0", "0x8086\n", "0x9bc5\n", None);
         card("card1", "0x1002\n", "0x699f\n", Some("4294967296\n"));
         std::fs::create_dir_all(dir.join("card1-DP-1")).unwrap();
-        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f), Some(4 * GIB));
-        assert_eq!(vram_in_sysfs(&dir, 0x8086, 0x9bc5), None, "no mem_info_vram_total");
-        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x73bf), None, "no such card");
-        assert_eq!(vram_in_sysfs(&dir.join("missing"), 0x1002, 0x699f), None);
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, ""), Some(4 * GIB));
+        assert_eq!(vram_in_sysfs(&dir, 0x8086, 0x9bc5, ""), None, "no mem_info_vram_total");
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x73bf, ""), None, "no such card");
+        assert_eq!(vram_in_sysfs(&dir.join("missing"), 0x1002, 0x699f, ""), None);
+        // A 2 GB RX 550 next to the 4 GB one: same ids, told apart by PCI address.
+        card("card2", "0x1002\n", "0x699f\n", Some("2147483648\n"));
+        std::fs::write(dir.join("card1/device/uevent"), "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:01:00.0\n").unwrap();
+        std::fs::write(dir.join("card2/device/uevent"), "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n").unwrap();
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, "0000:01:00.0"), Some(4 * GIB));
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, "0000:03:00.0"), Some(2 * GIB));
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, ""), Some(2 * GIB), "unknown address: the smaller card");
+        assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, "0000:09:00.0"), Some(2 * GIB), "no such address: the smaller card");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
