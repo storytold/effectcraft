@@ -47,6 +47,7 @@
 
 use std::io::Write;
 
+mod project_lock;
 mod template;
 
 use effectcraft_automation::tools::{self, Reply};
@@ -508,6 +509,7 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
         (None, Some(f)) => (std::fs::read_to_string(f).map_err(|e| Failure::Error(format!("cannot read {f}: {e}")))?, f.clone()),
         (None, None) => return usage_err("script needs a .jsx/.js file or --eval CODE"),
     };
+    let _lock = project_lock::for_save(args)?;
     let mut b = backend(args, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
     let saved = maybe_save(&mut b, args)?;
@@ -611,6 +613,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 (Some(p), _) | (None, Some(p)) => serde_json::from_str(p).map_err(|e| Failure::Usage(format!("params are not valid JSON: {e}")))?,
                 (None, None) => json!({}),
             };
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let r = b.exec(&id, params)?;
             if let Some(e) = failed_render(&id, &r) {
@@ -654,6 +657,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             if steps.is_empty() {
                 return Err(Failure::Usage(format!("--commands {}: no commands", sources.join(", "))));
             }
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let mut results = vec![];
             // The step's index closes the message: a generated list repeats ids, and callers match
@@ -690,7 +694,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                     if let Some(e) = p.get("expression").and_then(Value::as_str) {
                         extra += &format!("  expr: {e}");
                     }
-                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), p["value"]);
+                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), value_text(p));
                 }
             }
         }
@@ -708,6 +712,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             }
             let (comp, layer, path) = (args.pos[0].clone(), args.pos[1].clone(), args.pos[2].clone());
             let value = args.pos.get(3).map(|v| value_arg(v));
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let a =
                 json!({"comp": reference(&comp), "layer": reference(&layer), "path": path, "value": value, "time": args.num("--time")?, "expression": expr});
@@ -1537,6 +1542,16 @@ fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// A flat property's value for the text listing: an enum's number with the label `options` gives it
+/// (#2928), since the numbers are 0-based where After Effects scripting counts from 1.
+fn value_text(p: &Value) -> String {
+    let label = p["options"].as_array().and_then(|o| o.iter().find(|o| o["value"] == p["value"])).and_then(|o| o["label"].as_str());
+    match label {
+        Some(l) => format!("{} ({l})", p["value"]),
+        None => p["value"].to_string(),
+    }
 }
 
 #[cfg(test)]

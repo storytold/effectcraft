@@ -137,6 +137,13 @@ impl PanelKind {
     pub fn id(self) -> String {
         format!("{self:?}")
     }
+    /// The shortcut scope of the panel: an additional viewer is a Composition panel.
+    pub fn shortcut_scope(self) -> String {
+        match self {
+            PanelKind::Viewer(_) => PanelKind::Composition.id(),
+            p => p.id(),
+        }
+    }
     pub fn from_name(s: &str) -> Option<PanelKind> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-', '&'], "");
         Self::ALL.iter().copied().find(|p| format!("{p:?}").to_ascii_lowercase() == n || p.title().to_ascii_lowercase().replace([' ', '&', '-'], "") == n)
