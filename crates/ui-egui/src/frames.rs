@@ -235,9 +235,9 @@ impl Cache {
         self.gpu_pressure.is_none_or(|last| last.elapsed() >= GPU_PRESSURE_COOLDOWN)
     }
     fn forget(&mut self, img: &FrameImage) {
-        self.bytes -= img.bytes();
+        self.bytes = self.bytes.saturating_sub(img.bytes());
         if img.is_gpu() {
-            self.gpu_bytes -= img.bytes();
+            self.gpu_bytes = self.gpu_bytes.saturating_sub(img.bytes());
         }
     }
     fn remove(&mut self, k: &FrameKey) {

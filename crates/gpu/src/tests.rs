@@ -69,6 +69,10 @@ fn math_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out, p, vec4<f32>(q, fxs_posterize_bin(q, P.u[0].y), 0.0, 1.0));
         return;
     }
+    if (P.u[0].x == 2u) {
+        textureStore(out, p, vec4<f32>(round_away(v), 0.0, 0.0, 1.0));
+        return;
+    }
     textureStore(out, p, vec4<f32>(sin_p(v), cos_p(v), 0.0, 1.0));
 }
 "#;
@@ -124,6 +128,30 @@ fn alpha_division_and_posterization_match_f32_rounding() {
             assert_eq!(q.to_bits(), got[0].to_bits(), "levels {levels}, pixel {i}, input {v:?}");
             assert_eq!((q * levels as f32).round(), got[1], "levels {levels}, pixel {i}, input {v:?}");
         }
+    }
+}
+
+/// `round_away` is `f32::round`, also from 2^23 up where every value is already an integer
+/// (integer IDs there must not merge: 8388608 and 8388609 both rounded to 8388609).
+#[test]
+fn round_away_matches_f32_round_for_large_values() {
+    let Some(g) = gpu() else { return };
+    let mut values = vec![];
+    for m in [1.0f32, -1.0] {
+        for v in [0.0f32, 0.5, 1.5, 2.5, 0.49999997, 4194303.5, 8388607.5, 8388608.0, 8388609.0, 8388610.0, 16777216.0, 3.0e9] {
+            values.push([m * v, 0.0, 0.0, 1.0]);
+        }
+    }
+    let img = Image { width: values.len() as u32, height: 1, data: values.clone() };
+    let input = g.ctx.upload_image(&img).unwrap();
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let out = e.scratch(img.width, 1);
+    let mut params = crate::context::Params::default();
+    params.u[0] = [2, 0, 0, 0];
+    e.pixels("math_probe", &params, &input, None, &out, None);
+    let result = e.download(&out).unwrap();
+    for (v, got) in values.iter().zip(result.data) {
+        assert_eq!(v[0].round(), got[0], "round_away({})", v[0]);
     }
 }
 
