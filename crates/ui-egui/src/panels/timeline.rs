@@ -3576,9 +3576,9 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
     let t = g.tl.t;
     let font = Tokens::ui(11.5);
     let width = g.lp.layout_no_wrap(text.to_string(), font.clone(), t.accent).size().x;
-    // A link at the left of the Mode column, as in After Effects; without that column it sits
-    // after the switches, clear of the effect's fx switch.
-    let x = if g.tl.cw.vis.modes { g.tl.cw.mode + 4.0 } else { g.tl.cw.switches + SW * 4.0 + 6.0 };
+    // A link at the left edge of the values (as in After Effects), so it lines up with the values
+    // and dropdowns of the rows below it.
+    let x = g.tl.cw.switches + 2.0;
     let rect = Rect::from_min_size(pos2(x, rc.r.min.y + 1.0), vec2(width + 4.0, rc.r.height() - 2.0));
     let enabled = !layer.switches.locked;
     let response = ui.add_enabled_ui(enabled, |ui| {
