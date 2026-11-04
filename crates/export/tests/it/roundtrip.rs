@@ -302,6 +302,23 @@ fn exr_sequence_is_linear() {
     assert!((c[2] - 0.1329).abs() < 0.01 && (c[3] - 1.0).abs() < 1e-6, "{c:?}");
 }
 
+/// Sequence frames are scan-line EXR, not tiled, so scan-line readers such as FilmCraft open
+/// them (#2805).
+#[test]
+fn exr_sequence_writes_scan_lines() {
+    let (p, cid) = project(None);
+    let d = out_dir("seq-exr-scanline");
+    let om = OutputModule::for_format(OutputFormat::ExrSequence);
+    run(&p, cid, &NoFootage, &om, &d.join("f_[#####].exr"));
+    let bytes = std::fs::read(d.join("f_00000.exr")).expect("exr");
+    // Version field (little-endian u32 at bytes 4..8): version 2, then the flags byte. Its 0x02
+    // bit is the tiled bit, 0x200 of the field, so a scan-line file has 0 there.
+    assert_eq!(&bytes[4..6], &[2, 0], "{:02x?}", &bytes[..8]);
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes), false).expect("exr header");
+    assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines);
+    assert_eq!(meta.headers[0].compression, exr::compression::Compression::ZIP16);
+}
+
 /// A 32 bpc project whose only layer is a full-frame opaque solid of the given colour.
 fn bright_project(color: [f32; 3]) -> (Project, ItemId) {
     let mut p = Project::default();

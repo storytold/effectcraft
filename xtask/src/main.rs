@@ -479,16 +479,50 @@ fn tests() -> Result<(), String> {
     let mut runs = Vec::new();
     if nextest {
         runs.push(run(Command::new(cargo).args(["nextest", "run"]).args(targets).args(["-E", "not package(effectcraft-gpu)"])));
-        runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-gpu", "--lib", "--no-fail-fast"])));
+        // effectcraft-gpu's tests share one device, so they run in one libtest process: the
+        // binary nextest just built (`cargo test -p effectcraft-gpu` would rebuild ~2 minutes).
+        runs.push(lib_test_binary("effectcraft-gpu").and_then(|mut c| run(&mut c)));
     } else {
         println!("cargo-nextest not found, running cargo test (install: cargo install cargo-nextest --locked)");
         runs.push(run(Command::new(cargo).arg("test").args(targets)));
     }
-    // The test runs above hide a passing test's output, so the always-passing report runs again with --nocapture.
-    runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-ui-egui", "--lib", "missing_translations_report", "--", "--nocapture"])));
+    // The test runs above hide a passing test's output, so the always-passing report runs again
+    // with --nocapture, from the binary already built.
+    runs.push(lib_test_binary("effectcraft-ui-egui").and_then(|mut c| run(c.args(["missing_translations_report", "--nocapture"]))));
     runs.push(run(Command::new(cargo).args(["test", "--workspace", "--doc", "--no-fail-fast"])));
     let failed: Vec<String> = runs.into_iter().filter_map(Result::err).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+}
+
+/// A command running `package`'s lib test binary from the test build above, the way `cargo test`
+/// runs it (from the package directory), found with `--no-run` and the same workspace selection
+/// so nothing rebuilds: `cargo test -p <package>` resolves features for that package alone and
+/// recompiles much of the workspace.
+fn lib_test_binary(package: &str) -> Result<Command, String> {
+    let out = Command::new(env!("CARGO"))
+        .args(["test", "--workspace", "--lib", "--bins", "--tests", "--no-run", "--message-format=json-render-diagnostics"])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("cargo test --no-run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("cargo test --no-run: exited with {}", out.status));
+    }
+    let lib = package.replace('-', "_");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|m| {
+            m["reason"] == "compiler-artifact"
+                && m["profile"]["test"] == true
+                && m["target"]["name"] == lib.as_str()
+                && m["target"]["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "lib"))
+        })
+        .and_then(|m| {
+            let mut c = Command::new(m["executable"].as_str()?);
+            c.current_dir(std::path::Path::new(m["manifest_path"].as_str()?).parent()?);
+            Some(c)
+        })
+        .ok_or_else(|| format!("no {package} lib test binary in the test build"))
 }
 
 type Stage = fn() -> Result<(), String>;
