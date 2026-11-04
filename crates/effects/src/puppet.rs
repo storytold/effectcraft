@@ -343,9 +343,9 @@ pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
         if p.kind.moves() {
             // The pin holds the very point under it. A pin on a vertex holds that vertex, and one
             // off the mesh its nearest vertex at the same offset.
-            match locate(mesh, p.rest) {
-                Some((verts, bary)) if bary.iter().all(|l| *l < 1.0 - 1e-6) => h.points.push(arap::PointTarget { verts, bary, position: p.position }),
-                _ => {
+            match held_point(mesh, p.rest) {
+                Some((verts, bary)) => h.points.push(arap::PointTarget { verts, bary, position: p.position }),
+                None => {
                     if used.insert(v) {
                         h.fixed.push((v, [p.position[0] + r[0] - p.rest[0], p.position[1] + r[1] - p.rest[1]]));
                     }
@@ -392,6 +392,12 @@ pub fn depths(mesh: &Mesh, pins: &[Pin]) -> Vec<f64> {
 fn locate(mesh: &Mesh, p: [f64; 2]) -> Option<([usize; 3], [f64; 3])> {
     let v = &mesh.verts;
     mesh.tris.iter().find_map(|t| bary(v[t[0]], v[t[1]], v[t[2]], p).filter(|l| l.iter().all(|x| *x >= -1e-9)).map(|l| (*t, l)))
+}
+
+/// The point a moving pin at `rest` holds, as a triangle and barycentric coordinates. `None` when it
+/// holds a vertex instead: it's on one, or off the mesh.
+pub fn held_point(mesh: &Mesh, rest: [f64; 2]) -> Option<([usize; 3], [f64; 3])> {
+    locate(mesh, rest).filter(|(_, bary)| bary.iter().all(|l| *l < 1.0 - 1e-6))
 }
 
 /// Map a point of the deformed mesh back to rest space (barycentric through the triangle that
