@@ -57,7 +57,11 @@ fn info_and_commands() {
 fn headless_memory_preferences_are_opt_in_and_report_effective_budgets() {
     let dir = tmp("memory-prefs-applied");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("prefs.json"), r#"{"memory":{"layerCacheMb":80,"mediaCacheMb":96,"previewCacheMb":128}}"#).unwrap();
+    std::fs::write(
+        dir.join("prefs.json"),
+        r#"{"memory":{"ramReservedGb":0,"layerCacheMb":80,"mediaCacheMb":96,"previewCacheMb":128,"reduceCacheWhenLow":false}}"#,
+    )
+    .unwrap();
     let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &dir).args(["info", "--empty", "--memory-prefs", "--json"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
