@@ -598,7 +598,7 @@ fn flags_fit(limits: &wgpu::Limits, w: u32, h: u32) -> bool {
         .checked_mul(u64::from(h))
         .and_then(|n| n.checked_mul(4))
         .map(|b| b.max(16))
-        .is_some_and(|b| b <= limits.max_buffer_size && b <= u64::from(limits.max_storage_buffer_binding_size))
+        .is_some_and(|b| b <= limits.max_buffer_size && b <= limits.max_storage_buffer_binding_size)
 }
 
 /// The PatchMatch run at one level: the random stream's seed and the EM round and iteration
