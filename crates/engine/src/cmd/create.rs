@@ -25,6 +25,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         _ => None,
     };
     if let Some(c) = paths_cmd {
+        if matches!(p.get("layers"), Some(Value::Array(a)) if a.is_empty()) {
+            return Err(bad("layer.create", "select a layer first"));
+        }
         let mut q = p.clone();
         if let (Some(first), Some(o)) = (p.get("layers").and_then(|v| v.get(0)).cloned(), q.as_object_mut()) {
             o.entry("layer").or_insert(first);

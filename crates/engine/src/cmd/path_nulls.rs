@@ -41,15 +41,23 @@ fn target(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
     }
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    // An explicit `layer` wins over the selection: a path selected on another layer is not used.
+    let explicit = match p.get("layer").filter(|v| !v.is_null()) {
+        Some(_) => Some(super::layer_p(s, p, cmd)?.1),
+        None => None,
+    };
     // A selected path property.
     for (l, u) in super::selected_leaf_props(s) {
+        if explicit.is_some_and(|e| e != l) {
+            continue;
+        }
         if comp.layer(l).and_then(|ly| ly.props.find(u)).is_some_and(|pr| matches!(pr.value, KV::Path(_))) {
             return Ok((cid, l, u));
         }
     }
     // The first path of `layer` (or of the first selected layer).
-    let lid = match p.get("layer") {
-        Some(_) => super::layer_p(s, p, cmd)?.1,
+    let lid = match explicit {
+        Some(e) => e,
         None => *s.state.selected_layers.first().ok_or_else(|| bad(cmd, "select a layer with a mask or shape path"))?,
     };
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;

@@ -183,3 +183,20 @@ fn layer_create_null_path_menu_ops_run_the_paths_commands() {
     // A layer without a path is still an error.
     assert!(s.execute("layer.create", json!({"op": "nullTracing", "layers": [n]})).is_err());
 }
+
+#[test]
+fn layer_create_null_path_menu_ops_use_the_named_layer_not_the_selected_path() {
+    let (mut s, a) = masked();
+    let b = s.execute("layer.newSolid", json!({"name": "Other", "color": "#808080", "width": 40, "height": 40})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("mask.new", json!({"layer": b, "vertices": [[0, 0], [40, 0], [40, 40]], "closed": true})).unwrap();
+    // A path on layer A is selected, but `layers: [B]` names layer B: B's path is used.
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    let r = s.execute("layer.create", json!({"op": "nullsPathPoints", "layers": [b]})).unwrap();
+    assert_eq!(r["nulls"].as_array().unwrap().len(), 3);
+    let comp = s.active_comp().unwrap().clone();
+    assert!(comp.layer(effectcraft_project::LayerId(b)).unwrap().props.prop("masks/#1/path").unwrap().expr.is_some());
+    assert!(comp.layer(effectcraft_project::LayerId(a)).unwrap().props.prop("masks/#1/path").unwrap().expr.is_none());
+    // An empty `layers` array is refused rather than falling back to the selection.
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    assert!(s.execute("layer.create", json!({"op": "nullsFollowing", "layers": []})).is_err());
+}
