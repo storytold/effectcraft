@@ -390,8 +390,10 @@ pub fn twist(paths: &[BezPath], angle_deg: f64, center: [f64; 2]) -> Vec<BezPath
     // The pieces a segment asks for; the uniform cap applies only when the requests together
     // would pass the budget (long segments keep their detail next to many short ones otherwise).
     let want = |len: f64| ((a.abs() * len / rmax) / 0.15 + len / 50.0).ceil().clamp(1.0, 64.0) as usize;
-    let requested =
-        paths.iter().flat_map(subs).fold(0usize, |n, sub| sub.segs.iter().fold(n.saturating_add(2), |n, seg| n.saturating_add(want(seg.arclen(ACC)))));
+    let requested = paths
+        .iter()
+        .flat_map(subs)
+        .fold(0usize, |n, sub| sub.segs.iter().fold(n.saturating_add(overhead_of(&sub)), |n, seg| n.saturating_add(want(seg.arclen(ACC)))));
     let most = if requested <= MAX_OPERATOR_SEGMENTS { 64 } else { pieces_within_budget(paths, 64) };
     let rot = |v: Vec2, th: f64| {
         let (s, co) = th.sin_cos();
@@ -453,6 +455,11 @@ struct Sample {
 /// output keeps a short stack from multiplying a simple path into billions of points.
 pub const MAX_OPERATOR_SEGMENTS: usize = 1 << 20;
 
+/// Elements a subpath adds besides its segments: a `MoveTo`, and a `ClosePath` only when closed.
+fn overhead_of(sub: &Sub) -> usize {
+    if sub.closed { 2 } else { 1 }
+}
+
 /// `want` pieces (or copies) per input segment, reduced so the whole output (segments times
 /// pieces, plus per-subpath overhead) stays within [`MAX_OPERATOR_SEGMENTS`] (never below 1, so the input itself always passes through).
 fn pieces_within_budget(paths: &[BezPath], want: usize) -> usize {
@@ -460,7 +467,7 @@ fn pieces_within_budget(paths: &[BezPath], want: usize) -> usize {
     let (mut segs, mut overhead) = (0usize, 0usize);
     for sub in paths.iter().flat_map(subs) {
         segs = segs.saturating_add(sub.segs.len());
-        overhead = overhead.saturating_add(2);
+        overhead = overhead.saturating_add(overhead_of(&sub));
     }
     want.min(MAX_OPERATOR_SEGMENTS.saturating_sub(overhead) / segs.max(1)).max(1)
 }

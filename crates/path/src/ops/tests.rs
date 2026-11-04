@@ -469,3 +469,12 @@ fn many_short_open_paths_keep_their_requested_detail_within_the_budget() {
     let z = zigzag(&lines, 1.0, 1000.0, false);
     assert!(z.iter().all(|q| q.elements().len() == 1 + 1001));
 }
+
+#[test]
+fn open_subpaths_reserve_one_element_of_overhead() {
+    // 349,525 open lines: the move-to is the only extra element, so 2 copies fit the budget
+    // (a closed subpath's extra close-path would leave room for 1).
+    let line = BezPath::from_vec(vec![PathEl::MoveTo((0.0, 0.0).into()), PathEl::LineTo((1.0, 0.0).into())]);
+    let lines = vec![line; 349_525];
+    assert_eq!(pieces_within_budget(&lines, 3), 2);
+}
