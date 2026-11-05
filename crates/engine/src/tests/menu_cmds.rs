@@ -2199,6 +2199,17 @@ fn quick_set_anchor_skips_position_expressions_and_along_path_layers() {
     }
 }
 
+/// A selection of only empty text layers (no content bounds) is an error, not a silent `{layers: 0}`;
+/// `layer.centerAnchor` keeps reporting 0 for it.
+#[test]
+fn quick_set_anchor_errors_when_no_layer_has_content_bounds() {
+    let mut s = comp();
+    let t = s.execute("layer.newText", json!({"text": ""})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.execute("layer.quickSetAnchor", json!({"layers": [t], "point": "center"})).is_err());
+    let r = s.execute("layer.centerAnchor", json!({"layers": [t]})).unwrap();
+    assert_eq!(r["layers"], 0);
+}
+
 /// A child of a rotated, scaled parent keeps its place when its anchor moves (Position is in the
 /// parent's space).
 #[test]

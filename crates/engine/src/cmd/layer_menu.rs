@@ -243,7 +243,7 @@ fn set_transform(s: &mut Session, p: &Value) -> Result<Value> {
 fn center_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let ids = super::unlocked(s, cid, ids, "layer.centerAnchor")?;
-    move_anchor(s, cid, &ids, "Center Anchor Point", |[x0, y0, x1, y1]| [(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+    move_anchor(s, cid, &ids, "Center Anchor Point", false, |[x0, y0, x1, y1]| [(x0 + x1) / 2.0, (y0 + y1) / 2.0])
 }
 
 /// The nine points Quick Set Anchor offers, as `(name, column, row)`: column 0 is the left edge
@@ -264,7 +264,7 @@ const ANCHOR_POINTS: [(&str, u8, u8); 9] = [
 /// nine points of their content (corners, edge midpoints, centre) and shift Position, and every
 /// Position key, so nothing moves on screen. 3D and locked layers, and layers with an animated
 /// (or expression-driven) Anchor Point, Scale or Rotation, an expression on Position, or Auto-Orient
-/// along the path, are skipped; an error when no layer is left.
+/// along the path, are skipped; an error when no layer is left or none has content bounds.
 fn quick_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "layer.quickSetAnchor";
     let name = str_p(p, "point").ok_or_else(|| bad(c, "missing `point`"))?;
@@ -295,12 +295,14 @@ fn quick_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
         ));
     }
     let at = |lo: f64, hi: f64, i: u8| lo + (hi - lo) * f64::from(i) / 2.0;
-    move_anchor(s, cid, &flat, "Quick Set Anchor", |[x0, y0, x1, y1]| [at(x0, x1, col), at(y0, y1, row)])
+    move_anchor(s, cid, &flat, "Quick Set Anchor", true, |[x0, y0, x1, y1]| [at(x0, x1, col), at(y0, y1, row)])
 }
 
 /// Move each layer's Anchor Point to `target(content bounds)` (layer space) and offset Position
-/// by the matching amount, so the layer stays put over its whole animation.
-fn move_anchor(s: &mut Session, cid: ItemId, ids: &[LayerId], label: &str, target: impl Fn([f64; 4]) -> [f64; 2]) -> Result<Value> {
+/// by the matching amount, so the layer stays put over its whole animation. Layers without content
+/// bounds (an empty text or shape layer) are left alone; with `strict` it is an error when none of
+/// the layers has any, so the command does not report success for a no-op.
+fn move_anchor(s: &mut Session, cid: ItemId, ids: &[LayerId], label: &str, strict: bool, target: impl Fn([f64; 4]) -> [f64; 2]) -> Result<Value> {
     let t = s.time();
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, t);
@@ -310,6 +312,9 @@ fn move_anchor(s: &mut Session, cid: ItemId, ids: &[LayerId], label: &str, targe
         if let Some(b) = effectcraft_render::content_bounds(&ctx, l) {
             centers.push((*lid, target(b)));
         }
+    }
+    if strict && centers.is_empty() {
+        return Err(bad("layer.quickSetAnchor", "none of the layers has content to anchor to (empty text or shape layers have no bounds)"));
     }
     s.edit(label, None, |proj, _| {
         for (lid, c) in &centers {
