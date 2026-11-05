@@ -602,6 +602,11 @@ mod tests {
         assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "{:?}", out.img.data);
     }
 
+    /// A linear value up to 1 as a code of After Effects' 16-bit PNG renders: the sRGB curve × 6553.5.
+    fn png_code(x: f32) -> f32 {
+        (if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }) * 6553.5
+    }
+
     /// Our own measurements of After Effects 2026 (32 bpc, no working space; 16-bit PNG renders
     /// decoded back to linear): input pixel, then the output at Amount 100, 90, 84, 75, 50 and 25.
     #[test]
@@ -638,8 +643,10 @@ mod tests {
                 let got = out.img.data[x];
                 for c in 0..3 {
                     let w = want[i][c];
-                    let tol = 2e-3_f32.max(w * 2e-3);
-                    assert!((got[c] - w).abs() <= tol, "amount {amount}, input {input:?}, channel {c}: {} vs AE {w}", got[c]);
+                    // Up to 1: within 20 codes of the 16-bit PNG (the sRGB curve × 6553.5) the
+                    // renders were read from. Above 1 the PNG's lookup table is not known: 0.1 %.
+                    let ok = if w <= 1.0 { (png_code(got[c]) - png_code(w)).abs() <= 20.0 } else { (got[c] - w).abs() <= w * 1e-3 };
+                    assert!(ok, "amount {amount}, input {input:?}, channel {c}: {} vs AE {w}", got[c]);
                 }
             }
         }
