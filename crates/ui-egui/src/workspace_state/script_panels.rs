@@ -152,10 +152,17 @@ pub(crate) fn fit(ui: &mut UiState, script_ui: &ScriptUi) {
     ui.maximized = ui.maximized.filter(|panel| ui.dock.is_docked(*panel));
 }
 
-/// A new app's workspace meets the panels the frontend already opened.
+/// A new app's workspace meets the panels the frontend already opened. Their queued
+/// `window.scriptPanel` events would bring each to the front and take the focus, so the ones the
+/// restored workspace already placed are dropped; the others still dock.
 pub(crate) fn restore(ui: &mut UiState, session: &mut Session) {
     bind(ui, &session.script_ui);
     fit(ui, &session.script_ui);
+    session.events.retain(|event| {
+        let effectcraft_engine::Event::Frontend { command, params } = event else { return true };
+        let window = params.get("window").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok());
+        command != "window.scriptPanel" || !window.is_some_and(|id| ui.dock.is_open(PanelKind::ScriptPanel(id)))
+    });
 }
 
 /// The names of the panels `ui` still refers to, as the file holds them.
