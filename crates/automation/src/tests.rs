@@ -1474,6 +1474,14 @@ fn automation_roots_confine_file_access() {
     // Scripts can read and write anything: refused.
     denied(&mut s, "run_script", json!({"code": "1 + 1"}));
     denied(&mut s, "execute_command", json!({"command": "file.runScript", "params": {"path": p(&read, "x.jsx")}}));
+    // So can Plug-in Library jobs: they download modules, install code that loads at start-up and read `file://` catalogs.
+    for c in ["library.refresh", "library.install", "library.update", "library.uninstall", "library.loadInstalled", "library.preview"] {
+        let msg = denied(&mut s, "execute_command", json!({"command": c, "params": {"id": "x"}}));
+        assert!(msg.contains("not available while file access is confined"), "{msg}");
+    }
+    let steps = json!([{"command": "library.install", "params": {"id": "x"}}]);
+    denied(&mut s, "batch", json!({"steps": steps}));
+    call_json(&mut s, "execute_command", json!({"command": "library.list"}));
     for (id, params) in [
         ("file.runStartupScripts", json!({})),
         ("file.runShutdownScripts", json!({})),

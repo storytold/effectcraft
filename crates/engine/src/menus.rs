@@ -1015,6 +1015,7 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation
