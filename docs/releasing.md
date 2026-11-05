@@ -71,7 +71,7 @@ The MSI's setup wizard ([`installer-ui.wxs`](../packaging/windows/installer-ui.w
 choose the install folder; upgrades and repairs reuse it, and `INSTALLFOLDER="..."` picks it for a
 silent (`/qn`) install. [`packaging-lint.yml`](../.github/workflows/packaging-lint.yml) install-tests
 that with stub binaries ([`test-msi.ps1`](../packaging/windows/test-msi.ps1)): a custom folder,
-an upgrade that keeps it, a repair, uninstall, and the Program Files default. The wizard pages
+an upgrade that keeps it, a repair, uninstall, and the all-users default folder (`Program Files\ArtCraft\EffectCraft`). The wizard pages
 themselves are checked by hand.
 
 The portable zip ships [`portable.txt`](../packaging/windows/portable.txt) beside `effectcraft.exe`.

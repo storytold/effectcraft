@@ -11,10 +11,14 @@ use serde_json::json;
 use crate::EffectcraftApp;
 use crate::frames::FrameKey;
 
-/// Run once per frame, before the panels draw.
-pub fn frame(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    memory_watch(app, ctx);
+/// Settings read once per tick, before any paint (they must keep working while hidden).
+pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
+    memory_watch(app, ctx, now);
     home_on_open(app, ctx);
+}
+
+/// Settings that show or draw something: run in the UI pass, before the panels draw.
+pub fn frame(app: &mut EffectcraftApp, ctx: &egui::Context) {
     video_preview(app, ctx);
 }
 
@@ -29,7 +33,7 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
     if hovered != 0 {
         let label =
             if hovered == 1 { crate::i18n::tr("Drop file to import").to_string() } else { crate::i18n::tr_args("Drop {} files to import", &[&hovered]) };
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("native-file-drop")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("native-file-drop")));
         painter.rect_stroke(bounds.shrink(8.0), 6.0, Stroke::new(2.0, app.tokens.accent), StrokeKind::Inside);
         let hint = Rect::from_center_size(bounds.center(), vec2(300.0, 46.0));
         painter.rect_filled(hint, 6.0, app.tokens.panel_bg);
@@ -59,6 +63,10 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         errors.push(crate::i18n::tr_args("Skipped {} dropped file(s) without a local path. Use File ▸ Import ▸ File…", &[&skipped]));
     }
 
+    // Taken once per drop frame, so a handed-over flag cannot survive into a later, unrelated
+    // drop (#2661).
+    let handed_by_a_floating_window = std::mem::take(&mut app.forwarded.dropped_on_timeline);
+
     let (proj, rest): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| {
         let l = p.to_ascii_lowercase();
         l.ends_with(".ecproj") || l.ends_with(".ecprojx")
@@ -82,7 +90,18 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
             .find(|e| e.id == "viewer.area")
             .map(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])));
 
-        let at = if proj.is_empty() {
+        // Dropping a file on the Timeline adds it to the composition the panel shows, as it does
+        // on the viewer (#2588); the import decides the layer's position.
+        let over_timeline = handed_by_a_floating_window
+            || ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+                app.auto
+                    .elements
+                    .iter()
+                    .find(|e| e.id == "panel.Timeline")
+                    .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
+            });
+
+        let at = if proj.is_empty() && !over_timeline {
             ctx.input(|i| i.pointer.hover_pos()).filter(|p| viewer.is_some_and(|v| v.contains(*p))).and_then(|p| crate::panels::viewer::screen_to_comp(&ctx, p))
         } else {
             None
@@ -97,7 +116,7 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         let mut params = json!({
             "paths": rest,
             "drag": true,
-            "addToComp": at.is_some(),
+            "addToComp": at.is_some() || over_timeline,
             "position": at,
             "background": true
         });
@@ -120,9 +139,8 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
 
 /// Re-read the system's free memory every 30 s (cache budgets follow it; on Windows each
 /// reading starts PowerShell in the background, so it isn't done more often).
-fn memory_watch(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let now = ctx.input(|i| i.time);
-    let id = egui::Id::new("prefs-memory-watch");
+pub(crate) fn memory_watch(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
+    let id = egui::Id::unique("prefs-memory-watch");
     let last = ctx.data(|d| d.get_temp::<f64>(id));
     if last.is_some_and(|t| now - t < 30.0) {
         return;
@@ -135,8 +153,8 @@ fn memory_watch(app: &mut EffectcraftApp, ctx: &egui::Context) {
 }
 
 /// Startup ▸ Show Home Screen When Opening a Project.
-fn home_on_open(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let id = egui::Id::new("prefs-last-project");
+pub(crate) fn home_on_open(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let id = egui::Id::unique("prefs-last-project");
     let path = app.session.path.clone();
     let last = ctx.data(|d| d.get_temp::<Option<String>>(id));
     ctx.data_mut(|d| d.insert_temp(id, path.clone()));
@@ -169,7 +187,7 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
         return;
     }
     let v = app.session.prefs.video.clone();
-    let tex_id = egui::Id::new("video-preview-tex");
+    let tex_id = egui::Id::unique("video-preview-tex");
     let update = !app.playback.playing || v.output_during_playback;
     let key = app.viewer_shown.as_ref().map(|(_, k)| *k);
     let cur: Option<(FrameKey, egui::TextureHandle)> = ctx.data(|d| d.get_temp(tex_id));

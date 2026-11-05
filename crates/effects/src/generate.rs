@@ -292,10 +292,22 @@ pub(crate) fn fade(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
-/// 3D value noise in 0..1 (z = evolution).
+/// 3D value noise in 0..1 (z = evolution). The quintic fade applies on all three axes, so z
+/// eases in and out of every integer.
 pub fn value_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    value_noise_z(x, y, z, seed, true)
+}
+
+/// [`value_noise`] with the evolution axis z interpolated linearly (x and y keep the quintic
+/// fade). The fade's zero slope at every integer z made a small Evolution change almost invisible
+/// next to a whole revolution (#943, #1816); linear z moves the pattern at a constant rate.
+pub fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    value_noise_z(x, y, z, seed, false)
+}
+
+fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let (x0, y0, z0) = (x.floor(), y.floor(), z.floor());
-    let (fx, fy, fz) = (fade(x - x0), fade(y - y0), fade(z - z0));
+    let (fx, fy, fz) = (fade(x - x0), fade(y - y0), if ease_z { fade(z - z0) } else { z - z0 });
     let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let c = |dx: i32, dy: i32, dz: i32| lattice(ix + dx, iy + dy, iz + dz, seed);
@@ -412,6 +424,27 @@ mod generator_tests {
 
     fn red() -> Image {
         Image::filled(32, 32, [1.0, 0.0, 0.0, 1.0])
+    }
+
+    /// #943: the evolution axis is linear, so z moves the noise at a constant rate, while the
+    /// classic `value_noise` keeps its eased z (other effects and their pinned goldens use it).
+    #[test]
+    fn linear_z_value_noise_moves_at_a_constant_rate() {
+        for (x, y, seed) in [(0.3f32, 0.7f32, 5u32), (2.4, -1.6, 11), (-3.1, 4.9, 0)] {
+            let a = value_noise_linear_z(x, y, 0.0, seed);
+            let b = value_noise_linear_z(x, y, 1.0, seed);
+            for z in [0.1f32, 0.25, 0.5, 0.75, 0.9] {
+                let want = a + (b - a) * z;
+                let got = value_noise_linear_z(x, y, z, seed);
+                assert!((got - want).abs() < 1e-5, "({x}, {y}) z {z}: {got} vs {want}");
+            }
+            // Same lattice values at whole z, and x / y are untouched.
+            assert_eq!(value_noise_linear_z(x, y, 2.0, seed), value_noise(x, y, 2.0, seed));
+        }
+        // The eased version still has the old shape: at z = 0.25 it lags the linear one.
+        let (a, b) = (value_noise(0.3, 0.7, 0.0, 5), value_noise(0.3, 0.7, 1.0, 5));
+        let eased = value_noise(0.3, 0.7, 0.25, 5);
+        assert!((eased - (a + (b - a) * 0.25)).abs() > 1e-3);
     }
 
     #[test]

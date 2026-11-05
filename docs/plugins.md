@@ -12,12 +12,13 @@ Guide):
 | After Effects | EffectCraft | |
 |---|---|---|
 | Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (plug-in API v1) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
-| Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples | Same |
+| Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples; a subfolder (one level) is a submenu named after it | Same |
 | File ▸ Scripts ▸ Run Script File… (`.jsx`, `.jsxbin`) | `.jsx` / `.js` | Gap: `.jsxbin` (an undocumented binary encoding) |
+| File ▸ Scripts ▸ Recent Script Files: the 10 most recently run scripts; Cmd+Option+Shift+D (Ctrl+Alt+Shift+D on Windows) reruns one | File ▸ Scripts ▸ Recent Script Files lists the 10 scripts run last (script files and File ▸ Scripts entries, newest first, kept in the settings); Cmd+Alt+Shift+D runs the most recent one again (`file.runScript {"recent": 0}`, a key that can be changed in Edit ▸ Keyboard Shortcuts) | Same |
 | ExtendScript preprocessor directives (`#include`, `#target`, `#targetengine`) | `#include` / `//@include` / `#includepath` inline files relative to the script (once each, depth-limited, file gate applies); `#target`, `#targetengine`, `#strict` are ignored | Same |
-| `Scripts/Startup` and `Scripts/Shutdown`: run in alphabetical order when the app starts and quits | Not run | Gap |
-| `Scripts/ScriptUI Panels`: listed at the bottom of the Window menu, dockable like the app's own panels, `this` is the panel | `Scripts/ScriptUI Panels/` in the settings folder (File ▸ Scripts ▸ Install ScriptUI Panel… copies one there), listed at the bottom of the Window menu, docked like any panel, `this` is the panel; the panels open when the app quits open again at the next launch | Same. Where a panel was docked isn't kept: workspace layouts aren't saved between launches |
-| Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Shortcuts bind to commands and menu entries; the File ▸ Scripts and Window menu entries of scripts aren't offered | Gap |
+| `Scripts/Startup` and `Scripts/Shutdown`: run in alphabetical order when the app starts and quits | `Scripts/Startup/` and `Scripts/Shutdown/` in the settings folder, in alphabetical order (case ignored): the Startup scripts run at launch before a project opens, and the Shutdown scripts run as the desktop app quits, after the project is closed. A Startup script that fails is reported in a toast and in the log, a Shutdown script that fails is reported in the log, and the next script still runs | Partial: each script runs in its own global scope, so variables and functions a Startup script defines are not available to later scripts; a Startup script's modal dialog stays open while the next scripts run and the app starts; a Shutdown script's modal dialogs close as if canceled; the web app runs no Shutdown scripts |
+| `Scripts/ScriptUI Panels`: listed at the bottom of the Window menu, dockable like the app's own panels, `this` is the panel | `Scripts/ScriptUI Panels/` in the settings folder (File ▸ Scripts ▸ Install ScriptUI Panel… copies one there), listed at the bottom of the Window menu (a subfolder, one level, is a submenu named after it), docked like any panel, `this` is the panel; the panels open when the app quits open again at the next launch | Same. Where a panel was docked isn't kept: workspace layouts aren't saved between launches |
+| Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Edit ▸ Keyboard Shortcuts lists the scripts of File ▸ Scripts under File ▸ Scripts (`file.runScript {"name": "<file name>"}`); a key given to one is saved with the preset, File ▸ Scripts shows it, and pressing it runs the script as its menu entry does | Same. After Effects binds a key to a script's place in the alphabetical list (`ExecuteScriptMenuItem01`…), and EffectCraft binds it to the script's file name. The Window menu entries of ScriptUI panels aren't offered |
 | Running a script from the command line (`afterfx -r script.jsx`) | `effectcraft-cli script`, the control channel's and MCP's `script.run` | Same purpose, other entry points |
 | `app.settings` (kept in the preferences between sessions) | Kept in `script_settings.json` in the settings folder (`script.settings.get` / `script.settings.save`) | Same |
 | Allow Scripts to Write Files and Access Network | Settings ▸ Scripting & Expressions | Same |
@@ -38,8 +39,17 @@ journaled and the same as the UI's action. The `effectcraft-script` crate's docs
   file.jsx`, or `script.run {code, name}` over the control channel and MCP.
 * Install one: File ▸ Scripts ▸ Install Script File… (or copy it into `Scripts/` in the settings
   folder). It is listed in File ▸ Scripts at once (After Effects asks for a restart).
+* Run one at every launch or quit: copy it into `Scripts/Startup/` or `Scripts/Shutdown/` in the
+  settings folder. These scripts are not listed in File ▸ Scripts. `file.runStartupScripts` and
+  `file.runShutdownScripts` run them and return `{ran, waiting, failed}`; the desktop app calls them at
+  launch and quit, and the web app calls `file.runStartupScripts` at launch.
 * `file.scripts.list` lists installed and bundled scripts and panels; `file.runScript {name}` runs
   one; `file.uninstallScript {name}` removes an installed one.
+* A subfolder of `Scripts/` is a submenu of File ▸ Scripts named after the folder, and its scripts
+  are named `Folder/File.jsx` in `file.scripts.list` and `file.runScript`. One level of folders is
+  listed; deeper folders are not. `file.uninstallScript` removes only scripts at the top of the
+  Scripts folders: delete a script in a subfolder yourself. A subfolder may be a link to another
+  folder (an extension's own), and uninstall never deletes a file through it.
 
 ## ScriptUI panels
 
@@ -50,6 +60,13 @@ runs the script and docks its panel as a tab, which you can move, float, maximiz
 other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when EffectCraft
 quits open again at the next launch (`window.restoreScriptPanels`, which the desktop and web apps
 run at start-up; the list is `scriptui_panels.json` in the settings folder).
+
+To group panels, for example the several panels of one extension, make a subfolder of
+`Scripts/ScriptUI Panels/` and put them in it: `Scripts/ScriptUI Panels/My Tools/Animate.jsx` is
+listed as Window ▸ My Tools ▸ Animate.jsx, its tab is titled Animate, and commands name it
+`My Tools/Animate.jsx` (`window.scriptPanel {name}`). One level of folders is listed. Install
+ScriptUI Panel… copies a panel to the top of the folder; make the subfolder and move panels into it
+yourself, and delete them from it yourself too.
 
 Run from File ▸ Scripts instead, the same script gets no panel, so it should make a floating
 palette itself. A minimal panel:
@@ -135,7 +152,7 @@ example of a keyframe tool.
 
 ## Effect plug-ins
 
-EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 1**).
+EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 2**; WebAssembly ABI 1).
 A plug-in effect behaves exactly like a built-in one: it is listed in Effects & Presets (and the
 Effect menu) under its category, applied by id (`effect.apply {"effect": "org.example.posterize"}`)
 or display name, its parameters are ordinary properties (keyframes, expressions, Effect Controls,
@@ -146,7 +163,7 @@ There are two ways to write one:
 | | WebAssembly plug-in | Rust plug-in |
 |---|---|---|
 | What | a `.wasm` (or `.wat`) module | a type implementing `effectcraft_effects::plugin::EffectPlugin` |
-| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
+| Loaded by | Effect ▸ Install Effect Plug-in… (copied into the `Plug-ins` folder next to the settings and loaded on every start-up), Effect ▸ Load Effect Plug-in… / `effect.plugins.load {path \| folder}` (loads in this session only), the `Plug-ins` folder next to the settings at start-up, or `effect.plugins.install {path \| folder}` | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
 | Sandbox | yes: no imports (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
 | Platforms | desktop and CLI (the wasmi interpreter, crate feature `effectcraft-plugin/wasm`); not the web build | everywhere |
 
@@ -224,10 +241,58 @@ plain Rust (no dependencies):
 ```sh
 cd examples/plugins/posterize-bands
 cargo build --release --target wasm32-unknown-unknown
-# then, in EffectCraft: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
+# then, in EffectCraft: Effect ▸ Install Effect Plug-in…
+#   → target/wasm32-unknown-unknown/release/posterize_bands.wasm  (copied into Plug-ins, loads on start-up)
+# or in-session only: Effect ▸ Load Effect Plug-in…
 # or headless:
 effectcraft-cli exec effect.plugins.load '{"path": "target/wasm32-unknown-unknown/release/posterize_bands.wasm"}'
 ```
+
+**Bundles.** `effect.plugins.install {"folder": ...}` installs a whole plug-in folder in one
+go: every `.wasm` at its top level is copied into the `Plug-ins` folder (and loads at once),
+and every `.jsx` at its top level is installed as a ScriptUI panel — so a third-party plug-in
+ships as one folder the user installs once. A `.wasm` that does not load is not copied (the
+install rolls it back), and per-file problems in a folder install come back in `errors`
+instead of failing the whole bundle.
+
+**What an install does and does not do.** It is a security boundary: it copies code into a
+folder the app runs at every start, so:
+
+* Only `.wasm` (`path` / a bundle's `.wasm`) and `.jsx` (a bundle's panel) are installed; other
+  files in a bundle (readmes, manifests, sources) are skipped. Files are named by their own
+  entry name, so a bundle cannot carry a path, a `..` component or a name that escapes the
+  destination folder.
+* Nothing is overwritten. An existing plug-in or panel with the same file name makes that file
+  fail with "already installed": delete it from `Plug-ins` / `Scripts/ScriptUI Panels` first to
+  update it (versioning the file name is the other option). A bundle is installed file by file,
+  so one collision does not undo the rest.
+* Files over 64 MiB are refused before they are read, rather than copied into a startup folder.
+* A `.wasm` is loaded once, in the same sandbox it runs in later (see below), so a module that
+  cannot load is reported instead of failing every start. That load runs the module's start-up
+  code and its metadata exports; `ec_render` is never called, and a panel's script is not run at
+  install time (it runs when the panel opens, as with any installed panel). The copy made before
+  the load is then removed again — best effort: if removing it fails, the command says so and
+  names the file, and you delete it from `Plug-ins` yourself.
+* A `.wasm` is uninstalled by deleting it from `Plug-ins` (the next start no longer loads it):
+  there is no `effect.plugins.uninstall`. A panel installed here is an installed script, so
+  `file.uninstallScript {name}` removes it. Replacing either means removing it first.
+* Hidden files (names starting with `.`, such as macOS `._x.wasm` copies) are skipped in a bundle
+  and refused as a single install. A panel name that differs from an installed panel's only in
+  letter case counts as the same name.
+* Installed plug-ins share the `Plug-ins` folder with the [Plug-in Library](#plug-in-library)
+  (which keeps its packages in `Plug-ins/Library`). An effect id can be registered only once: a
+  plug-in whose id is already loaded, from either kind of install, is refused. At start-up the
+  files installed here load before the library's packages, so if both carry the same id (for
+  example after files were copied by hand), the file here wins and the library package reports
+  the duplicate.
+
+**The sandbox.** A plug-in runs in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter
+with no imports (no file, network or clock access), deterministic floats, a fuel budget per
+frame and a 1 GiB memory cap, so a plug-in cannot escape the sandbox, hang the app or render
+differently on another machine. A ScriptUI panel is different: it is a script with the app's
+scripting object model, so it can read and write project data through commands; file and
+network access for scripts follow Settings ▸ Scripting & Expressions, exactly as for a script
+installed with File ▸ Scripts ▸ Install ScriptUI Panel….
 
 Any language that compiles to WebAssembly works (C, Zig, AssemblyScript…) as long as the module
 has no imports. `crates/plugin/src/tests.rs` has a plug-in written directly in WebAssembly text.
@@ -253,11 +318,87 @@ impl EffectPlugin for Swap {
 register_plugin(Arc::new(Swap(manifest)))?; // before the UI builds its menus
 ```
 
-`PluginParams` reads values by parameter id (`f`, `b`, `point`, `color`). At most 64 plug-in
-effects can be registered per process.
+`PluginParams` reads values by parameter id (`f`, `b`, `point`, `color`, and in API 2 `point3`,
+`layer`, `text`). At most 1024 plug-in effects can be registered per process.
+
+## Plug-in API 2 (native plug-ins)
+
+API 2 is for Rust plug-ins and for hosts that bring effects from elsewhere (such as
+[external effect helpers](external-helpers.md)); the WebAssembly ABI stays at 1. Manifests with `"api": 1` or `2` are accepted,
+`effect.plugins.list` reports `api: 2`, and up to 1024 plug-in effects can be registered.
+
+* **New parameter types**: `point3` (`default` `[x, y, z]`; x, y arrive in buffer pixels, z as is),
+  `layer` (another layer of the composition; flattens to its id, -1 for none, read with
+  `PluginParams::layer`), `text` (a string field) and `hidden` (a string that is not shown, for
+  opaque plug-in data). `text` / `hidden` take no slot in `flat`; their strings are in
+  `PluginParams::texts`, one per such parameter in declaration order, read with
+  `PluginParams::text(id)`. `slider` gains `"integer": true` (shown with 0 decimals) and every
+  parameter an optional `"group"` path (`"Advanced/Edges"`; informational). WebAssembly modules
+  can't use `point3`, `layer`, `text` or `hidden`.
+* **`PluginFrame`** also carries `origin` (buffer pixels of layer pixel (0, 0); padding shifts it)
+  and `layer_size` (layer pixels).
+* **`EffectPlugin::padding(params, time, scale, layer_size, instance_key) -> u32`** asks for that
+  many transparent buffer pixels on every side before rendering (glows, regions of definition
+  larger than the input); at most 4096. `layer_size` is the layer's size in layer pixels (so
+  sizes relative to the frame can be measured) and `instance_key` identifies the applied effect
+  instance (see `PluginHost::instance_key`).
+* **`EffectPlugin::render_v2(frame, params, time, host)`** (default: calls `render`) gets a
+  `PluginHost` with `input_at(layer_time)` (the effect's input at another time, in its own extent;
+  the effects above this one are applied), `layer_input(param_id, layer_time)` (a layer parameter's
+  layer, effects and masks applied, resampled into the frame's grid), `params_at(layer_time)`,
+  `frame_rate()`, `time()`, `instance_key()` (a stable id of the applied effect instance: the
+  same on every frame, different per layer and per application; plug-ins that keep state between
+  frames pool their native instances by it) and `frame_range()` (the layer's source time range in
+  layer-time seconds, `None` when it has none). Images are `PluginImage { width, height, pixels, origin, scale }`.
+  It may run on several threads at once.
 
 ### Compatibility
 
 The API version is checked when a plug-in loads: a manifest or module for another version is
 refused with a message. Within a version the contract above does not change; additions (new
 parameter types, new optional exports) bump the version.
+
+## Plug-in Library
+
+Settings ▸ Plug-in Library (also Effect ▸ Plug-in Library…) lists WebAssembly effect plug-ins
+published by the community, and installs, updates and removes them without bundling them into
+the app. Only WebAssembly effects are listed: they run in the same sandbox as any plug-in, so a
+package can't read files, open the network or crash the app.
+
+* **One reviewed catalog.** The list comes from one `index.json` in the
+  [`storytold/effectcraft-plugins`](https://github.com/storytold/effectcraft-plugins) repository;
+  packages are added by pull request and reviewed there. The app has no field for another
+  catalog; `library.refresh {catalog}` (for plug-in authors testing an entry) takes an `index.json`
+  on GitHub or a local file, and the page then says it shows a test catalog until Refresh.
+* **Nothing is downloaded until you ask.** Fetch Catalog (`library.refresh`) reads the catalog;
+  Install (`library.install`) downloads the package's `.wasm`, checks its SHA-256 (and its size, when the
+  catalog gives one) against the catalog and loads it. Downloads use the system's `curl`,
+  `https://` only and starting on GitHub's hosts (redirects stay on `https://`; the SHA-256 check
+  is what guarantees the file).
+* **Where it goes.** `<Plug-ins>/Library/<id>/<version>/<id>.wasm` (the `Plug-ins` folder next to
+  the settings), listed in `Library/installed.json`. Installed packages load at start-up, each
+  checked against the SHA-256 it was installed with. The catalog last fetched is kept as
+  `Library/catalog.json`, so the list works offline.
+* **Restart after removing or updating.** Registered effects can't be unloaded: removing or
+  updating a package whose effects are loaded takes effect at the next start, and the list says
+  "Restart EffectCraft to finish".
+* **Preview before installing.** Preview (`library.preview`) downloads the package's module
+  (checked against the catalog's size and SHA-256) without installing it, and renders its
+  effect in the sandbox on a built-in sample frame with default parameters: 2 seconds at 12 fps,
+  with a Before/After split. The details show it playing, the effects with their parameter names,
+  "Open on GitHub" (the package's `repo`) and, when the package has a `preview.video` link (an
+  `https://` YouTube, Vimeo or GitHub URL), "Watch video".
+* **Missing effects.** `library.missing` lists the effects a project uses that aren't installed,
+  and the catalog packages that provide them.
+
+Commands (UI, CLI, control channel and MCP): `library.list {query?, tag?, installed?}`,
+`library.refresh {catalog?, wait?}`, `library.preview {id, version?, wait?}`,
+`library.install {id, version?, wait?}`, `library.update {id?, wait?}`, `library.uninstall {id}`,
+`library.missing`, `library.loadInstalled`. Downloads run in the background; `wait: true` runs
+them to the end (scripts and tests).
+
+### Publishing a plug-in
+
+[publishing-plugins.md](publishing-plugins.md) walks through it from an empty folder to a listed
+package: build, test, release on GitHub, the catalog entry and its fields, testing the entry with a
+local `file://` catalog, the pull request and its review, updates and removal.

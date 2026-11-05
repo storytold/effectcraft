@@ -127,7 +127,7 @@ pub fn format_size(bytes: u64) -> String {
 
 /// The Kind column: what a recent file is, by its extension, in the interface language.
 fn kind_of(path: &str) -> &'static str {
-    tr(match std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    tr(match std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase).as_deref() {
         Some("ecproj") => "EffectCraft project",
         Some("aep" | "aepx") => "After Effects project",
         Some("json" | "lottie") => "Lottie animation",
@@ -251,7 +251,7 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
     let mut y = rail.min.y + 20.0;
     for (label, id, primary) in [("New Project", "file.newProject", true), ("Open Project…", "file.open", false)] {
         let r = Rect::from_min_size(pos2(x0, y), vec2(w, 34.0));
-        if widgets::text_button(ui, r, tr(label), primary, &t, egui::Id::new(("home", id))).clicked() {
+        if widgets::text_button(ui, r, tr(label), primary, &t, egui::Id::unique(("home", id))).clicked() {
             actions.push((id, json!({})));
         }
         app.auto.add(&format!("home.{id}"), r, label);
@@ -268,7 +268,7 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
     };
     for (k, (label, icon)) in [("Home", Icon::Home), ("Templates", Icon::Grid), ("Learn", Icon::Sparkle)].into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(rail.min.x + 8.0, y), vec2(rail.width() - 16.0, 34.0));
-        let resp = ui.interact(r, egui::Id::new(("home-tab", label)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("home-tab", label)), Sense::click());
         let on = page == k;
         if on || resp.hovered() {
             p.rect_filled(r, 6.0, if on { t.row_selected } else { t.hover });
@@ -299,7 +299,7 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
     cy += 22.0;
     for (icon, label, cmd) in links {
         let r = Rect::from_min_size(pos2(x0, cy), vec2(w, 26.0));
-        let resp = ui.interact(r, egui::Id::new(("home-link", cmd)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("home-link", cmd)), Sense::click());
         let discord = cmd == "help.discord";
         if discord {
             p.rect_filled(r, 13.0, Color32::from_rgb(0x58, 0x65, 0xf2));
@@ -320,7 +320,7 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
     let sw = (w - 6.0) / 2.0;
     for (i, (name, slug)) in sib.iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + (i % 2) as f32 * (sw + 6.0), cy + (i / 2) as f32 * 26.0), vec2(sw, 22.0));
-        let resp = ui.interact(r, egui::Id::new(("sib", *slug)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("sib", *slug)), Sense::click());
         p.rect_filled(r, 11.0, if resp.hovered() { t.hover } else { t.field_bg });
         p.text(r.center(), Align2::CENTER_CENTER, *name, Tokens::ui(11.0), t.text);
         app.auto.add(&format!("home.sibling.{slug}"), r, name);
@@ -363,7 +363,7 @@ fn home_page(
     let tw = ((w - gap * 3.0) / 4.0).clamp(120.0, 220.0);
     for (k, (label, id, icon)) in tiles.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + k as f32 * (tw + gap), y), vec2(tw, 64.0));
-        let resp = ui.interact(r, egui::Id::new(("home-tile", id)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("home-tile", id)), Sense::click());
         p.rect_filled(r, 8.0, if resp.hovered() { t.hover } else { t.panel_bg });
         p.rect_stroke(r, 8.0, Stroke::new(1.0, if resp.hovered() { t.accent } else { t.separator }), StrokeKind::Inside);
         let ir = Rect::from_center_size(pos2(r.min.x + 30.0, r.center().y), vec2(32.0, 32.0));
@@ -385,7 +385,7 @@ fn home_page(
     // Recent: heading, filter, clear.
     p.text(pos2(x0, y + 12.0), Align2::LEFT_CENTER, tr("Recent"), Tokens::semibold(17.0), t.tab_text_active);
     let entries = recent_entries(&app.session.prefs);
-    let fid = egui::Id::new("home-filter");
+    let fid = egui::Id::unique("home-filter");
     let mut filter: String = ctx.data(|d| d.get_temp(fid)).unwrap_or_default();
     let fr = Rect::from_min_size(pos2(x0 + w - 240.0, y), vec2(240.0, 26.0));
     widgets::search_field(ui, fr, &mut filter, tr("Filter recent files"), &t);
@@ -393,7 +393,7 @@ fn home_page(
     ctx.data_mut(|d| d.insert_temp(fid, filter.clone()));
     if !entries.is_empty() {
         let cr = Rect::from_min_size(pos2(fr.min.x - 96.0, y + 3.0), vec2(84.0, 20.0));
-        let resp = ui.interact(cr, egui::Id::new("home-clear-recent"), Sense::click());
+        let resp = ui.interact(cr, egui::Id::unique("home-clear-recent"), Sense::click());
         p.text(cr.right_center(), Align2::RIGHT_CENTER, tr("Clear list"), Tokens::ui(11.5), if resp.hovered() { t.text } else { t.text_faint });
         app.auto.add("home.clearRecent", cr, "Clear Recent Projects");
         if resp.clicked() {
@@ -430,7 +430,7 @@ fn home_page(
         if r.min.y > area.max.y {
             break;
         }
-        let resp = ui.interact(r, egui::Id::new(("home-recent", e.index)), Sense::click()).on_hover_text(&e.path);
+        let resp = ui.interact(r, egui::Id::unique(("home-recent", e.index)), Sense::click()).on_hover_text(&e.path);
         if resp.hovered() {
             p.rect_filled(r, 6.0, t.hover);
         }

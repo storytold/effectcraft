@@ -6,7 +6,7 @@
 //!    with "outside" so every contour closes.
 //! 2. **Douglas–Peucker** simplification of each closed loop to the Tolerance (pixels).
 //! 3. **Bezier fitting**: each simplified span is fitted with one cubic (least squares with fixed
-//!    end tangents, Newton reparameterisation; [`crate::fit`]). The tangent at each vertex is the
+//!    end tangents, Newton reparameterisation; `crate::fit`). The tangent at each vertex is the
 //!    chord direction at Corner Roundness 0 (straight segments, sharp corners) and the smooth
 //!    (Catmull–Rom) direction at 100 %, blended between.
 //!

@@ -1,3 +1,4 @@
+use crate::gpu_test::RenderSerial;
 use std::sync::Arc;
 
 use effectcraft_engine::{
@@ -52,7 +53,8 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
     let mut session = Session { browser: Some(Arc::new(TestBrowser(tree))), ..Default::default() };
     session.prefs.general.language = "en".into();
     session.execute("comp.new", json!({"width": 64, "height": 36, "duration": 2})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| {
+    // The Chinese folder and file names need an installed CJK face.
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().build_eframe(|_| {
         let mut app = EffectcraftApp::new(session);
         app.ui.start_screen = false;
         app.show_panel(PanelKind::MediaBrowser);
@@ -73,7 +75,7 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
         if name == "作品 clip.csv"
             && let Ok(file) = std::env::var("MEDIA_BROWSER_COPY_SNAPSHOT")
         {
-            h.render().unwrap().save(file).unwrap();
+            h.render_serialized().unwrap().save(file).unwrap();
         }
         assert_eq!(click(&mut h, &id, PointerButton::Primary), [path]);
         h.run_steps(3);
@@ -96,7 +98,8 @@ fn copy_path_control_command_preserves_the_path_and_rejects_bad_arguments() {
         let mut reply = None;
         let mut out = ctx.run_ui(Default::default(), |ui| {
             let (request, _rx) = ControlRequest::new("ui.menu.invoke", json!({"id": "mediaBrowser.copySourcePath", "params": params}));
-            reply = match control::handle(&mut app, ui.ctx(), &request) {
+            let now = app.now();
+            reply = match control::handle(&mut app, ui.ctx(), &request, now) {
                 control::Outcome::Done(value) => Some(value),
                 _ => panic!("expected immediate reply"),
             };

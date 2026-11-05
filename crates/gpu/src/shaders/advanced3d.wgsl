@@ -14,8 +14,10 @@ struct Globals {
     ambient: vec4<f32>,
     // radiance first texture, mip count, irradiance texture, intensity
     env: vec4<f32>,
-    // rotation, any lighting (0/1), -, -
+    // rotation, any lighting (0/1), shadow map index (-1 none), shadow darkness
     env2: vec4<f32>,
+    // the environment's dominant direction (its shadow's source)
+    env_sun: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -194,6 +196,25 @@ fn tap_hash(x: i32, y: i32) -> u32 {
     return h;
 }
 
+fn tap_jitter_at(x: i32, y: i32) -> vec2<f32> {
+    let h = tap_hash(x, y);
+    return vec2<f32>(f32(h & 0xFFFFu) * (1.0 / 65536.0) - 0.5, f32((h >> 16u) & 0xFFFFu) * (1.0 / 65536.0) - 0.5);
+}
+
+// shade::tap_jitter: the hash at the four corners of the receiver's 1/8-texel lattice
+// cell (cx, cy), blended bilinearly by the receiver's position w in the cell.
+fn tap_jitter(cx: i32, cy: i32, w: vec2<f32>, i: i32, j: i32) -> vec2<f32> {
+    let x = cx + i * 7919;
+    let y = cy + j * 7919;
+    let c00 = tap_jitter_at(x, y);
+    let c10 = tap_jitter_at(x + 1, y);
+    let c01 = tap_jitter_at(x, y + 1);
+    let c11 = tap_jitter_at(x + 1, y + 1);
+    let a = c00 + (c10 - c00) * w.x;
+    let b = c01 + (c11 - c01) * w.x;
+    return a + (b - a) * w.y;
+}
+
 const PCF_MAX_TAPS: i32 = 10;
 const PLANE_SLOPE_MAX: f32 = 64.0;
 
@@ -244,7 +265,8 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     // shadows off their casters), each texel compared against the receiver plane's
     // depth at its centre so wide kernels never self-shadow a lit surface, an N×N grid
     // jittered by an integer hash (bit-identical across backends) of the sub-texel
-    // cell and tap index, and bilinear compares of the four nearest texel centres.
+    // lattice and tap index, blended across the receiver's lattice cell, and bilinear
+    // compares of the four nearest texel centers.
     // extra.y is the wanted penumbra in output pixels; dividing by the receiver's
     // texel footprint keeps it in output pixels at any map resolution, and the reach
     // is at least two texels so hard edges ramp over texel steps instead of showing them.
@@ -268,16 +290,17 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     let n = clamp(i32(ceil(reach)) + 1, 5, PCF_MAX_TAPS);
     let step = reach / f32(n - 1);
     let half = f32(n - 1) * 0.5;
-    let cx = i32(floor(u * 8.0));
-    let cy = i32(floor(v * 8.0));
+    let gu = u * 8.0;
+    let gv = v * 8.0;
+    let cx = i32(floor(gu));
+    let cy = i32(floor(gv));
+    let wc = vec2<f32>(gu - floor(gu), gv - floor(gv));
     var lit = 0.0;
     for (var j = 0; j < n; j = j + 1) {
         for (var i = 0; i < n; i = i + 1) {
-            let h = tap_hash(cx + i * 7919, cy + j * 7919);
-            let jx = f32(h & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
-            let jy = f32((h >> 16u) & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
-            let su = u + ((f32(i) - half) + jx) * step;
-            let sv = v + ((f32(j) - half) + jy) * step;
+            let jit = tap_jitter(cx, cy, wc, i, j);
+            let su = u + ((f32(i) - half) + jit.x) * step;
+            let sv = v + ((f32(j) - half) + jit.y) * step;
             // Texel (x, y) holds the depth at its centre (x + 0.5, y + 0.5); each of the
             // four is compared against the receiver plane at that centre.
             let tu = su - 0.5;
@@ -316,6 +339,18 @@ fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32,
     }
     let f = shadow_factor((u32(shadow) + face) * SHADOW_STRIDE, p, ng, n_l);
     return 1.0 - darkness * (1.0 - f);
+}
+
+// The Environment light's shadow from its dominant direction (shade::env_shadow). Only the
+// image's key fraction (g.env_sun.w) of the light is occluded — the fill keeps shining — so
+// the shadow stays partial the way After Effects renders an area-light shadow.
+fn env_shadow(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.env2.z < 0.0) {
+        return 1.0;
+    }
+    let n_l = clamp(dot(n, g.env_sun.xyz), 0.0, 1.0);
+    let f = shadow_factor(u32(g.env2.z + 0.5) * SHADOW_STRIDE, p, ng, n_l);
+    return 1.0 - g.env2.w * g.env_sun.w * (1.0 - f);
 }
 
 fn attenuation(kind: u32, falloff: u32, radius: f32, falloff_distance: f32, cos_inner: f32, cos_outer: f32, dir: vec3<f32>, to_l: vec3<f32>, dist: f32) -> f32 {
@@ -403,6 +438,10 @@ fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32
             continue;
         }
         amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
+    }
+    // The Environment light's shadow counts too (it reaches every surface: no falloff).
+    if (g.ambient.w > 0.5) {
+        amount = max(amount, 1.0 - env_shadow(pos, n, n));
     }
     return amount;
 }
@@ -543,7 +582,11 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let f0 = mix(vec3<f32>(0.04 * spec_k), rgb, metallic);
         let ab = env_brdf(n_v, rough);
         let fs = f0 * ab.x + vec3<f32>(ab.y);
-        acc = acc + (irr * rgb * (vec3<f32>(1.0) - fs) * (1.0 - metallic) * diff_k + spec * fs) * ao;
+        var esh = 1.0;
+        if (receives_shadows) {
+            esh = env_shadow(i.pos, ng, n);
+        }
+        acc = acc + (irr * rgb * (vec3<f32>(1.0) - fs) * (1.0 - metallic) * diff_k + spec * fs) * ao * esh;
     }
     let c = acc + emissive;
     out.color = vec4<f32>(c * alpha, alpha);

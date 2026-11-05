@@ -8,6 +8,7 @@ use effectcraft_engine::keyframe::Value as KV;
 use effectcraft_engine::project::{LayerId, Node, PropGroup};
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use egui::{Event, Pos2, pos2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -298,5 +299,5 @@ fn composition_tabs_and_scrolling_preview() {
     let shown = h.state().session.state.active_comp.unwrap();
     click_id(&mut h, "panel.tab.Timeline.close");
     assert!(!h.state().session.state.open_comps.contains(&shown));
-    assert!(h.state().ui.dock.contains(PanelKind::Timeline));
+    assert!(h.state().ui.dock.is_docked(PanelKind::Timeline));
 }

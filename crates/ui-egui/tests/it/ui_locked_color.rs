@@ -38,7 +38,7 @@ fn invoke(h: &mut Harness<'_, EffectcraftApp>, command: &str, params: Value) {
 }
 
 fn locked_center(h: &Harness<'_, EffectcraftApp>, images: &Images) -> [u8; 4] {
-    let (_, texture) = h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::new("viewer-locked"))).unwrap();
+    let (_, texture) = h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::unique("viewer-locked"))).unwrap();
     let images = images.borrow();
     let image = images.get(&texture.id()).unwrap();
     image.pixels[(image.size[1] / 2) * image.size[0] + image.size[0] / 2].to_array()

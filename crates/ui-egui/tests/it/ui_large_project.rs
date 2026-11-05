@@ -65,7 +65,7 @@ fn comp_thumbnail_renders_off_the_ui_thread() {
     for _ in 0..400 {
         h.step();
         if h.state().auto.find("project.thumbnail").is_some()
-            && h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::new(("proj-thumb", main.0)))).is_some()
+            && h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::unique(("proj-thumb", main.0)))).is_some()
         {
             landed = true;
             break;

@@ -274,12 +274,13 @@ fn comp_context_menu_opens_that_comps_settings() {
     assert_eq!(h.state().dialog, Some(Dialog::CompSettings));
     assert_eq!(h.state().session.active_comp_id(), Some(main), "the viewer keeps its comp");
     // A new name, then OK: Side's own size goes back to Side under it. Main's values in the
-    // dialog, or OK writing to the viewer's comp, would resize or rename the wrong one.
+    // dialog, or OK writing to the viewer's comp, would resize or rename the wrong one. The
+    // dialog previews the name as it is typed; OK keeps that as one undo step.
+    let undo = h.state().session.history.undo.len();
     click(&mut h, "dialog.comp.name");
     h.input_mut().events.push(Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
     h.input_mut().events.push(Event::Text("Side 2".into()));
     h.run_steps(2);
-    let undo = h.state().session.history.undo.len();
     h.input_mut().events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
     assert_eq!(h.state().dialog, None, "OK closed the dialog");

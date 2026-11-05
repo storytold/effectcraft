@@ -25,7 +25,7 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
     Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]))
 }
 
-fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+pub(crate) fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(from));
     h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.step();
@@ -175,6 +175,30 @@ fn layer_style_buttons_stay_in_view() {
     }
 }
 
+/// #2057: Gradient Overlay's gradient has an Edit Gradient… button in the Layer Style dialog. It
+/// opens the Gradient Editor on that property, and closing the editor goes back to the dialog.
+#[test]
+fn layer_style_gradient_opens_the_gradient_editor() {
+    for ok in [true, false] {
+        let mut h = harness(1400.0);
+        let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+        h.state_mut().session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+        let ctx = h.ctx.clone();
+        effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.style.gradientOverlay", json!({})).unwrap();
+        h.run_steps(5);
+        let edit = in_view(&h, "dialog.layerStyle.value.gradientOverlay/colors");
+        click(&mut h, edit);
+        assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::GradientEditor), "Edit Gradient… opened the editor");
+        effectcraft_ui_egui::panels::gradient_editor::finish(h.state_mut(), ok, &ctx);
+        h.run_steps(2);
+        assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles), "closing the editor (OK {ok}) went back to the dialog");
+        // The dialog closes as before once the editor is gone.
+        effectcraft_ui_egui::panels::layer_styles_dialog::finish(h.state_mut(), true);
+        h.run_steps(2);
+        assert_eq!(h.state().dialog, None);
+    }
+}
+
 /// #1062: with the buttons kept at the bottom, the style's controls still scroll both ways, so
 /// every one of them can be reached in the smallest window (960×600) at 200 % UI Scale, and in a
 /// dialog opened in a large window that then narrows: here Noise, near the end of Drop Shadow,
@@ -197,6 +221,7 @@ fn layer_style_controls_stay_reachable_in_a_small_window() {
             delta: vec2(-2000.0, -2000.0),
             modifiers: Default::default(),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
         });
         h.run_steps(5);
         let at = in_view(&h, "dialog.layerStyle.value.dropShadow/noise");
@@ -205,6 +230,38 @@ fn layer_style_controls_stay_reachable_in_a_small_window() {
         assert!(style_value(&mut h, lid, "noise") > 0.0, "narrowed {narrowed}: Noise was dragged (at {at:?})");
         assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles));
     }
+}
+
+/// #1389: on a layer with no styles, Blending Options shows its controls instead of an empty
+/// page. Opening the dialog adds nothing; the first change creates the Layer Styles group, and
+/// the group and the whole drag are one undo step.
+#[test]
+fn layer_style_blending_options_edit_a_layer_without_styles() {
+    let mut h = harness(1400.0);
+    let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.style.options", json!({})).unwrap();
+    h.run_steps(5);
+    let has_group = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers[0].layer_styles().is_some();
+    let undo = h.state().session.history.undo.len();
+    assert_eq!(h.state().auto.find("dialog.layerStyle.page").unwrap().label, "blendingOptions");
+    let fill = "dialog.layerStyle.value.blendingOptions/advancedBlending/fillOpacity";
+    assert!(h.state().auto.find("dialog.layerStyle.value.blendingOptions/globalLightAngle").is_some(), "Global Light is shown");
+    let at = in_view(&h, fill);
+    assert!(!has_group(&h), "opening the page adds nothing");
+    drag(&mut h, at, at - vec2(40.0, 0.0));
+    let v =
+        h.state_mut().session.execute("prop.get", json!({"layer": lid, "path": "layerStyles/blendingOptions/advancedBlending/fillOpacity"})).unwrap()["value"]
+            .as_f64()
+            .unwrap();
+    assert!(v < 100.0, "Fill Opacity was dragged: {v}");
+    assert!(styles(&mut h).is_empty(), "no style was added");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1, "the group and the drag are one undo step");
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles));
+    effectcraft_ui_egui::panels::layer_styles_dialog::finish(h.state_mut(), true);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert!(!has_group(&h), "one undo removes the group");
 }
 
 #[test]

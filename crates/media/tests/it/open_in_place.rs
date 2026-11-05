@@ -19,8 +19,26 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/media")
 }
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none (see the same
+/// helper in `footage.rs`: distro "free" builds often omit `libx264` and ship an alternative).
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 /// A 2 s 320×240 H.264 + AAC movie (written to a temp name and renamed, so concurrent test
-/// processes never see a partial file). `None` without ffmpeg.
+/// processes never see a partial file). `None` without ffmpeg, or when this build cannot encode
+/// H.264 at all — the test only measures how a movie is read, so it skips rather than asserting
+/// on the packager's choice of ffmpeg.
 fn small_mp4() -> Option<PathBuf> {
     let out = fixtures().join("in_place_small.mp4");
     if out.exists() {
@@ -29,16 +47,21 @@ fn small_mp4() -> Option<PathBuf> {
     if !Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()) {
         return None;
     }
+    let enc = h264_encoder()?;
     std::fs::create_dir_all(fixtures()).unwrap();
     let tmp = fixtures().join(format!("in_place_tmp_{}.mp4", std::process::id()));
     let st = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=2"])
         .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .args(["-c:v", enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
         .arg(&tmp)
         .status()
         .unwrap();
-    assert!(st.success(), "ffmpeg failed");
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("this ffmpeg build cannot make in_place_small.mp4: skipping");
+        return None;
+    }
     std::fs::rename(&tmp, &out).unwrap();
     Some(out)
 }
@@ -56,10 +79,27 @@ fn reset_peak() -> Option<u64> {
     status_kib("VmHWM:").map(|k| k * 1024)
 }
 
+/// Set in the child process that does the measuring (see below).
+const ALONE: &str = "EFFECTCRAFT_TEST_RSS_ALONE";
+
 #[test]
 fn a_long_movie_is_read_in_place_not_whole() {
     if !cfg!(target_os = "linux") {
         eprintln!("peak RSS is read from /proc: skipping");
+        return;
+    }
+    // Peak RSS is per process, and the other tests in this binary run on parallel threads, so
+    // their allocations would count against this one. Measure in a child running only this test.
+    if std::env::var_os(ALONE).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "open_in_place::a_long_movie_is_read_in_place_not_whole", "--test-threads=1", "--nocapture"])
+            .env(ALONE, "1")
+            .output()
+            .unwrap();
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "the measuring child failed:\n{log}");
+        assert!(log.contains("1 passed"), "the measuring child ran no test:\n{log}");
+        eprintln!("{log}");
         return;
     }
     let Some(small) = small_mp4() else {

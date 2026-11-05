@@ -23,6 +23,24 @@ const H: u32 = 48;
 const BG: [f32; 3] = [0.1, 0.1, 0.4];
 const FRAMES: u64 = 12;
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none. Distro "free"
+/// builds often omit `libx264` but ship an alternative (e.g. libopenh264), so pick the first
+/// present by name rather than hard-coding one that may be absent. The oracle only needs *an*
+/// H.264 encoder; the encoder identity is irrelevant to the assertion.
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 fn out_dir(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/export").join(name);
     let _ = std::fs::remove_dir_all(&d);
@@ -260,6 +278,8 @@ fn image_sequences_roundtrip() {
         (OutputFormat::JpegSequence, "jpg", 0.06, Channels::Rgb),
         (OutputFormat::TiffSequence, "tif", 0.01, Channels::Rgb),
         (OutputFormat::TiffSequence, "tif", 0.01, Channels::Rgba),
+        (OutputFormat::TargaSequence, "tga", 0.01, Channels::Rgb),
+        (OutputFormat::TargaSequence, "tga", 0.01, Channels::Rgba),
     ] {
         let d = out_dir(&format!("seq-{ext}-{ch:?}"));
         let om = OutputModule { channels: ch, ..OutputModule::for_format(fmt) };
@@ -280,6 +300,23 @@ fn exr_sequence_is_linear() {
     let c = img.get_pixel(2, 2).0;
     // sRGB 0.4 → linear ≈ 0.133
     assert!((c[2] - 0.1329).abs() < 0.01 && (c[3] - 1.0).abs() < 1e-6, "{c:?}");
+}
+
+/// Sequence frames are scan-line EXR, not tiled, so scan-line readers such as FilmCraft open
+/// them (#2805).
+#[test]
+fn exr_sequence_writes_scan_lines() {
+    let (p, cid) = project(None);
+    let d = out_dir("seq-exr-scanline");
+    let om = OutputModule::for_format(OutputFormat::ExrSequence);
+    run(&p, cid, &NoFootage, &om, &d.join("f_[#####].exr"));
+    let bytes = std::fs::read(d.join("f_00000.exr")).expect("exr");
+    // Version field (little-endian u32 at bytes 4..8): version 2, then the flags byte. Its 0x02
+    // bit is the tiled bit, 0x200 of the field, so a scan-line file has 0 there.
+    assert_eq!(&bytes[4..6], &[2, 0], "{:02x?}", &bytes[..8]);
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes), false).expect("exr header");
+    assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines);
+    assert_eq!(meta.headers[0].compression, exr::compression::Compression::ZIP16);
 }
 
 /// A 32 bpc project whose only layer is a full-frame opaque solid of the given colour.
@@ -489,14 +526,18 @@ fn ffmpeg_audio(src: &Path) -> Vec<f32> {
 fn movies_carry_resampled_footage_audio() {
     let d = out_dir("audio-44k");
     let clip = d.join("clip.mp4");
+    let Some(enc) = h264_encoder() else {
+        eprintln!("ffmpeg has no H.264 encoder: skipping");
+        return;
+    };
     let made = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=30000/1001:duration=3", "-f", "lavfi", "-i"])
-        .args(["aevalsrc=0.5*sin(2*PI*440*t)|0.5*sin(2*PI*(200+400*t/3)*t):s=44100:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .args(["aevalsrc=0.5*sin(2*PI*440*t)|0.5*sin(2*PI*(200+400*t/3)*t):s=44100:d=3", "-c:v", enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
         .arg(&clip)
         .status()
         .is_ok_and(|s| s.success());
     if !made {
-        eprintln!("ffmpeg not found: skipping");
+        eprintln!("ffmpeg could not make the H.264 fixture: skipping");
         return;
     }
     let fps = FrameRate::new(30000, 1001);

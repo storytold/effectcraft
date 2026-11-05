@@ -58,3 +58,34 @@ fn every_background_preset_renders_moves_and_undoes() {
         assert_eq!(fx, 0, "{id}: undo removes the effects");
     }
 }
+
+/// #1510: each Behaviors preset keeps its layer moving (position, scale, rotation or opacity
+/// changes over time) and renders finite, deterministic frames.
+#[test]
+fn every_behavior_preset_renders_and_moves() {
+    let mut s = effectcraft_host::session();
+    s.execute("comp.new", json!({"name": "BH", "width": 160, "height": 90, "frameRate": 30, "duration": 8})).unwrap();
+    // A small white square in the middle so position, scale and rotation changes are visible.
+    let solid = s.execute("layer.newSolid", json!({"name": "S", "color": "#ffffff", "width": 60, "height": 60})).unwrap()["layer"].as_u64().unwrap();
+    let list = s.execute("anim.builtinPresets", json!({"category": "Behaviors"})).unwrap();
+    let list = list.as_array().unwrap().clone();
+    assert!(list.len() >= 20, "{}", list.len());
+    for p in &list {
+        let id = p["id"].as_str().unwrap();
+        s.execute("time.set", json!({"time": 0.0})).unwrap();
+        let r = s.execute("anim.applyBuiltinPreset", json!({"layers": [solid], "preset": id})).unwrap();
+        assert_eq!(r["skipped"], json!([]), "{id}");
+        let mut frames = Vec::new();
+        // Times chosen off the periods of every preset so no two samples coincide.
+        for t in [0.03, 0.13, 0.41, 0.97, 1.73] {
+            let (px, _, _, nan) = frame(&s, t);
+            assert!(!nan, "{id} @ {t}: NaN or infinite pixel");
+            let (again, ..) = frame(&s, t);
+            assert!(px == again, "{id} @ {t}: render is not deterministic");
+            frames.push(px);
+        }
+        let moved = (1..frames.len()).any(|i| diff(&frames[0], &frames[i]) > 20.0);
+        assert!(moved, "{id}: the layer does not move ({:?})", (1..frames.len()).map(|i| diff(&frames[0], &frames[i])).collect::<Vec<_>>());
+        s.execute("edit.undo", json!({})).unwrap();
+    }
+}

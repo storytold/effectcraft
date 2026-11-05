@@ -1,5 +1,6 @@
 //! Spacebar-drag panning in the Timeline: the Hand tool scrolls the layer rows vertically as well
-//! as the time graph horizontally (#2083).
+//! as the time graph horizontally (#2083). A middle-drag does the same, from the layer list too
+//! (#2854).
 
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -28,16 +29,47 @@ fn space(h: &mut Harness<'_, EffectcraftApp>, pressed: bool) {
 }
 
 fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+    drag_with(h, egui::PointerButton::Primary, from, to);
+}
+
+fn drag_with(h: &mut Harness<'_, EffectcraftApp>, button: egui::PointerButton, from: Pos2, to: Pos2) {
     h.event(Event::PointerMoved(from));
     h.step();
-    h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.event(Event::PointerButton { pos: from, button, pressed: true, modifiers: Modifiers::NONE });
     h.step();
     for k in 1..=10 {
         h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
         h.step();
     }
-    h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.event(Event::PointerButton { pos: to, button, pressed: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
+}
+
+#[test]
+fn middle_drag_pans_from_the_layer_list_and_the_bars() {
+    let (mut h, layer) = harness();
+    h.state_mut().ui.timeline.pps = Some(400.0);
+    h.state_mut().ui.timeline.start = 1.0;
+    h.run_steps(3);
+    let order = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect::<Vec<_>>();
+    let before = order(&h);
+    let center = |r: [f32; 4]| pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let row = center(h.state().auto.find(&format!("timeline.layer.{layer}.row")).expect("layer row").rect);
+    drag_with(&mut h, egui::PointerButton::Middle, row, row - vec2(0.0, 180.0));
+    let y = h.state().ui.timeline.scroll_y;
+    assert!(y > 100.0, "the list scrolled: {y}");
+    assert_eq!(h.state().ui.timeline.start, 1.0, "a vertical drag leaves time alone");
+    assert_eq!(order(&h), before, "the layers stay in order");
+    assert!(h.state().session.state.selected_layers.is_empty(), "the press selects nothing");
+    // In the time graph, just right of the row, whatever the zoom has left of its bar.
+    h.state_mut().ui.timeline.scroll_y = 0.0;
+    h.run_steps(2);
+    let r = h.state().auto.find(&format!("timeline.layer.{layer}.row")).expect("layer row").rect;
+    let graph = pos2(r[0] + r[2] + 100.0, r[1] + r[3] / 2.0);
+    drag_with(&mut h, egui::PointerButton::Middle, graph, graph - vec2(80.0, 0.0));
+    let start = h.state().ui.timeline.start;
+    assert!(start > 1.1, "time panned: {start}");
+    assert_eq!(order(&h), before);
 }
 
 #[test]

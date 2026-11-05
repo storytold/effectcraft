@@ -1,5 +1,6 @@
 //! Inspect the actual viewer's painted colors and pointer-driven control geometry.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::{
     EffectcraftApp,
@@ -95,7 +96,13 @@ fn compact_control_row_scrolls_and_preserves_interactions() {
     let mut h = harness(300.0, ThemeKind::Light);
     assert!(rect(&h, "viewer.timecode").right() > 300.0);
     h.event(Event::PointerMoved(pos2(150.0, 345.0)));
-    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(-1500.0, 0.0), modifiers: Default::default(), phase: egui::TouchPhase::Move });
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(-1500.0, 0.0),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
     h.run_steps(30);
     let timecode = rect(&h, "viewer.timecode");
     let row = rect(&h, "viewer.controls");
@@ -136,6 +143,16 @@ fn compact_control_row_scrolls_and_preserves_interactions() {
     h.run_steps(3);
     assert!(!h.state().session.state.viewer.show_snapshot, "releasing the snapshot control must return to the current frame");
 
+    // Fast Previews sits beside the resolution control, so the row that scrolled to the timecode has
+    // to scroll back before its menu is reachable.
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(1500.0, 0.0),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(30);
     click_control(&mut h, "viewer.fastPreviews");
     click_control(&mut h, "viewer.fastPreviewsItem.1");
     assert_eq!(h.state().session.state.viewer.fast_previews.id(), "adaptive", "a scrolled dropdown must retain its menu command");
@@ -160,7 +177,7 @@ fn click_control(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
 #[test]
 fn tab_traversal_reveals_the_last_control() {
     let mut h = harness(300.0, ThemeKind::Dark);
-    let last = egui::Id::new("vw-timecode");
+    let last = egui::Id::unique("vw-timecode");
     for _ in 0..80 {
         h.key_press(egui::Key::Tab);
         h.run_steps(3);
@@ -232,7 +249,13 @@ fn painted_scrollbar(h: &Harness<'_, EffectcraftApp>, kind: ThemeKind, scale: f3
 
 fn scroll_controls_to_end(h: &mut Harness<'_, EffectcraftApp>) {
     h.event(Event::PointerMoved(pos2(150.0, 345.0)));
-    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(-1500.0, 0.0), modifiers: Default::default(), phase: egui::TouchPhase::Move });
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(-1500.0, 0.0),
+        modifiers: Default::default(),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
     h.run_steps(30);
     h.event(Event::PointerMoved(pos2(150.0, 180.0)));
     h.run_steps(3);
@@ -257,10 +280,10 @@ fn viewer_theme_and_width_visual_matrix() {
 }
 
 fn save_stable_snapshot(h: &mut Harness<'_, EffectcraftApp>, path: &str, width: f32) {
-    let image = h.render().unwrap();
+    let image = h.render_serialized().unwrap();
     image.save(path).unwrap();
     h.run_steps(3);
-    let repeated = h.render().unwrap();
+    let repeated = h.render_serialized().unwrap();
     assert!(image == repeated, "settled synthetic viewer pixels must repeat exactly: {path}");
     if width == 900.0 {
         let times: Vec<_> = h

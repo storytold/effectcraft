@@ -1,3 +1,4 @@
+use crate::gpu_test::RenderSerial;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -42,7 +43,7 @@ type Listing = (f64, Arc<Result<Vec<Entry>, String>>);
 
 fn listing(h: &Harness<'_, EffectcraftApp>, only: bool) -> Listing {
     let dir = h.state().session.state.media_browser.folder.clone().unwrap_or_else(|| "/Shoot".into());
-    h.ctx.data(|d| d.get_temp(egui::Id::new(("mb-list", dir, only)))).unwrap()
+    h.ctx.data(|d| d.get_temp(egui::Id::unique(("mb-list", dir, only)))).unwrap()
 }
 
 fn names(list: &Arc<Result<Vec<Entry>, String>>) -> Vec<&str> {
@@ -140,6 +141,6 @@ fn browser_cache_refreshes_filters_navigates_and_recovers_from_errors() {
     assert_eq!(names(&listing(&h, false).1), ["Sub", "Added.csv", "Clip.csv", "From action.csv"]);
     assert!(h.state().auto.find("mediaBrowser.entry.Clip.csv").is_some());
     if let Ok(path) = std::env::var("MEDIA_BROWSER_SNAPSHOT") {
-        h.render().unwrap().save(path).unwrap();
+        h.render_serialized().unwrap().save(path).unwrap();
     }
 }

@@ -42,7 +42,8 @@ fn harness(graph: bool) -> Harness<'static, EffectcraftApp> {
 fn send(h: &mut Harness<'_, EffectcraftApp>, method: &str, params: Value) {
     let ctx = h.ctx.clone();
     let (req, _rx) = ControlRequest::new(method, params);
-    if let Outcome::Done(v) = control::handle(h.state_mut(), &ctx, &req) {
+    let now = h.state().now();
+    if let Outcome::Done(v) = control::handle(h.state_mut(), &ctx, &req, now) {
         assert!(v["ok"] != false, "{method}: {v}");
     }
     for e in h.state_mut().take_synthetic_input() {
