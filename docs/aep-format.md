@@ -519,6 +519,20 @@ popup_selected_item, borrowed_definition}`, `Effect::has_own_definitions`,
 (356, 357, 361, 363, 364, 366, 368, 369, 371, 374, 377, 378, 380, 382, 383),
 `tests/effects_exposure.rs` (389-391, 393-397).
 
+**Importer block 2026-11-05, #3110 (`1100-quickwins.aep`, After Effects 26.2.1; V for every
+row: defaults from the defaults composition, the valid ranges from the minimum and maximum
+compositions, the items from one composition per popup item).** Each set value is stored as set
+(Decay 20 is `20.0`, Blend With Original 100 % is `1.0`); a value set to the default leaves no record
+(HDR Amount 100):
+
+| Effect (match name) | Parameters (`parT` index: type, valid range, default) |
+|---|---|
+| `ADBE HDR ToneMap` (HDR Highlight Compression) | 1 Amount: float, 0..100 (slider 0..100), default 100 |
+| `ADBE Echo` | 1 Echo Time (seconds): float, -30 000..30 000 (slider -5..5), default -1/30 (float32); 2 Number Of Echoes: integer, max 30 000, default 1; 3 Starting Intensity: float, 0..1, default 1; 4 Decay: float, **valid 0..100, slider 0..1**, default 1; 5 Echo Operator: popup (Add, Maximum, Minimum, Screen, Composite In Back, Composite In Front, Blend), default 1 |
+| `ADBE Linear Wipe` | 1 Transition Completion: fixed, max 100, default 0; 2 Wipe Angle: angle, default 90; 3 Feather: fixed, max 32 000, default 0 |
+| `ADBE Offset` | 1 Shift Center To: point, default the layer centre; 2 Blend With Original: fixed, **max 1 (a 0..1 fraction)**, default 0 |
+| `ADBE Deflicker` (Color Stabilizer) | 1 Stabilize: popup (Brightness, Levels, Curves), **default 2 (Levels)**; 2 Black Point, 3 Mid Point, 4 White Point: points, defaults 0.2 / 0.5 / 0.8 of the width at half the height; 5 Sample Size: fixed, max 50, default 3. The reference frame the Set Frame button picks is not among the parameters |
+
 **Curves and Mesh Warp** (961-965, 985; applied from presets, the data is not scriptable): their
 arbitrary-data parameter (type 11) always has a record (`tdbs` with a 4-byte `cdat`) and a `LIST
 aRbs` / `aRbp`, also at the default. Curves (`ADBE CurvesCustom-0001`, 1644 bytes): `u16` 1, 1;

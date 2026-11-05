@@ -266,6 +266,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
             if let Some(map) = &popup_map {
                 remap_popup_keys(prop, map, &here, &label, col);
             }
+            report_beyond_limit(m.limit, prop.keys.iter().map(|k| &k.value), &here, &label, col);
         }
         return;
     }
@@ -298,8 +299,21 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         _ => convert(value, kind),
     };
     match converted {
-        Some(v) => prop.value = v,
+        Some(v) => {
+            report_beyond_limit(m.limit, std::iter::once(&v), &here, &label, col);
+            prop.value = v;
+        }
         None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
+    }
+}
+
+/// Reports a value After Effects accepts but EffectCraft's effect limits (`ParamMap::limit`): it is
+/// imported as it is, and the effect renders it as the nearest end of its range.
+fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item = &'v Value>, here: &str, label: &str, col: &mut Collector) {
+    let Some((lo, hi)) = limit else { return };
+    let beyond: Vec<f64> = values.filter_map(|v| if let Value::Scalar(x) = v { Some(*x) } else { None }).filter(|x| *x < lo || *x > hi).collect();
+    if let Some(x) = beyond.first() {
+        col.lose(LossCategory::Effects, format!("{here}: parameter {label} is {x}, EffectCraft's effect uses {lo} to {hi} (rendered as the nearest of them)"));
     }
 }
 
