@@ -39,6 +39,9 @@ use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, Params, RenderFn};
 
 /// The plug-in API version this build implements (manifests with API 1 or 2 are accepted).
 pub const PLUGIN_API_VERSION: u32 = 2;
+/// The plug-in API a WebAssembly module implements (its `ec_api_version`). API 2 is for native
+/// and helper plug-ins; WebAssembly modules stay at 1.
+pub const WASM_API_VERSION: u32 = 1;
 
 /// The most plug-in effects one process can register (commercial effect suites register a few hundred each).
 pub const MAX_PLUGINS: usize = 1024;

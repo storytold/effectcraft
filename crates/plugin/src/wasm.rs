@@ -4,11 +4,8 @@ use std::sync::Mutex;
 
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
-use crate::{EffectPlugin, PluginFrame, PluginManifest, PluginParams};
+use crate::{EffectPlugin, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION};
 
-/// The WebAssembly ABI version (`ec_api_version`); manifests may say API 1 or 2, but a module
-/// can only use the API 1 parameter types.
-const WASM_API_VERSION: i32 = 1;
 /// Instruction budget per frame: a fixed allowance plus some per pixel. Generous for per-pixel
 /// work, but a runaway loop stops instead of hanging the render.
 const FUEL_BASE: u64 = 50_000_000;
@@ -77,7 +74,7 @@ impl WasmPlugin {
         let mut inst = instantiate(&engine, &module)?;
         let version = inst.func::<(), i32>("ec_api_version")?;
         let v = version.call(&mut inst.store, ()).map_err(err)?;
-        if v != WASM_API_VERSION {
+        if u32::try_from(v).ok() != Some(WASM_API_VERSION) {
             return Err(format!("the module implements plug-in API {v}, this build implements API {WASM_API_VERSION} for WebAssembly"));
         }
         let ptr = inst.func::<(), i32>("ec_manifest_ptr")?.call(&mut inst.store, ()).map_err(err)?;

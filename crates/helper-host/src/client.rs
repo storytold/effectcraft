@@ -346,11 +346,12 @@ impl Helper {
 
     /// Run `f` on the process a render started on (generation `started`), without starting or
     /// pinging one: mid-render the helper is waiting for the answer to its question. A
-    /// [`Failure::Broken`] stops the process.
+    /// [`Failure::Broken`] stops the process. A process already gone was stopped by what broke it
+    /// (a nested render, charged there): not charged again to this render's effect.
     fn with_running<T>(&self, started: u64, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
         let mut g = lock(&self.conn);
         let Some(c) = g.as_mut().filter(|c| c.generation == started) else {
-            return Err(Failure::Broken("the helper restarted during the render".into()));
+            return Err(Failure::Refused("the helper stopped during the render".into()));
         };
         let r = f(c);
         c.last_used = Instant::now();
