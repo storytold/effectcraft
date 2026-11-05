@@ -242,7 +242,7 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 return Some(b);
             }
             p.u[0][0] = 2;
-            p.f[0][0] = 1.0 - 0.5 * t;
+            p.f[0][0] = t;
         }
         "ec.utility.ccoverbrights" => {
             p.u[0] = [3, pr.e("channel"), 0, 0];
