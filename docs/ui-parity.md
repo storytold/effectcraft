@@ -42,7 +42,7 @@ cover shape paths and masks, corner-vertex dragging and undo, and layers without
 ## Estimate
 
 **≈ 60–110 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
-test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 12–25 h (two slices, seven panels and the audit, are done). Checking feel against After Effects needs the owner's Mac with After
+test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 10–22 h as in [gaps.md](gaps.md) gap 25 (two slices, seven panels and the audit, are done). Checking feel against After Effects needs the owner's Mac with After
 Effects running; most of the rest parallelises.
 
 ## Revision history

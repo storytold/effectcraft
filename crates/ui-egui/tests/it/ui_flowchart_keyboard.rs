@@ -101,6 +101,24 @@ fn the_toolbar_switches_say_whether_they_are_on() {
     assert!(h.query_by_role_and_label(Role::Button, "Left to Right").is_some(), "the direction button is named");
 }
 
+/// The toolbar switches show and speak the interface language, but their automation labels stay
+/// English, so a script that finds them by label works in every locale.
+#[test]
+fn the_toolbar_automation_labels_stay_english_in_another_language() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 100, "height": 100, "duration": 2})).unwrap();
+    s.prefs.general.language = "fr".into();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Flowchart);
+    h.state_mut().ui.maximized = Some(PanelKind::Flowchart);
+    h.run_steps(4);
+    assert!(h.query_by_role_and_label(Role::Button, "Effects").is_none(), "the switch shows the French name");
+    for (key, label) in [("effects", "Effects"), ("layers", "Layers"), ("solids", "Solids")] {
+        let e = h.state().auto.find(&format!("flowchart.option.{key}")).unwrap_or_else(|| panic!("no {key}"));
+        assert_eq!(e.label, label);
+    }
+}
+
 #[test]
 fn the_chart_is_one_tab_stop_and_the_arrows_move_between_the_nodes() {
     let mut h = harness();
