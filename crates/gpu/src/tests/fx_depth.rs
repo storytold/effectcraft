@@ -208,6 +208,13 @@ fn on() -> Value {
     Value::Bool(true)
 }
 
+/// #474: every effect done here reads aux channels, so the session gives the media layer its
+/// footage ([`effectcraft_effects::reads_aux`]).
+#[test]
+fn every_effect_here_reads_aux() {
+    assert!(crate::fx_depth::IDS.iter().all(|i| effectcraft_effects::reads_aux(i)));
+}
+
 #[test]
 fn channel_extract() {
     case("ec.3d.channelextract", &[("blackPoint", n(0.0)), ("whitePoint", n(1200.0))]);
