@@ -125,6 +125,48 @@ struct Coded {
     pulses: Vec<i32>,
 }
 
+/// Noise-feedback history (decoded − input), most recent first, as a double-length ring: each
+/// sample is stored at `pos` and `pos + MAX_LPC_ORDER`, so `buf[pos..pos + MAX_LPC_ORDER]` is
+/// always the contiguous window and a push costs two stores instead of a shift.
+struct NfRing {
+    buf: [f64; 2 * MAX_LPC_ORDER],
+    /// Index of the most recent sample, always below `MAX_LPC_ORDER`.
+    pos: usize,
+}
+
+impl NfRing {
+    fn new(hist: &[f64; MAX_LPC_ORDER]) -> Self {
+        let mut buf = [0.0; 2 * MAX_LPC_ORDER];
+        buf[..MAX_LPC_ORDER].copy_from_slice(hist);
+        buf[MAX_LPC_ORDER..].copy_from_slice(hist);
+        NfRing { buf, pos: 0 }
+    }
+
+    /// The history, most recent first.
+    fn window(&self) -> &[f64] {
+        self.buf.get(self.pos..self.pos + MAX_LPC_ORDER).unwrap_or(&[])
+    }
+
+    /// Makes `v` the most recent sample and drops the oldest.
+    fn push(&mut self, v: f64) {
+        self.pos = self.pos.checked_sub(1).unwrap_or(MAX_LPC_ORDER - 1);
+        for i in [self.pos, self.pos + MAX_LPC_ORDER] {
+            if let Some(slot) = self.buf.get_mut(i) {
+                *slot = v;
+            }
+        }
+    }
+
+    /// The history as a plain array, most recent first.
+    fn to_array(&self) -> [f64; MAX_LPC_ORDER] {
+        let mut out = [0.0; MAX_LPC_ORDER];
+        for (o, v) in out.iter_mut().zip(self.window()) {
+            *o = *v;
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 struct Channel {
     fs_khz: usize,
@@ -233,12 +275,7 @@ impl Channel {
         let sub = self.sub;
         let order = self.order;
         let st = &mut self.dec;
-        // Noise-feedback history, most recent first, as a double-length ring: `ring[pos..pos + 16]`
-        // is always the contiguous window (a new sample goes to `pos` and `pos + 16`).
-        let mut ring = [0f64; 2 * MAX_LPC_ORDER];
-        ring[..MAX_LPC_ORDER].copy_from_slice(&self.nf);
-        ring[MAX_LPC_ORDER..].copy_from_slice(&self.nf);
-        let mut pos = 0usize;
+        let mut ring = NfRing::new(&self.nf);
         let off = if p.signal_type == 0 { offset + INACTIVE_OFFSET } else { offset };
         let gamma = nf_gamma(off);
         let mut nf_c = [0f64; MAX_LPC_ORDER];
@@ -356,7 +393,7 @@ impl Channel {
                 }
                 let lpc_q14 = lpc_pred.saturating_mul(16);
                 // Target excitation (Q14) for this sample.
-                let fb: f64 = (0..order).map(|j| nf_c[j] * ring[pos + j]).sum();
+                let fb: f64 = nf_c.iter().zip(ring.window()).take(order).map(|(c, e)| c * e).sum();
                 let tgt = (x[n] as f64 + fb).clamp(-32768.0, 32767.0) * inv_g - lpc_q14 as f64 - ltp_q14 as f64;
                 let sgn = if seed_v < 0 { -1.0 } else { 1.0 };
                 let u = sgn * tgt;
@@ -395,14 +432,11 @@ impl Channel {
                 let v = res.saturating_add(lpc_q14);
                 s_lpc[MAX_LPC_ORDER + i] = v;
                 xq[n] = sat16(rshift_round(smulww(v, gain_q10), 8)) as i16;
-                pos = if pos == 0 { MAX_LPC_ORDER - 1 } else { pos - 1 };
-                let err = xq[n] as f64 - x[n] as f64;
-                ring[pos] = err;
-                ring[pos + MAX_LPC_ORDER] = err;
+                ring.push(xq[n] as f64 - x[n] as f64);
             }
             s_lpc.copy_within(sub..sub + MAX_LPC_ORDER, 0);
         }
-        self.nf.copy_from_slice(&ring[pos..pos + MAX_LPC_ORDER]);
+        self.nf = ring.to_array();
         st.s_lpc_q14.copy_from_slice(&s_lpc[..MAX_LPC_ORDER]);
         st.out_buf[..l].copy_from_slice(&xq);
         (Coded { gain_ix, gains_q16, seed, pulses }, xq)
@@ -730,6 +764,11 @@ impl SilkEncoder {
             }
             None => self.code(&prep, o, enc),
         }
+        self.end_frame(&prep, o);
+    }
+
+    /// Advances the input history and the frame counter after frame `prep` was coded at `o`.
+    fn end_frame(&mut self, prep: &Prep, o: f64) {
         self.last_offset = o;
         for ch in 0..self.channels {
             self.ch[ch].push_history(&prep.x[ch]);
@@ -738,5 +777,82 @@ impl SilkEncoder {
             self.prev_mid = prep.x[0][self.frame_len() - 1];
         }
         self.frame += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic speech-like test input: two harmonics with a moving pitch, a syllable
+    /// envelope, noise and short silences, at the internal rate and 16-bit scale.
+    fn signal(len: usize, fs_khz: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        let fs = (fs_khz * 1000) as f64;
+        (0..len)
+            .map(|i| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (s >> 8) as f64 / (1u32 << 24) as f64 - 0.5;
+                let t = i as f64 / fs;
+                let f0 = 140.0 + 40.0 * (t * 1.3).sin();
+                let env = ((t * 4.0).sin().max(0.0)).powf(0.7);
+                let voiced = (std::f64::consts::TAU * f0 * t).sin() + 0.5 * (std::f64::consts::TAU * 2.0 * f0 * t).sin();
+                (8000.0 * env * voiced + 600.0 * noise) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nf_ring_matches_a_shifted_history() {
+        let mut hist = [0f64; MAX_LPC_ORDER];
+        for (i, h) in hist.iter_mut().enumerate() {
+            *h = i as f64 * 0.5 - 3.0;
+        }
+        let mut ring = NfRing::new(&hist);
+        assert_eq!(ring.window(), &hist[..]);
+        for n in 0..100 {
+            let v = (n as f64 * 0.37).sin() * 100.0;
+            hist.copy_within(0..MAX_LPC_ORDER - 1, 1);
+            hist[0] = v;
+            ring.push(v);
+            assert_eq!(ring.window(), &hist[..], "after push {n}");
+        }
+        assert_eq!(ring.to_array(), hist);
+    }
+
+    /// The rate loop adopts the memoised trial for the chosen offset. A second encoder that codes
+    /// every frame afresh at that offset (what the loop did before the memo) must produce the
+    /// same bytes, frame after frame, so the adopted encoder and range-coder states are exact.
+    #[test]
+    fn adopting_the_memoised_trial_equals_coding_the_frame_again() {
+        for (fs_khz, channels, target_bits, max_bits) in
+            [(8, 1, 200.0, 1000), (12, 1, 320.0, 1000), (16, 1, 480.0, 1000), (16, 2, 640.0, 1000), (16, 1, 900.0, 400), (8, 2, 120.0, 160)]
+        {
+            let mut memo = SilkEncoder::new(fs_khz, channels);
+            let mut fresh = memo.clone();
+            let l = memo.frame_len();
+            let frames = 40;
+            let left = signal(l * frames, fs_khz, 7);
+            let right: Vec<f32> = signal(l * frames + 37, fs_khz, 11)[37..].iter().map(|v| v * 0.6).collect();
+            for f in 0..frames {
+                let mut input = vec![left[f * l..(f + 1) * l].to_vec()];
+                if channels == 2 {
+                    input.push(right[f * l..(f + 1) * l].to_vec());
+                }
+                let mut enc = RangeEncoder::new();
+                memo.encode(&input, target_bits, max_bits, &mut enc);
+                let o = memo.last_offset;
+                let prep = fresh.prepare(&input);
+                let mut enc_fresh = RangeEncoder::new();
+                fresh.code(&prep, o, &mut enc_fresh);
+                fresh.end_frame(&prep, o);
+                assert_eq!(enc.tell(), enc_fresh.tell(), "{fs_khz} kHz {channels} ch frame {f}");
+                assert_eq!(enc.done(1275), enc_fresh.done(1275), "{fs_khz} kHz {channels} ch frame {f}");
+                for c in 0..channels {
+                    assert_eq!(memo.ch[c].nf, fresh.ch[c].nf, "noise feedback, channel {c}, frame {f}");
+                    assert_eq!(memo.ch[c].dec.s_lpc_q14, fresh.ch[c].dec.s_lpc_q14, "LPC state, channel {c}, frame {f}");
+                }
+            }
+        }
     }
 }
