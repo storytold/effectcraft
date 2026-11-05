@@ -306,6 +306,9 @@ fn project_panel_columns_scroll_horizontally() {
 fn timeline_header_icons_explain_themselves_on_hover() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness(1400.0);
+    // English whatever the system language: the menu item checked below is translated.
+    h.state_mut().session.prefs.general.language = "en".into();
+    h.run_steps(3);
     for (id, tip) in [
         ("timeline.header.av.solo", "Solo: while any layer is soloed, only the soloed layers render"),
         ("timeline.header.av.video", "Video: shows or hides the layer's picture in the composition"),
@@ -320,6 +323,13 @@ fn timeline_header_icons_explain_themselves_on_hover() {
         assert!(h.query_all_by_label(tip).count() > before, "{id}: hovering shows {tip:?}");
         h.event(Event::PointerMoved(pos2(5.0, 5.0)));
         h.run_steps(5);
+    }
+    // The header's accessible node carries the text as its description (screen readers).
+    {
+        use egui_kittest::kittest::NodeT;
+        let tip = "Solo: while any layer is soloed, only the soloed layers render";
+        let described = h.query_all_by_label("Solo").any(|n| n.accesskit_node().description().as_deref() == Some(tip));
+        assert!(described, "the Solo header's node describes it");
     }
     // A layer's own switch shows the same text.
     let lid = h.state().session.active_comp().unwrap().layers[0].id.0;

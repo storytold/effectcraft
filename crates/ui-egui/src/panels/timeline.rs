@@ -541,7 +541,12 @@ pub const HEADER_TIPS: [(&str, &str, &str, &str); 15] = [
     ("switches", "motionBlur", "Motion Blur", "Motion Blur: blurs the layer along its movement while the composition's Motion Blur is on"),
     ("switches", "adjustment", "Adjustment Layer", "Adjustment Layer: the layer's effects apply to every layer below it"),
     ("switches", "threeD", "3D Layer", "3D Layer: the layer moves and turns in depth and reacts to cameras and lights"),
-    ("modes", "preserveTransparency", "Preserve Transparency", "Preserve Transparency: the layer shows only where the layers below it are opaque"),
+    (
+        "modes",
+        "preserveTransparency",
+        "Preserve Transparency",
+        "Preserve Transparency: the layer shows only over the layers below it, and only as opaque as they are",
+    ),
 ];
 
 /// The hover text of the layer switch (or the header over it) named `key`.
@@ -2711,8 +2716,10 @@ fn column_header_interact(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut T
         if !r.is_positive() {
             continue;
         }
-        let resp = ui.interact(r, egui::Id::unique(("tl-colhdr-tip", key)), Sense::hover()).on_hover_text(tr(tip));
+        // The node first: the hover text becomes its accessible description only on an existing node.
+        let resp = ui.interact(r, egui::Id::unique(("tl-colhdr-tip", key)), Sense::hover());
         crate::a11y::role_name(&resp, egui::accesskit::Role::ColumnHeader, tr(name));
+        let _ = resp.on_hover_text(tr(tip));
         // `label` and `#` are a column each: `timeline.header.label` / `.num` already name them.
         if col != key {
             app.auto.add(&format!("timeline.header.{col}.{key}"), r, name);
