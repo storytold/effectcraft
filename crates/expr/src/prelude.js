@@ -1422,9 +1422,16 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
     lock(n);
   }
   // `Math.sin = …` goes the same way, and the prelude leans on both of these itself. They are the
-  // `prototype` of no function, so the loop above never reaches them.
-  freezeProto(Math);
-  freezeProto(JSON);
+  // `prototype` of no function, so the loop above never reaches them, and they are the prototype
+  // of no object either: nothing inherits `sin` or `parse`, so there is no shadowing for the
+  // accessor repair to keep, and a plain freeze closes them. That matters on the hot path, where
+  // a repaired name costs an accessor call on every read and a per-frame expression reads
+  // `Math.*` more than anything else. The bindings are locked as well, so `Math = {}` cannot take
+  // them away from the next expression either.
+  freeze(Math);
+  freeze(JSON);
+  lock('Math');
+  lock('JSON');
   // The iterator intrinsics are the `prototype` of no global function either, and `for…of`,
   // destructuring and spread all run through them: replacing `next` on the array iterator left
   // every later expression on the thread unable to iterate at all.

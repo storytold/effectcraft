@@ -289,6 +289,37 @@ fn an_expression_cannot_tamper_with_a_prelude_object_for_the_next_one() {
     assert_close!(f.num("typeof thisProject === 'object' && thisProject.leak === undefined ? 1 : 0", 0.0), 1.0);
 }
 
+/// `Math` and `JSON` are namespaces rather than prototypes: nothing inherits from them, so the
+/// prelude freezes them plainly instead of turning every method into a shadowable accessor, which
+/// would put a getter call on every `Math.sin` of a per-frame expression for a shadowing no object
+/// can do. They still cannot be rewritten, through a member or through the binding (#2176).
+#[test]
+fn math_and_json_are_frozen_and_cannot_be_replaced_for_the_next_expression() {
+    let f = fx();
+    assert_close!(f.num("Object.isFrozen(Math) && Object.isFrozen(JSON) ? 1 : 0", 0.0), 1.0);
+    // Plain data properties, not the accessor repair: the hot path reads the native method directly.
+    assert_close!(f.num("'value' in Object.getOwnPropertyDescriptor(Math, 'sin') ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("'value' in Object.getOwnPropertyDescriptor(JSON, 'stringify') ? 1 : 0", 0.0), 1.0);
+    // A member write is dropped in silence, and the next expression still has the original.
+    assert_close!(f.num("Math.sin = function () { return 9 }; Math.max = function () { return -1 };\n1", 0.0), 1.0);
+    assert_close!(f.num("Math.sin(Math.PI / 2) * 100 + Math.max(3, 7)", 0.0), 107.0);
+    assert_close!(f.num("JSON.stringify = function () { return 'x' }; JSON.parse = null;\n2", 0.0), 2.0);
+    assert_close!(f.num("JSON.stringify(JSON.parse('[1,2]')) === '[1,2]' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("Math.leak = 5; JSON.leak = 6;\n3", 0.0), 3.0);
+    assert_close!(f.num("Math.leak === undefined && JSON.leak === undefined ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("delete Math.floor ? 1 : 0", 0.0), 0.0);
+    assert!(f.err("Object.defineProperty(Math, 'floor', { value: 5 })").contains("TypeError"));
+    // The bindings are locked too: assignment, `var` and `delete` leave both in place.
+    assert_close!(f.num("Math = { sin: function () { return 9 } }; JSON = null;\n4", 0.0), 4.0);
+    assert_close!(f.num("var Math = 5; var JSON = 6;\n5", 0.0), 5.0);
+    assert_close!(f.num("delete Math || delete JSON ? 1 : 0", 0.0), 0.0);
+    assert_close!(f.num("Math.floor(2.7) + JSON.parse('3')", 0.0), 5.0);
+    // A second project on the same thread-local runtime meets the same objects.
+    let g = fx();
+    assert_close!(g.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(g.num("JSON.stringify([1]) === '[1]' ? 1 : 0", 0.0), 1.0);
+}
+
 /// Closing the prototypes must not cost an expression its own objects: once an inherited data
 /// property is non-writable, an assignment meaning to shadow it on an instance is dropped in sloppy
 /// mode rather than creating an own property, and using an object as a dictionary runs into exactly
