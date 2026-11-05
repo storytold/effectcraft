@@ -159,6 +159,22 @@ fn effects_use_after_effects_match_names_and_accept_legacy_ones() {
     );
 }
 
+/// #3113: names that changed only in case (`ADBE Ellipse` → `ADBE ELLIPSE`, `ADBE Grow Bounds` →
+/// `ADBE GROW BOUNDS`) still find the effect and its parameters.
+#[test]
+fn match_names_that_changed_case_still_find_effects_and_parameters() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("E", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var e = fx.addProperty("ADBE Ellipse"), g = fx.addProperty("ADBE Grow Bounds");
+           [e.matchName, fx.property("ADBE Ellipse").matchName, e.property("ADBE Ellipse-0001").matchName,
+            g.matchName, fx.property("ADBE Grow Bounds").matchName, g.property("ADBE Grow Bounds-0001").matchName]"#,
+    );
+    assert_eq!(o.result, json!(["ADBE ELLIPSE", "ADBE ELLIPSE", "ADBE ELLIPSE-0001", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS-0001"]));
+}
+
 #[test]
 fn stroke_parameters_use_after_effects_match_names() {
     // #1405: `ADBE Stroke-0002` is Stroke's Color in After Effects, not All Masks.
