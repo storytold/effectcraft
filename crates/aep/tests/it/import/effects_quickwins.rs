@@ -10,6 +10,7 @@ use effectcraft_keyframe::Value;
 
 const ECHO_OPS: &[&str] = &["Add", "Maximum", "Minimum", "Screen", "Composite In Back", "Composite In Front", "Blend"];
 
+/// Echo with the definitions After Effects 2026 wrote and the stored `values`.
 fn echo(values: Vec<(usize, f64)>) -> Fx {
     Fx {
         match_name: "ADBE Echo",
@@ -23,9 +24,11 @@ fn echo(values: Vec<(usize, f64)>) -> Fx {
         ],
         values,
         data: vec![],
+        keys: vec![],
     }
 }
 
+/// HDR Highlight Compression's Amount, set and default.
 #[test]
 fn hdr_highlight_compression_amount() {
     let fx = |values| Fx {
@@ -34,6 +37,7 @@ fn hdr_highlight_compression_amount() {
         defs: vec![slider(K::FloatSlider, "Amount", 100.0, (0.0, 100.0))],
         values,
         data: vec![],
+        keys: vec![],
     };
     // `hdr-01-set-all`: 90; `hdr-00-defaults`: no record, 100.
     for (values, want) in [(vec![(1, 90.0)], 90.0), (vec![], 100.0)] {
@@ -43,6 +47,7 @@ fn hdr_highlight_compression_amount() {
     }
 }
 
+/// Echo's values and operator, set and default.
 #[test]
 fn echo_values_and_operator() {
     // `echo-01-set-all` (without its Decay 20, below) and `echo-09-pop5-6`.
@@ -61,6 +66,7 @@ fn echo_values_and_operator() {
     assert_eq!((num(&g, "numberOfEchoes"), v(&g, "echoOperator")), (1.0, Value::Enum(0)));
 }
 
+/// Echo values beyond EffectCraft's ranges are imported as stored and reported.
 #[test]
 fn echo_values_beyond_effectcrafts_range_are_reported() {
     // `echo-03-max`: 30 000 echoes and Decay 100; EffectCraft's Echo uses at most 255 and 1.
@@ -75,6 +81,25 @@ fn echo_values_beyond_effectcrafts_range_are_reported() {
     near(&g, "decay", 100.0);
 }
 
+/// A keyframed Echo parameter keeps its keys as stored and reports the range loss.
+#[test]
+fn echo_keys_beyond_effectcrafts_range_are_kept_and_reported() {
+    // Number Of Echoes keyed 10 -> 30 000: the second key is beyond EffectCraft's 255.
+    let mut fx = echo(vec![]);
+    fx.keys = vec![(2, vec![(0, 10.0), (1000, 30000.0)])];
+    let (g, r) = run(&fx, "ec.time.echo");
+    let found = losses(&r, LossCategory::Effects, "ADBE Echo");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("Number Of Echoes") && found[0].contains("30000") && found[0].contains("0 to 255"), "{found:?}");
+    assert!(losses(&r, LossCategory::DamagedData, "ADBE Echo").is_empty());
+    // Both keys arrive with their values.
+    let g = g.expect("still imported");
+    let keys = &g.prop("numberOfEchoes").expect("numberOfEchoes").keys;
+    let values: Vec<Value> = keys.iter().map(|k| k.value.clone()).collect();
+    assert_eq!(values, [Value::Scalar(10.0), Value::Scalar(30000.0)]);
+}
+
+/// Linear Wipe's values, set and default.
 #[test]
 fn linear_wipe_values() {
     let fx = |values| Fx {
@@ -87,6 +112,7 @@ fn linear_wipe_values() {
         ],
         values,
         data: vec![],
+        keys: vec![],
     };
     // `linwipe-01-set-all`.
     let (g, r) = run(&fx(vec![(1, 10.0), (2, 77.0), (3, 16.0)]), "ec.transition.linearwipe");
@@ -99,6 +125,7 @@ fn linear_wipe_values() {
     near(&run(&fx(vec![]), "ec.transition.linearwipe").0.expect("imported"), "angle", 90.0);
 }
 
+/// Offset's Blend With Original as a percentage and its centre as a point.
 #[test]
 fn offset_blend_is_a_fraction_and_the_centre_a_point() {
     let fx = |values| Fx {
@@ -107,6 +134,7 @@ fn offset_blend_is_a_fraction_and_the_centre_a_point() {
         defs: vec![other(K::Point, "Shift Center To", Default::Point(0.5, 0.5)), slider(K::FixedSlider, "Blend With Original", 0.0, (0.0, 1.0))],
         values,
         data: vec![],
+        keys: vec![],
     };
     // `offset-02-chk-toggled`: Blend With Original stored 1.0 is 100 %.
     let (g, r) = run(&fx(vec![(2, 1.0)]), "ec.distort.offset");
@@ -118,6 +146,7 @@ fn offset_blend_is_a_fraction_and_the_centre_a_point() {
     near(&run(&fx(vec![(2, 0.25)]), "ec.distort.offset").0.expect("imported"), "blend", 25.0);
 }
 
+/// Color Stabilizer's points, Sample Size and Stabilize, default and set.
 #[test]
 fn color_stabilizer_points_sample_size_and_stabilize() {
     let fx = |values| Fx {
@@ -132,6 +161,7 @@ fn color_stabilizer_points_sample_size_and_stabilize() {
         ],
         values,
         data: vec![],
+        keys: vec![],
     };
     // `colstab-00-defaults`: Levels, the points at 20 %, 50 % and 80 % of the width.
     let (g, r) = run(&fx(vec![]), "ec.color.colorstabilizer");
