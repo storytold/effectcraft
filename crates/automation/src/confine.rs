@@ -11,7 +11,7 @@
 //! folder. In a headless session the footage and other files a project or an imported file names
 //! are read only inside the roots ([`ConfinedFootage`], [`ConfinedServices`]). Commands that run
 //! code or open other applications (scripts, ScriptUI panels and the events that reach them,
-//! Execute File, Reveal in Finder…) are refused while confined, as is granting scripts the file
+//! Execute File, effect helpers, Reveal in Finder…) are refused while confined, as is granting scripts the file
 //! and network access the user withheld.
 
 use std::path::{Component, Path, PathBuf};
@@ -56,6 +56,8 @@ const REFUSED: &[&str] = &[
     "scriptui.mouse",
     "scriptui.close",
     "file.executeFile",
+    "effect.helpers.scan",
+    "effect.helpers.load",
     "file.revealInFinder",
     "layer.openSource",
     "help.revealLogFile",

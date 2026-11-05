@@ -482,3 +482,12 @@ fn silent_layers_are_music_and_unread_hidden_layers() {
         assert_eq!(q.silent_layers(cid, q.comp(cid).unwrap(), &q.heard_layers()).into_iter().collect::<Vec<LayerId>>(), vec![rest]);
     }
 }
+
+/// Plug-in effects read their input at other times (plug-in API 2), so a precomp under one is
+/// re-rendered over its whole span; built-in effects only when they are on the list.
+#[test]
+fn plug_in_effects_read_other_frames() {
+    assert!(crate::reads_other_frames("org.example.glow"));
+    assert!(crate::reads_other_frames("ec.time.echo"));
+    assert!(!crate::reads_other_frames("ec.blur.gaussian"));
+}

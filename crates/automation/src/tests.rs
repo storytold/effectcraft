@@ -1482,6 +1482,9 @@ fn automation_roots_confine_file_access() {
     let steps = json!([{"command": "library.install", "params": {"id": "x"}}]);
     denied(&mut s, "batch", json!({"steps": steps}));
     call_json(&mut s, "execute_command", json!({"command": "library.list"}));
+    // Effect helpers are native programs: starting them or loading through them is refused too.
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.scan"}));
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.load", "params": {"path": p(&read, "x.ofx")}}));
     for (id, params) in [
         ("file.runStartupScripts", json!({})),
         ("file.runShutdownScripts", json!({})),

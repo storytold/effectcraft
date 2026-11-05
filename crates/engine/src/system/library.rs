@@ -299,11 +299,12 @@ pub fn parse_catalog(bytes: &[u8]) -> std::result::Result<(Catalog, Vec<String>)
     Ok((Catalog { schema: CATALOG_SCHEMA, packages }, warnings))
 }
 
-/// This build implements the release's plug-in API and is at least its `minApp`.
+/// This build loads the release's WebAssembly plug-in API ([`WASM_API_VERSION`](crate::effects::plugin::WASM_API_VERSION):
+/// the library lists `.wasm` modules only) and is at least its `minApp`.
 fn runs_here(r: &Release) -> bool {
     // Without a pre-release suffix (`0.18.0-dev` is 0.18.0).
     let app = env!("CARGO_PKG_VERSION").split(['-', '+']).next().unwrap_or_default();
-    r.api == crate::effects::plugin::PLUGIN_API_VERSION && r.min_app.as_deref().is_none_or(|m| !newer(m, app))
+    r.api == crate::effects::plugin::WASM_API_VERSION && r.min_app.as_deref().is_none_or(|m| !newer(m, app))
 }
 
 /// The newest release this build can run (plug-in API and minimum app version).
@@ -788,13 +789,13 @@ fn pick(s: &Session, c: &str, p: &Value) -> Result<(String, Package, Release)> {
         return Err(bad(
             c,
             format!(
-                "{} {} needs plug-in API {} and EffectCraft {} or later; this is EffectCraft {} with plug-in API {}",
+                "{} {} needs plug-in API {} and EffectCraft {} or later; this is EffectCraft {} with WebAssembly plug-in API {}",
                 pkg.name,
                 rel.version,
                 rel.api,
                 rel.min_app.as_deref().unwrap_or("(any)"),
                 env!("CARGO_PKG_VERSION"),
-                crate::effects::plugin::PLUGIN_API_VERSION
+                crate::effects::plugin::WASM_API_VERSION
             ),
         ));
     }
@@ -1111,7 +1112,7 @@ mod tests {
 
     #[test]
     fn the_newest_compatible_release_wins() {
-        let api = crate::effects::plugin::PLUGIN_API_VERSION;
+        let api = crate::effects::plugin::WASM_API_VERSION;
         let p = Package {
             versions: vec![
                 rel("1.0.0", api, None),
@@ -1119,10 +1120,13 @@ mod tests {
                 rel("1.1.0", api, None),
                 rel("9.0.0", api, Some("999.0")),
                 rel("3.0.0", api + 1, None),
+                rel("4.0.0", 0, None),
             ],
             ..Default::default()
         };
         assert_eq!(latest_compatible(&p).map(|r| r.version.as_str()), Some("1.2.0"));
+        assert!(runs_here(&rel("1.0.0", 1, None)), "API 1 modules still run on a build with a newer plug-in API");
+        assert!(!runs_here(&rel("1.0.0", 2, None)), "WebAssembly modules are API 1: an API 2 release can't load");
         let j = package_json(&p, None, &Status::default());
         assert_eq!(j["needsNewerApp"], true);
         assert!(latest_compatible(&Package::default()).is_none());
