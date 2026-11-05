@@ -1,4 +1,4 @@
-use super::*;
+use super::{Buf, EffectCtx, IndexedParallelIterator, ParallelIterator, ParallelSliceMut, Plane, Px, smoothstep};
 
 // ---------------------------------------------------------------- shared rasterisation
 
@@ -147,7 +147,6 @@ pub(super) fn chaikin(pts: &[[f64; 2]], iters: usize) -> Vec<[f64; 2]> {
 // ---------------------------------------------------------------- Scribble
 
 /// Scan runs (start, end along direction `d`) of the fill region on the line `n·p = s`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn scan_runs(polys: &[(Vec<[f64; 2]>, bool, bool)], fill: u32, ew: f64, d: [f64; 2], n: [f64; 2], s: f64, out: &mut Vec<(f64, f64)>) {
     out.clear();
     for (pts, _closed, inverted) in polys {

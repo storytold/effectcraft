@@ -163,6 +163,8 @@ pub fn language_menu() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("easeIn(t, tMin, tMax, value1, value2)", "easeIn(t, tMin, tMax, value1, value2)"),
                 ("easeOut(t, value1, value2)", "easeOut(t, value1, value2)"),
                 ("easeOut(t, tMin, tMax, value1, value2)", "easeOut(t, tMin, tMax, value1, value2)"),
+                ("bezier(t, value1, value2, [x1, y1, x2, y2])", "bezier(t, value1, value2, [x1, y1, x2, y2])"),
+                ("bezier(t, tMin, tMax, value1, value2, [x1, y1, x2, y2])", "bezier(t, tMin, tMax, value1, value2, [x1, y1, x2, y2])"),
             ],
         ),
         (

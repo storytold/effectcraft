@@ -9,6 +9,80 @@ fn select(s: &mut crate::Session, layer: u64, path: &str) {
     s.execute("prop.select", json!({"layer": layer, "path": path})).unwrap();
 }
 
+fn selection_command_skips_locked_keys(command: &str, path: &str, values: [serde_json::Value; 3], mut params: serde_json::Value) {
+    let (mut s, locked) = setup();
+    let unlocked = s.execute("layer.newSolid", json!({"name": "Editable", "width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    for layer in [locked, unlocked] {
+        animate(&mut s, layer, path, &[(0.0, values[0].clone()), (0.5, values[1].clone()), (1.0, values[2].clone())]);
+    }
+    let before = prop(&s, locked, path).keys;
+    let selected: Vec<_> = [locked, unlocked]
+        .into_iter()
+        .flat_map(|layer| {
+            let pr = prop(&s, layer, path);
+            pr.keys.into_iter().map(move |key| crate::KeyRef { layer: effectcraft_project::LayerId(layer), prop: pr.uid, time: key.time })
+        })
+        .collect();
+    s.execute("layer.setSwitch", json!({"layers": [locked], "switch": "locked", "value": true})).unwrap();
+    s.state.selected_keys = selected.clone();
+    if params.get("keys").is_some() {
+        params["keys"] = serde_json::to_value(&selected).unwrap();
+    }
+    s.execute_checked(command, params.clone()).unwrap();
+    assert_eq!(prop(&s, locked, path).keys, before, "{command} changed a locked layer");
+    let after = prop(&s, unlocked, path).keys;
+    assert_ne!(after, before, "{command} must still edit unlocked keys");
+    let after_selection = s.state.selected_keys.clone();
+    assert!(selected.iter().filter(|k| k.layer.0 == locked).all(|key| after_selection.contains(key)));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, unlocked, path).keys, before);
+    assert!(selected.iter().filter(|key| key.layer.0 == locked).all(|key| s.state.selected_keys.contains(key)));
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(prop(&s, unlocked, path).keys, after);
+    assert_eq!(s.state.selected_keys, after_selection);
+    // All-locked input must preserve the selection and document as well.
+    s.state.selected_keys.retain(|k| k.layer.0 == locked);
+    if params.get("keys").is_some() {
+        params["keys"] = serde_json::to_value(&s.state.selected_keys).unwrap();
+    }
+    let locked_selection = s.state.selected_keys.clone();
+    let project = serde_json::to_value(&*s.project).unwrap();
+    let _ = s.execute_checked(command, params);
+    assert_eq!(serde_json::to_value(&*s.project).unwrap(), project);
+    assert_eq!(s.state.selected_keys, locked_selection);
+}
+
+#[test]
+fn wiggler_preserves_locked_keys_in_mixed_selection() {
+    selection_command_skips_locked_keys(
+        "keys.wiggle",
+        "transform/opacity",
+        [json!(10), json!(90), json!(20)],
+        json!({"apply": "temporal", "frequency": 8, "magnitude": 10}),
+    );
+}
+
+#[test]
+fn smoother_preserves_locked_keys_in_mixed_selection() {
+    selection_command_skips_locked_keys("keys.smooth", "transform/opacity", [json!(10), json!(50), json!(90)], json!({"tolerance": 1}));
+}
+
+#[test]
+fn exponential_scale_preserves_locked_keys_in_mixed_selection() {
+    selection_command_skips_locked_keys(
+        "keys.exponentialScale",
+        "transform/scale",
+        [json!([100, 100, 100]), json!([150, 150, 150]), json!([400, 400, 400])],
+        json!({}),
+    );
+}
+
+#[test]
+fn edit_label_preserves_locked_keys_in_mixed_selection() {
+    selection_command_skips_locked_keys("edit.label", "transform/opacity", [json!(10), json!(50), json!(90)], json!({"label": "Red"}));
+    selection_command_skips_locked_keys("edit.label", "transform/opacity", [json!(10), json!(50), json!(90)], json!({"label": "Red", "keys": true}));
+}
+
 #[test]
 fn wiggle_adds_keys_at_frequency_within_magnitude() {
     let (mut s, l) = setup();

@@ -124,6 +124,44 @@ fn alt_dragging_a_project_item_replaces_the_layer_source() {
     assert_eq!(layer.name, "Top", "the layer keeps its name");
 }
 
+/// Alt/Option-dropping a Project item on the Composition viewer replaces the source of the layer
+/// under the pointer, as in the Timeline, instead of adding a layer (#2173).
+#[test]
+fn alt_dropping_a_project_item_on_the_viewer_replaces_the_layer_source() {
+    use effectcraft_engine::project::{ItemId, LayerId, LayerSource};
+    let (mut h, clip) = harness();
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = comp_to_screen(&h.ctx, [160.0, 90.0]).unwrap();
+    // The three solids overlap completely, so the topmost one is under the pointer.
+    let (top, middle, bottom) = (layer_id(&h, "Top"), layer_id(&h, "Middle"), layer_id(&h, "Bottom"));
+    let source = |h: &Harness<'_, EffectcraftApp>, id: u64| h.state().session.active_comp().unwrap().layer(LayerId(id)).unwrap().source.clone();
+    let (middle_before, bottom_before) = (source(&h, middle), source(&h, bottom));
+    let before = stack(&h);
+    drag(&mut h, item, to, Modifiers::ALT);
+    assert_eq!(stack(&h), before, "no layer is added");
+    assert_eq!(source(&h, top), LayerSource::Comp { item: ItemId(clip) }, "the layer under the pointer takes the new source");
+    assert_eq!(source(&h, middle), middle_before, "the layer below it keeps its source");
+    assert_eq!(source(&h, bottom), bottom_before, "the bottom layer keeps its source");
+}
+
+/// A locked layer under the pointer refuses the Alt-drop; the layer behind it is not replaced
+/// instead (#2173).
+#[test]
+fn alt_dropping_on_a_locked_layer_in_the_viewer_replaces_nothing() {
+    use effectcraft_engine::project::LayerId;
+    let (mut h, clip) = harness();
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = comp_to_screen(&h.ctx, [160.0, 90.0]).unwrap();
+    let top = layer_id(&h, "Top");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [top], "switch": "locked", "value": true})).unwrap();
+    h.run_steps(3);
+    let sources = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.iter().map(|l| l.source.clone()).collect::<Vec<_>>();
+    let before = sources(&h);
+    drag(&mut h, item, to, Modifiers::ALT);
+    assert_eq!(sources(&h), before, "no layer takes the new source");
+    assert!(h.state().session.active_comp().unwrap().layer(LayerId(top)).unwrap().switches.locked);
+}
+
 /// Ctrl+Alt+/ (Cmd+Opt+/ on macOS) replaces every selected layer's source with the Project panel
 /// selection (#991).
 #[test]
@@ -198,7 +236,7 @@ fn dragging_selected_project_items_adds_every_item_to_the_viewer() {
     let to = comp_to_screen(&h.ctx, [80.0, 45.0]).unwrap();
     drag(&mut h, from, to, Modifiers::NONE);
     assert_eq!(stack(&h), ["Clip", "Other", "Top", "Middle", "Bottom"]);
-    for layer in &h.state().session.active_comp().unwrap().layers[..2] {
+    for layer in h.state().session.active_comp().unwrap().layers.iter().take(2) {
         let Some(KV::Vec3(p)) = layer.props.prop("transform/position").map(|p| p.value.clone()) else { panic!("no position") };
         let tol = 1.0 / last_fit(&h.ctx) as f64 + 1e-6;
         assert!((p[0] - 80.0).abs() <= tol && (p[1] - 45.0).abs() <= tol, "{p:?}");
@@ -463,6 +501,19 @@ fn dropped_file_on_viewer_imports_and_adds_layer_at_pointer() {
     assert!((p[0] - 80.0).abs() <= tol && (p[1] - 45.0).abs() <= tol, "{p:?}");
 }
 
+/// #2588: a file dropped on the Timeline joins the composition the panel shows, as it does on the
+/// viewer; the import places the layer.
+#[test]
+fn dropped_file_on_the_timeline_becomes_a_layer() {
+    let (mut h, _) = harness();
+    h.state_mut().session.importer = Some(Arc::new(Gated { started: AtomicUsize::new(0), allow: Arc::new(AtomicUsize::new(usize::MAX)) }));
+    h.event(Event::PointerMoved(rect(&h, "panel.Timeline").center()));
+    h.step();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(std::env::temp_dir().join("timeline-drop.mp4"))));
+    h.run_steps(2);
+    step_until(&mut h, |h| h.state().session.active_comp().is_some_and(|c| c.layers.iter().any(|l| l.name == "timeline-drop.mp4")));
+}
+
 /// #678: a dropped Photoshop file asks how to import it, as File ▸ Import ▸ File… does; the
 /// Import Kind starts at Settings ▸ Import ▸ Default Drag Import As, and OK imports the drop.
 #[test]
@@ -591,6 +642,27 @@ fn import_dialog_offers_the_image_sequence_option() {
     click_id(&mut h, "form.ok");
     step_until(&mut h, |h| footage_items(h).len() == 2);
     assert_eq!(footage_items(&h)[1], ("frame_[0001-0003].png".to_string(), 3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2573: the empty Composition viewer's New Composition From Footage imports the picked file
+/// (through the Import Image Sequence question a numbered still asks) and makes a composition
+/// of it, as in After Effects.
+#[test]
+fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    h.run_steps(3);
+    let dir = frames("fromfootage", 2);
+    let pick = dir.join("frame_0002.png").to_string_lossy().to_string();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.state_mut().hooks.pick_files = Some(Box::new(move |_: &[&str]| vec![pick.clone()]));
+    click_id(&mut h, "viewer.empty.import");
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| h.state().session.active_comp().is_some());
+    let comp = h.state().session.active_comp().unwrap();
+    assert_eq!((comp.width, comp.height), (64, 32));
+    assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["frame_0002.png"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

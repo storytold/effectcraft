@@ -1,3 +1,4 @@
+use crate::gpu_test::RenderSerial;
 use std::sync::Arc;
 
 use effectcraft_engine::{
@@ -74,7 +75,7 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
         if name == "作品 clip.csv"
             && let Ok(file) = std::env::var("MEDIA_BROWSER_COPY_SNAPSHOT")
         {
-            h.render().unwrap().save(file).unwrap();
+            h.render_serialized().unwrap().save(file).unwrap();
         }
         assert_eq!(click(&mut h, &id, PointerButton::Primary), [path]);
         h.run_steps(3);

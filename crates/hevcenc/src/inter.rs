@@ -35,7 +35,8 @@ impl PlaneRef<'_> {
 
 /// Luma prediction samples (14-bit intermediate) of a w x h block at (x, y) displaced by the
 /// quarter-sample vector `mv`, into `out` (stride w).
-pub fn mc_luma(f: PlaneRef, bd: u32, x: i32, y: i32, mv: [i16; 2], w: usize, h: usize, out: &mut [i16]) {
+pub fn mc_luma(f: PlaneRef, bd: u32, x: i32, y: i32, mv: [i16; 2], size: (usize, usize), out: &mut [i16]) {
+    let (w, h) = size;
     let (fx, fy) = ((mv[0] & 3) as usize, (mv[1] & 3) as usize);
     let xi = x + (mv[0] as i32 >> 2);
     let yi = y + (mv[1] as i32 >> 2);
@@ -89,7 +90,8 @@ pub fn mc_luma(f: PlaneRef, bd: u32, x: i32, y: i32, mv: [i16; 2], w: usize, h: 
 }
 
 /// Chroma prediction samples of a w x h block at chroma position (x, y) with a 1/8-sample vector.
-pub fn mc_chroma(f: PlaneRef, bd: u32, x: i32, y: i32, mv: [i16; 2], w: usize, h: usize, out: &mut [i16]) {
+pub fn mc_chroma(f: PlaneRef, bd: u32, x: i32, y: i32, mv: [i16; 2], size: (usize, usize), out: &mut [i16]) {
+    let (w, h) = size;
     let (fx, fy) = ((mv[0] & 7) as usize, (mv[1] & 7) as usize);
     let xi = x + (mv[0] as i32 >> 3);
     let yi = y + (mv[1] as i32 >> 3);

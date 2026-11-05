@@ -805,6 +805,12 @@ pub fn check_nesting(src: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// An error when plain JavaScript `src` (not rewritten: what `eval` and `Function` get at run
+/// time) nests deeper than [`MAX_NESTING`] levels.
+pub fn check_plain_nesting(src: &str) -> Result<(), String> {
+    if too_nested(&tokenize(src).0) { Err(too_deep()) } else { Ok(()) }
+}
+
 fn too_deep() -> String {
     format!("Error: expression is nested too deeply (more than {MAX_NESTING} levels of brackets, or too long a chain of operators)")
 }

@@ -1,6 +1,7 @@
 use super::footage::NoFootage;
 use super::opts::RenderOpts;
-use super::*;
+use super::{Arc, EvalCtx, Footage, FrameBlend, FrameRate, Image, ItemId, Layer, LayerSource, Project, Renderer, TICKS_PER_SECOND, Tick, shapes, text};
+use rayon::prelude::*;
 
 /// The layer's frame blending mode, if the comp's Enable Frame Blending switch is on.
 /// One field of an interlaced frame as a full frame: the field's lines (`parity` 0 = even /
@@ -33,6 +34,23 @@ pub fn field_frame(img: &Image, parity: usize) -> Image {
     out
 }
 
+/// Interpret Footage ▸ Cineon Settings ▸ Logarithmic Conversion converts the log code values of
+/// a decoded (premultiplied) frame of `f` to the Current Gamma. When the conversion does not
+/// apply, the frame is returned unchanged.
+pub fn cineon_frame(img: Arc<Image>, f: &Footage) -> Arc<Image> {
+    if !f.cineon_applies() {
+        return img;
+    }
+    let cs = f.cineon;
+    let mut out = (*img).clone();
+    out.data.par_iter_mut().for_each(|p| {
+        let a = p[3];
+        let c = if a > 1e-6 { [p[0] / a, p[1] / a, p[2] / a] } else { [0.0; 3] }.map(|v| cs.convert(v));
+        *p = [c[0] * a, c[1] * a, c[2] * a, a];
+    });
+    Arc::new(out)
+}
+
 /// Interpret Footage ▸ Invert Alpha and Interpret As Linear Light on decoded (premultiplied)
 /// pixels; linear light is encoded in `space` ([`color::Pipe::linear_footage_space`]).
 pub fn interpret_pixels(img: &Image, f: &Footage, space: effectcraft_color::ColorSpace) -> Image {
@@ -62,6 +80,10 @@ pub(crate) fn frame_blend_mode(ctx: &EvalCtx, layer: &Layer) -> FrameBlend {
 /// fraction (0..1) of the way to the next frame. Exact (integer tick arithmetic), so frames that
 /// line up exactly report a fraction of 0.
 pub fn frame_position(t: Tick, rate: FrameRate) -> (i64, f64) {
+    // A project file can carry a zero or negative rate; there are no frames to land between.
+    if rate.num <= 0 || rate.den <= 0 {
+        return (0, 0.0);
+    }
     let num = t.0 as i128 * rate.num as i128;
     let den = TICKS_PER_SECOND as i128 * rate.den as i128;
     (num.div_euclid(den) as i64, num.rem_euclid(den) as f64 / den as f64)
@@ -132,7 +154,7 @@ pub fn content_bounds(ctx: &EvalCtx, layer: &effectcraft_project::Layer) -> Opti
         LayerSource::Shape => layer.props.sub("contents").and_then(|c| shapes::content_bounds(ctx, layer, c)).map(|r| [r.x0, r.y0, r.x1, r.y1]),
         LayerSource::Camera | LayerSource::Light { .. } => None,
         _ => {
-            let (w, h) = source_size(ctx.project, layer);
+            let (w, h) = ctx.source_size(layer);
             (w > 0 && h > 0).then_some([0.0, 0.0, w as f64, h as f64])
         }
     }

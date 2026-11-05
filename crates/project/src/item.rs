@@ -2,13 +2,31 @@ use super::comp::Comp;
 use super::footage::{Footage, FootageKind, Proxy, Solid};
 use super::layer::LayerSource;
 use super::settings::{APP_VERSION, ProjectError, ProjectSettings, SCHEMA_VERSION, SavedView};
-use super::*;
+use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Tick, file_check, limits};
+
+/// `base` numbered with the lowest counter from 2 for which `taken` is false: a copy of an item or
+/// another layer of the same name. A number set off by a space is a counter and is replaced
+/// (`Red Solid 1` → `Red Solid 2`, `shot 2` → `shot 3`); digits that end a word belong to the
+/// name and stay (`v-b1.mp4` → `v-b1.mp4 2`, `clip2.mov` → `clip2.mov 2`).
+pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let head = base.trim_end_matches(|c: char| c.is_ascii_digit());
+    let stem = match head.strip_suffix(' ') {
+        Some(stem) if head.len() < base.len() && !stem.trim_end().is_empty() => stem.trim_end(),
+        _ => base.trim_end(),
+    };
+    (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemId(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LayerId(pub u64);
+
+/// An explicit "None" in a layer parameter whose unset value means the owning layer (Compound
+/// Blur's Blur Layer, Displacement Map's map, Set Matte's matte): `Value::Layer(Some(NO_LAYER))`.
+/// Ids start at 1, so it never names a layer; it resolves to no layer and shows as "None".
+pub const NO_LAYER: u64 = 0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -98,6 +116,93 @@ impl Default for Project {
 }
 
 impl Project {
+    /// Some layer has an expression, which can read markers (`marker.key(1)`, `numKeys`,
+    /// `nearestKey`...). Only then do the markers of comps and layers affect what is rendered, so
+    /// frame caches ignore them otherwise.
+    pub fn reads_markers(&self) -> bool {
+        // Called for every frame identity and disk-cache key: stops at the first expression and
+        // builds no paths (`PropGroup::walk` formats one per node).
+        fn any_expr(g: &crate::PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                crate::Node::Prop(p) => p.expr.is_some(),
+                crate::Node::Group(sub) => any_expr(sub),
+            })
+        }
+        self.comps().any(|(_, c)| c.layers.iter().any(|l| any_expr(&l.props)))
+    }
+
+    /// The layers whose audio something draws ([`Heard`]): those a layer picks in an effect (an
+    /// Audio Spectrum or Audio Waveform's Audio Layer, even on itself), and the layers inside a
+    /// picked precomp, whose audio it mixes. With an expression anywhere (it can read any layer's
+    /// Audio Levels) every layer may be heard ([`Heard::contains`]).
+    pub fn heard_layers(&self) -> Heard {
+        let mut layers = std::collections::BTreeSet::new();
+        let mut stack: Vec<(ItemId, LayerId)> =
+            self.comps().flat_map(|(id, c)| c.layers.iter().flat_map(move |l| l.picked_layers().into_iter().map(move |r| (*id, r)))).collect();
+        // (bounded: each (comp, layer) is visited once)
+        while let Some((cid, lid)) = stack.pop() {
+            if !layers.insert((cid, lid)) {
+                continue;
+            }
+            let inner = self.comp(cid).and_then(|c| c.layer(lid)).and_then(|l| match l.source {
+                LayerSource::Comp { item } => Some(item),
+                _ => None,
+            });
+            if let Some(inner) = inner
+                && let Some(c) = self.comp(inner)
+            {
+                stack.extend(c.layers.iter().map(|l| (inner, l.id)));
+            }
+        }
+        Heard { expressions: self.reads_markers(), audio_exprs: self.reads_audio(), layers }
+    }
+
+    /// Some expression may read a layer's audio: its text names it (`audio`, `"Audio Levels"`,
+    /// `"ADBE Audio Group"`) or walks properties by index (`layer(1)(3)`).
+    // ponytail: text heuristic; misses an index walk through a variable (`g = layer(1); g(3)`).
+    // Upgrade: record audio reads in the expression host.
+    fn reads_audio(&self) -> bool {
+        fn reads(text: &str) -> bool {
+            let t: String = text.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
+            t.contains("audio") || t.match_indices(")(").any(|(i, _)| t.get(i + 2..).and_then(|r| r.chars().next()).is_some_and(|c| c.is_ascii_digit()))
+        }
+        fn any(g: &crate::PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                crate::Node::Prop(p) => p.expr.as_ref().is_some_and(|e| reads(&e.text)),
+                crate::Node::Group(sub) => any(sub),
+            })
+        }
+        self.comps().any(|(_, c)| c.layers.iter().any(|l| any(&l.props)))
+    }
+
+    /// Layers of `comp` (item `id`) that can't change its pixels: footage layers of files without
+    /// video (music, voice-over) and layers with the Video switch off, unless another layer reads
+    /// them (a hidden track matte) or something draws their audio ([`Self::heard_layers`]: the
+    /// Audio Spectrum's Audio Layer, also from a comp that nests this one). Cameras, lights,
+    /// nulls, environment layers and soloed layers (Solo hides every other layer) are never
+    /// silent. Expressions, which can read any layer, are the caller's concern.
+    pub fn silent_layers(&self, id: ItemId, comp: &Comp, heard: &Heard) -> std::collections::BTreeSet<LayerId> {
+        let read: std::collections::BTreeSet<LayerId> =
+            comp.layers.iter().flat_map(|l| l.referenced_layers().into_iter().filter(move |r| *r != l.id)).collect();
+        comp.layers
+            .iter()
+            .filter(|l| {
+                let no_picture = match &l.source {
+                    LayerSource::Footage { item } => matches!(self.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if !f.has_video),
+                    _ => false,
+                };
+                // (environment layers light Advanced 3D scenes without being drawn)
+                (no_picture || l.source.is_av() && !l.switches.video)
+                    && !l.switches.solo
+                    && !l.environment
+                    && !l.environment_background
+                    && !read.contains(&l.id)
+                    && !heard.picked(id, l.id)
+            })
+            .map(|l| l.id)
+            .collect()
+    }
+
     /// Allocate an id (items, layers and property uids share one counter).
     pub fn alloc(&mut self) -> u64 {
         let id = self.next_id;
@@ -147,13 +252,11 @@ impl Project {
     pub fn find_by_name(&self, name: &str) -> Option<&Item> {
         self.items.values().find(|i| i.name == name)
     }
-    /// A numbered name for a copy of `base` that no project item has (Edit ▸ Duplicate): its
-    /// trailing number is dropped and the lowest free one from 2 is added (`Comp 1` → `Comp 2`,
-    /// `Name` → `Name 2`, then `Name 3`). Items for which `ignore` holds don't count.
+    /// A numbered name for a copy of `base` that no project item has (Edit ▸ Duplicate), as
+    /// `numbered_name` gives it (`Comp 1` → `Comp 2`, `Name` → `Name 2`, then `Name 3`,
+    /// `v-b1.mp4` → `v-b1.mp4 2`). Items for which `ignore` holds don't count.
     pub fn numbered_item_name(&self, base: &str, ignore: impl Fn(&Item) -> bool) -> String {
-        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
-        let taken = |n: &str| self.items.values().any(|i| i.name == n && !ignore(i));
-        (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
+        numbered_name(base, |n| self.items.values().any(|i| i.name == n && !ignore(i)))
     }
     /// `base` when no project item has that name, else the next free numbered name as
     /// [`Project::numbered_item_name`] gives it. Items for which `ignore` holds don't count.
@@ -252,29 +355,18 @@ impl Project {
     /// (NaN or infinity, written as `null`, and nesting too deep to parse) are refused on every
     /// save; debug builds also read the text back.
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
-        self.to_file_json_with_view(&SavedView::default())
+        self.to_file_json_with_view(&SavedView::default(), false)
     }
-    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
-    pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
-        if self.schema > SCHEMA_VERSION {
-            return Err(ProjectError::Invalid(format!(
-                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
-                self.schema
-            )));
-        }
-        #[derive(Serialize)]
-        struct File<'a> {
-            #[serde(rename = "savedBy")]
-            saved_by: &'a str,
-            #[serde(flatten)]
-            view: &'a SavedView,
-            #[serde(flatten)]
-            project: &'a Project,
-        }
-        let file = File { saved_by: APP_VERSION, view, project: self };
+    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]), on one
+    /// line when `compact` (Settings ▸ Project ▸ Save Compact Project Files).
+    pub fn to_file_json_with_view(&self, view: &SavedView, compact: bool) -> Result<String, ProjectError> {
+        craft_ecproj_format::check_schema(self.schema)
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        let file = craft_ecproj_format::File::new(APP_VERSION, view, self);
         file_check::check(&file)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
-        let text = serde_json::to_string_pretty(&file).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let text =
+            if compact { file.to_json_compact() } else { file.to_json() }.map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
         #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
@@ -295,14 +387,45 @@ impl Project {
     /// hostile file still opens, within bounds, and the user can be told what changed.
     pub fn from_json_repaired(s: &str) -> Result<(Project, Vec<String>), ProjectError> {
         let mut p: Project = serde_json::from_str(s).map_err(|e| ProjectError::Invalid(e.to_string()))?;
-        if p.schema > SCHEMA_VERSION {
-            return Err(ProjectError::Invalid(format!("project schema {} is newer than this version supports ({SCHEMA_VERSION})", p.schema)));
-        }
+        craft_ecproj_format::check_schema(p.schema).map_err(|e| ProjectError::Invalid(e.to_string()))?;
         p.fix_next_id();
         let mut notes = vec![];
         for item in p.items.values_mut() {
             limits::repair_item(item, &mut notes);
         }
         Ok((p, notes))
+    }
+}
+
+/// The layers whose audio something draws ([`Project::heard_layers`]): their Audio switch, Audio
+/// group and audio effects change pixels.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// Some layer has an expression (it can read anything).
+    pub expressions: bool,
+    /// Some expression may read a layer's audio ([`Project::reads_audio`]).
+    audio_exprs: bool,
+    layers: std::collections::BTreeSet<(ItemId, LayerId)>,
+}
+
+impl Heard {
+    /// Something may draw the audio of layer `layer` of comp `comp`: a layer picks it
+    /// ([`Self::picked`]) or an expression may read it.
+    pub fn contains(&self, comp: ItemId, layer: LayerId) -> bool {
+        self.audio_exprs || self.picked(comp, layer)
+    }
+
+    /// A layer picks layer `layer` of comp `comp` in an effect (or a precomp of it), so draws its
+    /// audio. Expressions aside: they draw in their own layers.
+    pub fn picked(&self, comp: ItemId, layer: LayerId) -> bool {
+        self.layers.contains(&(comp, layer))
+    }
+
+    /// Heard in `self` or in `o` (the states before and after an edit).
+    pub fn union(mut self, o: &Heard) -> Heard {
+        self.expressions |= o.expressions;
+        self.audio_exprs |= o.audio_exprs;
+        self.layers.extend(o.layers.iter().copied());
+        self
     }
 }

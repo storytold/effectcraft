@@ -58,7 +58,8 @@ fn slip_moves_the_source_under_fixed_in_and_out() {
     let before = get(&s);
     assert_eq!((before.start_time, before.in_point.seconds(), before.out_point.seconds()), (Tick::ZERO, 1.0, 3.0));
     // Slip the source 0.5 s later: in/out stay, the source (start) moves.
-    s.execute("layer.slip", json!({"layers": [id], "delta": 0.5})).unwrap();
+    let r = s.execute("layer.slip", json!({"layers": [id], "delta": 0.5})).unwrap();
+    assert_eq!(r["slipped"][0]["clamped"], json!(false));
     let l = get(&s);
     assert_eq!((l.start_time.seconds(), l.in_point, l.out_point), (0.5, before.in_point, before.out_point));
     // The source time at comp 2 s is now 1.5 s.
@@ -67,6 +68,8 @@ fn slip_moves_the_source_under_fixed_in_and_out() {
     let r = s.execute("layer.slip", json!({"layers": [id], "delta": 5.0})).unwrap();
     assert_eq!(get(&s).start_time.seconds(), 1.0);
     assert_eq!(r["slipped"][0]["delta"], json!(0.5));
+    // The response says the 5 s asked for was cut short (#2371).
+    assert_eq!((r["requested"].clone(), r["slipped"][0]["clamped"].clone()), (json!(5.0), json!(true)));
     // Slip by a frame.
     s.execute("layer.slipBack", json!({"layers": [id]})).unwrap();
     assert!((get(&s).start_time.seconds() - (1.0 - 1.0 / 30.0)).abs() < 1e-9);

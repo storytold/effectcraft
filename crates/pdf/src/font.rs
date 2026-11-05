@@ -89,7 +89,7 @@ impl OutlinePen for Pen {
 
 /// A bundled stand-in for a font that is not embedded, by its PostScript name.
 fn fallback(base: &str) -> &'static [u8] {
-    use effectcraft_text::fonts::*;
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_ITALIC, INTER_REGULAR, INTER_SEMIBOLD, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR};
     let b = base.to_ascii_lowercase();
     if b.contains("courier") || b.contains("mono") || b.contains("consol") {
         return JETBRAINS_MONO_REGULAR;
@@ -393,89 +393,10 @@ impl Font {
         }
         // Widths.
         if f.composite {
-            f.default_width = file.get_num(&desc_dict, "DW").unwrap_or(1000.0) / 1000.0;
-            if let Some(w) = file.get(&desc_dict, "W").and_then(Obj::array) {
-                let mut i = 0;
-                while i < w.len() {
-                    let first = file.resolve(&w[i]).num().unwrap_or(0.0) as u32;
-                    match w.get(i + 1).map(|x| file.resolve(x)) {
-                        Some(Obj::Array(list)) => {
-                            for (k, v) in list.iter().enumerate() {
-                                if let Some(cid) = first.checked_add(k as u32) {
-                                    f.cid_widths.insert(cid, file.resolve(v).num().unwrap_or(0.0) / 1000.0);
-                                }
-                            }
-                            i += 2;
-                        }
-                        Some(Obj::Num(last)) => {
-                            let wv = w.get(i + 2).and_then(|x| file.resolve(x).num()).unwrap_or(0.0) / 1000.0;
-                            for c in first..=(*last as u32).min(first.saturating_add(65535)) {
-                                f.cid_widths.insert(c, wv);
-                            }
-                            i += 3;
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            // Vertical metrics (§9.7.4.3): /DW2 [vy w1y] and /W2 entries
-            // `c [w1y vx vy …]` or `cfirst clast w1y vx vy`.
-            let dw2 = file.get(&desc_dict, "DW2").map(|x| file.nums(x)).unwrap_or_default();
-            if dw2.len() == 2 {
-                f.dw2 = (dw2[0] / 1000.0, dw2[1] / 1000.0);
-            }
-            if let Some(w) = file.get(&desc_dict, "W2").and_then(Obj::array) {
-                let num = |i: usize| w.get(i).and_then(|x| file.resolve(x).num());
-                let mut i = 0;
-                while i < w.len() {
-                    let Some(first) = num(i) else { break };
-                    let first = first.max(0.0) as u32;
-                    match w.get(i + 1).map(|x| file.resolve(x)) {
-                        Some(Obj::Array(list)) => {
-                            let v: Vec<f64> = list.iter().filter_map(|x| file.resolve(x).num()).collect();
-                            for (k, t) in v.as_chunks::<3>().0.iter().enumerate() {
-                                if let Some(cid) = first.checked_add(k as u32) {
-                                    f.cid_vmetrics.insert(cid, (t[0] / 1000.0, t[1] / 1000.0, t[2] / 1000.0));
-                                }
-                            }
-                            i += 2;
-                        }
-                        Some(Obj::Num(last)) => {
-                            let (Some(w1), Some(vx), Some(vy)) = (num(i + 2), num(i + 3), num(i + 4)) else { break };
-                            for c in first..=(last.max(0.0) as u32).min(first.saturating_add(65535)) {
-                                f.cid_vmetrics.insert(c, (w1 / 1000.0, vx / 1000.0, vy / 1000.0));
-                            }
-                            i += 5;
-                        }
-                        _ => break,
-                    }
-                }
-            }
+            f.load_cid_widths(file, &desc_dict);
+            f.load_vertical_metrics(file, &desc_dict);
             f.has_widths = true;
-            // Encoding CMap.
-            match file.get(d, "Encoding") {
-                Some(Obj::Name(n)) => {
-                    f.vertical = n.ends_with("-V");
-                    if !n.starts_with("Identity") {
-                        skipped.push(format!("CMap {n}"));
-                    }
-                }
-                Some(Obj::Stream(sd, raw)) => {
-                    if let Some(data) = decode_stream(file, sd, raw) {
-                        let cm = parse_cmap(&data);
-                        f.vertical = cm.wmode || file.get_num(sd, "WMode") == Some(1.0);
-                        f.codespace = cm.codespace;
-                        f.cid_ranges = cm.cids;
-                    }
-                }
-                _ => {}
-            }
-            match file.get(&desc_dict, "CIDToGIDMap") {
-                Some(Obj::Stream(sd, raw)) => {
-                    f.cid_to_gid = decode_stream(file, sd, raw).map(|b| b.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect());
-                }
-                _ => f.cid_to_gid = None,
-            }
+            f.load_cid_encoding(file, d, &desc_dict, skipped);
         } else {
             f.first_char = file.get_num(d, "FirstChar").unwrap_or(0.0) as u32;
             if let Some(w) = file.get(d, "Widths") {
@@ -486,16 +407,113 @@ impl Font {
                 f.default_width = file.get_num(fd, "MissingWidth").unwrap_or(0.0);
             }
         }
+        f.load_program(file, d, fd.as_ref(), &subtype, skipped);
+        f.load_simple_encoding(file, d);
+        f
+    }
+
+    fn load_cid_widths(&mut self, file: &File, desc_dict: &Dict) {
+        self.default_width = file.get_num(desc_dict, "DW").unwrap_or(1000.0) / 1000.0;
+        if let Some(w) = file.get(desc_dict, "W").and_then(Obj::array) {
+            let mut i = 0;
+            while i < w.len() {
+                let first = file.resolve(&w[i]).num().unwrap_or(0.0) as u32;
+                match w.get(i + 1).map(|x| file.resolve(x)) {
+                    Some(Obj::Array(list)) => {
+                        for (k, v) in list.iter().enumerate() {
+                            if let Some(cid) = first.checked_add(k as u32) {
+                                self.cid_widths.insert(cid, file.resolve(v).num().unwrap_or(0.0) / 1000.0);
+                            }
+                        }
+                        i += 2;
+                    }
+                    Some(Obj::Num(last)) => {
+                        let wv = w.get(i + 2).and_then(|x| file.resolve(x).num()).unwrap_or(0.0) / 1000.0;
+                        for c in first..=(*last as u32).min(first.saturating_add(65535)) {
+                            self.cid_widths.insert(c, wv);
+                        }
+                        i += 3;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    fn load_vertical_metrics(&mut self, file: &File, desc_dict: &Dict) {
+        // Vertical metrics (§9.7.4.3): /DW2 [vy w1y] and /W2 entries
+        // `c [w1y vx vy …]` or `cfirst clast w1y vx vy`.
+        let dw2 = file.get(desc_dict, "DW2").map(|x| file.nums(x)).unwrap_or_default();
+        if dw2.len() == 2 {
+            self.dw2 = (dw2[0] / 1000.0, dw2[1] / 1000.0);
+        }
+        if let Some(w) = file.get(desc_dict, "W2").and_then(Obj::array) {
+            let num = |i: usize| w.get(i).and_then(|x| file.resolve(x).num());
+            let mut i = 0;
+            while i < w.len() {
+                let Some(first) = num(i) else { break };
+                let first = first.max(0.0) as u32;
+                match w.get(i + 1).map(|x| file.resolve(x)) {
+                    Some(Obj::Array(list)) => {
+                        let v: Vec<f64> = list.iter().filter_map(|x| file.resolve(x).num()).collect();
+                        for (k, t) in v.as_chunks::<3>().0.iter().enumerate() {
+                            if let Some(cid) = first.checked_add(k as u32) {
+                                self.cid_vmetrics.insert(cid, (t[0] / 1000.0, t[1] / 1000.0, t[2] / 1000.0));
+                            }
+                        }
+                        i += 2;
+                    }
+                    Some(Obj::Num(last)) => {
+                        let (Some(w1), Some(vx), Some(vy)) = (num(i + 2), num(i + 3), num(i + 4)) else { break };
+                        for c in first..=(last.max(0.0) as u32).min(first.saturating_add(65535)) {
+                            self.cid_vmetrics.insert(c, (w1 / 1000.0, vx / 1000.0, vy / 1000.0));
+                        }
+                        i += 5;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    fn load_cid_encoding(&mut self, file: &File, d: &Dict, desc_dict: &Dict, skipped: &mut Vec<String>) {
+        // Encoding CMap.
+        match file.get(d, "Encoding") {
+            Some(Obj::Name(n)) => {
+                self.vertical = n.ends_with("-V");
+                if !n.starts_with("Identity") {
+                    skipped.push(format!("CMap {n}"));
+                }
+            }
+            Some(Obj::Stream(sd, raw)) => {
+                if let Some(data) = decode_stream(file, sd, raw) {
+                    let cm = parse_cmap(&data);
+                    self.vertical = cm.wmode || file.get_num(sd, "WMode") == Some(1.0);
+                    self.codespace = cm.codespace;
+                    self.cid_ranges = cm.cids;
+                }
+            }
+            _ => {}
+        }
+        match file.get(desc_dict, "CIDToGIDMap") {
+            Some(Obj::Stream(sd, raw)) => {
+                self.cid_to_gid = decode_stream(file, sd, raw).map(|b| b.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect());
+            }
+            _ => self.cid_to_gid = None,
+        }
+    }
+
+    fn load_program(&mut self, file: &File, d: &Dict, fd: Option<&Dict>, subtype: &str, skipped: &mut Vec<String>) {
         // The program.
         let font_file = |key: &str| -> Option<(Dict, Vec<u8>)> {
-            let fd = fd.as_ref()?;
+            let fd = fd?;
             match file.get(fd, key) {
                 Some(Obj::Stream(sd, raw)) => Some((sd.clone(), decode_stream(file, sd, raw)?)),
                 _ => None,
             }
         };
         if subtype == "Type3" {
-            f.matrix = file
+            self.matrix = file
                 .get(d, "FontMatrix")
                 .map(|m| file.nums(m))
                 .filter(|m| m.len() == 6)
@@ -511,76 +529,78 @@ impl Font {
                     }
                 }
             }
-            f.program = Program::Type3 { procs, resources: file.get_dict(d, "Resources").cloned() };
+            self.program = Program::Type3 { procs, resources: file.get_dict(d, "Resources").cloned() };
             // Type 3 widths are in glyph space.
-            let m = f.matrix.as_coeffs()[0];
-            for w in &mut f.widths {
+            let m = self.matrix.as_coeffs()[0];
+            for w in &mut self.widths {
                 *w *= m * 1000.0;
             }
         } else if let Some((_, data)) = font_file("FontFile2") {
-            f.program = Program::TrueType(Arc::new(data));
+            self.program = Program::TrueType(Arc::new(data));
         } else if let Some((sd, data)) = font_file("FontFile3") {
             match file.get(&sd, "Subtype").and_then(Obj::name) {
                 Some("OpenType") => {
                     // An OpenType wrapper: TrueType outlines through skrifa, CFF through ours.
                     let cff = FontRef::new(&data).ok().and_then(|fr| fr.table_data(skrifa::Tag::new(b"CFF ")).map(|t| t.as_bytes().to_vec()));
                     match cff.and_then(|c| Cff::parse(&c)) {
-                        Some(c) => f.program = Program::Cff(Box::new(c)),
-                        None => f.program = Program::TrueType(Arc::new(data)),
+                        Some(c) => self.program = Program::Cff(Box::new(c)),
+                        None => self.program = Program::TrueType(Arc::new(data)),
                     }
                 }
                 _ => match Cff::parse(&data) {
-                    Some(c) => f.program = Program::Cff(Box::new(c)),
+                    Some(c) => self.program = Program::Cff(Box::new(c)),
                     None => skipped.push("font program (CFF)".into()),
                 },
             }
         } else if let Some((_, data)) = font_file("FontFile") {
             match Type1::parse(&data) {
-                Some(t) => f.program = Program::Type1(Box::new(t)),
+                Some(t) => self.program = Program::Type1(Box::new(t)),
                 None => skipped.push("font program (Type 1)".into()),
             }
         } else {
-            f.program = Program::Fallback(fallback(&base_name));
+            self.program = Program::Fallback(fallback(&self.base_name));
         }
-        if let Program::Cff(c) = &f.program {
+        if let Program::Cff(c) = &self.program {
             let m = c.font_matrix;
-            f.matrix = Affine::new(m);
+            self.matrix = Affine::new(m);
         }
-        if let Program::Type1(t) = &f.program
+        if let Program::Type1(t) = &self.program
             && let Some(m) = t.font_matrix
         {
-            f.matrix = Affine::new(m);
+            self.matrix = Affine::new(m);
         }
+    }
+
+    fn load_simple_encoding(&mut self, file: &File, d: &Dict) {
         // Simple-font encoding: base encoding, built-in encoding, Differences.
-        if !f.composite {
+        if !self.composite {
             let enc = file.get(d, "Encoding").map(|e| file.resolve(e));
             let base = match enc {
                 Some(Obj::Name(n)) => Base::from_name(n),
                 Some(Obj::Dict(e)) => file.get(e, "BaseEncoding").and_then(Obj::name).and_then(Base::from_name),
                 _ => None,
             };
-            let builtin: Option<Vec<Option<String>>> = match &f.program {
+            let builtin: Option<Vec<Option<String>>> = match &self.program {
                 Program::Type1(t) if !t.encoding.is_empty() => Some((0..256).map(|c| t.encoding.get(&(c as u8)).cloned()).collect()),
                 _ => None,
             };
-            let fallback_base = if f.symbolic { None } else { Some(Base::Standard) };
+            let fallback_base = if self.symbolic { None } else { Some(Base::Standard) };
             for c in 0..256usize {
-                f.names[c] = match (base, &builtin) {
+                self.names[c] = match (base, &builtin) {
                     (Some(b), _) => b.name(c as u8),
                     (None, Some(bi)) => bi[c].clone(),
-                    (None, None) => match &f.program {
+                    (None, None) => match &self.program {
                         // TrueType symbolic fonts map codes directly; others use Standard.
-                        Program::TrueType(_) if f.symbolic => None,
-                        Program::Fallback(_) if base_name.contains("Symbol") || base_name.contains("Dingbats") => None,
+                        Program::TrueType(_) if self.symbolic => None,
+                        Program::Fallback(_) if self.base_name.contains("Symbol") || self.base_name.contains("Dingbats") => None,
                         _ => fallback_base.or(Some(Base::Standard)).and_then(|b| b.name(c as u8)),
                     },
                 };
             }
             if let Some(Obj::Dict(e)) = enc {
-                differences(file, e, &mut f.names);
+                differences(file, e, &mut self.names);
             }
         }
-        f
     }
 
     /// Split a string into (code, byte length) pairs.

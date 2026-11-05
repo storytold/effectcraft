@@ -2,7 +2,8 @@ use super::limits::{Error, Result};
 use super::model::{
     Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
 };
-use super::*;
+use super::{Psd, Reader, descriptor, engine_data, placed};
+use std::sync::Arc;
 
 /// Whether `bytes` start like a Photoshop document.
 pub fn is_psd(bytes: &[u8]) -> bool {

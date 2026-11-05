@@ -9,7 +9,7 @@
 //! - `ui.inspect`: UI state + summary; `ui.elements {prefix?}`: registered widgets (id, label, rect)
 //! - `ui.set {tool?, workspace?, theme?, focused?, viewer?: {zoom, res, pan, grid, …}, timeline?: {pps, start, graphEditor, showModes}}`
 //! - `ui.panel.show {panel}` / `ui.panel.close {panel}`
-//! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
+//! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy,unit?,source?,pinch?}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
 //! - `ui.key {key, command?, shift?, alt?, ctrl?}` / `ui.type {text}`
 //! - `ui.viewer.locate {x, y}`: screen point of a comp pixel; `ui.viewer.hit {x, y}`: comp pixel at a screen point
@@ -500,8 +500,9 @@ fn drag(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
-/// Queues a move to the target point, a wheel event of `dx`, `dy` points with the request's
-/// modifiers, and a released Extra1 button. Replies [`Outcome::AfterInput`].
+/// Queues a move to the target point, a wheel event of `dx`, `dy` (`unit`: points or lines) with
+/// the request's modifiers, a pinch's zoom factor, and a released Extra1 button. Replies
+/// [`Outcome::AfterInput`].
 fn scroll(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     let pos = match point(app, p) {
         Ok(p) => p,
@@ -509,14 +510,23 @@ fn scroll(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     };
     let dx = p.get("dx").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let dy = p.get("dy").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let line = p.get("unit").and_then(Value::as_str) == Some("line");
+    let unit = if line { egui::MouseWheelUnit::Line } else { egui::MouseWheelUnit::Point };
+    // Without a `source`, a scroll in lines is a mouse wheel and one in points comes from an
+    // unnamed device, as on Windows, Linux and the web.
+    let source = match p.get("source").and_then(Value::as_str) {
+        Some("trackpad") => egui::MouseWheelSource::Trackpad,
+        Some("wheel") => egui::MouseWheelSource::Wheel,
+        _ if line => egui::MouseWheelSource::Wheel,
+        _ => egui::MouseWheelSource::Unknown,
+    };
     app.synthetic.push(egui::Event::PointerMoved(pos));
-    app.synthetic.push(egui::Event::MouseWheel {
-        unit: egui::MouseWheelUnit::Point,
-        delta: egui::vec2(dx, dy),
-        modifiers: modifiers(p),
-        phase: egui::TouchPhase::Move,
-        source: egui::MouseWheelSource::Wheel,
-    });
+    if dx != 0.0 || dy != 0.0 {
+        app.synthetic.push(egui::Event::MouseWheel { unit, delta: egui::vec2(dx, dy), modifiers: modifiers(p), phase: egui::TouchPhase::Move, source });
+    }
+    if let Some(pinch) = p.get("pinch").and_then(Value::as_f64).filter(|z| z.is_finite() && *z > 0.0) {
+        app.synthetic.push(egui::Event::Zoom(pinch as f32));
+    }
     app.synthetic.push(egui::Event::PointerButton {
         pos: egui::pos2(-100.0, -100.0),
         button: egui::PointerButton::Extra1,
@@ -609,6 +619,12 @@ fn playback(app: &mut EffectcraftApp, p: &Value, now: f64) -> Outcome {
 /// when the capture is issued.
 fn screenshot(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
+    // A file the project reads is never the output.
+    if let Some(path) = s("path")
+        && let Err(e) = app.session.refuse_export(path)
+    {
+        return err(e);
+    }
     // The panel/element is an identity, not a rectangle: it is resolved when the capture
     // is issued (after the UI settles), so a panel that moves meanwhile is not cropped
     // with its old rectangle.
@@ -657,11 +673,17 @@ fn quit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     ok(Value::Null)
 }
 
-/// `render.frame {comp?, time?, max_side?, path?, base64?}`: render a comp frame through the session
+/// `render.frame {comp?, time?, max_side?, path?, base64?, write?}`: render a comp frame through the session
 /// (independent of the viewer zoom/resolution) and return it as PNG, written to `path` (default a
-/// temp file) or inline as base64 when `base64: true`.
+/// temp file) or inline as base64 when `base64: true`. `write: true` with `base64: true` does both.
 fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let s = &app.session;
+    // A file the project reads is never the output (checked before rendering).
+    if let Some(path) = p.get("path").and_then(Value::as_str)
+        && let Err(e) = s.refuse_export(path)
+    {
+        return err(e);
+    }
     let cid = match s.resolve_comp(p.get("comp")) {
         Ok(c) => c,
         Err(e) => return err(e),
@@ -680,7 +702,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let mut out = json!({"comp": cid.0, "time": t.seconds(), "width": w, "height": h});
     // (the web has no file system: inline unless a path is given)
     let inline = p.get("base64").and_then(Value::as_bool).unwrap_or(cfg!(target_arch = "wasm32") && p.get("path").is_none());
-    if inline {
+    if inline && !p.get("write").and_then(Value::as_bool).unwrap_or(false) {
         out["png"] = json!(base64(&png));
         return ok(out);
     }
@@ -689,7 +711,10 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| std::env::temp_dir().join(format!("effectcraft-frame-{}.png", std::process::id())).to_string_lossy().to_string());
-    match std::fs::write(&path, png) {
+    if inline {
+        out["png"] = json!(base64(&png));
+    }
+    match s.write_output(&path, &png) {
         Ok(()) => {
             out["path"] = json!(path);
             ok(out)

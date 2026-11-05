@@ -9,8 +9,9 @@ use serde_json::{Value, json};
 use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session};
 
-/// Commands that can't run inside a batch (they replace the project or nest batches).
-const NOT_IN_BATCH: &[&str] = &["engine.batch", "file.runScript", "script.run"];
+/// Commands that can't run inside a batch (they nest batches), besides the commands that run
+/// scripts ([`super::scripts::RUNS_SCRIPTS`]).
+const NOT_IN_BATCH: &[&str] = &["engine.batch"];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -78,7 +79,7 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                 .or_else(|| step.get("id"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| bad("engine.batch", "each step needs `command` (a command id)"))?;
-            if NOT_IN_BATCH.contains(&id) {
+            if NOT_IN_BATCH.contains(&id) || super::scripts::RUNS_SCRIPTS.contains(&id) {
                 return Err(bad("engine.batch", format!("`{id}` can't run inside a batch")));
             }
             let params = substitute(step.get("params").unwrap_or(&json!({})), results)?;

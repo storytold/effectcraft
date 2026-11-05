@@ -1,12 +1,16 @@
 use super::choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, THEMES, WINDOW_GRAPHICS, choices, is_choice, theme_family};
-use super::recent::MAX_EFFECTS_FAVORITES;
+use super::recent::{MAX_EFFECTS_FAVORITES, MAX_RECENT_SCRIPTS};
 use super::sections::{CompPreset, default_labels, parse_hex};
-use super::*;
+use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json};
 
 /// Bring an older settings document up to [`PREFS_VERSION`].
 ///
 /// - version 0/1 (early builds) kept a flat object: `undoLevels`, `autoSaveEnabled`,
 ///   `autoSaveMinutes`, `autoSaveVersions`, `labelNames` (array) and `theme` at the top level.
+/// - version 2 defaulted the disk cache to 100 GB, more than most laptops have free; the stored
+///   old default becomes the new one (a size the user chose is kept).
+/// - version 3 and earlier could still hold `createSplitLayersAbove: false`, the default before
+///   #2083 (every save kept it); it becomes After Effects' default, above (#2545).
 pub fn migrate(mut v: Value) -> Value {
     let Some(obj) = v.as_object_mut() else { return json!({}) };
     let version = obj.get("version").and_then(Value::as_u64).unwrap_or(0);
@@ -34,6 +38,18 @@ pub fn migrate(mut v: Value) -> Value {
             obj.insert("labels".into(), serde_json::to_value(labels).unwrap_or_default());
         }
     }
+    if version < 3
+        && let Some(d) = obj.get_mut("disk").and_then(Value::as_object_mut)
+        && d.get("diskCacheMaxGb").and_then(Value::as_u64) == Some(100)
+    {
+        d.insert("diskCacheMaxGb".into(), json!(20));
+    }
+    if version < 4
+        && let Some(g) = obj.get_mut("general").and_then(Value::as_object_mut)
+        && g.get("createSplitLayersAbove") == Some(&json!(false))
+    {
+        g.insert("createSplitLayersAbove".into(), json!(true));
+    }
     // Settings saved before appearance modes had one theme: keep showing it, as a fixed Dark or
     // Light mode, instead of switching established users to Auto.
     if let Some(a) = obj.get_mut("appearance").and_then(Value::as_object_mut)
@@ -60,7 +76,15 @@ impl Prefs {
             Err(_) => {
                 let mut base = serde_json::to_value(Prefs::default()).unwrap_or_default();
                 if let (Some(b), Some(o)) = (base.as_object_mut(), v.as_object()) {
+                    // Only the settings' own pages are tried one by one (each trial parses the
+                    // whole document): any other key is kept as it is, so a document of many
+                    // unknown keys costs one pass, not one parse per key.
+                    let pages: Vec<String> = b.keys().cloned().collect();
                     for (k, x) in o {
+                        if !pages.contains(k) {
+                            b.insert(k.clone(), x.clone());
+                            continue;
+                        }
                         let mut trial = b.clone();
                         trial.insert(k.clone(), x.clone());
                         if serde_json::from_value::<Prefs>(Value::Object(trial)).is_ok() {
@@ -138,6 +162,7 @@ impl Prefs {
         self.grids.grid_spacing = self.grids.grid_spacing.clamp(1.0, 10_000.0);
         let n = self.general.recent_items as usize;
         self.recent_projects.truncate(n);
+        self.recent_scripts.truncate(MAX_RECENT_SCRIPTS);
     }
 
     /// The value at a dotted key (`general.undoLevels`, `labels.3.color`); `""` = everything.
@@ -203,6 +228,7 @@ impl Prefs {
                 recent_projects: std::mem::take(&mut self.recent_projects),
                 recent_footage: std::mem::take(&mut self.recent_footage),
                 recent_presets: std::mem::take(&mut self.recent_presets),
+                recent_scripts: std::mem::take(&mut self.recent_scripts),
                 recent_fonts: std::mem::take(&mut self.recent_fonts),
                 effects_favorites: std::mem::take(&mut self.effects_favorites),
                 preview: std::mem::take(&mut self.preview),
@@ -276,6 +302,7 @@ pub fn page_id(name: &str) -> Option<&'static str> {
         "scripting" | "scriptingexpressions" => "scripting",
         "roto" | "rotobrush" | "models" => "roto",
         "face" | "facetracking" => "face",
+        "library" | "pluginlibrary" | "plugins" | "plugin" => "library",
         _ => return None,
     };
     Some(id)

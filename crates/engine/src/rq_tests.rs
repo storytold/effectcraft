@@ -117,6 +117,25 @@ fn persists_in_project_file() {
 }
 
 #[test]
+fn targa_sequence_output_module() {
+    let (mut s, _) = rq_session();
+    let a = s.execute("renderQueue.add", json!({"format": "tga", "output": "/out/[compName]_[#####].tga", "channels": "rgba"})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((format!("{:?}", om.format), om.channels.label()), ("TargaSequence".to_string(), "RGB + Alpha"));
+    assert!(a["outputPath"].as_str().unwrap().ends_with("_[#####].tga"), "{a}");
+    // Uncompressed: an 18-byte header and 4 bytes a pixel with alpha, 3 without.
+    assert_eq!(crate::render_queue::bytes_per_frame(om, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 4.0);
+    s.execute("renderQueue.setOutputModule", json!({"index": 1, "channels": "rgb"})).unwrap();
+    assert_eq!(crate::render_queue::bytes_per_frame(&s.project.render_queue[0].output, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 3.0);
+    let f = s.execute("renderQueue.formats", json!({})).unwrap();
+    let tga = f["formats"].as_array().unwrap().iter().find(|f| f["id"] == "TargaSequence").cloned();
+    assert_eq!(
+        tga,
+        Some(json!({"id": "TargaSequence", "label": "Targa Sequence", "extension": "tga", "sequence": true, "alpha": true, "audio": false, "available": true}))
+    );
+}
+
+#[test]
 fn failure_toast_names_the_first_reason() {
     struct Failing;
     impl Exporter for Failing {
@@ -186,7 +205,7 @@ fn without_exporter() {
     s.execute("renderQueue.add", json!({})).unwrap();
     assert!(!s.is_enabled("renderQueue.render"));
     let f = s.execute("renderQueue.formats", json!({})).unwrap();
-    assert_eq!(f["formats"].as_array().unwrap().len(), 13);
+    assert_eq!(f["formats"].as_array().unwrap().len(), 14);
     assert_eq!(f["formats"][0]["available"], false);
 }
 

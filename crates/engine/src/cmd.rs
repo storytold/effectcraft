@@ -1,6 +1,7 @@
 //! The command registry. Ids follow After Effects' menu structure; every menu item, panel button,
 //! shortcut and viewer/timeline gesture maps to one of these.
 
+mod aep;
 mod align;
 mod align_data;
 mod anim;
@@ -10,6 +11,7 @@ mod animation;
 pub(crate) mod app_more;
 mod autotrace;
 mod batch;
+mod blender;
 mod camera_cmds;
 mod comp;
 pub(crate) mod comp_more;
@@ -17,6 +19,8 @@ pub mod content_fill;
 mod create;
 mod edit;
 mod effect;
+pub use effect::{CryptoCoverage, CryptoProbeJob, PLUGINS_DIR};
+pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
 pub mod essential;
 pub mod expr_tools;
 mod file;
@@ -156,13 +160,13 @@ mod enabled;
 mod params;
 mod schema;
 
-use super::*;
+use super::commands;
 pub use enabled::always;
 pub(crate) use enabled::{has_comp, has_keys, has_layers, has_project_selection, not_yet, not_yet_run};
 pub use params::match_path_of;
 pub(crate) use params::{
-    b_p, bad, comp_id, f_p, frontend, layer_mut, layer_p, layers_p, merge_p, resolve_effect_path, resolve_layer, selectable, selected_leaf_props, str_p,
-    time_p, unlocked, visible_p,
+    b_p, bad, comp_id, f_p, frontend, layer_mut, layer_p, layers_or, layers_p, merge_p, popup_options, resolve_effect_path, resolve_layer, selectable,
+    selected_leaf_props, str_p, time_p, unlocked, visible_p,
 };
 pub use schema::{accepted_params, check_params, params_schema};
 
@@ -172,6 +176,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         let mut v = Vec::new();
         v.extend(file::specs());
         v.extend(crate::models::specs());
+        v.extend(crate::library::specs());
         v.extend(edit::specs());
         v.extend(comp::specs());
         v.extend(layer::specs());
@@ -214,6 +219,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(relink::specs());
         v.extend(relink_moved::specs());
         v.extend(lottie::specs());
+        v.extend(aep::specs());
         v.extend(import_project::specs());
         v.extend(timeline::specs());
         v.extend(comp_more::specs());

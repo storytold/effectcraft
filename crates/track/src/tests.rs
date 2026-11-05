@@ -93,6 +93,55 @@ fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
+fn bits(v: &Option<([f64; 2], [f64; 2])>) -> Option<[u64; 4]> {
+    v.map(|(c, a)| [c[0].to_bits(), c[1].to_bits(), a[0].to_bits(), a[1].to_bits()])
+}
+
+#[test]
+fn scorer_matches_ncc_for_integer_offsets() {
+    let pose = Pose { c: [60.0, 50.0], rot: 0.0, scale: 1.0 };
+    let img = frame(120, 100, pose, 20.0, 0.02, 1, None);
+    let crop = Crop::new(&Frame::new(&img), &TrackOptions::default(), [60.0, 50.0], [40.0, 30.0], 1);
+    for (lvl, c, a) in [(0, [30.3, 25.9], [0.97, 0.21]), (0, [12.0, 9.5], [1.2, -0.3]), (1, [20.4, 14.2], [0.8, 0.0]), (0, [30.3, 25.9], [1.0, 0.0])] {
+        let plane = &crop.levels[lvl];
+        let r = [7, 5];
+        let patch = Patch::sample(plane, c, a, r);
+        let sc = Scorer::new(plane, &patch, [c[0] + 0.3, c[1] - 0.45], a);
+        for j in -9..=9 {
+            for i in -9..=9 {
+                let q = [c[0] + 0.3 + i as f64, c[1] - 0.45 + j as f64];
+                assert_eq!(sc.at(i, j).to_bits(), ncc(plane, &patch, q, a).to_bits(), "level {lvl} {a:?} ({i}, {j})");
+            }
+        }
+    }
+}
+
+#[test]
+fn lk_refine_with_a_gradient_window_equals_the_full_gradients() {
+    let pose = Pose { c: [100.0, 90.0], rot: 5.0, scale: 1.05 };
+    let (img0, img1) = (frame(200, 180, pose, 30.0, 0.02, 1, None), frame(200, 180, Pose { c: [103.2, 88.1], rot: 6.5, scale: 1.08 }, 30.0, 0.02, 2, None));
+    let (opts, r) = (TrackOptions::default(), [24, 24]);
+    let (c0, a0) = ([100.0, 90.0], [1.0, 0.0]);
+    let tpl = Crop::new(&Frame::new(&img0), &opts, c0, [60.0, 60.0], 0);
+    let crop = Crop::new(&Frame::new(&img1), &opts, c0, [60.0, 60.0], 0);
+    let plane = &crop.levels[0];
+    let patch = Patch::sample(&tpl.levels[0], tpl.to_level(c0, 0), a0, r);
+    let mid = crop.to_level(c0, 0);
+    // Starts within the window, and far enough off that the iterations leave it (even near the edge).
+    for (d, edge) in [([0.0, 0.0], false), ([1.3, -0.8], false), ([4.0, 5.0], false), ([9.0, -9.0], false), ([0.0, 0.0], true)] {
+        let start = if edge { [4.0, 4.0] } else { [mid[0] + d[0], mid[1] + d[1]] };
+        for shape in [true, false] {
+            let (mut full, mut win) = (Grad::full(plane), Grad::around(plane, start, a0, r));
+            let x = lk_refine(&crop, &mut full, &patch, start, a0, shape);
+            let y = lk_refine(&crop, &mut win, &patch, start, a0, shape);
+            assert_eq!(bits(&x), bits(&y), "{d:?} edge {edge} shape {shape}");
+            // A window that misses the taps altogether is replaced by the full gradients.
+            let mut off = Grad::around(plane, [start[0] + 15.0, start[1] + 15.0], a0, r);
+            assert_eq!(bits(&x), bits(&lk_refine(&crop, &mut off, &patch, start, a0, shape)), "{d:?} edge {edge} shape {shape}: missed window");
+        }
+    }
+}
+
 #[test]
 fn recovers_translation_path_subpixel() {
     let path = |f: usize| {
@@ -112,6 +161,27 @@ fn recovers_translation_path_subpixel() {
     }
     eprintln!("worst error {worst:.4} px");
     assert!(worst < 0.25, "worst error {worst} px");
+}
+
+#[test]
+fn recovers_after_sudden_jumps_the_prediction_misses() {
+    // Alternating large steps defeat the velocity prediction, so the fine stage must keep its
+    // wider neighbourhood; smooth frames in between use the narrow one.
+    let path = |f: usize| {
+        let t = f as f64;
+        let jump = [0.0, 7.0, -5.0, 9.0, -8.0, 6.0, -7.0, 8.0];
+        let j = jump[f % jump.len()];
+        Pose { c: [120.0 + 1.5 * t + j, 100.0 + 1.1 * t - 0.6 * j], rot: 0.0, scale: 1.0 }
+    };
+    let f0 = frame(360, 260, path(0), 40.0, 0.02, 0, None);
+    let mut tr = Tracker::new(TrackOptions::default(), &[spec(path(0).c, 31.0, 91.0)], &Frame::new(&f0));
+    for f in 1..24 {
+        let img = frame(360, 260, path(f), 40.0, 0.02, f as u32, None);
+        let r = tr.step(&Frame::new(&img))[0];
+        let e = dist(r.center, path(f).c);
+        assert!(e < 0.3, "frame {f}: error {e} px");
+        assert_eq!(r.status, Status::Tracked);
+    }
 }
 
 #[test]

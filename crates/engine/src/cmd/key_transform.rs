@@ -72,6 +72,10 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
         let mut new_sel = vec![];
         for ((lid, uid), times) in groups {
             let Some(layer) = comp.layer_mut(lid) else { continue };
+            if layer.switches.locked {
+                new_sel.extend(times.into_iter().map(|time| KeyRef { layer: lid, prop: uid, time }));
+                continue;
+            }
             let (start, stretch) = (layer.start_time, layer.stretch);
             let to_comp = |lt: Tick| if (stretch - 100.0).abs() < 1e-9 { start + lt } else { start + Tick((lt.0 as f64 * stretch / 100.0) as i64) };
             let to_layer = |ct: Tick| {
@@ -122,6 +126,9 @@ fn spatial_tangents(s: &mut Session, p: &Value) -> Result<Value> {
     let brk = b_p(p, "break").unwrap_or(false);
     s.edit("Edit Spatial Tangents", merge_p(p), |proj, _| {
         let l = super::layer_mut(proj, cid, lid)?;
+        if l.switches.locked {
+            return Err(bad("keys.setSpatialTangents", "the layer is locked"));
+        }
         let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.setSpatialTangents", "no property"))?;
         if !pr.spatial {
             return Err(bad("keys.setSpatialTangents", "not a spatial property"));

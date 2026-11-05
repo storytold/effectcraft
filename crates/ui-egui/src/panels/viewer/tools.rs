@@ -1,6 +1,6 @@
 use super::geometry::{cam_state, l2c, parent_inverse};
 use super::gesture::{Gesture, pen_id};
-use super::*;
+use super::{CameraState, Color32, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, Rect, Stroke, Tool, ViewerMap, gv2, json, ov, three_d, vec2, vt};
 
 /// The position change per comp pixel of drag (x, y) that moves a layer by `dir` when the
 /// pointer covers the axis' on-screen vector `s` (comp px); drag across the axis is ignored.
@@ -137,14 +137,18 @@ pub(super) fn draw_rigs(
 /// layer, or a new shape layer when nothing is selected. The placed point snaps.
 /// Add a Position keyframe at a motion path's frame, keeping the path where it is.
 pub(super) fn add_motion_key(app: &mut EffectcraftApp, f: ov::PathFrame) {
-    if let Err(e) = app.session.execute("prop.addKey", json!({"layer": f.layer.0, "prop": f.prop, "time": f.time.seconds()})) {
-        app.ui.status = e.to_string();
+    // Separated dimensions: the key goes on X and Y Position.
+    for prop in f.axes.map_or_else(|| vec![f.prop], Vec::from) {
+        if let Err(e) = app.session.execute("prop.addKey", json!({"layer": f.layer.0, "prop": prop, "time": f.time.seconds()})) {
+            app.ui.status = e.to_string();
+        }
     }
 }
 
-/// Select only the motion path's keyframe `k` (what the vertex tools act on).
+/// Select only the motion path's keyframe `k` (what the vertex tools act on; with separated
+/// dimensions, the X and Y Position keys at its time).
 pub(super) fn select_motion_key(app: &mut EffectcraftApp, k: &ov::KeyHit) -> bool {
-    app.session.execute("keys.select", json!({"keys": [{"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()}]})).is_ok()
+    app.session.execute("keys.select", json!({"keys": k.select_entries()})).is_ok()
 }
 
 /// The pointer for a Pen slot tool: the tool's own pen, the Pen showing Add Vertex's over a path

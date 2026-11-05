@@ -1,5 +1,5 @@
 use super::sections::parse_hex;
-use super::*;
+use super::{Label, Prefs, Serialize, Tick};
 
 impl Prefs {
     /// Display name of a label (Labels settings).

@@ -32,7 +32,7 @@ use effectcraft_effects::{Buf, EffectCtx, EffectEnv, EffectHost, LayerPixels, Pa
 use effectcraft_geom::{Mat3, Mat4, vec2};
 use effectcraft_project::{Comp, Footage, FootageKind, FrameBlend, GroupKind, ItemId, ItemKind, Layer, LayerSource, MatteKind, Project, Quality, Sampling};
 pub use effectcraft_raster::Image;
-use effectcraft_raster::{WarpOpts, composite_warp};
+use effectcraft_raster::{WarpOpts, composite_warp_changed};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 pub use eval::{EvalCtx, ExprHost, effect_bounds, source_size};
 use rayon::prelude::*;
@@ -48,8 +48,8 @@ mod pipeline;
 pub use accel::{Accelerator, Backend, FxStep, FxTarget};
 pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage};
 pub use frames::{
-    adaptive_samples, blend_frames, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path, render_frame,
-    roi_inside,
+    adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,
+    render_frame, roi_inside,
 };
 #[cfg(test)]
 use fx_host::FxHost;
@@ -60,6 +60,7 @@ pub use layers::{Placement, StyledLayer};
 pub(crate) use opts::Collapse3d;
 pub use opts::{LayerTiming, RenderOpts};
 use opts::{MAX_THROUGH, Through};
+pub use pipeline::{Collapsed, MediaOverride, PropertyOverride};
 
 pub struct Renderer<'a> {
     pub project: &'a Project,

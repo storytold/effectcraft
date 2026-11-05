@@ -1,5 +1,8 @@
 use super::pieces::{M3, Piece, PiecePlan, PieceTex, inv3, rot_axis, rot_xyz, sort_far_first};
-use super::*;
+use super::{
+    Acc, Buf, EffectCtx, Image, IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, Lighting, ParallelIterator, Post, Shape, Sprite,
+    SpritePlan, Value, h, hs, layer_or_self, unpremul,
+};
 
 // ------------------------------------------------------------------ Card Dance
 

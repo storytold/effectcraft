@@ -362,7 +362,7 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
         }
         ControlType::Checkbox => {
             let mut on = v.as_bool();
-            let r = ui.checkbox(&mut on, "");
+            let r = crate::widgets::labelled_checkbox(ui, &mut on, "");
             if r.changed() {
                 out = Some(json!(on));
             }

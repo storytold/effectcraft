@@ -238,7 +238,7 @@ fn dst_fbm(u: f32, v: f32, z: f32, seed: u32) -> f32 {
         if (o + 1u == n && frac > 0.0) {
             w = frac;
         }
-        sum += value_noise(u * f, v * f, z + f32(o) * 5.17, seed + o * 101u) * amp * w;
+        sum += value_noise_linear_z(u * f, v * f, z + f32(o) * 5.17, seed + o * 101u) * amp * w;
         norm += amp * w;
         amp *= falloff;
         f *= 2.0;

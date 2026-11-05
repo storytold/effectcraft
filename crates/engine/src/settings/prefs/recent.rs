@@ -1,4 +1,6 @@
-use super::*;
+use serde::{Deserialize, Serialize};
+
+use super::Prefs;
 
 impl Prefs {
     /// Remember a project in File ▸ Open Recent.
@@ -44,6 +46,34 @@ impl Prefs {
     /// Remember an applied animation preset for Animation ▸ Recent Animation Presets.
     pub fn push_recent_preset(&mut self, path: &str) {
         push_mru(&mut self.recent_presets, path, self.general.recent_items as usize);
+    }
+
+    /// Remember a script that ran for File ▸ Scripts ▸ Recent Script Files.
+    pub fn push_recent_script(&mut self, script: RecentScript) {
+        self.recent_scripts.retain(|x| *x != script);
+        self.recent_scripts.insert(0, script);
+        self.recent_scripts.truncate(MAX_RECENT_SCRIPTS);
+    }
+}
+
+/// Most scripts File ▸ Scripts ▸ Recent Script Files lists.
+pub const MAX_RECENT_SCRIPTS: usize = 10;
+
+/// A File ▸ Scripts ▸ Recent Script Files entry, stored as the `file.runScript` parameter that
+/// ran it: `{"path": …}` for a script file, `{"name": …}` for an installed or bundled script.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecentScript {
+    Path(String),
+    Name(String),
+}
+
+impl RecentScript {
+    /// The file's path or the script's name.
+    pub fn text(&self) -> &str {
+        match self {
+            RecentScript::Path(s) | RecentScript::Name(s) => s,
+        }
     }
 }
 

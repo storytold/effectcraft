@@ -13,7 +13,7 @@ use std::sync::Arc;
 use effectcraft_color::Label;
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, LayerId, LayerSource, build};
 use effectcraft_raster::Image;
-use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, dilate, fill_sequence};
+use effectcraft_raster::inpaint::{FillInput, FillMethod, FillOpts, dilate};
 use effectcraft_render::{Accelerator, EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -170,8 +170,36 @@ pub struct FillPlan {
     pub dir: String,
 }
 
+/// The fill holds every frame as float RGBA (16 bytes a pixel), its hole mask (1) and the filled
+/// copy (16) until it finishes (#1789): when even that is more than `available`, the error to
+/// report up front, instead of running out of memory partway through.
+fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
+    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(33);
+    (need > available).then(|| {
+        let gb = |b: u64| b as f64 / 1e9;
+        format!(
+            "Content-Aware Fill of {frames} frames at {w}×{h} needs at least {:.1} GB of memory, and {:.1} GB is free: fill a shorter range (set the work area and choose Work Area) or close other applications",
+            gb(need),
+            gb(available)
+        )
+    })
+}
+
+/// The status line shown while the frames are filled. Edge Blend calls only the membrane, which
+/// the device backend leaves to the CPU reference, so it is not a device fill even when a `fill`
+/// backend is present; Object and Surface run the flow and PatchMatch on the device.
+fn filling_status(on_device: bool, method: FillMethod) -> &'static str {
+    if on_device && method != FillMethod::EdgeBlend { "Filling (GPU)" } else { "Filling" }
+}
+
 /// Run a fill: the layer's frames (rendered in passes with a job worker's GPU), the fill, the
 /// PNG sequence written into `plan.dir` (`Services::store_file`). Returns the files.
+///
+/// `accel` renders the frames (a job worker's GPU, as for every analysis: `None` on the
+/// desktop, whose analysis threads render on the CPU by design); `fill` is the fill's own
+/// backend ([`effectcraft_raster::inpaint::FillBackend`]), which is what makes Content-Aware
+/// Fill itself run on the GPU. They are separate on purpose: a desktop fill can run on the GPU
+/// while its input frames are composited on the CPU.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_plan(
     plan: &FillPlan,
@@ -181,6 +209,7 @@ pub(crate) async fn run_plan(
     cache: &LayerCache,
     services: &dyn crate::Services,
     accel: Option<&dyn Accelerator>,
+    fill: Option<&dyn effectcraft_raster::inpaint::FillBackend>,
     progress: &mut dyn FnMut(u64, u64) -> bool,
     message: &mut dyn FnMut(&str),
 ) -> std::result::Result<Vec<String>, String> {
@@ -218,10 +247,13 @@ pub(crate) async fn run_plan(
             references.push((k, img));
         }
     }
-    message("Filling");
     let opts = FillOpts { method: FillMethod::from_name(&plan.method).unwrap_or_default(), lighting: plan.lighting, ..Default::default() };
+    message(filling_status(fill.is_some(), opts.method));
     let input = FillInput { frames, holes, references };
-    let out = fill_sequence(&input, &opts, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3)).ok_or(crate::render_queue::CANCELLED)?;
+    let cpu = effectcraft_raster::inpaint::CpuFill;
+    let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
+    let out = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3))
+        .ok_or(crate::render_queue::CANCELLED)?;
     message("Writing the fill layer");
     let dir = &plan.dir;
     let mut paths = vec![];
@@ -275,6 +307,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let (fa, fb) = (fr.frame_at(fr.snap_nearest(a)), fr.frame_at(b - Tick(1)));
     let times: Vec<Tick> = (fa..=fb).map(|f| fr.tick_of(f)).collect();
+    if let Some(e) = crate::sysinfo::memory().and_then(|m| memory_shortfall(times.len(), w, h, m.available)) {
+        return Err(bad(c, e));
+    }
     let opts = FillOpts {
         method: FillMethod::from_name(&st.method).unwrap_or_default(),
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
@@ -306,7 +341,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let services = s.services.clone();
     let importer = s.importer.clone();
     let name = layer.name.clone();
+    // The fill's own GPU backend (Mercury GPU Acceleration; none under Software Only or
+    // without a compositor). The frames themselves still render on the CPU here, as for every
+    // desktop analysis (`offload::job_accel`): only the fill's own work moves to the device.
+    let accel = if s.project.settings.gpu_acceleration { s.accel.clone() } else { None };
     s.spawn_task("contentFill", format!("Content-Aware Fill: {name}"), wait, move |ctl| {
+        let fill = accel.as_deref().and_then(|a| a.inpaint());
         let paths = effectcraft_render::passes::block_on(run_plan(
             &plan,
             &lf.project,
@@ -315,6 +355,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             &lf.cache,
             services.as_ref(),
             None,
+            fill,
             &mut |d, t| ctl.progress(d, t),
             &mut |m| ctl.message(m),
         ))?;
@@ -423,4 +464,30 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: true,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{filling_status, memory_shortfall};
+
+    /// Edge Blend fills with the membrane, which the device backend leaves to the CPU reference:
+    /// it must not claim a GPU fill just because a backend is available.
+    #[test]
+    fn edge_blend_is_not_reported_as_a_device_fill() {
+        use effectcraft_raster::inpaint::FillMethod;
+        assert_eq!(filling_status(true, FillMethod::Object), "Filling (GPU)");
+        assert_eq!(filling_status(true, FillMethod::Surface), "Filling (GPU)");
+        assert_eq!(filling_status(true, FillMethod::EdgeBlend), "Filling");
+        assert_eq!(filling_status(false, FillMethod::Object), "Filling");
+    }
+
+    /// #1789: 10 s of 1080p30 (300 frames) needs at least 20 GB, which 4 GB free can't hold.
+    #[test]
+    fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
+        let e = memory_shortfall(300, 1920, 1080, 4_000_000_000).expect("refused");
+        assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
+        assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a second of it fits");
+        // Hostile sizes saturate instead of overflowing.
+        assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, u64::MAX - 1).is_some());
+    }
 }

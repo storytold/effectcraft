@@ -7,7 +7,8 @@
 //!
 //! Pin positions are in effect space. A new pin is attached to the mesh under it: the click is
 //! mapped back through the current deformation to the rest mesh (its hidden rest position), and
-//! Position / Advanced pins get a Position keyframe at the current time, as in After Effects.
+//! Position / Advanced pins get a Position keyframe at the current time, as in After Effects. Off
+//! every mesh a pin starts a new mesh, unless its art already has one (#2865).
 
 use effectcraft_effects::puppet::{self, MeshOpts, PinKind};
 use effectcraft_effects::{Buf, Params};
@@ -38,7 +39,8 @@ pub fn puppet_eval(s: &Session, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick)
     let fx = layer.effects()?;
     let index = fx.groups().position(|g| g.uid == fx_uid)?;
     let g = fx.groups().nth(index)?;
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let mut r = Renderer::new(&s.project, &*s.footage, RenderOpts::default());
     r.expr = s.expr.as_deref();
     r.cache = Some(&s.layer_cache);
@@ -59,6 +61,32 @@ fn snapped(s: &Session, cid: ItemId, p: &Value) -> Result<Tick> {
 fn layer_time(s: &Session, cid: ItemId, lid: LayerId, t: Tick) -> Result<Tick> {
     let l = s.project.comp(cid).and_then(|c| c.layer(lid)).ok_or(EngineError::NoComp)?;
     Ok(l.layer_time(t))
+}
+
+/// Whether a pin at `at` (effect space) goes on this mesh as `def` deforms it: on it or beside it.
+fn on_mesh(mesh: &puppet::Mesh, def: &[[f64; 2]], at: [f64; 2]) -> bool {
+    !mesh.tris.is_empty() && (puppet::contains(mesh, def, at) || def.iter().map(|v| (v[0] - at[0]).hypot(v[1] - at[1])).fold(f64::MAX, f64::min) < 12.0)
+}
+
+/// Whether a new mesh at `at` (effect space) would repeat a mesh of `params`: the art it would
+/// outline is that mesh's own, even if a deformation has carried the mesh off it (#2865).
+fn repeats_mesh(buf: &Buf, params: &Params, at: [f64; 2]) -> bool {
+    let (w, h) = (buf.img.width as usize, buf.img.height as usize);
+    let alpha: Vec<f32> = buf.img.data.iter().map(|p| p[3]).collect();
+    puppet::parse(params).iter().any(|m| {
+        let mut outline = puppet::mesh::outline(&alpha, w, h, buf.scale.max(1e-9), buf.offset, at, m.opts.expansion);
+        // As `triangulate` winds it.
+        if puppet::mesh::signed_area(&outline) < 0.0 {
+            outline.reverse();
+        }
+        puppet::mesh_for(buf, m).outline == outline
+    })
+}
+
+/// Whether `puppet.addPin` at `at` (effect space) places a pin on a layer with a Puppet effect.
+pub fn places_pin(s: &Session, cid: ItemId, lid: LayerId, at: [f64; 2], t: Tick) -> bool {
+    let Some((buf, params)) = find_puppet(s, cid, lid).and_then(|fu| puppet_eval(s, cid, lid, fu, t)) else { return true };
+    !repeats_mesh(&buf, &params, at) || puppet::overlay(&buf, &params).iter().any(|(_, mesh, def, _)| on_mesh(mesh, def, at))
 }
 
 fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
@@ -92,9 +120,7 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             if want_mesh.is_some_and(|w| w != *uid) || mesh.tris.is_empty() {
                 continue;
             }
-            let inside = puppet::contains(mesh, def, at);
-            let near = def.iter().map(|v| (v[0] - at[0]).hypot(v[1] - at[1])).fold(f64::MAX, f64::min) < 12.0;
-            if inside || near || want_mesh.is_some() {
+            if on_mesh(mesh, def, at) || want_mesh.is_some() {
                 let rest = puppet::unmap(mesh, def, at);
                 // A moving pin holds its nearest mesh vertex at `position + (vertex - rest)`
                 // (puppet::solve). Choose the position that keeps that vertex where it is now, so
@@ -118,6 +144,9 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             && let Some(w) = want_mesh
         {
             return Err(bad(cmd, format!("no mesh {w}")));
+        }
+        if target.is_none() && repeats_mesh(&buf, &params, at) {
+            return Ok(json!({"pin": null, "changed": false}));
         }
     }
     let opts = MeshOpts {

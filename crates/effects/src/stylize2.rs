@@ -457,7 +457,11 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
                     fy = 1.0 - fy;
                 }
             }
-            *px = src.sample_bilinear(fx * lw * s + b.offset[0], fy * lh * s + b.offset[1]);
+            // Clamped: a tile edge lands exactly on a pixel centre whenever the boundary does
+            // (#2820's animated Tile Center walks it across the grid), and the plain sampler
+            // would mix in the transparent outside at the source's geometric edge, leaving a
+            // half-faded seam pixel along the fold.
+            *px = src.sample_bilinear_clamped(fx * lw * s + b.offset[0], fy * lh * s + b.offset[1]);
         }
     });
     Buf { img: out, offset: noff, scale: s }
@@ -805,6 +809,37 @@ mod tests {
         let img = ramp(10, 8);
         for (a, b) in same.img.data.iter().zip(img.data.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn motion_tile_mirror_folds_stay_opaque() {
+        // A fold that lands exactly on a pixel centre samples the source's geometric edge, where
+        // the plain bilinear tap reaches half a texel into the transparent outside — a faint
+        // seam line on the mirrored boundary that sweeps the tile while Tile Center animates
+        // (#2820). The fold must repeat the edge texel instead: opaque, and exactly the pixel
+        // it mirrors.
+        let img = ramp(10, 8);
+        let out = run_at(
+            "ec.stylize.motiontile",
+            &[("tileCenter", Value::Vec2([5.0, 4.0])), ("tileWidth", num(50.0)), ("mirrorEdges", Value::Bool(true))],
+            img.clone(),
+            0.0,
+        );
+        assert_eq!((out.img.width, out.img.height), (10, 8));
+        for (x, mirrored) in [(2i64, 0i64), (7, 9)] {
+            for y in 0..i64::from(out.img.height) {
+                let a = out.img.get(x, y);
+                assert!((a[3] - 1.0).abs() < 1e-5, "fold x={x},y={y} faded to alpha {}", a[3]);
+                let b = img.get(mirrored, y);
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-5, "fold x={x},y={y} channel {c}");
+                }
+            }
+        }
+        // And no pixel anywhere in the tile faded either.
+        for px in out.img.data.iter() {
+            assert!((px[3] - 1.0).abs() < 1e-5, "tile pixel faded to alpha {}", px[3]);
         }
     }
 

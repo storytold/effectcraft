@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectcraftApp, LayerId, Mat3, Pos2, Rect, Tick, Tool, ViewerMap, ov, vec2};
 
 /// What a drag in the viewer is doing.
 #[derive(Clone, Debug)]
@@ -34,15 +34,20 @@ pub(super) enum Gesture {
     },
     Rotate {
         layer: LayerId,
-        center: Pos2,
-        /// The pointer's angle about the centre on the last frame (degrees, as atan2 gives it).
+        /// The anchor where it shows, in comp pixels, not screen points, so zooming mid-drag
+        /// doesn't turn it.
+        pivot: [f64; 2],
+        /// −1 when the layer's value runs opposite to the pointer (see `rotation_sign`).
+        sign: f64,
+        /// The pointer's angle about the pivot on the last frame (degrees, as atan2 gives it).
         last_angle: f64,
         /// The turn so far, summed frame by frame so it keeps counting past a full revolution in
         /// either direction (After Effects: 1x +0.0°, −1x −90.0°…) instead of wrapping at ±180°.
         turned: f64,
         start_rot: f64,
-        /// The other selected layers and their rotations: they turn by the same angle.
-        others: Vec<(LayerId, f64)>,
+        /// The other selected layers, their rotations and turn direction relative to this layer
+        /// (−1 when one parent is flipped): they turn by the same angle on screen.
+        others: Vec<(LayerId, f64, f64)>,
     },
     Anchor {
         layer: LayerId,

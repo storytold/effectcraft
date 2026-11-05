@@ -60,6 +60,62 @@ fn snap_lines_snap_axes_independently_and_priority_breaks_ties() {
     assert_eq!(snap(&[[0.0, 0.0]], &t3, 5.0).unwrap().hits[0].source, SnapSource::Vertex(LayerId(3)));
 }
 
+/// #2855: an edge midpoint lies on its edge line, so one line nearer than the point must not win
+/// and leave the other axis free. Two lines do win when together they are nearer.
+#[test]
+fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
+    let src = SnapSource::Layer(LayerId(1));
+    let mid = SnapTarget::point([100.0, 50.0], PRI_LAYER, src);
+    let top = SnapTarget::hline(50.0, PRI_LAYER, src);
+    // The line alone is nearer (1 against √10), and the point still snaps both axes.
+    let s = snap(&[[103.0, 51.0]], &[top, mid], 5.0).unwrap();
+    assert_eq!(s.at, [100.0, 50.0]);
+    assert_eq!(s.delta, [-3.0, -1.0]);
+    assert_eq!(s.hits, [mid]);
+    // Lines through the point itself tie with it: the point.
+    let centre = SnapTarget::vline(100.0, PRI_LAYER, src);
+    assert_eq!(snap(&[[103.0, 51.0]], &[top, centre, mid], 5.0).unwrap().hits, [mid]);
+    // Two lines together nearer than the point: both snap.
+    let far = SnapTarget::point([101.0, 55.0], PRI_LAYER, src);
+    let v = SnapTarget::vline(102.0, PRI_GUIDE, SnapSource::Guide);
+    let h = SnapTarget::hline(52.0, PRI_GUIDE, SnapSource::Guide);
+    let s = snap(&[[103.0, 51.0]], &[v, h, far], 5.0).unwrap();
+    assert_eq!(s.at, [102.0, 52.0]);
+    assert_eq!(s.hits, [v, h]);
+}
+
+/// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
+/// through a collapsed precomp layer, and a rotated layer keeps its points only.
+#[test]
+fn layer_centre_lines_follow_the_edges() {
+    use crate::viewer::{SnapFeatures, SnapOptions, targets};
+    let mut s = comp();
+    // A 100×50 solid moved off the comp's centre lines: x 70–170, y 55–105, centre (120, 80).
+    let a = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [120, 80, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, f: SnapFeatures| {
+        let comp = s.project.comp(cid).unwrap().clone();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+        targets(&ctx, &[], SnapOptions { layers: true, features: f, guides: false, grid: false, grid_spacing: 0.0 })
+    };
+    let lines = |t: &[SnapTarget], l: LayerId| {
+        let of = |kind: SnapKind, i: usize, c: f64| t.iter().find(|t| t.kind == kind && t.source == SnapSource::Layer(l) && t.pos[i] == c).map(|t| t.span);
+        (of(SnapKind::VLine, 0, 120.0), of(SnapKind::HLine, 1, 80.0))
+    };
+    assert_eq!(lines(&at(&s, SnapFeatures::default()), LayerId(a)), (Some(None), Some(None)));
+    let off = SnapFeatures { edges_extended: false, ..Default::default() };
+    assert_eq!(lines(&at(&s, off), LayerId(a)), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Through a collapsed precomp layer (it fills the comp, unmoved, so the numbers stay).
+    s.execute("layer.precompose", json!({"layers": [a], "name": "Inner"})).unwrap();
+    let pre = s.active_comp().unwrap().layers[0].id;
+    s.execute("layer.setSwitch", json!({"layers": [pre.0], "switch": "collapse", "value": true})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Rotated: no lines at all.
+    s.execute("prop.set", json!({"layer": pre.0, "path": "transform/rotation", "value": 30})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (None, None));
+}
+
 #[test]
 fn snap_targets_cover_layers_comp_guides_and_grid() {
     let mut s = comp();
@@ -419,7 +475,7 @@ fn shape_tool_options_paint_new_shapes() {
 fn masks_of_every_shape_tool_kind() {
     let mut s = comp();
     let sol = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
-    for (kind, n) in [("rect", 4), ("ellipse", 4), ("rounded", 8), ("polygon", 6), ("star", 10)] {
+    for (kind, n) in [("rect", 4), ("ellipse", 4), ("rounded", 8), ("polygon", 5), ("star", 10)] {
         let m = s.execute("layer.addMask", json!({"layer": sol, "shape": kind, "rect": [100, 100, 80, 80]})).unwrap()["mask"].as_u64().unwrap();
         let path = layer(&s, sol).props.find_group(m).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
         assert!(path.closed, "{kind}");
@@ -696,4 +752,167 @@ fn polystar_animated_type_keeps_the_inner_controls_needed_by_other_frames() {
     assert_eq!(star.get("type").unwrap().value_at(Tick::ZERO), KV::Enum(0));
     assert_eq!(star.get("type").unwrap().value_at(Tick::from_seconds_f64(1.0)), KV::Enum(1));
     assert_eq!(star.get("innerRadius").unwrap().value, KV::Scalar(27.0));
+}
+
+#[test]
+fn polystar_expression_routes_synchronize_controls_in_the_same_undo_step() {
+    for explicit in [false, true] {
+        let mut s = comp();
+        let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+        let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+        let before = group(&s);
+        let uid = before.get("type").unwrap().uid;
+        s.state.selected_props = vec![(LayerId(lid), uid)];
+        let params = if explicit { json!({"layer": lid, "prop": uid, "expression": "1"}) } else { json!({"expression": "1"}) };
+        s.execute("prop.setExpression", params).unwrap();
+        let animated = group(&s);
+        assert!(animated.get("innerRadius").is_some() && animated.get("innerRoundness").is_some());
+        assert!(s.undo());
+        assert_eq!(group(&s), before);
+        assert!(s.redo());
+        assert_eq!(group(&s), animated);
+        let inner = animated.get("innerRadius").unwrap().uid;
+        s.state.selected_props = vec![(LayerId(lid), inner)];
+        s.execute("prop.setExpression", json!({"layer": lid, "prop": uid, "expression": ""})).unwrap();
+        assert!(group(&s).get("innerRadius").is_none());
+        assert!(s.state.selected_props.is_empty());
+        assert!(s.undo());
+        assert_eq!(group(&s), animated);
+        assert!(s.redo());
+        assert!(group(&s).get("innerRadius").is_none());
+    }
+}
+
+#[test]
+fn polystar_animation_menu_adds_inner_controls_and_undoes() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+    let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    let before = group(&s);
+    s.state.selected_props = vec![(LayerId(lid), before.get("type").unwrap().uid)];
+    s.execute("anim.addKeyframe", json!({})).unwrap();
+    let animated = group(&s);
+    assert_eq!(animated.get("type").unwrap().keys.len(), 1);
+    assert!(animated.get("innerRadius").is_some() && animated.get("innerRoundness").is_some());
+    assert!(s.undo());
+    assert_eq!(group(&s), before);
+    assert!(s.redo());
+    assert_eq!(group(&s), animated);
+}
+
+#[test]
+fn deleting_the_last_polystar_type_key_removes_stale_controls_and_selection() {
+    for command in ["keys.delete", "edit.clear"] {
+        let mut s = comp();
+        let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+        let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+        let type_uid = group(&s).get("type").unwrap().uid;
+        s.execute("prop.addKey", json!({"layer": lid, "prop": type_uid, "time": 0, "value": 1})).unwrap();
+        let animated = group(&s);
+        let inner = animated.get("innerRadius").unwrap().uid;
+        s.state.selected_props = vec![(LayerId(lid), inner)];
+        s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(lid), prop: type_uid, time: Tick::ZERO }];
+        s.execute(command, json!({})).unwrap();
+        let polygon = group(&s);
+        assert!(polygon.get("innerRadius").is_none() && polygon.get("innerRoundness").is_none());
+        assert!(s.state.selected_props.is_empty() && s.state.selected_keys.is_empty());
+        assert!(s.undo());
+        assert_eq!(group(&s), animated);
+        assert!(s.redo());
+        assert_eq!(group(&s), polygon);
+    }
+}
+
+#[test]
+fn polystar_sync_cleans_the_edited_compositions_parked_selection() {
+    let mut s = comp();
+    let first = s.active_comp_id().unwrap();
+    let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+    let path = "contents/group/contents/star";
+    let type_uid = layer(&s, lid).props.group(path).unwrap().get("type").unwrap().uid;
+    s.execute("prop.addKey", json!({"layer": lid, "prop": type_uid, "time": 0, "value": 1})).unwrap();
+    let before = layer(&s, lid).props.group(path).unwrap().clone();
+    let inner = before.get("innerRadius").unwrap().uid;
+    s.state.selected_props = vec![(LayerId(lid), inner)];
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(lid), prop: inner, time: Tick::ZERO }];
+    s.execute("comp.new", json!({"width": 100, "height": 100, "duration": 2})).unwrap();
+    let second = s.active_comp_id().unwrap();
+    let other = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let other_prop = layer(&s, other).props.prop("transform/rotation").unwrap().uid;
+    s.execute("prop.addKey", json!({"layer": other, "prop": other_prop, "time": 0, "value": 15})).unwrap();
+    s.state.selected_props = vec![(LayerId(other), other_prop)];
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(other), prop: other_prop, time: Tick::ZERO }];
+    let live = (s.state.selected_props.clone(), s.state.selected_keys.clone());
+    s.execute("prop.toggleAnimation", json!({"comp": first.0, "layer": lid, "prop": type_uid, "value": false})).unwrap();
+    assert_eq!(s.active_comp_id(), Some(second));
+    assert_eq!((s.state.selected_props.clone(), s.state.selected_keys.clone()), live);
+    let parked = s.state.comp_selections.get(&first).unwrap();
+    assert!(parked.props.is_empty() && parked.keys.is_empty(), "the inactive composition must not keep removed control references");
+    let after = s.project.comp(first).unwrap().layer(LayerId(lid)).unwrap().props.group(path).unwrap().clone();
+    assert!(after.get("innerRadius").is_none());
+    assert!(s.undo());
+    assert_eq!(s.project.comp(first).unwrap().layer(LayerId(lid)).unwrap().props.group(path).unwrap(), &before);
+    assert!(s.redo());
+    assert_eq!(s.project.comp(first).unwrap().layer(LayerId(lid)).unwrap().props.group(path).unwrap(), &after);
+}
+
+#[test]
+fn polystar_multi_property_expression_clear_resolves_targets_before_removing_controls() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+    let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    let type_uid = group(&s).get("type").unwrap().uid;
+    s.execute("prop.setExpression", json!({"layer": lid, "prop": type_uid, "expression": "1"})).unwrap();
+    let inner = group(&s).get("innerRadius").unwrap().uid;
+    s.execute("prop.setExpression", json!({"layer": lid, "prop": inner, "expression": "37"})).unwrap();
+    let before = group(&s);
+    s.state.selected_props = vec![(LayerId(lid), type_uid), (LayerId(lid), inner)];
+    assert_eq!(s.execute("prop.setExpression", json!({"expression": ""})).unwrap(), json!([null, null]));
+    let after = group(&s);
+    assert!(after.get("type").unwrap().expr.is_none());
+    assert!(after.get("innerRadius").is_none());
+    assert_eq!(s.state.selected_props, vec![(LayerId(lid), type_uid)]);
+    assert!(s.undo());
+    assert_eq!(group(&s), before);
+    assert!(s.redo());
+    assert_eq!(group(&s), after);
+}
+
+/// Undo must discard removed controls before their UIDs can name newly allocated properties.
+#[test]
+fn polystar_undo_sanitizes_live_and_parked_property_selections_before_uid_reuse() {
+    for parked in [false, true] {
+        let mut s = comp();
+        let cid = s.active_comp_id().unwrap();
+        let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+        let polygon = layer(&s, lid).props.group("contents/group/contents/star").unwrap().clone();
+        let type_uid = polygon.get("type").unwrap().uid;
+        s.execute("comp.new", json!({"width": 100, "height": 100, "duration": 2})).unwrap();
+        let other = s.active_comp_id().unwrap();
+        s.activate_comp(cid);
+        s.state.selected_props = vec![(LayerId(lid), type_uid)];
+        s.execute("anim.addKeyframe", json!({})).unwrap();
+        let inner = layer(&s, lid).props.group("contents/group/contents/star").unwrap().get("innerRadius").unwrap().uid;
+        let valid = vec![(LayerId(lid), type_uid), (LayerId(lid), polygon.uid)];
+        s.state.selected_props = valid.iter().copied().chain([(LayerId(lid), inner)]).collect();
+        s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(lid), prop: inner, time: Tick::ZERO }];
+        if parked {
+            s.activate_comp(other);
+        }
+        assert!(s.undo());
+        let (props, keys) = if parked {
+            let selection = s.state.comp_selections.get(&cid).unwrap();
+            (&selection.props, &selection.keys)
+        } else {
+            (&s.state.selected_props, &s.state.selected_keys)
+        };
+        assert_eq!(props, &valid, "remove stale leaves while preserving property and group selections");
+        assert!(keys.is_empty());
+        s.activate_comp(cid);
+        s.execute("prop.separateDimensions", json!({"layer": lid, "value": true})).unwrap();
+        let position_z = layer(&s, lid).props.prop("transform/positionZ").unwrap().clone();
+        assert_eq!(position_z.uid, inner, "the removed control's UID was actually reused");
+        s.execute("prop.setExpression", json!({"expression": "1"})).unwrap();
+        assert_eq!(layer(&s, lid).props.prop("transform/positionZ").unwrap(), &position_z, "the reused UID must not become an implicit expression target");
+    }
 }

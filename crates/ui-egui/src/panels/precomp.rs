@@ -141,11 +141,11 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         );
         ui.add_space(4.0);
         ui.add_enabled_ui(!d.leave, |ui| {
-            let r = ui.checkbox(&mut d.adjust, tr("Adjust composition duration to the time span of the selected layers"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.adjust, tr("Adjust composition duration to the time span of the selected layers"));
             app.auto.add("dialog.precompose.adjust", r.rect, "Adjust composition duration");
         });
         ui.add_space(8.0);
-        let r = ui.checkbox(&mut d.open, tr("Open New Composition"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.open, tr("Open New Composition"));
         app.auto.add("dialog.precompose.open", r.rect, "Open New Composition");
         ui.add_space(14.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

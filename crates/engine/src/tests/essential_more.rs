@@ -2,6 +2,7 @@
 
 use effectcraft_keyframe::Value as KV;
 use effectcraft_project::essential::{self, ControlType};
+use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::{Event, Session};
@@ -101,4 +102,34 @@ fn open_in_essential_graphics_sets_the_primary_comp() {
             .any(|e| matches!(e, Event::Frontend { command, params } if command == "window.panel" && params["panel"] == "essentialGraphics"))
     );
     assert_eq!(s.execute("essential.list", json!({})).unwrap()["name"], "A");
+}
+
+/// #1747: through a collapsed precomp, a Text override and a Font override of the same Source
+/// Text both apply: the Font merges into the overridden text, as `essential::with_overrides`
+/// does on the flattened path, instead of one entry replacing the other.
+#[test]
+fn collapsed_instance_merges_text_and_font_overrides() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Title", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let title = s.active_comp_id().unwrap();
+    let text = s.execute("layer.newText", json!({"text": "Hello"})).unwrap()["layer"].as_u64().unwrap();
+    let body = s.execute("essential.addProperty", json!({"layer": text, "path": "text/sourceText"})).unwrap()["controls"][0].as_u64().unwrap();
+    let font = s.execute("essential.addProperty", json!({"layer": text, "path": "text/sourceText", "as": "font"})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let main = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": title.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [inst], "switch": "collapse", "value": true})).unwrap();
+    s.execute("essential.set", json!({"layer": inst, "control": body, "value": "Bye"})).unwrap();
+    s.execute("essential.set", json!({"layer": inst, "control": font, "value": {"font": "Serif Test", "size": 40}})).unwrap();
+    // Evaluate the nested text in the collapsed instance's context, as the renderer does.
+    let r = effectcraft_render::Renderer::new(&s.project, &*s.footage, crate::render::RenderOpts::default());
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, main, s.project.comp(main).unwrap(), Tick::ZERO);
+    let layer = ctx.comp.layer(effectcraft_project::LayerId(inst)).unwrap();
+    let collapsed = r.collapsed(&ctx, layer).expect("the instance collapses");
+    let (_, nctx) = r.collapse_into(&ctx, layer, &collapsed, 1.0).expect("a nested context");
+    let src = nctx.comp.layer(effectcraft_project::LayerId(text)).unwrap();
+    match nctx.value(src, src.props.prop("text/sourceText").unwrap()) {
+        KV::Text(d) => assert_eq!((d.text.as_str(), d.font.as_str(), d.size), ("Bye", "Serif Test", 40.0)),
+        o => panic!("{o:?}"),
+    }
 }

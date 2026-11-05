@@ -373,3 +373,29 @@ fn channel_extract_antialias_averages_sub_pixels() {
     let soft = run("ec.3d.channelextract", &[vals.as_slice(), &[("antialias", Value::Bool(true))]].concat(), &host);
     assert!((soft.get(5, 5)[0] - 0.5).abs() < 1e-5, "{:?}", soft.get(5, 5));
 }
+
+#[test]
+fn instance3d_replaces_the_pixels_with_the_referenced_layer() {
+    // Create 3D Layer Instance's copy: the chosen layer's render takes the place of the layer's
+    // own pixels, alpha included — the copy is transparent where the referenced layer isn't —
+    // and with no layer chosen the layer passes through.
+    struct Host(Image);
+    impl EffectHost for Host {
+        fn layer(&self, id: u64, _: bool) -> Option<LayerPixels> {
+            (id == 7).then(|| LayerPixels { buf: Buf { img: self.0.clone(), offset: [0.0; 2], scale: 1.0 }, size: [self.0.width as f64, self.0.height as f64] })
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+    }
+    let solid = || Image::filled(4, 4, [1.0, 1.0, 1.0, 1.0]);
+    let mut render = Image::new(4, 4);
+    render.set(1, 1, [1.0, 0.0, 0.0, 1.0]);
+    let env = EffectEnv { host: Some(&Host(render)), ..Default::default() };
+    let out = run_fx("ec.3d.instance3d", &[("layer", Value::Layer(Some(7)))], solid(), 0.0, env);
+    assert_eq!(out.img.get(1, 1), [1.0, 0.0, 0.0, 1.0], "the referenced layer's pixel");
+    assert_eq!(out.img.get(3, 3), [0.0; 4], "transparent where the referenced layer isn't");
+    // No layer chosen: the layer's own pixels.
+    let out = run_fx("ec.3d.instance3d", &[], solid(), 0.0, EffectEnv::default());
+    assert_eq!(out.img.data, solid().data);
+}

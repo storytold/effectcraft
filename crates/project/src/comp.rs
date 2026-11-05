@@ -1,7 +1,7 @@
 use super::item::LayerId;
 use super::layer::{Layer, LayerSource};
 use super::settings::{Marker, yes};
-use super::*;
+use super::{Deserialize, FrameRate, Node, PropGroup, Serialize, Tick, essential, styles};
 
 /// 3D renderer of a composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,8 +87,8 @@ pub struct Comp {
     pub display_start: Tick,
     pub background: [f32; 3],
     pub work_area: (Tick, Tick),
-    /// Layer #1 first (top of the stack).
-    pub layers: Vec<Layer>,
+    /// Layer #1 first (top of the stack). Each layer is shared between undo states until edited.
+    pub layers: super::Layers,
     #[serde(default)]
     pub markers: Vec<Marker>,
     pub shutter_angle: f64,
@@ -188,7 +188,7 @@ impl Comp {
             display_start: Tick::ZERO,
             background: [0.0, 0.0, 0.0],
             work_area: (Tick::ZERO, duration),
-            layers: vec![],
+            layers: super::Layers::new(),
             markers: vec![],
             shutter_angle: 180.0,
             shutter_phase: -90.0,
@@ -239,7 +239,7 @@ impl Comp {
     }
 
     pub fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
-        self.layers.iter_mut().find(|l| l.id == id)
+        self.layers.find_mut(|l| l.id == id)
     }
 
     /// 1-based layer number (#) of a layer.
@@ -265,25 +265,45 @@ impl Comp {
         self.layers.iter().find(|l| matches!(l.source, LayerSource::Camera) && l.switches.video && l.is_active_at(t))
     }
 
-    /// Unique layer name with a numeric suffix (`Shape Layer 2`).
+    /// `base`, or the next free numbered name when a layer already has it (`Shape Layer 2`,
+    /// `v-b1.mp4 2`; see `numbered_name`).
     pub fn unique_layer_name(&self, base: &str) -> String {
-        if !self.layers.iter().any(|l| l.name == base) {
-            return base.to_string();
-        }
-        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
-        (2..).map(|i| format!("{stem} {i}")).find(|n| !self.layers.iter().any(|l| &l.name == n)).unwrap_or_default()
+        let taken = |n: &str| self.layers.iter().any(|l| l.name == n);
+        if taken(base) { crate::item::numbered_name(base, taken) } else { base.to_string() }
     }
 }
 
+/// A protected time marker with a duration sets the comp's timing (Responsive Design), so it is
+/// part of the pixels even where plain markers are not.
+fn is_timing_marker(m: &Marker) -> bool {
+    m.protected && m.duration > Tick::ZERO
+}
+
+fn timing_markers(m: &[Marker]) -> impl Iterator<Item = (Tick, Tick)> + '_ {
+    m.iter().filter(|m| is_timing_marker(m)).map(|m| (m.time, m.duration))
+}
+
 impl Comp {
-    /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
-    /// Shy Layers and the viewer's Resolution.
+    /// Draws the same pixels as `o`: equal but for its layers' Lock and Shy switches, Hide Shy
+    /// Layers, the viewer's Resolution, the work area (a preview and render range only) and, as
+    /// nothing draws their audio, its layers' Audio switches, Audio groups and audio effects.
     pub fn same_pixels(&self, o: &Comp) -> bool {
-        self.same_settings(o) && self.layers.len() == o.layers.len() && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
+        self.same_pixels_with(o, true, &|_| false)
     }
 
-    /// [`Self::same_pixels`] but for the layers.
-    fn same_settings(&self, o: &Comp) -> bool {
+    /// [`Self::same_pixels`], with the comp's and its layers' markers counting only when
+    /// `with_markers`: only expressions read them, so while none does, adding or moving a marker
+    /// (even during playback) leaves every rendered frame valid. Protected time markers with a
+    /// duration set the timing (Responsive Design), so those always count. A layer's audio counts
+    /// when `heard` says something draws it ([`crate::Project::heard_layers`]).
+    pub fn same_pixels_with(&self, o: &Comp, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> bool {
+        self.same_settings(o, with_markers)
+            && self.layers.len() == o.layers.len()
+            && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels_with(b, with_markers, heard(a.id)))
+    }
+
+    /// [`Self::same_pixels_with`] but for the layers.
+    fn same_settings(&self, o: &Comp, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here).
         let Comp {
             width,
@@ -293,7 +313,7 @@ impl Comp {
             duration,
             display_start,
             background,
-            work_area,
+            work_area: _,
             layers: _,
             markers,
             shutter_angle,
@@ -320,8 +340,7 @@ impl Comp {
             && *duration == o.duration
             && *display_start == o.display_start
             && *background == o.background
-            && *work_area == o.work_area
-            && *markers == o.markers
+            && (if with_markers { *markers == o.markers } else { timing_markers(markers).eq(timing_markers(&o.markers)) })
             && *shutter_angle == o.shutter_angle
             && *shutter_phase == o.shutter_phase
             && *motion_blur_samples == o.motion_blur_samples
@@ -338,54 +357,139 @@ impl Comp {
             && *essential == o.essential
     }
 
-    /// The comp-time span (`in_point..out_point` of every layer changed, added or removed,
-    /// widened by the shutter) outside which `self` draws the same pixels as `o`, so cached
-    /// frames there stay valid (#1641). `None` when the edit can reach any frame: a comp setting,
-    /// a layer reorder, Solo turning on or off, an expression (it reads anything), or a changed
-    /// layer another layer parents to, mattes with or picks in an effect.
-    pub fn changed_span(&self, o: &Comp) -> Option<(Tick, Tick)> {
-        fn reads(g: &PropGroup, changed: &[LayerId]) -> bool {
+    /// The comp-time spans where `self` may draw other pixels than `o` after an edit of some of
+    /// its layers (moved, trimmed, split, edited, added, removed): where the active layers differ
+    /// or a changed one draws differently, widened by the shutter. A trim reaches only the part it
+    /// cut, a split only the copy's half (#1641). A layer that reads a changed one (its parent,
+    /// track matte, a layer it picks in an effect or tracker) draws differently wherever it is
+    /// active, and so does a layer with an expression that may read other layers or items when anything
+    /// changed: here or, `elsewhere`, outside these layers (markers, layers that draw nothing,
+    /// other comps and items). `None` when the edit can reach any frame: a comp setting, a layer
+    /// reorder, Solo turning on or off, an environment layer. A layer's audio counts when `heard`
+    /// says something draws it, a layer's markers when `with_markers`. `touched` layers draw differently in spans the caller adds (a
+    /// precomp whose comp changed): they reach the layers that read them, not their own frames.
+    pub fn changed_spans(
+        &self,
+        o: &Comp,
+        with_markers: bool,
+        heard: &dyn Fn(LayerId) -> bool,
+        elsewhere: bool,
+        touched: &[LayerId],
+    ) -> Option<Vec<(Tick, Tick)>> {
+        // An expression that may read outside its own layer: it names another comp, layer,
+        // footage, the project or its precomp's source, or its layer's `index` (a layer added or
+        // removed above shifts it). Its parent and the layers it picks in an effect are read
+        // through `referenced_layers` below.
+        // ponytail: text heuristic; misses another layer reached through a variable from a call
+        // without those words. Upgrade: record reads in the expression host.
+        fn reads_outside(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
-                Node::Prop(p) => {
-                    p.expr.is_some()
-                        || std::iter::once(&p.value)
-                            .chain(p.keys.iter().map(|k| &k.value))
-                            .any(|v| matches!(v, Value::Layer(Some(id)) if changed.contains(&LayerId(*id))))
-                }
-                Node::Group(g) => reads(g, changed),
+                Node::Prop(p) => p.expr.as_ref().is_some_and(|e| {
+                    let t = e.text.to_lowercase().replace("thislayer", "");
+                    ["comp", "layer", "footage", "project", "source", "index"].iter().any(|w| t.contains(w))
+                }),
+                Node::Group(g) => reads_outside(g),
             })
         }
-        // Solo hides every other layer at every frame.
-        if !self.same_settings(o) || self.any_solo() != o.any_solo() {
+        fn any_expression(g: &PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                Node::Prop(p) => p.expr.is_some(),
+                Node::Group(g) => any_expression(g),
+            })
+        }
+        // Solo hides every other layer at every frame. (Comp markers count through `elsewhere`:
+        // an expression reading them names `thisComp`.)
+        if !self.same_settings(o, false) || self.any_solo() != o.any_solo() {
             return None;
         }
         let common = |a: &Comp, b: &Comp| a.layers.iter().map(|l| l.id).filter(|id| b.layer(*id).is_some()).collect::<Vec<_>>();
         if common(self, o) != common(o, self) {
             return None;
         }
+        // Changed, added or removed layers (each from both sides: its old and its new span), and
+        // those that draw the same apart from their span (a trim or split). Ids count: they seed
+        // randomness (noise, text randomisers), so a split's copy may draw differently.
         let mut changed = Vec::new();
-        let mut span: Option<(Tick, Tick)> = None;
-        // Each changed layer comes up from both sides: its old and its new span.
+        let mut respanned = Vec::new();
+        let mut keyed = Vec::new();
+        let mut cuts = Vec::new();
         for (l, other) in self.layers.iter().map(|l| (l, o.layer(l.id))).chain(o.layers.iter().map(|l| (l, self.layer(l.id)))) {
-            if other.is_some_and(|b| l.same_pixels(b)) {
+            if other.is_some_and(|b| l.same_pixels_with(b, with_markers, heard(l.id))) {
                 continue;
             }
+            if l.environment || l.environment_background {
+                return None;
+            }
+            // (an expression on the layer can read its own in and out points and name, `inPoint`,
+            // `thisLayer.name`: then a trim or rename reaches all of it)
+            if let Some(b) = other
+                && !any_expression(&l.props)
+                && !any_expression(&b.props)
+                && (Layer { in_point: b.in_point, out_point: b.out_point, name: b.name.clone(), label: b.label, comment: b.comment.clone(), ..l.clone() })
+                    .same_pixels_with(b, with_markers, heard(l.id))
+            {
+                respanned.push(l.id);
+            } else if let Some(b) = other
+                && let Some(spans) = l.keyframe_spans(b, with_markers, heard(l.id))
+            {
+                // (drawn the same outside the keys it changed)
+                respanned.push(l.id);
+                keyed.extend(spans);
+            }
             changed.push(l.id);
-            let (s, e) = (l.in_point.min(l.out_point), l.in_point.max(l.out_point));
-            span = Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
+            cuts.extend([l.in_point, l.out_point]);
         }
-        let reaches = |l: &Layer| {
-            l.parent.is_some_and(|p| changed.contains(&p)) || l.track_matte.as_ref().is_some_and(|m| changed.contains(&m.layer)) || reads(&l.props, &changed)
-        };
-        if self.layers.iter().chain(&o.layers).any(reaches) {
-            return None;
+        // The layers the change reaches besides: expressions, then whatever reads a reached layer.
+        let both = || self.layers.iter().chain(&o.layers);
+        let mut reached: Vec<LayerId> = Vec::new();
+        if !changed.is_empty() || elsewhere || !touched.is_empty() {
+            reached.extend(both().filter(|l| reads_outside(&l.props)).map(|l| l.id));
         }
-        // A frame at `t` samples cameras, lights and transforms over its shutter,
-        // `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
+        // (each pass adds a layer or stops: at most one pass per layer)
+        loop {
+            let read = |l: &&Layer| {
+                !reached.contains(&l.id)
+                    && l.referenced_layers().iter().any(|r| *r != l.id && (changed.contains(r) || reached.contains(r) || touched.contains(r)))
+            };
+            let more: Vec<LayerId> = both().filter(read).map(|l| l.id).collect();
+            if more.is_empty() {
+                break;
+            }
+            reached.extend(more);
+        }
+        reached.sort_unstable();
+        reached.dedup();
+        for l in both().filter(|l| reached.contains(&l.id)) {
+            if l.environment || l.environment_background {
+                return None;
+            }
+            cuts.extend([l.in_point, l.out_point]);
+        }
+        let (before, after) = self.shutter_margin();
+        // Between two cuts the same layers are active; outside them no changed layer is.
+        cuts.sort_unstable();
+        cuts.dedup();
+        let draws_same = |l: &Layer| (!changed.contains(&l.id) || respanned.contains(&l.id)) && !reached.contains(&l.id);
+        let spans = cuts
+            .windows(2)
+            .filter_map(|w| {
+                let (&s, &e) = (w.first()?, w.last()?);
+                let active = |c: &Comp| c.layers.iter().filter(|l| l.is_active_at(s)).map(|l| l.id).collect::<Vec<_>>();
+                let same = active(self) == active(o) && self.layers.iter().filter(|l| l.is_active_at(s)).all(draws_same);
+                (!same).then(|| (s - before, e + after))
+            })
+            .chain(keyed.into_iter().map(|(s, e)| (s - before, e + after)))
+            .collect();
+        Some(spans)
+    }
+
+    /// How far a change at a time reaches the frames before and after it through the shutter: a
+    /// frame at `t` samples cameras, lights and transforms over its shutter,
+    /// `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
+    pub fn shutter_margin(&self) -> (Tick, Tick) {
         let (a, p) = (self.shutter_angle / 360.0, self.shutter_phase / 360.0);
         let fd = self.frame_duration().seconds();
-        let (before, after) = (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd));
-        span.map(|(s, e)| (s - before, e + after))
+        (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd))
     }
 
     /// Some layer is soloed: only the soloed layers draw.
@@ -393,34 +497,39 @@ impl Comp {
         self.layers.iter().any(|l| l.switches.solo && l.source.is_av())
     }
 
-    /// Draws the same pixels as `o` once plain markers are ignored: they change no pixels. Protected
-    /// time markers with a duration set the timing (Responsive Design), so those still count.
-    pub fn same_pixels_ignoring_markers(&self, o: &Comp) -> bool {
-        let protected =
-            |m: &[Marker]| -> Vec<(Tick, Tick)> { m.iter().filter(|m| m.protected && m.duration > Tick::ZERO).map(|m| (m.time, m.duration)).collect() };
-        if protected(&self.markers) != protected(&o.markers) {
-            return false;
-        }
-        let mut c = self.clone();
-        c.markers = o.markers.clone();
-        for (a, b) in c.layers.iter_mut().zip(&o.layers) {
-            a.markers = b.markers.clone();
-            a.markers_locked = b.markers_locked;
-        }
-        c.same_pixels(o)
+    /// The comp with those switches, the Resolution and the work area at their defaults (borrowed
+    /// when they already are), for keys that hash the whole comp.
+    pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
+        self.pixel_form_with(true, &|_| false)
     }
 
-    /// The comp with those switches and the Resolution at their defaults (borrowed when they
-    /// already are), for keys that hash the whole comp.
-    pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
-        if !self.hide_shy && self.resolution.is_auto() && self.layers.iter().all(|l| l.switches == l.switches.pixels()) {
+    /// [`Self::pixel_form`], also without the comp's plain markers and its layers' markers when not
+    /// `with_markers` (see [`Self::same_pixels_with`] and [`Project::reads_markers`]), and with the
+    /// audio of the layers `heard` doesn't name at its defaults ([`Layer::picture_form`]).
+    pub fn pixel_form_with(&self, with_markers: bool, heard: &dyn Fn(LayerId) -> bool) -> std::borrow::Cow<'_, Comp> {
+        let pictures: Vec<Option<Layer>> = self.layers.iter().map(|l| l.picture_form(heard(l.id))).collect();
+        if !self.hide_shy
+            && self.resolution.is_auto()
+            && self.work_area == (Tick::ZERO, Tick::ZERO)
+            && pictures.iter().all(Option::is_none)
+            && (with_markers || (self.markers.iter().all(is_timing_marker) && self.layers.iter().all(|l| l.markers.is_empty())))
+        {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut c = self.clone();
         c.hide_shy = false;
         c.resolution = Resolution::Auto;
-        for l in &mut c.layers {
-            l.switches = l.switches.pixels();
+        c.work_area = (Tick::ZERO, Tick::ZERO);
+        if !with_markers {
+            c.markers.retain(is_timing_marker);
+        }
+        for (l, picture) in c.layers.iter_mut().zip(pictures) {
+            if let Some(p) = picture {
+                *l = p;
+            }
+            if !with_markers {
+                l.markers.clear();
+            }
         }
         std::borrow::Cow::Owned(c)
     }

@@ -205,7 +205,8 @@ const PATHS: [&str; 4] = ["rect", "ellipse", "star", "path"];
 pub(crate) const MAX_DEPTH: usize = 64;
 
 /// The first Fill colour, Stroke colour and Stroke Width in `layer`'s contents at layer time
-/// `lt` (what the toolbar shows for a selected shape layer).
+/// `lt` (what the toolbar shows for a selected shape layer). Width comes from the first Stroke
+/// or Gradient Stroke, independently of the first solid stroke's colour.
 pub fn first_paint(layer: &Layer, lt: Tick) -> (Option<[f64; 4]>, Option<[f64; 4]>, Option<f64>) {
     let (mut fill, mut stroke, mut width) = (None, None, None);
     if let Some(c) = layer.props.sub("contents") {
@@ -216,9 +217,11 @@ pub fn first_paint(layer: &Layer, lt: Tick) -> (Option<[f64; 4]>, Option<[f64; 4
                 "fill" if fill.is_none() => fill = at("color").map(rgba),
                 "stroke" if stroke.is_none() => {
                     stroke = at("color").map(rgba);
-                    width = at("width").map(|v| v.as_f64());
                 }
                 _ => {}
+            }
+            if width.is_none() && is_stroke(g) {
+                width = at("width").map(|v| v.as_f64());
             }
         });
     }

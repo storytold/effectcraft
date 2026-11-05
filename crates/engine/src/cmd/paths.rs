@@ -5,10 +5,11 @@
 use effectcraft_keyframe::{ShapePath, Value as KV};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{FeatherFalloff, GroupKind, ItemId, LayerId, LayerSource, MaskMotionBlur, Node, PropGroup, Uid};
+use effectcraft_render::EvalCtx;
 use serde_json::{Value, json};
 
 use super::layer_menu::target_masks;
-use super::{CommandSpec, b_p, bad, f_p, has_comp, has_layers, layer_mut, layer_p, str_p};
+use super::{CommandSpec, b_p, bad, f_p, has_comp, has_layers, layer_mut, layer_p, merge_p, str_p};
 use crate::{EngineError, Result, Session, VertexRef, cmd};
 
 // ---------------------------------------------------------------- RotoBezier
@@ -111,26 +112,38 @@ fn roto_bezier(s: &mut Session, p: &Value) -> Result<Value> {
 /// The parametric shape paths that Convert To Bezier Path replaces with an editable path.
 const PARAMETRIC: [&str; 3] = ["rect", "ellipse", "star"];
 
-/// The path a parametric shape group draws, in the group's own space, read at `lt`. This is the
-/// geometry the renderer builds from the same values (`render::shapes::collect`), so the converted
-/// path is the shape that was on screen rather than an approximation of it; the defaults match
-/// that code for a property a group doesn't carry (a polygon has no inner radius or roundness).
-fn parametric_path(g: &PropGroup, lt: effectcraft_time::Tick) -> Option<ShapePath> {
-    let f = |id: &str, d: f64| g.prop(id).map_or(d, |pr| pr.value_at(lt).as_f64());
-    let v2 = |id: &str, d: [f64; 2]| g.prop(id).map_or(d, |pr| pr.value_at(lt).as_vec2());
+/// The path a parametric shape group draws, in the group's own space. This is the geometry the
+/// renderer builds from the same values (`render::shapes::collect`), expressions included, so the
+/// converted path is the shape that was on screen rather than an approximation of it; the defaults
+/// match that code for a property a group doesn't carry (a polygon has no inner radius or
+/// roundness).
+fn parametric_path(ctx: &EvalCtx, layer: &effectcraft_project::Layer, g: &PropGroup) -> Option<ShapePath> {
+    let f = |id: &str, d: f64| ctx.f(layer, g, id, d);
+    let v2 = |id: &str, d: [f64; 2]| ctx.v2(layer, g, id, d);
     let path = match g.match_id.as_str() {
-        "rect" => effectcraft_path::rect(v2("size", [100.0; 2]), v2("position", [0.0; 2]), f("roundness", 0.0)),
+        "rect" => {
+            let (size, pos) = (v2("size", [100.0; 2]), v2("position", [0.0; 2]));
+            if ctx.b(layer, g, "perCorner") {
+                effectcraft_path::rect_radii(
+                    size,
+                    pos,
+                    [f("topLeftRoundness", 0.0), f("topRightRoundness", 0.0), f("bottomRightRoundness", 0.0), f("bottomLeftRoundness", 0.0)],
+                )
+            } else {
+                effectcraft_path::rect(size, pos, f("roundness", 0.0))
+            }
+        }
         "ellipse" => effectcraft_path::ellipse(v2("size", [100.0; 2]), v2("position", [0.0; 2])),
-        "star" => effectcraft_path::polystar(
-            g.prop("type").map_or(0, |pr| pr.value_at(lt).as_enum()) == 0,
-            f("points", 5.0),
-            v2("position", [0.0; 2]),
-            f("rotation", 0.0),
-            f("innerRadius", 50.0),
-            f("outerRadius", 100.0),
-            f("innerRoundness", 0.0),
-            f("outerRoundness", 0.0),
-        ),
+        "star" => effectcraft_path::polystar(effectcraft_path::Polystar {
+            star: ctx.e(layer, g, "type") == 0,
+            points: f("points", 5.0),
+            pos: v2("position", [0.0; 2]),
+            rotation: f("rotation", 0.0),
+            inner: f("innerRadius", 50.0),
+            outer: f("outerRadius", 100.0),
+            inner_round: f("innerRoundness", 0.0),
+            outer_round: f("outerRoundness", 0.0),
+        }),
         _ => return None,
     };
     // A closed parametric shape is one subpath; anything else would not be this shape.
@@ -160,28 +173,38 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let t = s.time();
     let n = shapes.len();
+    // Read the geometry before editing, with the same expression-aware context the renderer
+    // uses: an expression-driven corner radius, size or position must convert to what is on
+    // screen, not to the property's underlying value.
+    let prepared = {
+        let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+        let ctx = EvalCtx { expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) };
+        let mut prepared = Vec::new();
+        for (lid, uid) in &shapes {
+            let Some(l) = comp.layer(*lid) else { continue };
+            let Some(old) = l.props.sub("contents").and_then(|c| c.find_group(*uid)) else { continue };
+            let Some(path) = parametric_path(&ctx, l, old) else { continue };
+            // Path Direction is the shape's own, not a default: reversing is a separate command.
+            prepared.push((*lid, *uid, path, ctx.e(l, old, "direction"), old.enabled));
+        }
+        prepared
+    };
     let made = s.edit("Convert To Bezier Path", None, |proj, st| {
         let mut next = proj.next_id;
         let mut made = Vec::new();
-        for (lid, uid) in &shapes {
-            let l = layer_mut(proj, cid, *lid)?;
-            let lt = l.layer_time(t);
+        for (lid, uid, path, direction, enabled) in prepared {
+            let l = layer_mut(proj, cid, lid)?;
             let contents = l.props.sub_mut("contents").ok_or_else(|| bad("path.convertToBezier", "not a shape layer"))?;
-            let Some(old) = contents.find_group(*uid) else { continue };
-            let Some(path) = parametric_path(old, lt) else { continue };
-            // Path Direction is the shape's own, not a default: reversing is a separate command.
-            let direction = old.prop("direction").map_or(0, |pr| pr.value_at(lt).as_enum());
-            let enabled = old.enabled;
             let mut g = build::shape_path(&mut Ids(&mut next), path);
             if let Some(pr) = g.prop_mut("direction") {
                 pr.value = KV::Enum(direction);
             }
             g.enabled = enabled;
             let new_uid = g.uid;
-            let parent = contents.parent_of_mut(*uid).ok_or_else(|| bad("path.convertToBezier", "no such shape item"))?;
-            let Some(at) = parent.children.iter().position(|c| c.uid() == *uid) else { continue };
+            let parent = contents.parent_of_mut(uid).ok_or_else(|| bad("path.convertToBezier", "no such shape item"))?;
+            let Some(at) = parent.children.iter().position(|c| c.uid() == uid) else { continue };
             parent.children[at] = Node::Group(g);
-            made.push((*lid, new_uid));
+            made.push((lid, new_uid));
         }
         proj.next_id = next;
         // The new paths are what is selected, so the vertices can be edited straight away.
@@ -308,7 +331,7 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
         let y = v[1] * scale[1];
         [x * c - y * sn, x * sn + y * c]
     };
-    let n = s.edit("Free Transform Points", None, |proj, _| {
+    let n = s.edit("Free Transform Points", merge_p(p), |proj, _| {
         let mut n = 0;
         for (lid, uid) in &targets {
             let l = layer_mut(proj, cid, *lid)?;
@@ -360,7 +383,7 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
 
 const SHAPE_ITEMS: &[&str] = &[
     "group", "rect", "ellipse", "star", "path", "fill", "stroke", "gfill", "gstroke", "trim", "repeater", "round", "offset", "pucker", "twist", "zigzag",
-    "wiggle", "merge", "front", "bevel", "side", "back",
+    "wiggle", "wiggler", "merge", "front", "bevel", "side", "back",
 ];
 
 /// Selected shape items (contents entries) of shape layers: (layer, uid).
@@ -542,7 +565,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Free Transform Points",
             ["Layer", "Mask and Shape Path"],
             None,
-            "{layer?, mask?, scale?: % | [x%, y%], rotation?: deg, offset?: [dx, dy], anchor?: [x, y]}",
+            "{layer?, mask?, scale?: % | [x%, y%], rotation?: deg, offset?: [dx, dy], anchor?: [x, y], merge?: string}",
             has_layers,
             free_transform
         ),

@@ -110,6 +110,197 @@ fn exec_set_get_with_saved_project() {
     assert_eq!(v[1]["result"]["time"], v[0]["result"]["time"], "{v}");
 }
 
+/// #2928: the text listing gives an enum's label next to its number (0-based, unlike After
+/// Effects scripting), the way `props --json` lists its `options`.
+#[test]
+fn props_lists_enum_labels() {
+    let proj = tmp("enum-labels.ecproj");
+    let p = proj.to_str().unwrap();
+    let anim = r#"{"layer":"t","properties":["opacity"]}"#;
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36}"#,
+        "layer.newText",
+        r#"{"text":"AB","name":"t"}"#,
+        "layer.addTextAnimator",
+        anim,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    ok_json(&["set", "T", "t", "text/animators/animator/selectors/rangeSelector/advanced/shape", "1", p, "--save"]);
+    let out = bin().args(["props", "T", "t", p]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let shape = text.lines().find(|l| l.contains("advanced/shape")).unwrap_or_else(|| panic!("no shape line in:\n{text}"));
+    assert!(shape.trim_end().ends_with("enum     1 (Ramp Up)"), "{shape}");
+    let units = text.lines().find(|l| l.contains("advanced/units")).unwrap_or_default();
+    assert!(units.trim_end().ends_with("0 (Percentage)"), "{units}");
+    let size = text.lines().find(|l| l.contains("transform/opacity")).unwrap_or_default();
+    assert!(size.trim_end().ends_with("100.0"), "a number without options stays bare: {size}");
+}
+
+/// A project in a new folder of its own, for the save lock tests (#2851).
+fn lock_test_project(tag: &str) -> (PathBuf, String) {
+    let dir = tmp(&format!("lock-{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.ecproj").to_str().unwrap().to_string();
+    ok_json(&["exec", "project.newFolder", r#"{"name":"start"}"#, "--empty", "--save-as", &proj]);
+    (dir, proj)
+}
+
+/// The lock of the project file `name`, held by this process.
+fn hold_lock(dir: &std::path::Path, name: &str) -> std::fs::File {
+    let lock = std::fs::File::options().create(true).truncate(false).read(true).write(true).open(dir.join(format!(".{name}.lock"))).unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+/// Start a run that has to wait for a lock this process holds; returns once it says it is waiting.
+fn start_waiting_run(args: &[&str]) -> std::process::Child {
+    let mut child = bin().args(args).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("waiting for another run saving") {
+        line.clear();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "{args:?} ended without waiting");
+    }
+    assert!(child.try_wait().unwrap().is_none(), "{args:?} did not wait");
+    child
+}
+
+/// Folder names in a saved project.
+fn has_folder(proj: &str, name: &str) -> bool {
+    std::fs::read_to_string(proj).unwrap().contains(&format!("\"{name}\""))
+}
+
+#[test]
+fn parallel_saves_keep_every_edit() {
+    let (dir, proj) = lock_test_project("parallel");
+    let names = |writer: usize| (0..300).map(move |i| format!("edit-{writer}-{i}"));
+    let mut writers: Vec<_> = (0..4)
+        .map(|_| {
+            bin()
+                .args(["run", "--project", &proj, "--commands", "-", "--save"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    // Each writer reads its whole script before it opens the project, so closing the stdins together
+    // starts all the edits at once, and long scripts keep each read-to-save span over the others.
+    for (n, writer) in writers.iter_mut().enumerate() {
+        let script: String = names(n).map(|name| format!("{}\n", json!({"command": "project.newFolder", "params": {"name": name}}))).collect();
+        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    }
+    for mut writer in writers {
+        assert!(writer.wait().unwrap().success());
+    }
+    let lost: Vec<String> = (0..4).flat_map(names).filter(|name| !has_folder(&proj, name)).collect();
+    assert!(lost.is_empty(), "lost {} edits: {lost:?}", lost.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_save_in_place_waits_for_the_lock_then_edits_the_latest_project() {
+    let (dir, proj) = lock_test_project("wait");
+    for save in [&["--save"][..], &["--save-as", proj.as_str()]] {
+        let held = hold_lock(&dir, "p.ecproj");
+        let before = std::fs::read(&proj).unwrap();
+        let params = json!({"name": format!("waited-{}", save.len())}).to_string();
+        let args = [&["exec", "project.newFolder", &params, "--project", &proj][..], save].concat();
+        let mut child = start_waiting_run(&args);
+        assert_eq!(std::fs::read(&proj).unwrap(), before, "{save:?} wrote while another run held the lock");
+        // an edit made meanwhile by the holder must survive: the waiter reads only after the lock is free
+        let held_params = json!({"name": format!("held-{}", save.len())}).to_string();
+        ok_json(&["exec", "project.newFolder", &held_params, "--project", &proj, "--save-as", &format!("{proj}.tmp")]);
+        std::fs::rename(format!("{proj}.tmp"), &proj).unwrap();
+        drop(held);
+        assert!(child.wait().unwrap().success(), "{save:?}");
+        for want in [format!("waited-{}", save.len()), format!("held-{}", save.len())] {
+            assert!(has_folder(&proj, &want), "{save:?} lost {want}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs through a symlink take the same lock before and after a save, or a run still waiting on
+/// the old one could overwrite a later run's save.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_keeps_its_lock_after_a_save() {
+    let (dir, proj) = lock_test_project("symlink");
+    let link = dir.join("link.ecproj");
+    std::os::unix::fs::symlink(&proj, &link).unwrap();
+    for name in [r#"{"name":"first"}"#, r#"{"name":"second"}"#] {
+        let held = hold_lock(&dir, "link.ecproj");
+        let mut child = start_waiting_run(&["exec", "project.newFolder", name, "--project", link.to_str().unwrap(), "--save"]);
+        drop(held);
+        assert!(child.wait().unwrap().success(), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn runs_that_do_not_save_in_place_ignore_the_lock() {
+    let (dir, proj) = lock_test_project("ignore");
+    let other = dir.join("other.ecproj").to_str().unwrap().to_string();
+    let _held = hold_lock(&dir, "p.ecproj");
+    let params = r#"{"name":"copy-only"}"#;
+    let cases: [&[&str]; 3] = [
+        &["info", "--project", &proj],
+        &["exec", "project.newFolder", params, "--project", &proj],
+        &["exec", "project.newFolder", params, "--project", &proj, "--save-as", &other],
+    ];
+    for args in cases {
+        let mut child = bin().args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("{args:?} is waiting for a lock it doesn't need");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success(), "{args:?}");
+    }
+    assert!(!has_folder(&proj, "copy-only"));
+    assert!(has_folder(&other, "copy-only"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_project_gets_no_lock_file_and_keeps_its_error() {
+    let (dir, _) = lock_test_project("missing");
+    let gone = dir.join("gone.ecproj").to_str().unwrap().to_string();
+    let other = dir.join("other.ecproj").to_str().unwrap().to_string();
+    // what opening it says, after the `effectcraft-cli <subcommand>: ` prefix
+    let error = |args: &[&str]| {
+        let out = bin().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        stderr.split_once(": ").map(|(_, e)| e.to_string()).unwrap_or(stderr)
+    };
+    let plain = error(&["info", "--project", &gone]);
+    assert!(plain.contains("gone.ecproj"), "{plain}");
+    // saving in place, saving elsewhere, or not saving: the error is the one opening gives
+    for save in [&["--save"][..], &["--save-as", gone.as_str()], &["--save-as", other.as_str()], &[]] {
+        let args = [&["exec", "project.newFolder", r#"{"name":"copy-only"}"#, "--project", &gone][..], save].concat();
+        assert_eq!(error(&args), plain, "{save:?}");
+    }
+    assert!(!dir.join(".gone.ecproj.lock").exists());
+    assert!(!dir.join("other.ecproj").exists());
+    // a project with --bridge stays a usage error
+    assert_eq!(bin().args(["exec", "project.newFolder", "--bridge", "9877", "--project", &gone, "--save"]).output().unwrap().status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `run --args-file` reads its command / params pairs from a file, one per line: a batch longer
 /// than a Windows command line (32 767 characters, os error 206) still runs.
 #[test]
@@ -131,6 +322,85 @@ fn run_reads_arguments_from_a_file() {
     let out = bin().args(["run", "--args-file", "no/such/file.txt", "--empty"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--args-file no/such/file.txt"));
+}
+
+/// Run with `stdin` piped in; returns (exit code, stdout, stderr).
+fn run_with_stdin(args: &[&str], stdin: &str) -> (i32, String, String) {
+    let mut child = bin().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    // The child may exit before it has read all of standard input (the usage-error cases below
+    // exit with code 2 without draining stdin), so a broken pipe while writing is that early
+    // exit, not a failure of this helper; the assertions on the returned output still hold.
+    let mut stdin_pipe = child.stdin.take().unwrap();
+    if let Err(err) = stdin_pipe.write_all(stdin.as_bytes()) {
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe, "writing the child's standard input: {err}");
+    }
+    drop(stdin_pipe);
+    let out = child.wait_with_output().unwrap();
+    (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// `run --commands FILE|-` (#2251) reads `{"command", "params"}` steps from a JSON array or JSON
+/// Lines, from a file or standard input, and runs them as the same positional pairs would: after
+/// the pairs, so a generated list can follow a hand-written prefix. One command whose params are
+/// over Linux's 128 KiB per-argument limit goes through.
+#[test]
+fn run_reads_commands_from_a_file_or_stdin() {
+    let steps = [
+        ("comp.new", json!({"name": "A", "width": 64, "height": 64})),
+        ("layer.newSolid", json!({"width": 8, "height": 8, "name": "One"})),
+        ("layer.newSolid", json!({"width": 8, "height": 8, "name": "Two"})),
+        ("project.summary", json!({})),
+    ];
+    let pairs: Vec<String> = steps.iter().flat_map(|(id, p)| [id.to_string(), p.to_string()]).collect();
+    let pairs: Vec<&str> = pairs.iter().map(String::as_str).collect();
+    let expected = ok_json(&[&["run", "--empty"][..], &pairs[..]].concat());
+    let layers = |v: &Value| v[3]["result"]["items"][0]["layers"].as_u64();
+    assert_eq!(layers(&expected), Some(2), "{expected}");
+
+    let objects: Vec<Value> = steps.iter().map(|(id, p)| json!({"command": id, "params": p})).collect();
+    let array = tmp("commands.json");
+    std::fs::write(&array, serde_json::to_string_pretty(&objects).unwrap()).unwrap();
+    assert_eq!(ok_json(&["run", "--commands", array.to_str().unwrap(), "--empty"]), expected);
+
+    let lines: String = objects.iter().map(|o| format!("{o}\n\n")).collect();
+    let (code, out, err) = run_with_stdin(&["run", "--commands", "-", "--empty", "--json"], &lines);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), expected);
+
+    // Positional pairs first, then the file.
+    let rest = tmp("commands-rest.jsonl");
+    std::fs::write(&rest, objects[1..].iter().map(|o| format!("{o}\n")).collect::<String>()).unwrap();
+    assert_eq!(ok_json(&[&["run", "--empty", "--commands", rest.to_str().unwrap()][..], &pairs[..2]].concat()), expected);
+
+    let name = "n".repeat(140 * 1024);
+    let big = tmp("commands-big.jsonl");
+    std::fs::write(&big, format!("{}\n{}\n", json!({"command": "comp.new", "params": {"name": name}}), json!({"command": "project.summary"}))).unwrap();
+    let v = ok_json(&["run", "--commands", big.to_str().unwrap(), "--empty"]);
+    assert_eq!(v[1]["result"]["items"][0]["name"].as_str().map(str::len), Some(name.len()));
+
+    for (input, args, error) in [
+        ("", &["run", "--commands", "-", "--empty"][..], "--commands -: no commands"),
+        (
+            "{\"command\":\"project.summary\"}\n{\"command\":\"x\",\"param\":{}}\n",
+            &["run", "project.summary", "{}", "--commands", "-", "--empty"],
+            "step 2 (line 2): unknown key `param`",
+        ),
+        ("[{\"command\":\"project.summary\"}, {\"params\":{}}]", &["run", "--commands", "-", "--empty"], "step 1 (entry 2): no `command`"),
+        ("{}", &["run", "--commands", "-", "--commands", "-", "--empty"], "standard input is read once"),
+    ] {
+        let (code, out, err) = run_with_stdin(args, input);
+        assert_eq!(code, 2, "{input:?}: {err}");
+        assert!(err.contains(error), "{input:?}: {err}");
+        assert!(out.is_empty(), "{input:?}: nothing ran");
+    }
+    // An empty list after positional pairs is no error: there is still something to run.
+    let (code, _, err) = run_with_stdin(&["run", "project.summary", "--commands", "-", "--empty"], "");
+    assert_eq!(code, 0, "{err}");
+    // A step that fails when it runs is named by its index too.
+    let (code, out, err) = run_with_stdin(&["run", "--commands", "-", "--empty", "--json"], "{\"command\":\"project.summary\"}\n{\"command\":\"no.such\"}\n");
+    assert_eq!(code, 1, "{err}");
+    let e = serde_json::from_str::<Value>(&out).unwrap()["error"].as_str().map(String::from).unwrap_or_default();
+    assert!(e.starts_with("no.such: ") && e.ends_with(" (step 1)"), "{e}");
 }
 
 #[test]
@@ -347,6 +617,67 @@ fn render_out_is_relative_to_the_working_directory() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// #1743: `render-frame --out` writes a PNG to the path it is given, and never over footage or
+/// the project file.
+#[test]
+fn render_frame_never_writes_over_footage_or_the_project() {
+    let root = tmp("render-frame-overwrite");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let (clip, project) = (root.join("clip.png"), root.join("p.ecproj"));
+    let (c, p) = (clip.to_str().unwrap(), project.to_str().unwrap());
+    // A real PNG to import: a frame of the demo project.
+    ok_json(&["render-frame", "--max-side", "64", "--out", c]);
+    let imported = json!({"paths": [c]}).to_string();
+    ok_json(&["run", "file.import", &imported, "comp.new", r#"{"name":"T","width":64,"height":36,"duration":1}"#, "--empty", "--save-as", p]);
+    let (footage, saved) = (std::fs::read(&clip).unwrap(), std::fs::read(&project).unwrap());
+    for (out, what) in [(c, "footage"), (p, "project")] {
+        let (code, v) = run_json(&["render-frame", "--project", p, "--out", out]);
+        assert_eq!(code, 1, "{what}: {v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(error.contains(out) && error.contains(what), "{what}: {v}");
+    }
+    assert_eq!(std::fs::read(&clip).unwrap(), footage, "the footage is as it was");
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Anywhere else it writes.
+    let free = root.join("frame.png");
+    ok_json(&["render-frame", "--project", p, "--out", free.to_str().unwrap()]);
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two queue items on one file are refused by the render before anything is written, with the
+/// file as it was.
+#[test]
+fn render_refuses_two_items_on_one_file() {
+    let root = tmp("render-clash");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let out = root.join("clash.mp4");
+    std::fs::write(&out, b"EARLIER").unwrap();
+    let project = root.join("p.ecproj");
+    let p = project.to_str().unwrap();
+    let add = json!({"output": out.to_str().unwrap()}).to_string();
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36,"duration":1}"#,
+        "renderQueue.add",
+        &add,
+        "renderQueue.add",
+        &add,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    let (code, v) = run_json(&["render", "--queue", "--project", p]);
+    assert_eq!(code, 1, "{v}");
+    let error = v["error"].as_str().unwrap();
+    assert!(error.contains("#1") && error.contains("#2") && error.contains("clash.mp4"), "{v}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"EARLIER");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A real stdio client: each edit's reply is read before disconnecting or killing the server.
 struct McpChild {
     child: std::process::Child,
@@ -533,6 +864,49 @@ fn a_failed_render_under_run_and_exec_exits_1() {
     assert!(v["error"].as_str().is_some_and(|e| e.starts_with("T: ")), "{v}");
 }
 
+/// A source refusal happens before encoding and has no started timestamp. It must still
+/// fail the CLI, while the valid queue item finishes and the imported frame stays intact.
+#[test]
+fn a_partly_protected_queue_exits_1_under_render_run_and_exec() {
+    let root = tmp("protected-mixed-queue");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source_00000.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([40, 80, 120, 255])).save(&source).unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let project = root.join("q.ecproj");
+    let good = root.join("good.gif");
+    let import = json!({"paths": [source]}).to_string();
+    let blocked = json!({"format": "png", "output": root.join("source_[#####].png")}).to_string();
+    let valid = json!({"format": "gif", "output": good}).to_string();
+    ok_json(&[
+        "run",
+        "--empty",
+        "--save-as",
+        project.to_str().unwrap(),
+        "comp.new",
+        r#"{"name":"Main","width":16,"height":16,"frameRate":10,"duration":0.1}"#,
+        "layer.newSolid",
+        "{}",
+        "file.import",
+        &import,
+        "renderQueue.add",
+        &blocked,
+        "renderQueue.add",
+        &valid,
+    ]);
+    let p = project.to_str().unwrap();
+    for args in [vec!["render", "--queue", "--project", p], vec!["run", p, "renderQueue.render", "{}"], vec!["exec", "renderQueue.render", "--project", p]] {
+        std::fs::write(&good, b"previous output").unwrap();
+        let (code, result) = run_json(&args);
+        assert_eq!(code, 1, "{args:?}: {result}");
+        assert!(result["error"].as_str().is_some_and(|e| e.contains("footage") && e.contains("source_00000.png")), "{result}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(std::fs::read(&good).unwrap().starts_with(b"GIF8"), "the valid item still rendered");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// `render --bitrate` (#440) targets the bitrate in VP9 WebM.
 #[test]
 fn render_bitrate_applies_to_vp9_webm() {
@@ -561,6 +935,113 @@ fn render_bitrate_applies_to_vp9_webm() {
     let (low, high) = (size("100"), size("8000"));
     assert!(high > low, "100 kbps: {low} bytes, 8000 kbps: {high} bytes");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `bench --roto --clip FRAMES --truth MASKS` runs the trackers on the user's own image sequences: here a bright disc
+/// drifting over a dark textured frame, with its true masks. Mismatched sequences are refused with a message.
+#[test]
+fn bench_roto_runs_on_a_users_clip() {
+    let (frames, masks) = (tmp("clip-frames"), tmp("clip-masks"));
+    let config = frames.join("config");
+    for d in [&frames, &masks] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (w, h) = (96u32, 72u32);
+    for f in 0..14u32 {
+        let (cx, cy) = (30.0 + 4.0 * f as f32, 36.0f32);
+        let (mut img, mut mask) = (image::RgbImage::new(w, h), image::GrayImage::new(w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let inside = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < 14.0;
+                let tex = 40 + ((x * 7 + y * 13) % 30) as u8;
+                img.put_pixel(x, y, if inside { image::Rgb([230, 120, 40 + (x % 20) as u8]) } else { image::Rgb([tex / 2, tex, tex + 20]) });
+                mask.put_pixel(x, y, image::Luma([if inside { 255 } else { 0 }]));
+            }
+        }
+        let extension = if f == 0 { "jpg" } else { "png" };
+        let stem = match f {
+            0 => "a".into(),
+            1 => "a.jpg".into(),
+            _ => format!("f{f:03}"),
+        };
+        img.save(frames.join(format!("{stem}.{extension}"))).unwrap();
+        mask.save(masks.join(format!("{stem}.png"))).unwrap();
+    }
+    let (f, m) = (frames.to_str().unwrap(), masks.to_str().unwrap());
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &config).args(["bench", "--roto", "--clip", f, "--truth", m, "--frames", "6", "--json"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+    let rows: Value = serde_json::from_str(&text).unwrap();
+    let row = rows.as_array().unwrap().iter().find(|row| row["tracker"] == "classical").unwrap();
+    assert_eq!(row["per_frame"].as_array().unwrap().len(), 6, "a user clip respects the requested frame limit");
+    let mean = row["mean_iou"].as_f64().unwrap();
+    assert!(mean > 0.8, "classical mean IoU on the user's clip: {mean}\n{text}");
+    // one mask short: refused
+    std::fs::remove_file(masks.join("f005.png")).unwrap();
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &config).args(["bench", "--roto", "--clip", f, "--truth", m]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("must match"), "{}", String::from_utf8_lossy(&out.stderr));
+    // --clip without --truth
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &config).args(["bench", "--roto", "--clip", f]).output().unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn bench_roto_rejects_mismatched_names_before_loading_images() {
+    let root = tmp("bench-clip-names");
+    let (frames, masks) = (root.join("frames"), root.join("masks"));
+    let _ = std::fs::remove_dir_all(&root);
+    for dir in [&frames, &masks] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("f000.png"), []).unwrap();
+    }
+    std::fs::write(frames.join("f001.png"), []).unwrap();
+    std::fs::write(masks.join("f002.png"), []).unwrap();
+    let out = bin()
+        .env("EFFECTCRAFT_CONFIG_DIR", root.join("config"))
+        .args(["bench", "--roto", "--frames", "1", "--clip"])
+        .arg(&frames)
+        .arg("--truth")
+        .arg(&masks)
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(error.contains("names must match"), "validate the entire name set before decoding: {error}");
+    std::fs::remove_file(frames.join("f001.png")).unwrap();
+    std::fs::remove_file(masks.join("f002.png")).unwrap();
+    for dir in [&frames, &masks] {
+        std::fs::write(dir.join("f000.jpg"), []).unwrap();
+    }
+    let out =
+        bin().env("EFFECTCRAFT_CONFIG_DIR", root.join("config")).args(["bench", "--roto", "--clip"]).arg(&frames).arg("--truth").arg(&masks).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unique stems"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `bench --roto --sam2 FILE` / `--mobilesam FILE` say why a file named on the command line cannot be
+/// used (a missing file, one that is not the published weights), instead of "not installed".
+#[test]
+fn bench_roto_reports_why_a_named_model_file_failed() {
+    let dir = tmp("bench-weights");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bogus = dir.join("bogus.bin");
+    std::fs::write(&bogus, b"not the weights").unwrap();
+    for flag in ["--sam2", "--mobilesam"] {
+        let missing = dir.join("missing.bin");
+        let out = bin().env("EFFECTCRAFT_CONFIG_DIR", dir.join("config")).args(["bench", "--roto", flag, missing.to_str().unwrap()]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!out.status.success(), "{flag}: {err}");
+        assert!(err.contains(flag) && err.contains("missing.bin"), "{flag} names the file that could not be read: {err}");
+        let out = bin().env("EFFECTCRAFT_CONFIG_DIR", dir.join("config")).args(["bench", "--roto", flag, bogus.to_str().unwrap()]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!out.status.success(), "{flag}: {err}");
+        assert!(err.contains("does not match"), "{flag} says the file is not the published weights: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Render uses the same empty/project/demo selection as the other CLI commands.

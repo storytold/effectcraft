@@ -1,4 +1,5 @@
-use super::*;
+use super::ov::parent_to_comp;
+use super::{CameraState, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, VIEW_CAM, gv2, three_d, vec2};
 
 /// The camera the viewer shows (view camera or the comp's active camera).
 pub(super) fn cam_state(ctx: &EvalCtx) -> CameraState {
@@ -118,6 +119,24 @@ pub(crate) fn layer_quad(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [[f64; 2
 pub(crate) fn layer_outline(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
     let Some(b) = effectcraft_engine::render::content_bounds(ctx, layer) else { return vec![] };
     project_clipped(&l2c(ctx, layer).0, &box_corners(b))
+}
+
+/// Where a layer's anchor point shows in the viewer (comp pixels), through the current 3D view for
+/// a 3D layer. None without a transform, or when it is at or behind the camera.
+pub(super) fn anchor_in_comp(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 2]> {
+    let a = ctx.v3(layer, layer.transform()?, "anchor", [0.0; 3]);
+    let p = ctx.world_matrix(layer).apply(a.into());
+    if layer.is_3d() {
+        let pc = cam_state(ctx).projection(ctx.comp.width as f64, ctx.comp.height as f64);
+        return project_segment(&pc, p, p).map(|[q, _]| q);
+    }
+    Some([p.x, p.y])
+}
+
+/// −1 when a layer's Rotation turns it counter-clockwise on screen, its parent being flipped.
+/// Otherwise 1.
+pub(super) fn rotation_sign(ctx: &EvalCtx, layer: &Layer) -> f64 {
+    if parent_to_comp(ctx, layer).determinant() < 0.0 { -1.0 } else { 1.0 }
 }
 
 /// Which axes a bounding-box handle scales: corners (0–3) both; the top and bottom edges (4, 6)

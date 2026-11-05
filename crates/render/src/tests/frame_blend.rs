@@ -167,3 +167,10 @@ fn time_stretched_precomp_frame_mixes() {
     let img = crate::render_frame(&p, cid, FrameRate::FPS_30.tick_of(1), 1.0);
     assert!(img.get(12, 10)[3] < 1e-3 && (img.get(17, 10)[3] - 1.0).abs() < 1e-3 && (img.get(22, 10)[3] - 1.0).abs() < 1e-3 && img.get(27, 10)[3] < 1e-3);
 }
+
+#[test]
+fn frame_position_survives_degenerate_rates() {
+    for rate in [FrameRate { num: 24, den: 0 }, FrameRate { num: 0, den: 1 }, FrameRate { num: -24, den: 1 }] {
+        assert_eq!(frame_position(Tick(1_000_000), rate), (0, 0.0));
+    }
+}

@@ -279,6 +279,31 @@ fn ui_dock_and_window_panel_commands_parse_craft_ui_commands() {
 }
 
 #[test]
+fn raw_open_actions_are_rejected_through_every_docking_route() {
+    let mut app = EffectcraftApp::new(Session::default());
+    let before = app.ui.dock.clone();
+    for panel in [PanelKind::ScriptPanel(77), PanelKind::Viewer(42)] {
+        for action in [
+            Action::Open { panel, anchor: Some(PanelKind::Project) },
+            Action::OpenAt { panel, anchor: PanelKind::Project, placement: Placement::Tab { before: None } },
+        ] {
+            for id in ["ui.dock", "window.panel.layout", "window.dockAction"] {
+                let error = invoke(&mut app, id, json!({"action": action})).unwrap_err();
+                assert!(error.contains("panel open commands"), "{id}: {error}");
+                assert_eq!(app.ui.dock, before, "{id} must leave the layout unchanged");
+                assert!(app.session.script_ui.window(77).is_none());
+                assert!(!app.ui.viewers.contains_key(&42));
+            }
+        }
+    }
+    // The normal operation still opens a panel and the raw form still activates one.
+    invoke(&mut app, "ui.dock", json!({"operation": "open", "panel": "Align"})).unwrap();
+    assert!(app.ui.dock.is_open(PanelKind::Align));
+    invoke(&mut app, "window.panel.layout", json!({"action": {"Activate": {"panel": "Project"}}})).unwrap();
+    assert!(app.ui.dock.is_visible(PanelKind::Project));
+}
+
+#[test]
 fn catalog_close_keeps_dynamic_panel_identity_and_releases_viewers() {
     let mut app = EffectcraftApp::new(Session::default());
     app.ui.dock = dock::docked(dock::tabs(&[PanelKind::Composition, PanelKind::Viewer(42), PanelKind::ScriptPanel(77)], 1));

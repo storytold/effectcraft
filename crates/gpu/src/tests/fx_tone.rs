@@ -164,7 +164,7 @@ fn color_stabilizer() {
             pos.keys = vec![Keyframe::new(Tick::ZERO, crate::tests::v3(22.0, 18.0)), Keyframe::new(Tick::from_seconds_f64(1.0), crate::tests::v3(38.0, 24.0))];
             let op = a.props.prop_mut("transform/opacity").unwrap();
             op.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(100.0)), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Scalar(40.0))];
-            s.p.comp_mut(inner_id).unwrap().layers = vec![a];
+            s.p.comp_mut(inner_id).unwrap().layers = vec![a].into();
             let mut l = build::layer(&mut s.p, &s.comp, "Inner", LayerSource::Comp { item: inner_id }, (60, 40), None);
             let vals = [
                 ("stabilize", e(mode)),

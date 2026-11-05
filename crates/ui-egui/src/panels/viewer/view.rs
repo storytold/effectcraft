@@ -1,5 +1,5 @@
 use super::tools::draw_rigs;
-use super::*;
+use super::{Align2, Color32, EffectcraftApp, EvalCtx, Rect, Sense, Stroke, StrokeKind, Tokens, View3D, ViewerMap, json, pos2, three_d, vec2, widgets};
 
 /// Draw the extra views of a 2- or 4-view layout and return the main view's rectangle.
 pub(super) fn aux_views(
@@ -44,7 +44,16 @@ pub(super) fn aux_views(
     // layout shows them), evaluated on a snapshot of the project.
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp, time: t, expr: snap_expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &snap_project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: snap_expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let selected = app.session.state.selected_layers.clone();
     let mut picked: Option<(usize, View3D)> = None;
     for (i, (r, v)) in aux.into_iter().enumerate() {
@@ -92,7 +101,7 @@ pub(super) fn aux_views(
             let map = ViewerMap { origin: cr.min, zoom: fit, comp: [cw, ch], area: r };
             draw_rigs(app, &p.with_clip_rect(r), &map, &ectx, &selected, cam, through_active, Some(v.id()));
         }
-        let label = if comp.has_3d() { v.label() } else { crate::i18n::tr("Active Camera") };
+        let label = if comp.has_3d() { super::view3d_label(v) } else { crate::i18n::tr("Active Camera") };
         p.text(r.left_bottom() + vec2(8.0, -8.0), Align2::LEFT_BOTTOM, label, Tokens::ui(11.0), Color32::from_white_alpha(200));
         app.auto.add(&format!("viewer.view.{}", v.id()), r, label);
         if comp.has_3d()
@@ -115,7 +124,7 @@ fn pane_selector(app: &mut EffectcraftApp, ui: &mut egui::Ui, pane: usize, area:
     let t = app.tokens;
     let r = Rect::from_min_size(area.min + vec2(6.0, 6.0), vec2(124.0, 20.0));
     let pid = egui::Id::unique(("viewer-pane-view", pane));
-    let response = widgets::dropdown(ui, r, crate::i18n::tr(current.label()), &t, pid);
+    let response = widgets::dropdown(ui, r, super::view3d_label(current), &t, pid);
     if response.clicked() {
         let open = widgets::popup_is_open(ui, pid);
         ui.data_mut(|d| d.insert_temp(pid.with("open"), !open));
@@ -128,7 +137,7 @@ fn pane_selector(app: &mut EffectcraftApp, ui: &mut egui::Ui, pane: usize, area:
         ui.set_min_width(124.0);
         let mut chosen = None;
         for (k, v) in View3D::ALL.iter().enumerate() {
-            let item = ui.selectable_label(*v == current, crate::i18n::tr(v.label()));
+            let item = ui.selectable_label(*v == current, super::view3d_label(*v));
             app.auto.add(&format!("viewer.view.{pane}.typeItem.{k}"), item.rect, v.label());
             if item.clicked() {
                 chosen = Some(*v);
@@ -191,7 +200,8 @@ pub(super) fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rec
     p.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
     p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     p.rect_stroke(cr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
-    let label = crate::i18n::tr_args("Locked: {} — {}", &[&name, &(if comp.has_3d() { lv.view.label() } else { crate::i18n::tr("Active Camera") })]);
+    let label =
+        crate::i18n::tr_args("Locked: {} — {}", &[&name, &(if comp.has_3d() { super::view3d_label(lv.view) } else { crate::i18n::tr("Active Camera") })]);
     p.text(r.left_top() + vec2(8.0, 8.0), Align2::LEFT_TOP, &label, Tokens::ui(11.0), Color32::from_white_alpha(210));
     app.auto.add("viewer.locked", r, &label);
     // Close the locked viewer.
