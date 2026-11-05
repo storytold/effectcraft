@@ -10,6 +10,7 @@ use effectcraft_keyframe::Value;
 
 const ECHO_OPS: &[&str] = &["Add", "Maximum", "Minimum", "Screen", "Composite In Back", "Composite In Front", "Blend"];
 
+/// Echo with the definitions After Effects 2026 wrote and the stored `values`.
 fn echo(values: Vec<(usize, f64)>) -> Fx {
     Fx {
         match_name: "ADBE Echo",
@@ -26,6 +27,7 @@ fn echo(values: Vec<(usize, f64)>) -> Fx {
     }
 }
 
+/// HDR Highlight Compression's Amount, set and default.
 #[test]
 fn hdr_highlight_compression_amount() {
     let fx = |values| Fx {
@@ -43,6 +45,7 @@ fn hdr_highlight_compression_amount() {
     }
 }
 
+/// Echo's values and operator, set and default.
 #[test]
 fn echo_values_and_operator() {
     // `echo-01-set-all` (without its Decay 20, below) and `echo-09-pop5-6`.
@@ -61,6 +64,7 @@ fn echo_values_and_operator() {
     assert_eq!((num(&g, "numberOfEchoes"), v(&g, "echoOperator")), (1.0, Value::Enum(0)));
 }
 
+/// Echo values beyond EffectCraft's ranges are imported as stored and reported.
 #[test]
 fn echo_values_beyond_effectcrafts_range_are_reported() {
     // `echo-03-max`: 30 000 echoes and Decay 100; EffectCraft's Echo uses at most 255 and 1.
@@ -75,6 +79,7 @@ fn echo_values_beyond_effectcrafts_range_are_reported() {
     near(&g, "decay", 100.0);
 }
 
+/// Linear Wipe's values, set and default.
 #[test]
 fn linear_wipe_values() {
     let fx = |values| Fx {
@@ -99,6 +104,7 @@ fn linear_wipe_values() {
     near(&run(&fx(vec![]), "ec.transition.linearwipe").0.expect("imported"), "angle", 90.0);
 }
 
+/// Offset's Blend With Original as a percentage and its centre as a point.
 #[test]
 fn offset_blend_is_a_fraction_and_the_centre_a_point() {
     let fx = |values| Fx {
@@ -118,6 +124,7 @@ fn offset_blend_is_a_fraction_and_the_centre_a_point() {
     near(&run(&fx(vec![(2, 0.25)]), "ec.distort.offset").0.expect("imported"), "blend", 25.0);
 }
 
+/// Color Stabilizer's points, Sample Size and Stabilize, default and set.
 #[test]
 fn color_stabilizer_points_sample_size_and_stabilize() {
     let fx = |values| Fx {

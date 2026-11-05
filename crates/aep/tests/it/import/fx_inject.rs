@@ -37,6 +37,7 @@ pub enum Default {
     Color([u8; 4]),
 }
 
+/// The parameter type code `pard` byte 15 holds for `k`.
 fn kind_code(k: ParamKind) -> u8 {
     match k {
         ParamKind::Layer => 0,
@@ -57,10 +58,12 @@ fn kind_code(k: ParamKind) -> u8 {
     }
 }
 
+/// `v` as a big-endian 16.16 fixed-point value.
 fn fixed(v: f64) -> [u8; 4] {
     ((v * 65536.0).round() as i32).to_be_bytes()
 }
 
+/// The 148-byte parameter definition (`pard`) of `d`: type, name, default and range.
 pub fn pard(d: &Def) -> Chunk<'static> {
     let mut b = vec![0u8; 148];
     b[15] = kind_code(d.kind);
@@ -99,6 +102,7 @@ pub fn tdmn(name: &str) -> Chunk<'static> {
     Chunk::data(*b"tdmn", b)
 }
 
+/// A UTF-8 string chunk (`Utf8`).
 fn utf8(s: &str) -> Chunk<'static> {
     Chunk::data(*b"Utf8", s.as_bytes().to_vec())
 }
@@ -137,10 +141,13 @@ pub struct Fx {
     pub data: Vec<(usize, Vec<u8>)>,
 }
 
+/// The match name of parameter `i` of `fx` (`<match>-NNNN`).
 fn param_name(fx: &Fx, i: usize) -> String {
     format!("{}-{i:04}", fx.match_name)
 }
 
+/// The effect's `sspc`: its name, the parameter definitions (`parT`) and the stored values
+/// (`tdgp`), each value record copied from `template`.
 fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
     let n = fx.defs.len() + 2;
     let mut part = vec![
@@ -194,6 +201,7 @@ fn find_glow_template(chunks: &[Chunk<'_>]) -> Option<Chunk<'static>> {
     None
 }
 
+/// Replaces every Glow (`ADBE Glo2` with its `sspc`) below `chunks` with `fx`; the number replaced.
 fn replace_glow(chunks: &mut [Chunk<'_>], fx: &Fx, template: &Chunk<'_>) -> usize {
     let mut n = 0;
     for ch in chunks {
@@ -239,10 +247,12 @@ pub fn losses(r: &ImportResult, category: LossCategory, match_name: &str) -> Vec
     r.report.losses.iter().filter(|l| l.category == category).flat_map(|l| l.details.clone()).filter(|d| d.contains(&tag)).collect()
 }
 
+/// The value of property `id` of `g` (panics when it is missing).
 pub fn v(g: &PropGroup, id: &str) -> Value {
     g.prop(id).unwrap_or_else(|| panic!("no {id} in {}", g.match_id)).value.clone()
 }
 
+/// The scalar value of property `id` of `g`.
 pub fn num(g: &PropGroup, id: &str) -> f64 {
     match v(g, id) {
         Value::Scalar(x) => x,
@@ -250,11 +260,13 @@ pub fn num(g: &PropGroup, id: &str) -> f64 {
     }
 }
 
+/// Asserts that property `id` of `g` is `want` (relative 1e-6).
 pub fn near(g: &PropGroup, id: &str, want: f64) {
     let got = num(g, id);
     assert!((got - want).abs() <= want.abs().max(1.0) * 1e-6, "{} {id}: {got} != {want}", g.match_id);
 }
 
+/// Asserts that the point property `id` of `g` is `want` (within 0.01).
 pub fn pt(g: &PropGroup, id: &str, want: [f64; 2]) {
     let Value::Vec2(a) = v(g, id) else { panic!("{id}") };
     assert!((a[0] - want[0]).abs() < 1e-2 && (a[1] - want[1]).abs() < 1e-2, "{} {id}: {a:?} != {want:?}", g.match_id);
@@ -265,14 +277,17 @@ pub fn slider(kind: ParamKind, name: &'static str, default: f64, valid: (f64, f6
     Def { kind, name, default: Default::Number(default), valid, items: &[] }
 }
 
+/// A popup definition: default item (1-based) and items.
 pub fn popup(name: &'static str, default: u32, items: &'static [&'static str]) -> Def {
     Def { kind: ParamKind::Popup, name, default: Default::Index(default), valid: (0.0, 0.0), items }
 }
 
+/// A definition of another kind (angle, point, colour, ...) with `default`.
 pub fn other(kind: ParamKind, name: &'static str, default: Default) -> Def {
     Def { kind, name, default, valid: (0.0, 0.0), items: &[] }
 }
 
+/// The definitions written here read back as the reader decodes After Effects' `pard`.
 #[test]
 fn pard_layout_decodes_as_written() {
     // Echo's Decay (float, valid 0..100, default 1), Linear Wipe's Feather (fixed, valid max
