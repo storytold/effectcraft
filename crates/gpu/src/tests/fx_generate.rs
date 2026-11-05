@@ -73,6 +73,8 @@ fn wipes() {
     effect_case("ec.transition.linearwipe", &[("completion", n(10.0)), ("angle", n(77.0)), ("feather", n(16.0))]);
     effect_case("ec.transition.linearwipe", &[("completion", n(100.0)), ("feather", n(32000.0))]);
     effect_case("ec.transition.linearwipe", &[("completion", n(0.0)), ("feather", n(40.0))]);
+    // 100 % clears the layer also when the angle is not a number (the CPU clears before reading it).
+    effect_case("ec.transition.linearwipe", &[("completion", n(100.0)), ("angle", n(f64::NAN))]);
     effect_case("ec.transition.linearwipe", &[("completion", n(40.0)), ("angle", n(30.0)), ("feather", n(12.0)), ("legacyFeather", b(true))]);
     effect_case("ec.transition.venetian", &[("completion", n(35.0)), ("direction", n(30.0)), ("width", n(11.0)), ("feather", n(2.0))]);
     effect_case("ec.transition.venetian", &[("completion", n(60.0)), ("width", n(17.0))]);

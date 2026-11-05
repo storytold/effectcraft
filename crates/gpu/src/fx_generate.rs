@@ -185,7 +185,7 @@ fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 /// Linear Wipe (`effects::misc::linear_wipe`): the hard matte at `lo + completion·(hi − lo)`
 /// blurred by Feather with the layer's edges repeated, or the legacy linear ramp.
-fn linear_wipe(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
+fn linear_wipe(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let done = ctx.params.f("completion") / 100.0;
     let (w, h) = (b.img.width as f64, b.img.height as f64);
     let ([dx, dy], lo, hi) = effectcraft_effects::linear_wipe_axis(ctx.params.f("angle"), w, h);
@@ -215,13 +215,17 @@ fn linear_wipe(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     if done.is_nan() || done <= 0.0 {
         return Some(b);
     }
-    // 100 %: every pixel's distance is at least a pixel short of the edge (alpha 0).
-    let edge = if done >= 1.0 { hi + 1.0 } else { lo + (hi - lo) * done };
+    // 100 % clears the layer whatever the angle (the CPU clears before it reads it).
+    if done >= 1.0 {
+        b.img = e.image(b.img.width, b.img.height);
+        return Some(b);
+    }
+    let edge = lo + (hi - lo) * done;
     if !(edge.is_finite() && dx.is_finite() && dy.is_finite()) {
         return Some(b);
     }
     let data = table(edge);
-    let sigma = if done >= 1.0 { 0.0 } else { effectcraft_effects::linear_wipe_sigma(ctx.params.f("feather"), b.scale, w, h) };
+    let sigma = effectcraft_effects::linear_wipe_sigma(ctx.params.f("feather"), b.scale, w, h);
     if sigma <= 1e-3 {
         return run(e, "gen_linear_wipe", &params(1.0, 0), b, None, Some(&data));
     }
