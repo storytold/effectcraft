@@ -407,11 +407,13 @@ fn fxn_echo(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 3u: {
             acc = acc + q - acc * q;
         }
+        // Composite In Back: each echo over what is there (time_fx.rs echo).
         case 4u: {
-            acc += q * (1.0 - acc.w);
-        }
-        case 5u: {
             acc = q + acc * (1.0 - q.w);
+        }
+        // Composite In Front: each echo behind what is there.
+        case 5u: {
+            acc += q * (1.0 - acc.w);
         }
         default: {
             acc += q;

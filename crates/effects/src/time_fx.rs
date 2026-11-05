@@ -289,15 +289,19 @@ fn echo(ctx: &EffectCtx, b: Buf) -> Buf {
                 2 => (0..4).for_each(|c| acc[c] = acc[c].min(q[c])),
                 // Screen
                 3 => (0..4).for_each(|c| acc[c] = acc[c] + q[c] - acc[c] * q[c]),
-                // Composite In Back: each later echo goes behind what is there.
+                // Composite In Back: the layer goes in back, each echo is composited over it.
+                // After Effects 2026 (opaque layer, one echo): the echo hides the current frame.
+                // The order among several echoes and whether the intensity scales their alpha
+                // are not measured yet; each later echo goes on top here.
                 4 => {
-                    let ia = 1.0 - acc[3];
-                    (0..4).for_each(|c| acc[c] += q[c] * ia);
-                }
-                // Composite In Front: each later echo goes on top.
-                5 => {
                     let ia = 1.0 - q[3];
                     (0..4).for_each(|c| acc[c] = q[c] + acc[c] * ia);
+                }
+                // Composite In Front: the layer stays in front, each echo goes behind what is
+                // there (After Effects 2026: an opaque layer hides its echo).
+                5 => {
+                    let ia = 1.0 - acc[3];
+                    (0..4).for_each(|c| acc[c] += q[c] * ia);
                 }
                 // Blend (average) and Add
                 _ => (0..4).for_each(|c| acc[c] += q[c]),
@@ -1121,6 +1125,63 @@ mod tests {
         v.push(("echoOperator", Value::Enum(6)));
         let out = run("ec.time.echo", &v, 0.8, &h);
         assert!((out.img.data[0][0] - want as f32 / 3.0).abs() < 1e-4);
+    }
+
+    /// Row y = 130, x = 60..111 of the importer sample's SRC test card (#3124): a black-to-white
+    /// ramp across 320 px under an opaque white 30 px square whose centre moves from x = 20 at
+    /// 0 s to x = 300 at 2 s.
+    struct MovingSquare;
+    impl EffectHost for MovingSquare {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let centre = 20.0 + 140.0 * t;
+            let (s0, s1) = (centre - 15.0, centre + 15.0);
+            let mut img = Image::new(52, 1);
+            for (i, px) in img.data.iter_mut().enumerate() {
+                let x = 60.0 + i as f64;
+                let cover = ((x + 1.0).min(s1) - x.max(s0)).clamp(0.0, 1.0) as f32;
+                let ramp = ((x + 0.5) / 320.0) as f32;
+                let v = cover + (1.0 - cover) * ramp;
+                *px = [v, v, v, 1.0];
+            }
+            Some(Buf { img, offset: [0.0; 2], scale: 1.0 })
+        }
+    }
+
+    /// After Effects 2026 renders of that row at 0.5 s, Echo Time −1/30 s, one echo, Starting
+    /// Intensity 1, Decay 1 (renders/echo-00 ... echo-10 of the 2026-11-05 importer sample, 32 bpc,
+    /// saved as 8-bit PNGs that hold floor(value × 25.5)).
+    #[rustfmt::skip]
+    const AE_ECHO_ROW: [(u32, &str, [u8; 52]); 6] = [
+        (0, "Add", [9, 9, 9, 10, 10, 10, 10, 10, 10, 11, 24, 31, 31, 31, 31, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 39, 33, 33, 33, 33, 16, 16, 17, 17, 17, 17, 17]),
+        (1, "Maximum", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 18, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 8, 8, 8, 8, 8, 8, 8]),
+        (2, "Minimum", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 13, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]),
+        (3, "Screen", [8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 20, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 14, 14, 14, 14, 14, 14, 14]),
+        (4, "Composite In Back", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 18, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 13, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]),
+        (5, "Composite In Front", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 8, 8, 8, 8, 8, 8, 8]),
+    ];
+
+    /// #3124: every operator but Blend against the After Effects row. Composite In Back puts
+    /// the echo over the layer (the trailing echo hides the square's leading edge), In Front
+    /// keeps the layer on top (the output is the current frame).
+    #[test]
+    fn echo_operators_match_after_effects_at_the_moving_edge() {
+        let h = MovingSquare;
+        for (op, name, ae) in AE_ECHO_ROW {
+            let vals = [("echoTime", num(-1.0 / 30.0)), ("numberOfEchoes", num(1.0)), ("echoOperator", Value::Enum(op))];
+            let env = EffectEnv { host: Some(&h), frame_rate: 25.0, comp_time: 0.5, ..Default::default() };
+            let out = run_fx("ec.time.echo", &vals, Image::new(52, 1), 0.5, env);
+            for (x, want) in ae.iter().enumerate() {
+                let got = (out.img.data[x][0] * 25.5).floor();
+                assert!((got - f32::from(*want)).abs() <= 1.0, "{name}: x = {} got {got}, After Effects {want}", 60 + x);
+                assert_eq!(out.img.data[x][3], 1.0, "{name}: alpha at x = {}", 60 + x);
+            }
+        }
     }
 
     #[test]
