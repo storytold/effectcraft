@@ -9,6 +9,7 @@ use crate::dock::{PanelKind, Workspace};
 use crate::state::UiState;
 
 mod legacy;
+pub(crate) mod script_panels;
 
 const FILE: &str = "workspaces.json";
 /// An earlier version's file, kept when it is first rewritten in the current format.
@@ -28,6 +29,10 @@ struct Snapshot {
     focused: PanelKind,
     maximized: Option<PanelKind>,
     saved_workspaces: BTreeMap<String, Workspace>,
+    /// The script of each [`PanelKind::ScriptPanel`] id in this file (see [`script_panels`]).
+    /// An older build ignores this and a file of an older build has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    script_panels: BTreeMap<u32, String>,
 }
 
 impl Snapshot {
@@ -39,6 +44,7 @@ impl Snapshot {
             focused: ui.focused,
             maximized: ui.maximized,
             saved_workspaces: ui.saved_workspaces.clone(),
+            script_panels: script_panels::captured(ui),
         }
     }
 
@@ -48,6 +54,7 @@ impl Snapshot {
         ui.focused = self.focused;
         ui.maximized = self.maximized;
         ui.saved_workspaces = self.saved_workspaces;
+        ui.script_panels = self.script_panels;
         // A native window's place is made safe to hand to the windowing system.
         for workspace in std::iter::once(&mut ui.dock).chain(ui.saved_workspaces.values_mut()) {
             for window in &mut workspace.layout.floating {
@@ -96,6 +103,9 @@ impl Snapshot {
 
 pub(crate) struct WorkspaceStore {
     saved: Snapshot,
+    /// [`UiState::script_panels`] as last saved: [`Self::has_changes`] runs every frame, and
+    /// `saved.script_panels` is that table less what the layouts no longer refer to.
+    saved_names: BTreeMap<u32, String>,
     last_attempt: f64,
     writable: bool,
     /// The text of an earlier version's file that loaded: the first save copies it to
@@ -142,7 +152,14 @@ impl WorkspaceStore {
         }
         // An unreadable or newer file is never replaced by this session, even after a later
         // layout edit. Ordinary failed writes remain dirty and retryable.
-        Self { saved: Snapshot::capture(ui), last_attempt: f64::NEG_INFINITY, writable: error.is_none(), migrated_from: original, error }
+        Self {
+            saved: Snapshot::capture(ui),
+            saved_names: ui.script_panels.clone(),
+            last_attempt: f64::NEG_INFINITY,
+            writable: error.is_none(),
+            migrated_from: original,
+            error,
+        }
     }
 
     pub(crate) fn due(&mut self, now: f64) -> bool {
@@ -163,6 +180,7 @@ impl WorkspaceStore {
             || self.saved.focused != ui.focused
             || self.saved.maximized != ui.maximized
             || self.saved.saved_workspaces != ui.saved_workspaces
+            || self.saved_names != ui.script_panels
     }
 
     pub(crate) fn save(&mut self, config: Option<&dyn ConfigStore>, ui: &UiState) -> Result<bool, String> {
@@ -183,6 +201,7 @@ impl WorkspaceStore {
         config.write(FILE, &text).map_err(|e| format!("save workspaces: {e}"))?;
         self.migrated_from = None;
         self.saved = snapshot;
+        self.saved_names = ui.script_panels.clone();
         self.error = None;
         Ok(true)
     }
