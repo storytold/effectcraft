@@ -73,6 +73,13 @@ impl EffectcraftApp {
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
     /// give it the focus: Window ▸ `<panel>`.
     pub fn show_panel(&mut self, p: PanelKind) {
+        // A saved place outlives its script's window, and an empty tab shows nothing.
+        if let PanelKind::ScriptPanel(id) = p
+            && self.session.script_ui.window(id).is_none()
+        {
+            self.ui.status = "That ScriptUI panel's script isn't open".into();
+            return;
+        }
         if !self.ui.dock.is_floating(p) && self.ui.maximized.is_some_and(|m| m != p) {
             self.ui.maximized = None;
         }

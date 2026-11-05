@@ -518,3 +518,18 @@ fn a_panel_closed_in_a_workspace_shows_there_while_its_script_is_open() {
     assert!(h.state().ui.dock.group_of(alpha).contains(&PanelKind::Project), "Alpha is with {:?}", h.state().ui.dock.group_of(alpha));
     assert_eq!(h.state().session.script_ui.windows.len(), 1, "the same window, not a second run");
 }
+
+#[test]
+fn a_queued_open_event_for_a_closed_window_opens_no_tab() {
+    let store = store_with(&["Alpha.jsx"]);
+    let mut session = restored(&store);
+    let window = id(panel_of(&session, "Alpha.jsx"));
+    session.execute("scriptui.close", json!({"window": window})).unwrap();
+    let app = EffectcraftApp::new(session);
+    let queued = |event: &effectcraft_engine::Event| matches!(event, effectcraft_engine::Event::Frontend { command, .. } if command == "window.scriptPanel");
+    assert!(app.session.events.iter().any(queued), "the event survives the launch");
+    let focused = app.ui.focused;
+    let h = harness(app);
+    assert_eq!(script_tabs(h.state()), []);
+    assert_eq!(h.state().ui.focused, focused);
+}
