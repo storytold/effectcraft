@@ -25,3 +25,4 @@ mod synthetic;
 mod text;
 mod text_anim;
 mod timing;
+mod versions;
