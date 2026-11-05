@@ -31,7 +31,7 @@ struct Snapshot {
     saved_workspaces: BTreeMap<String, Workspace>,
     /// The script of each [`PanelKind::ScriptPanel`] id in this file (see [`script_panels`]).
     /// An older build ignores this and a file of an older build has none.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "script_panels::read_names")]
     script_panels: BTreeMap<u32, String>,
 }
 

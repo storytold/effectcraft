@@ -88,6 +88,12 @@ fn hide_unless(workspace: &mut Workspace, shown: impl Fn(&PanelKind) -> bool) {
     }
 }
 
+/// The table as far as it reads: an entry that isn't an id and a name is an id without a name.
+pub(super) fn read_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<u32, String>, D::Error> {
+    let table = <Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(table.as_object().into_iter().flatten().filter_map(|(id, name)| Some((id.parse().ok()?, name.as_str()?.to_string()))).collect())
+}
+
 /// See the module docs. Runs on a validated snapshot; an `Err` rejects the file.
 pub(super) fn detach(snapshot: &mut Snapshot) -> Result<(), String> {
     let (mut moved, mut names, mut seen) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
