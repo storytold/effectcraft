@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use craft_ui::docking::{Action, Placement};
+use craft_ui::docking::{Action, Column, Floating, Group, Node, Placement, Side};
 use effectcraft_engine::Session;
 use effectcraft_engine::commands::scripts::OPEN_PANELS_FILE;
 use effectcraft_engine::config::{ConfigStore, MemoryConfig};
@@ -563,4 +563,47 @@ fn a_missing_script_alone_in_its_frame_returns_to_that_frame() {
     h.state_mut().session.events.push(effectcraft_engine::Event::Frontend { command: "window.scriptPanel".into(), params: json!({"window": 7}) });
     h.run_steps(3);
     assert_eq!(h.state().ui.dock.layout.root, Some(root(PanelKind::ScriptPanel(7))));
+}
+
+/// Project selected with `panel` beside it, in a collapsed container: an iconic dock column, a
+/// minimized dock group, then a minimized floating window.
+fn collapsed(container: usize, panel: PanelKind) -> dock::Layout {
+    let canvas = dock::tabs(&[PanelKind::Composition], 0);
+    if container == 2 {
+        let mut window = Floating::single(vec![PanelKind::Project, panel], 0, [20.0, 30.0, 300.0, 200.0]);
+        window.minimized = true;
+        return dock::Layout { root: Some(canvas), floating: vec![window] };
+    }
+    let mut group = Group::new(vec![PanelKind::Project, panel], 0);
+    group.minimized = container == 1;
+    let mut column = Column::new(vec![group], 240.0);
+    column.iconic = container == 0;
+    let side = Node::Dock { side: Side::Start, columns: vec![column] };
+    dock::Layout { root: Some(dock::hsplit(SplitSize::Ratio(0.3), side, canvas)), floating: Vec::new() }
+}
+
+#[test]
+fn a_returning_panel_keeps_a_collapsed_container_as_it_was() {
+    for container in 0..3 {
+        for locked in [false, true] {
+            for at_launch in [false, true] {
+                let case = format!("container {container}, locked {locked}, at launch {at_launch}");
+                let saved = PanelKind::ScriptPanel(900_001);
+                let mut workspace = Workspace::new(collapsed(container, saved));
+                workspace.apply(Action::Close { panel: saved }, dock::permissions).unwrap();
+                workspace.locked = locked;
+                let store = store_with(&[]);
+                store.write(WORKSPACES_FILE, &file(&workspace, &[(900_001, "Alpha.jsx")])).unwrap();
+                let open = [(7, "Alpha.jsx")];
+                let mut app = EffectcraftApp::new(session_with_windows(&store, if at_launch { &open } else { &[] }));
+                if !at_launch {
+                    let window = ScriptWindow { id: 7, kind: WindowKind::Panel, script: "Alpha.jsx".into(), visible: true, ..Default::default() };
+                    app.session.script_ui.windows.push(window);
+                    invoke(&mut app, "window.resetWorkspace");
+                }
+                assert_eq!(app.ui.dock.layout, collapsed(container, PanelKind::ScriptPanel(7)), "{case}");
+                assert!(app.ui.dock.hidden.is_empty(), "{case}");
+            }
+        }
+    }
 }
