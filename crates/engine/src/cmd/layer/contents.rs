@@ -15,8 +15,14 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         Some([x, y, rw, rh]) => (x + rw / 2.0, y + rh / 2.0, rw, rh),
         None => (if w > 0.0 { w / 2.0 } else { 0.0 }, h / 2.0, w * 0.6, h * 0.6),
     };
+    // A mask's corner radius is baked into its path, so it is given here or taken from the
+    // Rounded Rectangle tool, which is what the viewer's drag has just set.
+    let roundness = match p.get("roundness") {
+        None => s.state.shape_tool.roundness,
+        Some(v) => v.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad("layer.addMask", "`roundness`: pixels"))?.max(0.0),
+    };
     // The shape tools' masks: rectangle, ellipse, rounded rectangle, polygon or star.
-    let path = crate::cmd::shape_tool::mask_path(shape, [cx, cy], [rw, rh])
+    let path = crate::cmd::shape_tool::mask_path(shape, [cx, cy], [rw, rh], roundness)
         .ok_or_else(|| bad("layer.addMask", format!("unknown shape `{shape}`; one of rect, ellipse, rounded, polygon, star")))?;
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
