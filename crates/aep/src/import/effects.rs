@@ -469,6 +469,11 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
             prop.value = v;
         }
     };
+    // The plug-in's Output starts at Colors (EffectCraft's Display starts at Preview); an Output
+    // that cannot be imported keeps it.
+    let (display, matte_only) = CRYPTO_COLORS;
+    set(group, "display", Value::Enum(display));
+    set(group, "matteOnly", Value::Bool(matte_only));
     for p in params {
         if carries_nothing(p) {
             continue;
@@ -492,18 +497,17 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
             }
             (2, ParamKind::Popup) => {
                 if moving {
-                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported, EffectCraft's display used"));
+                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported, Colors used"));
                     continue;
                 }
-                if let Some((display, matte_only)) = crypto_output(p, &here, &label, col) {
-                    set(group, "display", Value::Enum(display));
-                    set(group, "matteOnly", Value::Bool(matte_only));
-                }
+                let (display, matte_only) = crypto_output(p, &here, &label, col);
+                set(group, "display", Value::Enum(display));
+                set(group, "matteOnly", Value::Bool(matte_only));
             }
             (3, ParamKind::Checkbox) => {
                 if moving {
                     col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
-                } else if p.value() == Some(ParamValue::Bool(true)) {
+                } else if selection_mode_on(p) {
                     // A picking switch of the plug-in; EffectCraft picks with its own tool.
                     col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart"));
                 }
@@ -517,45 +521,66 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
     }
 }
 
+/// EffectCraft's (Display, Matte Only) for the plug-in's Output Colors, its default.
+const CRYPTO_COLORS: (u32, bool) = (0, false);
+
+/// Is Selection Mode on? The plug-in writes it, when on, as a record in the default state
+/// (`tdsb` 3) holding 1.0, which [`EffectParam::stored_value`] does not read; After Effects
+/// reads it back as on and renders it (1400 `crypto-01-set-all`, `crypto-02-chk-toggled`). So
+/// the record's value counts whatever its state; no record is off (the `pard` default).
+fn selection_mode_on(p: &EffectParam<'_, '_>) -> bool {
+    match p.stored() {
+        Some(s) => s.static_value().and_then(|v| v.first().copied()).is_some_and(|v| v != 0.0),
+        None => p.value() == Some(ParamValue::Bool(true)),
+    }
+}
+
 /// Cryptomatte's Output as EffectCraft's (Display, Matte Only): Colors is Colors, Matted RGBA
-/// is Matte (the layer keyed by the selection), Matte Only is Matte Only. Matted Colors has no
-/// counterpart and is reported, so is a value that cannot be read.
-fn crypto_output(p: &EffectParam<'_, '_>, here: &str, label: &str, col: &mut Collector) -> Option<(u32, bool)> {
+/// is Matte (the layer keyed by the selection), Matte Only is Matte Only. Matted Colors (the
+/// ID colours keyed by the selection) becomes Matte, the same matte over the layer's own
+/// colours, and is reported; a value that cannot be read is reported and Colors used.
+fn crypto_output(p: &EffectParam<'_, '_>, here: &str, label: &str, col: &mut Collector) -> (u32, bool) {
     let items: Vec<String> = match &p.items {
         Some(items) => items.clone(),
         None if p.popup_item_count().map(usize::from) == Some(CRYPTOMATTE_OUTPUT.len()) => CRYPTOMATTE_OUTPUT.iter().map(|s| s.to_string()).collect(),
         None => {
             col.lose(
                 LossCategory::Effects,
-                format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported", p.popup_item_count()),
+                format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported, Colors used", p.popup_item_count()),
             );
-            return None;
+            return CRYPTO_COLORS;
         }
     };
     let index = match (p.stored(), p.stored_value()) {
         (Some(_), Some(ParamValue::Index(i))) => i,
         (Some(_), _) => {
-            col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, EffectCraft's display used"));
-            return None;
+            col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, Colors used"));
+            return CRYPTO_COLORS;
         }
-        // No record: the definition's default, unless it is borrowed (a selection writes into
-        // the borrowed slot) or empty; the plug-in's default for a fresh effect is not sampled.
+        // No record: the default. The plug-in's is Colors (1): the `pard` default of the
+        // instance's own and of the project's shared definition, and what scripting reads from a
+        // fresh effect (1400 `crypto-00-defaults`). An instance's own definition with another
+        // default keeps it; a borrowed one has no reliable popup default.
         (None, _) => match p.pard_default() {
             Some(ParamValue::Index(i)) if i != 0 && !p.borrowed_definition => i,
-            _ => {
-                col.lose(LossCategory::Effects, format!("{here}: parameter {label} has no value and no reliable default, EffectCraft's display used"));
-                return None;
-            }
+            _ => return CRYPTO_COLORS,
         },
     };
     let item = usize::try_from(index).ok().and_then(|i| i.checked_sub(1)).and_then(|i| items.get(i)).map(String::as_str).unwrap_or_default();
     match popup_key(item).as_str() {
-        "colors" => Some((0, false)),
-        "matted rgba" => Some((1, false)),
-        "matte only" => Some((1, true)),
+        "colors" => CRYPTO_COLORS,
+        "matted rgba" => (1, false),
+        "matte only" => (1, true),
+        "matted colors" => {
+            col.lose(
+                LossCategory::Effects,
+                format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, imported as Matte (the layer's colours keyed by the selection, not the ID colours)"),
+            );
+            (1, false)
+        }
         _ => {
-            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, EffectCraft's display used"));
-            None
+            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, Colors used"));
+            CRYPTO_COLORS
         }
     }
 }

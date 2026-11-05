@@ -34,13 +34,14 @@ fn utf8(s: &str) -> Chunk<'static> {
     Chunk::data(*b"Utf8", s.as_bytes().to_vec())
 }
 
-/// A static value record holding `v`, after the one After Effects wrote for Glow's A & B Midpoint
-/// (its header; without the expression).
-fn record(template: &Chunk<'_>, v: f64) -> Chunk<'static> {
+/// A static value record holding `v` in state `tdsb` (1 written, 3 the default state), after the
+/// one After Effects wrote for Glow's A & B Midpoint (its header; without the expression).
+fn record(template: &Chunk<'_>, tdsb: u32, v: f64) -> Chunk<'static> {
     let mut kids = Vec::new();
     for c in template.children() {
         match &c.body {
-            Body::Data(d) if c.id == *b"tdsb" || c.id == *b"tdb4" => kids.push(Chunk::data(c.id, d.to_vec())),
+            Body::Data(_) if c.id == *b"tdsb" => kids.push(Chunk::data(*b"tdsb", tdsb.to_be_bytes().to_vec())),
+            Body::Data(d) if c.id == *b"tdb4" => kids.push(Chunk::data(c.id, d.to_vec())),
             Body::Data(_) if c.id == *b"cdat" => {
                 let mut d = vec![0u8; 40];
                 d[..8].copy_from_slice(&v.to_be_bytes());
@@ -75,13 +76,16 @@ struct Crypto {
     settings: Option<Vec<u8>>,
     /// Output (1-based), if stored.
     output: Option<u32>,
-    /// Selection Mode, if stored.
-    selection_mode: Option<bool>,
+    /// Selection Mode, if stored: on, and the record's `tdsb`.
+    selection_mode: Option<(bool, u32)>,
+    /// The instance has no definitions of its own (an empty `parT`) and borrows the project's,
+    /// as every instance but the first of a project does (1400).
+    borrowed: bool,
 }
 
 /// The Cryptomatte instance: its own definitions (input layer, Settings, Output, Selection Mode,
-/// the built-in entry) and the stored values of `c`.
-fn sspc(c: &Crypto, template: &Chunk<'_>) -> Chunk<'static> {
+/// the built-in entry; none when `own` is false) and the stored values of `c`.
+fn sspc(c: &Crypto, template: &Chunk<'_>, own: bool) -> Chunk<'static> {
     let name = |i: u32| format!("Cryptomatte-{i:04}");
     let part = vec![
         Chunk::data(*b"parn", 5u32.to_be_bytes().to_vec()),
@@ -98,19 +102,20 @@ fn sspc(c: &Crypto, template: &Chunk<'_>) -> Chunk<'static> {
         tdmn("ADBE Effect Built In Params"),
         pard(9, "", None),
     ];
+    let part = if own { part } else { Vec::new() };
     let mut values = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec())];
     if let Some(d) = &c.settings {
         values.push(tdmn(&name(1)));
-        values.push(record(template, 0.0));
+        values.push(record(template, 1, 0.0));
         values.push(Chunk::list(*b"aRbs", vec![Chunk::data(*b"aRbp", d.clone())]));
     }
     if let Some(o) = c.output {
         values.push(tdmn(&name(2)));
-        values.push(record(template, f64::from(o)));
+        values.push(record(template, 1, f64::from(o)));
     }
-    if let Some(on) = c.selection_mode {
+    if let Some((on, tdsb)) = c.selection_mode {
         values.push(tdmn(&name(3)));
-        values.push(record(template, if on { 1.0 } else { 0.0 }));
+        values.push(record(template, tdsb, if on { 1.0 } else { 0.0 }));
     }
     Chunk::list(*b"sspc", vec![Chunk::list(*b"fnam", vec![utf8("Cryptomatte")]), Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)])
 }
@@ -131,19 +136,20 @@ fn find_glow_template<'a>(chunks: &'a [Chunk<'a>]) -> Option<Chunk<'a>> {
 }
 
 /// Puts `c` in place of the Glow effect (the instance in the effect parade and the project's
-/// shared definitions); the number of places.
-fn replace_glow(chunks: &mut [Chunk<'_>], c: &Crypto, template: &Chunk<'_>) -> usize {
+/// shared definitions, `defs` below `EfDf`); the number of places.
+fn replace_glow(chunks: &mut [Chunk<'_>], c: &Crypto, template: &Chunk<'_>, defs: bool) -> usize {
     let mut n = 0;
     for ch in chunks {
+        let defs = defs || ch.is_list(b"EfDf");
         let kids = ch.children_mut();
         if let Some(at) = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(b"ADBE Glo2\0")))
             && kids.get(at + 1).is_some_and(|k| k.is_list(b"sspc"))
         {
             kids[at] = tdmn("Cryptomatte");
-            kids[at + 1] = sspc(c, template);
+            kids[at + 1] = sspc(c, template, defs || !c.borrowed);
             n += 1;
         }
-        n += replace_glow(kids, c, template);
+        n += replace_glow(kids, c, template, defs);
     }
     n
 }
@@ -152,7 +158,7 @@ fn run(c: &Crypto) -> (Option<PropGroup>, ImportResult) {
     let file = parse(SYNTHETIC).unwrap();
     let template = find_glow_template(&file.chunks).expect("Glow's A & B Midpoint record");
     let mut file = parse(SYNTHETIC).unwrap();
-    assert_eq!(replace_glow(&mut file.chunks, c, &template), 2, "the Glow effect and its shared definitions");
+    assert_eq!(replace_glow(&mut file.chunks, c, &template, false), 2, "the Glow effect and its shared definitions");
     let bytes = write(&file).unwrap();
     let mut project = Project::default();
     let none = |_: &str| false;
@@ -178,7 +184,7 @@ fn str(s: &str) -> Value {
 #[test]
 fn cryptomatte_arrives_with_its_layer_selection_and_output() {
     let sel = "<0000002a>, <deadbeef>";
-    let (g, r) = run(&Crypto { settings: Some(settings("Layer_A", sel)), output: Some(3), selection_mode: None });
+    let (g, r) = run(&Crypto { settings: Some(settings("Layer_A", sel)), output: Some(3), selection_mode: None, borrowed: false });
     assert_eq!(losses(&r, LossCategory::Effects), Vec::<String>::new());
     assert_eq!(losses(&r, LossCategory::DamagedData), Vec::<String>::new());
     let g = g.expect("an EffectCraft Cryptomatte");
@@ -191,34 +197,97 @@ fn cryptomatte_arrives_with_its_layer_selection_and_output() {
 #[test]
 fn cryptomatte_output_maps_to_display_and_matte_only() {
     for (output, display, matte_only) in [(1, 0, false), (3, 1, false), (4, 1, true)] {
-        let (g, r) = run(&Crypto { settings: Some(settings("L", "<00000001>")), output: Some(output), selection_mode: Some(false) });
+        let (g, r) = run(&Crypto { settings: Some(settings("L", "<00000001>")), output: Some(output), selection_mode: Some((false, 1)), borrowed: false });
         assert_eq!(losses(&r, LossCategory::Effects), Vec::<String>::new(), "output {output}");
         let g = g.expect("effect");
         assert_eq!((v(&g, "display"), v(&g, "matteOnly")), (Value::Enum(display), Value::Bool(matte_only)), "output {output}");
     }
-    // No Output record: the instance's own definition has the default (Colors here).
-    let (g, r) = run(&Crypto { settings: None, output: None, selection_mode: None });
+    // No Output record: the default, Colors, from the instance's own definition or, borrowed,
+    // the plug-in's (1400 `crypto-00-defaults`; every other composition there borrows).
+    for borrowed in [false, true] {
+        let (g, r) = run(&Crypto { settings: None, output: None, selection_mode: None, borrowed });
+        assert_eq!(losses(&r, LossCategory::Effects), Vec::<String>::new(), "borrowed {borrowed}");
+        let g = g.expect("effect");
+        assert_eq!(
+            (v(&g, "display"), v(&g, "matteOnly"), v(&g, "layerName"), v(&g, "selection")),
+            (Value::Enum(0), Value::Bool(false), str(""), str("")),
+            "the default settings: Colors, no layer, no selection (borrowed {borrowed})"
+        );
+    }
+    // A borrowed definition with a stored Output.
+    let (g, r) = run(&Crypto { settings: None, output: Some(4), selection_mode: None, borrowed: true });
     assert_eq!(losses(&r, LossCategory::Effects), Vec::<String>::new());
     let g = g.expect("effect");
-    assert_eq!((v(&g, "display"), v(&g, "layerName"), v(&g, "selection")), (Value::Enum(0), str(""), str("")), "the default settings: no layer, no selection");
+    assert_eq!((v(&g, "display"), v(&g, "matteOnly")), (Value::Enum(1), Value::Bool(true)));
 }
 
 #[test]
 fn cryptomatte_values_without_a_counterpart_are_reported() {
-    // Matted Colors has no counterpart: reported, EffectCraft's display kept.
-    let (g, r) = run(&Crypto { settings: Some(settings("L", "")), output: Some(2), selection_mode: Some(true) });
+    // Matted Colors has no counterpart: reported, imported as Matte (the same matte).
+    let (g, r) = run(&Crypto { settings: Some(settings("L", "")), output: Some(2), selection_mode: Some((true, 1)), borrowed: false });
     let found = losses(&r, LossCategory::Effects);
-    assert!(found.iter().any(|d| d.contains("'Matted Colors'") && d.contains("no counterpart")), "{found:?}");
+    assert!(found.iter().any(|d| d.contains("'Matted Colors'") && d.contains("no counterpart") && d.contains("imported as Matte")), "{found:?}");
     assert!(found.iter().any(|d| d.contains("Selection Mode") && d.contains("is on")), "{found:?}");
     assert_eq!(found.len(), 2, "{found:?}");
     let g = g.expect("still imported");
-    assert_eq!((v(&g, "display"), v(&g, "matteOnly"), v(&g, "layerName")), (Value::Enum(2), Value::Bool(false), str("L")));
+    assert_eq!((v(&g, "display"), v(&g, "matteOnly"), v(&g, "layerName")), (Value::Enum(1), Value::Bool(false), str("L")));
+
+    // Selection Mode on as After Effects writes it: a default-state record (`tdsb` 3) holding 1
+    // (1400 `crypto-01-set-all`). Reported like a written one; off in that form is not.
+    for (on, n) in [(true, 1), (false, 0)] {
+        let (_, r) = run(&Crypto { settings: None, output: None, selection_mode: Some((on, 3)), borrowed: true });
+        let found = losses(&r, LossCategory::Effects);
+        assert_eq!(found.iter().filter(|d| d.contains("Selection Mode") && d.contains("is on")).count(), n, "on {on}: {found:?}");
+        assert_eq!(found.len(), n, "on {on}: {found:?}");
+    }
 
     // Unreadable Settings data: reported as damaged, no layer and no selection.
     let mut bad = settings("L", "<00000001>");
     bad[0] = b'x';
-    let (g, r) = run(&Crypto { settings: Some(bad), output: Some(3), selection_mode: None });
+    let (g, r) = run(&Crypto { settings: Some(bad), output: Some(3), selection_mode: None, borrowed: false });
     let found = losses(&r, LossCategory::DamagedData);
     assert!(found.iter().any(|d| d.contains("settings (layer, selection) are unreadable")), "{found:?}");
     assert_eq!((v(&g.expect("effect"), "layerName")), str(""));
+}
+
+/// Our own After Effects 2026 sample of the plug-in (2.6.6), corpus `aep/cryptomatte.aep`: one
+/// Cryptomatte on an EXR layer per composition. The first instance has its own definitions, the
+/// others borrow the project's; every Settings data is the fresh one (no layer, no selection).
+#[test]
+#[ignore = "needs aep/cryptomatte.aep in the corpus (EFFECTCRAFT_AEP_FIXTURES); not pinned yet"]
+fn the_after_effects_sample_arrives_as_after_effects_shows_it() {
+    let bytes = fixture!("cryptomatte.aep");
+    let mut project = Project::default();
+    let none = |_: &str| false;
+    let r = import(&mut project, &bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap();
+    assert_eq!(losses(&r, LossCategory::DamagedData), Vec::<String>::new());
+    let found = losses(&r, LossCategory::Effects);
+    // (composition, Display, Matte Only, the loss it reports): the readbacks are Output 1
+    // (fresh), 1, 1, 2, 3, 4 and Selection Mode 0, 1, 1, 0, 0, 0.
+    let want = [
+        ("crypto-00-defaults", 0, false, None),
+        ("crypto-01-set-all", 0, false, Some("Selection Mode")),
+        ("crypto-02-chk-toggled", 0, false, Some("Selection Mode")),
+        ("crypto-03-pop2-2", 1, false, Some("'Matted Colors'")),
+        ("crypto-04-pop2-3", 1, false, None),
+        ("crypto-05-pop2-4", 1, true, None),
+    ];
+    for (comp, display, matte_only, loss) in want {
+        let c = project.find_by_name(comp).and_then(|i| i.as_comp()).unwrap_or_else(|| panic!("no {comp}"));
+        let g = c.layers.iter().find_map(|l| {
+            l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == "ec.3d.cryptomatte").cloned())
+        });
+        let g = g.unwrap_or_else(|| panic!("{comp}: no Cryptomatte"));
+        assert_eq!(
+            (v(&g, "display"), v(&g, "matteOnly"), v(&g, "layerName"), v(&g, "selection")),
+            (Value::Enum(display), Value::Bool(matte_only), str(""), str("")),
+            "{comp}"
+        );
+        let mine: Vec<_> = found.iter().filter(|d| d.starts_with(&format!("{comp}:"))).collect();
+        match loss {
+            None => assert!(mine.is_empty(), "{comp}: {mine:?}"),
+            Some(what) => assert!(mine.len() == 1 && mine[0].contains(what), "{comp}: {mine:?}"),
+        }
+    }
+    assert_eq!(found.len(), 3, "{found:?}");
 }

@@ -309,14 +309,16 @@ impl MeshData {
 }
 
 /// The Cryptomatte plug-in's Settings data (`Cryptomatte-0001`, the plug-in's own layout,
-/// little-endian; read from 88 instances of one project, docs/aep-format.md 3.7): the magic
-/// `cry1`; bytes 4..32 are not read (they differ between instances holding the same settings);
-/// the Cryptomatte layer's name at 32, NUL-padded to 64 bytes; at 96 a `u32` 1 and a `u32` that
-/// is the same in every sample (neither read); at 104 the `u32` length of the selection text
-/// including its NUL, a `u32` that changes with the text (not read) and a zero byte; the
-/// selection text from byte 113 (`<0000002a>, <deadbeef>`, the matte list as ID hashes).
-/// Bytes after it are left-overs of a longer earlier text. The definition's default is `cry1`
-/// and zeros: no layer, no selection.
+/// little-endian; read from 88 instances of one project and the fresh instances of our own
+/// sample 1400, docs/aep-format.md 3.7): the magic `cry1`; bytes 4..32 are not read (they differ
+/// between instances holding the same settings); the Cryptomatte layer's name at 32, NUL-padded to
+/// 64 bytes; at 96 a `u32` 1 and a `u32` (neither read); at 104 the `u32` length of the selection
+/// text including its NUL, a `u32` that changes with the text (not read) and a zero byte; the
+/// selection text from byte 113 (`<0000002a>, <deadbeef>`, the matte list as ID hashes). Bytes
+/// after it are left-overs of a longer earlier text. A fresh effect stores no layer and an empty
+/// text (length 1, its NUL); the `u32`s at 100 and 108 are then both `0x514e28b7`, which is
+/// MurmurHash3 (x86, 32-bit, seed 0) of one NUL byte: each looks like the hash of the text whose
+/// length precedes it, the zero byte at 112 like a first text that is empty in every sample.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CryptomatteData {
     /// The Cryptomatte layer's name (`Crypto_Material`); empty when none is chosen.
@@ -387,6 +389,18 @@ mod tests {
         let mut d = b"cry1".to_vec();
         d.resize(116, 0);
         assert_eq!(CryptomatteData::parse(&d), Some(CryptomatteData::default()));
+        // What After Effects 2026 wrote for a fresh effect (plug-in 2.6.6, sample 1400
+        // `crypto-00-defaults`, the `pard` default and the instance's record alike): an empty text
+        // of length 1 and its hash, twice.
+        let mut fresh = b"cry1".to_vec();
+        fresh.resize(96, 0);
+        for _ in 0..2 {
+            fresh.extend(1u32.to_le_bytes());
+            fresh.extend(0x514e_28b7u32.to_le_bytes());
+        }
+        fresh.extend([0; 4]);
+        assert_eq!(fresh.len(), 116);
+        assert_eq!(CryptomatteData::parse(&fresh), Some(CryptomatteData::default()));
     }
 
     #[test]

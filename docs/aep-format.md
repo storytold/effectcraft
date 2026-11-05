@@ -534,21 +534,36 @@ suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
 
-**Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in; read from 88
-instances in one production project, not made by us, so H for what the samples do not vary):
+**Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
+sample; read from 88 instances in one production project, not made by us, and from our own After
+Effects 2026 sample 1400 (corpus `aep/cryptomatte.aep`: a fresh instance, Selection Mode on, each
+Output item; scripting read-backs and renders per composition); H for what neither varies):
 `parT` 0 the input layer; 1 Settings: **arbitrary data** (type 11, `Cryptomatte-0001`, a record and
-`aRbs` / `aRbp` in every instance, `parT` default `cry1` + 112 zero bytes); 2 Output: popup
-(Colors, Matted Colors, Matted RGBA, Matte Only; stored in every instance: 3 in 81, 4 in 7);
-3 Selection Mode: checkbox (no record in any instance, `pdnm` `fnord!`); the built-in entry. The
-Settings data is the plug-in's own layout, **little-endian**: `cry1`; bytes 4..32 differ between
-instances with the same settings (zeros in one, pointer-like values in others: not read); the
-layer name at 32, NUL-padded to 64 bytes (`Crypto_Material`, `Crypto_Name`: the channel prefix
-of the EXR's Cryptomatte layer); at 96 a `u32` 1 and a `u32` that is the same in every instance;
-at 104 the `u32` length of the selection text including its NUL; at 108 a `u32` that follows the
-text (equal texts, equal values: not read); a zero byte at 112; the selection text from 113, the
-matte list as comma-and-space separated ID hashes `<0000002a>, <deadbeef>` (303 tokens, all in
-that form). After the text 2 to 3 bytes, zeros or left-overs of a longer earlier text. API:
-`CryptomatteData` (refuses data without `cry1`, a length past the end or a non-zero byte at 112).
+`aRbs` / `aRbp` in every instance); 2 Output: popup (Colors, Matted Colors, Matted RGBA, Matte
+Only), **`pard` default 1 = Colors** (bytes 56..64 `00000001 0004 0001`, in the instance's own and
+the project's shared definition; scripting reads 1 from a fresh effect: 1400 `crypto-00-defaults`),
+a written record (`tdsb` 1) holding the item number when set (1400: 2, 3, 4; production: 3 in 81,
+4 in 7); 3 Selection Mode: checkbox (`pdnm` `fnord!`), no record when off, and when on **a
+default-state record (`tdsb` 3) holding 1.0** that After Effects reads back as on and renders
+(1400 `crypto-01-set-all`, `crypto-02-chk-toggled`; the general reader takes only `tdsb` 1
+values, so the importer reads this one itself); the built-in entry. As in every project, only the
+first instance has its own `parT`; the others borrow the project's (1400). The Settings data is
+the plug-in's own layout, **little-endian**: `cry1`; bytes 4..32 differ between instances with
+the same settings (zeros in one, pointer-like values in others: not read); the layer name at 32,
+NUL-padded to 64 bytes (`Crypto_Material`, `Crypto_Name`: the channel prefix of the EXR's
+Cryptomatte layer); at 96 a `u32` 1 and a `u32` that is the same in every instance; at 104 the
+`u32` length of the selection text including its NUL; at 108 a `u32` that follows the text (equal
+texts, equal values: not read); a zero byte at 112; the selection text from 113, the matte list as
+comma-and-space separated ID hashes `<0000002a>, <deadbeef>` (303 tokens, all in that form). After
+the text 2 to 3 bytes, zeros or left-overs of a longer earlier text. **A fresh effect** (the `parT`
+default and the record alike, 116 bytes, 1400) is `cry1`, zeros to 96, then `u32`s 1,
+`0x514e28b7`, 1, `0x514e28b7` and four zero bytes: no layer and an empty text (length 1, its NUL).
+`0x514e28b7` is MurmurHash3 (x86, 32-bit, seed 0) of a single NUL byte, so the `u32`s at 100 and
+108 look like the hashes of the texts whose lengths precede them, and the zero byte at 112 like a
+first text that is empty in every sample (H: one value). Layer and selection are decoded from the
+production project only; every 1400 instance holds the fresh data (presets that set them are
+still to be made). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
+a non-zero byte at 112).
 
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
