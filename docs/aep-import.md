@@ -299,7 +299,7 @@ for 24.x):
 |---|---|
 | `fileVersion` | the version the file is written for (`head`): `26.2.1x2` for a file After Effects 26.2.1 saved, `25.6.0x97` / `24.6.0x65` for a copy it saved with File > Save a Copy As 25.x / 24.x; `unknown` when the chunk is missing, short or holds no version |
 | `savedBy` | the version of the After Effects that wrote the file (`svap`): `26.2.1x2` for those copies too; `unknown` likewise |
-| `tested` | whether the major of `fileVersion` is one the importer is tested with: 24, 25 and 26 (`TESTED_MAJORS`) |
+| `tested` | whether the major of `fileVersion` is one the importer is tested with: 24, 25 and 26 (`TESTED_MAJORS`). A major-version classification only: the 24.x and 25.x samples are copies saved by After Effects 2026 (Save a Copy As), not files authored by those versions, and it does not guarantee that every older plug-in definition was verified |
 
 A file written for another version (or an unknown one) is imported like any other: everything that
 is read arrives and every loss is reported. It is not refused for its version (the version is not a
