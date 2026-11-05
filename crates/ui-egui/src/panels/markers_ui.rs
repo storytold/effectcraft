@@ -435,8 +435,9 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     // The bin senses drags only, so a drag starts as soon as it is pressed: sensing clicks too
     // would hold that back until the pointer moved, and a drag out released within that frame
     // would add nothing. The double-click is read from the pointer instead.
-    let double_clicked = resp.contains_pointer() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
-    if double_clicked && let Err(e) = app.session.execute("comp.addMarker", json!({})) {
+    if bin_double_clicked(ui, resp.id, bin, resp.contains_pointer())
+        && let Err(e) = app.session.execute("comp.addMarker", json!({}))
+    {
         app.ui.status = e.to_string();
     }
     app.auto.add("timeline.markerBin", bin, "Composition marker bin");
@@ -461,6 +462,38 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     {
         app.ui.status = e.to_string();
     }
+}
+
+/// Whether the marker bin `bin` (widget `id`, under the pointer when `here`) was double-clicked
+/// this frame: egui's double-click, with its first click on the bin too. egui takes any click
+/// within a few points of the last for the first one, so a click on the ruler right beside the
+/// bin and then one on the bin would count. The bin remembers when it was last clicked; two
+/// clicks on it within one frame need no memory.
+fn bin_double_clicked(ui: &egui::Ui, id: egui::Id, bin: Rect, here: bool) -> bool {
+    use egui::{Event, PointerButton};
+    if !here {
+        return false;
+    }
+    let (time, clicked, double, releases) = ui.input(|i| {
+        let releases = i
+            .events
+            .iter()
+            .filter(|e| matches!(e, Event::PointerButton { button: PointerButton::Primary, pressed: false, pos, .. } if bin.contains(*pos)))
+            .count();
+        (i.time, i.pointer.button_clicked(PointerButton::Primary), i.pointer.button_double_clicked(PointerButton::Primary), releases)
+    });
+    if !clicked {
+        return false;
+    }
+    let delay = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+    let id = id.with("last click");
+    let last = ui.data_mut(|d| {
+        let last = d.get_temp::<f64>(id);
+        d.insert_temp(id, time);
+        last
+    });
+    let last = last.unwrap_or(f64::NEG_INFINITY);
+    double && (releases >= 2 || time - last < delay)
 }
 
 /// Layer markers on a layer's row `r`; on a precomp layer, its comp's markers too (read-only,

@@ -431,6 +431,18 @@ fn double_clicking_the_marker_bin_adds_a_comp_marker_at_the_current_time() {
     h.step();
     h.run_steps(3);
     assert_eq!(markers(&h), vec![21.5, 22.0], "a double-click released while the bin is dragged");
+    // A click on the ruler right beside the bin and then one on the bin, in one frame: egui
+    // takes them for a double-click (they are a few points apart), but only one was on the bin.
+    let (beside, on) = (pos2(bin.min.x - 2.0, bin.center().y), pos2(bin.min.x + 2.0, bin.center().y));
+    assert!(ruler.contains(beside) && !bin.contains(beside) && bin.contains(on));
+    h.event(Event::PointerMoved(beside));
+    h.step();
+    for (pos, pressed) in [(beside, true), (beside, false), (on, true), (on, false)] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    h.run_steps(3);
+    assert_eq!(markers(&h), vec![21.5, 22.0], "one click beside the bin and one on it");
     // Dragged out 3 s into the visible span (from 10 s at 200 px/s): a marker at 13 s too.
     drag(&mut h, bin.center(), pos2(ruler.min.x + 6.0 + 600.0, ruler.center().y));
     assert_eq!(markers(&h), vec![13.0, 21.5, 22.0]);
