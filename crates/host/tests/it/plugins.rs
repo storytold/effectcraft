@@ -106,7 +106,7 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
     let bundle = bundle.path();
     std::fs::write(bundle.join("a-good.wasm"), wat_plugin("org.test.host.install", 1, "i32.const 0")).unwrap();
     std::fs::write(bundle.join("My Panel.jsx"), "1".as_bytes()).unwrap();
-    std::fs::write(bundle.join("notes.txt"), b"not a plug-in".to_vec()).unwrap();
+    std::fs::write(bundle.join("notes.txt"), b"not a plug-in").unwrap();
 
     let mut s = install_session(config);
     let r = s.execute("effect.plugins.install", json!({"folder": bundle.to_string_lossy()})).unwrap();
@@ -284,7 +284,7 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
         ("c-v2.wasm", wat_plugin("org.test.host.v2", 2, "i32.const 0").into_bytes()),
         ("d-empty.wasm", vec![]),
         ("e-trap.wasm", wat_plugin("org.test.host.trap", 1, "unreachable").into_bytes()),
-        ("notes.txt", b"not a plug-in".to_vec()),
+        ("notes.txt", b"not a plug-in"),
     ];
     for (name, bytes) in &files {
         std::fs::write(dir.join(name), bytes).unwrap();
