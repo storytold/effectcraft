@@ -135,13 +135,21 @@ pub fn box_mean(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     out
 }
 
+/// Box radius of [`gauss`]: three passes of it match the variance, 3·((2r+1)² − 1)/12 = σ².
+/// `None` when the blur is a copy.
+fn gauss_box(sigma: f64) -> Option<usize> {
+    (sigma >= 0.3).then(|| (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize)
+}
+
+/// How far (pixels, per axis) [`gauss`] reaches: an output pixel depends only on the input
+/// within this distance.
+pub fn gauss_reach(sigma: f64) -> usize {
+    gauss_box(sigma).map_or(0, |r| 3 * r)
+}
+
 /// Approximate Gaussian blur (three box passes) with standard deviation `sigma` pixels.
 pub fn gauss(src: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32> {
-    if sigma < 0.3 {
-        return src.to_vec();
-    }
-    // Box radius whose three passes match the variance: 3·((2r+1)² − 1)/12 = σ².
-    let r = (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize;
+    let Some(r) = gauss_box(sigma) else { return src.to_vec() };
     let a = box_mean(src, w, h, r);
     let b = box_mean(&a, w, h, r);
     box_mean(&b, w, h, r)
