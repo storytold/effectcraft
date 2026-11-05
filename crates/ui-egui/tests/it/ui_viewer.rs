@@ -643,6 +643,59 @@ fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
     }
 }
 
+/// Tap an arrow key while a drag is going on, as a user reaching for it mid-drag does.
+fn arrow(h: &mut Harness<'_, EffectcraftApp>, key: egui::Key) {
+    let modifiers = egui::Modifiers::NONE;
+    h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+    h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+    h.run_steps(2);
+}
+
+/// The Rounded Rectangle's corner radius is set while the shape is being drawn, as in After
+/// Effects: Up and Down step it, Right and Left take it to the largest the box allows and back to
+/// square corners, and the released shape carries the radius the ghost was showing.
+#[test]
+fn rounded_rectangle_corner_radius_follows_the_arrow_keys_while_drawing() {
+    // 260 × 160 comp pixels: its corners can reach 80, half the shorter side.
+    let (from, to) = ([140.0f32, 100.0], [400.0f32, 260.0]);
+    let mut h = harness();
+    h.state_mut().ui.tool = Tool::RoundedRect;
+    settle_viewer(&mut h);
+    let (a, b) = (screen(&h, from), screen(&h, to));
+    let mods = egui::Modifiers::default();
+    h.input_mut().events.push(Event::PointerMoved(a));
+    h.input_mut().events.push(Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: mods });
+    h.step();
+    for i in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(a + (b - a) * (i as f32 / 8.0)));
+        h.step();
+    }
+    let radius = |h: &Harness<'_, EffectcraftApp>| h.state().session.state.shape_tool.roundness;
+    assert_eq!(radius(&h), 20.0, "the tool starts at After Effects' default");
+    for _ in 0..5 {
+        arrow(&mut h, egui::Key::ArrowUp);
+    }
+    assert_eq!(radius(&h), 25.0, "Up steps the radius up");
+    arrow(&mut h, egui::Key::ArrowDown);
+    arrow(&mut h, egui::Key::ArrowDown);
+    assert_eq!(radius(&h), 23.0, "Down steps it back");
+    arrow(&mut h, egui::Key::ArrowRight);
+    assert_eq!(radius(&h), 80.0, "Right fully rounds this box");
+    arrow(&mut h, egui::Key::ArrowLeft);
+    assert_eq!(radius(&h), 0.0, "Left squares the corners");
+    // Stepping up from the minimum walks from what is on screen, not from where Right left off.
+    arrow(&mut h, egui::Key::ArrowUp);
+    arrow(&mut h, egui::Key::ArrowUp);
+    assert_eq!(radius(&h), 2.0);
+    release(&mut h, b, mods);
+
+    let comp = h.state().session.active_comp().unwrap().clone();
+    let layer = comp.layers.first().expect("a new shape layer").clone();
+    let group = layer.props.sub("contents").unwrap().groups().next().unwrap().clone();
+    let path = group.sub("contents").unwrap().sub("rect").expect("a Rectangle Path");
+    assert_eq!(path.get("roundness").unwrap().value.components()[0], 2.0, "the drawn shape keeps the radius the drag set");
+}
+
 /// The ghost says where the shape lands: a mask on the selected layer is drawn in the mask colour
 /// and not painted with the Fill, where a shape drawn into the selected shape layer is.
 #[test]
