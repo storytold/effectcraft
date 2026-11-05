@@ -746,6 +746,70 @@ fn hostile_shape_keys_never_panic() {
     assert!(r.report.count(LossCategory::InvalidValues) >= 1, "{:?}", r.report.losses);
 }
 
+/// A shape colour channel outside 0 to 1 (an over-bright or negative value) is written as the
+/// nearest limit and reported, as for lights; it was written unclamped (review finding). A colour
+/// inside the range stays lossless.
+#[test]
+fn a_shape_colour_outside_the_range_is_clamped_and_reported() {
+    use effectcraft_keyframe::Value;
+    use effectcraft_project::build;
+    let shape = |fill_color: [f64; 4], key_color: Option<[f64; 4]>| {
+        let mut p = Project::default();
+        let c = add_comp(&mut p, "C", 640, 360, FrameRate::new(25, 1), 2.0, None);
+        add_layer(&mut p, c, "S", LayerSource::Shape, (640, 360));
+        let mut next = p.next_id;
+        {
+            let mut ids = build::Ids(&mut next);
+            let rect = build::shape_rect(&mut ids, [100.0, 50.0], [0.0, 0.0], 0.0);
+            let mut fill = build::shape_fill(&mut ids, fill_color);
+            if let Some(k) = key_color {
+                fill.get_mut("color").unwrap().keys = vec![key(0.0, Value::Color([0.0, 0.0, 1.0, 1.0])), key(1.0, Value::Color(k))];
+            }
+            let g = build::shape_group(&mut ids, "G", vec![rect, fill]);
+            with_layer(&mut p, c, 0, |l| l.props.sub_mut("contents").expect("contents").children = vec![g.into()]);
+        }
+        p.next_id = next;
+        p
+    };
+    let strict = |p: &Project| effectcraft_aep::export::export(p, &effectcraft_aep::export::ExportOptions { allow_losses: false }).is_ok();
+    let inside = shape([0.25, 0.5, 1.0, 1.0], None);
+    assert_eq!(export_all(&inside).report.count(LossCategory::ShapeLayers), 0);
+    assert!(strict(&inside));
+    for p in [shape([2.0, 0.5, -0.5, 1.0], None), shape([0.0, 1.0, 0.0, 1.0], Some([1.5, 0.0, 0.0, 1.0]))] {
+        let r = export_all(&p);
+        assert_eq!(r.report.count(LossCategory::ShapeLayers), 1, "{:?}", r.report.losses);
+        assert!(!strict(&p));
+        // Every stored colour channel is within 0 to 255.
+        let mut q = Project::default();
+        let none = |_: &str| false;
+        let opts = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
+        effectcraft_aep::import::import(&mut q, &r.bytes, &opts).expect("import");
+        let mut colours = Vec::new();
+        for item in q.items.values() {
+            let effectcraft_project::ItemKind::Comp(c) = &item.kind else { continue };
+            for l in &c.layers {
+                let mut stack: Vec<&effectcraft_project::PropGroup> = l.props.sub("contents").into_iter().collect();
+                while let Some(g) = stack.pop() {
+                    for n in &g.children {
+                        match n {
+                            effectcraft_project::Node::Group(s) => stack.push(s),
+                            effectcraft_project::Node::Prop(pr) => {
+                                for v in std::iter::once(&pr.value).chain(pr.keys.iter().map(|k| &k.value)) {
+                                    if let Value::Color(c) = v {
+                                        colours.push(*c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!colours.is_empty());
+        assert!(colours.iter().all(|c| c.iter().take(3).all(|x| (0.0..=1.0).contains(x))), "{colours:?}");
+    }
+}
+
 /// The Transform group of a camera ends with its Group End: the camera's `ADBE Position_2` record
 /// sorts before it (review finding: an unlisted record used to sort after the end marker).
 #[test]

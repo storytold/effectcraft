@@ -226,11 +226,21 @@ pub(crate) fn c_point(v: &Value) -> Option<Vec<f64>> {
     }
 }
 
+/// A colour as the file stores it (alpha 255, then red, green and blue from 0 to 255). A channel
+/// outside 0 to 1 is written as the nearest limit, as for lights (`rec` reports it); a value that
+/// is not finite stays so and is reported as invalid.
 pub(crate) fn c_color(v: &Value) -> Option<Vec<f64>> {
+    let ch = |x: f64| if x.is_finite() { x.clamp(0.0, 1.0) * 255.0 } else { x };
     match v {
-        Value::Color(c) => Some(vec![255.0, c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
+        Value::Color(c) => Some(vec![255.0, ch(c[0]), ch(c[1]), ch(c[2])]),
         _ => None,
     }
+}
+
+/// Whether a colour property's value or one of its keys has a channel outside 0 to 1.
+fn colour_beyond(p: &Property) -> bool {
+    let beyond = |v: &Value| matches!(v, Value::Color(c) if c.iter().take(3).any(|x| x.is_finite() && !(0.0..=1.0).contains(x)));
+    beyond(&p.value) || p.keys.iter().any(|k| beyond(&k.value))
 }
 
 /// A popup stored 1-based (EffectCraft's items in After Effects' order).
@@ -384,6 +394,9 @@ fn rec(out: &mut Records, g: &PropGroup, names: (&'static str, &str), conv: Conv
     let Some(p) = g.get(id) else { return };
     let Some(kind) = kind_of(name) else { return };
     let w = format!("{what}: {name}");
+    if colour_beyond(p) {
+        cx.col.lose(LossCategory::ShapeLayers, format!("{w}: a colour channel outside 0 to 1 is written as the nearest limit"));
+    }
     if let Some(v) = rec_value(p, conv, kind.layout, Some(default), &w, LossCategory::ShapeLayers, cx) {
         out.push((name, v));
     }

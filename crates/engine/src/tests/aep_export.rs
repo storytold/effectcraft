@@ -4,10 +4,11 @@ use serde_json::json;
 
 use crate::Session;
 
-fn tmp(name: &str) -> String {
-    let d = std::env::temp_dir().join(format!("effectcraft-aep-export-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d.join(name).to_string_lossy().to_string()
+/// A path `name` in a folder of its own that is removed with the returned guard.
+fn tmp(name: &str) -> (tempfile::TempDir, String) {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join(name).to_string_lossy().to_string();
+    (d, path)
 }
 
 fn session() -> Session {
@@ -22,7 +23,7 @@ fn session() -> Session {
 #[test]
 fn export_aep_writes_a_file_that_imports_back() {
     let mut s = session();
-    let path = tmp("main.aep");
+    let (_dir, path) = tmp("main.aep");
     let undo_before = s.history.undo.len();
     let r = s.execute_checked("file.exportAep", json!({"path": path})).unwrap();
     assert!(r["bytes"].as_u64().unwrap() > 1000);
@@ -45,7 +46,7 @@ fn losses_are_refused_unless_allowed_and_a_dry_run_only_reports() {
     s.execute("layer.newText", json!({})).ok();
     // A parallel light is not written (no sampled case).
     s.execute("layer.newLight", json!({"kind": "Parallel"})).ok();
-    let path = tmp("lossy.aep");
+    let (_dir, path) = tmp("lossy.aep");
     let _ = std::fs::remove_file(&path);
     let err = s.execute_checked("file.exportAep", json!({"path": path})).unwrap_err().to_string();
     assert!(err.contains("allowLosses"), "{err}");
@@ -62,12 +63,14 @@ fn losses_are_refused_unless_allowed_and_a_dry_run_only_reports() {
 #[test]
 fn bad_input_is_an_error_not_a_crash() {
     let mut s = session();
+    let (_dir, x) = tmp("x.aep");
     assert!(s.execute_checked("file.exportAep", json!({})).is_err());
-    assert!(s.execute_checked("file.exportAep", json!({"path": tmp("x.aep"), "bogus": 1})).is_err());
+    assert!(s.execute_checked("file.exportAep", json!({"path": x, "bogus": 1})).is_err());
     assert!(s.execute_checked("file.exportAep", json!({"path": "/no/such/dir/at/all/x.aep"})).is_err());
     // An empty project exports too.
     let mut empty = Session::default();
-    assert!(empty.execute_checked("file.exportAep", json!({"path": tmp("empty.aep")})).is_ok());
+    let (_empty_dir, path) = tmp("empty.aep");
+    assert!(empty.execute_checked("file.exportAep", json!({"path": path})).is_ok());
 }
 
 #[test]
@@ -90,7 +93,7 @@ fn a_project_made_with_commands_exports_without_false_losses() {
         s.execute_checked("mask.new", json!({"layer": "#1", "vertices": [[0, 0], [50, 0], [50, 40]]})).unwrap();
     }
     s.execute_checked("mask.remove", json!({"layer": "#1", "mask": "Mask 1"})).unwrap();
-    let path = tmp("commands.aep");
+    let (_dir, path) = tmp("commands.aep");
     let r = s.execute_checked("file.exportAep", json!({"path": path, "dryRun": true})).unwrap();
     assert_eq!(r["report"]["losses"], json!([]));
     assert_eq!(r["report"]["exported"]["effects"], 4);
