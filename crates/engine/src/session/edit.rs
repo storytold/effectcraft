@@ -102,35 +102,88 @@ impl Session {
     }
 
     /// Salt the disk cache's layer keys with the project's footage files
-    /// ([`effectcraft_render::disk_cache::footage_salt`]). Taking it reads the size and time of
-    /// every file, every frame of an image sequence included, so it is taken again only when the
-    /// footage items changed, or with `force` (a project opened, footage reloaded, the disk cache
-    /// attached), not at every edit: with a few large sequences that cost each keystroke in a
-    /// text field over half a second (#1926).
+    /// ([`effectcraft_render::disk_cache::footage_salt`]) and attach the disk cache to the layer
+    /// cache with it. Taking it reads the size and time of every file, every frame of an image
+    /// sequence included, so it is taken again only when the footage items changed, or with
+    /// `force` (a project opened, footage reloaded, the disk cache attached), not at every edit:
+    /// with a few large sequences that cost each keystroke in a text field over half a second
+    /// (#1926).
+    ///
+    /// With [`Session::disk_salt_background`] the files are read on a worker thread: an imported
+    /// or opened project with thousands of sequence frames on a network share took half a minute
+    /// to stamp, all of it on the UI thread. Until [`Session::poll_disk_salt`] picks the salt up,
+    /// renders use the memory cache only (keys under the old salt may name other files, or
+    /// another project's items) and this returns `None`.
     pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        if self.disk_cache.is_none() {
+        let Some(dc) = self.disk_cache.clone() else {
             self.disk_salt = None;
+            self.disk_salt_job = None;
             return None;
-        }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for (id, it) in &self.project.items {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                id.hash(&mut h);
-                format!("{f:?}").hash(&mut h);
+        };
+        self.poll_disk_salt();
+        let footage = footage_fingerprint(&self.project);
+        if !force {
+            if let Some((seen, salt)) = self.disk_salt
+                && seen == footage
+            {
+                return Some(salt);
+            }
+            if self.disk_salt_job.as_ref().is_some_and(|j| j.footage == footage) {
+                return None;
             }
         }
-        let footage = h.finish();
-        if let Some((seen, salt)) = self.disk_salt
-            && seen == footage
-            && !force
-        {
-            return Some(salt);
+        if self.disk_salt_background && !cfg!(target_arch = "wasm32") {
+            let project = self.project.clone();
+            let slot: Arc<std::sync::Mutex<Option<u64>>> = Arc::default();
+            let out = slot.clone();
+            let spawned = std::thread::Builder::new().name("ec-disk-salt".into()).spawn(move || {
+                let salt = effectcraft_render::disk_cache::footage_salt(&project);
+                if let Ok(mut s) = out.lock() {
+                    *s = Some(salt);
+                }
+            });
+            // Without a thread the salt is taken here, as before.
+            if let Ok(thread) = spawned {
+                self.disk_salt = None;
+                self.disk_salt_job = Some(DiskSaltJob { footage, slot, thread });
+                self.layer_cache.set_disk(None);
+                return None;
+            }
         }
+        self.disk_salt_job = None;
         let salt = effectcraft_render::disk_cache::footage_salt(&self.project);
         self.disk_salt = Some((footage, salt));
-        self.layer_cache.set_disk_salt(salt);
+        self.layer_cache.set_disk(Some((dc, salt)));
         Some(salt)
+    }
+
+    /// Pick up a footage salt taken in the background ([`Session::refresh_disk_salt`]) and attach
+    /// the disk cache with it. Returns whether one is still being taken (frontends call this each
+    /// frame while it is).
+    pub fn poll_disk_salt(&mut self) -> bool {
+        let Some(job) = &self.disk_salt_job else { return false };
+        // (looked at first: a worker that has finished has left its salt in the slot)
+        let finished = job.thread.is_finished();
+        let salt = job.slot.lock().ok().and_then(|mut s| s.take());
+        let footage = job.footage;
+        match salt {
+            Some(salt) => {
+                self.disk_salt_job = None;
+                if let Some(dc) = self.disk_cache.clone() {
+                    self.disk_salt = Some((footage, salt));
+                    self.layer_cache.set_disk(Some((dc, salt)));
+                }
+                false
+            }
+            None if finished => {
+                // The worker stopped without a salt: the disk cache stays off until the next
+                // edit takes it again.
+                log::warn!("disk cache: the footage files could not be stamped; the disk cache is off until the next edit");
+                self.disk_salt_job = None;
+                false
+            }
+            None => true,
+        }
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -311,4 +364,26 @@ pub fn upgrade_effects(p: &mut Project) {
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+}
+
+/// A footage salt being taken on a worker thread ([`Session::refresh_disk_salt`]).
+pub struct DiskSaltJob {
+    /// The footage it is taken for ([`footage_fingerprint`]).
+    footage: u64,
+    slot: Arc<std::sync::Mutex<Option<u64>>>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// What the footage salt depends on besides the files themselves: every footage item's id and
+/// settings. Cheap (no file is read), so every edit can compare it.
+fn footage_fingerprint(p: &Project) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (id, it) in &p.items {
+        if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
+            id.hash(&mut h);
+            format!("{f:?}").hash(&mut h);
+        }
+    }
+    h.finish()
 }
