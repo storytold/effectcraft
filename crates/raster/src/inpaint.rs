@@ -629,19 +629,23 @@ impl HoleMask {
     pub fn zeros(n: usize) -> Self {
         HoleMask { words: vec![0u64; n.div_ceil(64)], len: n }
     }
-    /// Whether pixel `i` is in the hole.
+    /// Whether pixel `i` is in the hole. `words` and `len` are public, so a mask whose words are
+    /// shorter than `len` reads the missing pixels as known instead of panicking.
     pub fn get(&self, i: usize) -> bool {
-        i < self.len && (self.words[i / 64] >> (i % 64)) & 1 == 1
+        i < self.len && self.words.get(i / 64).is_some_and(|w| (w >> (i % 64)) & 1 == 1)
     }
-    /// Mark pixel `i` as missing (`true`) or known (`false`).
+    /// Mark pixel `i` as missing (`true`) or known (`false`). A pixel outside the mask is ignored.
     pub fn set(&mut self, i: usize, v: bool) {
         if i >= self.len {
             return;
         }
+        let Some(w) = self.words.get_mut(i / 64) else {
+            return;
+        };
         if v {
-            self.words[i / 64] |= 1u64 << (i % 64);
+            *w |= 1u64 << (i % 64);
         } else {
-            self.words[i / 64] &= !(1u64 << (i % 64));
+            *w &= !(1u64 << (i % 64));
         }
     }
     /// Whether any pixel is in the hole.
@@ -700,7 +704,7 @@ impl Frames {
     pub fn scratch_dir(&self) -> Option<std::path::PathBuf> {
         match self {
             Frames::Memory(_) => None,
-            Frames::Spilled(h) => h.path().parent().map(std::path::Path::to_path_buf),
+            Frames::Spilled(h) => h.dir().map(std::path::Path::to_path_buf),
         }
     }
     /// Whether a read or write of a spilled frame failed.
@@ -728,8 +732,8 @@ impl Frames {
 }
 
 /// A spill file holding `n` frames of `w x h` pixels at `bpc` bits per channel.
-/// Frames are read back on demand. The path is shared (reference-counted) so clones
-/// do not delete the file prematurely (#2570 review).
+/// Frames are read back on demand. The file is shared (reference-counted), so it lives until the
+/// last clone is dropped (#2570 review).
 #[derive(Clone)]
 pub struct SpillHandle {
     inner: std::sync::Arc<SpillInner>,
@@ -740,26 +744,23 @@ pub struct SpillHandle {
 }
 
 struct SpillInner {
-    path: std::path::PathBuf,
-    /// Kept open so sampling can use positioned reads: several trace threads read the same
+    /// The folder the spill was created in (`None`: the system temporary folder), so the fill's
+    /// other spills go beside it.
+    dir: Option<std::path::PathBuf>,
+    /// An anonymous temporary file: it has no name in `dir`, and the system reclaims it when the
+    /// last handle closes, even when the app is killed or runs out of memory partway through a
+    /// fill, so a multi-gigabyte scratch file is never left in the user's folder (#2570 review).
+    /// Every read and write is positioned on this one handle: several trace threads read the same
     /// file at once, and a shared file offset would need a lock around every read (#2570).
-    /// `Option` so `Drop` can close it before deleting (Windows refuses to delete an open file).
-    file: Option<std::fs::File>,
+    file: std::fs::File,
     /// Shared with any secondary spill so one probe reports every scratch failure.
     error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
-impl Drop for SpillInner {
-    fn drop(&mut self) {
-        self.file = None;
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 impl SpillHandle {
-    /// The spill file's path.
-    pub fn path(&self) -> &std::path::Path {
-        &self.inner.path
+    /// The folder the spill lives in (`None`: the system temporary folder).
+    pub fn dir(&self) -> Option<&std::path::Path> {
+        self.inner.dir.as_deref()
     }
 
     /// Bytes a pixel in the spill: RGBA `u8`, or four `f32` above 8 bits a channel.
@@ -808,13 +809,8 @@ impl SpillHandle {
             return img;
         };
         let mut buf = vec![0u8; len];
-        let read = std::fs::File::open(self.path()).and_then(|mut f| {
-            use std::io::{Read, Seek, SeekFrom};
-            f.seek(SeekFrom::Start(off as u64))?;
-            f.read_exact(&mut buf)
-        });
-        if let Err(e) = read {
-            self.record_error(format!("spill {}: {e}", self.path().display()));
+        if let Err(e) = self.read_at(off as u64, &mut buf) {
+            self.record_error(format!("spill: {e}"));
             return img;
         }
         if self.bpc <= 8 {
@@ -846,8 +842,7 @@ impl SpillHandle {
     /// A positioned read: `pread`/`seek_read` use the shared handle without touching a shared
     /// file offset, so tracing threads do not serialise on the file.
     fn read_at(&self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        #[cfg(any(unix, windows))]
-        let file = self.inner.file.as_ref().ok_or_else(|| std::io::Error::other("spill file closed"))?;
+        let file = &self.inner.file;
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
@@ -867,12 +862,46 @@ impl SpillHandle {
             }
             Ok(())
         }
+        // Elsewhere, seek the shared handle. Spills are only made natively: wasm keeps the
+        // propagated frames in RAM and has no file system to spill the input to.
         #[cfg(not(any(unix, windows)))]
         {
             use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(&self.inner.path)?;
+            let mut f = file;
             f.seek(SeekFrom::Start(off))?;
             f.read_exact(buf)
+        }
+    }
+
+    /// A positioned write on the same handle as `read_at`, so the propagation workers can store
+    /// their frames at once and the file never needs a name to be reopened by.
+    fn write_at(&self, off: u64, buf: &[u8]) -> std::io::Result<()> {
+        let file = &self.inner.file;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(buf, off)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            let mut done = 0usize;
+            while done < buf.len() {
+                match file.seek_write(&buf[done..], off.saturating_add(done as u64)) {
+                    Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                    Ok(n) => done += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = file;
+            f.seek(SeekFrom::Start(off))?;
+            f.write_all(buf)
         }
     }
 
@@ -928,7 +957,7 @@ impl SpillHandle {
         let mut held = [0u8; 32];
         let buf = held.get_mut(..len)?;
         if let Err(e) = self.read_at(off, buf) {
-            self.record_error(format!("spill {}: {e}", self.path().display()));
+            self.record_error(format!("spill: {e}"));
             return None;
         }
         let a = self.px_at(buf, 0);
@@ -968,10 +997,7 @@ impl SpillHandle {
         let bytes_per_px = self.bytes_per_px();
         let px = self.w.checked_mul(self.h).ok_or("overflow")?;
         let off = k.checked_mul(px).and_then(|v| v.checked_mul(bytes_per_px)).ok_or("overflow")?;
-        let mut file = std::fs::OpenOptions::new().write(true).open(self.path()).map_err(|e| format!("spill {}: {e}", self.path().display()))?;
-        use std::io::{Seek, SeekFrom, Write};
-        file.seek(SeekFrom::Start(off as u64)).map_err(|e| e.to_string())?;
-        if self.bpc <= 8 {
+        let buf = if self.bpc <= 8 {
             let mut buf = vec![0u8; px * 4];
             for (i, p) in img.data.iter().enumerate() {
                 buf[i * 4] = (p[0] * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -979,7 +1005,7 @@ impl SpillHandle {
                 buf[i * 4 + 2] = (p[2] * 255.0).round().clamp(0.0, 255.0) as u8;
                 buf[i * 4 + 3] = (p[3] * 255.0).round().clamp(0.0, 255.0) as u8;
             }
-            file.write_all(&buf).map_err(|e| e.to_string())?;
+            buf
         } else {
             let mut buf = vec![0u8; px * 16];
             for (i, p) in img.data.iter().enumerate() {
@@ -988,9 +1014,9 @@ impl SpillHandle {
                     buf[base + c * 4..base + c * 4 + 4].copy_from_slice(&p[c].to_le_bytes());
                 }
             }
-            file.write_all(&buf).map_err(|e| e.to_string())?;
-        }
-        Ok(())
+            buf
+        };
+        self.write_at(off as u64, &buf).map_err(|e| format!("spill: {e}"))
     }
 
     /// Create a spill file. `dir` lets the caller keep scratch next to the output (so a
@@ -1015,18 +1041,18 @@ impl SpillHandle {
             .and_then(|v| v.checked_mul(h))
             .and_then(|v| v.checked_mul(bytes_per_px))
             .ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, "overflow"))?;
-        let tmp = match dir {
+        // Anonymous, so nothing is left behind if `set_len` fails below or the app never gets
+        // to clean up.
+        let file = match dir {
             Some(d) => {
                 std::fs::create_dir_all(d)?;
-                tempfile::Builder::new().prefix("effectcraft-fill-").tempfile_in(d)?
+                tempfile::tempfile_in(d)?
             }
-            None => tempfile::NamedTempFile::with_prefix("effectcraft-fill-")?,
+            None => tempfile::tempfile()?,
         };
-        let path = tmp.into_temp_path().keep().map_err(|e| e.error)?;
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         file.set_len(total as u64)?;
         let error = error.unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(None)));
-        let inner = std::sync::Arc::new(SpillInner { path, file: Some(file), error });
+        let inner = std::sync::Arc::new(SpillInner { dir: dir.map(std::path::Path::to_path_buf), file, error });
         Ok(SpillHandle { inner, w, h, n, bpc })
     }
 
@@ -1329,6 +1355,10 @@ pub fn fill_sequence_with(
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let f = input.frames.get(i);
+            // A failed read returns a black frame, which must never reach the sink.
+            if input.frames.has_error() {
+                return None;
+            }
             let hl = input.holes[i].to_vec();
             let img = opaque_fill(backend.membrane(&f, &hl), &hl);
             if let Some(cb) = sink.as_mut()
@@ -1387,6 +1417,11 @@ pub fn fill_sequence_with(
     let propagated_left: Vec<HoleMask> = (0..n)
         .into_par_iter()
         .map(|t| {
+            // Once a frame failed to spill or read the fill is lost: stop tracing the rest (the
+            // masks are dropped below).
+            if store.has_error() || input.frames.has_error() {
+                return HoleMask::default();
+            }
             let mut img = if is_ref[t] { ref_images[t].clone().unwrap_or_default() } else { input.frames.get(t) };
             let mut left = holes[t].to_vec();
             if !is_ref[t] && holes[t].any() {
@@ -1609,6 +1644,36 @@ mod tests {
         }
     }
 
+    /// Packing round-trips where the last word is full, holds one bit or is one bit short, and
+    /// `set` builds the same mask; a mask whose public `words` are shorter than `len` reads and
+    /// writes without panicking (#2570 review).
+    #[test]
+    fn holemask_roundtrips_at_word_boundaries() {
+        for len in [1usize, 63, 64, 65, 127, 128, 129, 191, 192] {
+            let v: Vec<bool> = (0..len).map(|i| i % 3 == 0 || i == len - 1).collect();
+            let m = HoleMask::from_vec(&v);
+            assert_eq!(m.words.len(), len.div_ceil(64), "len {len}");
+            assert_eq!(m.to_vec(), v, "len {len}");
+            let mut s = HoleMask::zeros(len);
+            for (i, &h) in v.iter().enumerate() {
+                s.set(i, h);
+            }
+            assert_eq!(s, m, "len {len}: set builds the packed mask");
+            for i in 0..len {
+                s.set(i, false);
+            }
+            assert!(!s.any(), "len {len}: every pixel cleared");
+            // A pixel past the end is ignored.
+            s.set(len, true);
+            assert!(!s.get(len), "len {len}");
+            assert!(!s.any(), "len {len}");
+        }
+        let mut short = HoleMask { words: vec![], len: 100 };
+        assert!(!short.get(70));
+        short.set(70, true);
+        assert!(!short.any());
+    }
+
     #[test]
     fn membrane_matches_a_linear_ramp() {
         let (w, h) = (40u32, 30u32);
@@ -1783,6 +1848,168 @@ mod tests {
         let file = dir.path().join("not-a-folder");
         std::fs::write(&file, b"x").expect("write");
         assert!(SpillHandle::create_in(Some(&file), 4, 4, 1, 32).is_err());
+    }
+
+    /// The scratch file has no name in its folder, so a fill that is killed partway through
+    /// leaves nothing behind, and every read and write still reaches the frames (#2570 review).
+    #[test]
+    fn a_spill_leaves_no_file_in_its_folder() {
+        let dir = tempfile::tempdir().expect("temp");
+        let spill = SpillHandle::create_in(Some(dir.path()), 4, 3, 2, 32).expect("spill");
+        let mut img = Image::new(4, 3);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = [i as f32 / 12.0, 0.5, 0.25, 1.0];
+        }
+        spill.write_frame(1, &img).expect("write");
+        assert_eq!(spill.get(1).data, img.data);
+        assert!(!spill.has_error());
+        assert_eq!(spill.dir(), Some(dir.path()));
+        assert_eq!(Frames::Spilled(spill.clone()).scratch_dir().as_deref(), Some(dir.path()));
+        // Elsewhere the file is unlinked as soon as it is made; Windows keeps a delete-on-close
+        // file listed until its last handle closes.
+        #[cfg(not(windows))]
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0, "the open spill has a name in the folder");
+        drop(spill);
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0, "scratch left in the folder");
+    }
+
+    /// The same frames spilled to 32 bpc scratch.
+    fn spill_frames(frames: &Frames) -> SpillHandle {
+        let (w, h) = frames.size().expect("size");
+        let spill = SpillHandle::create(w, h, frames.len(), 32).expect("spill");
+        for k in 0..frames.len() {
+            spill.write_frame(k, &frames.get(k)).expect("write");
+        }
+        spill
+    }
+
+    /// Every channel of every pixel, as bits.
+    fn bits(img: &Image) -> Vec<u32> {
+        img.data.iter().flatten().map(|v| v.to_bits()).collect()
+    }
+
+    /// A spilled range fills bit-identically to the same frames in RAM, streamed or returned: the
+    /// spill keeps 32-bit floats and samples the same 2x2 support (#2570, "no quality loss").
+    #[test]
+    fn a_spilled_range_fills_exactly_like_one_in_memory() {
+        let (input, _) = sequence(6, 1.0);
+        for method in [FillMethod::Object, FillMethod::Surface, FillMethod::EdgeBlend] {
+            let opts = FillOpts { method, lighting: 0.5, ..Default::default() };
+            let memory = fill_sequence(&input, &opts, &mut |_, _| true).expect("memory fill");
+            let spilled = FillInput { frames: Frames::Spilled(spill_frames(&input.frames)), holes: input.holes.clone(), references: vec![] };
+            let returned = fill_sequence(&spilled, &opts, &mut |_, _| true).expect("spilled fill");
+            let mut streamed = Vec::new();
+            let mut sink = |_: usize, img: &Image| -> Result<(), String> {
+                streamed.push(img.clone());
+                Ok(())
+            };
+            let rest = fill_sequence_with(spilled, &opts, &CpuFill, &mut |_, _| true, Some(&mut sink));
+            assert!(rest.is_some_and(|v| v.is_empty()), "{method:?}: the sink took every frame");
+            assert_eq!((memory.len(), returned.len(), streamed.len()), (6, 6, 6), "{method:?}");
+            for t in 0..6 {
+                assert!(bits(&returned[t]) == bits(&memory[t]), "{method:?} frame {t}: spilled fill differs from RAM");
+                assert!(bits(&streamed[t]) == bits(&memory[t]), "{method:?} frame {t}: streamed fill differs from RAM");
+            }
+        }
+    }
+
+    /// The sink sees every frame once and strictly in order, whichever stage finishes it: the
+    /// complete frames before the first synthesised one, the synthesised run, and Edge Blend.
+    #[test]
+    fn the_sink_sees_frames_in_order() {
+        let (input, gts) = sequence(8, 1.0);
+        let mut frames: Vec<Image> = (0..8).map(|k| input.frames.get(k)).collect();
+        let mut holes = input.holes.clone();
+        // The first two frames are clean, so they stream ahead of the first synthesised frame.
+        for k in 0..2 {
+            frames[k] = gts[k].clone();
+            holes[k] = HoleMask::zeros(frames[k].data.len());
+        }
+        let input = FillInput { frames: Frames::Spilled(spill_frames(&Frames::Memory(frames))), holes, references: vec![] };
+        for method in [FillMethod::Object, FillMethod::Surface, FillMethod::EdgeBlend] {
+            let mut seen = Vec::new();
+            let mut sink = |t: usize, _: &Image| -> Result<(), String> {
+                seen.push(t);
+                Ok(())
+            };
+            let out = fill_sequence_with(input.clone(), &FillOpts { method, ..Default::default() }, &CpuFill, &mut |_, _| true, Some(&mut sink));
+            assert!(out.is_some(), "{method:?}");
+            assert_eq!(seen, (0..8).collect::<Vec<_>>(), "{method:?}");
+        }
+    }
+
+    /// A spill that cannot be read fails the fill with the disk error in the slot the caller
+    /// probes, and the black fallback frame never reaches the sink (#2570 review).
+    #[test]
+    fn a_spill_read_failure_is_an_error_and_never_streamed() {
+        let (input, _) = sequence(4, 1.0);
+        let spill = spill_frames(&input.frames);
+        // Truncate the scratch under the fill: every read comes back short.
+        spill.inner.file.set_len(0).expect("truncate");
+        for method in [FillMethod::Object, FillMethod::Surface, FillMethod::EdgeBlend] {
+            let mut seen = Vec::new();
+            let mut sink = |t: usize, _: &Image| -> Result<(), String> {
+                seen.push(t);
+                Ok(())
+            };
+            let failed = FillInput { frames: Frames::Spilled(spill.clone()), holes: input.holes.clone(), references: vec![] };
+            let out = fill_sequence_with(failed, &FillOpts { method, ..Default::default() }, &CpuFill, &mut |_, _| true, Some(&mut sink));
+            assert!(out.is_none(), "{method:?}");
+            assert!(seen.is_empty(), "{method:?}: streamed frames {seen:?} from an unreadable spill");
+            let e = spill.take_error().expect("the read failure is recorded");
+            assert!(e.starts_with("spill:"), "{method:?}: {e}");
+        }
+    }
+
+    /// A scratch failure while the output streams stops the fill before the next frame reaches
+    /// the sink, and leaves the failure for the caller to report.
+    #[test]
+    fn a_spill_failure_mid_stream_stops_before_the_next_frame() {
+        let (input, _) = sequence(6, 1.0);
+        let spill = spill_frames(&input.frames);
+        let cell = spill.error_cell();
+        let mut seen = Vec::new();
+        let mut sink = |t: usize, _: &Image| -> Result<(), String> {
+            seen.push(t);
+            if t == 2 {
+                *cell.lock().unwrap() = Some("spill: injected".into());
+            }
+            Ok(())
+        };
+        let streamed = FillInput { frames: Frames::Spilled(spill.clone()), holes: input.holes.clone(), references: vec![] };
+        let out = fill_sequence_with(streamed, &FillOpts::default(), &CpuFill, &mut |_, _| true, Some(&mut sink));
+        assert!(out.is_none());
+        assert_eq!(seen, vec![0, 1, 2]);
+        assert_eq!(spill.take_error().as_deref(), Some("spill: injected"));
+    }
+
+    /// Once a propagated frame fails to spill, the other propagation workers stop instead of
+    /// tracing the rest of a range whose fill is already lost (#2570 review).
+    #[test]
+    fn propagation_stops_after_a_spill_failure() {
+        /// Fails the spill from inside the propagation stage (Lighting Correction's membrane).
+        struct FailInPropagation {
+            cell: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl FillBackend for FailInPropagation {
+            fn membrane_known(&self, data: &mut [[f32; 4]], known: &[bool], w: usize, h: usize) {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.cell.lock().unwrap() = Some("spill: injected".into());
+                membrane_core(data, known, w, h);
+            }
+        }
+        let (input, _) = sequence(6, 1.0);
+        let spill = spill_frames(&input.frames);
+        let backend = FailInPropagation { cell: spill.error_cell(), calls: std::sync::atomic::AtomicUsize::new(0) };
+        let input = FillInput { frames: Frames::Spilled(spill.clone()), holes: input.holes, references: vec![] };
+        let opts = FillOpts { lighting: 1.0, ..Default::default() };
+        // One worker, so the frames run one after another and the count is exact.
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let out = pool.install(|| fill_sequence_with(input, &opts, &backend, &mut |_, _| true, None));
+        assert!(out.is_none());
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1, "propagation kept going after the failure");
+        assert_eq!(spill.take_error().as_deref(), Some("spill: injected"));
     }
 
     /// Peak RSS of one synthetic fill, quoted in the PR. Ignored so CI does not run it. Run it
