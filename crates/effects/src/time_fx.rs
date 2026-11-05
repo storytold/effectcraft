@@ -261,6 +261,9 @@ fn mean_of(ctx: &EffectCtx, b: Buf, times: &[f64]) -> Buf {
 
 // ---------------------------------------------------------------- Echo
 
+/// Echo: the layer at the current time and `numberOfEchoes` earlier (or later) times
+/// `echoTime` apart, each weighted Starting Intensity × Decay^i and combined by the Echo Operator
+/// (Add, Maximum, Minimum, Screen, Composite In Back, Composite In Front, Blend).
 fn echo(ctx: &EffectCtx, b: Buf) -> Buf {
     let n = ctx.params.f("numberOfEchoes").round().clamp(0.0, 255.0) as usize;
     let dt = ctx.params.f("echoTime");

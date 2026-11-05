@@ -601,6 +601,8 @@ fn minimax(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 // ---------------------------------------------------------------- Echo / Posterize Time (time_fx.rs)
 
+/// Echo on the GPU (`time_fx::echo`): the frames fetched on the CPU, folded in order by
+/// `fxn_echo` into two ping-pong images, then `fxn_echo_fin` clamps the result.
 fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let n = ctx.params.f("numberOfEchoes").round().clamp(0.0, 255.0) as usize;
     let dt = ctx.params.f("echoTime");
