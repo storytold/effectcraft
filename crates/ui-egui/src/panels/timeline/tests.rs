@@ -685,8 +685,8 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
     }
 }
 
-/// One box spans the outline and the time graph (#3056): rows it crosses are selected whichever
-/// column it starts in, and only keys in the time graph count (the part over the outline is cut).
+/// One box spans the outline and the time graph (#3056): rows it crosses are selected on both
+/// sides of the boundary, and only keys in the time graph count (the part over the outline is cut).
 #[test]
 fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
     let mut s = effectcraft_engine::Session::default();
@@ -714,13 +714,13 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
     let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 65.0)));
     assert_eq!(ls, [layers[0], layers[1]]);
     assert_eq!(keyed(&ks), [layers[0], layers[1]]);
-    // From the time graph back over the outline: the same rows, the same keys.
+    // The same box dragged the other way is the same rectangle: the same rows, the same keys.
     let (ls, ks) = go(Rect::from_two_pos(pos2(260.0, 65.0), pos2(10.0, 5.0)));
     assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
     // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
     let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
     assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
-    // A locked layer is not selected as a row, and its keys are not touched.
+    // A locked layer is not selected as a row (the engine drops its keys in keys.select).
     let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
     assert_eq!(ls, [layers[0], layers[1]]);
 }
