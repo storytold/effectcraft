@@ -112,7 +112,7 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         let alt = ctx.input(|i| i.modifiers.alt);
         // A dropped Photoshop file asks how to import it (the Import Photoshop File dialog, its
         // Import Kind starting at Default Drag Import As), as File ▸ Import ▸ File… does (#678).
-        let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb")));
+        let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb" | "pcraft")));
         let mut params = json!({
             "paths": rest,
             "drag": true,

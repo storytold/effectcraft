@@ -513,6 +513,20 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let lt = layer.map(|l| l.layer_time(t)).unwrap_or(t);
     let mut base = p.clone();
     let (title, fields): (String, Vec<Field>) = match id {
+        "file.import" if !has(p, &["importAs"]) && imports_ext(p, &["pcraft"]) && !is_layered(p) => {
+            let drag = p.get("drag").and_then(Value::as_bool).unwrap_or(false);
+            let sel = usize::from(drag && s.prefs.drag_import_as() != "footage");
+            (
+                "Import PhotoCraft File".into(),
+                vec![
+                    Field::choice("importAs", "Import Kind", &[("Footage", json!("footage")), ("Composition", json!("composition"))], sel),
+                    Field::note(
+                        "pcraftNote",
+                        "Composition uses canvas-sized saved pixels. Masks, effects and profiles may differ; use Footage for the saved appearance.",
+                    ),
+                ],
+            )
+        }
         // Photoshop files: Import Kind (Footage / Composition / – Retain Layer Sizes). Dropped
         // files start at Settings ▸ Import ▸ Default Drag Import As.
         "file.import" if !has(p, &["importAs"]) && is_layered(p) => {
@@ -1049,6 +1063,21 @@ pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Toke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photocraft_import_offers_footage_or_canvas_sized_layers() {
+        for (pref, expected) in [("footage", "footage"), ("comp", "composition"), ("compLayerSizes", "composition")] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.session.prefs.import.drag_import_as = pref.into();
+            let reply = crate::menus::invoke(&mut app, &egui::Context::default(), "file.import", json!({"paths":["/picked.pcraft"],"drag":true})).unwrap();
+            assert_eq!(reply["dialog"], "file.import");
+            assert_eq!(app.dialog_state.form.title, "Import PhotoCraft File");
+            assert_eq!(app.dialog_state.form.params()["importAs"], expected);
+            assert!(app.dialog_state.form.params().get("pcraftNote").is_none());
+            let FieldKind::Choice { options, .. } = &app.dialog_state.form.fields[0].kind else { panic!("no import choices") };
+            assert_eq!(options.len(), 2, "Retain Layer Sizes is not offered for canvas-sized PhotoCraft pixels");
+        }
+    }
 
     #[test]
     fn form_params_build_arrays_and_choices() {

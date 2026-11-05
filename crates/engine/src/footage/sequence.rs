@@ -97,7 +97,7 @@ fn extension(path: &str) -> String {
 
 /// Stills that can form a sequence (not layered or vector documents, which import as comps).
 fn sequenceable(path: &str) -> bool {
-    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb")
+    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb" | "pcraft")
 }
 
 /// The run a still belongs to: (folder, name prefix, extension); alphabetical runs ignore the
