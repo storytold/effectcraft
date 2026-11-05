@@ -221,20 +221,23 @@ fn global_pool_threads() -> u64 {
 /// partway through (#1789, #2570 review).
 #[cfg(test)]
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
-    memory_shortfall_with(frames, w, h, available, fill_workers(frames, true), false)
+    memory_shortfall_with(frames, w, h, available, fill_workers(frames, true), false, 0)
 }
 
 /// `workers` and `lighting` are parameters so the budget is testable: the scratch term used to
 /// be a fixed 8 frames, which under-counted a wide machine by several times (#2570 review).
-fn memory_shortfall_with(frames: usize, w: u32, h: u32, available: u64, workers: u64, lighting: bool) -> Option<String> {
+/// `resident` adds storage that would otherwise be spill: when the spill volume is RAM-backed,
+/// its files use the same memory as the working set (#2570 review).
+fn memory_shortfall_with(frames: usize, w: u32, h: u32, available: u64, workers: u64, lighting: bool, resident: u64) -> Option<String> {
     let px = u64::from(w).saturating_mul(u64::from(h));
     let per_frame = (frames as u64).saturating_mul(px);
     // `holes` and the leftover propagation masks, packed to a bit a pixel each.
     let masks = per_frame / 4;
     // The forward and backward flow fields, ~0.125 byte a pixel each.
     let flows = per_frame / 4;
-    // wasm keeps the input and one working copy in RAM at every stage.
-    let resident = if cfg!(target_arch = "wasm32") { per_frame.saturating_mul(32) } else { 0 };
+    // wasm keeps the input and one working copy in RAM at every stage; a RAM-backed spill
+    // volume counts there too.
+    let resident = resident.saturating_add(if cfg!(target_arch = "wasm32") { per_frame.saturating_mul(32) } else { 0 });
     // The synthesis stage is sequential; every parallel stage holds a few frames a worker.
     let scratch_frames = SYNTH_FRAMES.saturating_add(per_worker_frames(lighting).saturating_mul(workers));
     let scratch = px.saturating_mul(16).saturating_mul(scratch_frames);
@@ -325,7 +328,8 @@ pub(crate) async fn run_plan(
     let mut frames = Vec::with_capacity(times.len());
     // Spill 32-bit floats whatever the project depth: the old in-memory path kept f32 all the
     // way through, so quantising here would change the fill (#2570, "no quality loss"). Scratch
-    // lives beside the output, so a RAM-backed `/tmp` cannot defeat the memory saving.
+    // lives beside the output when one is set; the default temp folder may be RAM-backed, which
+    // the memory preflight accounts for when it chooses the spill folder.
     #[cfg(not(target_arch = "wasm32"))]
     let spill = SpillHandle::create_in(Some(std::path::Path::new(&plan.dir)), w as usize, h as usize, times.len(), 32).map_err(|e| e.to_string())?;
     #[cfg(not(target_arch = "wasm32"))]
@@ -467,17 +471,24 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
         ..Default::default()
     };
+    let dir = str_p(p, "outputDir").map(str::to_string).unwrap_or_else(|| default_dir(s, &layer.name));
+    // The spill lives beside the output. On a RAM-backed volume (`tmpfs`/`ramfs`, where the
+    // default temp dir may live) its files use the same memory as the working set, so the
+    // memory preflight counts them; disk-backed volumes get the space check below instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    let ram_spill = if crate::sysinfo::is_memory_backed(std::path::Path::new(&dir)) { scratch_need(times.len(), w, h) } else { 0 };
+    #[cfg(target_arch = "wasm32")]
+    let ram_spill = 0;
     let wait = b_p(p, "wait").unwrap_or(false);
     // `spawn_task` runs a fill inline on wasm, and `runs_inline` selects the pool it will use.
     let runs_inline = wait || cfg!(target_arch = "wasm32");
     if let Some(e) = crate::sysinfo::memory()
-        .and_then(|m| memory_shortfall_with(times.len(), w, h, m.available, fill_workers(times.len(), runs_inline), opts.lighting > 0.0))
+        .and_then(|m| memory_shortfall_with(times.len(), w, h, m.available, fill_workers(times.len(), runs_inline), opts.lighting > 0.0, ram_spill))
     {
         return Err(bad(c, e));
     }
     let expand = st.alpha_expansion.round().max(0.0) as usize;
     let reference = st.reference_layer.filter(|r| comp.layer(*r).is_some()).map(|r| (r, Tick::from_seconds_f64(st.reference_time.unwrap_or(0.0))));
-    let dir = str_p(p, "outputDir").map(str::to_string).unwrap_or_else(|| default_dir(s, &layer.name));
     // Native fills write three f32 copies of the range to scratch beside the output; a volume
     // that cannot hold them is refused before any frame is rendered (#2570 review).
     #[cfg(not(target_arch = "wasm32"))]
@@ -654,18 +665,22 @@ mod tests {
     /// scratch term scales with the workers and Lighting Correction, not a fixed frame count.
     #[test]
     fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
-        let e = memory_shortfall_with(300, 1920, 1080, 1_000_000, 8, false).expect("refused");
+        let e = memory_shortfall_with(300, 1920, 1080, 1_000_000, 8, false, 0).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
         // Four workers, no lighting: the packed masks and flows plus ~38 scratch frames fit.
-        assert_eq!(memory_shortfall_with(30, 1920, 1080, 4_000_000_000, 4, false), None);
-        assert_eq!(memory_shortfall_with(300, 1920, 1080, 2_000_000_000, 4, false), None);
+        assert_eq!(memory_shortfall_with(30, 1920, 1080, 4_000_000_000, 4, false, 0), None);
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 2_000_000_000, 4, false, 0), None);
         // A wide machine with Lighting Correction holds nine frames a worker: 300 frames no
         // longer fit in 5 GB, which the old fixed 8-frame scratch term missed (#2570 review).
-        assert!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 16, true).is_some());
-        assert!(memory_shortfall_with(300, 1920, 1080, 5_000_000_000, 16, true).is_some());
-        assert_eq!(memory_shortfall_with(300, 1920, 1080, 6_000_000_000, 16, true), None);
+        assert!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 16, true, 0).is_some());
+        assert!(memory_shortfall_with(300, 1920, 1080, 5_000_000_000, 16, true, 0).is_some());
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 6_000_000_000, 16, true, 0), None);
         // The two packed masks still grow with the range: a very long 1080p range cannot fit.
-        assert!(memory_shortfall_with(1000, 1920, 1080, 500_000_000, 8, false).is_some());
+        assert!(memory_shortfall_with(1000, 1920, 1080, 500_000_000, 8, false, 0).is_some());
+        // A RAM-backed spill volume counts its bytes as resident, so the same range that fit on
+        // a disk-backed volume is refused (#2570 review).
+        assert_eq!(memory_shortfall_with(30, 1920, 1080, 2_500_000_000, 4, false, 0), None);
+        assert!(memory_shortfall_with(30, 1920, 1080, 2_500_000_000, 4, false, 2_000_000_000).is_some());
         // Hostile sizes saturate instead of overflowing.
         assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
     }

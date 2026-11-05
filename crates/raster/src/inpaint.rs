@@ -1451,14 +1451,8 @@ pub fn fill_sequence_with(
     let Some(t0) = first else {
         if streaming {
             for t in 0..n {
-                let img = opaque_fill(store.take(t), &holes[t].to_vec());
-                // A failed spill read leaves a black frame; never hand it to the sink.
-                if store.has_error() {
-                    return None;
-                }
-                if let Some(cb) = sink.as_mut()
-                    && cb(t, &img).is_err()
-                {
+                let img = opaque_fill(take_checked(&store, t)?, &holes[t].to_vec());
+                if !stream_frame(&mut sink, t, Some(&img), &holes) {
                     return None;
                 }
             }
@@ -1472,31 +1466,20 @@ pub fn fill_sequence_with(
     };
     // Frames before t0 are complete already.
     for t in 0..t0 {
-        let img = store.take(t);
+        let img = take_checked(&store, t)?;
         if streaming {
-            let prepared = opaque_fill(img, &holes[t].to_vec());
-            if let Some(cb) = sink.as_mut()
-                && cb(t, &prepared).is_err()
-            {
+            if !stream_frame(&mut sink, t, Some(&img), &holes) {
                 return None;
             }
         } else {
             out[t] = Some(img);
         }
     }
-    if store.has_error() {
-        return None;
-    }
     let mut done = 2;
     let left0 = propagated_left[t0].to_vec();
-    out[t0] = Some(backend.patch(&store.take(t0), &left0, None, o.patch, o.seed));
-    if let Some(cb) = sink.as_mut()
-        && let Some(img) = &out[t0]
-    {
-        let prepared = opaque_fill(img.clone(), &holes[t0].to_vec());
-        if cb(t0, &prepared).is_err() {
-            return None;
-        }
+    out[t0] = Some(backend.patch(&take_checked(&store, t0)?, &left0, None, o.patch, o.seed));
+    if !stream_frame(&mut sink, t0, out[t0].as_ref(), &holes) {
+        return None;
     }
     done += 1;
     if !progress(done, total) {
@@ -1505,21 +1488,16 @@ pub fn fill_sequence_with(
     for t in t0 + 1..n {
         let complete = !propagated_left[t].any();
         if complete {
-            out[t] = Some(store.take(t));
+            out[t] = Some(take_checked(&store, t)?);
         } else {
-            let img = store.take(t);
+            let img = take_checked(&store, t)?;
             let left = propagated_left[t].to_vec();
             // Warp the previous result here along the backward flow (t → t − 1).
             // Frames after `t0` are filled in order, so the previous one is set.
             let Some(prev) = out[t - 1].as_ref() else {
                 out[t] = Some(backend.patch(&img, &left, None, o.patch, o.seed));
-                if let Some(cb) = sink.as_mut()
-                    && let Some(i) = &out[t]
-                {
-                    let prepared = opaque_fill(i.clone(), &holes[t].to_vec());
-                    if cb(t, &prepared).is_err() {
-                        return None;
-                    }
+                if !stream_frame(&mut sink, t, out[t].as_ref(), &holes) {
+                    return None;
                 }
                 continue;
             };
@@ -1540,13 +1518,8 @@ pub fn fill_sequence_with(
         if streaming && t >= 2 {
             out[t - 2] = None;
         }
-        if let Some(cb) = sink.as_mut()
-            && let Some(img) = &out[t]
-        {
-            let prepared = opaque_fill(img.clone(), &holes[t].to_vec());
-            if cb(t, &prepared).is_err() {
-                return None;
-            }
+        if !stream_frame(&mut sink, t, out[t].as_ref(), &holes) {
+            return None;
         }
         done += 1;
         if !progress(done, total) {
@@ -1563,6 +1536,22 @@ pub fn fill_sequence_with(
         return Some(Vec::new());
     }
     Some(out.into_iter().enumerate().map(|(i, img)| opaque_fill(img.unwrap_or_default(), &holes[i].to_vec())).collect())
+}
+
+/// Take frame `k` from the store, or `None` when the spill read failed. A failed read yields a
+/// black frame, which must never be emitted (#2570 review).
+fn take_checked(store: &PropStore, k: usize) -> Option<Image> {
+    let img = store.take(k);
+    (!store.has_error()).then_some(img)
+}
+
+/// Hand frame `t` to the streaming sink with its filled pixels made opaque. `true` when there is
+/// no sink or it accepted the frame.
+fn stream_frame(sink: &mut Option<&mut dyn FnMut(usize, &Image) -> Result<(), String>>, t: usize, img: Option<&Image>, holes: &[HoleMask]) -> bool {
+    let (Some(cb), Some(img)) = (sink.as_mut(), img) else {
+        return true;
+    };
+    cb(t, &opaque_fill(img.clone(), &holes[t].to_vec())).is_ok()
 }
 
 /// Filled pixels are opaque.
