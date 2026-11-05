@@ -261,6 +261,10 @@ build real projects through these interfaces; they are worked examples of everyt
   `layer.centerAnchor` skip them and fail when every target is locked ("… is locked"); Select
   All and `layer.selectNext` / `selectPrevious` step over them. Unlock with
   `layer.setSwitch {"layers": [...], "switch": "lock", "value": false}` or `layer.unlockAll`.
+* **Quick Set Anchor**: `layer.quickSetAnchor {point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?}`
+  (Layer ▸ Transform ▸ Quick Set Anchor) moves the Anchor Point of 2D layers to that point of their
+  content and shifts Position and its keys so the layers don't move, in one undo step. 3D and
+  locked layers are skipped (an error when none is left); returns `{layers}`.
 * **Solid Settings**: `layer.settings {layer, name?, color?, width?, height?, pixelAspect?,
   affectAll?}` edits a solid or adjustment layer's solid (and renames the layer and the solid).
   A solid shared by several layers (duplicates share theirs) changes for all of them unless

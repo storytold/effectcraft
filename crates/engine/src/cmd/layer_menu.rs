@@ -243,17 +243,60 @@ fn set_transform(s: &mut Session, p: &Value) -> Result<Value> {
 fn center_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let ids = super::unlocked(s, cid, ids, "layer.centerAnchor")?;
+    move_anchor(s, cid, &ids, "Center Anchor Point", |[x0, y0, x1, y1]| [(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+}
+
+/// The nine points Quick Set Anchor offers, as `(name, column, row)`: column 0 is the left edge
+/// of the layer's content, 2 the right; row 0 the top, 2 the bottom.
+const ANCHOR_POINTS: [(&str, u8, u8); 9] = [
+    ("topLeft", 0, 0),
+    ("top", 1, 0),
+    ("topRight", 2, 0),
+    ("left", 0, 1),
+    ("center", 1, 1),
+    ("right", 2, 1),
+    ("bottomLeft", 0, 2),
+    ("bottom", 1, 2),
+    ("bottomRight", 2, 2),
+];
+
+/// `layer.quickSetAnchor {point, layers?}`: move the Anchor Point of the 2D layers to one of the
+/// nine points of their content (corners, edge midpoints, centre) and shift Position, and every
+/// Position key, so nothing moves on screen. 3D and locked layers are skipped; an error when no
+/// layer is left.
+fn quick_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "layer.quickSetAnchor";
+    let name = str_p(p, "point").ok_or_else(|| bad(c, "missing `point`"))?;
+    let (_, col, row) = ANCHOR_POINTS
+        .iter()
+        .copied()
+        .find(|(n, ..)| *n == name)
+        .ok_or_else(|| bad(c, format!("unknown point `{name}`; one of {}", ANCHOR_POINTS.map(|(n, ..)| n).join(", "))))?;
+    let (cid, ids) = layers_p(s, p)?;
+    let ids = super::unlocked(s, cid, ids, c)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let flat: Vec<LayerId> = ids.into_iter().filter(|id| comp.layer(*id).is_some_and(|l| !l.is_3d())).collect();
+    if flat.is_empty() {
+        return Err(bad(c, "Quick Set Anchor works on 2D layers only"));
+    }
+    let at = |lo: f64, hi: f64, i: u8| lo + (hi - lo) * f64::from(i) / 2.0;
+    move_anchor(s, cid, &flat, "Quick Set Anchor", |[x0, y0, x1, y1]| [at(x0, x1, col), at(y0, y1, row)])
+}
+
+/// Move each layer's Anchor Point to `target(content bounds)` (layer space) and offset Position
+/// by the matching amount, so the layer stays put over its whole animation.
+fn move_anchor(s: &mut Session, cid: ItemId, ids: &[LayerId], label: &str, target: impl Fn([f64; 4]) -> [f64; 2]) -> Result<Value> {
     let t = s.time();
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, t);
     let mut centers = vec![];
-    for lid in &ids {
+    for lid in ids {
         let Some(l) = comp.layer(*lid) else { continue };
-        if let Some([x0, y0, x1, y1]) = effectcraft_render::content_bounds(&ctx, l) {
-            centers.push((*lid, [(x0 + x1) / 2.0, (y0 + y1) / 2.0]));
+        if let Some(b) = effectcraft_render::content_bounds(&ctx, l) {
+            centers.push((*lid, target(b)));
         }
     }
-    s.edit("Center Anchor Point", None, |proj, _| {
+    s.edit(label, None, |proj, _| {
         for (lid, c) in &centers {
             let l = layer_mut(proj, cid, *lid)?;
             let lt = l.layer_time(t);
@@ -901,6 +944,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{layers?}",
             has_layers,
             center_anchor
+        ),
+        cmd!(
+            "layer.quickSetAnchor",
+            "Quick Set Anchor",
+            ["Layer", "Transform", "Quick Set Anchor"],
+            None,
+            "{point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?} → {layers}: moves the Anchor Point of 2D layers to that point of their content and compensates Position (and its keys)",
+            has_layers,
+            quick_set_anchor
         ),
         cmd!(
             "layer.mask.shape",
