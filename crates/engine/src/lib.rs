@@ -78,6 +78,7 @@ pub use settings::config;
 pub use settings::prefs;
 pub use settings::shortcuts;
 pub use system::guard;
+pub use system::library;
 pub use system::logging;
 pub use system::perf;
 pub use system::storage;
@@ -202,6 +203,13 @@ pub struct Session {
     /// External effect helpers (native hosts link `effectcraft-helper-host`):
     /// `effect.helpers.list`, `effect.helpers.scan`, `effect.helpers.load`.
     pub helpers: Option<HelperHooks>,
+    /// Renders a module without registering it (`library.preview`; set with `plugin_loader`).
+    pub plugin_previewer: Option<PluginPreviewer>,
+    /// Where effect plug-ins live (hosts set it; else `Plug-ins` next to the settings): the
+    /// Plug-in Library installs into its `Library` folder ([`library`]).
+    pub plugins_dir: Option<std::path::PathBuf>,
+    /// The Plug-in Library's catalog, worker status and the packages this session loaded.
+    pub library: library::Library,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -290,6 +298,11 @@ pub struct HelperHooks {
     pub list: fn() -> Value,
 }
 
+/// Renders one WebAssembly effect module without registering it (the Plug-in Library preview):
+/// `(bytes, width, height, premultiplied RGBA pixels, times in seconds)` → (manifest JSON, one frame
+/// per time).
+pub type PluginPreviewer = fn(&[u8], u32, u32, &[[f32; 4]], &[f64]) -> std::result::Result<(Value, Vec<Vec<[f32; 4]>>), String>;
+
 impl Default for Session {
     /// A new unsaved session: a default project that is both current and saved, no path, no
     /// active jobs, the plain `FsServices`/`NoFootage` defaults, default preferences and keymaps,
@@ -346,6 +359,9 @@ impl Default for Session {
             script: None,
             plugin_loader: None,
             helpers: None,
+            plugin_previewer: None,
+            plugins_dir: None,
+            library: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,

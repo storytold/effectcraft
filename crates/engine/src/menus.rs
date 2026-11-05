@@ -581,6 +581,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
@@ -1016,6 +1017,7 @@ Effect
   Load Effect Plug-in... | effect.plugins.load
   Load Plug-ins Through Helper... | effect.helpers.load
   Scan for Effect Helpers | effect.helpers.scan
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation

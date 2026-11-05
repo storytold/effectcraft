@@ -265,13 +265,11 @@ impl Comp {
         self.layers.iter().find(|l| matches!(l.source, LayerSource::Camera) && l.switches.video && l.is_active_at(t))
     }
 
-    /// Unique layer name with a numeric suffix (`Shape Layer 2`).
+    /// `base`, or the next free numbered name when a layer already has it (`Shape Layer 2`,
+    /// `v-b1.mp4 2`; see `numbered_name`).
     pub fn unique_layer_name(&self, base: &str) -> String {
-        if !self.layers.iter().any(|l| l.name == base) {
-            return base.to_string();
-        }
-        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
-        (2..).map(|i| format!("{stem} {i}")).find(|n| !self.layers.iter().any(|l| &l.name == n)).unwrap_or_default()
+        let taken = |n: &str| self.layers.iter().any(|l| l.name == n);
+        if taken(base) { crate::item::numbered_name(base, taken) } else { base.to_string() }
     }
 }
 

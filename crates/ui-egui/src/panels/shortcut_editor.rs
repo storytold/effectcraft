@@ -17,7 +17,7 @@
 //! `shortcuts.resetPreset`, `shortcuts.close`.
 
 use crate::i18n::{tr, tr_args};
-use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize};
+use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize, scope_label};
 use egui::{Align2, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -517,7 +517,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     return;
                 };
                 ui.label(RichText::new(&b.label).font(Tokens::semibold(13.0)).color(t.tab_text_active));
-                ui.label(RichText::new(format!("{} • {}", b.command, b.scope)).color(t.text_faint));
+                ui.label(RichText::new(format!("{} • {}", b.command, scope_label(&b.scope))).color(t.text_faint));
                 ui.add_space(6.0);
                 let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
                 if keys.is_empty() {
@@ -565,7 +565,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         ui.add_space(4.0);
                         ui.label(RichText::new(tr_args("⚠ {} is used by:", &[&(crate::menus::shortcut_text(&k))])).color(t.warning));
                         for c in conflicts.iter().take(4) {
-                            ui.label(RichText::new(format!("   {} ({})", c.label, c.scope)).color(t.warning));
+                            ui.label(RichText::new(format!("   {} ({})", c.label, scope_label(&c.scope))).color(t.warning));
                         }
                     }
                 }

@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn render_scales_are_the_factors_the_thousandths_stand_for() {
+    assert_eq!(render_scale(333, Some(3)), 1.0 / 3.0);
+    assert_eq!(render_scale(333, None), 1.0 / 3.0);
+    assert_eq!(render_scale(167, Some(6)), 1.0 / 6.0);
+    assert_eq!((render_scale(1000, None), render_scale(500, None), render_scale(250, Some(4))), (1.0, 0.5, 0.25));
+    // 1/34 and 1/35 are both 29 thousandths: the comp's factor decides.
+    assert_eq!((render_scale(29, Some(35)), render_scale(29, Some(34))), (1.0 / 35.0, 1.0 / 34.0));
+    assert_eq!(render_scale(29, Some(2)), 1.0 / 34.0);
+}
+
+#[test]
 fn converting_a_frame_with_nan_alpha_keeps_the_viewer_alive() {
     let image = effectcraft_engine::render::Image::filled(1, 1, [0.5, 0.25, 0.1, f32::NAN]);
     assert_eq!(to_color_image(&image).pixels, [egui::Color32::TRANSPARENT]);
@@ -458,18 +469,36 @@ fn a_newer_viewer_frame_drops_the_ones_still_waiting() {
     assert_eq!(f.inflight(), 3, "dropped frames aren't in flight: the viewer can ask again");
 }
 
-/// Each time the GPU runs out of memory, half as many GPU frames are kept, down to a floor.
+/// One OOM burst halves once; separate episodes back off to a floor and healthy GPU work recovers.
 #[test]
 fn running_out_of_video_memory_halves_the_gpu_frame_budget() {
     let f = Frames::default();
     let mut c = f.cache.lock().unwrap();
     assert_eq!(c.gpu_budget, GPU_BUDGET);
+    assert!(c.gpu_ready());
     c.gpu_out_of_memory();
+    assert!(!c.gpu_ready(), "allocation failures must not be retried for every frame");
     assert_eq!(c.gpu_budget, GPU_BUDGET / 2);
     for _ in 0..20 {
         c.gpu_out_of_memory();
     }
+    assert_eq!(c.gpu_budget, GPU_BUDGET / 2, "one burst must not collapse the shared budget");
+    for _ in 0..20 {
+        c.gpu_pressure = None;
+        c.gpu_out_of_memory();
+    }
     assert_eq!(c.gpu_budget, MIN_GPU_BUDGET);
+    let before = web_time::Instant::now() - GPU_RECOVERY_INTERVAL;
+    c.gpu_pressure = Some(before);
+    assert!(c.gpu_ready(), "GPU attempts resume after the cooldown");
+    c.gpu_adjusted = Some(before);
+    c.gpu_succeeded();
+    assert_eq!(c.gpu_budget, 2 * MIN_GPU_BUDGET);
+    c.gpu_succeeded();
+    assert_eq!(c.gpu_budget, 2 * MIN_GPU_BUDGET, "recovery is paced");
+    drop(c);
+    f.clear();
+    assert_eq!(f.cache.lock().unwrap().gpu_budget, GPU_BUDGET);
 }
 
 #[test]
