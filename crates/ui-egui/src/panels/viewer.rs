@@ -1090,6 +1090,25 @@ fn middle_pan(app: &mut EffectcraftApp, ui: &egui::Ui, resp: &egui::Response, v:
     true
 }
 
+/// One layer of a Move: its id, start Position and the Position's per-comp-axis weights.
+type MoveLayer = (LayerId, [f64; 3], [f64; 3], [f64; 3]);
+
+/// The merge key of the drag in progress: every step it writes folds into one undo step.
+fn drag_merge_key(ui: &egui::Ui) -> String {
+    format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)))
+}
+
+/// Duplicate the layers of an Alt-drag (`edit.duplicate`, selecting the copies) and return the move
+/// entries re-pointed at the copies. If the duplicate fails the originals are dragged as they were.
+fn alt_duplicate(app: &mut EffectcraftApp, ui: &egui::Ui, layers: Vec<MoveLayer>) -> Vec<MoveLayer> {
+    let ids: Vec<u64> = layers.iter().map(|l| l.0.0).collect();
+    // A key left over from the previous drag would fold this copy into that drag's undo step.
+    app.session.history.merge_key = None;
+    let made = app.session.execute("edit.duplicate", json!({"layers": ids, "merge": drag_merge_key(ui)}));
+    let Ok(copies) = made.map(|v| serde_json::from_value::<Vec<u64>>(v).unwrap_or_default()) else { return layers };
+    layers.into_iter().zip(copies).map(|((_, p0, ax, ay), copy)| (LayerId(copy), p0, ax, ay)).collect()
+}
+
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1287,7 +1306,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                         })
                     })
                 } else if let Some(l) = pick(app, ectx, cpt, mods.shift) {
-                    let layers: Vec<(LayerId, [f64; 3], [f64; 3], [f64; 3])> = app
+                    let layers: Vec<MoveLayer> = app
                         .session
                         .state
                         .selected_layers
@@ -1309,6 +1328,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                             da.total_cmp(&db)
                         })
                     });
+                    // Alt-drag duplicates the dragged layers and moves the copies; the copy and the
+                    // drag are one undo step.
+                    let layers = if mods.alt && !layers.is_empty() { alt_duplicate(app, ui, layers) } else { layers };
                     (!layers.is_empty()).then_some(Gesture::Move { layers, start: map.to_comp(press), snap_src })
                 } else {
                     // With path vertices on screen the marquee selects vertices (layers stay
@@ -1386,7 +1408,7 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
     if let (Some(g), Some(pos)) = (gesture.clone(), resp.interact_pointer_pos()) {
         let map = edge_pan(app, &ctx, &g, map, pos);
         let cpt = map.to_comp(pos);
-        let merge = format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)));
+        let merge = drag_merge_key(ui);
         match g {
             Gesture::Pan { start_pan } => {
                 // No total drag on the release frame: keep the pan reached so far (it used to
