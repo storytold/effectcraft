@@ -45,6 +45,12 @@ fn dt1(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f64]) {
     }
 }
 
+/// Scratch vectors (`f`, `v`, `z`) for `dt1` over a line of `n` samples; sized per pass so a
+/// 1 x N image does not allocate N-sized buffers for each of its N one-pixel rows.
+fn line_scratch(n: usize) -> (Vec<f32>, Vec<usize>, Vec<f64>) {
+    (vec![0.0; n], vec![0; n], vec![0.0; n + 1])
+}
+
 /// Euclidean distance from every pixel to the nearest pixel where `seed` is true (BIG.sqrt()
 /// when there is none).
 pub fn distance(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
@@ -54,26 +60,31 @@ pub fn distance(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
     // dt1 needs its input intact while it writes the output, so each line goes through scratch
     // (`f`, `v`, `z`) that rayon creates once per work split, not once per line. The column pass
     // runs on a transposed copy so that every column is a contiguous chunk.
-    let scratch = || (vec![0.0f32; w.max(h)], vec![0usize; w.max(h)], vec![0.0f64; w.max(h) + 1]);
     // Columns: `t[x * h + y]` is pixel (x, y).
     let mut t = vec![0.0f32; w * h];
-    t.par_chunks_mut(h).enumerate().for_each_init(scratch, |(f, v, z), (x, col)| {
-        for (y, fv) in f[..h].iter_mut().enumerate() {
-            *fv = if seed.get(y * w + x).copied().unwrap_or(false) { 0.0 } else { BIG };
-        }
-        dt1(&f[..h], col, &mut v[..h], &mut z[..h + 1]);
-    });
+    t.par_chunks_mut(h).enumerate().for_each_init(
+        || line_scratch(h),
+        |(f, v, z), (x, col)| {
+            for (y, fv) in f.iter_mut().enumerate() {
+                *fv = if seed.get(y * w + x).copied().unwrap_or(false) { 0.0 } else { BIG };
+            }
+            dt1(f, col, v, z);
+        },
+    );
     // Rows, then the square root.
     let mut g = vec![0.0f32; w * h];
-    g.par_chunks_mut(w).enumerate().for_each_init(scratch, |(f, v, z), (y, row)| {
-        for (x, fv) in f[..w].iter_mut().enumerate() {
-            *fv = t[x * h + y];
-        }
-        dt1(&f[..w], row, &mut v[..w], &mut z[..w + 1]);
-        for d in row.iter_mut() {
-            *d = d.sqrt();
-        }
-    });
+    g.par_chunks_mut(w).enumerate().for_each_init(
+        || line_scratch(w),
+        |(f, v, z), (y, row)| {
+            for (x, fv) in f.iter_mut().enumerate() {
+                *fv = t[x * h + y];
+            }
+            dt1(f, row, v, z);
+            for d in row.iter_mut() {
+                *d = d.sqrt();
+            }
+        },
+    );
     g
 }
 
@@ -429,6 +440,18 @@ pub fn motion_blur(a: &[f32], w: usize, h: usize, v: [f64; 2], samples: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_scratch_is_sized_to_the_line_not_the_image() {
+        let (f, v, z) = line_scratch(1);
+        assert_eq!((f.len(), v.len(), z.len()), (1, 1, 2));
+        // A 1 x N image: every row job needs one sample, every column job N.
+        let (w, h) = (1usize, 50_000usize);
+        let seed: Vec<bool> = (0..w * h).map(|i| i == 777).collect();
+        let d = distance(&seed, w, h);
+        let r = distance_reference(&seed, w, h);
+        assert!(d.iter().zip(&r).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
 
     /// The distance transform as it was before the scratch reuse (one set of vectors per line).
     fn distance_reference(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
