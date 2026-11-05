@@ -294,13 +294,16 @@ fn filling_status(on_device: bool, method: FillMethod) -> &'static str {
 }
 
 /// The PNGs a fill has written so far. Unless the fill finishes ([`OutputFiles::keep`]), dropping
-/// it deletes them, and the output folder too when the fill made it and nothing else is in it, so
-/// a failed or stopped fill leaves no partial sequence behind (#2570 review).
+/// it deletes the ones it created, and the output folder too when the fill made it and nothing
+/// else is in it, so a failed or stopped fill leaves no partial sequence behind (#2570 review). A
+/// file that was already there (an `outputDir` holding an earlier sequence) is never deleted.
 struct OutputFiles {
     dir: std::path::PathBuf,
     /// The folder was missing before the fill (the spill creates it).
     made_dir: bool,
     paths: Vec<String>,
+    /// Paths among `paths` that existed before the fill wrote them: not the fill's to delete.
+    spare: Vec<String>,
     kept: bool,
 }
 
@@ -317,7 +320,7 @@ impl Drop for OutputFiles {
         if self.kept {
             return;
         }
-        for path in &self.paths {
+        for path in self.paths.iter().filter(|p| !self.spare.contains(p)) {
             let _ = std::fs::remove_file(path);
         }
         // `remove_dir` leaves a folder that still holds anything else.
@@ -365,7 +368,7 @@ pub(crate) async fn run_plan(
     // Declared before the spill, so on an early return the spill is closed first and the folder
     // it was made in can be removed.
     let dir = std::path::Path::new(&plan.dir);
-    let mut written = OutputFiles { dir: dir.to_path_buf(), made_dir: !dir.exists(), paths: Vec::with_capacity(times.len()), kept: false };
+    let mut written = OutputFiles { dir: dir.to_path_buf(), made_dir: !dir.exists(), paths: Vec::with_capacity(times.len()), spare: Vec::new(), kept: false };
     // Spill 32-bit floats whatever the project depth: the old in-memory path kept f32 all the
     // way through, so quantising here would change the fill (#2570, "no quality loss"). Scratch
     // lives beside the output when one is set; the default temp folder may be RAM-backed, which
@@ -427,8 +430,12 @@ pub(crate) async fn run_plan(
             if spill_probe.has_error() {
                 return Err(spill_probe.take_error().unwrap_or_else(|| "spill: read failed".to_string()));
             }
+            let existed = services.exists(&paths[idx]);
             services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
             written.paths.push(paths[idx].clone());
+            if existed {
+                written.spare.push(paths[idx].clone());
+            }
             if !report(2 * n + idx as u64 + 1) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
@@ -767,7 +774,7 @@ mod tests {
             for p in &paths {
                 std::fs::write(p, b"png").unwrap();
             }
-            OutputFiles { dir: dir.to_path_buf(), made_dir, paths, kept: false }
+            OutputFiles { dir: dir.to_path_buf(), made_dir, paths, spare: Vec::new(), kept: false }
         };
         // The fill made the folder: the files and the folder go.
         let made = root.path().join("made");
@@ -784,6 +791,14 @@ mod tests {
         std::fs::write(shared.join("notes.txt"), b"keep").unwrap();
         drop(files);
         assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 1);
+        // A file that was there before the fill wrote over it (an earlier sequence in a given
+        // `outputDir`) is not the fill's to delete.
+        let earlier = root.path().join("earlier");
+        let mut files = write(&earlier, false);
+        files.spare.push(files.paths[0].clone());
+        drop(files);
+        assert!(earlier.join("fill_00000.png").exists(), "an earlier fill's frame stays");
+        assert!(!earlier.join("fill_00001.png").exists(), "the fill's own frame goes");
         // A finished fill keeps its files.
         let done = root.path().join("done");
         let kept = write(&done, true).keep();
