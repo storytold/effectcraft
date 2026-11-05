@@ -255,10 +255,16 @@ pub struct Footage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub alphabetical: bool,
     /// Interpret Footage ▸ Start Timecode ▸ Override Start: the frame (at the footage's frame
-    /// rate) its timecode shows at its first frame. `None` = Use Source File Timecode (0: file
-    /// timecode isn't read). It only relabels source time, as in After Effects.
+    /// rate) its timecode shows at its first frame. `None` = Use Source File Timecode (shown
+    /// from 0: [`Footage::file_timecode`] isn't used here yet). It only relabels source time, as
+    /// in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timecode: Option<i64>,
+    /// The start timecode recorded in the file, in frames at its own frame rate (`native_rate`,
+    /// else `frame_rate`). Read when probing; importing an EDL uses it to turn the list's source
+    /// timecodes into footage time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_timecode: Option<i64>,
     /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
     /// made from the footage starts with them, and Update Markers From Source copies new ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -299,6 +305,7 @@ impl Default for Footage {
             page: 0,
             alphabetical: false,
             start_timecode: None,
+            file_timecode: None,
             markers: vec![],
         }
     }

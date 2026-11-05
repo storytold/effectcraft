@@ -1437,6 +1437,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-aep"
+version = "0.21.1"
+dependencies = [
+ "effectcraft-color",
+ "effectcraft-effects",
+ "effectcraft-keyframe",
+ "effectcraft-project",
+ "effectcraft-time",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "effectcraft-automation"
 version = "0.21.1"
 dependencies = [
@@ -1507,6 +1521,7 @@ version = "0.21.1"
 dependencies = [
  "chrono",
  "craft-docpath",
+ "effectcraft-aep",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-geom",
@@ -1555,6 +1570,7 @@ dependencies = [
  "effectcraft-render",
  "effectcraft-time",
  "effectcraft-vp9enc",
+ "exr",
  "filmcraft-aac",
  "filmcraft-h264enc",
  "filmcraft-isobmff",
@@ -1611,6 +1627,7 @@ dependencies = [
  "js-sys",
  "log",
  "pollster 1.0.1",
+ "rayon",
  "wasm-bindgen",
  "web-time",
  "wgpu",
@@ -7628,6 +7645,7 @@ dependencies = [
  "chrono",
  "pkg-config",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

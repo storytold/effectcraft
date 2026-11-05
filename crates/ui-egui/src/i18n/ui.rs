@@ -145,11 +145,13 @@ fn string_literal(rest: &str) -> Option<String> {
     None
 }
 
-/// Characters required by the fixed panel catalog, for system-font coverage selection.
-/// Sorted and deduplicated so fallback registration is deterministic.
+/// Characters required by the fixed panel catalog and the effect names and categories, for
+/// system-font coverage selection. Sorted and deduplicated so fallback registration is
+/// deterministic.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn catalog_characters(language: &str) -> Vec<char> {
-    catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+    let panels = catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars());
+    panels.chain(super::effects::characters(language)).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
 }
 
 /// Translate one interface string: the current language's row for `text`, or `text` itself.
@@ -240,6 +242,9 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "ブラシのダイナミクス"),
     ("Caching frames…", "フレームをキャッシュ中…"),
     ("Cancel", "キャンセル"),
+    ("Import After Effects Project", "After Effectsプロジェクトを読み込み"),
+    ("Some parts of this project cannot be imported exactly (left out or changed):", "このプロジェクトの一部は正確に読み込めません（省略または変更されます）:"),
+    ("Import Anyway", "このまま読み込み"),
     ("Casts Shadows", "シャドウを落とす"),
     ("Change Renderer…", "レンダラーを変更…"),
     (
@@ -1034,7 +1039,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Feet + Frames (35mm)", "フィート + フレーム (35mm)"),
     ("Feet + Frames (16mm)", "フィート + フレーム (16mm)"),
     ("Current Frame", "現在のフレーム"),
-    ("Work Area", "作業領域"),
+    ("Work Area", "ワークエリア"),
     ("Create Markers", "マーカーを作成"),
     ("Split Layers", "レイヤーを分割"),
     ("Split and Precompose", "分割してプリコンポーズ"),
@@ -1368,6 +1373,9 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "画笔动态"),
     ("Caching frames…", "正在缓存帧…"),
     ("Cancel", "取消"),
+    ("Import After Effects Project", "导入 After Effects 项目"),
+    ("Some parts of this project cannot be imported exactly (left out or changed):", "此项目的某些部分无法准确导入（将被省略或更改）："),
+    ("Import Anyway", "仍然导入"),
     ("Casts Shadows", "投射阴影"),
     ("Change Renderer…", "更改渲染器…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快捷键会创建自定义预设；默认预设保持不变。"),
@@ -2475,6 +2483,12 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Penseldynamik"),
     ("Caching frames…", "Cachelagrar bildrutor…"),
     ("Cancel", "Avbryt"),
+    ("Import After Effects Project", "Importera After Effects-projekt"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Vissa delar av projektet kan inte importeras exakt (utelämnas eller ändras):",
+    ),
+    ("Import Anyway", "Importera ändå"),
     ("Casts Shadows", "Kastar skuggor"),
     ("Change Renderer…", "Byt renderare…"),
     (
@@ -3733,6 +3747,9 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "筆刷動態"),
     ("Caching frames…", "正在快取幀…"),
     ("Cancel", "取消"),
+    ("Import After Effects Project", "匯入 After Effects 專案"),
+    ("Some parts of this project cannot be imported exactly (left out or changed):", "此專案的部分內容無法準確匯入（將被省略或變更）："),
+    ("Import Anyway", "仍要匯入"),
     ("Casts Shadows", "投射陰影"),
     ("Change Renderer…", "更改算圖引擎…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快速鍵會創建自定義預設集；預設預設集保持不變。"),
@@ -4788,6 +4805,12 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "Динаміка пензля"),
     ("Caching frames…", "Кешування кадрів…"),
     ("Cancel", "Скасувати"),
+    ("Import After Effects Project", "Імпортувати проєкт After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Деякі частини цього проєкту неможливо імпортувати точно (їх пропущено або змінено):",
+    ),
+    ("Import Anyway", "Усе одно імпортувати"),
     ("Casts Shadows", "Відкидає тіні"),
     ("Change Renderer…", "Змінити рушій рендерингу…"),
     (
@@ -5357,6 +5380,12 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinâmica do pincel"),
     ("Caching frames…", "Armazenando quadros em cache…"),
     ("Cancel", "Cancelar"),
+    ("Import After Effects Project", "Importar projeto do After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Algumas partes deste projeto não podem ser importadas exatamente (omitidas ou alteradas):",
+    ),
+    ("Import Anyway", "Importar mesmo assim"),
     ("Casts Shadows", "Projeta sombras"),
     ("Change Renderer…", "Alterar renderizador…"),
     (
@@ -6117,6 +6146,12 @@ const POLISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika pędzla"),
     ("Caching frames…", "Buforowanie klatek…"),
     ("Cancel", "Anuluj"),
+    ("Import After Effects Project", "Importuj projekt After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Niektórych części tego projektu nie można zaimportować dokładnie (zostaną pominięte lub zmienione):",
+    ),
+    ("Import Anyway", "Importuj mimo to"),
     ("Casts Shadows", "Rzuca cienie"),
     ("Change Renderer…", "Zmień renderer…"),
     (
@@ -6861,6 +6896,12 @@ const CZECH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika štětce"),
     ("Caching frames…", "Ukládání snímků do mezipaměti…"),
     ("Cancel", "Zrušit"),
+    ("Import After Effects Project", "Importovat projekt After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Některé části tohoto projektu nelze importovat přesně (budou vynechány nebo změněny):",
+    ),
+    ("Import Anyway", "Přesto importovat"),
     ("Casts Shadows", "Vrhat stíny"),
     ("Change Renderer…", "Změnit vykreslovací modul…"),
     (
@@ -7424,6 +7465,12 @@ const SPANISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinámica del pincel"),
     ("Caching frames…", "Almacenando fotogramas en caché…"),
     ("Cancel", "Cancelar"),
+    ("Import After Effects Project", "Importar proyecto de After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Algunas partes de este proyecto no se pueden importar con exactitud (se omiten o cambian):",
+    ),
+    ("Import Anyway", "Importar de todos modos"),
     ("Casts Shadows", "Proyecta sombras"),
     ("Change Renderer…", "Cambiar motor de procesamiento…"),
     (
@@ -7978,6 +8025,12 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "ფუნჯის დინამიკა"),
     ("Caching frames…", "კადრების ქეშირება…"),
     ("Cancel", "გაუქმება"),
+    ("Import After Effects Project", "After Effects-ის პროექტის იმპორტი"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "ამ პროექტის ზოგიერთი ნაწილის ზუსტად იმპორტი შეუძლებელია (გამოტოვებული ან შეცვლილი):",
+    ),
+    ("Import Anyway", "მაინც იმპორტი"),
     ("Casts Shadows", "ჩრდილს აგდებს"),
     ("Change Renderer…", "რენდერერის შეცვლა…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "მალსახმობის შეცვლა ქმნის მორგებულ პრესეტს; ნაგულისხმევი უცვლელი რჩება."),
@@ -8940,6 +8993,12 @@ const FRENCH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamique du pinceau"),
     ("Caching frames…", "Mise en cache des images…"),
     ("Cancel", "Annuler"),
+    ("Import After Effects Project", "Importer un projet After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "Certaines parties de ce projet ne peuvent pas être importées à l’identique (omises ou modifiées) :",
+    ),
+    ("Import Anyway", "Importer quand même"),
     ("Casts Shadows", "Projette des ombres"),
     ("Change Renderer…", "Changer de moteur de rendu…"),
     (
@@ -10177,6 +10236,7 @@ mod tests {
         ("prefs_live.rs", include_str!("../prefs_live.rs")),
         ("updates_ui.rs", include_str!("../updates_ui.rs")),
         ("widgets.rs", include_str!("../widgets.rs")),
+        ("panels/aep_losses.rs", include_str!("../panels/aep_losses.rs")),
         ("panels/anim_tools.rs", include_str!("../panels/anim_tools.rs")),
         ("panels/camera_tracker_ui.rs", include_str!("../panels/camera_tracker_ui.rs")),
         ("panels/comp_settings.rs", include_str!("../panels/comp_settings.rs")),

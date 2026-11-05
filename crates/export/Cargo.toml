@@ -23,6 +23,7 @@ effectcraft-vp9enc = { workspace = true }
 effectcraft-hevcenc = { workspace = true }
 effectcraft-av1enc = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
+exr = { workspace = true }
 gif = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
