@@ -589,7 +589,12 @@ mod tests {
             for corner in ["ul", "ur", "lr", "ll"] {
                 let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
                 let o = run("ec.distort.cornerpin", &[(corner, Value::Vec2([bad, 5.0]))], im);
-                assert!(o.img.width >= 1 && o.img.height >= 1 && o.img.width <= 16384 && o.img.height <= 16384, "{corner} {bad}: {}x{}", o.img.width, o.img.height);
+                assert!(
+                    o.img.width >= 1 && o.img.height >= 1 && o.img.width <= 16384 && o.img.height <= 16384,
+                    "{corner} {bad}: {}x{}",
+                    o.img.width,
+                    o.img.height
+                );
                 assert!(o.offset.iter().all(|v| v.is_finite()), "{corner} {bad}: offset {:?}", o.offset);
             }
         }
