@@ -42,6 +42,10 @@ fn aux_at(t: Tick) -> AuxChannels {
         aux.channels.push((format!("CryptoObject00.{c}"), planes[k].clone()));
     }
     aux.manifests = vec![("CryptoObject".into(), ["left", "right", "late", COMMA, "star*"].iter().map(|n| (n.to_string(), crypto_hash(n))).collect())];
+    // A second view's layer of the same kind (`Z.CryptoObject`, stored Layer 3): "right" everywhere.
+    aux.channels.push(("Z.CryptoObject00.R".into(), vec![crypto_float(crypto_hash("right")); w * h]));
+    aux.channels.push(("Z.CryptoObject00.G".into(), vec![1.0; w * h]));
+    aux.manifests.push(("Z.CryptoObject".into(), vec![("right".into(), crypto_hash("right"))]));
     aux
 }
 
@@ -128,6 +132,17 @@ fn picks_replace_add_and_remove_in_one_undo_step_each() {
     s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": " \"Green, \\\"Glossy\\\"\" "})).unwrap();
     let n = s.history.undo.len();
     assert_eq!((pick(&mut s, 2.0, "replace")["changed"].as_bool(), s.history.undo.len()), (Some(false), n));
+}
+
+/// A second layer that fits a standard slot (`Z.CryptoObject` beside `CryptoObject`) is picked by
+/// its own Layer value (3); Layer 0 still reads the first one.
+#[test]
+fn pick_reads_the_second_layer_of_a_kind() {
+    let mut s = session();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "left");
+    s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": 3})).unwrap();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "right");
+    assert_eq!(s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 1.0, "y": 1.5})).unwrap()["name"], "right");
 }
 
 #[test]

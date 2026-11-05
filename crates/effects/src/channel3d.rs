@@ -398,16 +398,15 @@ pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoA
 
 /// The Layer popup's entries for Cryptomatte `layers` (sorted, as [`AuxChannels::crypto_layers`]
 /// returns them): the stored value and the layer's name, in value order. Of several layers
-/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one is listed, as it
-/// is the one rendered.
+/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one keeps the standard
+/// slot, so existing projects load unchanged, and the others get the next custom slots.
 fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
     let mut out: Vec<(usize, &str)> = vec![];
     let mut custom = CRYPTO_LAYERS.len();
     for l in layers {
         match CRYPTO_LAYERS.iter().position(|w| l == w || l.ends_with(w)) {
-            Some(i) if out.iter().any(|(j, _)| *j == i) => {}
-            Some(i) => out.push((i, l)),
-            None => {
+            Some(i) if !out.iter().any(|(j, _)| *j == i) => out.push((i, l)),
+            _ => {
                 out.push((custom, l));
                 custom += 1;
             }

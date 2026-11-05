@@ -446,8 +446,12 @@ fn crypto_layer_popup_lists_the_layers_of_the_footage() {
     );
     assert_eq!(crypto_layer_menu(None, 2).1.as_deref(), Some("CryptoAsset"));
     assert_eq!(crypto_layer_menu(None, 9).1.as_deref(), Some("CryptoObject"), "a custom value with no footage");
-    // Two layers for one slot: the first, which the effect renders.
-    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string())]);
+    // Two layers for one slot: the first keeps it, the next gets a custom value.
+    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string()), (3, "B.CryptoObject".to_string())]);
+    assert_eq!(
+        choices(&["A.CryptoObject", "B.CryptoObject", "C.CryptoObject", "Mine"]).iter().map(|c| c.0).collect::<Vec<_>>(),
+        [0, 3, 4, 5]
+    );
 }
 
 /// A project saved with Layer = CryptoObject / CryptoMaterial / CryptoAsset renders the same layer
@@ -492,4 +496,17 @@ fn cryptomatte_renders_the_layer_the_value_names() {
     let (object, mine) = (matte(0, &two), matte(3, &two));
     assert_eq!((object.get(2, 5)[3], object.get(12, 5)[3]), (1.0, 0.0));
     assert_eq!((mine.get(2, 5)[3], mine.get(12, 5)[3]), (0.0, 1.0), "Layer 3 is the custom layer");
+    // A second view's layer of a standard kind is selectable too: B.CryptoObject is Layer 3.
+    let mut a = AuxChannels::new(20, 10, 1.0);
+    for (name, flip) in [("A.CryptoObject", false), ("B.CryptoObject", true)] {
+        let ids: Vec<f32> = (0..200).map(|i| crypto_float(if (i % 20 < 10) != flip { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; 200]));
+    }
+    let views = AuxHost(Arc::new(a));
+    assert_eq!(crypto_layer_name(&views.0, 0).as_deref(), Some("A.CryptoObject"));
+    assert_eq!(crypto_layer_name(&views.0, 3).as_deref(), Some("B.CryptoObject"));
+    let (first, second) = (matte(0, &views), matte(3, &views));
+    assert_eq!((first.get(2, 5)[3], first.get(12, 5)[3]), (1.0, 0.0));
+    assert_eq!((second.get(2, 5)[3], second.get(12, 5)[3]), (0.0, 1.0), "Layer 3 renders B");
 }
