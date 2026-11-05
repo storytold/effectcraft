@@ -637,3 +637,23 @@ fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
+
+/// A command run from the menu that opens a composition (File ▸ Import ▸ After Effects
+/// Project… after Import Anyway, a new composition) leaves the Home screen: it stayed over the
+/// imported project, which looked as if nothing was imported. A command that opens none keeps it.
+#[test]
+fn a_menu_command_that_opens_a_composition_leaves_the_home_screen() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "project.summary", json!({})).unwrap();
+    assert!(app.ui.start_screen);
+    assert!(run_engine(&mut app, &ctx, "file.importAep", json!({"path": "/no/such/file.aep", "allowLosses": true})).is_err());
+    assert!(app.ui.start_screen);
+    run_engine(&mut app, &ctx, "comp.new", json!({"name": "Opened", "width": 64, "height": 36, "duration": 1})).unwrap();
+    assert!(!app.ui.start_screen);
+    // Asked for again (Home button, Help ▸ In-App Tutorials) it stays while the comp is open.
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    assert!(app.ui.start_screen);
+}

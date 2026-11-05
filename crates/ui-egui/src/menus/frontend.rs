@@ -33,11 +33,18 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
 pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     // Events already queued belong to earlier invocations (`engine.execute` defers them).
     let queued = app.session.events.len();
+    let previous_comp = app.session.active_comp_id();
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
+    }
+    // A command that opened a composition (an imported After Effects project, a new or opened
+    // project) leaves the Home screen, as the Home screen's own buttons do: it otherwise stayed
+    // over the opened project. Frontend events below may show it again (Help ▸ In-App Tutorials).
+    if r.is_ok() && app.session.active_comp_id().is_some() && app.session.active_comp_id() != previous_comp {
+        app.ui.start_screen = false;
     }
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
