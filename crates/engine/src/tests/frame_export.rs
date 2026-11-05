@@ -294,6 +294,26 @@ fn proexr_samples(path: &str) -> Vec<(String, Vec<f32>)> {
     out
 }
 
+/// ProEXR decodes with the output space's own curve. A Rec. 709 output has the sRGB working
+/// space's primaries but another curve, so the composite and the isolated layer must hold the
+/// solid's light (its sRGB working value decoded), not the sRGB decode of its Rec. 709 encoding.
+#[test]
+fn proexr_decodes_a_non_srgb_output_curve() {
+    let dir = out_dir("frame-exr-rec709");
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 32, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb", "linearize": true, "outputSpace": "rec709"})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Warm", "color": [0.8, 0.5, 0.2]})).unwrap();
+    let path = dir.join("rec709.exr").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+    let got = proexr_samples(&path);
+    let at = |n: &str| got.iter().find(|c| c.0 == n).unwrap_or_else(|| panic!("no {n}")).1[0];
+    let lin = effectcraft_color::srgb_to_linear;
+    for (n, want) in [("R", lin(0.8)), ("G", lin(0.5)), ("B", lin(0.2)), ("Warm.R", lin(0.8)), ("Warm.B", lin(0.2))] {
+        assert!((at(n) - want).abs() <= 1e-3 * want, "{n}: {} vs {want}", at(n));
+    }
+}
+
 /// ProEXR samples in Clip mode (sRGB output) for each bit depth.
 #[test]
 fn proexr_clip_samples_are_unchanged() {

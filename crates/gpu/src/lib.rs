@@ -422,7 +422,7 @@ impl Accelerator for Gpu {
         // Readback is synchronous-only, and a kernel that failed to build would make every stage
         // fall back to the CPU *after* paying the upload and a failed dispatch (and the fill
         // would still report the GPU path). Neither is a backend at all.
-        if !self.ctx.can_wait() || self.ctx.unavailable_kernels().iter().any(|(e, _)| crate::inpaint::KERNELS.contains(e)) {
+        if !self.ctx.can_wait() || !crate::inpaint::KERNELS.iter().all(|e| self.ctx.has_kernel(e)) {
             return None;
         }
         Some(self as &dyn effectcraft_raster::inpaint::FillBackend)
