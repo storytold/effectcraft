@@ -1109,6 +1109,26 @@ fn alt_duplicate(app: &mut EffectcraftApp, ui: &egui::Ui, layers: Vec<MoveLayer>
     layers.into_iter().zip(copies).map(|((_, p0, ax, ay), copy)| (LayerId(copy), p0, ax, ay)).collect()
 }
 
+/// For each layer of a Move, whether one of its ancestors is in the Move as well: it follows that
+/// parent, so its own Position must not get the drag too. The copies `alt_duplicate` makes keep
+/// this order and are parented to each other the same way.
+fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
+    let moved: std::collections::HashSet<LayerId> = layers.iter().map(|l| l.0).collect();
+    let led = |id: LayerId| {
+        let mut up = comp.layer(id).and_then(|l| l.parent);
+        // (bounded: a parent cycle in a broken file must not hang the viewer)
+        for _ in 0..comp.layers.len() {
+            let Some(p) = up else { return false };
+            if moved.contains(&p) {
+                return true;
+            }
+            up = comp.layer(p).and_then(|l| l.parent);
+        }
+        false
+    };
+    layers.iter().map(|l| led(l.0)).collect()
+}
+
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1280,7 +1300,12 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                 // that axis only, without snapping.
                 if let Some((lid, _, ax, ay)) = axis_at(&axis_hits, press) {
                     let p0 = comp.layer(lid).and_then(|l| Some(ectx.v3(l, l.transform()?, "position", [0.0; 3])));
-                    p0.map(|p0| Gesture::Move { layers: vec![(lid, p0, ax, ay)], start: cpt, snap_src: None })
+                    p0.map(|p0| {
+                        // Alt duplicates the layer and moves the copy along the axis.
+                        let layers = vec![(lid, p0, ax, ay)];
+                        let layers = if mods.alt { alt_duplicate(app, ui, layers) } else { layers };
+                        Gesture::Move { layers, start: cpt, snap_src: None }
+                    })
                 } else if let Some((lid, hi, ..)) = handle_hits.iter().find(|(_, _, h, _)| h.distance(press) < HANDLE + 2.0).cloned() {
                     let layer = comp.layer(lid).cloned();
                     layer.and_then(|layer| {
@@ -1328,9 +1353,13 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                             da.total_cmp(&db)
                         })
                     });
+                    // A layer whose parent (or grandparent…) is dragged too rides along with it:
+                    // moving it as well would add the drag twice. It is still duplicated.
+                    let led = led_by_a_moved_ancestor(comp, &layers);
                     // Alt-drag duplicates the dragged layers and moves the copies; the copy and the
                     // drag are one undo step.
                     let layers = if mods.alt && !layers.is_empty() { alt_duplicate(app, ui, layers) } else { layers };
+                    let layers: Vec<MoveLayer> = layers.into_iter().zip(led).filter(|(_, led)| !led).map(|(l, _)| l).collect();
                     (!layers.is_empty()).then_some(Gesture::Move { layers, start: map.to_comp(press), snap_src })
                 } else {
                     // With path vertices on screen the marquee selects vertices (layers stay
