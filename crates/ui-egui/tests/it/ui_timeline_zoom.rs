@@ -376,6 +376,52 @@ fn dragging_out_of_the_marker_bin_adds_a_comp_marker() {
     assert_eq!(markers(&h), vec![13.0, 20.0]);
 }
 
+/// #1826: as in After Effects, a double-click on the composition marker bin adds a composition
+/// marker at the current time, one undo step; a single click adds none, and a marker dragged
+/// out of the bin still lands where it is dropped.
+#[test]
+fn double_clicking_the_marker_bin_adds_a_comp_marker_at_the_current_time() {
+    let (mut h, _) = harness();
+    h.state_mut().ui.timeline.pps = Some(200.0);
+    h.state_mut().ui.timeline.start = 10.0;
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.state_mut().session.execute("time.set", json!({"time": 21.5})).unwrap();
+    h.run_steps(2);
+    let markers = |h: &Harness<'_, EffectcraftApp>| -> Vec<f64> { h.state().session.active_comp().unwrap().markers.iter().map(|m| m.time.seconds()).collect() };
+    let bin = rect(&h, "timeline.markerBin");
+    let ruler = rect(&h, "timeline.ruler");
+    // Presses and releases in one frame each, so a pair falls inside egui's double-click time.
+    let clicks = |h: &mut Harness<'_, EffectcraftApp>, n: usize| {
+        h.event(Event::PointerMoved(bin.center()));
+        h.step();
+        for _ in 0..n {
+            for pressed in [true, false] {
+                h.input_mut().events.push(Event::PointerButton {
+                    pos: bin.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+        }
+        h.step();
+        h.run_steps(3);
+    };
+    clicks(&mut h, 1);
+    assert!(markers(&h).is_empty(), "a single click: {:?}", markers(&h));
+    let undo = h.state().session.history.undo.len();
+    clicks(&mut h, 2);
+    assert_eq!(markers(&h), vec![21.5], "at the current time");
+    let s = &h.state().session;
+    assert_eq!(s.active_comp().unwrap().markers[0].time, s.time(), "exactly the current time");
+    let history = &h.state().session.history.undo;
+    assert_eq!((history.len(), history.last().map(|u| u.0.as_str())), (undo + 1, Some("Add Marker")), "one undo step");
+    assert_eq!(h.state().session.time().seconds(), 21.5, "the current time stays");
+    // Dragged out 3 s into the visible span (from 10 s at 200 px/s): a marker at 13 s too.
+    drag(&mut h, bin.center(), pos2(ruler.min.x + 6.0 + 600.0, ruler.center().y));
+    assert_eq!(markers(&h), vec![13.0, 21.5]);
+}
+
 /// #976: as in After Effects, Numpad * marks the selected layers at the current time; only with
 /// no layer selected does it add a composition marker.
 #[test]

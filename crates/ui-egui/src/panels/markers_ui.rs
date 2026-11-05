@@ -428,9 +428,16 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
 /// (#275): drag a marker out of it and it follows the pointer along the marker strip `strip`
 /// (snapping like a dragged marker); dropping it there adds a composition marker at that time,
 /// one undo step. Dropped back on the bin or outside the time graph's width, nothing is added.
+/// A double-click on the bin adds one at the current time (#1826).
 pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, bin: Rect, strip: Rect) {
     let t = app.tokens;
-    let resp = ui.interact(bin, egui::Id::unique("marker-bin"), Sense::drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
+    let resp =
+        ui.interact(bin, egui::Id::unique("marker-bin"), Sense::click_and_drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
+    if resp.double_clicked()
+        && let Err(e) = app.session.execute("comp.addMarker", json!({}))
+    {
+        app.ui.status = e.to_string();
+    }
     app.auto.add("timeline.markerBin", bin, "Composition marker bin");
     let hot = resp.hovered() || resp.dragged();
     if hot {
