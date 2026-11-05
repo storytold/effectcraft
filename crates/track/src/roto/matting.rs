@@ -51,31 +51,29 @@ pub fn distance(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
     if w == 0 || h == 0 {
         return vec![];
     }
-    let mut g: Vec<f32> = seed.iter().map(|s| if *s { 0.0 } else { BIG }).collect();
-    // dt1 needs `f` intact while pass 2 writes `d`, so transform one line at a time through
-    // shared scratch (four vectors total, reused for every column and row). The line scan is
-    // O(n) scalar work; parallelising it copies 4 vectors per line, which costs more than it
-    // saves on one thread (measured: dt1 self time 17.5 % of propagate).
-    let m = w.max(h);
-    let (mut f, mut d, mut v, mut z) = (vec![0.0f32; m], vec![0.0f32; m], vec![0usize; m], vec![0.0f64; m + 1]);
-    // Columns.
-    for x in 0..w {
-        for (q, fv) in f[..h].iter_mut().enumerate() {
-            *fv = g[q * w + x];
+    // dt1 needs its input intact while it writes the output, so each line goes through scratch
+    // (`f`, `v`, `z`) that rayon creates once per work split, not once per line. The column pass
+    // runs on a transposed copy so that every column is a contiguous chunk.
+    let scratch = || (vec![0.0f32; w.max(h)], vec![0usize; w.max(h)], vec![0.0f64; w.max(h) + 1]);
+    // Columns: `t[x * h + y]` is pixel (x, y).
+    let mut t = vec![0.0f32; w * h];
+    t.par_chunks_mut(h).enumerate().for_each_init(scratch, |(f, v, z), (x, col)| {
+        for (y, fv) in f[..h].iter_mut().enumerate() {
+            *fv = if seed.get(y * w + x).copied().unwrap_or(false) { 0.0 } else { BIG };
         }
-        dt1(&f[..h], &mut d[..h], &mut v[..h], &mut z[..h + 1]);
-        for (q, &dv) in d[..h].iter().enumerate() {
-            g[q * w + x] = dv;
+        dt1(&f[..h], col, &mut v[..h], &mut z[..h + 1]);
+    });
+    // Rows, then the square root.
+    let mut g = vec![0.0f32; w * h];
+    g.par_chunks_mut(w).enumerate().for_each_init(scratch, |(f, v, z), (y, row)| {
+        for (x, fv) in f[..w].iter_mut().enumerate() {
+            *fv = t[x * h + y];
         }
-    }
-    // Rows.
-    for y in 0..h {
-        let row = &mut g[y * w..y * w + w];
-        f[..w].copy_from_slice(row);
-        dt1(&f[..w], &mut d[..w], &mut v[..w], &mut z[..w + 1]);
-        row.copy_from_slice(&d[..w]);
-    }
-    g.par_iter_mut().for_each(|v| *v = v.sqrt());
+        dt1(&f[..w], row, &mut v[..w], &mut z[..w + 1]);
+        for d in row.iter_mut() {
+            *d = d.sqrt();
+        }
+    });
     g
 }
 
@@ -431,6 +429,76 @@ pub fn motion_blur(a: &[f32], w: usize, h: usize, v: [f64; 2], samples: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The distance transform as it was before the scratch reuse (one set of vectors per line).
+    fn distance_reference(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
+        if w == 0 || h == 0 {
+            return vec![];
+        }
+        let mut g: Vec<f32> = seed.iter().map(|s| if *s { 0.0 } else { BIG }).collect();
+        let cols: Vec<Vec<f32>> = (0..w)
+            .map(|x| {
+                let f: Vec<f32> = (0..h).map(|y| g[y * w + x]).collect();
+                let mut d = vec![0.0; h];
+                let (mut v, mut z) = (vec![0usize; h], vec![0.0f64; h + 1]);
+                dt1(&f, &mut d, &mut v, &mut z);
+                d
+            })
+            .collect();
+        for (x, c) in cols.iter().enumerate() {
+            for y in 0..h {
+                g[y * w + x] = c[y];
+            }
+        }
+        for row in g.chunks_mut(w) {
+            let f = row.to_vec();
+            let (mut v, mut z) = (vec![0usize; w], vec![0.0f64; w + 1]);
+            dt1(&f, row, &mut v, &mut z);
+        }
+        g.iter().map(|v| v.sqrt()).collect()
+    }
+
+    #[test]
+    fn distance_is_bit_identical_to_the_per_line_version() {
+        let disk =
+            |w: usize, h: usize, cx: f64, cy: f64, r: f64| -> Vec<bool> { (0..w * h).map(|i| ((i % w) as f64 - cx).hypot((i / w) as f64 - cy) <= r).collect() };
+        let cases: Vec<(usize, usize, Vec<bool>)> = vec![
+            (64, 48, disk(64, 48, 30.0, 20.0, 11.0)),
+            (64, 48, disk(64, 48, 30.0, 20.0, 11.0).iter().map(|b| !b).collect()),
+            (97, 1, (0..97).map(|i| i % 13 == 0).collect()),
+            (1, 97, (0..97).map(|i| i % 17 == 5).collect()),
+            (40, 30, vec![true; 1200]),
+            (40, 30, vec![false; 1200]),
+            (40, 30, (0..1200).map(|i| i % 40 == 39 || i / 40 == 0).collect()),
+            (333, 211, (0..333 * 211).map(|i| (i * 7919) % 1031 == 0).collect()),
+        ];
+        for (w, h, seed) in cases {
+            let a = distance(&seed, w, h);
+            let b = distance_reference(&seed, w, h);
+            assert_eq!(a.len(), b.len());
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "{w}x{h} pixel {i}: {x} vs {y}");
+            }
+        }
+        assert!(distance(&[], 0, 5).is_empty());
+    }
+
+    /// `cargo test --release -p effectcraft-track distance_bench -- --ignored --nocapture`
+    /// (set `RAYON_NUM_THREADS` to compare thread counts).
+    #[test]
+    #[ignore]
+    fn distance_bench() {
+        let (w, h) = (1920, 1080);
+        let seed: Vec<bool> = (0..w * h).map(|i| ((i % w) as f64 - 960.0).hypot((i / w) as f64 - 540.0) <= 300.0).collect();
+        let mut times = vec![];
+        for _ in 0..15 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(distance(&seed, w, h));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("distance 1080p, {} threads: median {:.2} ms", rayon::current_num_threads(), times[times.len() / 2]);
+    }
 
     #[test]
     fn distance_matches_brute_force() {
