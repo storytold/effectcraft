@@ -348,9 +348,11 @@ impl CryptomatteData {
         let selection = if len == 0 {
             String::new()
         } else {
-            // The length counts the text's NUL: a text without one is not this layout.
+            // The length counts the text's NUL as its last byte: a text without it, or with an early
+            // NUL before more bytes (which `text` would silently cut short), is not this layout.
             let b = data.get(113..113usize.checked_add(len)?)?;
-            if !b.contains(&0) {
+            let (last, text_bytes) = b.split_last()?;
+            if *last != 0 || text_bytes.contains(&0) {
                 return None;
             }
             text(b)?
@@ -389,6 +391,18 @@ mod tests {
             let d = CryptomatteData::parse(&crypto("Layer_A", "<0000002a>, <deadbeef>", noise));
             assert_eq!(d, Some(CryptomatteData { layer: "Layer_A".into(), selection: "<0000002a>, <deadbeef>".into() }), "noise {noise}");
         }
+    }
+
+    #[test]
+    fn a_selection_whose_nul_is_not_its_last_byte_is_refused() {
+        // An early NUL followed by more declared bytes would shorten the selection silently.
+        let mut d = crypto("Layer_A", "<0000002a>, <deadbeef>", 0);
+        d[113 + 4] = 0;
+        assert_eq!(CryptomatteData::parse(&d), None);
+        // No NUL at the end of the declared length.
+        let mut d = crypto("Layer_A", "<0000002a>", 0);
+        d[113 + 10] = b'x';
+        assert_eq!(CryptomatteData::parse(&d), None);
     }
 
     #[test]
