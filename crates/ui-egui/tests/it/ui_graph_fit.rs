@@ -118,7 +118,7 @@ fn locked_graph_keys_preserve_the_existing_selection_and_keyframes() {
         h.run_steps(3);
         assert_eq!(h.state().session.state.selected_keys, selection, "{button:?}, {modifiers:?}, drag={drag}");
         assert_eq!(
-            serde_json::to_value(&h.state().session.project).unwrap(),
+            serde_json::to_value(&*h.state().session.project).unwrap(),
             serde_json::to_value(&before).unwrap(),
             "locked gestures must not edit another key"
         );

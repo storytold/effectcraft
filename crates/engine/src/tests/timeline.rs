@@ -640,7 +640,7 @@ fn time_set_keeps_the_frame_shown_in_the_current_time_field() {
     assert_eq!((r["frame"].as_i64(), r["time"].as_f64()), (Some(0), Some(0.0)));
 
     s.execute("file.projectSettings", json!({"timeDisplay": "frames"})).unwrap();
-    std::sync::Arc::make_mut(&mut s.project).settings.frame_start = 1;
+    s.project_mut().settings.frame_start = 1;
     let r = s.execute("time.set", json!({"frame": 12})).unwrap();
     assert_eq!(r["display"], "00013");
     let r = s.execute("time.set", json!({"timecode": "00013"})).unwrap();
@@ -1429,7 +1429,7 @@ fn add_item_keeps_footage_longer_than_the_comp_at_full_length() {
         duration: effectcraft_time::Tick::from_seconds_f64(10.0),
         ..Default::default()
     };
-    let item = std::sync::Arc::make_mut(&mut s.project).add_item("long.mp4", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
+    let item = s.project_mut().add_item("long.mp4", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
     let l = s.execute("layer.addItem", json!({"item": item.0})).unwrap()["layer"].as_u64().unwrap();
     let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap();
     assert_eq!(layer.out_point.seconds(), 10.0);

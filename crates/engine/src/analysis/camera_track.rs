@@ -441,7 +441,8 @@ impl Session {
                     None => "3D Camera Tracker analysis cancelled".into(),
                 };
                 self.events.push(Event::Toast { message: msg, error: st.error.is_some() });
-                self.bump();
+                let hooks = self.hooks.clone();
+                hooks.with_cause(craft_command::Cause::Job("camera_track"), || self.bump());
             }
         }
         true

@@ -346,7 +346,7 @@ impl Session {
         let redo: Vec<(String, Arc<Project>)> = new_line[k + 1..].iter().rev().map(|&i| (a.label[i].clone(), a.state[i].clone())).collect();
         let edited = crate::commands::text_edit::active_editor_snapshot(self);
         let probe = crate::commands::kept_crypto_probe(self);
-        let cur = std::mem::replace(&mut self.project, a.state[target].clone());
+        let cur = self.swap_project(a.state[target].clone());
         self.keep_view_settings(&cur);
         self.history.undo = undo;
         self.history.redo = redo;

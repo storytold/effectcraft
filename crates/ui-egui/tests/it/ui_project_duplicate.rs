@@ -88,7 +88,7 @@ fn unselected_row_duplicates_only_itself_and_undo_restores_the_project() {
     assert_eq!(h.state().session.project.items.len(), before.items.len() + 1);
     assert_eq!(h.state().session.history.undo.len(), undo + 1);
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(h.state().session.project, before);
+    assert_eq!(*h.state().session.project, before);
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn folders_and_mixed_selections_disable_duplicate_without_partial_changes() {
         let undo = h.state().session.history.undo.len();
         let status = h.state().ui.status.clone();
         click(&mut h, DUPLICATE, PointerButton::Primary, Modifiers::NONE);
-        assert_eq!(h.state().session.project, before, "mixed={mixed}: no partial copy");
+        assert_eq!(*h.state().session.project, before, "mixed={mixed}: no partial copy");
         assert_eq!(h.state().session.state.project_selection, selected);
         assert_eq!(h.state().session.history.undo.len(), undo);
         assert_eq!(h.state().ui.status, status, "no failing engine command was dispatched");
@@ -160,7 +160,7 @@ fn duplicate_shortcut_still_dispatches_and_the_menu_tracks_rebinding_and_unbindi
     row(&mut h, main, PointerButton::Primary, Modifiers::NONE);
     let before = h.state().session.project.clone();
     key(&mut h, command, d);
-    assert_eq!(h.state().session.project, before, "the former shortcut stays unbound");
+    assert_eq!(*h.state().session.project, before, "the former shortcut stays unbound");
     key(&mut h, Key::F6, Modifiers::NONE);
     assert_eq!(h.state().session.project.items.len(), before.items.len() + 1);
     h.state_mut().session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": null})).unwrap();

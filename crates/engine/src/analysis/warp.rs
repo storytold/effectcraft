@@ -408,7 +408,8 @@ impl Session {
                     None => "Warp Stabilizer analysis cancelled".into(),
                 };
                 self.events.push(Event::Toast { message: msg, error: st.error.is_some() });
-                self.bump();
+                let hooks = self.hooks.clone();
+                hooks.with_cause(craft_command::Cause::Job("warp"), || self.bump());
             }
         }
         true

@@ -80,7 +80,7 @@ fn footage_on_other_computers_is_never_looked_at() {
     let mut s = Session::default();
     for (name, path) in &stored {
         let f = Footage { path: path.clone(), width: 64, height: 48, has_video: true, ..Default::default() };
-        Arc::make_mut(&mut s.project).add_item(name, crate::color::Label::None, None, ItemKind::Footage(f));
+        s.project_mut().add_item(name, crate::color::Label::None, None, ItemKind::Footage(f));
     }
     let project = dir.join("p.ecproj");
     s.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();

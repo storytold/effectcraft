@@ -22,7 +22,9 @@
 //! `templates.delete`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use effectcraft_keyframe::{Keyframe, Value as KV};
 use effectcraft_project::{ItemId, LayerId, Project};
@@ -178,7 +180,7 @@ fn gradient(s: &mut Session, l: LayerId, start: [f64; 2], end: [f64; 2], a: &str
 
 fn edit_layer(s: &mut Session, l: LayerId, f: impl FnOnce(&mut effectcraft_project::Layer)) {
     let Some(cid) = s.active_comp_id() else { return };
-    if let Some(ly) = Arc::make_mut(&mut s.project).comp_mut(cid).and_then(|c| c.layer_mut(l)) {
+    if let Some(ly) = s.project_mut().comp_mut(cid).and_then(|c| c.layer_mut(l)) {
         f(ly);
     }
 }
@@ -210,7 +212,7 @@ fn finish(s: &mut Session, eg_name: &str, poster: f64) -> Result<()> {
     ex(s, "essential.setName", json!({"name": eg_name}))?;
     if let Some(cid) = s.active_comp_id() {
         let rate = s.active_comp().map(|c| c.frame_rate).unwrap_or(effectcraft_time::FrameRate::FPS_30);
-        if let Some(c) = Arc::make_mut(&mut s.project).comp_mut(cid) {
+        if let Some(c) = s.project_mut().comp_mut(cid) {
             c.poster_time = rate.snap_nearest(Tick::from_seconds_f64(poster));
         }
     }
@@ -408,7 +410,7 @@ pub fn build_builtin(id: &str) -> Result<Project> {
     let b = builtin(id).ok_or_else(|| bad("templates.create", format!("unknown template `{id}` (see templates.list)")))?;
     let mut s = Session::default();
     (b.build)(&mut s).map_err(|e| EngineError::Other(format!("template {id}: {e}")))?;
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     p.fix_next_id();
     Ok(p)
 }
@@ -851,7 +853,7 @@ fn save_as(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = s.active_comp_id().or_else(|| main_comp(&s.project)).ok_or(EngineError::NoComp)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     // The active comp becomes the template's main comp: give it the poster time it shows now.
-    let mut proj = (*s.project).clone();
+    let mut proj = (**s.project).clone();
     if let Some(c) = proj.comp_mut(cid)
         && c.poster_time == Tick::ZERO
     {
@@ -1136,7 +1138,7 @@ mod tests {
 
     fn add_footage(s: &mut Session, name: &str, path: &str, sequence: Vec<String>) -> ItemId {
         let f = effectcraft_project::Footage { path: path.into(), width: 4, height: 4, has_video: true, sequence, ..Default::default() };
-        Arc::make_mut(&mut s.project).add_item(name, effectcraft_color::Label::Aqua, None, effectcraft_project::ItemKind::Footage(f))
+        s.project_mut().add_item(name, effectcraft_color::Label::Aqua, None, effectcraft_project::ItemKind::Footage(f))
     }
 
     fn footage_paths(s: &Session) -> Vec<(String, String, Vec<String>)> {

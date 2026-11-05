@@ -581,7 +581,7 @@ fn ai_composition_retains_layer_sizes_and_positions() {
         let direct = effectcraft_svg::rasterize(&effectcraft_pdf::parse(&bytes).unwrap(), 120, 80, 1.0);
         assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 0.001);
         let saved = s.project.to_json();
-        s.project = std::sync::Arc::new(Project::from_json(&saved).unwrap());
+        s.set_project(std::sync::Arc::new(Project::from_json(&saved).unwrap()));
         assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 0.001, "reopened project");
         let box_id = s.active_comp().unwrap().layer_by_name("Box").unwrap().id.0;
         s.execute_checked("layer.create", json!({"op": "shapesFromVector", "layers": [box_id]})).unwrap();

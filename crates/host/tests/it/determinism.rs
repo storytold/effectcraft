@@ -49,7 +49,7 @@ fn renders_are_bit_identical_across_runs_and_thread_counts() {
     let mut s = effectcraft_host::session();
     s.replace_project(effectcraft_engine::demo::demo_project(), None);
     let random = random_comp(&mut s);
-    let p = (*s.project).clone();
+    let p = (**s.project).clone();
     let mut comps: Vec<(ItemId, f64)> = p.comps().map(|(id, c)| (*id, c.duration.seconds())).collect();
     comps.sort_by_key(|c| c.0);
     assert!(comps.len() >= 3, "demo comps + the random comp");

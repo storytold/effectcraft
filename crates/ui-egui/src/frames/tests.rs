@@ -241,7 +241,7 @@ fn a_frame_whose_render_panics_is_released() {
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
     let clip = Footage { kind: FootageKind::Still, width: 8, height: 8, has_video: true, ..Default::default() };
-    let item = Arc::make_mut(&mut s.project).add_item("clip.png", Default::default(), None, ItemKind::Footage(clip));
+    let item = s.project_mut().add_item("clip.png", Default::default(), None, ItemKind::Footage(clip));
     s.execute("layer.addItem", json!({"item": item.0})).unwrap();
     let footage = Arc::new(Explodes::default());
     let src = RenderSource {
@@ -312,7 +312,7 @@ fn a_waiting_render_never_starts_another_on_its_thread() {
         duration: Tick::from_seconds_f64(10.0),
         ..Default::default()
     };
-    let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+    let item = s.project_mut().add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
     s.execute("layer.addItem", json!({"item": item.0})).unwrap();
     let footage = Arc::new(Parallel::default());
     let src = RenderSource {
@@ -394,7 +394,7 @@ fn a_newer_viewer_frame_calls_off_the_one_rendering() {
         duration: Tick::from_seconds_f64(10.0),
         ..Default::default()
     };
-    let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+    let item = s.project_mut().add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
     s.execute("layer.addItem", json!({"item": item.0})).unwrap();
     let footage = Arc::new(Seeking::default());
     let src = RenderSource {
@@ -632,7 +632,7 @@ fn parallel_clip() -> (Frames, Arc<ParallelClip>, RenderSource, ItemId, FrameKey
         duration: Tick::from_seconds_f64(10.0),
         ..Default::default()
     };
-    let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+    let item = s.project_mut().add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
     s.execute("layer.addItem", json!({"item": item.0})).unwrap();
     let footage = Arc::new(ParallelClip::default());
     let src = RenderSource {
@@ -861,7 +861,7 @@ fn an_identity_keeps_its_comps_so_an_edit_in_place_still_changes_it() {
     let a = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
     // A project nothing else holds (no undo history): make_mut would edit the comp in place,
     // at the same address, if the identity hadn't kept a snapshot holding it.
-    let mut p = Arc::new((*s.project).clone());
+    let mut p = Arc::new((**s.project).clone());
     drop(s);
     let f = Frames::default();
     let before = f.content_of(&p, 1, a);
@@ -1141,7 +1141,7 @@ fn kept_frames_render_the_same() {
     }
     /// Set a layer's start, in and out (frames).
     fn timing(s: &mut Session, cid: ItemId, l: u64, start: i64, inp: i64, out: i64) {
-        let c = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+        let c = s.project_mut().comp_mut(cid).unwrap();
         let fr = c.frame_rate;
         let l = c.layer_mut(effectcraft_engine::project::LayerId(l)).unwrap();
         (l.start_time, l.in_point, l.out_point) = (fr.tick_of(start), fr.tick_of(inp), fr.tick_of(out));
@@ -1177,7 +1177,7 @@ fn kept_frames_render_the_same() {
     fn music(s: &mut Session, cid: ItemId) -> u64 {
         use effectcraft_engine::project::{Footage, FootageKind};
         let song = Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() };
-        let song = Arc::make_mut(&mut s.project).add_item("song.wav", Default::default(), None, ItemKind::Footage(song));
+        let song = s.project_mut().add_item("song.wav", Default::default(), None, ItemKind::Footage(song));
         let l = run(s, "layer.addItem", json!({"item": song.0}))["layer"].as_u64().unwrap();
         timing(s, cid, l, 0, 0, 45);
         l
@@ -1232,7 +1232,7 @@ fn kept_frames_render_the_same() {
         (
             "motion blur trim",
             |s, c, l| {
-                Arc::make_mut(&mut s.project).comp_mut(c).unwrap().enable_motion_blur = true;
+                s.project_mut().comp_mut(c).unwrap().enable_motion_blur = true;
                 run(s, "layer.setSwitch", json!({"layers": [l[1]], "switch": "motionBlur", "value": true}));
             },
             |s, c, l| timing(s, c, l[1], 20, 20, 32),
@@ -1349,7 +1349,7 @@ fn an_edit_keeps_the_frames_it_cant_reach() {
             let fr = s.project.comp(cid).unwrap().frame_rate;
             let t = |f: i64| fr.tick_of(f);
             let b = {
-                let c = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+                let c = s.project_mut().comp_mut(cid).unwrap();
                 let (a, b): (LayerId, LayerId) = (c.layers[0].id, c.layers[1].id);
                 let l = c.layer_mut(a).unwrap();
                 (l.in_point, l.out_point) = (t(0), t(30));
@@ -1498,7 +1498,7 @@ fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
     s.execute("layer.newSolid", json!({})).unwrap();
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     let clip =
         p.add_item("clip.mov", effectcraft_color::Label::None, None, ItemKind::Footage(Footage { has_video: true, has_audio: true, ..Default::default() }));
     let comp = p.comp(cid).unwrap().clone();
@@ -1610,7 +1610,7 @@ fn an_expression_reaches_only_the_frames_of_its_layer() {
     .unwrap();
     let fr = s.project.comp(cid).unwrap().frame_rate;
     let n = fr.frame_at(s.project.comp(cid).unwrap().duration);
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for (id, i, o) in [(a, 0, 20), (b, 20, 40), (c, 40, 45)] {
         let l = p0.comp_mut(cid).unwrap().layer_mut(id).unwrap();
         (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(o));
@@ -1670,7 +1670,7 @@ fn an_edit_in_a_precomp_reaches_only_where_it_shows() {
     let pre = LayerId(id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer"));
     let fr = s.project.comp(outer).unwrap().frame_rate;
     let t = |f: i64| fr.tick_of(f);
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
         let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
         (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
@@ -1727,7 +1727,7 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
     let a = LayerId(s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
     let b = LayerId(s.execute("layer.newSolid", json!({"color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap());
     let fr = s.project.comp(cid).unwrap().frame_rate;
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for (l, i, o) in [(a, 0, 15), (b, 15, 30)] {
         let l = p0.comp_mut(cid).unwrap().layer_mut(l).unwrap();
         (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(o));
@@ -1815,7 +1815,7 @@ fn a_keyframe_edit_reaches_only_the_keys_around_it() {
         s.execute("prop.addKey", json!({"layer": l, "path": "transform/position", "time": fr.tick_of(f).seconds(), "value": [2.0 + i as f64 * 2.0, y, 0.0]}))
             .unwrap();
     }
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for k in &mut p0.comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().props.prop_mut("transform/position").unwrap().keys {
         (k.in_interp, k.out_interp, k.auto_bezier, k.continuous, k.spatial_continuous) = (Interp::Bezier, Interp::Bezier, true, true, true);
     }
@@ -1858,7 +1858,7 @@ fn music_volume_keeps_the_frames_with_expressions_that_dont_read_audio() {
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
     let solid = LayerId(s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap());
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     let song = p.add_item(
         "song.wav",
         effectcraft_color::Label::None,
@@ -1904,7 +1904,7 @@ fn a_two_key_edit_beside_a_wiggle_keeps_the_other_frames() {
     for (f, v) in [(20, 50.0), (80, 150.0)] {
         s.execute("prop.addKey", json!({"layer": l.0, "path": "transform/scale", "time": fr.tick_of(f).seconds(), "value": [v, v, 100.0]})).unwrap();
     }
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     p0.comp_mut(cid).unwrap().layer_mut(wig).unwrap().props.prop_mut("transform/position").unwrap().expr =
         Some(Expression { text: "wiggle(2, 3)".into(), enabled: true });
     let p0 = Arc::new(p0);
@@ -1971,7 +1971,7 @@ fn a_volume_read_by_its_own_layer_re_renders_it() {
     use serde_json::json;
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     let clip = p.add_item(
         "clip.mp4",
         effectcraft_color::Label::None,
@@ -2057,7 +2057,7 @@ fn an_edit_two_precomps_down_reaches_the_outer_comp() {
     s.execute("layer.addItem", json!({"comp": outer.0, "item": mid.0})).unwrap();
     let fr = s.project.comp(outer).unwrap().frame_rate;
     let t = |f: i64| fr.tick_of(f);
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
         let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
         (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
@@ -2088,13 +2088,13 @@ fn expressions_reading_their_own_layer_re_render_on_a_trim_or_a_layer_above() {
     /// Trim the layer to start at frame 10.
     fn trim(s: &mut Session, cid: ItemId, l: LayerId) {
         let fr = s.project.comp(cid).unwrap().frame_rate;
-        Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(l).unwrap().in_point = fr.tick_of(10);
+        s.project_mut().comp_mut(cid).unwrap().layer_mut(l).unwrap().in_point = fr.tick_of(10);
     }
     /// Add a solid above the layer on frames 0–5.
     fn layer_above(s: &mut Session, cid: ItemId, _: LayerId) {
         let fr = s.project.comp(cid).unwrap().frame_rate;
         let a = s.execute("layer.newSolid", json!({"comp": cid.0, "color": "#00ff00", "width": 2, "height": 2})).unwrap()["layer"].as_u64().unwrap();
-        let a = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap();
+        let a = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap();
         (a.start_time, a.in_point, a.out_point) = (fr.tick_of(0), fr.tick_of(0), fr.tick_of(5));
     }
     type Edit = fn(&mut Session, ItemId, LayerId);
@@ -2155,7 +2155,7 @@ fn an_edit_read_by_a_precomp_expression_reaches_the_precomp() {
     let controls = LayerId(id(s.execute("layer.newSolid", controls).unwrap(), "layer"));
     // (hidden, and short: the precomp reads it at every frame all the same)
     let fr = s.project.comp(main).unwrap().frame_rate;
-    let c = Arc::make_mut(&mut s.project).comp_mut(main).unwrap().layer_mut(controls).unwrap();
+    let c = s.project_mut().comp_mut(main).unwrap().layer_mut(controls).unwrap();
     (c.switches.video, c.start_time, c.in_point, c.out_point) = (false, fr.tick_of(0), fr.tick_of(0), fr.tick_of(10));
     let p0 = s.project.clone();
     s.execute("prop.set", json!({"comp": main.0, "layer": controls.0, "path": "transform/rotation", "value": 60.0})).unwrap();
@@ -2201,7 +2201,7 @@ fn an_edit_in_a_precomp_under_a_time_effect_reaches_its_whole_layer() {
     s.execute("prop.set", json!({"comp": outer.0, "layer": pre, "path": "effects/#1/echoTime", "value": -0.3})).unwrap();
     let fr = s.project.comp(outer).unwrap().frame_rate;
     let t = |f: i64| fr.tick_of(f);
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
         let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
         (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
@@ -2241,7 +2241,7 @@ fn a_keyframe_edit_beside_muted_keys_reaches_the_keys_that_play() {
         let add = json!({"layer": l.0, "path": "transform/position", "time": fr.tick_of(i * 20).seconds(), "value": [2.0 + i as f64 * 2.0, 8.0, 0.0]});
         s.execute("prop.addKey", add).unwrap();
     }
-    let mut p0 = (*s.project).clone();
+    let mut p0 = (**s.project).clone();
     for k in p0.comp_mut(cid).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/position").unwrap().keys.iter_mut().skip(1).take(2) {
         k.muted = true;
     }

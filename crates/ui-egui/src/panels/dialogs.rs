@@ -724,9 +724,9 @@ fn palette(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             .filter(|m| m.enabled)
             .map(|m| (m.path.join(" ▸ ") + " ▸ " + &m.label, m.id, if m.params.is_null() { json!({}) } else { m.params }, m.shortcut.unwrap_or_default()))
             .collect();
-        for c in effectcraft_engine::command_specs().iter().filter(|c| c.menu.is_empty() && c.journal && c.params == "{}") {
-            if app.session.is_enabled(c.id) {
-                v.push((c.label.to_string(), c.id.to_string(), json!({}), c.shortcut.unwrap_or("").to_string()));
+        for (id, label, shortcut) in app.session.palette_commands() {
+            if app.session.is_enabled(&id) {
+                v.push((label, id, json!({}), shortcut.unwrap_or_default()));
             }
         }
         v

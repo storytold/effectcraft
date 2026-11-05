@@ -226,7 +226,7 @@ fn cancel_and_escape_change_nothing() {
             key(&mut h, Key::Escape);
         }
         assert_eq!(h.state().dialog, None, "{cancel}");
-        assert_eq!(h.state().session.project, project, "{cancel} leaves the project as it was");
+        assert_eq!(*h.state().session.project, project, "{cancel} leaves the project as it was");
         assert_eq!(undo_len(&h), undo);
     }
 }
@@ -584,5 +584,5 @@ fn the_escape_after_the_picker_closes_cancels_the_editor() {
     assert_eq!(h.state().dialog, Some(Dialog::GradientEditor), "the first Escape closed only the picker");
     escape(&mut h);
     assert_eq!(h.state().dialog, None, "the next pass's Escape cancels the editor");
-    assert_eq!(h.state().session.project, project, "and changes nothing");
+    assert_eq!(*h.state().session.project, project, "and changes nothing");
 }

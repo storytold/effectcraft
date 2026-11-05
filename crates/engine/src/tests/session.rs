@@ -484,7 +484,7 @@ fn save_and_open_roundtrip() {
     let before = s.project.clone();
     let mut s2 = Session::default();
     s2.execute("file.open", json!({"path": path})).unwrap();
-    assert_eq!(*before, *s2.project);
+    assert_eq!(*before, **s2.project);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -828,7 +828,7 @@ fn reopening_a_project_restores_layer_times_and_current_time() {
     s.execute("comp.new", json!({"name": "C", "width": 108, "height": 192, "duration": 60})).unwrap();
     s.execute("layer.newSolid", json!({"name": "crown"})).unwrap();
     let cid = s.active_comp_id().unwrap();
-    let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+    let comp = s.project_mut().comp_mut(cid).unwrap();
     comp.frame_rate = FrameRate::FPS_59_94;
     // The layer from the issue: 34f, 315f and 3033f at 59.94 fps.
     let l = comp.layers.first_mut().unwrap();

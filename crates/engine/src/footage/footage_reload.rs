@@ -183,7 +183,7 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
             Ok(())
         })?;
     } else {
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let mut changed = false;
         for (i, f) in updates {
             if let Some(it) = p.item_mut(i)
@@ -195,7 +195,8 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
         }
         if changed {
             let dirty = s.is_dirty();
-            s.bump();
+            let hooks = s.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("footage_reload"), || s.bump());
             if !dirty {
                 // Only the disk changed: the project isn't modified.
                 s.mark_saved();

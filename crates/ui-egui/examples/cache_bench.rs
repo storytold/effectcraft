@@ -98,7 +98,7 @@ fn main() {
             let items = run(&mut s, "file.import", json!({"paths": paths}))["items"].clone();
             for (i, item) in items.as_array().expect("items").iter().enumerate() {
                 let l = run(&mut s, "layer.addItem", json!({"item": item}))["layer"].as_u64().expect("layer");
-                let c = Arc::make_mut(&mut s.project).comp_mut(cid).expect("comp");
+                let c = s.project_mut().comp_mut(cid).expect("comp");
                 let fr = c.frame_rate;
                 let l = c.layer_mut(effectcraft_engine::project::LayerId(l)).expect("layer");
                 let at = fr.tick_of(i as i64 * 1275 / 10);

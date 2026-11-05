@@ -301,7 +301,7 @@ pub(crate) fn restore(app: &mut EffectcraftApp, checkpoint: Checkpoint) {
         // Snapshot only when Cancel has something to restore: opening and cancelling without
         // edits must not copy the whole TextDoc.
         let edited = active_editor_snapshot(&app.session);
-        app.session.project = checkpoint.project;
+        app.session.set_project(checkpoint.project);
         app.session.history = checkpoint.history;
         app.session.sanitize_after_replacement(edited.as_ref());
         app.session.bump();

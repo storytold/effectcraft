@@ -161,7 +161,7 @@ fn import_aep_takes_the_project_settings_into_an_empty_project_only() {
     // working space None and frames (with 623 and 629); 632's and 633's file has 32 bits and feet
     // + frames 35mm.
     let mut s = Session::default();
-    std::sync::Arc::make_mut(&mut s.project).settings.bit_depth = BitDepth::Bpc16;
+    s.project_mut().settings.bit_depth = BitDepth::Bpc16;
     s.execute_checked("file.importAep", json!({"path": fixture!("621-settings-bpc-8.aep")})).unwrap();
     assert_eq!(s.project.settings.bit_depth, BitDepth::Bpc8);
     assert_eq!(s.project.settings.working_space, None);

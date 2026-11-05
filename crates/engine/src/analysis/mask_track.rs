@@ -344,10 +344,10 @@ pub(crate) fn face_effect(p: &mut Project, comp: ItemId, layer: LayerId, id: &st
     Some(uid)
 }
 
-fn write_frames(p: &mut Project, job: &MaskTrackJob, frames: &[MaskFrame]) {
-    let points = if frames.iter().any(|f| f.3.is_some()) { face_points_group(p, job.comp, job.layer) } else { None };
-    let Some(layer) = p.comp_mut(job.comp).and_then(|c| c.layer_mut(job.layer)) else { return };
-    if let Some(g) = layer.props.find_group_mut(job.mask)
+fn write_frames(p: &mut Project, comp: ItemId, layer: LayerId, mask: Uid, frames: &[MaskFrame]) {
+    let points = if frames.iter().any(|f| f.3.is_some()) { face_points_group(p, comp, layer) } else { None };
+    let Some(layer) = p.comp_mut(comp).and_then(|c| c.layer_mut(layer)) else { return };
+    if let Some(g) = layer.props.find_group_mut(mask)
         && let Some(pr) = g.get_mut("path")
     {
         for (lt, _, path, _) in frames {
@@ -428,18 +428,21 @@ impl Session {
     /// Key newly tracked frames and move the CTI with them; drop the job once it finished.
     /// Frontends call this every frame while tracking.
     pub fn poll_mask_track(&mut self) -> bool {
-        let Some(job) = &self.mask_job else { return false };
-        let frames = std::mem::take(&mut *lock(&job.shared.frames));
-        let finished = job.is_finished();
+        let (frames, finished, comp, layer, mask) = {
+            let Some(job) = &self.mask_job else { return false };
+            let frames = std::mem::take(&mut *lock(&job.shared.frames));
+            (frames, job.is_finished(), job.comp, job.layer, job.mask)
+        };
         let changed = !frames.is_empty();
         if changed {
-            write_frames(Arc::make_mut(&mut self.project), job, &frames);
-            if self.state.active_comp == Some(job.comp)
+            write_frames(self.project_mut(), comp, layer, mask, &frames);
+            if self.state.active_comp == Some(comp)
                 && let Some(last) = frames.last()
             {
-                self.state.times.insert(job.comp, last.1);
+                self.state.times.insert(comp, last.1);
             }
-            self.bump();
+            let hooks = self.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("mask_track"), || self.bump());
         }
         if finished && let Some(mut job) = self.mask_job.take() {
             if let Some(t) = job.thread.take() {

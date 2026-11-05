@@ -118,7 +118,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
 fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
     let checked = found.len();
     let (mut missing, mut probed, mut moved, mut changed) = (0, 0, 0, false);
-    let p = std::sync::Arc::make_mut(&mut s.project);
+    let p = s.project_mut();
     for (id, f) in found {
         let Some(ItemKind::Footage(cur)) = p.item_mut(id).map(|i| &mut i.kind) else { continue };
         match f {
@@ -143,7 +143,8 @@ fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
     }
     if changed {
         let dirty = s.is_dirty();
-        s.bump();
+        let hooks = s.hooks.clone();
+        hooks.with_cause(craft_command::Cause::Job("footage_check"), || s.bump());
         if !dirty {
             // Only the disk changed: the project isn't modified.
             s.mark_saved();
@@ -177,7 +178,7 @@ mod tests {
         let mut s = Session::default();
         for (i, p) in paths.iter().enumerate() {
             let f = Footage { path: p.to_string(), width: 64, height: 48, has_video: true, ..Default::default() };
-            std::sync::Arc::make_mut(&mut s.project).add_item(&format!("f{i}"), crate::color::Label::None, None, ItemKind::Footage(f));
+            s.project_mut().add_item(&format!("f{i}"), crate::color::Label::None, None, ItemKind::Footage(f));
         }
         s
     }

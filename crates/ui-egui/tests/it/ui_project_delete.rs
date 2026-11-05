@@ -16,7 +16,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Vec<ItemId>, LayerId) {
     s.execute("comp.new", json!({"name": "Working composition", "width": 320, "height": 180, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap();
     let solid = s.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
-    let footage = std::sync::Arc::make_mut(&mut s.project).add_item(
+    let footage = s.project_mut().add_item(
         "Data asset",
         Default::default(),
         None,
@@ -108,7 +108,7 @@ fn delete_and_backspace_remove_project_items_and_undo() {
             assert_eq!(h.state().session.project.items.len(), project.items.len() - 1);
             assert_eq!(h.state().session.history.undo.len(), undo + 1);
             h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-            assert_eq!(h.state().session.project, project, "one undo restores the item and its references");
+            assert_eq!(*h.state().session.project, project, "one undo restores the item and its references");
         }
     }
 }
@@ -128,7 +128,7 @@ fn project_multi_selection_deletes_together_and_undoes_once() {
     assert!(h.state().session.active_comp().unwrap().layer(keep).is_some());
     assert_eq!(h.state().session.history.undo.len(), undo + 1);
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(h.state().session.project, project);
+    assert_eq!(*h.state().session.project, project);
 }
 
 #[test]
@@ -173,14 +173,14 @@ fn typing_dialogs_and_modified_keys_do_not_delete_project_items() {
         (Key::Delete, Modifiers::SHIFT | Modifiers::ALT),
     ] {
         key(&mut h, k, m);
-        assert_eq!(h.state().session.project, project, "{m:?}+{k:?}");
+        assert_eq!(*h.state().session.project, project, "{m:?}+{k:?}");
     }
     h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
     key(&mut h, Key::Delete, Modifiers::NONE);
     for how in SHIFT_DELETE {
         shift_delete(&mut h, how);
     }
-    assert_eq!(h.state().session.project, project);
+    assert_eq!(*h.state().session.project, project);
     h.state_mut().dialog = None;
     h.run_steps(2);
     key(&mut h, Key::Enter, Modifiers::NONE);
@@ -188,11 +188,11 @@ fn typing_dialogs_and_modified_keys_do_not_delete_project_items() {
     assert!(h.ctx.egui_wants_keyboard_input(), "the inline rename field has focus");
     for delete_key in [Key::Backspace, Key::Delete] {
         key(&mut h, delete_key, Modifiers::NONE);
-        assert_eq!(h.state().session.project, project, "typing must not delete the item");
+        assert_eq!(*h.state().session.project, project, "typing must not delete the item");
     }
     for how in SHIFT_DELETE {
         shift_delete(&mut h, how);
-        assert_eq!(h.state().session.project, project, "typing must not delete the item ({how:?})");
+        assert_eq!(*h.state().session.project, project, "typing must not delete the item ({how:?})");
     }
 }
 
@@ -249,7 +249,7 @@ fn shift_delete_deletes_without_asking_and_undoes_once() {
             assert!(h.state().session.state.project_selection.is_empty());
             assert_eq!(h.state().session.history.undo.len(), undo + 1);
             h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-            assert_eq!(h.state().session.project, project, "one undo restores the item and its references");
+            assert_eq!(*h.state().session.project, project, "one undo restores the item and its references");
         }
     }
 }
@@ -278,7 +278,7 @@ fn shift_delete_deletes_a_multi_selection_and_folder_contents_together() {
         assert!(h.state().session.active_comp().unwrap().layer(keep).is_some());
         assert_eq!(h.state().session.history.undo.len(), undo + 1);
         h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-        assert_eq!(h.state().session.project, project);
+        assert_eq!(*h.state().session.project, project);
     }
 }
 
@@ -294,7 +294,7 @@ fn shift_delete_and_answered_prompts_dont_skip_the_next_prompt() {
         let project = h.state().session.project.clone();
         shift_delete(&mut h, how);
         assert_eq!(h.state().dialog, None);
-        assert_eq!(h.state().session.project, project, "{how:?} with nothing selected deletes nothing");
+        assert_eq!(*h.state().session.project, project, "{how:?} with nothing selected deletes nothing");
         assert!(h.state().session.active_comp().unwrap().layer(keep).is_some());
 
         // Without asking once, then Delete on an item in use still asks.
@@ -387,6 +387,6 @@ fn clear_with_the_project_focused_stands_down_during_a_text_edit() {
 
     cleared.expect("Clear stands down during a text edit");
     assert!(h.state().session.project.item(working).is_some(), "the composition being typed into survives");
-    assert_eq!(h.state().session.project, project, "nothing was deleted");
+    assert_eq!(*h.state().session.project, project, "nothing was deleted");
     assert!(h.state().session.state.text_edit.is_some(), "the text edit stays open");
 }

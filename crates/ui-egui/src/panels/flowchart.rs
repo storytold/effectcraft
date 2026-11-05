@@ -430,7 +430,7 @@ mod tests {
         // Make Mid contain Main: Main → Mid → Main.
         s.execute("comp.open", json!({"comp": mid.0})).unwrap();
         // Adding a cyclic layer may be refused by the engine; build a cycle in the model directly.
-        let mut p = (*s.project).clone();
+        let mut p = (**s.project).clone();
         let mut c = (*p.comp(mid).unwrap()).clone();
         let mut l = c.layers[0].clone();
         l.id = effectcraft_engine::project::LayerId(9999);
