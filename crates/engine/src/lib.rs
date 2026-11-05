@@ -261,6 +261,9 @@ pub struct Session {
     pub disk_salt_background: bool,
     /// The footage salt being taken in the background.
     pub disk_salt_job: Option<DiskSaltJob>,
+    /// The footage files effects read the channels of, as last given to the footage source
+    /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
+    pub aux_footage: Option<Vec<String>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -390,6 +393,7 @@ impl Default for Session {
             disk_salt: None,
             disk_salt_background: false,
             disk_salt_job: None,
+            aux_footage: None,
             script_calls: ScriptCalls::default(),
         }
     }
