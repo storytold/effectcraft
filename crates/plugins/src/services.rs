@@ -33,6 +33,9 @@ use crate::doc;
 /// Ids that start with this belong to the host. A plug-in can neither list nor run them.
 pub const HOST_PREFIX: &str = "plugin.app.effectcraft.";
 
+/// What a plug-in gets when it asks for a host command.
+pub(crate) const HOST_ONLY: &str = "this command manages plug-ins and is not available to plug-ins";
+
 /// Last `host.progress` of a plug-in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Progress {
@@ -90,7 +93,7 @@ impl Services for AppServices {
 
     fn execute_command(&self, _owner: &Owner, id: &str, params: &Value) -> Result<Value, CommandFailure> {
         if id.starts_with(HOST_PREFIX) {
-            return Err(CommandFailure::Failed("this command manages plug-ins and is not available to plug-ins".into()));
+            return Err(CommandFailure::Failed(HOST_ONLY.into()));
         }
         self.bridge.execute(id, params)
     }

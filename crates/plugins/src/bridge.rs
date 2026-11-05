@@ -25,7 +25,7 @@
 //! |---|---|
 //! | the session thread inside a guest call (command body, `before` gate, panel event) | the live session, at once |
 //! | the session thread outside a guest call | none. The session is borrowed above this call. The call fails with [`Unavailable::Busy`]. |
-//! | any other thread (`after` and `change` hooks, batch jobs) | a job in the mailbox. [`Bridge::pump`] runs it on the session thread, once per frame. The caller waits up to `wait`. |
+//! | any other thread (`after` and `change` hooks, batch jobs) | a job in the mailbox. [`Bridge::pump`] runs it on the session thread, on every logic tick (also while the window is hidden). The caller waits up to `wait`. |
 //!
 //! Rollback. `begin` opens a scope. The first command a scope runs takes a [`Checkpoint`] of the
 //! document just before it runs, because a guest can change the document only through `cmd.execute`.
@@ -33,7 +33,7 @@
 //! state, the undo and redo stacks and the command journal. What it cannot cover: files a command
 //! wrote and jobs it started.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -127,6 +127,24 @@ struct Job {
 thread_local! {
     /// Open scopes of guest calls on this thread, innermost last.
     static SCOPES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// How many commands that a plug-in asked for (`cmd.execute`) are running on this thread.
+    static PLUGIN_COMMANDS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks the commands a plug-in asked for as running, on this thread, until it drops (also on unwind).
+struct PluginCommand;
+
+impl PluginCommand {
+    fn enter() -> Self {
+        PLUGIN_COMMANDS.with(|n| n.set(n.get().saturating_add(1)));
+        PluginCommand
+    }
+}
+
+impl Drop for PluginCommand {
+    fn drop(&mut self) {
+        PLUGIN_COMMANDS.with(|n| n.set(n.get().saturating_sub(1)));
+    }
 }
 
 /// See the module comment.
@@ -228,7 +246,7 @@ impl Bridge {
         }
     }
 
-    /// Run the jobs other threads queued. Call once per frame on the session thread, with no
+    /// Run the jobs other threads queued. Call on every logic tick on the session thread, with no
     /// plugin command running. Returns how many ran.
     pub fn pump(&self, session: &mut Session) -> usize {
         let mut ran = 0;
@@ -260,6 +278,14 @@ impl Bridge {
         lock(&self.scopes).insert(id, None);
         SCOPES.with(|s| s.borrow_mut().push(id));
         id
+    }
+
+    /// Whether a command that a plug-in asked for (`cmd.execute`) is running on this thread. It
+    /// stays true for every command that command runs in turn, such as the steps of
+    /// `engine.batch`, which reach the registry as `Origin::Execute`. The host commands use it to
+    /// stay out of reach of plug-ins however the call is nested.
+    pub fn in_plugin_command() -> bool {
+        PLUGIN_COMMANDS.with(|n| n.get() > 0)
     }
 
     /// The scope of the innermost guest call on this thread.
@@ -334,7 +360,10 @@ impl Bridge {
         let levels = s.prefs.general.undo_levels;
         s.prefs.general.undo_levels = levels.saturating_add(1024);
         let before = s.history.undo.len();
-        let result = s.execute_as(id, params, craft_command::Origin::Plugin);
+        let result = {
+            let _running = PluginCommand::enter();
+            s.execute_as(id, params, craft_command::Origin::Plugin)
+        };
         s.prefs.general.undo_levels = levels;
         fold_steps(s, before, levels as usize);
         self.note_revision(scope, s.revision);

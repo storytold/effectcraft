@@ -6,7 +6,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::guest::{MADE, command_package, gate_package};
-use common::{EDIT, install, rig_frozen};
+use common::{EDIT, PIXELS, install, pixels_package, rig_frozen};
 use craft_command::{Call, DynCommand, Enablement, Interceptor, Interest, Origin, Owner, Verdict, Visibility};
 use effectcraft_engine::{EngineError, Session};
 use serde_json::{Value, json};
@@ -82,4 +82,25 @@ fn a_native_dynamic_command_gets_the_real_session_with_the_plugin_host_running()
     session.registry.register(probe).expect("registered");
     let answer = session.execute("plugin.test.native.probe", json!({})).expect("probe");
     assert_eq!(answer["has_link_comp"], json!(true), "the body saw the open project, not an idle spare");
+}
+
+/// `execute_command` turns away a host id only at the top. `file.runScript` with inline steps (and
+/// `engine.batch`) run their steps as ordinary commands, so a plug-in that nests a host command in
+/// one must be refused by the host command.
+#[test]
+fn a_plugin_cannot_reach_a_host_command_through_a_nested_command() {
+    let (mut session, host, _comp) = rig_frozen();
+    install(&host, &pixels_package());
+    let installed = |host: &effectcraft_plugins::PluginHost| host.manager.list().iter().any(|id| id == PIXELS);
+    assert!(installed(&host));
+
+    let nested = json!({"steps": [{"command": "plugin.app.effectcraft.remove", "params": {"id": PIXELS}}]});
+    let asked = host.bridge.scoped(&mut session, || host.bridge.execute("file.runScript", &nested));
+    assert!(asked.is_err(), "the nested host command ran: {asked:?}");
+    assert!(installed(&host), "the plug-in was removed by a plug-in");
+    assert!(!effectcraft_plugins::bridge::Bridge::in_plugin_command(), "the mark ends with the call");
+
+    // The same command from the user is not refused.
+    session.execute("plugin.app.effectcraft.remove", json!({"id": PIXELS})).expect("the user removes the plug-in");
+    assert!(!installed(&host));
 }

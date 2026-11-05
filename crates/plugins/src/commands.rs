@@ -24,8 +24,9 @@ use serde_json::{Value, json};
 
 use craft_plugin_ui::manager::state_text;
 
+use crate::bridge::Bridge;
 use crate::host::PluginHost;
-use crate::services::HOST_PREFIX;
+use crate::services::{HOST_ONLY, HOST_PREFIX};
 
 /// The owner of the host commands.
 pub const OWNER: &str = "app.effectcraft";
@@ -104,10 +105,15 @@ fn row(id: &str, label: &str, params: &str, menu: &[&str], run: Run) -> DynComma
     }
 }
 
-/// Run `f` with the host if it is still alive.
+/// Run `f` with the host if it is still alive. Refused while a command that a plug-in asked for
+/// is running, however deep: `Services::execute_command` turns away a host id only at the top, and
+/// a plug-in can reach one through a command that runs others, such as `engine.batch`.
 fn with_host(weak: &Weak<PluginHost>, f: impl Fn(&Arc<PluginHost>, &Value) -> Result<Value, EngineError> + Send + Sync + 'static) -> Run {
     let weak = Weak::clone(weak);
     Arc::new(move |_session: &mut Session, params: &Value| {
+        if Bridge::in_plugin_command() {
+            return Err(other(HOST_ONLY));
+        }
         let host = weak.upgrade().ok_or_else(|| other("the plug-in host has shut down"))?;
         f(&host, params)
     })
