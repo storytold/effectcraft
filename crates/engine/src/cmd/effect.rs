@@ -76,7 +76,16 @@ fn has_helpers(s: &Session) -> std::result::Result<(), String> {
     if s.helpers.is_some() { Ok(()) } else { Err("effect helpers are not available in this build".into()) }
 }
 
-fn helper_hooks(s: &Session) -> Result<crate::HelperHooks> {
+/// The host's helper hooks, for the commands that start helpers. Helpers run native code, so a
+/// script may start them only with Allow Scripts to Write Files and Access Network on (as for
+/// File.execute()).
+fn helper_hooks(s: &Session, c: &str) -> Result<crate::HelperHooks> {
+    if s.running_for_script() && !s.prefs.scripting.allow_scripts_write_files {
+        return Err(bad(
+            c,
+            "scripts can't start effect helpers unless Settings ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network is on",
+        ));
+    }
     s.helpers.ok_or_else(|| EngineError::Other("effect helpers are not available in this build".into()))
 }
 
@@ -91,7 +100,7 @@ fn helpers_list(s: &mut Session, _: &Value) -> Result<Value> {
 /// `effect.helpers.scan`: start the installed helpers that aren't running and register their
 /// effects. One bad helper doesn't stop the rest; `retry: true` turns blocked effects back on.
 fn helpers_scan(s: &mut Session, p: &Value) -> Result<Value> {
-    let h = helper_hooks(s)?;
+    let h = helper_hooks(s, "effect.helpers.scan")?;
     let r = (h.scan)(b_p(p, "retry").unwrap_or(false));
     let n = r["loaded"].as_array().map_or(0, Vec::len);
     if n > 0 {
@@ -104,7 +113,7 @@ fn helpers_scan(s: &mut Session, p: &Value) -> Result<Value> {
 /// helper takes `.ofx` plug-ins, for example).
 fn helpers_load(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "effect.helpers.load";
-    let h = helper_hooks(s)?;
+    let h = helper_hooks(s, c)?;
     let path = str_p(p, "path").ok_or_else(|| bad(c, "missing `path`"))?;
     let r = (h.load)(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let n = r["loaded"].as_array().map_or(0, Vec::len);

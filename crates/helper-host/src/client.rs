@@ -9,8 +9,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,8 @@ const MAX_RESTARTS_PER_MINUTE: usize = 5;
 /// A helper idle for longer than this is pinged before it is used again.
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest piece of a helper's stderr logged as one line (longer lines are logged in parts).
+const MAX_LOG_LINE: u64 = 64 << 10;
 
 /// [`set_render_timeout`] (milliseconds; 0 = not set).
 static RENDER_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -72,7 +74,11 @@ enum Line {
 /// A running helper process.
 struct Conn {
     child: Child,
-    stdin: ChildStdin,
+    /// Request lines for the writer thread, which owns the helper's stdin: a helper that stops
+    /// reading can block that thread, never the render waiting for it ([`Conn::send`]).
+    input: Sender<Vec<u8>>,
+    /// The writer thread's result for each line, in order.
+    written: Receiver<Result<(), String>>,
     rx: Receiver<Line>,
     exchange: Exchange,
     /// The first free byte of the exchange file (images are stacked, see [`Helper::render`]).
@@ -82,9 +88,19 @@ struct Conn {
 }
 
 impl Conn {
-    fn send(&mut self, r: &Request) -> Result<(), String> {
-        let line = request_line(r)?;
-        self.stdin.write_all(line.as_bytes()).and_then(|_| self.stdin.flush()).map_err(|e| format!("can't write to the helper: {e}"))
+    /// Write one request, waiting at most `timeout` for the helper to take it.
+    fn send(&mut self, r: &Request, timeout: Duration) -> Result<(), Failure> {
+        let line = request_line(r).map_err(Failure::Broken)?;
+        let closed = || Failure::Broken("can't write to the helper: its input is closed".into());
+        self.input.send(line.into_bytes()).map_err(|_| closed())?;
+        match self.written.recv_timeout(timeout) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(Failure::Broken(format!("can't write to the helper: {e}"))),
+            Err(RecvTimeoutError::Timeout) => {
+                Err(Failure::Broken(format!("the helper did not answer within {} s (it stopped reading its input)", timeout.as_secs())))
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(closed()),
+        }
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Reply, Failure> {
@@ -105,7 +121,7 @@ impl Conn {
     }
 
     fn call(&mut self, r: &Request, timeout: Duration) -> Result<Reply, Failure> {
-        self.send(r).map_err(Failure::Broken)?;
+        self.send(r, timeout)?;
         self.recv(timeout)
     }
 
@@ -119,7 +135,10 @@ impl Conn {
     }
 
     fn stop(mut self) {
-        let _ = self.send(&Request::Shutdown);
+        // Not waited for: the process is killed right after, which also ends a blocked write.
+        if let Ok(line) = request_line(&Request::Shutdown) {
+            let _ = self.input.send(line.into_bytes());
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -221,7 +240,12 @@ impl Helper {
 
     pub fn status(&self) -> HelperStatus {
         let mut s = lock(&self.info).clone();
-        s.running = lock(&self.conn).is_some();
+        // A render holds the process for as long as the helper works on it: don't wait for it.
+        s.running = match self.conn.try_lock() {
+            Ok(c) => c.is_some(),
+            Err(TryLockError::Poisoned(c)) => c.into_inner().is_some(),
+            Err(TryLockError::WouldBlock) => true,
+        };
         s.restarts = lock(&self.restarts).len();
         s
     }
@@ -262,6 +286,10 @@ impl Helper {
 
     fn take_turn(&self) -> Result<TurnGuard<'_>, String> {
         let me = std::thread::current().id();
+        // Bounded, so a thread that can't get the helper (its holder waiting for work that a
+        // blocked thread pool would have to do) fails instead of hanging forever.
+        let limit = load_timeout();
+        let deadline = Instant::now().checked_add(limit);
         let mut t = lock(&self.turn);
         loop {
             match t.owner {
@@ -277,7 +305,13 @@ impl Helper {
                     t.depth += 1;
                     break;
                 }
-                Some(_) => t = self.turn_cv.wait(t).unwrap_or_else(PoisonError::into_inner),
+                Some(_) => {
+                    let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
+                    if left.is_zero() {
+                        return Err(format!("the effect helper was busy for more than {} s", limit.as_secs()));
+                    }
+                    t = self.turn_cv.wait_timeout(t, left).unwrap_or_else(PoisonError::into_inner).0;
+                }
             }
         }
         Ok(TurnGuard(self))
@@ -299,6 +333,25 @@ impl Helper {
             *g = Some(self.spawn().map_err(|e| self.not_started(e))?);
         }
         let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
+        let r = f(c);
+        c.last_used = Instant::now();
+        if let Err(Failure::Broken(e)) = &r {
+            self.note_error(e);
+            if let Some(dead) = g.take() {
+                dead.stop();
+            }
+        }
+        r
+    }
+
+    /// Run `f` on the process a render started on (generation `started`), without starting or
+    /// pinging one: mid-render the helper is waiting for the answer to its question. A
+    /// [`Failure::Broken`] stops the process.
+    fn with_running<T>(&self, started: u64, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
+        let mut g = lock(&self.conn);
+        let Some(c) = g.as_mut().filter(|c| c.generation == started) else {
+            return Err(Failure::Broken("the helper restarted during the render".into()));
+        };
         let r = f(c);
         c.last_used = Instant::now();
         if let Err(Failure::Broken(e)) = &r {
@@ -347,6 +400,7 @@ impl Helper {
         let mut child = cmd.spawn().map_err(|e| format!("can't start {}: {e}", self.program.display()))?;
         let (Some(stdin), Some(stdout), stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
             let _ = child.kill();
+            let _ = child.wait();
             return Err("the helper's pipes are unavailable".into());
         };
         let (tx, rx) = channel();
@@ -377,12 +431,38 @@ impl Helper {
         });
         if let Err(e) = spawned {
             let _ = child.kill();
+            let _ = child.wait();
             return Err(format!("can't start a reader thread: {e}"));
         }
+        let (input, lines) = channel::<Vec<u8>>();
+        let (done, written) = channel();
+        let writer = std::thread::Builder::new().name(format!("helper-in {label}")).spawn(move || {
+            let mut stdin: ChildStdin = stdin;
+            for line in lines {
+                let r = stdin.write_all(&line).and_then(|_| stdin.flush()).map_err(|e| e.to_string());
+                let failed = r.is_err();
+                if done.send(r).is_err() || failed {
+                    return;
+                }
+            }
+        });
+        if let Err(e) = writer {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("can't start a writer thread: {e}"));
+        }
         if let Some(err) = stderr {
+            // Drained to the end whatever it holds (bytes that aren't UTF-8, endless lines): a
+            // helper blocked on a full stderr pipe would hang its render.
             let _ = std::thread::Builder::new().name(format!("helper-err {label}")).spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    log::info!("helper {label}: {line}");
+                let mut r = BufReader::new(err);
+                let mut buf = vec![];
+                loop {
+                    buf.clear();
+                    match (&mut r).take(MAX_LOG_LINE).read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => log::info!("helper {label}: {}", String::from_utf8_lossy(&buf).trim_end()),
+                    }
                 }
             });
         }
@@ -391,7 +471,7 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, stdin, rx, exchange, top: 0, last_used: Instant::now(), generation };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
             Ok(Reply::Hello { version, name, helper_version, loads }) if version == PROTOCOL_VERSION => {
@@ -451,7 +531,11 @@ impl Helper {
         let (at, base, started) = self.with_conn(|c| {
             let base = c.top;
             let at = c.alloc(frame.width, frame.height, frame.origin, frame.scale).map_err(Failure::Refused)?;
-            c.exchange.write(&at, frame.pixels).map_err(Failure::Broken)?;
+            // Nothing is sent yet, so the helper is fine (a full disk, say): not its fault.
+            if let Err(e) = c.exchange.write(&at, frame.pixels) {
+                c.top = base;
+                return Err(Failure::Refused(e));
+            }
             Ok((at, base, c.generation))
         })?;
         let req = Request::Render(RenderRequest {
@@ -476,15 +560,11 @@ impl Helper {
     }
 
     fn converse(&self, req: Request, frame: &mut PluginFrame, at: &ImageRef, host: &dyn PluginHost, started: u64) -> Result<(), Failure> {
-        let gone = || Failure::Broken("the helper restarted during the render".into());
         let mut next = req;
         loop {
-            let reply = self.with_conn(|c| if c.generation == started { c.call(&next, render_timeout()) } else { Err(gone()) })?;
+            let reply = self.with_running(started, |c| c.call(&next, render_timeout()))?;
             next = match reply {
-                Reply::Done => {
-                    return self
-                        .with_conn(|c| if c.generation == started { c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken) } else { Err(gone()) });
-                }
+                Reply::Done => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
                 Reply::Error { message } => return Err(Failure::Refused(message)),
                 // Host callbacks run without holding the process, so they may render through
                 // this helper again (on this thread: the turn is re-entered).
@@ -496,18 +576,24 @@ impl Helper {
         }
     }
 
-    /// Put a callback's image in the exchange file and make the answer.
+    /// Put a callback's image in the exchange file and make the answer. The helper is waiting
+    /// for one, so an image that can't be passed on is answered with none (failing here would
+    /// leave it waiting, out of step with the next request).
     fn send_image(&self, img: Option<PluginImage>, started: u64) -> Result<Request, Failure> {
         let Some(img) = img.filter(|i| u64::from(i.width).saturating_mul(u64::from(i.height)) == i.pixels.len() as u64) else {
             return Ok(Request::Image { image: None });
         };
-        self.with_conn(|c| {
-            if c.generation != started {
-                return Err(Failure::Broken("the helper restarted during the render".into()));
-            }
-            let at = c.alloc(img.width, img.height, img.origin, img.scale).map_err(Failure::Refused)?;
-            c.exchange.write(&at, &img.pixels).map_err(Failure::Broken)?;
-            Ok(Request::Image { image: Some(at) })
+        self.with_running(started, |c| {
+            let base = c.top;
+            let written = c.alloc(img.width, img.height, img.origin, img.scale).and_then(|at| c.exchange.write(&at, &img.pixels).map(|()| at));
+            Ok(match written {
+                Ok(at) => Request::Image { image: Some(at) },
+                Err(e) => {
+                    log::warn!("helper {}: {e}", self.program.display());
+                    c.top = base;
+                    Request::Image { image: None }
+                }
+            })
         })
     }
 }

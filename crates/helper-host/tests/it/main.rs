@@ -3,11 +3,12 @@
 //! `--effectcraft-helper` it is the helper, otherwise it runs the checks, starting itself as
 //! the helper. (`harness = false`: libtest would reject the helper argument.)
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParam, PluginParamKind, PluginParams, plugin};
-use effectcraft_helper_host::protocol::HELPER_ARG;
+use effectcraft_helper_host::protocol::{HELPER_ARG, Reply, reply_line};
 use effectcraft_helper_host::serve::{Provider, serve};
 
 fn manifest(id: &str, params: Vec<PluginParam>) -> PluginManifest {
@@ -44,8 +45,11 @@ enum Kind {
     Echo,
     /// Exits the process mid-render.
     Crash,
-    /// Never answers.
+    /// Asks for the parameters before 0 (an answer far larger than a pipe holds), then never
+    /// reads it or answers.
     Hang,
+    /// Writes a long line of bytes that aren't UTF-8 to stderr, then more, then inverts.
+    Noisy,
 }
 
 struct Fake {
@@ -86,7 +90,21 @@ impl EffectPlugin for Fake {
                 }
             }
             Kind::Crash => std::process::exit(3),
-            Kind::Hang => std::thread::sleep(Duration::from_secs(3600)),
+            Kind::Hang => {
+                let mut out = std::io::stdout();
+                out.write_all(reply_line(&Reply::ParamsAt { time: -1.0 })?.as_bytes()).and_then(|_| out.flush()).map_err(|e| e.to_string())?;
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+            Kind::Noisy => {
+                let mut err = std::io::stderr();
+                let mut junk = vec![0xffu8; 1 << 20];
+                junk.push(b'\n');
+                err.write_all(&junk).map_err(|e| format!("stderr: {e}"))?;
+                // EffectCraft must still be reading.
+                std::thread::sleep(Duration::from_millis(300));
+                err.write_all(b"still talking\n").map_err(|e| format!("stderr: {e}"))?;
+                frame.pixels.iter_mut().for_each(|p| *p = [1.0, 0.0, 0.0, 1.0]);
+            }
         }
         Ok(())
     }
@@ -99,8 +117,15 @@ impl Provider for FakeProvider {
         "Fake".into()
     }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
-        let v: Vec<Arc<dyn EffectPlugin>> = [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang)]
-            .into_iter()
+        let v: Vec<Arc<dyn EffectPlugin>> = [
+            ("invert", Kind::Invert),
+            ("pad", Kind::Pad),
+            ("echo", Kind::Echo),
+            ("crash", Kind::Crash),
+            ("hang", Kind::Hang),
+            ("noisy", Kind::Noisy),
+        ]
+        .into_iter()
             .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
             .collect();
         (v, vec!["fake helper: a warning".into()])
@@ -130,7 +155,11 @@ impl PluginHost for TestHost {
     fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
         None
     }
-    fn params_at(&self, _: f64) -> Option<(Vec<f64>, Vec<String>)> {
+    fn params_at(&self, t: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        // Before 0: megabytes, far more than a pipe holds (see `Kind::Hang`).
+        if t < 0.0 {
+            return Some((vec![0.5; 1 << 20], vec![]));
+        }
         Some((vec![0.25], vec![]))
     }
     fn frame_rate(&self) -> f64 {
@@ -173,7 +202,7 @@ fn run_checks() -> bool {
     // Discovery + describe.
     let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe), false);
     let loaded = r["loaded"].as_array().map_or(0, Vec::len);
-    all &= check("scan registers the helper's effects", loaded == 5, &r);
+    all &= check("scan registers the helper's effects", loaded == 6, &r);
     all &= check("helper warnings are reported", r["errors"].to_string().contains("a warning"), &r);
     all &= check(
         "a second scan doesn't start it twice",
@@ -187,6 +216,12 @@ fn run_checks() -> bool {
     let mut px = vec![[0.25, 0.5, 1.0, 1.0]; 6];
     let r = render("org.test.helper.invert", &mut px, 3, 2, 1.0, false);
     all &= check("invert renders", r.is_ok() && px.iter().all(|p| (p[0] - 0.75).abs() < 1e-6 && p[2].abs() < 1e-6 && p[3] == 1.0), (&r, &px));
+
+    // Output on stderr that isn't text, in long lines, is drained, so the helper never blocks on it
+    // or loses its stderr.
+    let mut px = vec![[0.0; 4]; 4];
+    let r = render("org.test.helper.noisy", &mut px, 2, 2, 1.0, false);
+    all &= check("a helper's stderr is drained whatever it holds", r.is_ok() && px[0] == [1.0, 0.0, 0.0, 1.0], &r);
 
     // Padding.
     let mut px = vec![[0.0; 4]; 4];
@@ -244,7 +279,8 @@ fn run_checks() -> bool {
     let r = effectcraft_helper_host::scan_paths(&[], true);
     all &= check("retry clears the block list", !effectcraft_helper_host::blocklist::is_blocked("org.test.helper.crash"), &r);
 
-    // A hang is cut off by the timeout.
+    // A hang is cut off by the timeout, also while EffectCraft is writing to a helper that
+    // stopped reading.
     let t0 = std::time::Instant::now();
     let r = render("org.test.helper.hang", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false);
     all &= check(

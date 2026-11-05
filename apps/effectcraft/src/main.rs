@@ -148,10 +148,6 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
     }
 }
 
-/// Run a normal desktop launch: install logging and the panic hook, parse arguments (`--version` exits before the
-/// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
-/// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
-/// reports startup failure through `startup_failed`. Returns the event loop's result.
 /// External effect helpers are native programs, so they start at launch only when the user opts
 /// in with `EFFECTCRAFT_HELPERS=1`: an environment variable, outside the settings folder, so
 /// writing there alone can't run code at launch. Otherwise Effect ▸ Scan for Effect Helpers
@@ -170,6 +166,10 @@ fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
     }
 }
 
+/// Run a normal desktop launch: install logging and the panic hook, parse arguments (`--version` exits before the
+/// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
+/// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
+/// reports startup failure through `startup_failed`. Returns the event loop's result.
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]

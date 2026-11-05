@@ -13,7 +13,7 @@ and carries on. See [ADR 0001](adr/0001-external-effect-helpers.md) for why.
 | What | How |
 |---|---|
 | Install | Put the helper program (`effectcraft-helper-<name>`, `.exe` on Windows) in `helpers/` next to EffectCraft, in `helpers/` in the [settings folder](preferences.md), or in a folder named in `EFFECTCRAFT_HELPER_PATH` (a path list; entries can be programs or folders). Subfolders one level down are searched too. |
-| Start | Helpers run native code, so nothing starts them unless the user asks: Effect ▸ Scan for Effect Helpers (`effect.helpers.scan`) starts them. To start them every time EffectCraft launches, opt in with `EFFECTCRAFT_HELPERS=1`. It is an environment variable, not a setting, so writing to the settings folder can't turn it on. Agents confined with `--automation-read-root` / `--automation-write-root` can't run `effect.helpers.scan` or `effect.helpers.load`. |
+| Start | Helpers run native code, so nothing starts them unless the user asks: Effect ▸ Scan for Effect Helpers (`effect.helpers.scan`) starts them. To start them every time EffectCraft launches, opt in with `EFFECTCRAFT_HELPERS=1`. It is an environment variable, not a setting, so writing to the settings folder can't turn it on. Agents confined with `--automation-read-root` / `--automation-write-root` can't run `effect.helpers.scan` or `effect.helpers.load`, and scripts can run them only with Allow Scripts to Write Files and Access Network on. |
 | Load more plug-ins | Effect ▸ Load Plug-ins Through Helper… (`effect.helpers.load {path}`) hands a file or folder to the helpers that accept it (an OpenFX helper takes `.ofx` plug-ins and `.ofx.bundle` folders). |
 | Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, effects, restarts, error}], blocked}`; `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
 | Errors | A failed render leaves the frame as it was and puts ⚠ after the effect's name in Effect Controls (hover for the message). The next render starts the helper again. An effect that stops its helper 3 times is turned off and listed in `helper_blocklist.txt` in the settings folder. `effect.helpers.scan {"retry": true}` turns it back on. A helper that stops 5 times in a minute stays off until the next scan. |
@@ -32,7 +32,7 @@ loading).
 - **Replies** (helper → EffectCraft): one JSON object per line on stdout, prefixed with
   `@ec-helper ` (with the space). Lines without the prefix, or text before it, are logged and
   otherwise ignored, so plug-ins that print to stdout don't break the protocol. stderr is
-  logged.
+  logged (whatever bytes it holds).
 - Every object has an `"op"`. Lines are at most 256 MB.
 - The helper exits when stdin closes or on `shutdown`.
 
@@ -85,7 +85,7 @@ when the render ends.
 
 `error` replies are per request: the helper carries on. EffectCraft stops (kills) the helper
 when it exits, closes stdout, sends a reply that doesn't parse or doesn't fit, or misses a
-timeout. The request then fails. The next request starts a fresh process, runs `hello`, replays
+timeout, or stops reading its stdin for longer than the timeout. The request then fails. The next request starts a fresh process, runs `hello`, replays
 earlier `load`s and recreates instances lazily: the helper sees a `render` for an `instance` it
 doesn't know and creates it.
 

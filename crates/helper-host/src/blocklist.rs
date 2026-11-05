@@ -7,7 +7,8 @@
 //! `retry` ([`clear`]).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::client::lock;
@@ -16,6 +17,8 @@ use crate::client::lock;
 pub const CRASH_LIMIT: u32 = 3;
 
 const FILE: &str = "helper_blocklist.txt";
+/// The most of the block list file read (tens of thousands of effect ids).
+const MAX_FILE: u64 = 1 << 20;
 
 #[derive(Default)]
 struct State {
@@ -47,13 +50,20 @@ fn load(s: &mut State) {
         return;
     }
     s.loaded = true;
-    if let Some(text) = s.dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(FILE)).ok()) {
+    if let Some(text) = s.dir.as_ref().and_then(|d| read_capped(&d.join(FILE))) {
         for id in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             if !s.blocked.iter().any(|b| b == id) {
                 s.blocked.push(id.to_string());
             }
         }
     }
+}
+
+/// The file's text, at most [`MAX_FILE`] bytes of it.
+fn read_capped(path: &Path) -> Option<String> {
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(MAX_FILE).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 fn save(s: &State) {
