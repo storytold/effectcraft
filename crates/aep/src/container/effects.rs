@@ -382,17 +382,18 @@ impl<'f, 'a> EffectParam<'f, 'a> {
         self.recorded_value()
     }
 
-    /// The value in the value record whatever the record's state (`tdsb`): what
-    /// [`EffectParam::stored_value`] reads, also from a record in the default state (`tdsb` 3).
-    /// Lumetri Color writes the values of its hidden parameters so (High Dynamic Range, HDR
-    /// Specular, Look: 1200 `lumetri-01-set-all`, `-02-sec-top`, `-06-sec-light`; After Effects
-    /// reads back the recorded values). `None` with keyframes or without a record.
+    /// The value in the value record when the record is written (`tdsb` 1) or in the default
+    /// state (`tdsb` 3): what [`EffectParam::stored_value`] reads, also from a default-state
+    /// record. Lumetri Color writes the values of its hidden parameters so (High Dynamic Range,
+    /// HDR Specular, Look: 1200 `lumetri-01-set-all`, `-02-sec-top`, `-06-sec-light`; After
+    /// Effects reads back the recorded values). `None` with keyframes, without a record or for a
+    /// record in any other state (no sample has one; the importer reports it as damaged).
     pub fn recorded_value(&self) -> Option<ParamValue> {
         let p = self.stored?;
         if self.kind == ParamKind::Layer {
             return be_u32(p.chunk().child(b"tdpi")?.bytes()?, 0).map(ParamValue::Layer);
         }
-        if p.is_animated() {
+        if !matches!(p.flags(), Some(1 | 3)) || p.is_animated() {
             return None;
         }
         let v = p.static_value()?;

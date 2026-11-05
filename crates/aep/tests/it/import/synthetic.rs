@@ -339,6 +339,7 @@ fn effect_values(p: &Project) -> Vec<(String, effectcraft_keyframe::Value)> {
     out
 }
 
+/// A default-state record (`tdsb` 3) reads like a written one, except through `stored_value`.
 #[test]
 fn a_default_state_effect_record_holds_the_value() {
     // After Effects writes the values of some parameters as records in the default state (`tdsb`
@@ -368,6 +369,7 @@ fn a_default_state_effect_record_holds_the_value() {
     assert_eq!(seen, 1);
 }
 
+/// Default-state records import with their values and no loss, like written records.
 #[test]
 fn default_state_effect_records_import_like_written_ones() {
     // Before, such a record was reported as an unreadable value and the default used.
@@ -383,4 +385,21 @@ fn default_state_effect_records_import_like_written_ones() {
     let (p, _) = run(&with_record("ADBE Glo2-0011", 3, 0.75), true);
     let mid: Vec<_> = effect_values(&p).into_iter().filter(|(id, _)| id == "abMidpoint").collect();
     assert_eq!(mid, vec![("abMidpoint".to_string(), effectcraft_keyframe::Value::Scalar(75.0))]);
+    // Levels' Clip To Output Black (`-0008`) recorded as After Effects' item 1, On: EffectCraft's
+    // On is item 1 of Off, On, Off for 32 bpc Color (the default is item 2).
+    let (p, _) = run(&with_record("ADBE Easy Levels2-0008", 3, 1.0), true);
+    let clip: Vec<_> = effect_values(&p).into_iter().filter(|(id, _)| id == "clipToOutputBlack").collect();
+    assert_eq!(clip, vec![("clipToOutputBlack".to_string(), effectcraft_keyframe::Value::Enum(1))]);
+}
+
+/// A record in a state other than 1 or 3 is not read and is reported.
+#[test]
+fn an_effect_record_in_another_state_is_reported_as_damaged() {
+    // Only the written (1) and the default (3) state hold a value; any other state is not read.
+    for tdsb in [0, 2, 5] {
+        let (_, r) = run(&with_record("ADBE Glo2-0011", tdsb, 0.75), true);
+        let r = r.unwrap();
+        let damaged = losses(&r, LossCategory::DamagedData);
+        assert!(damaged.iter().any(|l| l.contains("unreadable value")), "tdsb {tdsb}: {:?}", r.report.losses);
+    }
 }
