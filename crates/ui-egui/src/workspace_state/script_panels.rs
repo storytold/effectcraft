@@ -20,6 +20,9 @@ use super::Snapshot;
 use crate::dock::{PanelKind, Workspace, WorkspaceExt as _};
 use crate::state::UiState;
 
+#[cfg(test)]
+mod tests;
+
 /// Script window ids count up from 1 in each process and never get here.
 const DETACHED: u32 = 1 << 31;
 /// A dock tree level nests its panels a few JSON levels deeper.

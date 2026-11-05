@@ -342,3 +342,83 @@ fn loading_or_resetting_a_workspace_runs_no_script() {
     assert!(h.state().session.script_ui.windows.is_empty(), "the panel stays closed");
     assert!(h.state().session.project.items.is_empty(), "the script did not run");
 }
+
+#[test]
+fn an_open_script_whose_panel_was_hidden_returns_to_its_place_at_launch() {
+    let (store, _, _) = saved_layout_store();
+    store.remove(&script_file("Beta.jsx")).unwrap();
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    eframe::App::on_exit(h.state_mut());
+    drop(h);
+    store.write(&script_file("Beta.jsx"), BUTTON).unwrap();
+    store.write(OPEN_PANELS_FILE, &json!({"open": ["Alpha.jsx", "Beta.jsx"]}).to_string()).unwrap();
+    let h = harness(EffectcraftApp::new(restored(&store)));
+    let beta = panel_of(&h.state().session, "Beta.jsx");
+    assert!(h.state().ui.dock.group_of(beta).contains(&PanelKind::Timeline), "Beta is with {:?}", h.state().ui.dock.group_of(beta));
+}
+
+#[test]
+fn a_script_missing_across_restarts_adds_nothing_to_the_file() {
+    let (store, _, _) = saved_layout_store();
+    store.remove(&script_file("Beta.jsx")).unwrap();
+    let mut sizes = BTreeSet::new();
+    for _ in 0..4 {
+        let mut h = harness(EffectcraftApp::new(restored(&store)));
+        eframe::App::on_exit(h.state_mut());
+        let doc: Value = serde_json::from_str(&store.read(WORKSPACES_FILE).unwrap()).unwrap();
+        let mut ids = BTreeSet::new();
+        saved_ids(&doc, &mut ids);
+        assert_eq!(ids.len(), 2, "{doc}");
+        assert_eq!(doc["script_panels"].as_object().map(|table| table.len()), Some(2), "{doc}");
+        let hidden = doc["dock"]["hidden"].as_array().unwrap();
+        assert_eq!(hidden.iter().filter(|entry| entry[0].get("ScriptPanel").is_some()).count(), 1, "{doc}");
+        sizes.insert(hidden.len());
+    }
+    assert_eq!(sizes.len(), 1, "hidden stays the same size: {sizes:?}");
+}
+
+#[test]
+fn a_panel_closed_and_opened_again_in_a_session_returns_to_its_place() {
+    let store = store_with(&["Alpha.jsx"]);
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    let first = panel_of(&h.state().session, "Alpha.jsx");
+    tab_beside(&mut h, first, PanelKind::Project);
+    h.state_mut().close_panel(first);
+    h.run_steps(2);
+    assert!(h.state().session.script_ui.windows.is_empty());
+    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Alpha.jsx"})).unwrap();
+    h.run_steps(3);
+    let second = panel_of(&h.state().session, "Alpha.jsx");
+    assert_ne!(first, second, "a new window");
+    assert!(h.state().ui.dock.group_of(second).contains(&PanelKind::Project), "Alpha is with {:?}", h.state().ui.dock.group_of(second));
+    assert!(!dock::referenced_panels(&h.state().ui.dock).contains(&first), "the closed window's id is gone");
+}
+
+#[test]
+fn a_workspace_not_showing_now_keeps_each_script_at_its_place() {
+    let (store, alpha, beta) = saved_layout_store();
+    let mut doc: Value = serde_json::from_str(&store.read(WORKSPACES_FILE).unwrap()).unwrap();
+    doc["saved_workspaces"]["Mine"] = doc["saved_workspaces"]["Default"].clone();
+    doc["saved_workspaces"].as_object_mut().unwrap().remove("Default");
+    store.write(WORKSPACES_FILE, &doc.to_string()).unwrap();
+    let session = restored(&store);
+    let (alpha_now, beta_now) = (panel_of(&session, "Alpha.jsx"), panel_of(&session, "Beta.jsx"));
+    rewrite_saved_ids(&store, &[(alpha, beta_now), (beta, alpha_now)]);
+    let mut h = harness(EffectcraftApp::new(session));
+    h.state_mut().set_workspace("Mine");
+    h.run_steps(2);
+    let dock = &h.state().ui.dock;
+    assert!(dock.group_of(alpha_now).contains(&PanelKind::Project), "Alpha is with {:?}", dock.group_of(alpha_now));
+    assert!(dock.group_of(beta_now).contains(&PanelKind::Timeline), "Beta is with {:?}", dock.group_of(beta_now));
+}
+
+#[test]
+fn reset_finds_a_panel_whose_window_has_not_docked_yet() {
+    let store = store_with(&[]);
+    let dock = dock::docked(dock::tabs(&[PanelKind::Project, PanelKind::ScriptPanel(900_001)], 0));
+    store.write(WORKSPACES_FILE, &file(&dock, &[(900_001, "Alpha.jsx")])).unwrap();
+    let mut app = EffectcraftApp::new(session_with_windows(&store, &[]));
+    app.session.script_ui.windows.push(ScriptWindow { id: 7, kind: WindowKind::Panel, script: "Alpha.jsx".into(), visible: true, ..Default::default() });
+    invoke(&mut app, "window.resetWorkspace");
+    assert_eq!(app.ui.dock.group_of(PanelKind::ScriptPanel(7)), [PanelKind::Project, PanelKind::ScriptPanel(7)]);
+}
