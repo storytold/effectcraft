@@ -29,6 +29,8 @@ mod stream;
 mod wav_markers;
 mod webp_anim;
 
+/// Video decoder counters (time in decoders, samples decoded, seeks, cache hits), for benchmarks.
+pub use filmcraft_codecs::{GopStats, gop_stats};
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
 

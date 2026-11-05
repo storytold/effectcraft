@@ -489,6 +489,8 @@ async fn run_work(w: Work, shared: &RotoShared) {
         // With the classic engine, Propagate leaves no saved tracking behind.
         *lock(&shared.saved) = Some(String::new());
     }
+    // Freezing again keeps the frames frozen already (resolved once: it reads the whole frozen cache).
+    let kept = if w.task == RotoTask::Freeze && !w.object_matte { fx::applying_frozen(&w.params, w.size, w.fps) } else { None };
     for (k, f) in w.frames.iter().enumerate() {
         if cancel() {
             let mut s = lock(&shared.state);
@@ -524,7 +526,7 @@ async fn run_work(w: Work, shared: &RotoShared) {
                 }
             }
             (RotoTask::Propagate, false) => chain.ensure(*f, &mut get, &cancel).is_some(),
-            (RotoTask::Freeze, false) => match fx::frame_matte(&w.params, w.size, w.fps, *f, &mut get, &cancel) {
+            (RotoTask::Freeze, false) => match fx::frame_matte(&w.params, w.size, w.fps, *f, kept.as_deref(), &mut get, &cancel) {
                 Some((a, b)) => {
                     if let Some(img) = src.get(*f) {
                         frozen.size = [img.width as usize, img.height as usize];
@@ -852,6 +854,7 @@ impl Session {
     /// instances in the background.
     pub fn poll_roto(&mut self, auto: bool) -> bool {
         self.poll_models();
+        self.poll_library();
         let changed = self.poll_roto_job();
         // Edited instances stay pending while the model they will segment with is still loading.
         let loading = self.roto_model_loading();
