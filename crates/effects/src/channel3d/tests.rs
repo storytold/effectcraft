@@ -258,15 +258,20 @@ fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
     let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
     assert_eq!(selection_hashes(names, None), edge_selection());
     let src = img().data[0];
-    for (display, matte_only) in [(0, false), (1, false), (2, false), (0, true)] {
+    for (display, matte_only, in_alpha) in [(0, false, false), (1, false, false), (2, false, false), (0, true, false), (0, true, true)] {
         let out = run(
             "ec.3d.cryptomatte",
-            &[("selection", Value::Str(names.into())), ("display", Value::Enum(display)), ("matteOnly", Value::Bool(matte_only))],
+            &[
+                ("selection", Value::Str(names.into())),
+                ("display", Value::Enum(display)),
+                ("matteOnly", Value::Bool(matte_only)),
+                (MATTE_ONLY_IN_ALPHA, Value::Bool(in_alpha)),
+            ],
             &host,
         );
         let expect = |c: [f32; 3], m: f32| -> [f32; 4] {
             if matte_only {
-                return [m; 4];
+                return if in_alpha { [m; 4] } else { [m, m, m, 1.0] };
             }
             match display {
                 0 => {
@@ -279,24 +284,62 @@ fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
         };
         for (x, y) in [(0u32, 0u32), (1, 0), (5, 0), (0, 1), (3, 1), (5, 1)] {
             let (c, m) = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize);
-            assert_eq!(out.get(x as i64, y as i64).map(f32::to_bits), expect(c, m).map(f32::to_bits), "display {display} matteOnly {matte_only} at ({x}, {y})");
+            assert_eq!(
+                out.get(x as i64, y as i64).map(f32::to_bits),
+                expect(c, m).map(f32::to_bits),
+                "display {display} matteOnly {matte_only} inAlpha {in_alpha} at ({x}, {y})"
+            );
         }
         for (x, y) in [(6u32, 0u32), (19, 0), (0, 2), (12, 9)] {
             assert_eq!(
                 out.get(x as i64, y as i64).map(f32::to_bits),
                 expect([0.0; 3], 0.0).map(f32::to_bits),
-                "display {display} matteOnly {matte_only} outside the aux at ({x}, {y})"
+                "display {display} matteOnly {matte_only} inAlpha {in_alpha} outside the aux at ({x}, {y})"
             );
         }
     }
+}
+
+/// #3127: Matte Only shows the matte as After Effects' Cryptomatte plug-in does, in RGB over
+/// alpha 1 (its Matte Only render of 2026-11-05 is opaque black where nothing is selected), not
+/// in alpha. A partly covered pixel is grey, not translucent; the hidden Matte Only In Alpha
+/// switch (on for projects saved before) keeps the old matte in every channel.
+#[test]
+fn cryptomatte_matte_only_is_the_matte_in_rgb_over_alpha_one() {
+    let a = edge_aux(true);
+    let host = AuxHost(Arc::new(a.clone()));
+    let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
+    let only = |in_alpha: bool| {
+        run(
+            "ec.3d.cryptomatte",
+            &[("selection", Value::Str(names.into())), ("matteOnly", Value::Bool(true)), (MATTE_ONLY_IN_ALPHA, Value::Bool(in_alpha))],
+            &host,
+        )
+    };
+    let (new, old) = (only(false), only(true));
+    let partial = (0..6u32 * 2).map(|i| (i % 6, i / 6)).find(|&(x, y)| {
+        let m = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize).1;
+        m > 0.0 && m < 1.0
+    });
+    let (x, y) = partial.expect("the edge aux has a partly covered pixel");
+    let m = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize).1;
+    assert_eq!(new.get(x as i64, y as i64), [m, m, m, 1.0]);
+    assert_eq!(old.get(x as i64, y as i64), [m; 4]);
+    // Outside the aux area (and unselected): opaque black, as After Effects renders it.
+    assert_eq!(new.get(12, 9), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(old.get(12, 9), [0.0; 4]);
+    // A fresh instance has the switch off.
+    let spec = crate::find("ec.3d.cryptomatte").unwrap();
+    let ps = spec.params.iter().find(|p| p.id == MATTE_ONLY_IN_ALPHA).expect("the hidden switch");
+    assert_eq!((&ps.default, &ps.ui), (&Value::Bool(false), &ParamUi::Hidden));
 }
 
 #[test]
 fn cryptomatte_selects_by_name_and_wildcard() {
     let h = scene();
     let m = run("ec.3d.cryptomatte", &[("selection", Value::Str("right".into())), ("matteOnly", Value::Bool(true))], &h);
-    assert_eq!(m.get(2, 5)[3], 0.0);
-    assert_eq!(m.get(12, 5)[3], 1.0);
+    assert_eq!(m.get(2, 5), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(m.get(12, 5), [1.0; 4]);
     let w = run("ec.3d.cryptomatte", &[("selection", Value::Str("l*".into())), ("display", Value::Enum(1))], &h);
     assert_eq!(w.get(2, 5)[3], 1.0);
     assert_eq!(w.get(12, 5)[3], 0.0);
