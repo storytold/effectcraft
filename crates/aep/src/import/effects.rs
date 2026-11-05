@@ -272,7 +272,9 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         }
         return;
     }
-    let value = match (p.stored(), p.stored_value()) {
+    // A record in the default state (`tdsb` 3) still holds the value After Effects uses (1200,
+    // 1400: every such record reads back as recorded).
+    let value = match (p.stored(), p.recorded_value()) {
         (Some(_), Some(v)) => Some(v),
         (Some(_), None) => {
             col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, default used"));

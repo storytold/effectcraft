@@ -215,6 +215,8 @@ fn composite_mode(m: u32) -> BlendMode {
     }
 }
 
+/// The per-pixel effects of `fp2_point` (Cineon, HDR Compander and Highlight Compression, CC
+/// Overbrights, CC Composite, Color Link): their parameters packed for the kernel, or `None`.
 fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let pr = ctx.params;
     let mut p = Params::default();
@@ -238,11 +240,12 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         }
         "ec.utility.hdrcompression" => {
             let t = (pr.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
-            if t <= 0.0 {
+            // A NaN Amount keeps the layer, as on the CPU.
+            if t <= 0.0 || !t.is_finite() {
                 return Some(b);
             }
             p.u[0][0] = 2;
-            p.f[0][0] = 1.0 - 0.5 * t;
+            p.f[0][0] = t;
         }
         "ec.utility.ccoverbrights" => {
             p.u[0] = [3, pr.e("channel"), 0, 0];
