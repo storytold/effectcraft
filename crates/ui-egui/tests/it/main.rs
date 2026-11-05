@@ -79,6 +79,7 @@ mod ui_roto_objects;
 mod ui_roto_span_confidence;
 mod ui_script_console;
 mod ui_scriptui;
+mod ui_scriptui_workspaces;
 mod ui_scrolling;
 mod ui_self_drop;
 mod ui_settings_info;
