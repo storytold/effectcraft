@@ -345,7 +345,7 @@ impl Layer {
     /// last (auto-Bezier and continuous tangents reach the neighbouring segments), to the
     /// layer's in or out point past the first or last key (values hold there). `None` for any
     /// other difference, a static value, an expression on the layer (it can read the keyed
-    /// property at other times), roving keys, a time remap or a time effect (it reads other
+    /// property at other times), roving or muted keys, a time remap or a time effect (it reads other
     /// times): those reach the layer's whole span.
     pub fn keyframe_spans(&self, o: &Layer, with_markers: bool, heard: bool) -> Option<Vec<(Tick, Tick)>> {
         let transform = |l: &Layer| l.props.group("transform").cloned();
@@ -381,7 +381,8 @@ impl Layer {
             }
             let (Node::Prop(p1), Node::Prop(p0)) = (n1, n0) else { return None };
             let bare = |p: &Property| Property { keys: vec![], value: Value::Scalar(0.0), ..p.clone() };
-            if bare(p1) != bare(p0) || p1.keys.is_empty() || p0.keys.is_empty() || p1.keys.iter().chain(&p0.keys).any(|k| k.roving) {
+            // (muted keys are skipped: the keys around an edit that play can be any distance away)
+            if bare(p1) != bare(p0) || p1.keys.is_empty() || p0.keys.is_empty() || p1.keys.iter().chain(&p0.keys).any(|k| k.roving || k.muted) {
                 return None;
             }
             // Keys only one side has as they are (added, removed, edited, moved).

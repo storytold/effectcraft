@@ -2224,3 +2224,43 @@ fn an_edit_in_a_precomp_under_a_time_effect_reaches_its_whole_layer() {
         assert!(same(i), "kept frame {i} renders differently after the edit");
     }
 }
+
+/// A keyframe edit beside muted keys reaches back to the nearest keys that play: muted keys are
+/// skipped, so the segment the edited key ends can start far before the two keys before it.
+/// Every frame kept renders as before.
+#[test]
+fn a_keyframe_edit_beside_muted_keys_reaches_the_keys_that_play() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{LayerId, Value};
+    use effectcraft_engine::render::render_frame;
+    use serde_json::json;
+    let mut s = Session::default();
+    let new = json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30});
+    let cid = ItemId(s.execute("comp.new", new).unwrap()["comp"].as_u64().unwrap());
+    let l = LayerId(s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].as_u64().unwrap());
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    // Keys at frames 0, 20, 40, 60, 80, 100; the ones at 20 and 40 muted.
+    for i in 0..6 {
+        let add = json!({"layer": l.0, "path": "transform/position", "time": fr.tick_of(i * 20).seconds(), "value": [2.0 + i as f64 * 2.0, 8.0, 0.0]});
+        s.execute("prop.addKey", add).unwrap();
+    }
+    let mut p0 = (*s.project).clone();
+    for k in p0.comp_mut(cid).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/position").unwrap().keys.iter_mut().skip(1).take(2) {
+        k.muted = true;
+    }
+    let p0 = Arc::new(p0);
+    let mut p1 = p0.clone();
+    Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/position").unwrap().keys[3].value =
+        Value::Vec3([8.0, 2.0, 0.0]);
+    let same = |i: i64| render_frame(&p0, cid, fr.tick_of(i), 1.0).data == render_frame(&p1, cid, fr.tick_of(i), 1.0).data;
+    assert!(!same(10), "the edited key's segment starts at frame 0");
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, cid);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+    assert!(!kept.contains(&10), "{kept:?}");
+    for i in kept {
+        assert!(same(i), "kept frame {i} renders differently after the edit");
+    }
+}
