@@ -1180,7 +1180,7 @@ impl PropStore {
             #[cfg(not(target_arch = "wasm32"))]
             PropStore::Spilled(h) => h.get(k),
             #[cfg(target_arch = "wasm32")]
-            PropStore::Memory(v) => v.lock().ok().and_then(|v| v.get(k).cloned()).unwrap_or_default(),
+            PropStore::Memory(v) => v.lock().ok().and_then(|v| v.get(k).cloned()).flatten().unwrap_or_default(),
         }
     }
 

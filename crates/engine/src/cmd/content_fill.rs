@@ -201,6 +201,7 @@ fn fill_workers(frames: usize) -> u64 {
 /// spill and keeps the input and the working copies in RAM (~32 bytes a pixel a frame). When
 /// even that peak is more than `available`, report it up front instead of running out of memory
 /// partway through (#1789, #2570 review).
+#[cfg(test)]
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
     memory_shortfall_with(frames, w, h, available, fill_workers(frames), false)
 }
