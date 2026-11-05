@@ -43,7 +43,7 @@ impl NativeBar {
 
     /// Run activations and keep the native menu in step with the app (call once per frame).
     pub fn update(&mut self, app: &mut EffectcraftApp, ctx: &egui::Context) {
-        let in_window = app.session.prefs.appearance.in_window_menu_bar_mac;
+        let in_window = app.session.prefs.appearance.menu_bar_shown();
         if self.in_window != Some(in_window) {
             self.in_window = Some(in_window);
             app.ui.show_menu_bar = in_window;

@@ -42,9 +42,17 @@ fn brand_and_home(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     let bresp = ui.interact(brand, egui::Id::unique("brand"), Sense::click());
     app.auto.add_response("header.about", &bresp, "About EffectCraft");
     widgets::focus_outline(ui, &bresp, &t);
-    if bresp.on_hover_text(tr("About EffectCraft")).clicked() {
+    let bresp = bresp.on_hover_text(tr("About EffectCraft"));
+    if bresp.clicked() {
         app.dialog = Some(Dialog::About);
     }
+    bresp.context_menu(|ui| {
+        let mut show_mb = app.ui.show_menu_bar;
+        if ui.checkbox(&mut show_mb, tr("Menu Bar")).clicked() {
+            app.set_menu_bar(Some(show_mb));
+            ui.close();
+        }
+    });
     x += 32.0;
 
     let home = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
@@ -54,6 +62,21 @@ fn brand_and_home(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
         app.ui.start_screen = !app.ui.start_screen;
     }
     x += 30.0;
+
+    if !app.ui.show_menu_bar {
+        let menu_btn = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
+        let label = tr("Show Menu Bar");
+        let tip = match app.session.shortcuts().shortcut_of("view.menuBar", &serde_json::Value::Null) {
+            Some(s) => format!("{label} ({})", crate::menus::shortcut_text(s)),
+            None => label.to_string(),
+        };
+        let menu_resp = widgets::icon_button(ui, menu_btn, Icon::Hamburger, false, &t, egui::Id::unique("hdr-show-menu-bar")).on_hover_text(tip);
+        app.auto.add_response("header.showMenuBar", &menu_resp, "Show Menu Bar");
+        if menu_resp.clicked() {
+            app.set_menu_bar(Some(true));
+        }
+        x += 30.0;
+    }
     p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, t.separator));
     x + 6.0
 }

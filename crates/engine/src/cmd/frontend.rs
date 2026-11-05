@@ -72,6 +72,7 @@ pub fn specs() -> Vec<CommandSpec> {
         // macOS uses Control+Command+F for native full screen. On Windows and Linux,
         // Cmd maps to Ctrl; the After Effects-style Ctrl+\ is window.maximizeApp.
         fe!("view.fullScreen", "Enter Full Screen", ["View"], cfg!(target_os = "macos").then_some("Ctrl+Cmd+F"), "{}", always),
+        fe!("view.menuBar", "Menu Bar", ["View"], Some("Cmd+Alt+M"), "{value?: bool} — toggle or set menu bar visibility", always),
         fe!(
             "view.newViewer",
             "New Viewer",
