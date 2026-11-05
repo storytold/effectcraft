@@ -9,6 +9,11 @@ effectcraft --control 9877        # or EFFECTCRAFT_CONTROL_PORT=9877
 The port must be a number from 1 to 65535, and `--control` overrides the variable. A bad port or an
 unknown option prints an error and the app exits with status 1 before it opens a window.
 
+An app started with a control port is meant to be driven by an agent, so nothing at launch waits
+for a person: the window opens without taking keyboard focus, and the app skips crash recovery, the
+Home screen (unless `--home` is given) and the startup update check. Help ▸ Check for Updates still
+works.
+
 - **Transport:** TCP on `127.0.0.1` only, one JSON object per line in each direction. Connections are
   persistent; requests on one connection are answered in order.
 - **Request:** `{"id": 1, "method": "engine.execute", "params": {...}}` (`id` is echoed back, `params`
