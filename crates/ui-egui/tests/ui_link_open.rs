@@ -73,6 +73,11 @@ fn otio() -> String {
     String::from_utf8(bytes).unwrap()
 }
 
+/// A result path under the system temp directory, so the test also holds where `/tmp` does not exist.
+fn link_result_path(tag: &str) -> String {
+    std::env::temp_dir().join(format!("ec-ui-link-{tag}-{}", std::process::id())).join(format!("{LINK_ID}.mov")).to_string_lossy().into_owned()
+}
+
 #[test]
 fn link_open_dismisses_the_home_screen() {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
@@ -82,7 +87,7 @@ fn link_open_dismisses_the_home_screen() {
         "link_id": LINK_ID,
         "payload": {"format": "otio-json", "data": otio()},
         "place": {"seconds": 0.5},
-        "result_path": format!("/tmp/ec-ui-link-open-{}/{LINK_ID}.mov", std::process::id()),
+        "result_path": link_result_path("open"),
         "source": {"app": "filmcraft", "doc_id": "22222222-2222-4222-8222-222222222222", "item": "12"},
     });
     let reply = send(&mut h, "link.open", params);
@@ -95,7 +100,7 @@ fn link_open_dismisses_the_home_screen() {
 fn link_attach_dismisses_the_home_screen() {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
-    let result_path = format!("/tmp/ec-ui-link-attach-{}/{LINK_ID}.mov", std::process::id());
+    let result_path = link_result_path("attach");
     let params = json!({
         "link_id": LINK_ID,
         "payload": {"format": "otio-json", "data": otio()},
@@ -122,7 +127,7 @@ fn app_activate_with_a_link_dismisses_the_home_screen() {
         "link_id": LINK_ID,
         "payload": {"format": "otio-json", "data": otio()},
         "place": {"seconds": 0.5},
-        "result_path": format!("/tmp/ec-ui-link-activate-{}/{LINK_ID}.mov", std::process::id()),
+        "result_path": link_result_path("activate"),
         "source": {"app": "filmcraft", "doc_id": "22222222-2222-4222-8222-222222222222", "item": "12"},
     });
     let opened = send(&mut h, "link.open", params);
@@ -158,7 +163,7 @@ fn the_viewer_says_when_the_footage_is_missing() {
         "link_id": LINK_ID,
         "payload": {"format": "otio-json", "data": otio()},
         "place": {"seconds": 0.5},
-        "result_path": format!("/tmp/ec-ui-link-missing-{}/{LINK_ID}.mov", std::process::id()),
+        "result_path": link_result_path("missing"),
         "source": {"app": "filmcraft", "doc_id": "22222222-2222-4222-8222-222222222222", "item": "12"},
     });
     let reply = send(&mut h, "link.open", params);

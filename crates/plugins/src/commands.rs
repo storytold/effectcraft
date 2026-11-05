@@ -155,9 +155,16 @@ pub fn register(host: &Arc<PluginHost>) -> Result<(), String> {
             &[],
             with_host(&weak, |h, p| {
                 let id = id_arg(p)?;
-                let accept = p.get("accept").and_then(Value::as_bool).unwrap_or(true);
+                let accept = match p.get("accept") {
+                    None | Some(Value::Null) => true,
+                    Some(v) => v.as_bool().ok_or_else(|| other("`accept` must be a boolean"))?,
+                };
                 let mut optional = Vec::new();
-                for name in p.get("optional").and_then(Value::as_array).into_iter().flatten() {
+                let listed: &[Value] = match p.get("optional") {
+                    None | Some(Value::Null) => &[],
+                    Some(v) => v.as_array().map(Vec::as_slice).ok_or_else(|| other("`optional` must be an array of strings"))?,
+                };
+                for name in listed {
                     let name = name.as_str().ok_or_else(|| other("`optional` must list strings"))?;
                     optional.push(name.parse::<Permission>().map_err(other)?);
                 }

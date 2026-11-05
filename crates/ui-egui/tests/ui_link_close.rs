@@ -53,6 +53,17 @@ fn request_close(h: &mut Harness<'_, EffectcraftApp>) {
     h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
 }
 
+/// Leftover encoder files in `dir`. Each encode names its own `<link>.mov.<n>.part`.
+fn part_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.contains(".mov.") && n.ends_with(".part"))
+        .collect()
+}
+
 fn sidecar_epoch(dir: &Path, link: &str) -> Option<u64> {
     let text = std::fs::read_to_string(dir.join(format!("{link}.ecproj"))).ok()?;
     Some(Project::from_json(&text).ok()?.craft_links.get(link)?.epoch)
@@ -80,7 +91,7 @@ fn closing_a_linked_window() {
     }
     assert!(closed, "the window never closed after the render");
     assert!(dir.join(format!("{FIRST}.mov")).exists(), "the window closed without the result movie");
-    assert!(!dir.join(format!("{FIRST}.mov.part")).exists());
+    assert!(part_files(&dir).is_empty(), "a part file was left: {:?}", part_files(&dir));
     assert_eq!(sidecar_epoch(&dir, FIRST), Some(1), "the sidecar carries the epoch of the result");
     assert!(!h.state().link_close_rendering());
 
@@ -97,7 +108,7 @@ fn closing_a_linked_window() {
     assert!(!h.state().link_close_rendering(), "the second request must end the render hold");
     assert!(h.state().ui.status.contains("without the result"), "status: {:?}", h.state().ui.status);
     assert!(sidecar_epoch(&dir, SECOND).is_some(), "the skip left the placeholder sidecar");
-    assert!(!dir.join(format!("{SECOND}.mov.part")).exists(), "a part file was left");
+    assert!(part_files(&dir).is_empty(), "a part file was left: {:?}", part_files(&dir));
 
     // The user keeps the window: the unsaved-changes prompt is cancelled. The skip ended with
     // that close, so the next close renders the result again.

@@ -127,3 +127,22 @@ fn a_v1_ec_plugin_loads_through_the_shim_and_renders_in_the_effect_registry() {
     host.manager.remove(id).unwrap();
     assert!(plugin(id).is_none());
 }
+
+#[test]
+fn the_grant_command_refuses_params_of_the_wrong_type() {
+    let (mut session, host, _comp) = rig();
+    let out = host.install_bytes(&command_package(), craft_plugin_host::store::Source::File).unwrap();
+    assert!(matches!(out, craft_plugin_host::lifecycle::InstallOutcome::NeedsGrant(_)), "{out:?}");
+    let grant = "plugin.app.effectcraft.grant";
+
+    // A string is not a boolean. The old code read it as "accept" and granted the plug-in.
+    let err = session.execute(grant, json!({"id": EDIT, "accept": "false"})).expect_err("a string `accept` must fail");
+    assert!(err.to_string().contains("boolean"), "{err}");
+    let err = session.execute(grant, json!({"id": EDIT, "optional": "clock"})).expect_err("a string `optional` must fail");
+    assert!(err.to_string().contains("array"), "{err}");
+    assert!(!matches!(host.manager.state(EDIT), Some(PluginState::Active { .. })), "a malformed answer must not grant");
+
+    // The prompt is still open: a well-formed answer works.
+    session.execute(grant, json!({"id": EDIT, "accept": true})).expect("a boolean answers the prompt");
+    assert!(matches!(host.manager.state(EDIT), Some(PluginState::Active { .. })), "{:?}", host.manager.state(EDIT));
+}
