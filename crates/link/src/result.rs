@@ -370,8 +370,8 @@ mod tests {
     /// expects `result_path_refused`, with the victim untouched and no directory made.
     #[test]
     fn a_project_cannot_aim_the_render_at_a_file_it_did_not_make() {
-        let dir = scratch("s02");
-        let bare = scratch("s02-bare");
+        let dir = scratch("refused");
+        let bare = scratch("refused-bare");
         std::fs::remove_file(bare.join(format!("{LINK}.ecproj"))).unwrap();
         let victim = dir.join("authorized_keys");
         std::fs::write(&victim, b"ssh-ed25519 KEEP").unwrap();
@@ -403,7 +403,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlink_at_the_result_name_is_refused() {
-        let dir = scratch("s02-symlink");
+        let dir = scratch("result-symlink");
         let victim = dir.join("victim");
         std::fs::write(&victim, b"KEEP").unwrap();
         let result = dir.join(format!("{LINK}.mov"));
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn a_result_made_by_the_link_is_replaced_and_a_refusal_has_a_code() {
-        let dir = scratch("s02-ok");
+        let dir = scratch("replaced");
         let result = dir.join(format!("{LINK}.mov"));
         let mut session = Session::default();
         let comp = add_comp(&mut session);
