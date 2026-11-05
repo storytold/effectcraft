@@ -7,6 +7,8 @@
 //!   from another process can't name a window of this one. An id without a name, or repeating a
 //!   name, says nothing about which script it was and is dropped.
 //! - [`bind`] gives each open script its references back at its window's id, in every workspace.
+//! - [`fit`] hides what the current workspace shows of scripts that aren't open. Their place stays
+//!   in `hidden` and in the stored workspaces, for [`bind`] to find when the script opens.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,7 +17,7 @@ use effectcraft_engine::scriptui::{ScriptUi, WindowKind};
 use serde_json::Value;
 
 use super::Snapshot;
-use crate::dock::{PanelKind, Workspace};
+use crate::dock::{PanelKind, Workspace, WorkspaceExt as _};
 use crate::state::UiState;
 
 /// Script window ids count up from 1 in each process and never get here.
@@ -140,9 +142,20 @@ pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
     ui.maximized = ui.maximized.map(|panel| remap_panel(panel, &mut map));
 }
 
+/// `ui.dock` shows no panel whose script window isn't open. Focus and the maximized panel follow.
+pub(crate) fn fit(ui: &mut UiState, script_ui: &ScriptUi) {
+    let live = |panel: &PanelKind| !matches!(panel, PanelKind::ScriptPanel(id) if script_ui.window(*id).is_none());
+    hide_unless(&mut ui.dock, live);
+    if !live(&ui.focused) {
+        ui.focused = UiState::default().focused;
+    }
+    ui.maximized = ui.maximized.filter(|panel| ui.dock.is_docked(*panel));
+}
+
 /// A new app's workspace meets the panels the frontend already opened.
 pub(crate) fn restore(ui: &mut UiState, session: &mut Session) {
     bind(ui, &session.script_ui);
+    fit(ui, &session.script_ui);
 }
 
 /// The names of the panels `ui` still refers to, as the file holds them.

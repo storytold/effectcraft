@@ -31,6 +31,7 @@ impl EffectcraftApp {
         self.ui.workspace = name.to_string();
         self.ui.dock = self.ui.saved_workspaces.get(name).cloned().unwrap_or_else(|| dock::Workspace::new(dock::workspace(name)));
         self.ui.maximized = None;
+        crate::workspace_state::script_panels::fit(&mut self.ui, &self.session.script_ui);
     }
 
     /// Built-in workspaces followed by the saved ones (Window ▸ Workspace ▸ Save as New Workspace).
