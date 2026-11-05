@@ -225,6 +225,40 @@ fn set_closed(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!(c))
 }
 
+/// Rebuild a rectangular mask or shape path with corner radius `radius` (layer pixels; 0 gives
+/// square corners). The rectangle is the path's bounding box; a path whose vertices don't all
+/// lie on that box's edges is not a rectangle and is refused rather than reshaped.
+fn set_roundness(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "mask.setRoundness";
+    let radius = p.get("roundness").and_then(Value::as_f64).filter(|r| r.is_finite() && *r >= 0.0);
+    let radius = radius.ok_or_else(|| bad(c, "need `roundness`: a corner radius in pixels, 0 or more"))?;
+    edit_path(s, p, c, |sp| {
+        let Some(first) = sp.vertices.first() else { return Err(bad(c, "the path has no vertices")) };
+        let (mut lo, mut hi) = (*first, *first);
+        for v in &sp.vertices {
+            lo = [lo[0].min(v[0]), lo[1].min(v[1])];
+            hi = [hi[0].max(v[0]), hi[1].max(v[1])];
+        }
+        let on_edge = |v: &[f64; 2]| v[0] == lo[0] || v[0] == hi[0] || v[1] == lo[1] || v[1] == hi[1];
+        // A straight segment (no tangents) must run along the box; a curve is a rounded corner.
+        let n = sp.vertices.len();
+        let flat = |i: usize| {
+            let j = (i + 1) % n;
+            let zero = |t: Option<&[f64; 2]>| t.is_none_or(|t| *t == [0.0, 0.0]);
+            let (a, b) = (sp.vertices[i], sp.vertices[j]);
+            !(zero(sp.out_tangents.get(i)) && zero(sp.in_tangents.get(j))) || a[0] == b[0] || a[1] == b[1]
+        };
+        if !sp.closed || n < 4 || !sp.vertices.iter().all(on_edge) || !(0..n).all(flat) || hi[0] <= lo[0] || hi[1] <= lo[1] {
+            return Err(bad(c, "the path is not a closed rectangle or rounded rectangle"));
+        }
+        let size = [hi[0] - lo[0], hi[1] - lo[1]];
+        let bez = effectcraft_path::rect(size, [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0], radius);
+        *sp = effectcraft_path::from_kurbo(&bez).into_iter().next().ok_or_else(|| bad(c, "could not rebuild the path"))?;
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
 /// Selected (or given) vertices grouped per (layer, mask).
 fn vertex_groups(s: &Session, p: &Value) -> Result<std::collections::BTreeMap<(u64, Uid), Vec<usize>>> {
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
@@ -645,6 +679,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mask.addVertex", "Add Mask Vertex", [], None, "{layer?, mask, point: [x,y], in?, out?, index?}", has_layers, add_vertex),
         cmd!("mask.setVertex", "Set Mask Vertex", [], None, "{layer?, mask, index, point?, in?, out?, merge?}", has_layers, set_vertex),
         cmd!("mask.setClosed", "Closed", ["Layer", "Mask and Shape Path"], None, "{layer?, mask, closed?}", has_layers, set_closed),
+        cmd!("mask.setRoundness", "Set Mask Roundness", [], None, "{layer?, mask, roundness (corner radius in px; 0 = square)}", has_layers, set_roundness),
         cmd!("mask.selectVertices", "Select Mask Vertices", [], None, "{vertices: [{layer, mask, index}], add?, toggle?}", has_comp, select_vertices),
         cmd!("mask.moveVertices", "Move Mask Vertices", [], None, "{vertices?: [{layer, mask, index}], delta: [dx,dy], merge?}", has_vertices, move_vertices),
         cmd!("mask.deleteVertices", "Delete Mask Vertices", [], None, "{vertices?}", has_vertices, delete_vertices),

@@ -667,3 +667,55 @@ fn free_transform_drag_undoes_in_one_step() {
     s.execute("edit.redo", json!({})).unwrap();
     assert_eq!(mask_path(&s, l, m), after, "redo restores the whole drag");
 }
+
+fn bounds(p: &effectcraft_keyframe::ShapePath) -> ([f64; 2], [f64; 2]) {
+    let lo = p.vertices.iter().fold([f64::MAX; 2], |a, v| [a[0].min(v[0]), a[1].min(v[1])]);
+    let hi = p.vertices.iter().fold([f64::MIN; 2], |a, v| [a[0].max(v[0]), a[1].max(v[1])]);
+    (lo, hi)
+}
+
+#[test]
+fn rounded_mask_roundness_is_set_on_creation_and_editable() {
+    let mut s = comp();
+    let l = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 400, "height": 300})).unwrap()["layer"].as_u64().unwrap();
+    // A 20 px radius by default; an explicit radius moves the first vertex.
+    let m = s.execute("layer.addMask", json!({"layer": l, "shape": "rounded", "rect": [100, 100, 200, 100]})).unwrap()["mask"].as_u64().unwrap();
+    let default = mask_path(&s, l, m);
+    assert_eq!(default.vertices[0], [300.0, 120.0]);
+    let m2 =
+        s.execute("layer.addMask", json!({"layer": l, "shape": "rounded", "rect": [100, 100, 200, 100], "roundness": 30})).unwrap()["mask"].as_u64().unwrap();
+    assert_eq!(mask_path(&s, l, m2).vertices[0], [300.0, 130.0]);
+    assert!(s.execute("layer.addMask", json!({"layer": l, "shape": "ellipse", "roundness": 5})).is_err());
+    assert!(s.execute("layer.addMask", json!({"layer": l, "shape": "rounded", "roundness": -1})).is_err());
+    // Edit it afterwards: same box, new radius; 0 is a plain rectangle; undo restores.
+    s.execute("mask.setRoundness", json!({"layer": l, "mask": m, "roundness": 50})).unwrap();
+    let p = mask_path(&s, l, m);
+    assert_eq!(p.vertices[0], [300.0, 150.0]);
+    assert_eq!(bounds(&p), ([100.0, 100.0], [300.0, 200.0]));
+    s.execute("mask.setRoundness", json!({"layer": l, "mask": m, "roundness": 0})).unwrap();
+    let p = mask_path(&s, l, m);
+    assert_eq!(p.vertices.len(), 4);
+    assert_eq!(bounds(&p), ([100.0, 100.0], [300.0, 200.0]));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, l, m).vertices[0], [300.0, 150.0]);
+}
+
+#[test]
+fn set_roundness_refuses_what_is_not_a_rectangle() {
+    let mut s = comp();
+    let l = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 400, "height": 300})).unwrap()["layer"].as_u64().unwrap();
+    let star = s.execute("layer.addMask", json!({"layer": l, "shape": "star"})).unwrap()["mask"].as_u64().unwrap();
+    let before = mask_path(&s, l, star);
+    assert!(s.execute("mask.setRoundness", json!({"layer": l, "mask": star, "roundness": 10})).is_err());
+    assert_eq!(mask_path(&s, l, star), before, "a refused edit leaves the mask alone");
+    assert!(s.execute("mask.setRoundness", json!({"layer": l, "mask": star})).is_err(), "needs a roundness");
+    // A diamond inscribed in its box touches every edge but is not a rectangle.
+    s.execute("mask.new", json!({"layer": l, "vertices": [[150, 100], [200, 150], [150, 200], [100, 150]], "closed": true})).unwrap();
+    let diamond = layer(&s, l).masks().unwrap().groups().last().unwrap().uid;
+    assert!(s.execute("mask.setRoundness", json!({"layer": l, "mask": diamond, "roundness": 10})).is_err());
+    assert_eq!(mask_path(&s, l, diamond).vertices.len(), 4);
+    // "roundness": null is unset, and an unknown shape is reported as such.
+    s.execute("layer.addMask", json!({"layer": l, "shape": "rounded", "roundness": null})).unwrap();
+    let e = s.execute("layer.addMask", json!({"layer": l, "shape": "foo", "roundness": 5})).unwrap_err().to_string();
+    assert!(e.contains("unknown shape"), "{e}");
+}
