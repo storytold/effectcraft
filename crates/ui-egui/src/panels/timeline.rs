@@ -4680,15 +4680,16 @@ fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect
 }
 
 /// What a box over the Timeline selects: the layer rows it crosses (locked layers stay out) and
-/// the keys whose markers it touches. Rows reach across the outline and the time graph, so a box
-/// started on either side selects the rows it crosses. Keys exist only in the time graph, so the
-/// box is cut at its left edge (`graph_x0`; a key scrolled out under the outline isn't touched).
+/// the keys whose markers it touches. A box that reaches the outline (started on either side)
+/// selects the rows it crosses; one kept inside the time graph selects keys only, as before.
+/// Keys exist only in the time graph, so the box is cut at its left edge (`graph_x0`; a key
+/// scrolled out under the outline isn't touched).
 /// `graph_on`: the Graph Editor shows no key markers here.
 #[allow(clippy::too_many_arguments)]
 fn box_targets(comp: &Comp, rows: &[Row], hit_rows: &[(Rect, Row)], tm: &TMap, top: f32, rh: f32, graph_x0: f32, graph_on: bool, br: Rect) -> (Vec<u64>, Vec<effectcraft_engine::KeyRef>) {
     let layers = hit_rows
         .iter()
-        .filter(|(r, row)| matches!(row.kind, RowKind::Layer) && r.intersects(br))
+        .filter(|(r, row)| br.min.x < graph_x0 && matches!(row.kind, RowKind::Layer) && r.intersects(br))
         .filter(|(_, row)| comp.layer(row.layer).is_some_and(|l| !l.switches.locked))
         .map(|(_, row)| row.layer.0)
         .collect();

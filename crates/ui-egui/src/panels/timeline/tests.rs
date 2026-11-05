@@ -720,6 +720,9 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
     // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
     let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
     assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
+    // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
+    let (ls, ks) = go(Rect::from_min_max(pos2(204.0, 5.0), pos2(260.0, 65.0)));
+    assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
     // A locked layer is not selected as a row (the engine drops its keys in keys.select).
     let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
     assert_eq!(ls, [layers[0], layers[1]]);
