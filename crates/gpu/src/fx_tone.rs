@@ -190,7 +190,9 @@ fn arbitrary_map_table(map: &[f32], phase: f64) -> Option<Vec<f32>> {
     }
     let at = |v: f32| {
         let x = (v as f64 * scale + offset).rem_euclid(n as f64);
-        let i = x.floor() as usize;
+        // `rem_euclid` can round a tiny negative phase up to `n`: wrap the index like the CPU
+        // lookup (`color3::arbitrary_map`) so both endpoints come from the start of the map.
+        let i = x.floor() as usize % n;
         let a = *map.get(i).unwrap_or(&0.0);
         let b = *map.get((i + 1).min(n - 1)).unwrap_or(&a);
         (a + (b - a) * (x - x.floor()) as f32, (b - a) * scale as f32)
@@ -434,4 +436,20 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         _ => return None,
     }
     run(e, &p, b, data)
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::arbitrary_map_table;
+
+    /// A phase just below zero rounds `rem_euclid` up to `n` at input 0: the table must hold the
+    /// map's first entry and the slope towards its second, as the CPU lookup does.
+    #[test]
+    fn arbitrary_map_wraps_a_phase_rounded_to_the_end() {
+        let map = [0.25f32, 0.75, 1.0];
+        let table = arbitrary_map_table(&map, -1e-300).unwrap();
+        assert_eq!(table[0], 0.0);
+        assert_eq!(table[1], 0.25, "value at input 0 is map[0]");
+        assert_eq!(table[2], 0.5 * 2.0, "slope from map[0] to map[1], times n - 1");
+    }
 }

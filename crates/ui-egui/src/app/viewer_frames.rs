@@ -105,6 +105,15 @@ impl EffectcraftApp {
         self.frame_series(comp, scale as f64 / 1000.0)
     }
 
+    /// The frame series a preview with options `o` plays: at its Resolution, or the one the
+    /// viewer shows with Auto (it follows the zoom). The Preview panel's cache bar counts it.
+    pub fn preview_series(&self, comp: ItemId, o: &effectcraft_engine::preview::PreviewPreset) -> FrameKey {
+        match o.resolution.factor(o.custom_resolution) {
+            Some(n) => self.frame_series(comp, 1.0 / f64::from(n)),
+            None => self.shown_series(comp),
+        }
+    }
+
     /// Hash of the comp viewer's 3D view camera (0 for the active camera view).
     pub fn view_hash(&self, comp: ItemId) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -164,6 +173,7 @@ impl EffectcraftApp {
             backend: effectcraft_engine::render::Backend::Auto,
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
+            skip_hdr_step: false,
             proxy: Default::default(),
         }
     }
