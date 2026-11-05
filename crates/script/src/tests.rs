@@ -309,6 +309,59 @@ fn wiggle_paths_properties_by_match_name() {
     assert_eq!(sh.props.prop("contents/wiggle/spatialPhase").unwrap().value, KV::Scalar(45.0));
 }
 
+/// Scripts reach Offset Paths' and Zig Zag's properties by their match names.
+#[test]
+fn offset_paths_and_zig_zag_properties_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("O", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var root = sh.property("ADBE Root Vectors Group");
+        root.addProperty("ADBE Vector Filter - Offset");
+        root.addProperty("ADBE Vector Filter - Zigzag");
+        var o = root.property("ADBE Vector Filter - Offset");
+        var z = root.property("ADBE Vector Filter - Zigzag");
+        var on = ["ADBE Vector Offset Amount", "ADBE Vector Offset Line Join", "ADBE Vector Offset Miter Limit",
+                  "ADBE Vector Offset Copies", "ADBE Vector Offset Copy Offset"];
+        var zn = ["ADBE Vector Zigzag Size", "ADBE Vector Zigzag Detail", "ADBE Vector Zigzag Points"];
+        var names = [];
+        for (var i = 0; i < on.length; i++) names.push([o.property(on[i]).matchName, o.property(on[i]).name]);
+        for (var j = 0; j < zn.length; j++) names.push([z.property(zn[j]).matchName, z.property(zn[j]).name]);
+        var before = [o.property("ADBE Vector Offset Amount").value, o.property("ADBE Vector Offset Line Join").value,
+                      z.property("ADBE Vector Zigzag Points").value];
+        o.property("ADBE Vector Offset Amount").setValue(-6);
+        o.property("ADBE Vector Offset Copies").setValue(3);
+        z.property("ADBE Vector Zigzag Detail").setValue(8);
+        [names, before, o.property("ADBE Vector Offset Nope") === null, z.property("ADBE Vector Zigzag Nope") === null]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            [
+                ["ADBE Vector Offset Amount", "Amount"],
+                ["ADBE Vector Offset Line Join", "Line Join"],
+                ["ADBE Vector Offset Miter Limit", "Miter Limit"],
+                ["ADBE Vector Offset Copies", "Copies"],
+                ["ADBE Vector Offset Copy Offset", "Copy Offset"],
+                ["ADBE Vector Zigzag Size", "Size"],
+                ["ADBE Vector Zigzag Detail", "Ridges per segment"],
+                ["ADBE Vector Zigzag Points", "Points"]
+            ],
+            [10, 1, 1],
+            true,
+            true
+        ])
+    );
+    let (_, c) = comp_named(&s, "O");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/offset/amount").unwrap().value, KV::Scalar(-6.0));
+    assert_eq!(sh.props.prop("contents/offset/copies").unwrap().value, KV::Scalar(3.0));
+    assert_eq!(sh.props.prop("contents/zigzag/ridges").unwrap().value, KV::Scalar(8.0));
+}
+
 #[test]
 fn match_names_and_lookups() {
     let mut s = session();

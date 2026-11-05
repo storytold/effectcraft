@@ -3,6 +3,8 @@
 use crate::EffectcraftApp;
 
 #[cfg(not(target_arch = "wasm32"))]
+use craft_update::dialog::{CheckResultDialog, CheckResultResponse};
+#[cfg(not(target_arch = "wasm32"))]
 use craft_update::updater::{Action, Status, Updater};
 
 pub(crate) struct Runtime {
@@ -14,6 +16,7 @@ pub(crate) struct Runtime {
     #[cfg(not(target_arch = "wasm32"))]
     check_requested: bool,
     pub(crate) manual_window_open: bool,
+    #[cfg(target_arch = "wasm32")]
     pub(crate) status_message: Option<String>,
 }
 
@@ -27,6 +30,7 @@ impl Default for Runtime {
             #[cfg(not(target_arch = "wasm32"))]
             check_requested: false,
             manual_window_open: false,
+            #[cfg(target_arch = "wasm32")]
             status_message: None,
         }
     }
@@ -44,6 +48,7 @@ pub(crate) fn check(app: &mut EffectcraftApp) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.updates_rt.check_requested = true;
+        app.updates_rt.manual_window_open = true;
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -77,19 +82,24 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             Action::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::None => {}
         }
-        // The window answers Help ▸ Check for Updates, so it follows the updater's status.
         let rt = &mut app.updates_rt;
-        (rt.manual_window_open, rt.status_message) = match rt.updater.status() {
-            Status::Idle => (false, None),
-            Status::Checking => (true, None),
-            Status::UpToDate => (
-                true,
-                Some(crate::i18n::tr("EffectCraft {version} is currently the newest version available.").replace("{version}", env!("CARGO_PKG_VERSION"))),
-            ),
-            Status::Failed(e) => (true, Some(crate::i18n::tr("Could not check for updates:\n{error}").replace("{error}", e))),
-        };
+        if rt.manual_window_open {
+            match CheckResultDialog::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).show(ctx, rt.updater.status()) {
+                CheckResultResponse::None => {}
+                CheckResultResponse::Close => {
+                    rt.manual_window_open = false;
+                    rt.updater.dismiss_status();
+                }
+                CheckResultResponse::CheckAgain => rt.updater.check_now(ctx),
+            }
+            // A check that found a release leaves the status idle and the startup prompt takes over.
+            if matches!(rt.updater.status(), Status::Idle) && !rt.check_requested {
+                rt.manual_window_open = false;
+            }
+        }
     }
 
+    #[cfg(target_arch = "wasm32")]
     if app.updates_rt.manual_window_open {
         let mut open = true;
         let mut close = false;
@@ -101,8 +111,6 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             .show(ctx, |ui| {
                 if let Some(msg) = &app.updates_rt.status_message {
                     ui.label(msg);
-                } else {
-                    ui.label(crate::i18n::tr("Checking for updates…"));
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -115,11 +123,5 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             app.updates_rt.manual_window_open = false;
             app.updates_rt.status_message = None;
         }
-    }
-
-    // Closing the window dismisses the outcome it showed.
-    #[cfg(not(target_arch = "wasm32"))]
-    if !app.updates_rt.manual_window_open {
-        app.updates_rt.updater.dismiss_status();
     }
 }

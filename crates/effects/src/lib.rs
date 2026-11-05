@@ -104,12 +104,12 @@ pub use generate3::{
 };
 pub use noise::GrainLook;
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
-pub use transition::place_layer;
+pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
 pub use noise3::{FractalGpu, NOISE_CELL, fractal_gpu};
-pub use stylize3::{BumpLight, bump_layer_id};
+pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
 // effectcraft-gpu fx_tone.
@@ -544,6 +544,12 @@ pub struct EffectEnv<'a> {
     /// comp's and the layer's motion blur switches are on (Transform's Use Composition's
     /// Shutter Angle).
     pub shutter: Option<(f64, f64, u32)>,
+    /// The layer's source time range in **layer time** seconds as (first, end): the layer time of
+    /// the first source frame and the time just past the last one (so the source lasts
+    /// `end - first` seconds and its last frame starts one frame before `end`). `None` when the
+    /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
+    /// Retimers clamp their source requests to it.
+    pub layer_span: Option<(f64, f64)>,
 }
 
 /// What an effect gets to render with.

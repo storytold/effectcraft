@@ -26,7 +26,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 
 | Category | Effects | On the GPU | Known differences or bugs |
 |---|---:|---:|---|
-| 3D Channel | 8 | 8 | Cryptomatte selection can't be set in the UI and the GPU path is slow (#473; quoted names with commas fixed); multi-layer EXR decode shared (#474 open: f16 storage and cache sizing remain) |
+| 3D Channel | 8 | 8 | Cryptomatte's GPU path is slow (#473; the Selection is picked in the viewer with an eyedropper, quoted names with commas fixed); multi-layer EXR decode shared (#474 open: f16 storage and cache sizing remain) |
 | Audio | 13 | 0 | CPU by design (applied in the mixdown) |
 | Blur & Sharpen | 16 | 15 | Radial Blur keeps the layer edges as After Effects 2026 (713 now pixel-identical); Gaussian Blur interaction and output to be measured first ([fidelity/ae-2026-acceptance.md](fidelity/ae-2026-acceptance.md)) |
 | Channel | 13 | 13 | — |
