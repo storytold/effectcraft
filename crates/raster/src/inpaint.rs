@@ -562,23 +562,31 @@ pub fn patch_fill(img: &Image, hole: &[bool], init: Option<&Image>, patch: usize
 
 // ------------------------------------------------------------------ flow-guided propagation
 
-/// Block flow from `a` to `b` with the tiles that touch either hole replaced by the membrane
-/// interpolation of the surrounding motion (flow completion).
+/// Block flow `a` → `b` (tile 8, search radius 6) with the tiles that touch either hole replaced
+/// by the membrane interpolation of the surrounding motion (flow completion).
 fn completed_flow(a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flow {
-    let mut f = block_flow(a, b, 8, 6);
+    let f = block_flow(a, b, 8, 6);
+    complete_flow(f, hole_a, hole_b, a.width as usize, a.height as usize)
+}
+
+/// The completion half of `completed_flow`: the tiles of `f` (a `block_flow` of `w × h`) that
+/// touch either hole become the harmonic interpolation of the surrounding motion. Split out so a
+/// hardware backend can compute the block matching itself and hand the raw field here; the
+/// completion is cheap (the field is a `cols × rows` grid) and stays on the CPU.
+pub fn complete_flow(mut f: Flow, hole_a: &[bool], hole_b: &[bool], w: usize, h: usize) -> Flow {
     if f.v.is_empty() {
         return f;
     }
-    let (w, bs) = (a.width as usize, f.block as usize);
+    let bs = f.block as usize;
     let mut known = vec![true; f.v.len()];
     for (i, k) in known.iter_mut().enumerate() {
         let (c, r) = (i % f.cols, i / f.cols);
         // A tile is unreliable when any pixel within it (and a block's margin) is a hole.
         let (x0, y0) = ((c * bs).saturating_sub(bs / 2), (r * bs).saturating_sub(bs / 2));
-        let (x1, y1) = (((c + 1) * bs + bs / 2).min(w), ((r + 1) * bs + bs / 2).min(a.height as usize));
+        let (x1, y1) = (((c + 1) * bs + bs / 2).min(w), ((r + 1) * bs + bs / 2).min(h));
         'tile: for y in y0..y1 {
             for x in x0..x1 {
-                if hole_a[y * w + x] || hole_b[y * w + x] {
+                if hole_a.get(y * w + x).copied().unwrap_or(true) || hole_b.get(y * w + x).copied().unwrap_or(true) {
                     *k = false;
                     break 'tile;
                 }
@@ -598,6 +606,7 @@ fn completed_flow(a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flo
 }
 
 /// The input of a sequence fill.
+#[derive(Clone)]
 pub struct FillInput {
     /// Frames (premultiplied RGBA, all the same size).
     pub frames: Vec<Image>,
@@ -607,38 +616,44 @@ pub struct FillInput {
     pub references: Vec<(usize, Image)>,
 }
 
-/// Trace pixel (x, y) of frame `t` through `flows` (`step` = +1 forward with `fwd`, −1 backward
-/// with `bwd`) to the nearest frame where it is visible: (sampled colour, frames travelled).
-fn trace(
-    t: usize,
+/// Shared frame and flow data for tracing pixels through a sequence.
+struct TraceContext<'a> {
+    fwd: &'a [Flow],
+    bwd: &'a [Flow],
+    known: &'a (dyn Fn(usize, i64, i64) -> bool + Sync),
+    frames: &'a [&'a Image],
+    max: usize,
+}
+
+/// Starting frame, point, and direction for a flow trace.
+struct TraceStart {
+    frame: usize,
     x: f64,
     y: f64,
     step: i64,
-    fwd: &[Flow],
-    bwd: &[Flow],
-    known: &dyn Fn(usize, i64, i64) -> bool,
-    frames: &[&Image],
-    max: usize,
-) -> Option<([f32; 4], usize)> {
-    let n = frames.len();
-    let (w, h) = (frames[0].width as f64, frames[0].height as f64);
-    let (mut px, mut py) = (x, y);
-    let mut k = t as i64;
-    for d in 1..=max {
-        let v = if step > 0 {
+}
+
+/// Trace a point to the nearest visible frame: (sampled colour, frames travelled).
+fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usize)> {
+    let n = context.frames.len();
+    let (w, h) = (context.frames[0].width as f64, context.frames[0].height as f64);
+    let (mut px, mut py) = (start.x, start.y);
+    let mut k = start.frame as i64;
+    for d in 1..=context.max {
+        let v = if start.step > 0 {
             if k as usize + 1 >= n {
                 return None;
             }
-            fwd[k as usize].at(px, py)
+            context.fwd[k as usize].at(px, py)
         } else {
             if k == 0 {
                 return None;
             }
-            bwd[k as usize - 1].at(px, py)
+            context.bwd[k as usize - 1].at(px, py)
         };
         px += v[0] as f64;
         py += v[1] as f64;
-        k += step;
+        k += start.step;
         if px < 0.0 || py < 0.0 || px >= w || py >= h {
             return None;
         }
@@ -646,16 +661,62 @@ fn trace(
         let (x0, y0) = ((px - 0.5).floor() as i64, (py - 0.5).floor() as i64);
         let ok = [(x0, y0), (x0 + 1, y0), (x0, y0 + 1), (x0 + 1, y0 + 1)]
             .iter()
-            .all(|&(xx, yy)| known(k as usize, xx.clamp(0, w as i64 - 1), yy.clamp(0, h as i64 - 1)));
+            .all(|&(xx, yy)| (context.known)(k as usize, xx.clamp(0, w as i64 - 1), yy.clamp(0, h as i64 - 1)));
         if ok {
-            return Some((frames[k as usize].sample_bilinear_clamped(px, py), d));
+            return Some((context.frames[k as usize].sample_bilinear_clamped(px, py), d));
         }
     }
     None
 }
 
-/// Fill a range of frames. `progress(done, total)` returns `false` to cancel (→ `None`).
+/// A hardware backend for the fill's stages (the GPU compositor implements it; see
+/// `effectcraft_render::Accelerator::inpaint`). Every method has the CPU implementation as its
+/// default, so a backend that cannot take a stage returns the CPU's work and the fill stays
+/// correct — only slower.
+///
+/// The orchestration ([`fill_sequence_with`]) stays on the CPU: the sequence's frame-to-frame
+/// coupling is sequential, and only the per-frame and per-pair work is worth offloading.
+///
+/// **A backend must be safe to call concurrently.** [`fill_sequence_with`] runs the stages of
+/// independent frames and frame pairs in parallel (`rayon`), so `membrane`, `flow` and `patch`
+/// may all be entered from several threads at once — a backend that owns a device must serialise
+/// its use of it (the GPU compositor's per-call encoder does; a backend whose device cannot be
+/// used from several threads must lock).
+pub trait FillBackend: Send + Sync {
+    /// [`membrane_fill`]: the `hole` pixels take the harmonic interpolation of their border.
+    fn membrane(&self, img: &Image, hole: &[bool]) -> Image {
+        membrane_fill(img, hole)
+    }
+    /// `membrane_core`: harmonic interpolation of `data`'s unknown pixels in place (`known` is
+    /// true where the pixel is known).
+    fn membrane_known(&self, data: &mut [[f32; 4]], known: &[bool], w: usize, h: usize) {
+        membrane_core(data, known, w, h)
+    }
+    /// `completed_flow`: block flow `a` → `b` with the tiles touching either hole replaced by
+    /// the membrane interpolation of the surrounding motion.
+    fn flow(&self, a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flow {
+        completed_flow(a, b, hole_a, hole_b)
+    }
+    /// [`patch_fill`]: PatchMatch synthesis of `img`'s `hole` (`init`: a starting guess, e.g. the
+    /// previous frame's fill warped here).
+    fn patch(&self, img: &Image, hole: &[bool], init: Option<&Image>, patch: usize, seed: u32) -> Image {
+        patch_fill(img, hole, init, patch, seed)
+    }
+}
+
+/// The CPU backend: every stage is the reference implementation.
+pub struct CpuFill;
+
+impl FillBackend for CpuFill {}
+
+/// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
+/// (→ `None`).
 pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
+    fill_sequence_with(input.clone(), o, &CpuFill, progress)
+}
+
+/// [`fill_sequence`] with a hardware backend for the stages it can take (see [`FillBackend`]).
+pub fn fill_sequence_with(mut input: FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
     let n = input.frames.len();
     if n == 0 {
         return Some(vec![]);
@@ -666,7 +727,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
     if o.method == FillMethod::EdgeBlend {
         let mut out = Vec::with_capacity(n);
         for (i, (f, hl)) in input.frames.iter().zip(&input.holes).enumerate() {
-            out.push(opaque_fill(membrane_fill(f, hl), hl));
+            out.push(opaque_fill(backend.membrane(f, hl), hl));
             if !progress(i + 1, n) {
                 return None;
             }
@@ -674,10 +735,11 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
         return Some(out);
     }
     // Reference frames make their frame fully known.
-    let mut frames: Vec<Image> = input.frames.clone();
-    let mut holes: Vec<Vec<bool>> = input.holes.clone();
+    let mut frames: Vec<Image> = std::mem::take(&mut input.frames);
+    let mut holes: Vec<Vec<bool>> = std::mem::take(&mut input.holes);
+    let references = std::mem::take(&mut input.references);
     let mut is_ref = vec![false; n];
-    for (k, img) in &input.references {
+    for (k, img) in &references {
         if *k < n && img.width as usize == w && img.height as usize == h {
             frames[*k] = img.clone();
             holes[*k] = vec![false; w * h];
@@ -685,20 +747,22 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
         }
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
-    let pre: Vec<Image> = frames.par_iter().zip(&holes).map(|(f, hl)| membrane_fill(f, hl)).collect();
+    let pre: Vec<Image> = frames.par_iter().zip(&holes).map(|(f, hl)| backend.membrane(f, hl)).collect();
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
         .into_par_iter()
-        .map(|i| (completed_flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), completed_flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
+        .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
         .collect();
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
+    drop(pre);
     if !progress(1, total) {
         return None;
     }
     // 2. Propagation (and the lighting-correction border ring).
     let refs: Vec<&Image> = frames.iter().collect();
     let known = |k: usize, x: i64, y: i64| !holes[k][y as usize * w + x as usize];
+    let trace_context = TraceContext { fwd: &fwd, bwd: &bwd, known: &known, frames: &refs, max: n };
     let ring_r = 2usize;
-    let propagated: Vec<(Image, Vec<bool>)> = (0..n)
+    let mut propagated: Vec<(Image, Vec<bool>)> = (0..n)
         .into_par_iter()
         .map(|t| {
             let mut img = frames[t].clone();
@@ -708,8 +772,8 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             }
             let sample = |i: usize| -> Option<[f32; 4]> {
                 let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
-                let f = trace(t, x, y, 1, &fwd, &bwd, &known, &refs, n);
-                let b = trace(t, x, y, -1, &fwd, &bwd, &known, &refs, n);
+                let f = trace(&trace_context, TraceStart { frame: t, x, y, step: 1 });
+                let b = trace(&trace_context, TraceStart { frame: t, x, y, step: -1 });
                 match (f, b) {
                     (Some((a, da)), Some((c, dc))) => {
                         let (wa, wc) = (1.0 / da as f32, 1.0 / dc as f32);
@@ -739,7 +803,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
                         diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
                     }
                 }
-                membrane_core(&mut diff, &dk, w, h);
+                backend.membrane_known(&mut diff, &dk, w, h);
                 for (i, _) in &filled {
                     for c in 0..3 {
                         img.data[*i][c] += o.lighting * diff[*i][c];
@@ -749,6 +813,8 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             (img, left)
         })
         .collect();
+    drop(refs);
+    drop(frames);
     if !progress(2, total) {
         return None;
     }
@@ -760,23 +826,27 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
     };
     // Frames before t0 are complete already.
     for (t, slot) in out.iter_mut().enumerate().take(t0) {
-        *slot = Some(propagated[t].0.clone());
+        *slot = Some(std::mem::take(&mut propagated[t].0));
     }
     let mut done = 2;
-    out[t0] = Some(patch_fill(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
+    let (img0, left0) = std::mem::take(&mut propagated[t0]);
+    out[t0] = Some(backend.patch(&img0, &left0, None, o.patch, o.seed));
+    drop((img0, left0));
     done += 1;
     if !progress(done, total) {
         return None;
     }
     for t in t0 + 1..n {
-        let (img, left) = &propagated[t];
+        // Taken, not cloned: each propagated frame is freed once its output exists.
+        let (img, left) = std::mem::take(&mut propagated[t]);
+        let (img, left) = (&img, &left);
         if !left.iter().any(|b| *b) {
             out[t] = Some(img.clone());
         } else {
             // Warp the previous result here along the backward flow (t → t − 1).
             // Frames after `t0` are filled in order, so the previous one is set.
             let Some(prev) = out[t - 1].as_ref() else {
-                out[t] = Some(patch_fill(img, left, None, o.patch, o.seed));
+                out[t] = Some(backend.patch(img, left, None, o.patch, o.seed));
                 continue;
             };
             let mut warped = img.clone();
@@ -789,7 +859,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             }
             out[t] = Some(match o.method {
                 FillMethod::Surface => warped,
-                _ => patch_fill(img, left, Some(&warped), o.patch, o.seed),
+                _ => backend.patch(img, left, Some(&warped), o.patch, o.seed),
             });
         }
         done += 1;

@@ -879,7 +879,7 @@ fn corner_pin(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let o = b.to_px([0.0, 0.0]);
     let m = quad * Mat3::scale(vec2(1.0 / (w * b.scale), 1.0 / (h * b.scale))) * Mat3::translate(vec2(-o.0, -o.1));
     let empty = e.image(b.img.width, b.img.height);
-    b.img = ops::warp(e, &empty, &b.img, &m, Sampling::Bilinear, BlendMode::Normal, 1.0, 0, None);
+    b.img = ops::warp(e, &empty, &b.img, &m, ops::WarpOptions { sampling: Sampling::Bilinear, mode: BlendMode::Normal, opacity: 1.0, seed: 0 }, None);
     Some(b)
 }
 
@@ -937,11 +937,12 @@ pub(crate) fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
         p.f[2] = ctx.params.color("colorB");
         e.pixels("glow_bright", &p, &b.img, None, &bright, None);
     }
-    let s = (radius / 2.0).max(0.5);
+    let s = effectcraft_effects::glow_sigma(radius);
     let blurred = gaussian_blur(e, &bright, s * kx, s * ky, false);
     let operation = ctx.params.e("operation");
     let glow_op = effectcraft_effects::glow_operation(ctx);
     let mut p = Params::default();
+    p.u[0][1] = (ctx.params.e("based") == 0) as u32;
     p.f[0][0] = intensity;
     let out = e.scratch(b.img.width, b.img.height);
     if operation == 0 && glow_op != BlendMode::Add {
@@ -963,15 +964,7 @@ pub(crate) fn transform_blur(ctx: &EffectCtx) -> bool {
 
 /// distort::transform_matrix.
 fn transform_matrix(pr: &effectcraft_effects::Params, b: &GBuf) -> Mat3 {
-    let anchor = b.to_px(pr.v2("anchor"));
-    let pos = b.to_px(pr.v2("position"));
-    let sh = pr.f("scaleHeight");
-    let sw = if pr.b("uniform") { sh } else { pr.f("scaleWidth") };
-    Mat3::translate(vec2(pos.0, pos.1))
-        * Mat3::rotate_deg(pr.f("rotation"))
-        * Mat3::skew_deg(pr.f("skew"), pr.f("skewAxis"))
-        * Mat3::scale(vec2(sw / 100.0, sh / 100.0))
-        * Mat3::translate(vec2(-anchor.0, -anchor.1))
+    effectcraft_effects::transform_matrix_px(pr, |p| b.to_px(p))
 }
 
 /// distort::transform's motion blur: the transform at Samples instants across the shutter,
@@ -981,15 +974,24 @@ pub(crate) fn transform(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBu
     let host = ctx.env.host?;
     let sampling = if ctx.params.e("sampling") == 1 { Sampling::Bicubic } else { Sampling::Bilinear };
     let fd = 1.0 / ctx.fps();
+    let samples: Vec<effectcraft_effects::Params> =
+        (0..n).filter_map(|k| host.params_at(ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd)).collect();
+    if samples.is_empty() {
+        // The CPU renders the frame sharp.
+        return None;
+    }
+    if !ctx.adjustment {
+        let ms: Vec<Mat3> = samples.iter().map(|pr| transform_matrix(pr, &b)).collect();
+        let sides = effectcraft_effects::transform_grow(&ms, b.img.width, b.img.height);
+        b.pad_sides(e, sides)?;
+    }
     let (w, h) = (b.img.width, b.img.height);
     let mut acc = e.image(w, h);
     let mut count = 0u32;
-    for k in 0..n {
-        let t = ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd;
-        let Some(pr) = host.params_at(t) else { continue };
+    for pr in &samples {
         let op = pr.f("opacity") as f32 / 100.0;
         let empty = e.image(w, h);
-        let one = ops::warp(e, &empty, &b.img, &transform_matrix(&pr, &b), sampling, BlendMode::Normal, op, 0, None);
+        let one = ops::warp(e, &empty, &b.img, &transform_matrix(pr, &b), ops::WarpOptions { sampling, mode: BlendMode::Normal, opacity: op, seed: 0 }, None);
         let sum = e.image(w, h);
         e.pixels("fxs_add", &Params::default(), &acc, Some(&one), &sum, None);
         acc = sum;

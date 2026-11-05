@@ -1,0 +1,25 @@
+[package]
+name = "effectcraft-sam2"
+description = "SAM 2.1 (Hiera) video object tracker for the Roto Brush: a Rust port of the Hugging Face transformers implementation, native only, weights downloaded by the user"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-segment = { workspace = true }
+rayon = { workspace = true }
+log = { workspace = true }
+
+# Native only (D1): candle is not built for wasm32, where this crate is empty.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+candle-core = "=0.9.2"
+candle-nn = "=0.9.2"
+# The optional GPU path (wgpu compute, any vendor); the CPU path stays the reference.
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+half = "2.7"

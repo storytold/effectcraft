@@ -15,8 +15,6 @@
 //! ```
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
-// Index loops over fixed-size blocks read more clearly than iterator chains in codec code.
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 mod bitstream;
 mod cabac;
@@ -85,6 +83,10 @@ pub struct EncoderConfig {
     pub keyint: u32,
     /// BT.709 limited range is signalled in the VUI unless this is set.
     pub full_range: bool,
+    /// The VUI colour description (ITU-T H.273 code points); BT.709 by default.
+    pub colour_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coeffs: u8,
 }
 
 impl EncoderConfig {
@@ -99,6 +101,9 @@ impl EncoderConfig {
             rate: RateControl::ConstantQp(28),
             keyint: 60,
             full_range: false,
+            colour_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coeffs: 1,
         }
     }
 }
@@ -236,6 +241,9 @@ impl Encoder {
             profile_idc: cfg.profile.idc(),
             level_idc,
             full_range: cfg.full_range,
+            colour_primaries: cfg.colour_primaries,
+            transfer_characteristics: cfg.transfer_characteristics,
+            matrix_coeffs: cfg.matrix_coeffs,
             fps_num: cfg.fps_num,
             fps_den: cfg.fps_den,
         };
@@ -311,7 +319,7 @@ impl Encoder {
         let kind = if idr { SliceKind::I } else { SliceKind::P };
         let me = if idr { None } else { self.reference.as_ref().map(|r| me::MeRef::new(&r[0], w, h, bd)) };
         let refp = if idr { None } else { self.reference.as_ref() };
-        let mut fc = FrameCoder::new(bd, w, h, kind, qp, &src, refp, me.as_ref());
+        let mut fc = FrameCoder::new(frame::FrameConfig { bit_depth: bd, width: w, height: h, kind, slice_qp: qp }, &src, refp, me.as_ref());
 
         // slice_segment_header() (7.3.6.1)
         let mut bw = BitWriter::new();

@@ -17,7 +17,7 @@
 //! `shortcuts.resetPreset`, `shortcuts.close`.
 
 use crate::i18n::{tr, tr_args};
-use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize};
+use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize, scope_label};
 use egui::{Align2, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -49,6 +49,8 @@ const PANEL_COLOR: Color32 = Color32::from_rgb(0x3f, 0xa8, 0x6c);
 
 pub fn open(app: &mut EffectcraftApp) {
     app.dialog_state.shortcuts = EditorState::default();
+    // Scripts copied into the Scripts folder since the table was built are listed too.
+    app.session.scripts_changed();
     app.dialog = Some(Dialog::Shortcuts);
 }
 
@@ -200,6 +202,12 @@ const SIDE_KEYS: &[(&str, &str, f32, f32)] = &[
     ("→", "ArrowRight", 2.0, 5.0),
 ];
 
+/// The Keyboard Shortcuts dialog: while a shortcut field listens it records the next key
+/// combination (dropping those key events so the field does not type them), the preset bar switches
+/// keymaps, the drawn keyboard lists what the selected key runs, and the command list and editor
+/// remove, assign and reset bindings, warning about conflicts. Enter is OK unless a rename field, a
+/// preset menu or the delete confirmation is open. The collected `shortcuts.*` commands are run
+/// with the session when the frame ends; OK closes the dialog.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut st = std::mem::take(&mut app.dialog_state.shortcuts);
     let mut run: Vec<(String, Value)> = vec![];
@@ -258,7 +266,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         // ---- preset bar
         ui.horizontal(|ui| {
             ui.label(tr("Preset:"));
-            let r = egui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
+            let r = craft_ui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
                 for n in &presets {
                     if ui.selectable_label(*n == active, n).clicked() {
                         run.push(("shortcuts.preset".into(), json!({"op": "select", "name": n})));
@@ -377,7 +385,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             let id = format!("shortcuts.key.{}", name.trim_start_matches('#'));
             app.auto.add(&id, r, label);
-            let resp = ui.interact(r, egui::Id::new(("sc-key", name, r.min.x as i32)), Sense::click());
+            let resp = ui.interact(r, egui::Id::unique(("sc-key", name, r.min.x as i32)), Sense::click());
             if resp.clicked() {
                 if let Some(i) = mod_idx {
                     st.mods[i] = !st.mods[i];
@@ -509,7 +517,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     return;
                 };
                 ui.label(RichText::new(&b.label).font(Tokens::semibold(13.0)).color(t.tab_text_active));
-                ui.label(RichText::new(format!("{} • {}", b.command, b.scope)).color(t.text_faint));
+                ui.label(RichText::new(format!("{} • {}", b.command, scope_label(&b.scope))).color(t.text_faint));
                 ui.add_space(6.0);
                 let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
                 if keys.is_empty() {
@@ -557,7 +565,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         ui.add_space(4.0);
                         ui.label(RichText::new(tr_args("⚠ {} is used by:", &[&(crate::menus::shortcut_text(&k))])).color(t.warning));
                         for c in conflicts.iter().take(4) {
-                            ui.label(RichText::new(format!("   {} ({})", c.label, c.scope)).color(t.warning));
+                            ui.label(RichText::new(format!("   {} ({})", c.label, scope_label(&c.scope))).color(t.warning));
                         }
                     }
                 }

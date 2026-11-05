@@ -2,6 +2,11 @@
 use serde_json::{Value, json};
 use std::process::{Command, Output};
 
+/// Nextest archives relocate binaries; plain Cargo keeps the compile-time path valid.
+fn binary() -> std::ffi::OsString {
+    std::env::var_os("NEXTEST_BIN_EXE_xtask").unwrap_or_else(|| env!("CARGO_BIN_EXE_xtask").into())
+}
+
 struct ResultsDir(tempfile::TempDir);
 impl ResultsDir {
     fn new() -> Self {
@@ -12,7 +17,7 @@ impl ResultsDir {
         let candidate = self.0.path().join("candidate.jsonl");
         std::fs::write(&baseline, old).unwrap();
         std::fs::write(&candidate, new).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        let mut command = Command::new(binary());
         command.args(["bench", "--compare"]).arg(baseline).arg("--with").arg(candidate);
         if gate {
             command.args(["--fail-over", "5"]);

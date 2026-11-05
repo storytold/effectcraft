@@ -122,6 +122,7 @@ fn cpu_pixels(f: &FrameImage) -> Vec<egui::Color32> {
 
 #[test]
 fn gpu_worker_renders_effect_frames_and_the_disk_cache_survives_a_reload() {
+    let _device = crate::gpu_test::lock();
     let (Some(page_gpu), Some(worker_gpu)) = (Gpu::headless(), Gpu::headless_deferred()) else {
         eprintln!("no GPU adapter: skipped");
         return;
@@ -211,7 +212,8 @@ impl StorageHost for Storage {
 fn send(h: &mut Harness<'_, EffectcraftApp>, method: &str, params: Value) {
     let ctx = h.ctx.clone();
     let (req, _rx) = ControlRequest::new(method, params);
-    if let Outcome::Done(v) = control::handle(h.state_mut(), &ctx, &req) {
+    let now = h.state().now();
+    if let Outcome::Done(v) = control::handle(h.state_mut(), &ctx, &req, now) {
         assert!(v["ok"] != false, "{method}: {v}");
     }
     // kittest doesn't call `raw_input_hook`: feed the synthetic click in.

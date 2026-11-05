@@ -13,7 +13,7 @@ use std::collections::BinaryHeap;
 
 use rayon::prelude::*;
 
-use super::scene::{Scene, ShadowMap, Vertex};
+use super::scene::{EnvInfo, Scene, ShadowMap, Vertex};
 use super::shade::{Frag, sample, shade};
 
 /// A rendered target at raster size.
@@ -500,11 +500,39 @@ pub(crate) fn shadow_sizes(width: u32, height: u32, draft: bool, kinds: &[u32]) 
     sizes.into_iter().map(|z| (z > 0).then_some(z)).collect()
 }
 
-/// Build the shadow maps of every shadow-casting light (lights marked `shadow == 0`).
+/// The Environment light's shadow map: one orthographic map over the scene's bounding sphere
+/// from its dominant direction (the light travels from the bright region into the scene), like
+/// a parallel light's.
+fn env_shadow_map(e: EnvInfo, centre: [f64; 3], radius: f64, size: u32) -> ShadowMap {
+    // After Effects' environment-light shadows are soft out of the box, and this
+    // map covers the whole scene bounding sphere — not the view — so its texels
+    // can be coarse (all the more in a draft render's flat 512 budget). A
+    // penumbra of at least eight output pixels, or four map texels where those
+    // are coarser, keeps the edge smooth at any map resolution; Shadow Diffusion
+    // widens it further, as for the other lights.
+    let texel = 2.0 * radius / size as f64;
+    let soft = (4.0 * texel).max(8.0) + (e.shadow_diffusion as f64 * 0.5).min(24.0);
+    let sun = e.sun.map(|v| v as f64);
+    let dir = [-sun[0], -sun[1], -sun[2]];
+    let eye = [centre[0] + sun[0] * radius * 2.0, centre[1] + sun[1] * radius * 2.0, centre[2] + sun[2] * radius * 2.0];
+    let hint = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [0.0, 0.0, 1.0] };
+    let focal = (size as f64 * 0.5 / radius) as f32;
+    ShadowMap { view: basis(eye, dir, hint), focal, ortho: true, size, offset: 0, bias: 1.5, radius: soft as f32 }
+}
+
+/// Build the shadow maps of every shadow-casting light (lights marked `shadow == 0`), and of
+/// the Environment light when it casts shadows and its image has a dominant direction (marked
+/// `env.shadow == 0`, `env.sun != [0; 3]`): one map from that direction, like a parallel light.
 pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
     let casters: Vec<usize> = (0..s.indices.len() / 3)
         .filter(|&t| s.materials.get(s.vertices[s.indices[3 * t] as usize].material as usize).is_some_and(|m| m.casts_shadows))
         .collect();
+    // The Environment light casts a shadow when marked and its image has a dominant direction;
+    // with nothing to cast one, its mark is cleared either way.
+    let env_shadow = !casters.is_empty() && s.env.is_some_and(|e| e.shadow == 0 && e.sun != [0.0; 3]);
+    if !env_shadow && let Some(e) = &mut s.env {
+        e.shadow = -1;
+    }
     if casters.is_empty() {
         for l in &mut s.lights {
             l.shadow = -1;
@@ -536,6 +564,8 @@ pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
                 1
             }
         })
+        // The Environment light's map is a single orthographic one.
+        .chain(std::iter::once(if env_shadow { 1 } else { 0 }))
         .collect();
     let sizes = shadow_sizes(s.width, s.height, draft, &kinds);
     let mut maps: Vec<ShadowMap> = vec![];
@@ -582,6 +612,25 @@ pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
             }
         }
         s.lights[li].shadow = first;
+    }
+    // The Environment light's shadow: one orthographic map over the scene from its dominant
+    // direction (the light travels from the bright region into the scene), after the lights'.
+    if env_shadow && let Some(e) = s.env {
+        match sizes.get(s.lights.len()).copied().flatten() {
+            Some(size) => {
+                let first = maps.len() as i32;
+                maps.push(env_shadow_map(e, centre, radius, size));
+                if let Some(e) = &mut s.env {
+                    e.shadow = first;
+                }
+            }
+            // The texel budget dropped it.
+            None => {
+                if let Some(e) = &mut s.env {
+                    e.shadow = -1;
+                }
+            }
+        }
     }
     let texels: Vec<Vec<f32>> = maps.par_iter().map(|m| shadow_raster(s, m, &casters)).collect();
     for (m, t) in maps.iter_mut().zip(texels) {
