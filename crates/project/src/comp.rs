@@ -377,17 +377,24 @@ impl Comp {
         touched: &[LayerId],
     ) -> Option<Vec<(Tick, Tick)>> {
         // An expression that may read outside its own layer: it names another comp, layer,
-        // footage, the project or its precomp's source (its parent and the layers it picks in an
-        // effect are read through `referenced_layers` below).
+        // footage, the project or its precomp's source, or its layer's `index` (a layer added or
+        // removed above shifts it). Its parent and the layers it picks in an effect are read
+        // through `referenced_layers` below.
         // ponytail: text heuristic; misses another layer reached through a variable from a call
         // without those words. Upgrade: record reads in the expression host.
         fn reads_outside(g: &PropGroup) -> bool {
             g.children.iter().any(|c| match c {
                 Node::Prop(p) => p.expr.as_ref().is_some_and(|e| {
                     let t = e.text.to_lowercase().replace("thislayer", "");
-                    ["comp", "layer", "footage", "project", "source"].iter().any(|w| t.contains(w))
+                    ["comp", "layer", "footage", "project", "source", "index"].iter().any(|w| t.contains(w))
                 }),
                 Node::Group(g) => reads_outside(g),
+            })
+        }
+        fn any_expression(g: &PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                Node::Prop(p) => p.expr.is_some(),
+                Node::Group(g) => any_expression(g),
             })
         }
         // Solo hides every other layer at every frame. (Comp markers count through `elsewhere`:
@@ -413,7 +420,11 @@ impl Comp {
             if l.environment || l.environment_background {
                 return None;
             }
+            // (an expression on the layer can read its own in and out points and name, `inPoint`,
+            // `thisLayer.name`: then a trim or rename reaches all of it)
             if let Some(b) = other
+                && !any_expression(&l.props)
+                && !any_expression(&b.props)
                 && (Layer { in_point: b.in_point, out_point: b.out_point, name: b.name.clone(), label: b.label, comment: b.comment.clone(), ..l.clone() })
                     .same_pixels_with(b, with_markers, heard(l.id))
             {

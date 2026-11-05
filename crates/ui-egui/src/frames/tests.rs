@@ -2075,3 +2075,58 @@ fn an_edit_two_precomps_down_reaches_the_outer_comp() {
         assert!(render_frame(&p0, outer, t(i), 1.0).data == render_frame(&p1, outer, t(i), 1.0).data, "kept frame {i} renders differently after the edit");
     }
 }
+
+/// An expression reading its own layer's in point (a fade from `inPoint`) re-renders the layer
+/// when it is trimmed, and one reading its `index` re-renders it when a short layer is added
+/// above it. Every frame kept renders as before.
+#[test]
+fn expressions_reading_their_own_layer_re_render_on_a_trim_or_a_layer_above() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::LayerId;
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    /// Trim the layer to start at frame 10.
+    fn trim(s: &mut Session, cid: ItemId, l: LayerId) {
+        let fr = s.project.comp(cid).unwrap().frame_rate;
+        Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(l).unwrap().in_point = fr.tick_of(10);
+    }
+    /// Add a solid above the layer on frames 0–5.
+    fn layer_above(s: &mut Session, cid: ItemId, _: LayerId) {
+        let fr = s.project.comp(cid).unwrap().frame_rate;
+        let a = s.execute("layer.newSolid", json!({"comp": cid.0, "color": "#00ff00", "width": 2, "height": 2})).unwrap()["layer"].as_u64().unwrap();
+        let a = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap();
+        (a.start_time, a.in_point, a.out_point) = (fr.tick_of(0), fr.tick_of(0), fr.tick_of(5));
+    }
+    type Edit = fn(&mut Session, ItemId, LayerId);
+    let edits: [(&str, &str, &str, Edit); 2] = [
+        ("trim", "transform/opacity", "linear(time, inPoint, inPoint + 2, 20, 100)", trim),
+        ("layer above", "transform/rotation", "index * 20", layer_above),
+    ];
+    for (name, path, expression, edit) in edits {
+        let mut s = effectcraft_host::session();
+        let new = json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30});
+        let cid = ItemId(s.execute("comp.new", new).unwrap()["comp"].as_u64().unwrap());
+        let l = LayerId(s.execute("layer.newSolid", json!({"comp": cid.0, "color": "#ff0000", "width": 6, "height": 6})).unwrap()["layer"].as_u64().unwrap());
+        s.execute("prop.setExpression", json!({"comp": cid.0, "layer": l.0, "path": path, "expression": expression})).unwrap();
+        let p0 = s.project.clone();
+        edit(&mut s, cid, l);
+        let p1 = s.project.clone();
+        let fr = p0.comp(cid).unwrap().frame_rate;
+        let host = s.expr.clone().unwrap();
+        let render = |p: &Project, i: i64| {
+            let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+            r.expr = Some(&*host);
+            r.comp_frame(cid, fr.tick_of(i))
+        };
+        assert_ne!(render(&p0, 60), render(&p1, 60), "{name}: the edit changes frame 60");
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..120).for_each(|i| insert(&f, k(id0, i)));
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        assert!(!kept.contains(&60), "{name}: frame 60 must go: {kept:?}");
+        for i in kept {
+            assert_eq!(render(&p0, i), render(&p1, i), "{name}: kept frame {i} draws other pixels now");
+        }
+    }
+}
