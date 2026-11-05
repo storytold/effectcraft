@@ -2098,10 +2098,8 @@ fn expressions_reading_their_own_layer_re_render_on_a_trim_or_a_layer_above() {
         (a.start_time, a.in_point, a.out_point) = (fr.tick_of(0), fr.tick_of(0), fr.tick_of(5));
     }
     type Edit = fn(&mut Session, ItemId, LayerId);
-    let edits: [(&str, &str, &str, Edit); 2] = [
-        ("trim", "transform/opacity", "linear(time, inPoint, inPoint + 2, 20, 100)", trim),
-        ("layer above", "transform/rotation", "index * 20", layer_above),
-    ];
+    let edits: [(&str, &str, &str, Edit); 2] =
+        [("trim", "transform/opacity", "linear(time, inPoint, inPoint + 2, 20, 100)", trim), ("layer above", "transform/rotation", "index * 20", layer_above)];
     for (name, path, expression, edit) in edits {
         let mut s = effectcraft_host::session();
         let new = json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30});
@@ -2198,10 +2196,9 @@ fn an_edit_in_a_precomp_under_a_time_effect_reaches_its_whole_layer() {
     let (a, b) = (solid(&mut s, "#ff0000"), solid(&mut s, "#00ff00"));
     let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"));
     let pre = id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer");
-    // Echo reaching 9 frames back, three times.
+    // Echo reaching 9 frames back, once (more echoes of one solid add up past full and look alike).
     s.execute("effect.apply", json!({"comp": outer.0, "layers": [pre], "effect": "Echo"})).unwrap();
     s.execute("prop.set", json!({"comp": outer.0, "layer": pre, "path": "effects/#1/echoTime", "value": -0.3})).unwrap();
-    s.execute("prop.set", json!({"comp": outer.0, "layer": pre, "path": "effects/#1/numberOfEchoes", "value": 3.0})).unwrap();
     let fr = s.project.comp(outer).unwrap().frame_rate;
     let t = |f: i64| fr.tick_of(f);
     let mut p0 = (*s.project).clone();
