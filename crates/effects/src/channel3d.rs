@@ -30,6 +30,25 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "3D Channel", params, render, gpu: false, float: true }
 }
 
+/// The effects that read their layer's auxiliary channels ([`crate::EffectHost::aux`]): every
+/// 3D Channel effect but 3D Layer Instance.
+const READS_AUX: [&str; 8] = [
+    "ec.3d.channelextract",
+    "ec.3d.cryptomatte",
+    "ec.3d.depthmatte",
+    "ec.3d.depthoffield",
+    "ec.3d.extractor",
+    "ec.3d.fog3d",
+    "ec.3d.idmatte",
+    "ec.3d.identifier",
+];
+
+/// Does effect `id` read its layer's auxiliary channels ([`crate::EffectHost::aux`])? The media
+/// layer then decodes the footage's picture together with its channels (#474).
+pub fn reads_aux(id: &str) -> bool {
+    READS_AUX.contains(&id)
+}
+
 fn aux(ctx: &EffectCtx) -> Option<Arc<AuxChannels>> {
     ctx.env.host?.aux()
 }

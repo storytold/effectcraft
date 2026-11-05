@@ -48,6 +48,12 @@ pub trait FootageSource: Send + Sync {
     fn aux(&self, _item: ItemId, _footage: &Footage, _t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         None
     }
+    /// The footage files (by [`Footage::path`]) whose channels effects of the project read
+    /// through [`FootageSource::aux`] (EXtractoR, Cryptomatte and the other 3D Channel effects),
+    /// replacing the set given before. A source that decodes a file's picture and its channels
+    /// separately can decode both at once for these from the first frame on. Sources that don't
+    /// ignore it.
+    fn set_aux_footage(&self, _paths: &[String]) {}
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -139,6 +145,9 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)
+    }
+    fn set_aux_footage(&self, paths: &[String]) {
+        self.inner.set_aux_footage(paths)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)
