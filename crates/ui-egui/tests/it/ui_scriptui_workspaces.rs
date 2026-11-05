@@ -422,3 +422,79 @@ fn reset_finds_a_panel_whose_window_has_not_docked_yet() {
     invoke(&mut app, "window.resetWorkspace");
     assert_eq!(app.ui.dock.group_of(PanelKind::ScriptPanel(7)), [PanelKind::Project, PanelKind::ScriptPanel(7)]);
 }
+
+fn script_tabs(app: &EffectcraftApp) -> Vec<PanelKind> {
+    app.ui.dock.panels().into_iter().filter(|p| matches!(p, PanelKind::ScriptPanel(_))).collect()
+}
+
+#[test]
+fn a_script_with_two_panel_windows_keeps_one_tab_at_its_place() {
+    let store = store_with(&[]);
+    store.write(&script_file("Twin.jsx"), &format!("{BUTTON} __uiDockPanel('Extra');")).unwrap();
+    store.write(OPEN_PANELS_FILE, r#"{"open": ["Twin.jsx"]}"#).unwrap();
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    let [tab] = script_tabs(h.state())[..] else { panic!("{:?}", script_tabs(h.state())) };
+    tab_beside(&mut h, tab, PanelKind::Project);
+    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Twin.jsx"})).unwrap();
+    h.run_steps(3);
+    assert_eq!(script_tabs(h.state()), [tab], "opening it again brings the same tab forward");
+    eframe::App::on_exit(h.state_mut());
+    drop(h);
+    let h = harness(EffectcraftApp::new(restored(&store)));
+    let [tab] = script_tabs(h.state())[..] else { panic!("{:?}", script_tabs(h.state())) };
+    assert!(h.state().ui.dock.group_of(tab).contains(&PanelKind::Project), "the tab is with {:?}", h.state().ui.dock.group_of(tab));
+}
+
+#[test]
+fn reset_shows_an_open_script_saved_while_it_was_missing() {
+    let (store, _, _) = saved_layout_store();
+    store.remove(&script_file("Beta.jsx")).unwrap();
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    invoke(h.state_mut(), "window.saveWorkspace");
+    eframe::App::on_exit(h.state_mut());
+    drop(h);
+
+    store.write(&script_file("Beta.jsx"), BUTTON).unwrap();
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Beta.jsx"})).unwrap();
+    h.run_steps(3);
+    invoke(h.state_mut(), "window.resetWorkspace");
+    let beta = panel_of(&h.state().session, "Beta.jsx");
+    assert!(h.state().ui.dock.group_of(beta).contains(&PanelKind::Timeline), "Beta is with {:?}", h.state().ui.dock.group_of(beta));
+}
+
+#[test]
+fn a_hidden_panel_of_an_open_script_returns_without_the_focus() {
+    let (store, _, _) = saved_layout_store();
+    store.remove(&script_file("Beta.jsx")).unwrap();
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    h.state_mut().ui.focused = PanelKind::Project;
+    eframe::App::on_exit(h.state_mut());
+    drop(h);
+    store.write(&script_file("Beta.jsx"), BUTTON).unwrap();
+    store.write(OPEN_PANELS_FILE, &json!({"open": ["Alpha.jsx", "Beta.jsx"]}).to_string()).unwrap();
+    let h = harness(EffectcraftApp::new(restored(&store)));
+    let beta = panel_of(&h.state().session, "Beta.jsx");
+    assert!(h.state().ui.dock.group_of(beta).contains(&PanelKind::Timeline), "Beta is with {:?}", h.state().ui.dock.group_of(beta));
+    assert_eq!(h.state().ui.focused, PanelKind::Project);
+}
+
+#[test]
+fn showing_a_panel_whose_script_is_closed_opens_no_tab() {
+    for locked in [false, true] {
+        let store = store_with(&[]);
+        let mut dock = dock::docked(dock::tabs(&[PanelKind::Composition, PanelKind::ScriptPanel(900_001)], 0));
+        dock.locked = locked;
+        store.write(WORKSPACES_FILE, &file(&dock, &[(900_001, "Gone.jsx")])).unwrap();
+        let mut app = EffectcraftApp::new(session_with_windows(&store, &[]));
+        let hidden = app.ui.dock.hidden.iter().map(|(p, _)| *p).find(|p| matches!(p, PanelKind::ScriptPanel(_))).expect("a hidden script panel");
+        let focused = app.ui.focused;
+        for params in [json!({"operation": "open", "panel": hidden}), json!({"operation": "activate", "panel": hidden})] {
+            effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), "ui.dock", params).unwrap();
+            assert_eq!(dead_tabs(&app), [], "locked {locked}");
+        }
+        app.show_panel(PanelKind::ScriptPanel(900_002));
+        assert_eq!(dead_tabs(&app), [], "locked {locked}");
+        assert_eq!(app.ui.focused, focused, "locked {locked}");
+    }
+}

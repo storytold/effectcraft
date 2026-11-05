@@ -214,3 +214,47 @@ fn a_name_repeated_in_the_table_keeps_only_its_first_id() {
     assert_eq!(snapshot.dock.panels(), [PanelKind::Composition, script(DETACHED)]);
     assert!(snapshot.dock.hidden.is_empty(), "the second id leaves no reference to bind");
 }
+
+fn file_with_table(table: Value) -> String {
+    let dock = docked(tabs(&[PanelKind::Composition, script(5), script(6)], 0));
+    let mut doc = serde_json::to_value(snapshot_of(dock, &[])).unwrap();
+    doc["script_panels"] = table;
+    doc.to_string()
+}
+
+#[test]
+fn a_table_entry_that_is_not_an_id_and_a_name_is_an_id_without_a_name() {
+    let config = MemoryConfig::default();
+    config.write(FILE, &file_with_table(serde_json::json!({"not a number": "B.jsx", "5": "A.jsx", "6": 7}))).unwrap();
+    let mut ui = UiState::default();
+    let store = WorkspaceStore::load(Some(&config), &mut ui);
+    assert_eq!(store.error, None);
+    assert_eq!(ui.script_panels, BTreeMap::from([(DETACHED, "A.jsx".to_string())]));
+    assert_eq!(ui.dock.panels(), [PanelKind::Composition, script(DETACHED)]);
+}
+
+#[test]
+fn a_table_of_the_wrong_shape_names_nothing() {
+    let config = MemoryConfig::default();
+    config.write(FILE, &file_with_table(serde_json::json!(["A.jsx"]))).unwrap();
+    let mut ui = UiState::default();
+    let store = WorkspaceStore::load(Some(&config), &mut ui);
+    assert_eq!(store.error, None);
+    assert_eq!(ui.dock.panels(), [PanelKind::Composition]);
+}
+
+#[test]
+fn a_place_that_is_not_finite_is_reported_and_the_file_kept() {
+    let mut dock = docked(tabs(&[PanelKind::Composition, script(5)], 0));
+    dock.hidden.push((PanelKind::Align, place(script(5), None, Vec::new())));
+    let mut doc = serde_json::to_value(snapshot_of(dock, &[(5, "A.jsx")])).unwrap();
+    doc["dock"]["hidden"][0][1]["floating"] = serde_json::json!([0.0, 0.0, 10.0, 10.0]);
+    let text = doc.to_string().replacen("[0.0,0.0,10.0,10.0]", "[1e300,0.0,10.0,10.0]", 1);
+    assert!(text.contains("1e300"), "{text}");
+    let config = MemoryConfig::default();
+    config.write(FILE, &text).unwrap();
+    let mut ui = UiState::default();
+    let store = WorkspaceStore::load(Some(&config), &mut ui);
+    assert!(store.error.is_some(), "{text}");
+    assert_eq!(config.read(FILE).as_deref(), Some(text.as_str()));
+}
