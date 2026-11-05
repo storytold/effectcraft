@@ -117,7 +117,7 @@ pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
     CRYPTO_LAYERS, CryptoAux, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu, crypto_layer_name, id_color,
-    selection_hashes,
+    reads_aux, selection_hashes,
 };
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
