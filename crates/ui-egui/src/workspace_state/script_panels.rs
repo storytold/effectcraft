@@ -18,7 +18,7 @@ use effectcraft_engine::scriptui::{ScriptUi, WindowKind};
 use serde_json::Value;
 
 use super::Snapshot;
-use crate::dock::{PanelKind, Workspace, WorkspaceExt as _};
+use crate::dock::{Layout, Node, PanelKind, Permissions, Workspace, WorkspaceExt as _};
 use crate::state::UiState;
 
 #[cfg(test)]
@@ -86,6 +86,47 @@ fn hide_unless(workspace: &mut Workspace, shown: impl Fn(&PanelKind) -> bool) {
     if workspace.validate().is_ok() && crate::dock::referenced_panels(workspace).iter().any(|panel| !shown(panel)) {
         workspace.reconcile(shown, crate::dock::permissions, &Workspace::default());
     }
+}
+
+/// Calls `visit` with each tab group of `layout`: its panels and the index of its selected tab.
+fn each_group(layout: &mut Layout, visit: &mut impl FnMut(&[PanelKind], &mut usize)) {
+    fn walk(node: &mut Node<PanelKind>, visit: &mut impl FnMut(&[PanelKind], &mut usize)) {
+        match node {
+            Node::Split { first, second, .. } => {
+                walk(first, visit);
+                walk(second, visit);
+            }
+            Node::Tabs { panels, active } => visit(panels, active),
+            Node::Dock { columns, .. } => {
+                for group in columns.iter_mut().flat_map(|column| column.groups.iter_mut()) {
+                    visit(&group.panels, &mut group.active);
+                }
+            }
+            _ => {}
+        }
+    }
+    for node in layout.root.iter_mut().chain(layout.floating.iter_mut().map(|window| &mut window.root)) {
+        walk(node, visit);
+    }
+}
+
+/// Gives each hidden panel `open` accepts its tab back, behind the tab its group shows.
+/// `reconcile` restores a panel that can't close without activating it, so a minimized group or
+/// window and an iconic column stay as they are; `set_visible` would expand them. Inserting a tab
+/// still selects it, so the selection goes back afterwards.
+fn show_hidden(workspace: &mut Workspace, open: impl Fn(&PanelKind) -> bool) {
+    if workspace.validate().is_err() || !workspace.hidden.iter().any(|(panel, _)| open(panel)) {
+        return;
+    }
+    let mut selected = Vec::new();
+    each_group(&mut workspace.layout, &mut |panels, active| selected.extend(panels.get(*active).copied()));
+    let stays_open = |panel: &PanelKind| Permissions { closable: !open(panel), ..crate::dock::permissions(panel) };
+    workspace.reconcile(|_| true, stays_open, &Workspace::default());
+    each_group(&mut workspace.layout, &mut |panels, active| {
+        if let Some(index) = panels.iter().position(|panel| selected.contains(panel)) {
+            *active = index;
+        }
+    });
 }
 
 /// The table as far as it reads: an entry that isn't an id and a name is an id without a name.
@@ -158,19 +199,7 @@ pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
 pub(crate) fn fit(ui: &mut UiState, script_ui: &ScriptUi) {
     let live = |panel: &PanelKind| !matches!(panel, PanelKind::ScriptPanel(id) if script_ui.window(*id).is_none());
     hide_unless(&mut ui.dock, live);
-    let waiting: Vec<PanelKind> =
-        ui.dock.hidden.iter().map(|(panel, _)| *panel).filter(|panel| matches!(panel, PanelKind::ScriptPanel(_)) && live(panel)).collect();
-    let front: Vec<PanelKind> = ui.dock.panels().into_iter().filter(|panel| ui.dock.is_visible(*panel)).collect();
-    for panel in waiting {
-        if let Err(error) = ui.dock.set_visible(panel, true, None, crate::dock::permissions) {
-            log::warn!("An open ScriptUI panel stays hidden: {error}");
-        }
-    }
-    for panel in front {
-        if !ui.dock.is_visible(panel) {
-            let _ = ui.dock.apply(craft_ui::docking::Action::Activate { panel }, crate::dock::permissions);
-        }
-    }
+    show_hidden(&mut ui.dock, |panel| matches!(panel, PanelKind::ScriptPanel(_)) && live(panel));
     if !live(&ui.focused) {
         ui.focused = UiState::default().focused;
     }
