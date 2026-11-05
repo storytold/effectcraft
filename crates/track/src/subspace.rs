@@ -27,7 +27,7 @@
 use rayon::prelude::*;
 
 use crate::camtrack::Track2D;
-use crate::camtrack::linalg::cholesky_solve;
+use crate::camtrack::linalg::{cholesky_solve, sym_eigen};
 use crate::fit::{Model, least_squares};
 use crate::solve::Homography;
 
@@ -338,155 +338,148 @@ pub fn solve_mesh(size: [f64; 2], o: &MeshOpts, pairs: &[([f64; 2], [f64; 2])], 
     m
 }
 
-/// Symmetric eigen-decomposition by Householder tridiagonalisation and implicit QL (textbook:
-/// Golub & Van Loan §8.3; Wilkinson & Reinsch). Same contract as `sym_eigen`: eigenvalues
-/// ascending, eigenvectors as columns of a row-major matrix.
-fn sym_eigen_ql(a_in: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    // z: row-major n x n, starts as A, ends as eigenvectors (columns).
-    let mut z = a_in.to_vec();
-    let mut d = vec![0.0; n];
-    let mut e = vec![0.0; n];
-    // tred2
-    for i in (1..n).rev() {
-        let l = i - 1;
-        let mut h = 0.0;
-        if l > 0 {
-            let scale: f64 = (0..=l).map(|k| z[i * n + k].abs()).sum();
-            if scale == 0.0 {
-                e[i] = z[i * n + l];
-            } else {
-                for k in 0..=l {
-                    z[i * n + k] /= scale;
-                    h += z[i * n + k] * z[i * n + k];
-                }
-                let f = z[i * n + l];
-                let g = if f >= 0.0 { -h.sqrt() } else { h.sqrt() };
-                e[i] = scale * g;
-                h -= f * g;
-                z[i * n + l] = f - g;
-                let mut f = 0.0;
-                for j in 0..=l {
-                    z[j * n + i] = z[i * n + j] / h;
-                    let mut g = 0.0;
-                    for k in 0..=j {
-                        g += z[j * n + k] * z[i * n + k];
-                    }
-                    for k in j + 1..=l {
-                        g += z[k * n + j] * z[i * n + k];
-                    }
-                    e[j] = g / h;
-                    f += e[j] * z[i * n + j];
-                }
-                let hh = f / (h + h);
-                for j in 0..=l {
-                    let f = z[i * n + j];
-                    let g = e[j] - hh * f;
-                    e[j] = g;
-                    for k in 0..=j {
-                        z[j * n + k] -= f * e[k] + g * z[i * n + k];
-                    }
-                }
-            }
-        } else {
-            e[i] = z[i * n + l];
-        }
-        d[i] = h;
-    }
-    d[0] = 0.0;
-    e[0] = 0.0;
+/// Reduce the symmetric `a` (row-major `n × n`, consumed) to tridiagonal form `T = Qᵀ A Q` by
+/// Householder reflections. Returns the diagonal of `T`, its off-diagonal (`off[i] = T[i][i+1]`)
+/// and `Qᵀ` (row-major: row `j` is column `j` of `Q`).
+///
+/// Step `k` picks the reflector `H = I − β v vᵀ` that maps column `k` below the diagonal onto a
+/// multiple of the first unit vector, and applies it to the trailing block `B` from both sides
+/// as the symmetric rank-2 update `B −= v wᵀ + w vᵀ` with `p = β B v`, `w = p − (β pᵀv / 2) v`.
+fn householder_tridiagonal(mut a: Vec<f64>, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut qt = vec![0.0; n * n];
     for i in 0..n {
-        if d[i] != 0.0 {
-            for j in 0..i {
-                let mut g = 0.0;
-                for k in 0..i {
-                    g += z[i * n + k] * z[k * n + j];
-                }
-                for k in 0..i {
-                    z[k * n + j] -= g * z[k * n + i];
-                }
+        qt[i * n + i] = 1.0;
+    }
+    let mut v = vec![0.0; n];
+    let mut p = vec![0.0; n];
+    let mut u = vec![0.0; n];
+    for k in 0..n.saturating_sub(2) {
+        let s = k + 1;
+        let len = n - s;
+        for i in 0..len {
+            v[i] = a[(s + i) * n + k];
+        }
+        let norm = v[..len].iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            continue;
+        }
+        let alpha = if v[0] >= 0.0 { -norm } else { norm };
+        v[0] -= alpha;
+        let beta = 2.0 / v[..len].iter().map(|x| x * x).sum::<f64>();
+        for i in 0..len {
+            let row = &a[(s + i) * n + s..(s + i) * n + n];
+            p[i] = beta * row.iter().zip(&v[..len]).map(|(x, y)| x * y).sum::<f64>();
+        }
+        let half = 0.5 * beta * p[..len].iter().zip(&v[..len]).map(|(x, y)| x * y).sum::<f64>();
+        for i in 0..len {
+            p[i] -= half * v[i];
+        }
+        // `p` now holds `w`.
+        for i in 0..len {
+            let row = &mut a[(s + i) * n + s..(s + i) * n + n];
+            for (j, x) in row.iter_mut().enumerate() {
+                *x -= v[i] * p[j] + p[i] * v[j];
             }
         }
-        d[i] = z[i * n + i];
-        z[i * n + i] = 1.0;
-        for j in 0..i {
-            z[j * n + i] = 0.0;
-            z[i * n + j] = 0.0;
+        a[s * n + k] = alpha;
+        a[k * n + s] = alpha;
+        // Q ← Q H: with rows of Qᵀ, row j −= β v_j (Σ_l v_l row l).
+        u.fill(0.0);
+        for (l, vl) in v[..len].iter().enumerate() {
+            for (x, q) in u.iter_mut().zip(&qt[(s + l) * n..(s + l + 1) * n]) {
+                *x += vl * q;
+            }
+        }
+        for (j, vj) in v[..len].iter().enumerate() {
+            for (q, x) in qt[(s + j) * n..(s + j + 1) * n].iter_mut().zip(&u) {
+                *q -= beta * vj * x;
+            }
         }
     }
-    // tqli
-    for i in 1..n {
-        e[i - 1] = e[i];
-    }
-    if n > 0 {
-        e[n - 1] = 0.0;
-    }
-    for l in 0..n {
-        let mut iter = 0;
-        loop {
-            let mut m = l;
-            while m + 1 < n {
-                let dd = d[m].abs() + d[m + 1].abs();
-                if e[m].abs() <= f64::EPSILON * dd {
-                    break;
-                }
-                m += 1;
-            }
-            if m == l {
-                break;
-            }
-            iter += 1;
-            if iter > 60 {
-                break;
-            }
-            let mut g = (d[l + 1] - d[l]) / (2.0 * e[l]);
-            let mut r = g.hypot(1.0);
-            g = d[m] - d[l] + e[l] / (g + if g >= 0.0 { r.abs() } else { -r.abs() });
-            let (mut s, mut c, mut p) = (1.0, 1.0, 0.0);
-            let mut i = m;
-            let mut early = false;
-            while i > l {
-                i -= 1;
-                let f = s * e[i];
-                let b = c * e[i];
-                r = f.hypot(g);
-                e[i + 1] = r;
-                if r == 0.0 {
-                    d[i + 1] -= p;
-                    e[m] = 0.0;
-                    early = true;
-                    break;
-                }
-                s = f / r;
-                c = g / r;
-                g = d[i + 1] - p;
-                r = (d[i] - g) * s + 2.0 * c * b;
-                p = s * r;
-                d[i + 1] = g + p;
-                g = c * r - b;
-                for k in 0..n {
-                    let f = z[k * n + i + 1];
-                    z[k * n + i + 1] = s * z[k * n + i] + c * f;
-                    z[k * n + i] = c * z[k * n + i] - s * f;
-                }
-            }
-            if early {
-                continue;
-            }
-            d[l] -= p;
-            e[l] = g;
-            e[m] = 0.0;
+    let diag = (0..n).map(|i| a[i * n + i]).collect();
+    let off = (0..n.saturating_sub(1)).map(|i| a[(i + 1) * n + i]).collect();
+    (diag, off, qt)
+}
+
+/// One implicit symmetric QR step with the Wilkinson shift on the unreduced block `lo..=hi` of
+/// the tridiagonal `(diag, off)`: a Givens rotation of rows/columns `k, k+1` for `k = lo..hi`
+/// first introduces, then chases down a bulge below the subdiagonal. The rotations are applied to
+/// the rows of `qt` as well.
+fn wilkinson_qr_step(diag: &mut [f64], off: &mut [f64], qt: &mut [f64], n: usize, lo: usize, hi: usize) {
+    // The eigenvalue of the trailing 2×2 block nearer its last diagonal entry.
+    let t = off[hi - 1];
+    let half = 0.5 * (diag[hi - 1] - diag[hi]);
+    let sign = if half >= 0.0 { 1.0 } else { -1.0 };
+    let shift = diag[hi] - t * t / (half + sign * half.hypot(t));
+    let (mut x, mut z) = (diag[lo] - shift, off[lo]);
+    for k in lo..hi {
+        let r = x.hypot(z);
+        let (c, s) = if r == 0.0 { (1.0, 0.0) } else { (x / r, z / r) };
+        if k > lo {
+            off[k - 1] = r;
         }
+        let (a, b, d) = (diag[k], off[k], diag[k + 1]);
+        diag[k] = c * c * a + 2.0 * c * s * b + s * s * d;
+        diag[k + 1] = s * s * a - 2.0 * c * s * b + c * c * d;
+        off[k] = c * s * (d - a) + (c * c - s * s) * b;
+        if k + 1 < hi {
+            // The rotation spreads `off[k+1]` into the bulge at (k+2, k).
+            x = off[k];
+            z = s * off[k + 1];
+            off[k + 1] *= c;
+        }
+        let (top, bottom) = qt.split_at_mut((k + 1) * n);
+        for (p, q) in top[k * n..].iter_mut().zip(&mut bottom[..n]) {
+            let (pk, qk) = (*p, *q);
+            *p = c * pk + s * qk;
+            *q = c * qk - s * pk;
+        }
+    }
+}
+
+/// Symmetric eigen-decomposition: Householder reduction to tridiagonal form, then implicit QR
+/// steps with the Wilkinson shift and deflation of negligible off-diagonal entries (the method of
+/// Golub & Van Loan, *Matrix Computations*, ch. 8: Householder tridiagonalisation and the
+/// symmetric QR algorithm). Same contract as `sym_eigen`: eigenvalues ascending, eigenvectors as
+/// the columns of a row-major matrix. `None` for non-finite input, a size mismatch or no
+/// convergence within `30 n` steps; the caller then falls back to Jacobi.
+fn sym_eigen_qr(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    if a.len() != n * n || a.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    let (mut diag, mut off, mut qt) = householder_tridiagonal(a.to_vec(), n);
+    let mut budget = 30 * n.max(1);
+    let mut hi = n.saturating_sub(1);
+    while hi > 0 {
+        for i in 0..hi {
+            if off[i].abs() <= f64::EPSILON * (diag[i].abs() + diag[i + 1].abs()) {
+                off[i] = 0.0;
+            }
+        }
+        if off[hi - 1] == 0.0 {
+            hi -= 1;
+            continue;
+        }
+        let mut lo = hi - 1;
+        while lo > 0 && off[lo - 1] != 0.0 {
+            lo -= 1;
+        }
+        budget = budget.checked_sub(1)?;
+        wilkinson_qr_step(&mut diag, &mut off, &mut qt, n, lo, hi);
+    }
+    if diag.iter().chain(&qt).any(|x| !x.is_finite()) {
+        return None;
     }
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&x, &y| d[x].total_cmp(&d[y]));
-    let vals = order.iter().map(|&j| d[j]).collect();
+    order.sort_by(|&x, &y| diag[x].total_cmp(&diag[y]));
+    let vals = order.iter().map(|&j| diag[j]).collect();
     let mut vecs = vec![0.0; n * n];
     for (k, &j) in order.iter().enumerate() {
         for r in 0..n {
-            vecs[r * n + k] = z[r * n + j];
+            vecs[r * n + k] = qt[j * n + r];
         }
     }
-    (vals, vecs)
+    Some((vals, vecs))
 }
 
 /// Gaussian weights of the frames `lo..=hi` around `t`.
@@ -540,7 +533,7 @@ pub fn smooth_trajectories(tracks: &[Track2D], frames: usize, sigma: f64, rank: 
                     gram[b * m + a] = s;
                 }
             }
-            let (_, vecs) = sym_eigen_ql(&gram, m);
+            let (_, vecs) = sym_eigen_qr(&gram, m).unwrap_or_else(|| sym_eigen(&gram, m));
             // C[q][c] = vecs[c][m − 1 − q] (largest first).
             let cmat: Vec<Vec<f64>> = (0..k).map(|q| (0..m).map(|c| vecs[c * m + (m - 1 - q)]).collect()).collect();
             let g = gauss(lo, hi, t, sigma.max(1e-6));
@@ -654,8 +647,95 @@ mod tests {
         (*seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
     }
 
+    /// Checks an eigen-decomposition of `a` directly: `A v = λ v` per column, `VᵀV = I`, values
+    /// ascending; `tol` relative to the largest |entry| of `a`.
+    fn check_eigen(a: &[f64], n: usize, vals: &[f64], vecs: &[f64], tol: f64, what: &str) {
+        let scale = a.iter().fold(0.0f64, |m, x| m.max(x.abs())).max(f64::MIN_POSITIVE);
+        assert!(vals.windows(2).all(|w| w[0] <= w[1]), "{what}: values not ascending");
+        for k in 0..n {
+            for i in 0..n {
+                let av: f64 = (0..n).map(|j| a[i * n + j] * vecs[j * n + k]).sum();
+                let r = (av - vals[k] * vecs[i * n + k]).abs();
+                assert!(r <= tol * scale, "{what}: residual {r} at ({i}, {k})");
+            }
+            for l in 0..n {
+                let d: f64 = (0..n).map(|i| vecs[i * n + k] * vecs[i * n + l]).sum();
+                let want = if k == l { 1.0 } else { 0.0 };
+                assert!((d - want).abs() < 1e-10, "{what}: VᵀV ({k}, {l}) = {d}");
+            }
+        }
+    }
+
+    fn random_symmetric(n: usize, seed: &mut u64, scale: impl Fn(usize) -> f64) -> Vec<f64> {
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                let v = lcg(seed) * scale(i) * scale(j);
+                a[i * n + j] = v;
+                a[j * n + i] = v;
+            }
+        }
+        a
+    }
+
     #[test]
-    fn ql_eigen_matches_jacobi() {
+    fn qr_eigen_matches_jacobi_on_random_matrices() {
+        use crate::camtrack::linalg::sym_eigen;
+        let mut seed = 3;
+        for n in [1, 2, 3, 7, 20, 61] {
+            for _ in 0..3 {
+                let a = random_symmetric(n, &mut seed, |_| 1.0);
+                let (vals, vecs) = sym_eigen_qr(&a, n).unwrap();
+                check_eigen(&a, n, &vals, &vecs, 1e-12, &format!("random n {n}"));
+                let (v0, _) = sym_eigen(&a, n);
+                for (x, y) in vals.iter().zip(&v0) {
+                    assert!((x - y).abs() < 1e-11, "n {n}: {x} vs {y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qr_eigen_handles_special_matrices() {
+        let mut seed = 5;
+        let n = 6;
+        let mut identity = vec![0.0; n * n];
+        let mut blocks = vec![0.0; n * n];
+        for i in 0..n {
+            identity[i * n + i] = 1.0;
+            // Two equal 3×3 blocks: every eigenvalue twice.
+            for j in 0..n {
+                if i / 3 == j / 3 {
+                    blocks[i * n + j] = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 4.0]][i % 3][j % 3];
+                }
+            }
+        }
+        let cases: Vec<(&str, usize, Vec<f64>)> = vec![
+            ("identity", n, identity),
+            ("repeated blocks", n, blocks),
+            ("zero", n, vec![0.0; n * n]),
+            ("1x1", 1, vec![-4.5]),
+            ("0x0", 0, vec![]),
+            // Rows and columns scaled from 1e-8 to 1e8.
+            ("badly scaled", 9, random_symmetric(9, &mut seed, |i| 10f64.powi(2 * i as i32 - 8))),
+            ("tridiagonal 1-2-1", 30, (0..900usize).map(|k| [0.0, 1.0, 2.0][2 - (k / 30).abs_diff(k % 30).min(2)]).collect()),
+        ];
+        for (what, n, a) in cases {
+            let (vals, vecs) = sym_eigen_qr(&a, n).unwrap();
+            check_eigen(&a, n, &vals, &vecs, 1e-12, what);
+        }
+        let (vals, _) = sym_eigen_qr(&[1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        assert_eq!(vals, vec![1.0, 1.0]);
+        // Non-finite input or a size mismatch: None (the caller falls back to Jacobi) at once.
+        let mut nan = random_symmetric(8, &mut seed, |_| 1.0);
+        nan[9] = f64::NAN;
+        assert!(sym_eigen_qr(&nan, 8).is_none());
+        assert!(sym_eigen_qr(&[f64::INFINITY], 1).is_none());
+        assert!(sym_eigen_qr(&[1.0, 2.0, 3.0], 2).is_none());
+    }
+
+    #[test]
+    fn qr_eigen_keeps_the_leading_subspace_of_gram_like_matrices() {
         use crate::camtrack::linalg::sym_eigen;
         let mut seed = 7;
         for n in [1, 2, 5, 31, 61] {
@@ -669,17 +749,18 @@ mod tests {
                 }
             }
             let (v0, e0) = sym_eigen(&a, n);
-            let (v1, e1) = sym_eigen_ql(&a, n);
+            let (v1, e1) = sym_eigen_qr(&a, n).unwrap();
+            check_eigen(&a, n, &v1, &e1, 1e-12, &format!("gram n {n}"));
             let top = v0[n - 1].abs().max(1.0);
             for k in 0..n {
                 assert!((v0[k] - v1[k]).abs() < 1e-9 * top, "n {n} value {k}: {} vs {}", v0[k], v1[k]);
             }
-            // The leading subspace (as a projector; signs and basis are free).
-            let r = rank.min(n);
+            // The leading subspace (distinct eigenvalues, compared as a projector: signs and the
+            // basis are free).
             for i in 0..n {
                 for j in 0..n {
-                    let p0: f64 = (0..r).map(|q| e0[i * n + n - 1 - q] * e0[j * n + n - 1 - q]).sum();
-                    let p1: f64 = (0..r).map(|q| e1[i * n + n - 1 - q] * e1[j * n + n - 1 - q]).sum();
+                    let p0: f64 = (0..rank).map(|q| e0[i * n + n - 1 - q] * e0[j * n + n - 1 - q]).sum();
+                    let p1: f64 = (0..rank).map(|q| e1[i * n + n - 1 - q] * e1[j * n + n - 1 - q]).sum();
                     assert!((p0 - p1).abs() < 1e-9, "n {n} projector ({i},{j}): {p0} vs {p1}");
                 }
             }
