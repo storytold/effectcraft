@@ -130,6 +130,27 @@ fn record(template: &Chunk<'_>, v: f64) -> Chunk<'static> {
     Chunk::list(*b"tdbs", kids)
 }
 
+/// A keyframed value record: `record`'s header with a key list of linear one-component keys.
+fn keyed_record(template: &Chunk<'_>, keys: &[(i32, f64)]) -> Chunk<'static> {
+    let Body::List { children, .. } = record(template, keys.first().map_or(0.0, |k| k.1)).body else { unreachable!("record builds a LIST") };
+    let mut children = children;
+    let mut lhd3 = vec![0u8; 52];
+    lhd3[0..4].copy_from_slice(&0x00d0_0beeu32.to_be_bytes());
+    lhd3[8..12].copy_from_slice(&(keys.len() as u32).to_be_bytes());
+    lhd3[16..20].copy_from_slice(&48u32.to_be_bytes());
+    let mut ldat = Vec::new();
+    for (time, value) in keys {
+        let mut rec = vec![0u8; 48];
+        rec[0..4].copy_from_slice(&time.to_be_bytes());
+        rec[4] = 1;
+        rec[5] = 1;
+        rec[8..16].copy_from_slice(&value.to_be_bytes());
+        ldat.extend(rec);
+    }
+    children.push(Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", lhd3), Chunk::data(*b"ldat", ldat)]));
+    Chunk::list(*b"tdbs", children)
+}
+
 /// An effect instance: its match name, display name, parameter definitions (after the input
 /// layer, before the built-in entry), the 1-D values stored (`parT` index, value) and the
 /// arbitrary data stored (`parT` index, bytes).
@@ -139,6 +160,9 @@ pub struct Fx {
     pub defs: Vec<Def>,
     pub values: Vec<(usize, f64)>,
     pub data: Vec<(usize, Vec<u8>)>,
+    /// Keyframed 1-D parameters (`parT` index, (time units, value) per key), linear keys; the
+    /// parameter then has no entry in `values`.
+    pub keys: Vec<(usize, Vec<(i32, f64)>)>,
 }
 
 /// The match name of parameter `i` of `fx` (`<match>-NNNN`).
@@ -171,6 +195,10 @@ fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
         if let Some((_, d)) = fx.data.iter().find(|(j, _)| j == i) {
             values.push(Chunk::list(*b"aRbs", vec![Chunk::data(*b"aRbp", d.clone())]));
         }
+    }
+    for (i, keys) in &fx.keys {
+        values.push(tdmn(&param_name(fx, *i)));
+        values.push(keyed_record(template, keys));
     }
     Chunk::list(*b"sspc", vec![nested(*b"fnam", vec![utf8(fx.name)]), Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)])
 }
@@ -306,6 +334,7 @@ fn pard_layout_decodes_as_written() {
         ],
         values: vec![(1, 20.0)],
         data: vec![],
+        keys: vec![],
     };
     let bytes = bytes_with(&fx);
     let file = parse(&bytes).unwrap();
