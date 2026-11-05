@@ -431,11 +431,12 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
 /// A double-click on the bin adds one at the current time (#1826).
 pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, bin: Rect, strip: Rect) {
     let t = app.tokens;
-    let resp =
-        ui.interact(bin, egui::Id::unique("marker-bin"), Sense::click_and_drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
-    if resp.double_clicked()
-        && let Err(e) = app.session.execute("comp.addMarker", json!({}))
-    {
+    let resp = ui.interact(bin, egui::Id::unique("marker-bin"), Sense::drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
+    // The bin senses drags only, so a drag starts as soon as it is pressed: sensing clicks too
+    // would hold that back until the pointer moved, and a drag out released within that frame
+    // would add nothing. The double-click is read from the pointer instead.
+    let double_clicked = resp.contains_pointer() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+    if double_clicked && let Err(e) = app.session.execute("comp.addMarker", json!({})) {
         app.ui.status = e.to_string();
     }
     app.auto.add("timeline.markerBin", bin, "Composition marker bin");

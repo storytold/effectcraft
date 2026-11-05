@@ -417,9 +417,47 @@ fn double_clicking_the_marker_bin_adds_a_comp_marker_at_the_current_time() {
     let history = &h.state().session.history.undo;
     assert_eq!((history.len(), history.last().map(|u| u.0.as_str())), (undo + 1, Some("Add Marker")), "one undo step");
     assert_eq!(h.state().session.time().seconds(), 21.5, "the current time stays");
+    // The second press in one frame and its release in the next (a frame here is 0.25 s, inside
+    // egui's 0.3 s double-click time): the bin is dragged by then, and still a marker at 22 s.
+    h.state_mut().session.execute("time.set", json!({"time": 22.0})).unwrap();
+    h.event(Event::PointerMoved(bin.center()));
+    h.step();
+    for pressed in [true, false, true] {
+        h.input_mut().events.push(Event::PointerButton { pos: bin.center(), button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    assert!(h.ctx.dragged_id().is_some(), "the second press drags the bin");
+    h.event(Event::PointerButton { pos: bin.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    h.run_steps(3);
+    assert_eq!(markers(&h), vec![21.5, 22.0], "a double-click released while the bin is dragged");
     // Dragged out 3 s into the visible span (from 10 s at 200 px/s): a marker at 13 s too.
     drag(&mut h, bin.center(), pos2(ruler.min.x + 6.0 + 600.0, ruler.center().y));
-    assert_eq!(markers(&h), vec![13.0, 21.5]);
+    assert_eq!(markers(&h), vec![13.0, 21.5, 22.0]);
+}
+
+/// A marker dragged out of the bin and dropped within one frame (a fast drag, or a slow frame)
+/// still lands where it is dropped: the bin starts its drag as soon as it is pressed.
+#[test]
+fn a_marker_dragged_out_of_the_bin_and_dropped_in_one_frame_is_added() {
+    let (mut h, _) = harness();
+    h.state_mut().ui.timeline.pps = Some(200.0);
+    h.state_mut().ui.timeline.start = 10.0;
+    h.run_steps(2);
+    let bin = rect(&h, "timeline.markerBin");
+    let ruler = rect(&h, "timeline.ruler");
+    let at = pos2(ruler.min.x + 6.0 + 600.0, ruler.center().y);
+    h.event(Event::PointerMoved(bin.center()));
+    h.step();
+    h.event(Event::PointerButton { pos: bin.center(), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    // Both in one frame (`event` would give each a frame of its own).
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    h.run_steps(2);
+    let markers: Vec<f64> = h.state().session.active_comp().unwrap().markers.iter().map(|m| m.time.seconds()).collect();
+    assert_eq!(markers, vec![13.0]);
 }
 
 /// #976: as in After Effects, Numpad * marks the selected layers at the current time; only with
