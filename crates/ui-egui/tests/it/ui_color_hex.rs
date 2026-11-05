@@ -271,3 +271,39 @@ fn the_fields_agree_with_the_hex_code() {
     assert_eq!(value("B:", 1), "179");
     assert_eq!(value("H:", 0), "0°");
 }
+
+/// The Settings labels page draws several swatches, and keyboard activation opens a second picker
+/// without a pointer press — a press would land outside the first picker's area and close it
+/// through `pressed_outside`. Both pickers write the shared Escape marker, and the one drawn last
+/// owns it, so when it closes the marker must stay with the picker still open. The dialog's Escape
+/// route runs before rendering, so what the next pass reads is the marker left at the end of the
+/// closing pass: unowned, it says no picker is open and Escape cancels the dialog while one still
+/// is (#2828).
+#[test]
+fn closing_one_of_two_open_pickers_leaves_escape_with_the_one_left_open() {
+    let mut h = Harness::builder().with_size(vec2(560.0, 640.0)).build_ui_state(
+        |ui, c: &mut [[f32; 3]; 2]| {
+            widgets::srgb_color_button(ui, &mut c[0]);
+            widgets::srgb_color_button(ui, &mut c[1]);
+        },
+        [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+    );
+    h.run_steps(2);
+    let open = |h: &Harness<'_, [[f32; 3]; 2]>| h.query_all_by_role_and_label(Role::TextInput, "#").count();
+    assert_eq!(open(&h), 0, "no picker yet");
+
+    // Open both through accessibility activation: it toggles the swatch with no pointer press, so
+    // the first picker stays open while the second opens.
+    for well in 0..2 {
+        h.get_all_by_role(Role::ColorWell).nth(well).expect("the swatch").click_accesskit();
+        h.run_steps(2);
+    }
+    assert_eq!(open(&h), 2, "both pickers are open");
+
+    // The second swatch's `color_popup` runs after the first's, so its picker owns the marker.
+    // Close it; one step is one pass, the pass the next frame's Escape route reads.
+    h.get_all_by_role(Role::ColorWell).nth(1).expect("the second swatch").click_accesskit();
+    h.step();
+    assert_eq!(open(&h), 1, "the first picker is still open");
+    assert!(effectcraft_ui_egui::color_picker::open_recently(&h.ctx), "the picker still open keeps the Escape marker");
+}

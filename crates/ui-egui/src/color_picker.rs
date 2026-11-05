@@ -44,8 +44,11 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             ui.data_mut(|d| {
                 d.remove::<[f32; 3]>(orig_id);
                 d.remove::<u64>(pass_id);
-                // Closed: the next Escape is the dialog's again.
-                d.remove::<u64>(open_pass_id());
+                // Closed: the next Escape is the dialog's again — but only if this picker owns
+                // the marker; another picker can still be open and keeps it (#2828).
+                if d.get_temp::<(egui::Id, u64)>(open_pass_id()).is_some_and(|(owner, _)| owner == id) {
+                    d.remove::<(egui::Id, u64)>(open_pass_id());
+                }
             });
         }
         return false;
@@ -95,8 +98,11 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             d.insert_temp(id.with("open"), false);
             d.remove::<[f32; 3]>(orig_id);
             d.remove::<u64>(pass_id);
-            // Closed: the next Escape is the dialog's again.
-            d.remove::<u64>(open_pass_id());
+            // Closed: the next Escape is the dialog's again — but only if this picker owns the
+            // marker; another picker can still be open and keeps it (#2828).
+            if d.get_temp::<(egui::Id, u64)>(open_pass_id()).is_some_and(|(owner, _)| owner == id) {
+                d.remove::<(egui::Id, u64)>(open_pass_id());
+            }
         });
     } else {
         refresh_armed(ui.ctx(), id);
@@ -104,14 +110,17 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
         let pass = ui.ctx().cumulative_pass_nr();
         ui.data_mut(|d| {
             d.insert_temp(pass_id, pass);
-            d.insert_temp(open_pass_id(), pass);
+            // The marker names its owner: with several pickers open at once (Settings' labels
+            // page), one closing must not take Escape from the others (#2828).
+            d.insert_temp(open_pass_id(), (id, pass));
         });
     }
     out.changed || sampled
 }
 
-/// The `egui::Id` of the pass number in which a colour picker last stayed open, which
-/// [`open_recently`] uses to keep Escape for the picker rather than the dialog under it.
+/// The `egui::Id` of the pass number in which a colour picker last stayed open, together with the
+/// id of the picker that owns it, which [`open_recently`] uses to keep Escape for the picker
+/// rather than the dialog under it.
 fn open_pass_id() -> egui::Id {
     egui::Id::unique("color-picker-open-pass")
 }
@@ -119,10 +128,12 @@ fn open_pass_id() -> egui::Id {
 /// A colour picker is open: it was drawn, and stayed open, in this pass or the last one (so one
 /// that stops being drawn without closing, its dialog gone, doesn't count for long). Escape then
 /// belongs to the picker (it goes back to the original colour and closes), not to the dialog it
-/// was opened from. Closing clears this at once, so the next Escape reaches the dialog.
+/// was opened from. The marker names the picker owning it — several can be open at once, on
+/// Settings' labels page — and a picker closing clears it only when it is that owner, so the
+/// picker still open keeps Escape; clearing it makes the next Escape reach the dialog.
 pub fn open_recently(ctx: &egui::Context) -> bool {
-    let pass: Option<u64> = ctx.data(|d| d.get_temp(open_pass_id()));
-    pass.is_some_and(|p| p.saturating_add(1) >= ctx.cumulative_pass_nr())
+    let pass: Option<(egui::Id, u64)> = ctx.data(|d| d.get_temp(open_pass_id()));
+    pass.is_some_and(|(_, p)| p.saturating_add(1) >= ctx.cumulative_pass_nr())
 }
 
 /// The armed eyedropper of a picker: the picker's popup id, the pass it was last drawn in, and the
