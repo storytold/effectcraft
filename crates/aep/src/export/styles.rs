@@ -76,6 +76,18 @@ pub(crate) fn stored(conv: StyleConv, v: &Value) -> Option<Vec<f64>> {
     Some(out)
 }
 
+/// Whether an expression on a style popup would mean something else in After Effects. Both
+/// programs count popup items from 1 in expressions, so only a popup whose stored item numbers are
+/// not EffectCraft's items in the same order (Inner Glow Source is stored reversed) or a blend
+/// mode whose After Effects item number differs from its place in EffectCraft's list is reported.
+fn popup_expression_differs(conv: StyleConv) -> bool {
+    match conv {
+        StyleConv::Popup(map) => map.iter().enumerate().any(|(i, m)| usize::try_from(*m).ok() != Some(i)),
+        StyleConv::Mode => STYLE_BLEND_MODES.iter().enumerate().any(|(i, (name, _))| sm::mode_code(name).and_then(|c| usize::try_from(c).ok()) != Some(i + 1)),
+        _ => false,
+    }
+}
+
 fn same(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-9 * x.abs().max(1.0))
 }
@@ -86,6 +98,9 @@ fn plan_record(spec: &StyleParam, full: String, prop: &Property, cp: &CompPlan, 
     let expr = prop.expr.as_ref().filter(|e| !e.text.is_empty()).map(|e| (e.text.clone(), e.enabled));
     if expr.is_some() {
         col.exported.expressions = col.exported.expressions.saturating_add(1);
+        if popup_expression_differs(spec.conv) {
+            col.lose(LossCategory::LayerStyles, format!("{here}: an expression on a popup whose items are in another order in After Effects means something else there (written unchanged)"));
+        }
     }
     if !prop.keys.is_empty() {
         if spec.conv == StyleConv::Number {

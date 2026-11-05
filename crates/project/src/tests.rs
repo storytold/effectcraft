@@ -410,3 +410,30 @@ fn upgrading_deeply_nested_shape_groups_fits_a_small_stack() {
     let ids: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
     assert_eq!(ids, ["size", "detail", "points", "speed", "correlation", "phase", "spatialPhase", "seed"]);
 }
+
+/// An item whose parent is a composition (or an item that is not there) lists under no folder, and
+/// the AEP export lost it without a word (review finding): opening such a file moves it to the top
+/// level and says so; a parent that is a folder stays.
+#[test]
+fn an_item_inside_a_non_folder_moves_to_the_top_level_when_a_project_is_opened() {
+    let mut p = Project::default();
+    let folder = p.add_item("Folder", Default::default(), None, ItemKind::Folder);
+    let comp = p.add_item("Comp", Default::default(), None, ItemKind::Comp(std::sync::Arc::new(Comp::new(64, 36, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0)))));
+    let inside_folder = p.add_item("Fine", Default::default(), Some(folder), ItemKind::Folder);
+    let inside_comp = p.add_item("Inside comp", Default::default(), None, ItemKind::Folder);
+    let orphan = p.add_item("Orphan", Default::default(), None, ItemKind::Folder);
+    if let Some(i) = p.item_mut(inside_comp) {
+        i.parent = Some(comp);
+    }
+    if let Some(i) = p.item_mut(orphan) {
+        i.parent = Some(crate::ItemId(9_999));
+    }
+    let (q, notes) = Project::from_json_repaired(&p.to_json()).expect("opens");
+    assert_eq!(q.item(inside_folder).and_then(|i| i.parent), Some(folder));
+    assert_eq!(q.item(inside_comp).and_then(|i| i.parent), None);
+    assert_eq!(q.item(orphan).and_then(|i| i.parent), None);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes.iter().all(|n| n.contains("not a folder")), "{notes:?}");
+    // Nothing to repair in a sound project.
+    assert!(Project::from_json_repaired(&q.to_json()).expect("opens").1.is_empty());
+}

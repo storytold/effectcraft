@@ -186,3 +186,39 @@ fn styles_on_every_layer_kind_that_takes_them() {
         assert!(layer(&q, name).props.sub(GROUP).and_then(|g| g.sub("stroke")).is_some(), "{name}");
     }
 }
+
+/// An expression on a style popup that After Effects stores in another order (Inner Glow Source:
+/// Edge is 1 there, Center 1 here) means something else there: reported, and a strict export
+/// refuses. A popup in the same order stays lossless (review finding).
+#[test]
+fn a_style_popup_expression_is_reported_only_when_the_items_are_stored_in_another_order() {
+    let build = |param: &str| {
+        let mut p = Project::default();
+        let comp = add_comp(&mut p, "C", 400, 300, FrameRate::FPS_25, 4.0, None);
+        let s = add_solid(&mut p, "S", 200, 100, [0.2, 0.4, 0.8], None);
+        add_layer(&mut p, comp, "S", LayerSource::Solid { item: s }, (200, 100));
+        let gl = p.comp(comp).expect("comp").global_light.clone();
+        let mut next = p.next_id;
+        with_layer(&mut p, comp, 0, |l| {
+            let mut ids = Ids(&mut next);
+            st::add_style(l, &mut ids, "innerGlow", &gl, true);
+            let g = l.props.sub_mut(GROUP).expect("styles");
+            let glow = g.sub_mut("innerGlow").expect("glow");
+            if let Some(prop) = glow.get_mut(param) {
+                prop.expr = Some(Expression { text: "1".into(), enabled: true });
+            } else {
+                panic!("no {param}");
+            }
+        });
+        p.next_id = next;
+        p
+    };
+    let strict = |p: &Project| effectcraft_aep::export::export(p, &effectcraft_aep::export::ExportOptions { allow_losses: false }).is_ok();
+    let reversed = build("source");
+    let r = export_all(&reversed);
+    assert_eq!(r.report.count(effectcraft_aep::export::LossCategory::LayerStyles), 1, "{:?}", r.report.losses);
+    assert!(!strict(&reversed));
+    let same = build("technique");
+    assert_eq!(export_all(&same).report.count(effectcraft_aep::export::LossCategory::LayerStyles), 0);
+    assert!(strict(&same));
+}

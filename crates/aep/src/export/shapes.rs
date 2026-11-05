@@ -244,6 +244,13 @@ fn colour_beyond(p: &Property, keyed: bool) -> bool {
     if keyed { p.keys.iter().any(|k| beyond(&k.value)) } else { beyond(&p.value) }
 }
 
+/// Whether a colour that is written has an alpha other than 1 (a colour property of After Effects
+/// has no alpha): the keys of an animated property, else the static value.
+fn colour_alpha(p: &Property, keyed: bool) -> bool {
+    let alpha = |v: &Value| matches!(v, Value::Color(c) if c[3].is_finite() && (c[3] - 1.0).abs() > 1e-9);
+    if keyed { p.keys.iter().any(|k| alpha(&k.value)) } else { alpha(&p.value) }
+}
+
 /// A popup stored 1-based (EffectCraft's items in After Effects' order).
 pub(crate) fn c_popup(v: &Value) -> Option<Vec<f64>> {
     match v {
@@ -384,6 +391,9 @@ pub(crate) fn rec_value(
     // Shape and text animator colours alike (both are planned here).
     if layout == Layout::Color && colour_beyond(p, !keys.is_empty()) {
         cx.col.lose(category, format!("{w}: a colour channel outside 0 to 1 is written as the nearest limit"));
+    }
+    if layout == Layout::Color && colour_alpha(p, !keys.is_empty()) {
+        cx.col.lose(category, format!("{w}: the colour's alpha is not written (After Effects colours have none; written opaque)"));
     }
     if keys.is_empty() && expr.is_none() && !differs(&value) {
         return None;

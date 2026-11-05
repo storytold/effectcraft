@@ -558,6 +558,55 @@ fn a_text_animator_colour_outside_the_range_is_reported() {
     assert_eq!(lost(&with_fill([3.0, 0.4, -1.0, 1.0])), 1);
 }
 
+/// A text animator's Fill or Stroke Color alpha is reported (After Effects colours have none; the
+/// converter wrote them opaque without a word, review finding), for the static value and for keys;
+/// the check follows the values that are written: an alpha on the static value of a keyed colour
+/// is not reported, an opaque control is lossless.
+#[test]
+fn a_text_animator_colour_alpha_is_reported_for_the_values_that_are_written() {
+    use effectcraft_project::build;
+    for id in ["fillColor", "strokeColor"] {
+        let make = |value: [f64; 4], keys: Option<([f64; 4], [f64; 4])>| {
+            let mut d = TextDoc::plain("Glow");
+            d.set_runs(vec![StyleRun { len: 4, style: style("ArialMT", 40.0) }]);
+            let (mut p, c) = text_project(vec![d]);
+            let mut next = p.next_id;
+            {
+                let mut ids = build::Ids(&mut next);
+                let props = build::text_anim_props(&mut ids, id, false);
+                let mut a = build::text_animator(&mut ids, "A", props);
+                if let Some(pg) = a.sub_mut("properties") {
+                    let prop = pg.get_mut(id).unwrap();
+                    prop.value = Value::Color(value);
+                    if let Some((k0, k1)) = keys {
+                        prop.keys = vec![key(0.0, Value::Color(k0)), key(1.0, Value::Color(k1))];
+                    }
+                }
+                with_layer(&mut p, c, 0, |l| l.props.sub_mut("text").unwrap().sub_mut("animators").unwrap().children = vec![effectcraft_project::Node::Group(a)]);
+            }
+            p.next_id = next;
+            p
+        };
+        let alpha_lost = |p: &Project| {
+            let r = export_all(p);
+            r.report.losses.iter().filter(|l| l.category == LossCategory::TextLayers).flat_map(|l| l.details.clone()).filter(|d| d.contains("alpha")).count()
+        };
+        let strict = |p: &Project| effectcraft_aep::export::export(p, &effectcraft_aep::export::ExportOptions { allow_losses: false }).is_ok();
+        let opaque = [0.2, 0.4, 0.6, 1.0];
+        let clear = [0.2, 0.4, 0.6, 0.25];
+        let control = make(opaque, None);
+        assert_eq!(alpha_lost(&control), 0, "{id}");
+        let static_alpha = make(clear, None);
+        assert_eq!(alpha_lost(&static_alpha), 1, "{id}");
+        assert!(!strict(&static_alpha), "{id}");
+        let keyed_alpha = make(opaque, Some((opaque, clear)));
+        assert_eq!(alpha_lost(&keyed_alpha), 1, "{id}");
+        // The static value of a keyed colour is not written: its alpha is not reported.
+        let keyed_opaque = make(clear, Some((opaque, opaque)));
+        assert_eq!(alpha_lost(&keyed_opaque), 0, "{id}");
+    }
+}
+
 /// Two fonts whose names differ only in bytes a lossy UTF-8 conversion turns into the same text
 /// (U+4E80 and U+4E81 both read as `N` + U+FFFD) get entries of their own (review finding).
 #[test]

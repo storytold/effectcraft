@@ -836,3 +836,48 @@ fn a_camera_transform_group_ends_with_its_group_end() {
     assert_eq!(names.last().map(String::as_str), Some("ADBE Group End"), "{names:?}");
     assert!(names.iter().any(|n| n == "ADBE Position_2"));
 }
+
+/// Camera and light options that are not written (the iris, the highlight, the light's radius,
+/// falloff and shadow settings) are reported when they are animated, also while their static value
+/// is the default: keys and expressions change the render, and the export was identical to the
+/// unanimated layer with no loss (review finding). The default layer stays lossless.
+#[test]
+fn animated_camera_and_light_options_that_are_not_written_are_reported() {
+    use effectcraft_project::{Expression, LightKind};
+    let camera_ids = ["irisShape", "irisRotation", "irisRoundness", "irisAspectRatio", "irisDiffractionFringe", "highlightGain", "highlightThreshold", "highlightSaturation"];
+    let light_ids = ["radius", "falloffDistance", "shadowDarkness", "shadowDiffusion", "falloff", "castsShadows"];
+    let make = |source: LayerSource, path: Option<String>, keyed: bool| {
+        let mut p = Project::default();
+        let c = add_comp(&mut p, "C", 640, 360, FrameRate::new(25, 1), 2.0, None);
+        add_layer(&mut p, c, "L", source, (640, 360));
+        if let Some(path) = path {
+            with_layer(&mut p, c, 0, |l| {
+                let prop = l.props.prop_mut(&path).unwrap_or_else(|| panic!("no {path}"));
+                if keyed {
+                    let v = prop.value.clone();
+                    prop.keys = vec![key(0.0, v.clone()), key(1.0, v)];
+                } else {
+                    prop.expr = Some(Expression { text: "value".into(), enabled: true });
+                }
+            });
+        }
+        p
+    };
+    let strict = |p: &Project| effectcraft_aep::export::export(p, &effectcraft_aep::export::ExportOptions { allow_losses: false }).is_ok();
+    let cam = make(LayerSource::Camera, None, true);
+    assert!(export_all(&cam).report.is_lossless() && strict(&cam));
+    let light = make(LayerSource::Light { kind: LightKind::Spot }, None, true);
+    assert!(export_all(&light).report.is_lossless() && strict(&light));
+    for keyed in [true, false] {
+        for id in camera_ids {
+            let p = make(LayerSource::Camera, Some(format!("cameraOptions/{id}")), keyed);
+            assert_eq!(export_all(&p).report.count(LossCategory::Cameras), 1, "camera {id} keyed {keyed}");
+            assert!(!strict(&p), "camera {id} keyed {keyed}");
+        }
+        for id in light_ids {
+            let p = make(LayerSource::Light { kind: LightKind::Spot }, Some(format!("lightOptions/{id}")), keyed);
+            assert_eq!(export_all(&p).report.count(LossCategory::Lights), 1, "light {id} keyed {keyed}");
+            assert!(!strict(&p), "light {id} keyed {keyed}");
+        }
+    }
+}
