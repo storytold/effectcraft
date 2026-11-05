@@ -684,3 +684,35 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
         assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
     }
 }
+
+/// Every icon-only column header says what it is on hover, over the icon it explains, and every
+/// layer switch under one shows the same text.
+#[test]
+fn every_icon_only_header_has_a_hover_text() {
+    let all = crate::state::TimelineState { columns: COLUMNS.iter().map(|c| c.0.to_string()).collect(), show_modes: true, ..Default::default() };
+    let cw = cols(0.0, 2000.0, Vis::of(&all));
+    let ch = Rect::from_min_max(pos2(0.0, 0.0), pos2(2000.0, 20.0));
+    let rects = header_tip_rects(&cw, ch);
+    assert_eq!(rects.len(), HEADER_TIPS.len(), "every header icon is placed with every column shown");
+    for (col, key, r) in &rects {
+        assert_eq!(column_at(&cw, r.center().x), Some(*col), "{key} sits in its column");
+        let (_, _, name, tip) = HEADER_TIPS.iter().find(|t| t.1 == *key).unwrap();
+        assert!(tip.starts_with(&format!("{name}:")) || *key == "num", "{key}: {tip}");
+    }
+    for (i, (_, a, ra)) in rects.iter().enumerate() {
+        for (_, b, rb) in &rects[i + 1..] {
+            assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() < 1.0, "{a} and {b} overlap");
+        }
+    }
+    // The icons the header draws over the A/V and switch columns, left to right.
+    let av: Vec<&str> = rects.iter().filter(|r| r.0 == "av").map(|r| r.1).collect();
+    assert_eq!(av, ["video", "audio", "solo", "lock"]);
+    let sw: Vec<&str> = rects.iter().filter(|r| r.0 == "switches").map(|r| r.1).collect();
+    assert_eq!(sw, ["shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"]);
+    for name in av.iter().chain(&sw).chain(&["preserveTransparency"]) {
+        assert!(switch_tip(name).is_some(), "the {name} switch has a hover text");
+    }
+    // A hidden column has no hover targets.
+    let none = crate::state::TimelineState { columns: Default::default(), show_modes: false, ..Default::default() };
+    assert!(header_tip_rects(&cols(0.0, 800.0, Vis::of(&none)), ch).is_empty());
+}
