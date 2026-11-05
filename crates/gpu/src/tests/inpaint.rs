@@ -44,7 +44,7 @@ fn rect_hole(w: u32, h: u32, x0: u32, y0: u32, s: u32) -> Vec<bool> {
 #[test]
 fn the_inpaint_kernels_are_available() {
     let Some(g) = gpu() else { return };
-    let bad: Vec<&str> = g.ctx.unavailable_kernels().iter().filter(|(e, _)| crate::inpaint::KERNELS.contains(e)).map(|(e, _)| *e).collect();
+    let bad: Vec<&str> = crate::inpaint::KERNELS.iter().copied().filter(|e| !g.ctx.has_kernel(e)).collect();
     assert!(bad.is_empty(), "inpaint kernels did not build on {}: {bad:?}", g.ctx.name);
 }
 
@@ -148,7 +148,7 @@ fn object_fill_recovers_background_and_is_stable() {
             gts.push(gt);
         }
         let input = FillInput { frames, holes, references: vec![] };
-        let out = fill_sequence_with(&input, &FillOpts::default(), g, &mut |_, _| true).expect("fill");
+        let out = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true).expect("fill");
         for t in 0..out.len() {
             let db = psnr(&out[t], &gts[t], Some(&input.holes[t]));
             assert!(db > 26.0, "frame {t} pan {pan}: {db:.1} dB");
@@ -174,7 +174,7 @@ fn edge_blend_takes_the_cpu_membrane() {
     let hole = rect_hole(w, h, 30, 20, 14);
     let input = FillInput { frames: vec![cut(&gt, &hole); 4], holes: vec![hole.clone(); 4], references: vec![] };
     let opts = FillOpts { method: effectcraft_raster::inpaint::FillMethod::EdgeBlend, ..Default::default() };
-    let edge = fill_sequence_with(&input, &opts, g, &mut |_, _| true).expect("fill");
+    let edge = fill_sequence_with(input.clone(), &opts, g, &mut |_, _| true).expect("fill");
     for t in 1..4 {
         assert!(psnr(&edge[t], &edge[0], Some(&hole)) > 40.0, "frame {t}");
     }
@@ -300,8 +300,8 @@ fn sequence_fill_with_the_device_flow_matches_the_cpu() {
             holes.push(hole);
         }
         let input = FillInput { frames, holes, references: vec![] };
-        let dev = fill_sequence_with(&input, &FillOpts::default(), g, &mut |_, _| true).expect("gpu fill");
-        let ref_cpu = fill_sequence_with(&input, &FillOpts::default(), &cpu, &mut |_, _| true).expect("cpu fill");
+        let dev = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true).expect("gpu fill");
+        let ref_cpu = fill_sequence_with(input.clone(), &FillOpts::default(), &cpu, &mut |_, _| true).expect("cpu fill");
         for t in 0..dev.len() {
             let db = psnr(&dev[t], &ref_cpu[t], Some(&input.holes[t]));
             assert!(db > 40.0, "frame {t} pan {pan}: device vs CPU {db:.1} dB");
