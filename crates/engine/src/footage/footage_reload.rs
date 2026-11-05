@@ -185,10 +185,8 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
     } else {
         // Take the project for writing only for updates that differ: a write without a `bump`
         // is published as an untracked change.
-        let updates: Vec<_> = updates
-            .into_iter()
-            .filter(|(i, f)| s.project.item(*i).is_some_and(|it| !matches!(&it.kind, ItemKind::Footage(cur) if cur == f)))
-            .collect();
+        let updates: Vec<_> =
+            updates.into_iter().filter(|(i, f)| s.project.item(*i).is_some_and(|it| !matches!(&it.kind, ItemKind::Footage(cur) if cur == f))).collect();
         let changed = !updates.is_empty();
         if changed {
             let p = s.project_mut();

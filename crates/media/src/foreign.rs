@@ -73,7 +73,8 @@ mod tests {
     /// it must not get.
     fn register_test_reader() {
         register(Arc::new(|path, _| {
-            (path.ends_with(".ecforeign") || path.ends_with("ecforeign-claims-png.png")).then(|| Ok(Raster { width: 1, height: 1, rgba8: vec![255, 0, 0, 255], has_alpha: false }))
+            (path.ends_with(".ecforeign") || path.ends_with("ecforeign-claims-png.png"))
+                .then(|| Ok(Raster { width: 1, height: 1, rgba8: vec![255, 0, 0, 255], has_alpha: false }))
         }));
     }
 
