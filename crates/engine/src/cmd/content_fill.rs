@@ -253,10 +253,12 @@ fn memory_shortfall_with(frames: usize, w: u32, h: u32, available: u64, workers:
 }
 
 /// Scratch floor for a native fill: the input, membrane-filled and propagated frames are each
-/// spilled as f32 RGBA (3 × 16 bytes a pixel a frame), plus a tenth for the PNG output.
+/// spilled as f32 RGBA (16 bytes a pixel a frame), but the membrane spill is closed before the
+/// propagated one is made, so at most two copies exist at once (2 × 16 bytes a pixel a frame),
+/// plus a tenth for the PNG output.
 #[cfg(not(target_arch = "wasm32"))]
 fn scratch_need(frames: usize, w: u32, h: u32) -> u64 {
-    let bytes = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(48);
+    let bytes = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(32);
     bytes.saturating_add(bytes / 10)
 }
 
@@ -289,6 +291,40 @@ fn scratch_shortfall(frames: usize, w: u32, h: u32, dir: &std::path::Path) -> Op
 /// backend is present; Object and Surface run the flow and PatchMatch on the device.
 fn filling_status(on_device: bool, method: FillMethod) -> &'static str {
     if on_device && method != FillMethod::EdgeBlend { "Filling (GPU)" } else { "Filling" }
+}
+
+/// The PNGs a fill has written so far. Unless the fill finishes ([`OutputFiles::keep`]), dropping
+/// it deletes them, and the output folder too when the fill made it and nothing else is in it, so
+/// a failed or stopped fill leaves no partial sequence behind (#2570 review).
+struct OutputFiles {
+    dir: std::path::PathBuf,
+    /// The folder was missing before the fill (the spill creates it).
+    made_dir: bool,
+    paths: Vec<String>,
+    kept: bool,
+}
+
+impl OutputFiles {
+    /// The fill finished: keep its files.
+    fn keep(mut self) -> Vec<String> {
+        self.kept = true;
+        std::mem::take(&mut self.paths)
+    }
+}
+
+impl Drop for OutputFiles {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+        // `remove_dir` leaves a folder that still holds anything else.
+        if self.made_dir {
+            let _ = std::fs::remove_dir(&self.dir);
+        }
+    }
 }
 
 /// Run a fill: the layer's frames (rendered in passes with a job worker's GPU), the fill, the
@@ -326,12 +362,17 @@ pub(crate) async fn run_plan(
     let mut holes = Vec::with_capacity(times.len());
     #[cfg(target_arch = "wasm32")]
     let mut frames = Vec::with_capacity(times.len());
+    // Declared before the spill, so on an early return the spill is closed first and the folder
+    // it was made in can be removed.
+    let dir = std::path::Path::new(&plan.dir);
+    let mut written = OutputFiles { dir: dir.to_path_buf(), made_dir: !dir.exists(), paths: Vec::with_capacity(times.len()), kept: false };
     // Spill 32-bit floats whatever the project depth: the old in-memory path kept f32 all the
     // way through, so quantising here would change the fill (#2570, "no quality loss"). Scratch
     // lives beside the output when one is set; the default temp folder may be RAM-backed, which
     // the memory preflight accounts for when it chooses the spill folder.
     #[cfg(not(target_arch = "wasm32"))]
-    let spill = SpillHandle::create_in(Some(std::path::Path::new(&plan.dir)), w as usize, h as usize, times.len(), 32).map_err(|e| e.to_string())?;
+    let spill = SpillHandle::create_in(Some(dir), w as usize, h as usize, times.len(), 32)
+        .map_err(|e| format!("spill: cannot make the scratch file in {}: {e}", plan.dir))?;
     #[cfg(not(target_arch = "wasm32"))]
     let spill_probe = spill.clone();
     for (k, t) in times.iter().enumerate() {
@@ -376,9 +417,7 @@ pub(crate) async fn run_plan(
         high.set(done);
         (progress.borrow_mut())(done, n * 3)
     };
-    let dir = &plan.dir;
-    let paths: Vec<String> = (0..n as usize).map(|k| std::path::Path::new(dir).join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
-    let mut paths_out = Vec::with_capacity(n as usize);
+    let paths: Vec<String> = (0..n as usize).map(|k| dir.join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
     let mut sink_error: Option<String> = None;
     let mut sink = |idx: usize, img: &Image| -> std::result::Result<(), String> {
         let r = (|| -> std::result::Result<(), String> {
@@ -389,7 +428,7 @@ pub(crate) async fn run_plan(
                 return Err(spill_probe.take_error().unwrap_or_else(|| "spill: read failed".to_string()));
             }
             services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
-            paths_out.push(paths[idx].clone());
+            written.paths.push(paths[idx].clone());
             if !report(2 * n + idx as u64 + 1) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
@@ -420,21 +459,28 @@ pub(crate) async fn run_plan(
         for (k, img) in produced.iter().enumerate() {
             let path = paths[k].clone();
             services.store_file(&path, &png(img)?).map_err(|e| format!("{path}: {e}"))?;
-            if paths_out.len() <= k {
-                paths_out.push(path);
+            if written.paths.len() <= k {
+                written.paths.push(path);
             }
             if !report(2 * n + k as u64 + 1) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
         }
     }
-    Ok(paths_out)
+    // Every frame must have a file: the fill layer is built on the first one, and a short
+    // sequence would play the wrong frames.
+    if written.paths.len() != times.len() {
+        return Err(format!("Content-Aware Fill wrote {} of {} frames", written.paths.len(), times.len()));
+    }
+    Ok(written.keep())
 }
 
 /// Add the fill layer of a finished plan (one undo step).
+/// The plan comes back from a job worker, so an empty range is an error, not a crash.
 pub(crate) fn apply_plan(s: &mut Session, plan: &FillPlan, paths: Vec<String>) -> Result<Value> {
     let importer = s.importer.clone();
-    add_fill_layer(s, plan.comp, plan.layer, &plan.name, paths, (plan.width, plan.height), plan.times[0], plan.times.len(), importer)
+    let start = plan.times.first().copied().ok_or_else(|| bad("contentFill.generate", "the fill has no frames"))?;
+    add_fill_layer(s, plan.comp, plan.layer, &plan.name, paths, (plan.width, plan.height), start, plan.times.len(), importer)
 }
 
 /// `contentFill.generate`: validate the layer and range, refuse a fill that cannot fit in
@@ -495,7 +541,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let expand = st.alpha_expansion.round().max(0.0) as usize;
     let reference = st.reference_layer.filter(|r| comp.layer(*r).is_some()).map(|r| (r, Tick::from_seconds_f64(st.reference_time.unwrap_or(0.0))));
-    // Native fills write three f32 copies of the range to scratch beside the output; a volume
+    // Native fills keep up to two f32 copies of the range in scratch beside the output; a volume
     // that cannot hold them is refused before any frame is rendered (#2570 review).
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(e) = scratch_shortfall(times.len(), w, h, std::path::Path::new(&dir)) {
@@ -559,12 +605,13 @@ fn add_fill_layer(
     count: usize,
     importer: Option<Arc<dyn crate::Importer>>,
 ) -> Result<Value> {
+    let first = paths.first().cloned().ok_or_else(|| bad("contentFill.generate", "the fill wrote no frames"))?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let src = comp.layer(lid).ok_or_else(|| bad("contentFill.generate", "the source layer is gone"))?.clone();
     let fr = comp.frame_rate;
     let dur = fr.tick_of(count as i64);
-    let mut footage = importer.and_then(|i| i.probe(&paths[0]).ok()).filter(|f| f.has_video).unwrap_or_else(|| Footage {
-        path: paths[0].clone(),
+    let mut footage = importer.and_then(|i| i.probe(&first).ok()).filter(|f| f.has_video).unwrap_or_else(|| Footage {
+        path: first.clone(),
         kind: FootageKind::Sequence,
         width: size.0,
         height: size.1,
@@ -691,12 +738,13 @@ mod tests {
         assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, 0).is_some());
     }
 
-    /// The native spill holds three f32 copies of the range beside the output, plus the PNGs.
+    /// The native spill holds at most two f32 copies of the range beside the output at once (the
+    /// membrane spill is gone before the propagated one is made), plus the PNGs.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn scratch_space_is_checked_before_a_fill() {
-        let per_copy = 300u64 * 1920 * 1080 * 48;
-        assert_eq!(scratch_need(300, 1920, 1080), per_copy + per_copy / 10);
+        let copies = 300u64 * 1920 * 1080 * 32;
+        assert_eq!(scratch_need(300, 1920, 1080), copies + copies / 10);
         let tmp = std::env::temp_dir();
         // A range that cannot possibly fit on the volume is refused up front.
         assert!(scratch_shortfall(usize::MAX, u32::MAX, u32::MAX, &tmp).is_some());
@@ -704,5 +752,42 @@ mod tests {
         assert!(scratch_shortfall(usize::MAX, u32::MAX, u32::MAX, std::path::Path::new("effectcraft-missing-fill-folder")).is_some());
         // A tiny fill fits.
         assert_eq!(scratch_shortfall(1, 16, 16, &tmp), None);
+    }
+
+    /// A fill that fails or is stopped after some frames were written deletes them, and the
+    /// output folder it made; a finished fill keeps its files (#2570 review).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_stopped_fill_removes_its_partial_output() {
+        use super::OutputFiles;
+        let root = tempfile::tempdir().unwrap();
+        let write = |dir: &std::path::Path, made_dir: bool| {
+            std::fs::create_dir_all(dir).unwrap();
+            let paths: Vec<String> = (0..2).map(|k| dir.join(format!("fill_{k:05}.png")).to_string_lossy().to_string()).collect();
+            for p in &paths {
+                std::fs::write(p, b"png").unwrap();
+            }
+            OutputFiles { dir: dir.to_path_buf(), made_dir, paths, kept: false }
+        };
+        // The fill made the folder: the files and the folder go.
+        let made = root.path().join("made");
+        drop(write(&made, true));
+        assert!(!made.exists(), "the partial sequence and its folder are removed");
+        // The folder was already there: only the fill's own files go.
+        let existing = root.path().join("existing");
+        drop(write(&existing, false));
+        assert!(existing.exists());
+        assert_eq!(std::fs::read_dir(&existing).unwrap().count(), 0);
+        // Something else in a folder the fill made keeps the folder.
+        let shared = root.path().join("shared");
+        let files = write(&shared, true);
+        std::fs::write(shared.join("notes.txt"), b"keep").unwrap();
+        drop(files);
+        assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 1);
+        // A finished fill keeps its files.
+        let done = root.path().join("done");
+        let kept = write(&done, true).keep();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|p| std::path::Path::new(p).exists()));
     }
 }
