@@ -13,6 +13,7 @@ mod effects;
 mod effects_batch5;
 mod effects_round2;
 mod effects_round3;
+mod lumetri;
 mod markers;
 mod masks;
 mod mattes;

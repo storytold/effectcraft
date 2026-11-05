@@ -376,10 +376,23 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     /// keyframes; a layer control reads the `tdpi` chunk; a button has no value.
     pub fn stored_value(&self) -> Option<ParamValue> {
         let p = self.stored?;
+        if self.kind != ParamKind::Layer && p.flags() != Some(1) {
+            return None;
+        }
+        self.recorded_value()
+    }
+
+    /// The value in the value record whatever the record's state (`tdsb`): what
+    /// [`EffectParam::stored_value`] reads, also from a record in the default state (`tdsb` 3).
+    /// Lumetri Color writes the values of its hidden parameters so (High Dynamic Range, HDR
+    /// Specular, Look: 1200 `lumetri-01-set-all`, `-02-sec-top`, `-06-sec-light`; After Effects
+    /// reads back the recorded values). `None` with keyframes or without a record.
+    pub fn recorded_value(&self) -> Option<ParamValue> {
+        let p = self.stored?;
         if self.kind == ParamKind::Layer {
             return be_u32(p.chunk().child(b"tdpi")?.bytes()?, 0).map(ParamValue::Layer);
         }
-        if p.flags() != Some(1) || p.is_animated() {
+        if p.is_animated() {
             return None;
         }
         let v = p.static_value()?;

@@ -534,6 +534,44 @@ suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
 
+**Lumetri Color** (`ADBE Lumetri`, 1200: 58 compositions made by script in After Effects 2026, 32 bpc,
+working space None; defaults, all set, one per section, valid minima and maxima, every popup item the
+script can set, checkboxes toggled, keys, an expression): 131 `parT` entries. The `-NNNN` suffix is a
+parameter id, not the position (`-0127` ... `-0130` sit between `-0005` and `-0026`), so the importer
+keys by suffix. Float sliders (type 10) store the value After Effects shows; the valid ranges (`pard`
+104 / 108) are wider than the slider's (112 / 116): Temperature / Tint -300..300 (slider -100..100),
+Saturation 0..300 (0..200), Exposure -7..7 (-5..5), Contrast, Highlights, Shadows, Whites, Blacks,
+HDR Specular, Tint Balance -150..150 (-100..100), Faded Film 0..150 (0..100), HDR White 100..1000,
+HDR Range 100..10000, Refine Blur 0..1000 (0..30), Vignette Amount -5..5 (-3..3); the read-backs of
+`-19-min` / `-20-max` equal the stored numbers. **Hidden controls are recorded in the default state**
+(`tdsb` 3) and still hold the value After Effects reads back: High Dynamic Range `-0062` (1.0),
+HDR Specular `-0064` (22), the second Look popup `-0128` (26.16 as set, read back 26), Legacy Tone And
+Saturation `-0097`, Auto Color `-0124`, Face Detection `-0102`, the Auto Intensity `-0123`
+(`EffectParam::recorded_value`). Each section has an Active checkbox (blank `pard` name; `-0003` Basic
+Correction, `-0023` Creative, `-0037` Curves, `-0118` RGB Curves, `-0104` / `-0105` / `-0107` / `-0109` /
+`-0111` the hue / saturation curves, `-0046` Color Wheels, `-0068` HSL Secondary, `-0050` Vignette, on
+by default); off, the section does nothing (`-03-sec-basic-correction`, `-17-sec-vignette` render as
+`-00-defaults`). Arbitrary data (type 11, a record and `aRbs` in every instance; empty is `fe fe`):
+`-0001` an XML copy of the grade written only when the Look changes (not kept current: `-01-set-all`
+holds defaults for controls set after the Look); `-0096` the Look's name, UTF-16LE (`SL BLUE ICE`; the
+popup `-0025` itself has no record, `-0128` can disagree with it: `-07-sec-creative` names item 20
+while `-0128` holds 23), `-0095` likewise for the Input LUT (H, by analogy: no sample sets a LUT);
+`-0129` the Look colour space's 16-byte id (the GUID `LookColorSpace` of `-0001`, byte-swapped; zero
+for None; the Color Space popup `-0130` writes no record of its own, `-22-pop38-1` ... `-53-pop38-33`);
+`-0032` Split Toning (32 zero bytes); `-0039` the four RGB curves and `-0042`, `-0106`, `-0108`,
+`-0110`, `-0112` the hue / saturation curves, 520 bytes each: `i32` type (3 for the hue curves, 2 for
+Luma vs Sat and Sat vs Sat, 0 for an RGB curve), `u32` point count, then little-endian `f64` pairs x, y
+(RGB: (0, 0), (1, 1) by default; hue / saturation: no points, and the selector colours `-0113` ...
+`-0117` add three points at y = 0, the hue picked +- 0.0556; no sample moves a point, so y's scale is
+H); `-0047` Color Wheels (4 x `f64` triples, 0, 0.5, 0 each) and `-0085` the HSL correction wheels (8
+triples, the same); `-0073` the HSL key, 40 bytes: a flag byte (1 once a colour was picked), then hue,
+saturation, lightness, each centre, range, tolerance (`f32` LE, fractions) and an enabled byte (fresh:
+0.5, 0, 0, on; picking RGB 0.02 0.55 0.85 gives hue centre 0.5605 = that colour's hue and lightness
+centre 0.435 = its HSL lightness, range 0.05, tolerance 0.1: `-01-set-all`; whether range is the half
+or full width is H); `-0122` the Auto Tone analysis (UTF-16 JSON). Curves, LUTs and wheels are not
+scriptable: the presets for them are still to be made. [V for the sliders, checkboxes, popups and the
+`tdsb` 3 values; H where marked]
+
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
 | Field | Chunk path | Offset | Type | Meaning | Evidence | Conf. |

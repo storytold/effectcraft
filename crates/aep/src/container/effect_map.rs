@@ -134,6 +134,9 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
+    /// Lumetri Color: every parameter goes through its own table, keyed by match name
+    /// (`import/lumetri.rs`, 1200).
+    Lumetri,
 }
 
 /// One mapped effect.
@@ -509,6 +512,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // Lumetri Color (1200): the parameters are mapped by match name, not by `parT` index
+    // (`import/lumetri.rs`).
+    EffectMap { match_name: "ADBE Lumetri", effect: "ec.color.lumetri", params: &[], extra: Extra::Lumetri },
     // Expression controls (070-077, 217-221, 310).
     // Directional Blur (711): Direction in degrees, Blur Length in pixels (valid max 1 000).
     fx(
