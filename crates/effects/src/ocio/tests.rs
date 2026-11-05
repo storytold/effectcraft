@@ -179,6 +179,14 @@ fn lut_files_parse_and_interpolate() {
     assert!((o[0] - 0.25).abs() < 1e-6 && (o[1] - 0.4).abs() < 1e-6, "{o:?}");
     let inv = x.apply(o, 2, true, "");
     assert!((inv[0] - 0.5).abs() < 1e-4, "{inv:?}");
+    // A .csp whose header claims a huge or fractional table is refused before anything is reserved.
+    let head = "CSPLUTV100\n{k}\n\n2\n0 1\n0 1\n2\n0 1\n0 1\n2\n0 1\n0 1\n\n";
+    for (k, size) in [("3D", "100000 100000 100000"), ("3D", "130 130 130"), ("3D", "2.5 2.5 2.5"), ("1D", "4000000000000")] {
+        let text = head.replace("{k}", k) + size + "\n0 0 0\n";
+        assert!(parse_file(&text, "csp").is_none(), "{k} {size}");
+    }
+    // A short file that claims a valid size is refused once its rows run out.
+    assert!(parse_file(&(head.replace("{k}", "3D") + "129 129 129\n0 0 0\n"), "csp").is_none());
     // CDL collection: pick by id.
     let ccc = r#"<ColorCorrectionCollection><ColorCorrection id="a"><SOPNode><Slope>2 2 2</Slope><Offset>0 0 0</Offset><Power>1 1 1</Power></SOPNode></ColorCorrection>
             <ColorCorrection id='b'><SOPNode><Slope>0.5 0.5 0.5</Slope></SOPNode><SatNode><Saturation>1</Saturation></SatNode></ColorCorrection></ColorCorrectionCollection>"#;

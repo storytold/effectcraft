@@ -242,13 +242,20 @@ fn powz(x: f32, y: f32) -> f32 {
     return pow(x, y);
 }
 
-// Rust's f32::round (half away from zero; WGSL's round() is half to even).
+// Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
+// `x` with `t ± 0.5` (exact for integer `t`) rather than subtracting: drivers may fuse a product
+// that feeds `x - t` into one fma (AMD does), skipping the product's rounding, so `5/6 · 3`,
+// which rounds to exactly 2.5 on the CPU, came out 0.49999994 above 2 and rounded down (#1605).
 fn round_away(x: f32) -> f32 {
-    let t = trunc(x);
-    if (abs(x - t) >= 0.5) {
-        return t + sign(x);
+    // From 2^23 up every f32 is an integer, and `t + 0.5` would round to even (8388608 → 8388609).
+    if (abs(x) >= 8388608.0) {
+        return x;
     }
-    return t;
+    let t = trunc(x);
+    if (x >= 0.0) {
+        return select(t, t + 1.0, x >= t + 0.5);
+    }
+    return select(t, t - 1.0, x <= t - 0.5);
 }
 
 // f32::rem_euclid(1.0).

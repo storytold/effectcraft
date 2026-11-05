@@ -69,6 +69,10 @@ fn math_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out, p, vec4<f32>(q, fxs_posterize_bin(q, P.u[0].y), 0.0, 1.0));
         return;
     }
+    if (P.u[0].x == 2u) {
+        textureStore(out, p, vec4<f32>(round_away(v), 0.0, 0.0, 1.0));
+        return;
+    }
     textureStore(out, p, vec4<f32>(sin_p(v), cos_p(v), 0.0, 1.0));
 }
 "#;
@@ -127,6 +131,30 @@ fn alpha_division_and_posterization_match_f32_rounding() {
     }
 }
 
+/// `round_away` is `f32::round`, also from 2^23 up where every value is already an integer
+/// (integer IDs there must not merge: 8388608 and 8388609 both rounded to 8388609).
+#[test]
+fn round_away_matches_f32_round_for_large_values() {
+    let Some(g) = gpu() else { return };
+    let mut values = vec![];
+    for m in [1.0f32, -1.0] {
+        for v in [0.0f32, 0.5, 1.5, 2.5, 0.49999997, 4194303.5, 8388607.5, 8388608.0, 8388609.0, 8388610.0, 16777216.0, 3.0e9] {
+            values.push([m * v, 0.0, 0.0, 1.0]);
+        }
+    }
+    let img = Image { width: values.len() as u32, height: 1, data: values.clone() };
+    let input = g.ctx.upload_image(&img).unwrap();
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let out = e.scratch(img.width, 1);
+    let mut params = crate::context::Params::default();
+    params.u[0] = [2, 0, 0, 0];
+    e.pixels("math_probe", &params, &input, None, &out, None);
+    let result = e.download(&out).unwrap();
+    for (v, got) in values.iter().zip(result.data) {
+        assert_eq!(v[0].round(), got[0], "round_away({})", v[0]);
+    }
+}
+
 /// Prove that the numerical fixes run on the device, without per-effect image
 /// downloads or CPU fallback. Compiler-limited DX12 devices retain their tested
 /// fallback contract; these kernels must compile on the Vulkan test adapters.
@@ -137,7 +165,7 @@ fn numerical_effects_remain_resident_on_vulkan() {
         return;
     }
     for entry in ["fxs_point", "fxt_point", "ftr_grid", "fp2_hextile"] {
-        assert!(!g.ctx.unavailable_kernels().iter().any(|(name, _)| *name == entry), "{entry}: {:?}", g.ctx.unavailable_kernels());
+        assert!(g.ctx.has_kernel(entry), "{entry}: {:?}", g.ctx.unavailable_kernels());
     }
     for (id, vals) in [
         ("ec.stylize.posterize", vec![("level", n(4.0))]),
@@ -1107,7 +1135,7 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
     ctx.drop_kernel("pointwise");
     ctx.drop_kernel("box_h");
     let names: Vec<&str> = ctx.unavailable_kernels().iter().map(|(e, _)| *e).collect();
-    assert_eq!(names, ["pointwise", "box_h"]);
+    assert_eq!(names, ["box_h", "pointwise"]);
     let g = Gpu::from_context(ctx);
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         let mut s = Scene::new(depth);
@@ -1125,6 +1153,24 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
         d.quantized = depth != BitDepth::Bpc32;
         check(&format!("missing kernels {depth:?}"), Some(d), 0.0);
     }
+}
+
+/// #1590: effect kernels are built on first use, not with the context (building all of them
+/// up front kept Chrome's GPU process busy past its watchdog). Once asked for, every one of
+/// them builds on this device: a kernel no test dispatches still can't break unnoticed.
+#[test]
+fn effect_kernels_build_on_first_use() {
+    if gpu().is_none() {
+        return;
+    }
+    let Ok(ctx) = pollster::block_on(crate::context::GpuContext::request()) else { return };
+    let built = |ctx: &crate::context::GpuContext| ctx.effect_pipelines_built();
+    assert_eq!(built(&ctx), 0, "no effect kernel is built with the context");
+    let started = std::time::Instant::now();
+    ctx.build_all_kernels();
+    eprintln!("{}: built {} effect kernels in {:.2?}", ctx.name, built(&ctx), started.elapsed());
+    assert_eq!(ctx.unavailable_kernels(), vec![], "every effect kernel builds on {}", ctx.name);
+    assert!(ctx.has_kernel("classic3d") && ctx.has_kernel("math_probe"), "the up-front kernels build on {}", ctx.name);
 }
 
 /// WGSL cannot read the CPU's constants, so Glow's bright pass repeats them as literals; this

@@ -284,6 +284,11 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
     }
+    // An After Effects import with a path that loses something asks first (the menu's file
+    // dialog asks in `run_with_picked`).
+    if params.get("path").is_some() && crate::panels::aep_losses::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "aepLosses"}));
+    }
     // J / K and Select All Keyframes act on what the Timeline shows (its revealed properties).
     if matches!(id, "time.nextKey" | "time.previousKey" | "keys.selectAll")
         && ["visible", "layers", "layer", "prop"].iter().all(|k| params.get(*k).is_none())

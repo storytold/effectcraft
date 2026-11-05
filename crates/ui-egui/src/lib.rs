@@ -152,6 +152,9 @@ pub enum Dialog {
     UnsavedChanges,
     /// Delete Project items that compositions use? (`panels::delete_items`).
     DeleteItems,
+    /// Import an After Effects project although some of it cannot be imported exactly?
+    /// (`panels::aep_losses`).
+    AepLosses,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
