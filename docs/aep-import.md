@@ -267,7 +267,7 @@ parameter gets the file's value:
   EffectCraft's Lumetri interpolates monotone); Hue vs Sat mean 0.008, max 0.18 (After Effects
   scales the saturation in linear light, red reaching 1.26; EffectCraft in display values, 8.3 % of
   pixels > 2 levels); the colour wheels mean 0.042, max 0.13 (the hues go the same way: Shadows
-  lift blue at black by 0.13 in After Effects, 0.21 here; Highlights add green; the brightness
+  lift blue at black by 0.13 in After Effects, 0.17 here; Highlights add green; the brightness
   sliders are not imported); the Input LUT and the Look are not imported (mean 0.088 / 0.076).
 - **Colour.** After Effects stores the colour its picker shows as ARGB doubles 0..255 in the
   project's working-space encoding; EffectCraft's parameter colours are straight RGBA 0..1 that the
