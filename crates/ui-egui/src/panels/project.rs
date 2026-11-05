@@ -493,8 +493,28 @@ impl Columns {
     }
 }
 
-fn layout_columns(app: &mut EffectcraftApp, rect: Rect) -> Columns {
-    let name_w = (rect.width() * 0.40).clamp(120.0, 260.0);
+/// Narrowest Name column (points).
+const MIN_NAME_W: f32 = 120.0;
+
+/// The Name column width that shows every listed name in full: indent, twirl and icon, the
+/// name, and room for a problem marker.
+fn name_fit(app: &EffectcraftApp, p: &egui::Painter, rows: &[(ItemId, usize)]) -> f32 {
+    rows.iter()
+        .filter_map(|(id, depth)| {
+            let it = app.session.project.item(*id)?;
+            let text = p.layout_no_wrap(it.name.clone(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            Some(8.0 + 14.0 * *depth as f32 + 30.0 + text + 24.0)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// Column positions. The Name column is as wide as the user dragged it, else wide enough for
+/// the names listed (`fit`), as After Effects shows full names; at most the panel's width less
+/// the Label column (the optional columns scroll under it).
+fn layout_columns(app: &mut EffectcraftApp, rect: Rect, fit: f32) -> Columns {
+    let max_w = (rect.width() - 40.0).max(MIN_NAME_W);
+    let auto = (rect.width() * 0.40).clamp(MIN_NAME_W, 260.0).max(fit);
+    let name_w = app.ui.project_name_w.filter(|w| w.is_finite()).unwrap_or(auto).clamp(MIN_NAME_W, max_w);
     let label_x = rect.min.x + name_w + 14.0;
     let mut cols: Vec<(&'static str, &'static str, f32, f32)> = vec![("name", "Name", rect.min.x + 26.0, name_w - 26.0), ("label", "", label_x - 8.0, 18.0)];
     // Optional columns wider than the panel scroll horizontally under the frozen Name and Label
@@ -568,6 +588,21 @@ fn draw_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, h
     }
     let hresp = ui.interact(Rect::from_min_max(pos2(end_x, hdr.min.y), hdr.max), egui::Id::unique("proj-hdr-rest"), Sense::CLICK);
     column_menu(app, &hresp);
+    // The Name column's right edge: drag to resize it, double-click to fit the names again.
+    let edge = Rect::from_center_size(pos2(hdr.min.x + cl.name_w + 5.0, hdr.center().y), vec2(8.0, hdr.height()));
+    let eresp = ui.interact(edge, egui::Id::unique("proj-name-edge"), Sense::click_and_drag());
+    app.auto.add("project.nameColumn.edge", edge, "Drag to resize the Name column; double-click to fit the names");
+    if eresp.hovered() || eresp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        hp.line_segment([pos2(edge.center().x, hdr.min.y + 3.0), pos2(edge.center().x, hdr.max.y - 3.0)], Stroke::new(1.0, t.text_dim));
+    }
+    if eresp.double_clicked() {
+        app.ui.project_name_w = None;
+    } else if eresp.dragged() {
+        let max_w = (hdr.width() - 40.0).max(MIN_NAME_W);
+        app.ui.project_name_w = Some((app.ui.project_name_w.unwrap_or(cl.name_w).min(max_w) + eresp.drag_delta().x).clamp(MIN_NAME_W, max_w));
+    }
+    eresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::tr("Resize the Name column")));
     app.auto.add("project.columns", hdr, "Columns (right-click to show or hide)");
 }
 
@@ -1165,7 +1200,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gutter_id = egui::Id::unique("project-gutter");
     let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
     let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
-    let cl = layout_columns(app, content);
+    let fit = name_fit(app, &p, &visible_rows(app));
+    let cl = layout_columns(app, content, fit);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
     // Rows.
@@ -1406,6 +1442,45 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")
+    /// up to the panel's width less the Label column; a width the user dragged wins.
+    #[test]
+    fn the_name_column_fits_the_names_up_to_the_panel_width() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 400.0));
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 260.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        assert_eq!(layout_columns(&mut app, rect, 2000.0).name_w, 660.0);
+        let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 400.0));
+        assert_eq!(layout_columns(&mut app, narrow, 400.0).name_w, MIN_NAME_W);
+        app.ui.project_name_w = Some(150.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 150.0);
+        app.ui.project_name_w = Some(f32::NAN);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        app.ui.project_name_w = Some(5000.0);
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 660.0);
+    }
+
+    #[test]
+    fn name_fit_measures_the_longest_listed_name_with_its_indent() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = std::sync::Arc::make_mut(&mut s.project);
+        let folder = p.add_item("F", Label::Aqua, None, ItemKind::Folder);
+        let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
+        let app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        let mut fit = (0.0, 0.0);
+        ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let text = painter.layout_no_wrap("A rather long composition name for the list".into(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            fit = (name_fit(&app, painter, &[(folder, 0), (long, 1)]), 8.0 + 14.0 + 30.0 + text + 24.0);
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(fit.0, fit.1);
+        assert!(fit.0 > 260.0);
     }
 
     #[test]

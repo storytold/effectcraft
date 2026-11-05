@@ -299,3 +299,25 @@ fn project_panel_columns_scroll_horizontally() {
     assert!(rect(&h, "project.sort.comment").min.x < x0 - 20.0);
     assert_eq!(rect(&h, "project.sort.name").min.x, name0, "Name stays frozen");
 }
+
+/// The Project panel's Name column edge drags to resize the column, and a double-click on the
+/// edge fits the names again.
+#[test]
+fn project_name_column_edge_resizes_and_fits_again() {
+    let mut h = harness(1400.0);
+    h.state_mut().ui.start_screen = false;
+    h.run_steps(3);
+    let before = rect(&h, "project.nameColumn.edge").center();
+    drag(&mut h, before, before + vec2(80.0, 0.0));
+    assert!(h.state().ui.project_name_w.is_some());
+    let edge = rect(&h, "project.nameColumn.edge").center();
+    assert!((edge.x - (before.x + 80.0)).abs() < 2.0, "{edge:?} after dragging from {before:?}");
+    h.input_mut().events.push(Event::PointerMoved(edge));
+    for _ in 0..2 {
+        h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().ui.project_name_w, None);
+    assert!((rect(&h, "project.nameColumn.edge").center().x - before.x).abs() < 1.0);
+}
