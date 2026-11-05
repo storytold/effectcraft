@@ -112,6 +112,32 @@ fn link_attach_dismisses_the_home_screen() {
     assert!(!h.state().ui.start_screen, "the Home screen still covers the reattached comp");
 }
 
+/// FilmCraft's `app.activate {open: {link_id}}` brings the window forward and opens the linked comp.
+/// Home must not stay over it. A link the session does not bind opens nothing and leaves Home.
+#[test]
+fn app_activate_with_a_link_dismisses_the_home_screen() {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    h.run_steps(3);
+    let params = json!({
+        "link_id": LINK_ID,
+        "payload": {"format": "otio-json", "data": otio()},
+        "place": {"seconds": 0.5},
+        "result_path": format!("/tmp/ec-ui-link-activate-{}/{LINK_ID}.mov", std::process::id()),
+        "source": {"app": "filmcraft", "doc_id": "22222222-2222-4222-8222-222222222222", "item": "12"},
+    });
+    let opened = send(&mut h, "link.open", params);
+    assert_eq!(opened["ok"], true, "{opened}");
+
+    h.state_mut().ui.start_screen = true;
+    let reply = send(&mut h, "app.activate", json!({"token": null, "open": {"link_id": "99999999-9999-4999-8999-999999999999"}}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(h.state().ui.start_screen, "an unknown link opens nothing, so Home stays");
+
+    let reply = send(&mut h, "app.activate", json!({"token": null, "open": {"link_id": LINK_ID}}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(!h.state().ui.start_screen, "the Home screen still covers the activated link's comp");
+}
+
 #[test]
 fn a_failed_link_open_leaves_the_home_screen_alone() {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));

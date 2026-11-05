@@ -99,6 +99,23 @@ fn closing_a_linked_window() {
     assert!(sidecar_epoch(&dir, SECOND).is_some(), "the skip left the placeholder sidecar");
     assert!(!dir.join(format!("{SECOND}.mov.part")).exists(), "a part file was left");
 
+    // The user keeps the window: the unsaved-changes prompt is cancelled. The skip ended with
+    // that close, so the next close renders the result again.
+    h.step(); // the prompt draws the frame after the request
+    h.key_press(egui::Key::Escape);
+    h.step();
+    request_close(&mut h);
+    h.step();
+    assert!(h.state().link_close_rendering(), "a cancelled close must not skip the next result render");
+    assert!(commands(&h).contains(&ViewportCommand::CancelClose), "{:?}", commands(&h));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while h.state().link_close_rendering() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        h.step();
+    }
+    assert!(!h.state().link_close_rendering(), "the render never finished");
+    assert!(dir.join(format!("{SECOND}.mov")).exists(), "the second close rendered the result");
+
     // eframe's exit hook writes the link project whatever the user answered about their own project.
     let dir = link_dir("exit", FIRST);
     let mut h = harness(&dir, FIRST);

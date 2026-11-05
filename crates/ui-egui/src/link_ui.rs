@@ -12,10 +12,15 @@ pub use web::{activate, back_button, close_step};
 pub struct CloseState {
     /// The window stays open while the result for FilmCraft renders.
     pub rendering: bool,
-    /// The next close request goes through without a render: the render finished, or the user
-    /// closed a second time to skip it. Only the native build renders a result.
+    /// The next close request goes through without a render: the render finished. Only the
+    /// native build renders a result.
     #[cfg(not(target_arch = "wasm32"))]
     pub pass: bool,
+    /// The user closed a second time to skip the render. The close requests that follow go
+    /// through while the unsaved-changes prompt of that close decides, and once it is confirmed.
+    /// A prompt that ends without closing ends the skip too, so the next close renders again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub skipped: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -95,9 +100,16 @@ mod native {
             if std::mem::take(&mut app.link_close.pass) {
                 return false;
             }
+            if app.link_close.skipped {
+                let unsaved = &app.dialog_state.unsaved;
+                if unsaved.quitting || app.dialog == Some(crate::Dialog::UnsavedChanges) {
+                    return false;
+                }
+                app.link_close.skipped = false;
+            }
             if app.link_close.rendering {
                 app.link_close.rendering = false;
-                app.link_close.pass = true;
+                app.link_close.skipped = true;
                 effectcraft_link::live::abort_close(&mut app.session);
                 app.ui.status = tr("Closed without the result for FilmCraft.").to_string();
                 return false;
@@ -129,7 +141,17 @@ mod native {
     /// Control method `app.activate`: bring this window forward, as FilmCraft asked.
     pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, params: &Value) -> Value {
         let backend = effectcraft_link::EguiActivation::new(ctx.clone());
-        effectcraft_link::handle_activate(&mut app.session, &backend, params)
+        // A link the session binds opens its comp. That comp is the point of the hand-off, so the
+        // Home screen must not stay over it (as for `link.open` and `link.attach`).
+        let opens = effectcraft_link::ActivateRequest::parse(params)
+            .ok()
+            .and_then(|request| request.open_link)
+            .is_some_and(|link_id| app.session.project.craft_links.contains_key(&link_id));
+        let reply = effectcraft_link::handle_activate(&mut app.session, &backend, params);
+        if opens && reply.get("ok") == Some(&Value::Bool(true)) {
+            app.ui.start_screen = false;
+        }
+        reply
     }
 }
 
