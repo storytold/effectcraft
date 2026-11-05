@@ -100,14 +100,16 @@ impl PluginHost {
         self.ui.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Once per frame, on the session thread: serve the jobs other threads queued and show the
-    /// notices plug-ins and the host raised.
-    pub fn pump(&self, session: &mut Session) {
-        self.bridge.pump(session);
+    /// On every logic tick, on the session thread: serve the jobs other threads queued and show
+    /// the notices plug-ins and the host raised. Returns how many jobs and notices it handled.
+    pub fn pump(&self, session: &mut Session) -> usize {
+        let mut handled = self.bridge.pump(session);
         for n in self.bridge.drain_notices() {
             let who = if n.plugin_id.is_empty() { "plugin".to_owned() } else { format!("plugin:{}", n.plugin_id) };
             session.events.push(Event::Toast { message: format!("{who}: {}", n.message), error: true });
+            handled += 1;
         }
+        handled
     }
 
     fn note_restored(&self) {

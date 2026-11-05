@@ -3,8 +3,9 @@
 //! The windows live in `craft-plugin-ui` (`manager`), shared with EffectCraft. This module feeds
 //! them EffectCraft's plug-in host and carries out the acts they return.
 //!
-//! [`frame`] is the one entry. The app calls it once per frame (`HostHooks::per_frame`). It
-//! serves the queued host calls first, then draws.
+//! Two entries. [`serve`] runs on every logic tick (`Hooks::per_tick`), also while the window is
+//! hidden, and serves the host calls that other threads queued. [`frame`] runs once per painted
+//! frame (`Hooks::per_frame`) and draws the windows.
 //!
 //! Known gap: these windows are not in the automation registry (`ui.elements`), because that
 //! registry lives in `effectcraft-ui-egui` and the per-frame hook does not reach it. The same
@@ -53,9 +54,18 @@ impl PluginHost {
     }
 }
 
-/// Serve queued host calls and draw the plug-in windows. Call once per frame on the session thread.
+/// Serve the host calls that other threads queued, and show the notices. Call on every logic
+/// tick on the session thread, with the window hidden or not. A served call can change the
+/// session, so it asks for a repaint.
+pub fn serve(host: &PluginHost, ctx: &egui::Context, session: &mut Session) {
+    if host.pump(session) > 0 {
+        ctx.request_repaint();
+    }
+}
+
+/// Draw the plug-in windows and carry out what the user did in them. Call once per painted frame
+/// on the session thread.
 pub fn frame(host: &Arc<PluginHost>, ctx: &egui::Context, session: &mut Session) {
-    host.pump(session);
     let acts = draw(ctx, &mut host.ui_state(), || manager_view(host));
     for act in acts {
         carry_out(host, session, act);

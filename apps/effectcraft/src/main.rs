@@ -312,6 +312,8 @@ fn main() -> eframe::Result {
             let plugins = start_plugins(&mut session);
             let mut app = EffectcraftApp::new(session);
             if let Some(host) = plugins {
+                let serving = std::sync::Arc::clone(&host);
+                app.hooks.per_tick = Some(Box::new(move |ctx, session| effectcraft_plugins::ui::serve(&serving, ctx, session)));
                 app.hooks.per_frame = Some(Box::new(move |ctx, session| effectcraft_plugins::ui::frame(&host, ctx, session)));
             }
             app.set_startup_update_check(true);

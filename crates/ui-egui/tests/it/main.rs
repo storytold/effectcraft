@@ -46,6 +46,7 @@ mod ui_gradient_value;
 mod ui_graph_fit;
 mod ui_group_rename;
 mod ui_guide_layers;
+mod ui_host_hooks;
 mod ui_inline_edit;
 mod ui_keyframes;
 mod ui_large_project;

@@ -177,6 +177,10 @@ impl EffectcraftApp {
         }
         // Plug-in Library: a finished job's toast (also polled with Roto, for other frontends).
         self.session.poll_library();
+        // The host's per-tick work, such as the calls plug-in threads queued for the session.
+        if let Some(per_tick) = self.hooks.per_tick.as_mut() {
+            per_tick(ctx, &mut self.session);
+        }
         // Warp Stabilizer: finish analyses and start queued (re-)analyses in the background.
         if self.session.warp_job.is_some() || !self.session.warp_pending.is_empty() {
             self.session.poll_warp(true);
