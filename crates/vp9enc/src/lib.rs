@@ -33,12 +33,17 @@ use probs::Probs;
 use tables::{AC_QLOOKUP, DC_QLOOKUP};
 use transform::Quant;
 
+/// Largest width or height the 16-bit frame size fields can hold.
+const MAX_DIMENSION: u32 = 1 << 16;
+
 pub(crate) const BLOCK_8X8: u8 = 3;
 pub(crate) const BLOCK_16X16: u8 = 6;
 
 /// Encoder settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EncoderConfig {
+    /// Frame size in samples; the stream stores size - 1 in 16 bits, so values above 65536 are
+    /// clamped to 65536 by [`Vp9Encoder::new`].
     pub width: u32,
     pub height: u32,
     /// 1..=100; 100 is lossless. With a target bitrate: the quality of the first frame.
@@ -85,7 +90,6 @@ pub(crate) struct Plane {
 }
 
 impl Plane {
-    #[allow(clippy::too_many_arguments)]
     fn new(data: &[u8], vw: usize, vh: usize, w: usize, h: usize, max_x: usize, max_y: usize) -> Plane {
         let mut src = vec![0u8; w * h];
         for y in 0..h {
@@ -140,7 +144,10 @@ fn quality_to_qidx(q: u8) -> u8 {
 }
 
 impl Vp9Encoder {
-    pub fn new(cfg: EncoderConfig) -> Self {
+    pub fn new(mut cfg: EncoderConfig) -> Self {
+        // The frame header stores width - 1 and height - 1 in 16 bits.
+        cfg.width = cfg.width.min(MAX_DIMENSION);
+        cfg.height = cfg.height.min(MAX_DIMENSION);
         let q = cfg.quality.clamp(1, 100);
         let lossless = q >= 100 && cfg.target_kbps.is_none();
         let base_qidx = if lossless { 0 } else { quality_to_qidx(q) };
@@ -460,4 +467,17 @@ pub fn alpha_to_yuv420(rgba: &[u8], w: u32, h: u32) -> (Vec<u8>, Vec<u8>, Vec<u8
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let y: Vec<u8> = rgba.as_chunks::<4>().0.iter().take(w * h).map(|p| p[3]).collect();
     (y, vec![128; cw * ch], vec![128; cw * ch])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_beyond_the_16_bit_header_fields_are_clamped() {
+        let enc = Vp9Encoder::new(EncoderConfig { width: 70_000, height: u32::MAX, ..Default::default() });
+        assert_eq!((enc.cfg.width, enc.cfg.height), (65_536, 65_536));
+        let enc = Vp9Encoder::new(EncoderConfig { width: 65_536, height: 1, ..Default::default() });
+        assert_eq!((enc.cfg.width, enc.cfg.height), (65_536, 1));
+    }
 }

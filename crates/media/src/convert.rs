@@ -103,12 +103,34 @@ pub(crate) fn frame_to_image_in(f: &VideoFrame, op: AlphaOp, mut buf: Vec<Px>) -
         PixelData::Yuv8 { planes, chroma, alpha } => {
             let yuv = Yuv::new(f.color.matrix, f.color.range, 8);
             let amax = 255.0;
-            convert_yuv(&mut img, w, h, *chroma, [&planes[0][..], &planes[1][..], &planes[2][..]], alpha.as_deref().map(|a| &a[..]), amax, &yuv, op);
+            convert_yuv(
+                &mut img,
+                YuvSource {
+                    size: (w, h),
+                    chroma: *chroma,
+                    planes: [&planes[0][..], &planes[1][..], &planes[2][..]],
+                    alpha: alpha.as_deref().map(|a| &a[..]),
+                    amax,
+                },
+                &yuv,
+                op,
+            );
         }
         PixelData::Yuv16 { planes, chroma, bits, alpha } => {
             let yuv = Yuv::new(f.color.matrix, f.color.range, *bits);
             let amax = ((1u32 << *bits) - 1) as f32;
-            convert_yuv(&mut img, w, h, *chroma, [&planes[0][..], &planes[1][..], &planes[2][..]], alpha.as_deref().map(|a| &a[..]), amax, &yuv, op);
+            convert_yuv(
+                &mut img,
+                YuvSource {
+                    size: (w, h),
+                    chroma: *chroma,
+                    planes: [&planes[0][..], &planes[1][..], &planes[2][..]],
+                    alpha: alpha.as_deref().map(|a| &a[..]),
+                    amax,
+                },
+                &yuv,
+                op,
+            );
         }
     }
     img
@@ -280,8 +302,17 @@ fn centred(i: usize, n: usize) -> (usize, usize) {
     (c, o)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn convert_yuv<T: Sample>(img: &mut Image, w: usize, h: usize, chroma: Chroma, planes: [&[T]; 3], alpha: Option<&[T]>, amax: f32, k: &Yuv, op: AlphaOp) {
+/// Borrowed YUV planes and the geometry/range needed to interpret their samples.
+struct YuvSource<'a, T> {
+    size: (usize, usize),
+    chroma: Chroma,
+    planes: [&'a [T]; 3],
+    alpha: Option<&'a [T]>,
+    amax: f32,
+}
+
+fn convert_yuv<T: Sample>(img: &mut Image, source: YuvSource<'_, T>, k: &Yuv, op: AlphaOp) {
+    let YuvSource { size: (w, h), chroma, planes, alpha, amax } = source;
     let (sx, sy) = chroma.shifts();
     let cw = w.div_ceil(1 << sx);
     let ch = h.div_ceil(1 << sy);

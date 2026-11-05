@@ -15,4 +15,4 @@ effectcraft-keyframe = { workspace = true }
 effectcraft-raster = { workspace = true }
 kurbo = { workspace = true }
 tiny-skia = { workspace = true }
-linesweeper = "0.4"
+linesweeper = "0.5"

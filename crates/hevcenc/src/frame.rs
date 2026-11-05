@@ -7,7 +7,10 @@ use crate::inter::{self, PlaneRef};
 use crate::intra::{self, Refs};
 use crate::me::MeRef;
 use crate::params::{LOG2_CTB, LOG2_MAX_TB, LOG2_MIN_CB, MAX_MERGE_CAND};
-use crate::tables::*;
+use crate::tables::{
+    ABS_MVD_GT0, ABS_MVD_GT1, CBF_CHROMA, CBF_LUMA, CODED_SUB_BLOCK, CTX_IDX_MAP, CU_SKIP, GT1, GT2, INTRA_CHROMA, LAST_X_PREFIX, LAST_Y_PREFIX, MERGE_FLAG,
+    MERGE_IDX, MVP_FLAG, PART_MODE, PRED_MODE, PREV_INTRA_LUMA, RQT_ROOT_CBF, SCAN_4, SIG_COEFF, SPLIT_CU, qpc_420, scan_order,
+};
 use crate::transform;
 
 pub const F_INTRA: u8 = 1;
@@ -73,6 +76,40 @@ pub enum SliceKind {
     P,
 }
 
+/// Picture geometry and slice coding parameters shared by the CTU encoder.
+pub struct FrameConfig {
+    pub bit_depth: u32,
+    pub width: usize,
+    pub height: usize,
+    pub kind: SliceKind,
+    pub slice_qp: i32,
+}
+
+/// A square node in the coding or transform quadtree.
+#[derive(Clone, Copy)]
+struct TreeNode {
+    x: usize,
+    y: usize,
+    log2: u32,
+    depth: u32,
+}
+
+impl TreeNode {
+    fn children(self) -> impl Iterator<Item = Self> {
+        let h = 1usize << (self.log2 - 1);
+        [(0, 0), (h, 0), (0, h), (h, h)].into_iter().map(move |(dx, dy)| Self { x: self.x + dx, y: self.y + dy, log2: self.log2 - 1, depth: self.depth + 1 })
+    }
+}
+
+/// Transform syntax inherited from the parent node and the enclosing CU.
+#[derive(Clone, Copy)]
+struct TransformState {
+    blk_idx: u32,
+    parent: [bool; 2],
+    intra: bool,
+    nxn: bool,
+}
+
 pub struct FrameCoder<'a> {
     pub bd: u32,
     pub w: usize,
@@ -114,17 +151,8 @@ fn morton(x: u32, y: u32) -> u32 {
 const COARSE_MODES: [u32; 11] = [0, 1, 2, 6, 10, 14, 18, 22, 26, 30, 34];
 
 impl<'a> FrameCoder<'a> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        bd: u32,
-        w: usize,
-        h: usize,
-        kind: SliceKind,
-        slice_qp: i32,
-        src: &'a [Vec<u16>; 3],
-        refp: Option<&'a [Vec<u16>; 3]>,
-        me: Option<&'a MeRef>,
-    ) -> Self {
+    pub fn new(config: FrameConfig, src: &'a [Vec<u16>; 3], refp: Option<&'a [Vec<u16>; 3]>, me: Option<&'a MeRef>) -> Self {
+        let FrameConfig { bit_depth: bd, width: w, height: h, kind, slice_qp } = config;
         let off = 6 * (bd as i32 - 8);
         let qpi = slice_qp.clamp(-off, 57);
         let qp_c = qpc_420(qpi) + off;
@@ -256,7 +284,7 @@ impl<'a> FrameCoder<'a> {
             let mut decs = Vec::with_capacity(64);
             self.decide(x, y, LOG2_CTB, 0, &mut est, &mut decs);
             let mut idx = 0;
-            self.write_cq(enc, x, y, LOG2_CTB, 0, &decs, &mut idx);
+            self.write_cq(enc, TreeNode { x, y, log2: LOG2_CTB, depth: 0 }, &decs, &mut idx);
             debug_assert_eq!(idx, decs.len());
             debug_assert_eq!(est.ctx, enc.ctx);
             enc.terminate((i + 1 == total) as u32); // end_of_slice_segment_flag
@@ -276,7 +304,8 @@ impl<'a> FrameCoder<'a> {
     }
 
     /// Final pass: re-code the decided quadtree with the real arithmetic coder.
-    fn write_cq(&mut self, enc: &mut CabacEncoder, x: usize, y: usize, log2: u32, depth: u32, decs: &[CuDec], idx: &mut usize) {
+    fn write_cq(&mut self, enc: &mut CabacEncoder, node: TreeNode, decs: &[CuDec], idx: &mut usize) {
+        let TreeNode { x, y, log2, depth } = node;
         if x >= self.w || y >= self.h {
             return;
         }
@@ -294,9 +323,8 @@ impl<'a> FrameCoder<'a> {
             let (eff, _) = self.encode_cu(enc, x, y, log2, depth, d.mode);
             debug_assert_eq!(eff, d.mode);
         } else {
-            let h = n / 2;
-            for (dx, dy) in [(0, 0), (h, 0), (0, h), (h, h)] {
-                self.write_cq(enc, x + dx, y + dy, log2 - 1, depth + 1, decs, idx);
+            for child in node.children() {
+                self.write_cq(enc, child, decs, idx);
             }
         }
     }
@@ -447,7 +475,7 @@ impl<'a> FrameCoder<'a> {
                 self.write_intra_modes(s, x, y, n, nxn, &modes);
                 s.decision(INTRA_CHROMA, 0); // intra_chroma_pred_mode 4 (DM)
                 let mut ti = 0;
-                self.write_tt(s, x, y, x, y, log2, 0, 0, [true, true], true, nxn, &mut ti);
+                self.write_tt(s, TreeNode { x, y, log2, depth: 0 }, TransformState { blk_idx: 0, parent: [true, true], intra: true, nxn }, &mut ti);
                 (mode, self.cu_dist(x, y, n))
             }
             _ => {
@@ -490,7 +518,12 @@ impl<'a> FrameCoder<'a> {
                         s.decision(MERGE_FLAG, 1);
                         write_merge_idx(s, idx as usize);
                         let mut ti = 0;
-                        self.write_tt(s, x, y, x, y, log2, 0, 0, [true, true], false, false, &mut ti);
+                        self.write_tt(
+                            s,
+                            TreeNode { x, y, log2, depth: 0 },
+                            TransformState { blk_idx: 0, parent: [true, true], intra: false, nxn: false },
+                            &mut ti,
+                        );
                     }
                     CuMode::Amvp { mv, mvp } => {
                         s.decision(CU_SKIP + skip_ctx, 0);
@@ -503,7 +536,12 @@ impl<'a> FrameCoder<'a> {
                         s.decision(RQT_ROOT_CBF, root as u32);
                         if root {
                             let mut ti = 0;
-                            self.write_tt(s, x, y, x, y, log2, 0, 0, [true, true], false, false, &mut ti);
+                            self.write_tt(
+                                s,
+                                TreeNode { x, y, log2, depth: 0 },
+                                TransformState { blk_idx: 0, parent: [true, true], intra: false, nxn: false },
+                                &mut ti,
+                            );
                         }
                     }
                     // Handled by the arm above.
@@ -715,22 +753,9 @@ impl<'a> FrameCoder<'a> {
 
     /// transform_tree() (7.3.8.8) over the coded transform blocks of the CU; no split flag is ever
     /// coded (max_transform_hierarchy_depth_* = 0), splits are inferred.
-    #[allow(clippy::too_many_arguments)]
-    fn write_tt<S: Sink>(
-        &self,
-        s: &mut S,
-        x0: usize,
-        y0: usize,
-        xb: usize,
-        yb: usize,
-        log2: u32,
-        depth: u32,
-        blk_idx: u32,
-        parent: [bool; 2],
-        intra: bool,
-        nxn: bool,
-        ti: &mut usize,
-    ) {
+    fn write_tt<S: Sink>(&self, s: &mut S, node: TreeNode, state: TransformState, ti: &mut usize) {
+        let TreeNode { x: x0, y: y0, log2, depth } = node;
+        let TransformState { blk_idx, parent, intra, nxn } = state;
         let n = 1usize << log2;
         let split = log2 > LOG2_MAX_TB || (nxn && depth == 0);
         let mut cbf_c = [false; 2];
@@ -745,13 +770,11 @@ impl<'a> FrameCoder<'a> {
             cbf_c = parent;
         }
         if split {
-            let h = n / 2;
-            for (i, (dx, dy)) in [(0, 0), (h, 0), (0, h), (h, h)].into_iter().enumerate() {
-                self.write_tt(s, x0 + dx, y0 + dy, x0, y0, log2 - 1, depth + 1, i as u32, cbf_c, intra, nxn, ti);
+            for (i, child) in node.children().enumerate() {
+                self.write_tt(s, child, TransformState { blk_idx: i as u32, parent: cbf_c, ..state }, ti);
             }
             return;
         }
-        let _ = (xb, yb);
         let tb = self.tbs[*ti];
         *ti += 1;
         debug_assert_eq!(tb.c, 0);
@@ -874,9 +897,9 @@ impl<'a> FrameCoder<'a> {
             let (px, py, pn, pw, ph) = if c == 0 { (x, y, n, self.w, self.h) } else { (x / 2, y / 2, n / 2, self.cw, self.ch) };
             let pr = PlaneRef { data: &refp[c], w: pw, h: ph };
             if c == 0 {
-                inter::mc_luma(pr, self.bd, px as i32, py as i32, mv, pn, pn, &mut self.pred);
+                inter::mc_luma(pr, self.bd, px as i32, py as i32, mv, (pn, pn), &mut self.pred);
             } else {
-                inter::mc_chroma(pr, self.bd, px as i32, py as i32, mv, pn, pn, &mut self.pred);
+                inter::mc_chroma(pr, self.bd, px as i32, py as i32, mv, (pn, pn), &mut self.pred);
             }
             inter::put_uni(&self.pred, pn, pn, self.bd, &mut self.rec[c][py * pw + px..], pw);
         }
@@ -1153,8 +1176,119 @@ fn last_prefix(v: u32) -> (u32, u32, u32) {
     }
 }
 
+/// Context increment for significant_coeff_flag (H.265 9.3.4.2).
+fn significance_context(group: (usize, usize), pos: (usize, usize), log2: u32, prev_csbf: u8, c: usize, scan_idx: usize) -> usize {
+    let (xs, ys) = group;
+    let (xp, yp) = pos;
+    let (xc, yc) = (xs * 4 + xp, ys * 4 + yp);
+    if log2 == 2 {
+        CTX_IDX_MAP[(yc << 2) + xc] as usize
+    } else if xc + yc == 0 {
+        0
+    } else {
+        let mut sc = match prev_csbf {
+            0 => {
+                if xp + yp == 0 {
+                    2
+                } else if xp + yp < 3 {
+                    1
+                } else {
+                    0
+                }
+            }
+            1 => {
+                if yp == 0 {
+                    2
+                } else if yp == 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+            2 => {
+                if xp == 0 {
+                    2
+                } else if xp == 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+            _ => 2,
+        };
+        if c == 0 {
+            if xs + ys > 0 {
+                sc += 3;
+            }
+            sc += if log2 == 3 { if scan_idx == 0 { 9 } else { 15 } } else { 21 };
+        } else {
+            sc += if log2 == 3 { 9 } else { 12 };
+        }
+        sc
+    }
+}
+
+/// Absolute levels, signs and Rice remainders for one significant coefficient group.
+fn write_coefficient_levels<S: Sink>(s: &mut S, sig: &[u8], at: impl Fn(usize) -> i32, i: usize, c: usize, prev_g1: &mut Option<u32>) {
+    let nsig = sig.len();
+    let abs_at = |k: usize| at(sig[k] as usize).unsigned_abs();
+    let mut ctx_set = if i == 0 || c > 0 { 0 } else { 2 };
+    if *prev_g1 == Some(0) {
+        ctx_set += 1;
+    }
+    let mut g1ctx = 1u32;
+    let mut gt1 = [0u8; 16];
+    let mut first_g1: Option<usize> = None;
+    let c_off_g1 = if c > 0 { 16 } else { 0 };
+    for k in 0..nsig.min(8) {
+        let f = abs_at(k) > 1;
+        s.decision(GT1 + ctx_set * 4 + g1ctx.min(3) as usize + c_off_g1, f as u32);
+        gt1[k] = f as u8;
+        if f {
+            g1ctx = 0;
+            if first_g1.is_none() {
+                first_g1 = Some(k);
+            }
+        } else if g1ctx > 0 {
+            g1ctx += 1;
+        }
+    }
+    *prev_g1 = Some(g1ctx);
+    let mut gt2 = 0u32;
+    if let Some(k) = first_g1 {
+        gt2 = (abs_at(k) > 2) as u32;
+        s.decision(GT2 + ctx_set + if c > 0 { 4 } else { 0 }, gt2);
+    }
+    // sign data hiding: the sign of the first coefficient in scan order (sig[nsig - 1]) is
+    // inferred from the parity of the sum of absolute levels
+    let hidden = sig[0] as i32 - sig[nsig - 1] as i32 > 3;
+    let nsigns = if hidden { nsig - 1 } else { nsig };
+    for k in 0..nsigns {
+        s.bypass((at(sig[k] as usize) < 0) as u32);
+    }
+    if hidden {
+        let sum: u32 = (0..nsig).map(abs_at).sum();
+        debug_assert_eq!(at(sig[nsig - 1] as usize) < 0, sum & 1 == 1, "sign hiding parity");
+    }
+    let mut rice = 0u32;
+    for k in 0..nsig {
+        let mut base = 1 + gt1[k] as u32;
+        if Some(k) == first_g1 {
+            base += gt2;
+        }
+        let thresh = if k < 8 { if Some(k) == first_g1 { 3 } else { 2 } } else { 1 };
+        if base == thresh {
+            let level = abs_at(k);
+            write_remaining(s, level - base, rice);
+            if level > 3 * (1 << rice) {
+                rice = (rice + 1).min(4);
+            }
+        }
+    }
+}
+
 /// residual_coding() (7.3.8.11) of one transform block of levels (row-major, n x n). No transform
-/// skip, no sign data hiding.
+/// skip; signs use sign data hiding where the coefficient span permits it.
 fn residual_coding<S: Sink>(s: &mut S, lv: &[i32], log2: u32, c: usize, scan_idx: usize) {
     let n = 1usize << log2;
     let log2sb = log2 - 2;
@@ -1233,51 +1367,7 @@ fn residual_coding<S: Sink>(s: &mut S, lv: &[i32], log2: u32, c: usize, scan_idx
             let (xc, yc) = (xs * 4 + xp, ys * 4 + yp);
             let v = lv[yc * n + xc] != 0;
             if np > 0 || !infer_dc {
-                let sig_ctx = if log2 == 2 {
-                    CTX_IDX_MAP[(yc << 2) + xc] as usize
-                } else if xc + yc == 0 {
-                    0
-                } else {
-                    let mut sc = match prev_csbf {
-                        0 => {
-                            if xp + yp == 0 {
-                                2
-                            } else if xp + yp < 3 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        1 => {
-                            if yp == 0 {
-                                2
-                            } else if yp == 1 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        2 => {
-                            if xp == 0 {
-                                2
-                            } else if xp == 1 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        _ => 2,
-                    };
-                    if c == 0 {
-                        if xs + ys > 0 {
-                            sc += 3;
-                        }
-                        sc += if log2 == 3 { if scan_idx == 0 { 9 } else { 15 } } else { 21 };
-                    } else {
-                        sc += if log2 == 3 { 9 } else { 12 };
-                    }
-                    sc
-                };
+                let sig_ctx = significance_context((xs, ys), (xp, yp), log2, prev_csbf, c, scan_idx);
                 s.decision(SIG_COEFF + c_off_sig + sig_ctx, v as u32);
                 if v {
                     sig[nsig] = p as u8;
@@ -1294,60 +1384,7 @@ fn residual_coding<S: Sink>(s: &mut S, lv: &[i32], log2: u32, c: usize, scan_idx
         if nsig == 0 {
             continue;
         }
-        let abs_at = |k: usize| at(xs, ys, sig[k] as usize).unsigned_abs();
-        let mut ctx_set = if i == 0 || c > 0 { 0 } else { 2 };
-        if prev_g1 == Some(0) {
-            ctx_set += 1;
-        }
-        let mut g1ctx = 1u32;
-        let mut gt1 = [0u8; 16];
-        let mut first_g1: Option<usize> = None;
-        let c_off_g1 = if c > 0 { 16 } else { 0 };
-        for k in 0..nsig.min(8) {
-            let f = abs_at(k) > 1;
-            s.decision(GT1 + ctx_set * 4 + g1ctx.min(3) as usize + c_off_g1, f as u32);
-            gt1[k] = f as u8;
-            if f {
-                g1ctx = 0;
-                if first_g1.is_none() {
-                    first_g1 = Some(k);
-                }
-            } else if g1ctx > 0 {
-                g1ctx += 1;
-            }
-        }
-        prev_g1 = Some(g1ctx);
-        let mut gt2 = 0u32;
-        if let Some(k) = first_g1 {
-            gt2 = (abs_at(k) > 2) as u32;
-            s.decision(GT2 + ctx_set + if c > 0 { 4 } else { 0 }, gt2);
-        }
-        // sign data hiding: the sign of the first coefficient in scan order (sig[nsig - 1]) is
-        // inferred from the parity of the sum of absolute levels
-        let hidden = sig[0] as i32 - sig[nsig - 1] as i32 > 3;
-        let nsigns = if hidden { nsig - 1 } else { nsig };
-        for k in 0..nsigns {
-            s.bypass((at(xs, ys, sig[k] as usize) < 0) as u32);
-        }
-        if hidden {
-            let sum: u32 = (0..nsig).map(abs_at).sum();
-            debug_assert_eq!(at(xs, ys, sig[nsig - 1] as usize) < 0, sum & 1 == 1, "sign hiding parity");
-        }
-        let mut rice = 0u32;
-        for k in 0..nsig {
-            let mut base = 1 + gt1[k] as u32;
-            if Some(k) == first_g1 {
-                base += gt2;
-            }
-            let thresh = if k < 8 { if Some(k) == first_g1 { 3 } else { 2 } } else { 1 };
-            if base == thresh {
-                let level = abs_at(k);
-                write_remaining(s, level - base, rice);
-                if level > 3 * (1 << rice) {
-                    rice = (rice + 1).min(4);
-                }
-            }
-        }
+        write_coefficient_levels(s, &sig[..nsig], |p| at(xs, ys, p), i, c, &mut prev_g1);
     }
 }
 

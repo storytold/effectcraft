@@ -10,9 +10,9 @@
 
 use rayon::prelude::*;
 
-use super::Distortion;
 use super::geometry::Pose;
-use super::linalg::*;
+use super::linalg::{M3, V3, add, cholesky_solve, conjugate_gradient, dot, inv3, mm, mtv, mv, rodrigues, scale, skew, sub};
+use super::{Distortion, SolveError};
 
 /// A camera in the adjustment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +52,7 @@ pub struct BaOpts {
     pub fixed: Vec<bool>,
     /// Huber threshold (pixels).
     pub huber: f64,
+    /// Maximum LM iterations (at most 1000).
     pub max_iter: usize,
     /// Adjust the shared radial distortion `(k1, k2)` too.
     pub distortion: bool,
@@ -76,21 +77,89 @@ fn huber(e2: f64, k: f64) -> f64 {
     if e2 <= k * k { e2 } else { 2.0 * k * e2.sqrt() - k * k }
 }
 
-/// Residual (pixels) of one observation, `None` behind the camera.
+// Bound the temporary systems before any input-sized allocation. Includes dense matrices
+// for the main system, trial copies and both Rayon phases, plus per-point/observation data.
+const MAX_BA_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BA_CAMERAS: usize = 4096;
+const MAX_BA_POINTS: usize = 200_000;
+const MAX_BA_OBSERVATIONS: usize = 1_000_000;
+
+fn valid_camera(c: &BaCam) -> bool {
+    c.f.is_finite()
+        && c.f > 0.0
+        && c.pose.r.iter().flatten().chain(&c.pose.c).all(|v| v.is_finite())
+        && [c.dist.k1, c.dist.k2, c.dist.radius].iter().all(|v| v.is_finite())
+}
+
+fn validate(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> Result<(), SolveError> {
+    if cams.len() > MAX_BA_CAMERAS || pts.len() > MAX_BA_POINTS || obs.len() > MAX_BA_OBSERVATIONS {
+        return Err(SolveError("bundle adjustment input exceeds the supported size".into()));
+    }
+    if !o.huber.is_finite() || o.huber <= 0.0 || o.max_iter > 1000 || matches!(o.focal, FocalMode::PerCamera(k) if !k.is_finite() || k < 0.0) {
+        return Err(SolveError("invalid bundle adjustment options".into()));
+    }
+    if cams.iter().any(|c| !valid_camera(c)) || pts.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(SolveError("bundle adjustment cameras and points must be finite, with positive focal lengths".into()));
+    }
+    for ob in obs {
+        if cams.get(ob.cam as usize).is_none() || pts.get(ob.pt as usize).is_none() {
+            return Err(SolveError("bundle adjustment observation index is out of range".into()));
+        }
+        if ob.uv.iter().any(|v| !v.is_finite()) {
+            return Err(SolveError("bundle adjustment observations must be finite".into()));
+        }
+    }
+    Ok(())
+}
+
+fn matrix_len(n: usize, npts: usize, nobs: usize) -> Result<usize, SolveError> {
+    let threads = rayon::current_num_threads();
+    let build_workers = if n <= 700 && npts > 64 { threads.clamp(1, 16) } else { 0 };
+    let schur_workers = if n <= 1200 && npts >= 64 && threads > 1 { threads.clamp(1, 8) } else { 0 };
+    // The two worker phases do not coexist; allow the larger phase plus main/trial buffers.
+    let copies = 4 + build_workers.max(schur_workers);
+    let len = n.checked_mul(n);
+    let bytes = len
+        .and_then(|v| v.checked_add(n))
+        .and_then(|v| v.checked_mul(size_of::<f64>()))
+        .and_then(|v| v.checked_mul(copies))
+        .and_then(|v| npts.checked_mul(320).and_then(|p| v.checked_add(p)))
+        .and_then(|v| nobs.checked_mul(2 * 9 * size_of::<(usize, V3)>() + size_of::<BaObs>() + 2 * size_of::<u32>()).and_then(|p| v.checked_add(p)));
+    match (len, bytes) {
+        (Some(len), Some(bytes)) if bytes <= MAX_BA_BYTES => Ok(len),
+        _ => Err(SolveError("bundle adjustment exceeds its 256 MiB workspace budget; use fewer cameras or observations".into())),
+    }
+}
+
+/// Residual (pixels), or `None` for an invalid or behind-camera projection.
 pub fn residual(c: &BaCam, x: V3, uv: [f64; 2]) -> Option<[f64; 2]> {
+    if !valid_camera(c) || x.iter().chain(&uv).any(|v| !v.is_finite()) {
+        return None;
+    }
+    project_residual(c, x, uv)
+}
+
+fn project_residual(c: &BaCam, x: V3, uv: [f64; 2]) -> Option<[f64; 2]> {
     let p = c.pose.to_cam(x);
-    if p[2] <= 1e-9 {
+    if p[2] <= 1e-9 || p.iter().any(|v| !v.is_finite()) {
         return None;
     }
     let q = c.dist.distort([c.f * p[0] / p[2], c.f * p[1] / p[2]]);
-    Some([q[0] - uv[0], q[1] - uv[1]])
+    let r = [q[0] - uv[0], q[1] - uv[1]];
+    r.iter().all(|v| v.is_finite()).then_some(r)
 }
 
-/// Total robust cost.
-pub fn cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> f64 {
+/// Total robust cost. Rejects invalid inputs before starting parallel evaluation.
+pub fn cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> Result<f64, SolveError> {
+    validate(cams, pts, obs, o)?;
+    let c = validated_cost(cams, pts, obs, o);
+    if c.is_finite() { Ok(c) } else { Err(SolveError("bundle adjustment cost is not finite".into())) }
+}
+
+fn validated_cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> f64 {
     let c: f64 = obs
         .par_iter()
-        .map(|ob| match residual(&cams[ob.cam as usize], pts[ob.pt as usize], ob.uv) {
+        .map(|ob| match cams.get(ob.cam as usize).zip(pts.get(ob.pt as usize)).and_then(|(c, x)| project_residual(c, *x, ob.uv)) {
             Some(r) => huber(r[0] * r[0] + r[1] * r[1], o.huber),
             None => BEHIND,
         })
@@ -147,8 +216,52 @@ fn layout(ncam: usize, o: &BaOpts) -> Layout {
     Layout { start, fidx, shared, dist, n, rot_only: o.fix_centers }
 }
 
+// Six pose parameters, one shared OR per-camera focal parameter, two distortion parameters.
+const MAX_CAMERA_JACOBIAN_ENTRIES: usize = 6 + 1 + 2;
+type CameraJacobianEntry = (usize, [f64; 2]);
+
+/// Keeps the current parameter set on the stack. Extra parameters spill rather than panic
+/// if a future extension grows beyond the inline capacity.
+struct CameraJacobian {
+    entries: [CameraJacobianEntry; MAX_CAMERA_JACOBIAN_ENTRIES],
+    len: usize,
+    overflow: Vec<CameraJacobianEntry>,
+}
+
+impl CameraJacobian {
+    fn new() -> Self {
+        Self { entries: [(0, [0.0; 2]); MAX_CAMERA_JACOBIAN_ENTRIES], len: 0, overflow: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+        self.overflow.clear();
+    }
+
+    fn push(&mut self, entry: CameraJacobianEntry) {
+        if self.overflow.is_empty() {
+            if let Some(slot) = self.entries.get_mut(self.len) {
+                *slot = entry;
+                self.len += 1;
+                return;
+            }
+            self.overflow.extend_from_slice(&self.entries);
+        }
+        self.overflow.push(entry);
+    }
+
+    fn as_slice(&self) -> &[CameraJacobianEntry] {
+        if self.overflow.is_empty() {
+            // len only grows after a successful get_mut, so it cannot exceed capacity.
+            self.entries.get(..self.len).unwrap_or_default()
+        } else {
+            &self.overflow
+        }
+    }
+}
+
 /// Camera-side Jacobian entries of one observation: (parameter index, d r / d param).
-fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64; 2], out: &mut Vec<(usize, [f64; 2])>) {
+fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64; 2], out: &mut CameraJacobian) {
     out.clear();
     let s = l.start[ci];
     if s != usize::MAX {
@@ -174,16 +287,186 @@ fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64;
     }
 }
 
+struct PtSys {
+    v: M3,
+    bp: V3,
+    w: Vec<(usize, V3)>,
+}
+
+struct PreconditionerBlock {
+    start: usize,
+    dim: usize,
+    inverse: Vec<f64>,
+}
+
+fn camera_preconditioner(u: &[f64], l: &Layout) -> Option<Vec<PreconditionerBlock>> {
+    let mut ranges = Vec::new();
+    let pose_dim = if l.rot_only { 3 } else { 6 };
+    for (&pose, &focal) in l.start.iter().zip(&l.fidx) {
+        if pose != usize::MAX {
+            ranges.push((pose, pose_dim + usize::from(focal != usize::MAX)));
+        } else if focal != usize::MAX {
+            ranges.push((focal, 1));
+        }
+    }
+    if let Some(start) = l.shared.or(l.dist) {
+        ranges.push((start, l.n - start));
+    }
+    ranges
+        .into_iter()
+        .map(|(start, dim)| {
+            let mut matrix = Vec::with_capacity(dim * dim);
+            for i in 0..dim {
+                for j in 0..dim {
+                    matrix.push(*u.get((start + i) * l.n + start + j)?);
+                }
+            }
+            let mut inverse = vec![0.0; dim * dim];
+            for col in 0..dim {
+                let mut a = matrix.clone();
+                let mut b = vec![0.0; dim];
+                *b.get_mut(col)? = 1.0;
+                if !cholesky_solve(&mut a, dim, &mut b) {
+                    return None;
+                }
+                for (row, value) in b.into_iter().enumerate() {
+                    inverse[row * dim + col] = value;
+                }
+            }
+            Some(PreconditionerBlock { start, dim, inverse })
+        })
+        .collect()
+}
+
+/// Apply the point-eliminated system without materialising W V^-1 W^T.
+fn iterative_schur(u: &[f64], rhs: &[f64], systems: &[PtSys], vinv: &[Option<M3>], l: &Layout) -> Option<Vec<f64>> {
+    if l.n == 0 || l.n.checked_mul(l.n) != Some(u.len()) || rhs.len() != l.n || systems.len() != vinv.len() {
+        return None;
+    }
+    let blocks = camera_preconditioner(u, l)?;
+    // U contains camera blocks, global parameters and the focal prior. Store its nonzeros
+    // once; all subsequent products are linear in these and the point-camera connections.
+    let rows: Vec<Vec<(usize, f64)>> =
+        u.chunks_exact(l.n).map(|row| row.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(i, v)| (i, *v)).collect()).collect();
+    let mut reduced_rhs = rhs.to_vec();
+    for (ps, vi) in systems.iter().zip(vinv) {
+        let Some(vi) = vi else { continue };
+        let vb = mv(vi, ps.bp);
+        for (i, w) in &ps.w {
+            *reduced_rhs.get_mut(*i)? -= dot(*w, vb);
+        }
+    }
+    conjugate_gradient(
+        &reduced_rhs,
+        |x, y| {
+            for (i, row) in rows.iter().enumerate() {
+                y[i] = row.iter().map(|(j, v)| v * x[*j]).sum();
+            }
+            for (ps, vi) in systems.iter().zip(vinv) {
+                let Some(vi) = vi else { continue };
+                let q = ps.w.iter().fold([0.0; 3], |q, (i, w)| add(q, scale(*w, x[*i])));
+                let q = mv(vi, q);
+                for (i, w) in &ps.w {
+                    y[*i] -= dot(*w, q);
+                }
+            }
+        },
+        |r, z| {
+            z.fill(0.0);
+            for block in &blocks {
+                for i in 0..block.dim {
+                    z[block.start + i] = (0..block.dim).map(|j| block.inverse[i * block.dim + j] * r[block.start + j]).sum();
+                }
+            }
+        },
+    )
+}
+
+/// Smooth per-camera log focal lengths in the normal equations.
+fn add_focal_prior(cams: &[BaCam], o: &BaOpts, l: &Layout, s_mat: &mut [f64], bc: &mut [f64]) {
+    let n = l.n;
+    // Focal prior.
+    if let FocalMode::PerCamera(k) = o.focal {
+        for i in 0..cams.len().saturating_sub(1) {
+            let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
+            let (a, b) = (l.fidx[i], l.fidx[i + 1]);
+            let ia = (a != usize::MAX).then_some(a);
+            let ib = (b != usize::MAX).then_some(b);
+            for (idx, g) in [(ia, k), (ib, -k)] {
+                let Some(x) = idx else { continue };
+                bc[x] -= g * r;
+                for (idy, h) in [(ia, k), (ib, -k)] {
+                    if let Some(y) = idy {
+                        s_mat[x * n + y] += g * h;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Eliminate the points into the camera system explicitly (`S -= W V^-1 W^T`, `rhs -= W V^-1 bp`).
+fn reduce_points(systems: &[PtSys], vinv: &[Option<M3>], n: usize, s: &mut [f64], rhs: &mut [f64]) {
+    let npts = systems.len();
+    let reduce = |range: std::ops::Range<usize>, s: &mut [f64], rhs: &mut [f64]| {
+        for j in range {
+            let (Some(vi), ps) = (&vinv[j], &systems[j]) else { continue };
+            let vb = mv(vi, ps.bp);
+            let wv: Vec<V3> = ps.w.iter().map(|(_, w)| mv(vi, *w)).collect();
+            for (a, (ia, wa)) in ps.w.iter().enumerate() {
+                rhs[*ia] -= dot(*wa, vb);
+                for (ib, wb) in &ps.w[a..] {
+                    let d = dot(wv[a], *wb);
+                    s[ia * n + ib] -= d;
+                    if ia != ib {
+                        s[ib * n + ia] -= d;
+                    }
+                }
+            }
+        }
+    };
+    let chunks = rayon::current_num_threads().clamp(1, 8);
+    if n <= 1200 && npts >= 64 && chunks > 1 {
+        let per = npts.div_ceil(chunks);
+        let parts: Vec<(Vec<f64>, Vec<f64>)> = (0..chunks)
+            .into_par_iter()
+            .map(|t| {
+                let (mut ds, mut dr) = (vec![0.0; n * n], vec![0.0; n]);
+                reduce(t * per..((t + 1) * per).min(npts), &mut ds, &mut dr);
+                (ds, dr)
+            })
+            .collect();
+        for (ds, dr) in parts {
+            s.par_iter_mut().zip(ds.par_iter()).for_each(|(x, y)| *x += y);
+            for (x, y) in rhs.iter_mut().zip(dr) {
+                *x += y;
+            }
+        }
+    } else {
+        reduce(0..npts, s, rhs);
+    }
+}
+
 /// Run Levenberg–Marquardt. `cams` and `pts` are updated in place.
-pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> BaReport {
+/// Invalid inputs or workspaces exceeding 256 MiB return an error before mutation.
+pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> Result<BaReport, SolveError> {
+    validate(cams, pts, obs, o)?;
+    adjust_impl(cams, pts, obs, o, true)
+}
+
+fn adjust_impl(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts, allow_iterative: bool) -> Result<BaReport, SolveError> {
     let l = layout(cams.len(), o);
+    let matrix_len = matrix_len(l.n, pts.len(), obs.len())?;
     let npts = pts.len();
     // Observations by point.
     let mut by_pt: Vec<Vec<u32>> = vec![vec![]; npts];
     for (i, ob) in obs.iter().enumerate() {
         by_pt[ob.pt as usize].push(i as u32);
     }
-    let mut cur = cost(cams, pts, obs, o);
+    let mut cur = validated_cost(cams, pts, obs, o);
+    if !cur.is_finite() {
+        return Err(SolveError("bundle adjustment cost is not finite".into()));
+    }
     let initial = cur;
     let t0 = web_time::Instant::now();
     let mut tries = 0usize;
@@ -191,7 +474,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
     let mut lambda = 1e-4;
     let mut iters = 0;
     if l.n == 0 && o.fix_points {
-        return BaReport { initial_cost: initial, cost: cur, iterations: 0 };
+        return Ok(BaReport { initial_cost: initial, cost: cur, iterations: 0 });
     }
     let n = l.n;
     let parallel = n <= 700;
@@ -199,14 +482,9 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
         iters += 1;
         // ---- Normal equations (Gauss–Newton with IRLS weights).
         // Per point: V (3×3), bp (3), W entries (cam-side index → 3).
-        struct PtSys {
-            v: [[f64; 3]; 3],
-            bp: V3,
-            w: Vec<(usize, V3)>,
-        }
         let build_point = |j: usize, s_acc: &mut Vec<f64>, bc: &mut Vec<f64>| -> PtSys {
             let mut ps = PtSys { v: [[0.0; 3]; 3], bp: [0.0; 3], w: vec![] };
-            let mut jc: Vec<(usize, [f64; 2])> = Vec::with_capacity(8);
+            let mut jc = CameraJacobian::new();
             for &oi in &by_pt[j] {
                 let ob = &obs[oi as usize];
                 let ci = ob.cam as usize;
@@ -231,6 +509,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     jc.push((g, [dk[0][0], dk[1][0]]));
                     jc.push((g + 1, [dk[0][1], dk[1][1]]));
                 }
+                let jc = jc.as_slice();
                 // Point Jacobian: A R.
                 let jx = if o.fix_points {
                     [[0.0; 3]; 2]
@@ -239,9 +518,9 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     let r1 = mtv(&c.pose.r, a[1]);
                     [r0, r1]
                 };
-                for (ia, ja) in &jc {
+                for (ia, ja) in jc.iter() {
                     bc[*ia] -= w * (ja[0] * r[0] + ja[1] * r[1]);
-                    for (ib, jb) in &jc {
+                    for (ib, jb) in jc.iter() {
                         s_acc[ia * n + ib] += w * (ja[0] * jb[0] + ja[1] * jb[1]);
                     }
                 }
@@ -252,7 +531,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                             ps.v[a1][b1] += w * (jx[0][a1] * jx[0][b1] + jx[1][a1] * jx[1][b1]);
                         }
                     }
-                    for (ia, ja) in &jc {
+                    for (ia, ja) in jc.iter() {
                         let wv =
                             [w * (ja[0] * jx[0][0] + ja[1] * jx[1][0]), w * (ja[0] * jx[0][1] + ja[1] * jx[1][1]), w * (ja[0] * jx[0][2] + ja[1] * jx[1][2])];
                         // Each observation of a point is on another camera: only the shared focal
@@ -274,12 +553,12 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
             let parts: Vec<(Vec<f64>, Vec<f64>, Vec<PtSys>)> = (0..chunks)
                 .into_par_iter()
                 .map(|t| {
-                    let (mut s, mut b) = (vec![0.0; n * n], vec![0.0; n]);
+                    let (mut s, mut b) = (vec![0.0; matrix_len], vec![0.0; n]);
                     let v = (t * per..((t + 1) * per).min(npts)).map(|j| build_point(j, &mut s, &mut b)).collect();
                     (s, b, v)
                 })
                 .collect();
-            let mut s = vec![0.0; n * n];
+            let mut s = vec![0.0; matrix_len];
             let mut b = vec![0.0; n];
             let mut sys = Vec::with_capacity(npts);
             for (ps, pb, pv) in parts {
@@ -293,32 +572,19 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
             }
             (s, b, sys)
         } else {
-            let mut s = vec![0.0; n * n];
+            let mut s = vec![0.0; matrix_len];
             let mut b = vec![0.0; n];
             let sys = (0..npts).map(|j| build_point(j, &mut s, &mut b)).collect();
             (s, b, sys)
         };
-        // Focal prior.
-        if let FocalMode::PerCamera(k) = o.focal {
-            for i in 0..cams.len().saturating_sub(1) {
-                let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
-                let (a, b) = (l.fidx[i], l.fidx[i + 1]);
-                let ia = (a != usize::MAX).then_some(a);
-                let ib = (b != usize::MAX).then_some(b);
-                for (idx, g) in [(ia, k), (ib, -k)] {
-                    let Some(x) = idx else { continue };
-                    bc[x] -= g * r;
-                    for (idy, h) in [(ia, k), (ib, -k)] {
-                        if let Some(y) = idy {
-                            s_mat[x * n + y] += g * h;
-                        }
-                    }
-                }
-            }
-        }
+        add_focal_prior(cams, o, &l, &mut s_mat, &mut bc);
         let base_s = s_mat.clone();
         let base_bc = bc.clone();
         let mean_diag = ((0..n).map(|i| base_s[i * n + i]).sum::<f64>() / n.max(1) as f64).max(1e-12);
+        let schur_pairs = systems.iter().fold(0usize, |sum, ps| sum.saturating_add(ps.w.len().saturating_mul(ps.w.len().saturating_add(1)) / 2));
+        // Reserve the iterative solve for expensive long-track reductions; small systems
+        // retain the direct path and its rounding. Failed solves use the direct path too.
+        let mut use_iterative = allow_iterative && !o.fix_points && n >= 120 && schur_pairs > 4_000_000;
         // ---- Try steps with increasing damping.
         let mut accepted = false;
         for _try in 0..12 {
@@ -346,50 +612,26 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     })
                     .collect()
             };
-            if !o.fix_points {
-                let reduce = |range: std::ops::Range<usize>, s: &mut [f64], rhs: &mut [f64]| {
-                    for j in range {
-                        let (Some(vi), ps) = (&vinv[j], &systems[j]) else { continue };
-                        let vb = mv(vi, ps.bp);
-                        let wv: Vec<V3> = ps.w.iter().map(|(_, w)| mv(vi, *w)).collect();
-                        for (a, (ia, wa)) in ps.w.iter().enumerate() {
-                            rhs[*ia] -= dot(*wa, vb);
-                            for (ib, wb) in &ps.w[a..] {
-                                let d = dot(wv[a], *wb);
-                                s[ia * n + ib] -= d;
-                                if ia != ib {
-                                    s[ib * n + ia] -= d;
-                                }
-                            }
-                        }
-                    }
-                };
-                let chunks = rayon::current_num_threads().clamp(1, 8);
-                if n <= 1200 && npts >= 64 && chunks > 1 {
-                    let per = npts.div_ceil(chunks);
-                    let parts: Vec<(Vec<f64>, Vec<f64>)> = (0..chunks)
-                        .into_par_iter()
-                        .map(|t| {
-                            let (mut ds, mut dr) = (vec![0.0; n * n], vec![0.0; n]);
-                            reduce(t * per..((t + 1) * per).min(npts), &mut ds, &mut dr);
-                            (ds, dr)
-                        })
-                        .collect();
-                    for (ds, dr) in parts {
-                        s.par_iter_mut().zip(ds.par_iter()).for_each(|(x, y)| *x += y);
-                        for (x, y) in rhs.iter_mut().zip(dr) {
-                            *x += y;
-                        }
-                    }
-                } else {
-                    reduce(0..npts, &mut s, &mut rhs);
+            let iterative_step = if use_iterative { iterative_schur(&s, &rhs, &systems, &vinv, &l) } else { None };
+            if dbg && use_iterative {
+                eprintln!("ba iterative n={n} pairs={schur_pairs} solved={}", iterative_step.is_some());
+            }
+            if use_iterative && iterative_step.is_none() {
+                use_iterative = false;
+            }
+            let dc = if let Some(dc) = iterative_step {
+                dc
+            } else {
+                if !o.fix_points {
+                    reduce_points(&systems, &vinv, n, &mut s, &mut rhs);
                 }
-            }
-            let mut dc = rhs;
-            if n > 0 && !cholesky_solve(&mut s, n, &mut dc) {
-                lambda *= 10.0;
-                continue;
-            }
+                let mut dc = rhs;
+                if n > 0 && !cholesky_solve(&mut s, n, &mut dc) {
+                    lambda *= 10.0;
+                    continue;
+                }
+                dc
+            };
             // Apply.
             let mut nc: Vec<BaCam> = cams.to_vec();
             for (i, c) in nc.iter_mut().enumerate() {
@@ -424,7 +666,11 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     *x = add(*x, mv(vi, b));
                 });
             }
-            let c2 = cost(&nc, &np, obs, o);
+            if nc.iter().any(|c| !valid_camera(c)) || np.iter().flatten().any(|v| !v.is_finite()) {
+                lambda *= 4.0;
+                continue;
+            }
+            let c2 = validated_cost(&nc, &np, obs, o);
             if c2.is_finite() && c2 < cur {
                 cams.copy_from_slice(&nc);
                 pts.copy_from_slice(&np);
@@ -443,7 +689,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                             t0.elapsed().as_secs_f64()
                         );
                     }
-                    return BaReport { initial_cost: initial, cost: cur, iterations: iters };
+                    return Ok(BaReport { initial_cost: initial, cost: cur, iterations: iters });
                 }
                 break;
             }
@@ -456,13 +702,208 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
     if dbg {
         eprintln!("ba n={} pts={} obs={} iters={iters} tries={tries} {:.2}s cost {initial:.1} -> {cur:.1}", l.n, npts, obs.len(), t0.elapsed().as_secs_f64());
     }
-    BaReport { initial_cost: initial, cost: cur, iterations: iters }
+    Ok(BaReport { initial_cost: initial, cost: cur, iterations: iters })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::camtrack::geometry::Rng;
+    use crate::camtrack::linalg::{I3, log_rot, mt, norm};
+
+    #[test]
+    fn long_track_adjustment_matches_direct_reprojections_and_outliers() {
+        rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| {
+            for (focal, fix_centers, distortion) in
+                [(FocalMode::Fixed, false, false), (FocalMode::Shared, false, true), (FocalMode::PerCamera(30.0), false, true), (FocalMode::Shared, true, true)]
+            {
+                let mut rng = Rng(71);
+                let mut noise = || (rng.next_u64() % 100_000) as f64 / 100_000.0 - 0.5;
+                let truth: Vec<V3> = (0..320).map(|_| [noise() * 8.0, noise() * 5.0, 10.0 + noise() * 5.0]).collect();
+                let true_cams: Vec<_> = (0..60)
+                    .map(|i| BaCam {
+                        pose: Pose {
+                            r: rodrigues([0.001 * i as f64, -0.003 * i as f64, 0.0]),
+                            c: if fix_centers { [0.0; 3] } else { [0.03 * i as f64, 0.01 * (i as f64).sin(), 0.0] },
+                        },
+                        f: if matches!(focal, FocalMode::PerCamera(_)) { 900.0 * (1.0 + 0.05 * (i as f64 * 0.07).sin()) } else { 900.0 },
+                        dist: if distortion { Distortion { k1: 0.015, k2: -0.005, radius: 1100.0 } } else { Distortion::NONE },
+                    })
+                    .collect();
+                let mut obs = Vec::new();
+                for (ci, c) in true_cams.iter().enumerate() {
+                    for (pi, p) in truth.iter().enumerate() {
+                        let mut uv = residual(c, *p, [0.0; 2]).unwrap();
+                        uv[0] += noise() * 0.05;
+                        uv[1] += noise() * 0.05;
+                        if (ci * truth.len() + pi).is_multiple_of(37) {
+                            uv[0] += 25.0;
+                            uv[1] -= 30.0;
+                        }
+                        obs.push(BaObs { cam: ci as u32, pt: pi as u32, uv });
+                    }
+                }
+                let mut cams = true_cams.clone();
+                for c in cams.iter_mut().skip(2) {
+                    c.pose.r = mm(&rodrigues([0.001, -0.001, 0.0005]), &c.pose.r);
+                    if !fix_centers {
+                        c.pose.c = add(c.pose.c, [0.002, -0.003, 0.001]);
+                    }
+                }
+                let mut pts: Vec<_> = truth.iter().map(|p| add(*p, [0.01, -0.01, 0.005])).collect();
+                let (mut direct_cams, mut direct_pts) = (cams.clone(), pts.clone());
+                let opts = BaOpts { focal, fix_centers, distortion, fixed: (0..60).map(|i| i < 2).collect(), max_iter: 10, ..Default::default() };
+                let report = adjust(&mut cams, &mut pts, &obs, &opts).unwrap();
+                let direct = adjust_impl(&mut direct_cams, &mut direct_pts, &obs, &opts, false).unwrap();
+                assert!((report.cost - direct.cost).abs() < 1e-5 * direct.cost.max(1.0));
+                for ob in &obs {
+                    let a = residual(&cams[ob.cam as usize], pts[ob.pt as usize], ob.uv).unwrap();
+                    let b = residual(&direct_cams[ob.cam as usize], direct_pts[ob.pt as usize], ob.uv).unwrap();
+                    assert!((a[0] - b[0]).hypot(a[1] - b[1]) < 0.001);
+                    assert_eq!(a[0].hypot(a[1]) <= 4.0, b[0].hypot(b[1]) <= 4.0);
+                }
+                for (a, b) in cams.iter().zip(direct_cams) {
+                    assert!(norm(sub(a.pose.c, b.pose.c)) < 0.001);
+                    assert!(norm(log_rot(&mm(&a.pose.r, &mt(&b.pose.r)))) < 1e-4);
+                    assert!((a.f - b.f).abs() < 1e-4 * b.f);
+                    assert!((a.dist.k1 - b.dist.k1).abs() < 1e-4 && (a.dist.k2 - b.dist.k2).abs() < 1e-4);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn matrix_free_schur_matches_explicit_system_and_rejects_bad_preconditioner() {
+        let l = layout(20, &BaOpts::default());
+        let n = l.n;
+        let mut u = vec![0.0; n * n];
+        for i in 0..n {
+            u[i * n + i] = 10.0;
+        }
+        let systems: Vec<_> = (0..80)
+            .map(|j| PtSys {
+                v: I3,
+                bp: [0.01, -0.02, 0.03],
+                w: (0..n).map(|i| (i, [((j * 13 + i * 7) % 19) as f64 * 0.001 - 0.009, (i % 7) as f64 * 0.001, (j % 11) as f64 * 0.001])).collect(),
+            })
+            .collect();
+        let vinv = vec![Some(I3); systems.len()];
+        let rhs: Vec<_> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let x = iterative_schur(&u, &rhs, &systems, &vinv, &l).unwrap();
+        let mut explicit = u.clone();
+        let mut reduced_rhs = rhs.clone();
+        for ps in &systems {
+            for (i, a) in &ps.w {
+                reduced_rhs[*i] -= dot(*a, ps.bp);
+                for (j, b) in &ps.w {
+                    explicit[i * n + j] -= dot(*a, *b);
+                }
+            }
+        }
+        let mut direct = reduced_rhs.clone();
+        let mut factor = explicit.clone();
+        assert!(cholesky_solve(&mut factor, n, &mut direct));
+        for (a, b) in x.iter().zip(direct) {
+            assert!((a - b).abs() < 1e-9);
+        }
+        let mut error2 = 0.0;
+        for (i, row) in explicit.chunks_exact(n).enumerate() {
+            let ax: f64 = row.iter().zip(&x).map(|(a, x)| a * x).sum();
+            error2 += (ax - reduced_rhs[i]).powi(2);
+        }
+        assert!(error2 < 1e-18 * reduced_rhs.iter().map(|v| v * v).sum::<f64>());
+        u[0] = -1.0;
+        assert!(iterative_schur(&u, &rhs, &systems, &vinv, &l).is_none());
+    }
+
+    fn test_camera() -> BaCam {
+        BaCam { pose: Pose::IDENTITY, f: 900.0, dist: Distortion::NONE }
+    }
+
+    #[test]
+    fn cost_rejects_invalid_observation_indices() {
+        for (cam, pt) in [(1, 0), (0, 1)] {
+            let obs = [BaObs { cam, pt, uv: [0.0; 2] }];
+            assert!(cost(&[test_camera()], &[[0.0, 0.0, 5.0]], &obs, &BaOpts::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn adjust_rejects_invalid_observation_without_mutating_inputs() {
+        for (cam, pt) in [(1, 0), (0, 1)] {
+            let mut cams = [test_camera()];
+            let mut pts = [[0.0, 0.0, 5.0]];
+            let before = (cams, pts);
+            let obs = [BaObs { cam, pt, uv: [0.0; 2] }];
+            assert!(adjust(&mut cams, &mut pts, &obs, &BaOpts::default()).is_err());
+            assert_eq!((cams, pts), before);
+        }
+    }
+
+    #[test]
+    fn residual_rejects_non_finite_inputs_and_projection_overflow() {
+        let cam = test_camera();
+        assert!(residual(&cam, [0.0, 0.0, f64::NAN], [0.0; 2]).is_none());
+        assert!(residual(&cam, [0.0, 0.0, 5.0], [f64::INFINITY, 0.0]).is_none());
+        for bad in [
+            BaCam { f: f64::NAN, ..cam },
+            BaCam { dist: Distortion { k1: f64::INFINITY, ..Distortion::NONE }, ..cam },
+            BaCam { pose: Pose { c: [f64::NAN; 3], ..Pose::IDENTITY }, ..cam },
+            BaCam { pose: Pose { r: [[f64::INFINITY; 3]; 3], ..Pose::IDENTITY }, ..cam },
+        ] {
+            assert!(residual(&bad, [0.0, 0.0, 5.0], [0.0; 2]).is_none());
+        }
+        assert!(residual(&cam, [f64::MAX, 0.0, 1.0], [0.0; 2]).is_none());
+    }
+
+    #[test]
+    fn adjustment_rejects_non_finite_points_observations_and_options() {
+        let cam = test_camera();
+        let pts = [[0.0, 0.0, 5.0]];
+        let obs = [BaObs { cam: 0, pt: 0, uv: [0.0; 2] }];
+        assert!(cost(&[cam], &[[f64::NAN, 0.0, 5.0]], &obs, &BaOpts::default()).is_err());
+        assert!(cost(&[cam], &pts, &[BaObs { uv: [f64::NAN; 2], ..obs[0] }], &BaOpts::default()).is_err());
+        for opts in [
+            BaOpts { huber: f64::NAN, ..Default::default() },
+            BaOpts { huber: 0.0, ..Default::default() },
+            BaOpts { focal: FocalMode::PerCamera(f64::INFINITY), ..Default::default() },
+            BaOpts { max_iter: usize::MAX, ..Default::default() },
+        ] {
+            let mut trial_pts = pts;
+            assert!(adjust(&mut [cam], &mut trial_pts, &obs, &opts).is_err());
+        }
+    }
+
+    #[test]
+    fn matrix_workspace_is_checked_and_bounded_before_allocation() {
+        assert!(matrix_len(usize::MAX, 0, 0).is_err());
+        assert!(matrix_len(1, usize::MAX, 0).is_err());
+        assert!(matrix_len(1, 0, usize::MAX).is_err());
+        let mut cams = vec![test_camera(); 1000];
+        assert!(adjust(&mut cams, &mut [], &[], &BaOpts::default()).is_err());
+        assert!(matrix_len(6, 1000, 1000).is_ok());
+        assert!(matrix_len(955, 900, 160 * 900).is_ok());
+    }
+
+    #[test]
+    fn camera_jacobian_keeps_extra_parameters_and_resets() {
+        let mut jac = CameraJacobian::new();
+        let count = MAX_CAMERA_JACOBIAN_ENTRIES + 3;
+        for i in 0..count {
+            jac.push((i, [i as f64, -(i as f64)]));
+        }
+        assert_eq!(jac.as_slice().iter().count(), count);
+        for (i, entry) in jac.as_slice().iter().enumerate() {
+            assert_eq!(*entry, (i, [i as f64, -(i as f64)]));
+        }
+        jac.clear();
+        assert_eq!(jac.as_slice().iter().count(), 0);
+        for i in 0..MAX_CAMERA_JACOBIAN_ENTRIES {
+            jac.push((i, [1.0, 2.0]));
+        }
+        assert_eq!(jac.as_slice().iter().count(), MAX_CAMERA_JACOBIAN_ENTRIES);
+        assert!(jac.overflow.is_empty());
+    }
 
     #[test]
     fn bundle_adjustment_converges_from_noise() {
@@ -493,7 +934,7 @@ mod tests {
         let mut fixed = vec![false; 6];
         fixed[0] = true;
         fixed[1] = true;
-        let rep = adjust(&mut cams, &mut pts, &obs, &BaOpts { fixed, max_iter: 50, ..Default::default() });
+        let rep = adjust(&mut cams, &mut pts, &obs, &BaOpts { fixed, max_iter: 50, ..Default::default() }).unwrap();
         let rms = (rep.cost / obs.len() as f64).sqrt();
         assert!(rms < 1e-4, "{rep:?}");
     }

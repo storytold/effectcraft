@@ -76,7 +76,7 @@ pub fn viewer_hook(
             }
             for (pr, s) in pts.iter().zip(screen) {
                 let hr = Rect::from_center_size(s, vec2(16.0, 16.0));
-                let id = egui::Id::new(("viewer-gradient-pt", pr.uid));
+                let id = egui::Id::unique(("viewer-gradient-pt", pr.uid));
                 let resp = ui.interact(hr, id, Sense::drag());
                 let col = if resp.hovered() || resp.dragged() { t.accent } else { Color32::WHITE };
                 fw::draw_crosshair(painter, s + vec2(1.0, 1.0), 5.0, Color32::from_black_alpha(160));

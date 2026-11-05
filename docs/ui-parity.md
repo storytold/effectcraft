@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-18 · **Change:** minor (accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; earlier changes: shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
 How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
@@ -16,8 +16,8 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Area | Status | % | Evidence and gaps |
 |---|---|---:|---|
 | Menu bar | After Effects' menus, order, submenus and labels; native on macOS; keyboard-operable in-window bar | 95% | 587 entries in `crates/engine/src/menus.rs`; Adobe-service entries omitted by design; `ui_menus` tests (#279) |
-| Panels and workspaces | Every After Effects panel; all standard workspaces; drag-to-dock, tabs, floating panels, maximise | 75% | `ui_tabs`, `ui_panels`; panels move into their own native windows on any screen (#486 open: no dragging tabs between those windows); #302, #301 and #320 (docking, stacked-panel headers, workspace persistence) are closed |
-| Timeline | Switches, modes, parent & link, twirl-downs, reveal shortcuts (U, UU, P, S, R, T, A, E, M, F, Alt+Shift…), pick whips, graph editor, work area, markers | 75% | `ui_keyframes`, `ui_timeline_*`; expand precomps in place (#601); #456, #457, #569 and #355 (Graph Editor jitter and buttons, negative rotation, bulk keyframing) are closed; Proportional Scrubbing (26.2: Ctrl+Alt / Cmd+Opt scrub of hot text spreads the change over the selected layers by selection order, #770) matched for layers selected as a whole, not yet for individually selected properties; every layer has the Video switch, nulls, cameras and lights included (a null with its eye off has no box or handles in the viewer and isn't picked there) |
+| Panels and workspaces | Every After Effects panel; all standard workspaces; drag-to-dock, tabs, floating panels, maximise | 75% | `ui_tabs`, `ui_panels`; on Windows, macOS and X11 floating panels are OS windows of their own on any screen (on Wayland, the web and in embedded viewports they stay in the app window), with tabs and groups dragging between windows and shortcuts working in them (#486); #302, #301 and #320 (docking, stacked-panel headers, workspace persistence) are closed |
+| Timeline | Switches, modes, parent & link, twirl-downs, reveal shortcuts (U, UU, P, S, R, T, A, E, M, F, Alt+Shift…), pick whips, graph editor, work area, markers | 75% | `ui_keyframes`, `ui_timeline_*`; expand precomps in place (#601); #456, #457, #569 and #355 (Graph Editor jitter and buttons, negative rotation, bulk keyframing) are closed; Proportional Scrubbing (26.2: Ctrl+Alt / Cmd+Opt scrub of hot text spreads the change over the selected layers by selection order, #770) matched for layers selected as a whole, not yet for individually selected properties; every layer has the Video switch, nulls, cameras and lights included (a hidden null, camera or light has no box or handles in the viewer and isn't picked there; other selected hidden layers keep their layer controls and paths, #1769); a row control (a switch, the label swatch, a Modes cell) clicked on one of several selected layers acts on the whole selection, with the layers the switch doesn't apply to left out (#1849); a shape group's inner Contents (After Effects' elided Vectors group) draws no row — the group's path, fill/stroke and Transform list directly under it |
 | Composition viewer | Selection, handles with direction-aware cursors, rulers, guides, grids, snapping, channels, exposure, region of interest, snapshots, 3D views, Spacebar hand | 70% | `ui_viewer`, `ui_viewers`; Cmd/Ctrl +/− doesn't zoom (#570); anchor point grab on Linux (#492); #352 (snapping) is closed; no 3D transform gizmos (#392, #347); percentage guides (26.5) exist as View ▸ Add Percentage Guide and Convert Guides to Percentage / Pixels (a guide stores a percent of the comp, so it follows comp-size changes; behaviour inferred from the release note, not compared with After Effects); Copy Frame to Clipboard (26.3) is in the Composition menu and the viewer's context menu |
 | Tools panel | All After Effects tools; long-press flyouts; Tool Creates Shape / Mask; Fill / Stroke options | 80% | #213, #227 fixed; #553 (pen and vertex tools on motion paths) is closed |
 | Nudging and modifiers | Arrow nudge (1 px, Shift 10 px), Alt/Option duplicates and slips, Shift constrains | 75% | #290 nudging fixed; #491 (Linux multi-layer edits) is closed |
@@ -30,7 +30,7 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Preview feel | Spacebar / Numpad 0 previews, RAM preview, cache bars, adaptive resolution | 55% | `ui_ram_preview`, `ui_live_preview`; stutter (#595, #304); scrubbing lag (#329, closed by #784) |
 | Home screen, Learn, templates | Home with recent projects, template gallery, interactive Learn tutorials | 70% | Layout nitpicks (#581); Home literals untranslated (#574) |
 | Quick Apply (26.2) | Search to apply effects, presets or commands | partial | A command palette exists; not After Effects' Quick Apply |
-| Accessibility | AccessKit enabled; focus labels tested; Project panel keyboard navigation and accessible names (#776) | 20% | No screen-reader pass or keyboard-navigation audit of the other panels; no contrast check |
+| Accessibility | AccessKit enabled; `ui_accessibility_audit` counts unnamed or roleless controls per panel: Project (#776), Effects & Presets, Settings (all pages) and Render Queue with Templates are at zero, with names, roles, selected / open / checked state and arrow-key, Home / End, Enter, Space operation (#1335); `ui_contrast` checks theme tokens against WCAG 2 | 20% | No screen reader has been run on anything; the other panels are counted, not fixed (Timeline ≈ 55 unnamed controls); 13 of 48 token pairs are below WCAG 2 (primary button text, error text, control borders, Light theme warning colour); focus order across panels, colour-blindness and reduced motion are unchecked; app shortcuts pause while a widget has keyboard focus |
 | UI scale | Settings ▸ Appearance ▸ UI Scale 75–200% | beyond | After Effects follows the system's scaling (#284) |
 
 Path editing (#1220): the Composition viewer suppresses a selected layer’s transform box while
@@ -41,15 +41,16 @@ cover shape paths and masks, corner-vertex dragging and undo, and layers without
 
 ## Estimate
 
-**≈ 60–120 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
-test), 3D gizmos 8–15 h, multi-monitor panels 10–20 h, the 26.x interface changes 10–20 h, an
-accessibility pass 15–30 h. Checking feel against After Effects needs the owner's Mac with After
+**≈ 60–110 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
+test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 12–25 h (the first slice, three panels and the audit, is done). Checking feel against After Effects needs the owner's Mac with After
 Effects running; most of the rest parallelises.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | A shape group's inner Contents (After Effects' elided Vectors group) draws no row: the group's path, fill/stroke and Transform list directly under the group |
+| 2026-10-13 | minor | Accessibility row: AccessKit audit and contrast tests, Effects & Presets, Settings and Render Queue named and keyboard-operable (#1335); no screen reader tested |
 | 2026-10-13 | patch | Layer bounds are suppressed during path-point editing (#1220); shape/mask interaction regressions |
 | 2026-10-12 | minor | Closed issues (#302, #320, #491, #511, #553 and others) marked as closed instead of open; panels in their own windows (#486) |
 | 2026-10-12 | minor | Percentage guides and effect colour labels (26.5) added; rows updated |
