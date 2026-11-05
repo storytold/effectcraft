@@ -22,7 +22,7 @@ use craft_command::{Owner, Registry};
 use craft_plugin_abi::permissions::DocScope;
 use craft_plugin_host::link::LinkClient;
 use craft_plugin_host::services::{
-    CallOutcome, CallScope, CommandFailure, CommandInfo, HostInfo, LinkApp, LinkFailure, LogLevel, QueryFailure, Services, UserNotice,
+    CallOutcome, CallScope, CommandFailure, CommandInfo, EntropyUnavailable, HostInfo, LinkApp, LinkFailure, LogLevel, QueryFailure, Services, UserNotice,
 };
 use effectcraft_engine::{EngineError, Session};
 use serde_json::Value;
@@ -110,12 +110,12 @@ impl Services for AppServices {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
 
-    fn fill_random(&self, buf: &mut [u8]) {
-        if let Err(e) = getrandom::fill(buf) {
-            // Entropy is a permission-gated nicety. A failure must not hand out zeros as random.
+    fn fill_random(&self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+        // No system entropy: the guest gets `E_UNSUPPORTED`, never a buffer that only looks random.
+        getrandom::fill(buf).map_err(|e| {
             log::error!("no operating system entropy: {e}");
-            buf.fill(0);
-        }
+            EntropyUnavailable(e.to_string())
+        })
     }
 
     fn notify(&self, notice: UserNotice) {
