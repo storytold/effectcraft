@@ -946,12 +946,14 @@ fn copied_effect_property_pastes_onto_the_same_effect() {
 /// and Access Network on (as for File.execute()); the user always can.
 #[test]
 fn scripts_start_effect_helpers_only_with_file_access() {
-    let mut s = Session::default();
-    s.helpers = Some(crate::HelperHooks {
-        scan: |_| json!({"paths": [], "helpers": [], "loaded": [], "errors": []}),
-        load: |_| Ok(json!({"loaded": [], "errors": []})),
-        list: || json!({"helpers": [], "blocked": []}),
-    });
+    let mut s = Session {
+        helpers: Some(crate::HelperHooks {
+            scan: |_| json!({"paths": [], "helpers": [], "loaded": [], "errors": []}),
+            load: |_| Ok(json!({"loaded": [], "errors": []})),
+            list: || json!({"helpers": [], "blocked": []}),
+        }),
+        ..Default::default()
+    };
     for (id, params) in [("effect.helpers.scan", json!({})), ("effect.helpers.load", json!({"path": "/plug-ins/x.ofx"}))] {
         let e = s.execute_for_script(id, params.clone()).unwrap_err().to_string();
         assert!(e.contains("Allow Scripts to Write Files"), "{id}: {e}");

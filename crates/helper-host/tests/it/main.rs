@@ -117,17 +117,11 @@ impl Provider for FakeProvider {
         "Fake".into()
     }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
-        let v: Vec<Arc<dyn EffectPlugin>> = [
-            ("invert", Kind::Invert),
-            ("pad", Kind::Pad),
-            ("echo", Kind::Echo),
-            ("crash", Kind::Crash),
-            ("hang", Kind::Hang),
-            ("noisy", Kind::Noisy),
-        ]
-        .into_iter()
-            .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
-            .collect();
+        let v: Vec<Arc<dyn EffectPlugin>> =
+            [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
+                .into_iter()
+                .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
+                .collect();
         (v, vec!["fake helper: a warning".into()])
     }
 }
