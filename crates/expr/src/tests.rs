@@ -216,6 +216,54 @@ fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
     assert_close!(g.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
 }
 
+/// The four ways a script can reach a global binding, against a prelude *function* rather than one
+/// of the unqualified accessors: assignment, `var`, `delete` and `defineProperty`. The lock is
+/// `writable: false, configurable: false`, and it is the second half of that pair that answers the
+/// last two — a `delete` of a non-configurable property is false, and a `defineProperty` over one
+/// is a `TypeError`. Asked for by a reviewer on #2176.
+#[test]
+fn a_prelude_function_survives_every_way_a_script_can_reach_its_binding() {
+    let f = fx();
+    // Assignment and `var`: silent, and the next expression still has the original.
+    assert_close!(f.num("clamp = function () { return 777 };\n1", 0.0), 1.0);
+    assert_close!(f.num("var clamp = 5;\n2", 0.0), 2.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // `delete` of a non-configurable binding answers false in sloppy mode rather than throwing.
+    assert_close!(f.num("delete clamp ? 1 : 0", 0.0), 0.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("typeof clamp === 'function' ? 1 : 0", 0.0), 1.0);
+    // `defineProperty` over one is a `TypeError`, so this is the one route the user does see. The
+    // expression fails; what it was reaching for is unchanged for the next one.
+    assert!(f.err("Object.defineProperty(globalThis, 'clamp', { value: 5 })").contains("TypeError"));
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // Reconfiguring it to writable is refused the same way, so the lock cannot be reopened.
+    assert!(f.err("Object.defineProperty(globalThis, 'clamp', { writable: true })").contains("TypeError"));
+    assert_close!(f.num("clamp = 7;\n3", 0.0), 3.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // A second project on the same thread-local runtime meets the same bindings.
+    let g = fx();
+    assert_close!(g.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(g.num("typeof clamp === 'function' ? 1 : 0", 0.0), 1.0);
+}
+
+/// Which mode a write is silent in decides what the user sees, and the answer is that an expression
+/// cannot reach strict mode at all: `Runtime::script` wraps the text in `try{…}catch(__e){throw __e}`,
+/// so a `"use strict"` the user writes is an expression statement inside a block rather than a
+/// directive prologue, and has no effect. A failed write is therefore always the silent kind.
+/// Asked for by a reviewer on #2176.
+#[test]
+fn a_use_strict_in_an_expression_is_inert_so_a_refused_write_stays_silent() {
+    let f = fx();
+    assert_close!(f.num("\"use strict\";\nlinear = function () { return 777 };\n50", 0.0), 50.0);
+    assert_close!(f.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    // The directive is inert rather than honoured: in strict mode an assignment to an undeclared
+    // name is a ReferenceError, and here it quietly creates a global instead.
+    assert_close!(f.num("\"use strict\";\nundeclared_global = 5;\nundeclared_global", 0.0), 5.0);
+    // Which is also why the refused write above cannot be made to report itself by the user: the
+    // only mode an expression runs in is the one where it is dropped.
+    assert_close!(f.num("\"use strict\";\ntypeof linear === 'function' ? 1 : 0", 0.0), 1.0);
+}
+
 /// The same leak, reached through the objects instead of the names: a prelude constructor keeps its
 /// methods on its `prototype`, the prelude itself calls `Array.isArray` and `Object.setPrototypeOf`
 /// while it answers an expression, and `thisProject` is reachable surface that holds no function at
