@@ -117,27 +117,32 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
 /// not an edit (the same as After Effects marking footage missing at open).
 fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
     let checked = found.len();
-    let (mut missing, mut probed, mut moved, mut changed) = (0, 0, 0, false);
-    let p = s.project_mut();
+    let (mut missing, mut probed, mut moved) = (0, 0, 0);
+    // Decide what changes before taking the project for writing: a write without a `bump` is
+    // published as an untracked change, even when nothing in the project differs.
+    let mut writes: Vec<(ItemId, Found)> = Vec::new();
     for (id, f) in found {
-        let Some(ItemKind::Footage(cur)) = p.item_mut(id).map(|i| &mut i.kind) else { continue };
-        match f {
+        let Some(ItemKind::Footage(cur)) = s.project.item(id).map(|i| &i.kind) else { continue };
+        match &f {
             Found::Missing(m) => {
-                missing += usize::from(m);
-                if cur.missing != m {
-                    cur.missing = m;
-                    changed = true;
+                missing += usize::from(*m);
+                if cur.missing == *m {
+                    continue;
                 }
             }
-            Found::Probed(nf) => {
-                probed += 1;
-                *cur = *nf;
-                changed = true;
-            }
-            Found::Moved(nf) => {
-                moved += 1;
-                *cur = *nf;
-                changed = true;
+            Found::Probed(_) => probed += 1,
+            Found::Moved(_) => moved += 1,
+        }
+        writes.push((id, f));
+    }
+    let changed = !writes.is_empty();
+    if changed {
+        let p = s.project_mut();
+        for (id, f) in writes {
+            let Some(ItemKind::Footage(cur)) = p.item_mut(id).map(|i| &mut i.kind) else { continue };
+            match f {
+                Found::Missing(m) => cur.missing = m,
+                Found::Probed(nf) | Found::Moved(nf) => *cur = *nf,
             }
         }
     }
@@ -215,6 +220,33 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(s.project.items.values().all(|i| matches!(&i.kind, ItemKind::Footage(f) if f.missing)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A check that finds every item as it is stored writes nothing, so the change bus has
+    /// nothing to publish for it.
+    #[test]
+    fn a_check_that_finds_nothing_new_publishes_no_change() {
+        let dir = std::env::temp_dir().join(format!("ec-footage-check-quiet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let there = dir.join("there.png");
+        std::fs::write(&there, b"x").unwrap();
+        let mut s = session_with(&[there.to_str().unwrap()]);
+        s.mark_saved();
+        // Publish the setup's own write first, so only the call under test is seen.
+        s.hooks.flush(&mut s.project, s.revision);
+        let bus = s.hooks.change_bus::<std::sync::Arc<effectcraft_project::Project>>();
+        let sub = bus.subscribe();
+        let r = s.execute("footage.check", json!({"wait": true})).unwrap();
+        assert_eq!(r, json!({"checked": 1, "missing": 0, "probed": 0}));
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert!(seen.is_empty(), "{seen:?}");
+        // The same check after the file is gone changes the project, with the job's cause.
+        std::fs::remove_file(&there).unwrap();
+        s.execute("footage.check", json!({"wait": true})).unwrap();
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert!(seen.iter().any(|c| matches!(c, craft_command::Cause::Job("footage_check"))), "{seen:?}");
+        assert!(!seen.contains(&craft_command::Cause::Untracked), "{seen:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

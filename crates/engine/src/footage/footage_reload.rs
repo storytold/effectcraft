@@ -183,14 +183,19 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
             Ok(())
         })?;
     } else {
-        let p = s.project_mut();
-        let mut changed = false;
-        for (i, f) in updates {
-            if let Some(it) = p.item_mut(i)
-                && !matches!(&it.kind, ItemKind::Footage(cur) if *cur == f)
-            {
-                it.kind = ItemKind::Footage(f);
-                changed = true;
+        // Take the project for writing only for updates that differ: a write without a `bump`
+        // is published as an untracked change.
+        let updates: Vec<_> = updates
+            .into_iter()
+            .filter(|(i, f)| s.project.item(*i).is_some_and(|it| !matches!(&it.kind, ItemKind::Footage(cur) if cur == f)))
+            .collect();
+        let changed = !updates.is_empty();
+        if changed {
+            let p = s.project_mut();
+            for (i, f) in updates {
+                if let Some(it) = p.item_mut(i) {
+                    it.kind = ItemKind::Footage(f);
+                }
             }
         }
         if changed {
@@ -520,5 +525,37 @@ mod watcher_tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "the worker is still running");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    fn footage(width: u32) -> Footage {
+        Footage { path: "/ec/a.png".into(), width, height: 48, has_video: true, ..Default::default() }
+    }
+
+    /// Reloads that equal what is stored write nothing, so the change bus has nothing to
+    /// publish; one that differs is published with the reload's cause.
+    #[test]
+    fn a_reload_that_changes_nothing_publishes_no_change() {
+        let mut s = Session::default();
+        let id = s.project_mut().add_item("a", crate::color::Label::None, None, ItemKind::Footage(footage(64)));
+        s.mark_saved();
+        // Publish the setup's own write first, so only the call under test is seen.
+        s.hooks.flush(&mut s.project, s.revision);
+        let bus = s.hooks.change_bus::<Arc<effectcraft_project::Project>>();
+        let sub = bus.subscribe();
+        apply_reloads(&mut s, vec![(id, footage(64))], false).unwrap();
+        s.hooks.flush(&mut s.project, s.revision);
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert!(seen.is_empty(), "{seen:?}");
+        assert!(!s.is_dirty());
+        apply_reloads(&mut s, vec![(id, footage(96))], false).unwrap();
+        s.hooks.flush(&mut s.project, s.revision);
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert_eq!(seen, [craft_command::Cause::Job("footage_reload")]);
+        assert!(!s.is_dirty(), "only the disk changed");
     }
 }
