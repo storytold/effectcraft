@@ -51,6 +51,15 @@ impl Dependencies<'_> {
                         id.hash(self.h);
                         let other = ctx.layer(LayerId(id));
                         other.is_some().hash(self.h);
+                        // Sampling Space "Comp": the pixels read depend on where the owner and the
+                        // referenced layer sit in the comp (transforms, parents and, for a 3D
+                        // layer, the camera, which the referenced layer's own key leaves out).
+                        if g.get(&effectcraft_effects::layer_space_id(&p.match_id)).is_some_and(|s| ctx.value(layer, s).as_enum() == 1) {
+                            hash_debug(self.h, &ctx.layer_to_comp(layer));
+                            if let Some(other) = other {
+                                hash_debug(self.h, &ctx.layer_to_comp(other));
+                            }
+                        }
                         if let Some(other) = other {
                             if other.id == layer.id {
                                 // Source/Masks never enter the same stack again. The owner

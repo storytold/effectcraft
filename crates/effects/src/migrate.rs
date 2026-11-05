@@ -18,7 +18,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{Node, ParamUi, PropGroup, Property};
 
-use crate::{EffectSpec, ParamSpec, default_value, group_name, layer_source_id};
+use crate::{EffectSpec, ParamSpec, default_value, group_name, has_sampling_space, layer_source_id, layer_space_id};
 
 /// Parameter ids renamed since they were first saved: `(effect id, old id, new id)`. The new id
 /// is a spec id (it may include twirl-down group segments, `group/param`).
@@ -320,6 +320,16 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 None => g.children.push(src.into()),
             }
         }
+        // Sampling Space companions (Layer by default) for projects saved before they existed.
+        if has_sampling_space(spec, ps) && prop_at(g, &layer_space_id(ps.id)).is_none() {
+            let (path, leaf) = ps.id.rsplit_once('/').map(|(p, l)| (Some(p), l)).unwrap_or((None, ps.id));
+            let mut space = Property::new(ids.alloc(), &layer_space_id(leaf), &format!("{} Sampling Space", ps.name), Value::Enum(0)).with_ui(ParamUi::Hidden);
+            space.hold_only = true;
+            match path.and_then(|path| group_at(g, ids, path)) {
+                Some(sub) => sub.children.push(space.into()),
+                None => g.children.push(space.into()),
+            }
+        }
     }
     if let Some(on) = back_self
         && let Some(pr) = g.get_mut("backSelf")
@@ -514,6 +524,29 @@ mod tests {
         assert_eq!(pr.name, popup.name);
         assert_eq!(pr.value, Value::Enum(options.len() as u32 - 1));
         assert_eq!(pr.ui, popup.ui);
+    }
+
+    /// Projects saved before Sampling Space gain it (Layer, so they render as before), grouped
+    /// layer parameters' next to them, and the Source choice is kept.
+    #[test]
+    fn upgrade_adds_the_sampling_space_companion_as_layer() {
+        let mut next = 1;
+        for (effect, id, group) in [("ec.channel.setmatte", "takeMatteFromLayer", None), ("ec.blur.cameralens", "blurMap/blurMapLayer", Some("blurMap"))] {
+            let spec = find(effect).unwrap();
+            let mut g = instantiate(spec, &mut Ids(&mut next), spec.name, [100.0, 50.0]);
+            let leaf = id.rsplit('/').next().unwrap();
+            let sub = match group {
+                Some(m) => g.sub_mut(m).unwrap(),
+                None => &mut g,
+            };
+            sub.children.retain(|c| c.match_id() != layer_space_id(leaf));
+            sub.get_mut(&layer_source_id(leaf)).unwrap().value = Value::Enum(1);
+            assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]), "{effect}");
+            let sub = group.map_or(&g, |m| g.sub(m).unwrap());
+            let space = sub.get(&layer_space_id(leaf)).unwrap();
+            assert_eq!((space.value.clone(), space.ui.clone(), space.hold_only), (Value::Enum(0), ParamUi::Hidden, true), "{effect}");
+            assert_eq!(sub.get(&layer_source_id(leaf)).unwrap().value, Value::Enum(1), "{effect}: the Source choice is kept");
+        }
     }
 
     /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the

@@ -135,6 +135,38 @@ fn effect_controls_widgets_register_automation_ids() {
     assert!(ids(&h).contains(&pt_id), "effect point control shown for the selected effect");
 }
 
+/// A layer parameter's Source popup also holds its Sampling Space: choosing Comp Space sets it,
+/// keeps the source choice, and the popup then reads both.
+#[test]
+fn layer_parameter_source_popup_sets_the_sampling_space() {
+    use effectcraft_ui_egui::widgets::check_label;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "frameRate": 30, "duration": 10})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Matte", "color": "#ffffff", "width": 100, "height": 100})).unwrap();
+    let l = s.execute("layer.newSolid", json!({"name": "Fill", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layers": [l], "effect": "Set Matte"})).unwrap();
+    let uid = |s: &Session, id: &str| layer(s, l).effects().unwrap().groups().next().and_then(|g| g.get(id)).map(|p| p.uid).unwrap();
+    let (param, source, space) = (uid(&s, "takeMatteFromLayer"), uid(&s, "takeMatteFromLayerSource"), uid(&s, "takeMatteFromLayerSpace"));
+    s.state.selected_layers = vec![LayerId(l)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    settle(&mut h);
+    let id = format!("effectControls.prop.{param}.source");
+    let r = h.state().auto.previous.iter().chain(h.state().auto.elements.iter()).find(|e| e.id == id).map(|e| e.rect).unwrap();
+    // Layer space (the default) reads as the source choice alone, as before.
+    assert!(h.query_by_label("Effects & Masks").is_some());
+    click(&mut h, egui::pos2(r[0] + 10.0, r[1] + r[3] / 2.0));
+    let entry = h.query_by_label(&check_label(false, "Comp Space")).expect("the source popup lists the spaces").rect();
+    assert!(h.query_by_label(&check_label(true, "Effects & Masks")).is_some() && h.query_by_label(&check_label(true, "Layer Space")).is_some());
+    click(&mut h, entry.center());
+    let value = |h: &Harness<'_, EffectcraftApp>, uid: u64| layer(&h.state().session, l).props.find(uid).map(|p| p.value.clone());
+    assert_eq!(value(&h, space), Some(KV::Enum(1)));
+    assert_eq!(value(&h, source), Some(KV::Enum(2)), "the source choice is kept");
+    h.step();
+    assert!(h.query_by_label("Effects & Masks · Comp").is_some());
+}
+
 #[test]
 fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
     let mut s = Session::default();

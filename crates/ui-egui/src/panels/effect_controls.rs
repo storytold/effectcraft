@@ -9,8 +9,8 @@
 //! - point parameters have the crosshair button (then click in the Composition viewer) and an
 //!   on-viewer ⊕ control while their effect is selected (see [`viewer_hook`]);
 //! - colour parameters have a swatch and an eyedropper that samples the composited frame;
-//! - layer parameters have a layer popup and a Source / Masks / Effects & Masks popup; mask
-//!   ("Path") parameters list the layer's masks;
+//! - layer parameters have a layer popup and a Source / Masks / Effects & Masks popup that also
+//!   holds the Sampling Space (Layer / Comp); mask ("Path") parameters list the layer's masks;
 //! - Curves has its graph editor, Levels its histogram with input/output triangles, Auto
 //!   Levels a histogram; Lumetri's curves, Colorama's output cycle, Glow's colour map and
 //!   Reshape's correspondence points have visual editors ([`super::fx_editors`]).

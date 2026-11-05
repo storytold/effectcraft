@@ -525,6 +525,13 @@ pub trait EffectHost: Sync {
     fn layer_masks(&self, id: u64) -> Option<LayerPixels> {
         self.layer(id, false)
     }
+    /// `px`, layer `id`'s pixels as returned above (in its own effect space), resampled to where
+    /// the layer appears in the comp and brought into the running layer's effect space, so the
+    /// two line up wherever either sits (a layer parameter's "Comp" Sampling Space, the way a
+    /// track matte lines up). The result has the running layer's size. Defaults to `px` as is.
+    fn to_comp_space(&self, _id: u64, px: LayerPixels) -> LayerPixels {
+        px
+    }
     /// The effect's own layer at another **layer time** `layer_time` (seconds): its source with
     /// masks applied, followed by the first `effects` effects of its stack (0 = none; the host
     /// never goes past the effect being rendered). `None` when unavailable (no host, recursion
@@ -625,12 +632,16 @@ impl EffectCtx<'_> {
     pub fn layer_param(&self, id: &str, masks_and_effects: bool) -> Option<LayerPixels> {
         let lid = self.params.get(id)?.as_layer()?;
         let host = self.env.host?;
-        match self.params.get(&layer_source_id(id)).map(Value::as_enum) {
+        let px = match self.params.get(&layer_source_id(id)).map(Value::as_enum) {
             Some(0) => host.layer(lid, false),
             Some(1) => host.layer_masks(lid),
             Some(_) => host.layer(lid, true),
             None => host.layer(lid, masks_and_effects),
-        }
+        }?;
+        Some(match self.params.get(&layer_space_id(id)).map(Value::as_enum) {
+            Some(1) => host.to_comp_space(lid, px),
+            _ => px,
+        })
     }
     /// Frame rate for frame-based maths (comp rate, else 30).
     pub fn fps(&self) -> f64 {
@@ -816,6 +827,43 @@ pub fn layer_source_id(id: &str) -> String {
     format!("{id}Source")
 }
 
+/// Options of a layer parameter's Sampling Space popup: the space the chosen layer is read in.
+/// "Layer" (After Effects' behaviour) reads it in its own layer space; "Comp" reads it where it
+/// appears in the comp, after its transform, so it lines up with the effect's layer wherever
+/// either sits.
+pub const LAYER_SPACE_OPTIONS: [&str; 2] = ["Layer", "Comp"];
+
+/// Id of the hidden companion parameter holding layer parameter `id`'s Sampling Space (an index
+/// into [`LAYER_SPACE_OPTIONS`], default 0 = Layer).
+pub fn layer_space_id(id: &str) -> String {
+    format!("{id}Space")
+}
+
+/// Layer parameters without a Sampling Space, `(effect id, parameter id)`: they don't read
+/// through [`EffectCtx::layer_param`]. Time Difference and Timewarp read the layer at other
+/// times, the simulations seed themselves from its first frame, the audio effects read only
+/// its sound and Layer Control hands expressions the layer, not its pixels.
+pub const NO_SAMPLING_SPACE: &[(&str, &str)] = &[
+    ("ec.time.timedifference", "targetLayer"),
+    ("ec.time.timewarp", "matteLayer"),
+    ("ec.time.timewarp", "warpLayer"),
+    ("ec.sim.particleplayground", "layerExploder/explodeLayer"),
+    ("ec.sim.particleplayground", "layerMap/layerMapLayer"),
+    ("ec.sim.waveworld", "ground/ground"),
+    ("ec.sim.foam", "flowMap/flowMap"),
+    ("ec.generate.audiospectrum", "audioLayer"),
+    ("ec.generate.audiowaveform", "audioLayer"),
+    ("ec.control.layer", "layer"),
+];
+
+/// Whether layer parameter `ps` of `spec` gets a Sampling Space companion: it is a layer
+/// parameter, the effect doesn't declare the companion itself, and it isn't in
+/// [`NO_SAMPLING_SPACE`].
+pub(crate) fn has_sampling_space(spec: &EffectSpec, ps: &ParamSpec) -> bool {
+    let sid = layer_space_id(ps.id);
+    matches!(ps.ui, ParamUi::Layer) && !spec.params.iter().any(|q| q.id == sid) && !NO_SAMPLING_SPACE.contains(&(spec.id, ps.id))
+}
+
 /// Build the property group for a new instance of an effect.
 pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_size: [f64; 2]) -> PropGroup {
     let mut g = ids.group(spec.id, instance_name);
@@ -848,6 +896,18 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
+        }
+    }
+    // ... and a Sampling Space (Layer / Comp), in its parameter's group but after every
+    // parameter (where upgrading an older project adds it too): it doesn't move the parameters
+    // that follow, which expressions and scripts can address by number.
+    for ps in spec.params.iter().filter(|ps| has_sampling_space(spec, ps)) {
+        let (path, leaf) = ps.id.rsplit_once('/').map(|(g, l)| (Some(g), l)).unwrap_or((None, ps.id));
+        let mut space = Property::new(ids.alloc(), &layer_space_id(leaf), &format!("{} Sampling Space", ps.name), Value::Enum(0)).with_ui(ParamUi::Hidden);
+        space.hold_only = true;
+        match path.and_then(|path| nested_group(&mut g, ids, path)) {
+            Some(sub) => sub.children.push(space.into()),
+            None => g.children.push(space.into()),
         }
     }
     g
@@ -1684,6 +1744,78 @@ mod tests {
         }
         fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
             None
+        }
+    }
+
+    /// [`ModeHost`] also tags what went through [`EffectHost::to_comp_space`] (G = 1).
+    struct SpaceHost;
+    impl EffectHost for SpaceHost {
+        fn layer(&self, id: u64, me: bool) -> Option<LayerPixels> {
+            ModeHost.layer(id, me)
+        }
+        fn layer_masks(&self, id: u64) -> Option<LayerPixels> {
+            ModeHost.layer_masks(id)
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn to_comp_space(&self, _: u64, mut px: LayerPixels) -> LayerPixels {
+            px.buf.img.data.iter_mut().for_each(|p| p[1] = 1.0);
+            px
+        }
+    }
+
+    #[test]
+    fn layer_param_sampling_space_companion_goes_through_the_comp() {
+        let host = SpaceHost;
+        let read = |source: u32, space: Option<u32>| {
+            let mut params = Params::default();
+            params.values.insert("l".into(), Value::Layer(Some(3)));
+            params.values.insert(layer_source_id("l"), Value::Enum(source));
+            if let Some(s) = space {
+                params.values.insert(layer_space_id("l"), Value::Enum(s));
+            }
+            let env = EffectEnv { host: Some(&host), ..Default::default() };
+            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [1.0, 1.0], seed: 0, adjustment: false, env };
+            let px = ctx.layer_param("l", true).unwrap().buf.img.get(0, 0);
+            (px[0], px[1])
+        };
+        // Layer (and no companion, as in an effect that declares none): read as it is.
+        assert_eq!(read(2, None), (1.0, 0.0));
+        assert_eq!(read(2, Some(0)), (1.0, 0.0));
+        // Comp, with each source choice.
+        assert_eq!(read(0, Some(1)), (0.0, 1.0));
+        assert_eq!(read(1, Some(1)), (0.5, 1.0));
+        assert_eq!(read(2, Some(1)), (1.0, 1.0));
+    }
+
+    #[test]
+    fn layer_params_get_a_sampling_space_unless_they_dont_read_pixels() {
+        let mut next = 0;
+        let g = instantiate(find("ec.channel.blend").unwrap(), &mut Ids(&mut next), "Blend", [10.0, 10.0]);
+        assert_eq!(g.get("blendWithLayerSpace").map(|p| (p.value.clone(), p.ui.clone())), Some((Value::Enum(0), ParamUi::Hidden)));
+        // A grouped layer parameter's companion sits in its group.
+        let g = instantiate(find("ec.blur.cameralens").unwrap(), &mut Ids(&mut next), "Camera Lens Blur", [10.0, 10.0]);
+        assert!(g.sub("blurMap").and_then(|m| m.get("blurMapLayerSpace")).is_some());
+        // Companions come after every other property of their group, so they don't renumber the
+        // parameters that follow (expressions and scripts address them by position).
+        fn after_the_rest(g: &PropGroup) -> bool {
+            use effectcraft_project::Node;
+            let space = |n: &Node| matches!(n, Node::Prop(p) if p.ui == ParamUi::Hidden && p.match_id.ends_with("Space"));
+            g.children.iter().skip_while(|n| !space(n)).all(space) && g.children.iter().all(|n| n.as_group().is_none_or(after_the_rest))
+        }
+        for spec in registry() {
+            let g = instantiate(spec, &mut Ids(&mut next), spec.name, [10.0, 10.0]);
+            assert!(after_the_rest(&g), "{}: a Sampling Space sits between parameters", spec.id);
+        }
+        // Every entry of the exclusion list names a layer parameter, and gets no companion.
+        for (effect, id) in NO_SAMPLING_SPACE {
+            let spec = find(effect).unwrap_or_else(|| panic!("{effect} is not an effect"));
+            assert!(spec.params.iter().any(|p| p.id == *id && matches!(p.ui, ParamUi::Layer)), "{effect} has no layer parameter {id}");
+            let g = instantiate(spec, &mut Ids(&mut next), spec.name, [10.0, 10.0]);
+            let (path, leaf) = id.rsplit_once('/').map_or((None, *id), |(p, l)| (Some(p), l));
+            let group = path.map_or(Some(&g), |p| p.split('/').try_fold(&g, |g, m| g.sub(m)));
+            assert!(group.is_some_and(|g| g.get(&layer_space_id(leaf)).is_none()), "{effect} {id} has a Sampling Space");
         }
     }
 

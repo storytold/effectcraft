@@ -138,9 +138,11 @@ one (shape, text) a comp-sized rectangle centred on the layer's origin that thei
 surrounds. A shape layer's default effect point (the bounds' centre) is therefore its content's
 origin, as in After Effects. The renderer moves the layer buffer into effect space for the whole
 stack (`Buf::rebase`, on the CPU and the GPU alike) and hands effects everything else in it too:
-masks, other layers' pixels for layer parameters (each in its own effect space), the layer's own
-frames at other times (`Renderer::layer_input`, also what Puppet, Roto Brush and the Layer panel
-read) and the comp camera. Effect point handles, Puppet pins and the Layer panel map effect space
+masks, other layers' pixels for layer parameters (each in its own effect space; with Sampling
+Space set to Comp, resampled from where the layer appears in the comp into this one's effect
+space, `EffectHost::to_comp_space`), the layer's own frames at other times
+(`Renderer::layer_input`, also what Puppet, Roto Brush and the Layer panel read) and the comp
+camera. Effect point handles, Puppet pins and the Layer panel map effect space
 to the comp with `EvalCtx::effect_to_comp`. Adjustment layers run their effects on the comp below
 as it is.
 

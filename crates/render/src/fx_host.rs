@@ -1,4 +1,4 @@
-use super::{Arc, Buf, EffectHost, EvalCtx, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::{Arc, Buf, EffectHost, EvalCtx, Image, ItemKind, Layer, LayerPixels, LayerSource, Mat3, ParallelIterator, Params, Renderer, Tick, three_d, vec2};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -93,6 +93,45 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let sub = self.r.nested();
         let buf = (*sub.layer_input(self.ctx, other, 0)?).clone();
         Some(self.pixels(other, buf, false))
+    }
+
+    fn to_comp_space(&self, id: u64, px: LayerPixels) -> LayerPixels {
+        let Some(other) = self.ctx.layer(effectcraft_project::LayerId(id)) else { return px };
+        // Where each effect space sits in the comp. An adjustment layer's effects run on the
+        // comp below, which is already in comp space.
+        let (own_to_comp, size) = if self.layer.switches.adjustment {
+            (Mat3::default(), [self.ctx.comp.width as f64, self.ctx.comp.height as f64])
+        } else {
+            let (size, _) = self.ctx.effect_bounds(self.layer);
+            (self.ctx.layer_to_comp(self.layer).0 * Mat3::translate(vec2(self.origin[0], self.origin[1])), size)
+        };
+        // A 3D model or primitive is read as the comp's pixels already (`Renderer::solo_3d`).
+        let other_to_comp = if other.source.is_model() { Mat3::default() } else { self.ctx.effect_to_comp(other) };
+        // The result is the size of the running layer's own buffer, which the renderer already
+        // holds (a layer under a pixel at this scale still gets one): past the largest side a
+        // comp can have, keep the layer-space read.
+        let scale = px.buf.scale;
+        let (w, h) = (size[0] * scale, size[1] * scale);
+        let max = f64::from(effectcraft_raster::MAX_PADDED_SIDE);
+        if !(scale.is_finite() && scale > 0.0 && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 || w > max || h > max {
+            return px;
+        }
+        let mut img = Image::new(w.ceil() as u32, h.ceil() as u32);
+        // A layer with no extent in the comp (a zero scale) covers none of it: transparent.
+        let Some(to_other) = other_to_comp.inverse().map(|inv| inv * own_to_comp) else {
+            return LayerPixels { buf: Buf { img, offset: [0.0; 2], scale }, size };
+        };
+        let src = &px.buf;
+        img.rows_mut().for_each(|(y, row)| {
+            for (x, out) in row.iter_mut().enumerate() {
+                let q = to_other.apply(vec2((x as f64 + 0.5) / scale, (y as f64 + 0.5) / scale));
+                let (sx, sy) = (q.x * src.scale + src.offset[0], q.y * src.scale + src.offset[1]);
+                if sx.is_finite() && sy.is_finite() {
+                    *out = src.img.sample_bilinear(sx, sy);
+                }
+            }
+        });
+        LayerPixels { buf: Buf { img, offset: [0.0; 2], scale }, size }
     }
 
     fn audio(&self, id: u64, start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
