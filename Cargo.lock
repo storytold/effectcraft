@@ -1855,6 +1855,7 @@ dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
  "rayon",
+ "tempfile",
 ]
 
 [[package]]
