@@ -32,10 +32,12 @@ fn with_head_word(word: u32) -> Vec<u8> {
     })
 }
 
+/// The report of an analysis of `bytes` (no footage on disk).
 fn report(bytes: &[u8]) -> ImportReport {
     analyze(bytes, &|_| false).unwrap()
 }
 
+/// The limitation lines about an untested version.
 fn version_limitations(r: &ImportReport) -> Vec<&String> {
     r.limitations.iter().filter(|l| l.contains("is not tested")).collect()
 }
@@ -51,6 +53,7 @@ fn the_report_names_the_version_the_file_is_written_for_and_saved_by() {
     assert_eq!(json["aeVersion"]["tested"], true);
 }
 
+/// A copy saved for 25.x or 24.x reports that version and the 2026 writer, and counts as tested.
 #[test]
 fn a_copy_saved_for_an_older_version_names_both() {
     // The words of the copies After Effects 2026 saved as 25.x and 24.x; `svap` stays 2026's.
@@ -81,6 +84,7 @@ fn an_untested_version_is_imported_and_said_to_be_untested() {
     assert!(!r.comps.is_empty());
 }
 
+/// A missing, short or empty version word reads as `unknown` and the file still imports.
 #[test]
 fn a_file_without_a_version_reads_as_unknown_and_imports() {
     // A zero word (After Effects itself refuses it, "[0.0x0]") and all ones.
@@ -141,6 +145,7 @@ fn import_file(name: &str) -> Option<(serde_json::Value, ImportReport)> {
     Some((serde_json::to_value(&project).unwrap(), r.report))
 }
 
+/// Per corpus family, the 25.x and 24.x copies import to the same project and report as the 2026 save.
 #[test]
 #[ignore = "needs the version fixtures of the corpus (<family>-26/-25x/-24x.aep)"]
 fn copies_saved_as_25x_and_24x_import_like_the_2026_file() {
@@ -158,6 +163,7 @@ fn copies_saved_as_25x_and_24x_import_like_the_2026_file() {
     }
 }
 
+/// Per corpus family, `head` holds the version each copy is written for and `svap` the writer.
 #[test]
 #[ignore = "needs the version fixtures of the corpus (<family>-26/-25x/-24x.aep)"]
 fn the_container_of_a_copy_states_its_version_in_head_and_the_writer_in_svap() {
