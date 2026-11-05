@@ -268,9 +268,9 @@ build real projects through these interfaces; they are worked examples of everyt
   in the project; the nested comp's frame no longer clips what its layers draw outside it. It
   refuses, changing nothing, when the pre-comp layer itself is locked, has a parent or matte,
   effects, masks, a non-default Scale / Rotation / Opacity, an animated transform, time remap or
-  stretch, a blending mode, Video or Audio off, the 3D / collapse / adjustment switch, or is used
-  by another layer (parent, matte or a layer property); or when the nested comp holds a camera,
-  light, adjustment, 3D or collapsing layer or a layer with a blending mode.
+  stretch, a blending mode, Video or Audio off, Solo or Guide on, the 3D / collapse / adjustment
+  switch, or is used by another layer (parent, matte or a layer property); or when the nested comp
+  holds a camera, light, adjustment, 3D or collapsing layer or a layer with a blending mode.
 * **Solid Settings**: `layer.settings {layer, name?, color?, width?, height?, pixelAspect?,
   affectAll?}` edits a solid or adjustment layer's solid (and renames the layer and the solid).
   A solid shared by several layers (duplicates share theirs) changes for all of them unless

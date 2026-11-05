@@ -2176,6 +2176,11 @@ fn unprecompose_refuses_what_the_precomp_layer_itself_adds() {
     s.execute("prop.set", json!({"layer": pre, "path": "transform/rotation", "value": 10})).unwrap();
     refused(&mut s, "Rotation");
     s.execute("prop.set", json!({"layer": pre, "path": "transform/rotation", "value": 0})).unwrap();
+    for switch in ["solo", "guide"] {
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": switch, "value": true})).unwrap();
+        refused(&mut s, "Solo or Guide");
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": switch, "value": false})).unwrap();
+    }
     s.execute("layer.setParent", json!({"layers": [pre], "parent": c})).unwrap();
     refused(&mut s, "has a parent");
     // A layer that is not a pre-comp, and a selection of several, are refused too.

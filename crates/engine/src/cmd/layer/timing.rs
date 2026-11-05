@@ -333,6 +333,11 @@ fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested
     if !layer.switches.video || !layer.switches.audio {
         why.push("the layer's Video or Audio switch is off".to_string());
     }
+    if layer.switches.solo || layer.switches.guide {
+        // Solo hides the comp's other layers and a guide layer is left out of renders; the
+        // expanded copies would carry neither, so the picture would change.
+        why.push("the layer's Solo or Guide switch is on".to_string());
+    }
     if comp.layers.iter().any(|o| o.id != layer.id && refers_to(&o.props, layer.id)) {
         why.push("a property of another layer refers to it".to_string());
     }

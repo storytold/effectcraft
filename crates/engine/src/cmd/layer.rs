@@ -182,7 +182,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Un-precompose",
             ["Layer"],
             None,
-            "{layer?} → {layers}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over); refuses, changing nothing, when the pre-comp layer itself is locked, has a parent, matte, effects, masks, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, is 3D/collapsing/adjustment, is referenced by another layer, or the nested comp has cameras, lights, adjustment, 3D, collapsing or blend-mode layers",
+            "{layer?} → {layers}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over); refuses, changing nothing, when the pre-comp layer itself is locked, has a parent, matte, effects, masks, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, Solo/Guide on, is 3D/collapsing/adjustment, is referenced by another layer, or the nested comp has cameras, lights, adjustment, 3D, collapsing or blend-mode layers",
             has_layers,
             unprecompose
         ),
