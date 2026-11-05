@@ -187,10 +187,12 @@ fn per_worker_frames(lighting: bool) -> u64 {
 /// coarse-to-fine copies, the warped previous frame, and the sink's prepared copy.
 const SYNTH_FRAMES: u64 = 6;
 
-/// Workers a range of `frames` can keep busy (rayon never runs more tasks than frames).
+/// Workers a range of `frames` can keep busy (rayon never runs more tasks than frames). The
+/// scratch estimate must follow the pool that actually runs the parallel stages, which
+/// `RAYON_NUM_THREADS` can size differently from the hardware count.
 fn fill_workers(frames: usize) -> u64 {
-    let hw = std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(4);
-    hw.min(frames.max(1) as u64)
+    let pool = rayon::current_num_threads() as u64;
+    pool.min(frames.max(1) as u64)
 }
 
 /// Native builds spill the input, the membrane-filled neighbours and the propagated copies, and
