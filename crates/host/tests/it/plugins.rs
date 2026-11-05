@@ -125,7 +125,7 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
     // A load failure rolls the copy back: nothing left behind to fail every start.
     let bad = tempfile::TempDir::new().unwrap();
     let bad = bad.path();
-    std::fs::write(bad.join("b-garbage.wasm"), b"\0asm\x01\0\0\0garbage".to_vec()).unwrap();
+    std::fs::write(bad.join("b-garbage.wasm"), b"\0asm\x01\0\0\0garbage").unwrap();
     let r2 = s.execute("effect.plugins.install", json!({"folder": bad.to_string_lossy()})).unwrap();
     assert_eq!(r2["errors"].as_array().unwrap().len(), 1, "{r2}");
     assert!(r2["installed"].as_array().unwrap().is_empty(), "{r2}");
@@ -284,7 +284,7 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
         ("c-v2.wasm", wat_plugin("org.test.host.v2", 2, "i32.const 0").into_bytes()),
         ("d-empty.wasm", vec![]),
         ("e-trap.wasm", wat_plugin("org.test.host.trap", 1, "unreachable").into_bytes()),
-        ("notes.txt", b"not a plug-in"),
+        ("notes.txt", b"not a plug-in".to_vec()),
     ];
     for (name, bytes) in &files {
         std::fs::write(dir.join(name), bytes).unwrap();
