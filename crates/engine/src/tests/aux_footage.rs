@@ -120,7 +120,7 @@ fn opening_a_project_gives_the_set_before_the_first_frame() {
     let item = import(&mut s, "/renders/crypto.exr");
     let l = add_layer(&mut s, &item);
     s.execute_checked("effect.apply", json!({"effect": "Cryptomatte", "layers": [l]})).unwrap();
-    let project: Project = (*s.project).clone();
+    let project: Project = (**s.project).clone();
     let comp = s.state.active_comp.unwrap();
 
     let rec = Arc::new(Recorder::default());
