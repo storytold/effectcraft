@@ -185,6 +185,8 @@ fn composites_and_colour() {
     effect_case("ec.utility.hdrcompression", &[]);
     effect_case("ec.utility.hdrcompression", &[("amount", n(40.0))]);
     effect_case("ec.utility.hdrcompression", &[("amount", n(90.0))]);
+    // A NaN Amount keeps the layer (the CPU returns it unchanged).
+    effect_case("ec.utility.hdrcompression", &[("amount", n(f64::NAN))]);
     effect_case("ec.utility.growbounds", &[("pixels", n(9.0))]);
     effect_case("ec.utility.ccoverbrights", &[]);
     for ch in 1..=5 {

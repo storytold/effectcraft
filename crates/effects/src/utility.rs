@@ -60,6 +60,7 @@ const HDR_LUMA: [f32; 3] = [0.30, 0.59, 0.11];
 /// Exponent of the domain the Amount blend happens in (out^0.4 is mixed linearly).
 const HDR_BLEND_GAMMA: f32 = 0.4;
 
+/// `v^e` with the sign of `v` kept (negative input stays negative, as on the GPU).
 #[inline]
 fn hdr_spow(v: f32, e: f32) -> f32 {
     v.signum() * v.abs().powf(e)
@@ -82,6 +83,8 @@ fn hdr_compress_pixel(c: [f32; 3], t: f32) -> [f32; 3] {
     })
 }
 
+/// HDR Highlight Compression: every straight-colour pixel through [`hdr_compress_pixel`] at
+/// Amount / 100; Amount 0 or NaN returns the layer unchanged.
 fn hdr_compression(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let t = (ctx.params.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
     if t <= 0.0 || !t.is_finite() {
