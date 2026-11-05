@@ -902,7 +902,12 @@ pub fn popup_list<R>(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, anchor: Rect, r
     if let Some(target) = crawl {
         ui.ctx().data_mut(|d| d.insert_temp(pending, target));
     }
-    let outside = pressed_outside(ui.ctx(), &area.response) && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| anchor.contains(p));
+    // The press that opens the list lands on the trigger, outside the list itself, and by the end
+    // of the frame the pointer may have left the trigger too (a quick flick): it must not read as
+    // a press outside the list and close it in the pass it opened (#2686). Only that opening
+    // press is exempt — later presses out there and the release still cancel the browse.
+    let opening_press = held && pointer_steps(ui).into_iter().any(|(step, p)| step == Step::Press && anchor.contains(p));
+    let outside = !opening_press && pressed_outside(ui.ctx(), &area.response) && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| anchor.contains(p));
     // A browse that comes up outside the list and outside its trigger cancels it without choosing,
     // as a native menu does: the button was dragged off the list (#2686).
     let cancelled = browse_release_pos(ui).is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p));
@@ -1080,20 +1085,27 @@ fn browse_owner_id() -> egui::Id {
 /// highlight as the pointer moves over them ([`browse_hover`]) and the one the button comes up
 /// over is chosen ([`browse_pick`]). A press on it while the list is open closes the list, so it
 /// is its own toggle; keyboard and accessibility activation (a `clicked` without the primary
-/// button) toggles it too.
+/// button) toggles it too. The press is taken from the press event's own position, so a press
+/// that leaves the trigger within the same frame still opens the list.
 ///
 /// The trigger's rect is remembered for the list, so the press that opens it is not mistaken for
 /// a press outside it ([`popup_list`]) and closes it in the same pass, and for [`browse_pick`],
 /// which must not choose when the button comes up back over the trigger.
 pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     let open = popup_is_open(ui, id);
-    // The trigger's rect is the list's anchor, so a press on it is never a press outside the list.
-    // egui withholds hover from a control a clamped list covers, so the press is tested against the
-    // rect as well: the second press must still toggle such a list shut (#2686). A disabled trigger
-    // takes neither: egui does not let a disabled control take input, so a list left open over one
-    // waits for a press elsewhere (#2686).
-    let over_trigger = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| resp.rect.contains(p));
-    let pressed = resp.enabled() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (resp.hovered() || (open && over_trigger));
+    // The press is taken where it landed, not where the pointer ended: egui hit-tests the frame at
+    // the last pointer position, so a press that starts on the trigger and moves off it within the
+    // same frame (a quick flick) would report no hover and the list would never open (#2686). The
+    // trigger's rect is the list's anchor, so a press in it is never a press outside the list; a
+    // clamped list covers its own trigger and takes the hover from it, so an open list accepts a
+    // press anywhere in the trigger's visible rect, while a closed one requires the press to have
+    // landed on the visible trigger with nothing over it. A disabled trigger takes neither: egui
+    // does not let a disabled control take input, so a list left open over one waits for a press
+    // elsewhere (#2686).
+    let press = pointer_steps(ui).into_iter().find(|(step, _)| *step == Step::Press).map(|(_, p)| p);
+    let landed = press.filter(|p| resp.interact_rect.contains(*p));
+    let on_trigger = landed.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(resp.layer_id));
+    let pressed = resp.enabled() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (on_trigger || (open && landed.is_some()));
     ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
     if pressed {
         ui.data_mut(|d| {
@@ -1923,5 +1935,36 @@ mod tests {
         pointer_button(&mut h, p, false);
         h.run_steps(2);
         assert_eq!(h.state().current, None, "the release over the clipped row chooses nothing");
+    }
+
+    /// The press can start on the trigger and leave it within the same frame (a quick flick): egui
+    /// hit-tests the frame at the position the pointer ended at, so the hover and the current
+    /// interact position are both outside the trigger. Taken from its own event the press still
+    /// opens the list — and must not be read as a press outside the list, which would close it in
+    /// the pass it opened (#2686).
+    #[test]
+    fn a_press_that_leaves_the_trigger_in_the_same_frame_still_opens_the_list() {
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        let away = pos2(300.0, 300.0);
+        // All three in one frame: `Harness::event` queues, and `step` runs a frame per queued
+        // event, which would give the press a frame of its own with the pointer still on the
+        // trigger.
+        h.input_mut().events.push(egui::Event::PointerMoved(trigger));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: trigger,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.input_mut().events.push(egui::Event::PointerMoved(away));
+        h.step();
+        assert!(h.state().open, "the press that starts on the trigger opens the list although the pointer has left it by the end of the frame");
+        h.run();
+        assert!(h.state().open, "held outside the list it stays up");
+        pointer_button(&mut h, away, false);
+        assert!(!h.state().open, "the release outside cancels it");
+        assert_eq!(h.state().current, None, "without choosing anything");
     }
 }
