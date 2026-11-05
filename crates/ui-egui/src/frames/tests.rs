@@ -2179,3 +2179,48 @@ fn an_edit_read_by_a_precomp_expression_reaches_the_precomp() {
         assert_eq!(render(&p0, i), render(&p1, i), "kept frame {i} draws other pixels now");
     }
 }
+
+/// An edit inside a precomp whose layer runs Echo (it reads the precomp at earlier times)
+/// re-renders the precomp layer's whole span, not only where the precomp shows the edit. Every
+/// frame kept renders as before.
+#[test]
+fn an_edit_in_a_precomp_under_a_time_effect_reaches_its_whole_layer() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::LayerId;
+    use effectcraft_engine::render::render_frame;
+    use serde_json::json;
+    let mut s = Session::default();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let inner = ItemId(id(s.execute("comp.new", json!({"name": "Inner", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"));
+    let solid = |s: &mut Session, color: &str| {
+        LayerId(id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": color, "width": 6, "height": 6})).unwrap(), "layer"))
+    };
+    let (a, b) = (solid(&mut s, "#ff0000"), solid(&mut s, "#00ff00"));
+    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"));
+    let pre = id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer");
+    // Echo reaching 9 frames back, three times.
+    s.execute("effect.apply", json!({"comp": outer.0, "layers": [pre], "effect": "Echo"})).unwrap();
+    s.execute("prop.set", json!({"comp": outer.0, "layer": pre, "path": "effects/#1/echoTime", "value": -0.3})).unwrap();
+    s.execute("prop.set", json!({"comp": outer.0, "layer": pre, "path": "effects/#1/numberOfEchoes", "value": 3.0})).unwrap();
+    let fr = s.project.comp(outer).unwrap().frame_rate;
+    let t = |f: i64| fr.tick_of(f);
+    let mut p0 = (*s.project).clone();
+    for (l, i, o) in [(a, 0, 30), (b, 30, 60)] {
+        let l = p0.comp_mut(inner).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (t(i), t(i), t(o));
+    }
+    let p0 = Arc::new(p0);
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: outer.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, outer);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let mut p1 = p0.clone();
+    Arc::make_mut(&mut p1).comp_mut(inner).unwrap().layer_mut(b).unwrap().out_point = t(45);
+    let same = |i: i64| render_frame(&p0, outer, t(i), 1.0).data == render_frame(&p1, outer, t(i), 1.0).data;
+    assert!(!same(65), "Echo at frame 65 shows frame 56, which the trim removed");
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, outer), 0));
+    assert!(!kept.contains(&65), "{kept:?}");
+    for i in kept {
+        assert!(same(i), "kept frame {i} renders differently after the edit");
+    }
+}

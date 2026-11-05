@@ -192,6 +192,35 @@ pub fn is_audio_effect(id: &str) -> bool {
     id.starts_with("ec.audio.")
 }
 
+/// Does effect `id` read its own layer at other times (`EffectHost::self_at`, `layer_at` on
+/// itself): the time effects (Echo, Posterize Time, Timewarp…), simulations, temporal smoothing
+/// and analysis (Remove Grain, Auto Levels, Color Stabilizer's reference frame, Warp Stabilizer,
+/// Roto Brush…) and Clone strokes with a time offset? On a precomp layer, a change at one nested
+/// time then reaches frames of the layer far from where it shows.
+// ponytail: hand-kept list of the effects that call `self_at`; a new one must be added here.
+pub fn reads_other_frames(id: &str) -> bool {
+    id.starts_with("ec.time.") || id.starts_with("ec.sim.") || READS_OTHER_FRAMES.contains(&id)
+}
+
+/// The effects outside `ec.time.` and `ec.sim.` that read their own layer at other times.
+const READS_OTHER_FRAMES: &[&str] = &[
+    "ec.noise.removegrain",
+    "ec.color.autolevels",
+    "ec.color.autocontrast",
+    "ec.color.autocolor",
+    "ec.color.shadowhighlight",
+    "ec.color.colorstabilizer",
+    "ec.matte.refinesoft",
+    "ec.matte.refinehard",
+    "ec.matte.rotobrush",
+    "ec.matte.objectmatte",
+    "ec.blur.camerashakedeblur",
+    "ec.distort.rollingshutterrepair",
+    "ec.distort.warpstabilizer",
+    "ec.key.ccsimplewireremoval",
+    "ec.paint.paint",
+];
+
 impl Switches {
     /// These switches with Audio, Lock and Shy at their defaults.
     pub fn pixels(&self) -> Switches {
@@ -324,7 +353,7 @@ impl Layer {
         let reads_time = |l: &Layer| {
             l.props.get("timeRemap").is_some()
                 || l.props.group("effects").is_some_and(|e| {
-                    e.children.iter().any(|n| matches!(n, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if effect.starts_with("ec.time."))))
+                    e.children.iter().any(|n| matches!(n, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if reads_other_frames(effect))))
                 })
         };
         let has_expr = |l: &Layer| {

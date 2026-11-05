@@ -2,8 +2,8 @@
 
 use super::comp::Comp;
 use super::item::{Heard, ItemId};
-use super::layer::{Layer, LayerSource};
-use super::{Arc, Project, Tick};
+use super::layer::{Layer, LayerSource, reads_other_frames};
+use super::{Arc, GroupKind, Node, Project, Tick};
 
 /// Precomps nested deeper than this count as changed wherever they show.
 const MAX_DEPTH: usize = 32;
@@ -79,14 +79,16 @@ impl Project {
 }
 
 /// The comp-time spans of `outer` where its precomp layer `l` shows the spans `inner` of its comp
-/// `n` (`None`: all of it), widened by `outer`'s shutter. A time remap or Responsive Design
-/// timing can show any nested time anywhere: then the layer's whole span.
+/// `n` (`None`: all of it), widened by `outer`'s shutter. A time remap, Responsive Design
+/// timing or an effect reading the layer at other times (Echo, Posterize Time…: [`reads_other_frames`],
+/// or an effect picking the layer itself) can show any nested time anywhere: then the layer's
+/// whole span.
 fn shown(l: &Layer, outer: &Comp, n: &Comp, inner: Option<Vec<(Tick, Tick)>>) -> Vec<(Tick, Tick)> {
     let (before, after) = outer.shutter_margin();
     let whole = vec![(l.in_point - before, l.out_point + after)];
     let responsive = (l.stretch - 100.0).abs() > 1e-9 && n.markers.iter().any(|m| m.protected && m.duration > Tick::ZERO);
     let Some(inner) = inner else { return whole };
-    if l.props.get("timeRemap").is_some() || responsive {
+    if l.props.get("timeRemap").is_some() || responsive || reads_itself_elsewhen(l) {
         return whole;
     }
     // (a nested frame either side: Preserve Frame Rate holds nested frames, Frame Blending mixes
@@ -100,4 +102,11 @@ fn shown(l: &Layer, outer: &Comp, n: &Comp, inner: Option<Vec<(Tick, Tick)>>) ->
             (lo <= hi).then(|| (lo - before, hi + after))
         })
         .collect()
+}
+
+/// Some effect of `l` reads the layer at other times ([`reads_other_frames`]) or picks the layer
+/// itself (a layer parameter set to its own layer).
+fn reads_itself_elsewhen(l: &Layer) -> bool {
+    let time_fx = |c: &Node| matches!(c, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if reads_other_frames(effect)));
+    l.picked_layers().contains(&l.id) || l.props.group("effects").is_some_and(|e| e.children.iter().any(time_fx))
 }
