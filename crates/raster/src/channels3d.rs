@@ -141,10 +141,7 @@ impl AuxChannels {
     /// `Crypto_A` and `crypto_a` are different layers), the component letter either case.
     fn rank(&self, layer: &str, k: usize, comp: char) -> Option<&[f32]> {
         let tail = format!("{k:02}.{comp}");
-        self.channels
-            .iter()
-            .find(|(n, _)| n.strip_prefix(layer).is_some_and(|rest| rest.eq_ignore_ascii_case(&tail)))
-            .map(|(_, v)| v.as_slice())
+        self.channels.iter().find(|(n, _)| n.strip_prefix(layer).is_some_and(|rest| rest.eq_ignore_ascii_case(&tail))).map(|(_, v)| v.as_slice())
     }
 
     /// Rank pairs (id, coverage) of Cryptomatte layer `layer` at aux pixel index `i`. For a

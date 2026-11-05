@@ -337,7 +337,10 @@ fn cryptomatte_layer_name_picks_the_named_layer() {
 fn cryptomatte_layer_name_is_case_sensitive() {
     let base = scene();
     let mut a = (*base.0).clone();
-    let (r, g) = (a.channels.iter().find(|(n, _)| n == "CryptoObject00.R").unwrap().1.clone(), a.channels.iter().find(|(n, _)| n == "CryptoObject00.G").unwrap().1.clone());
+    let (r, g) = (
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.R").unwrap().1.clone(),
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.G").unwrap().1.clone(),
+    );
     let w = 20;
     let flipped: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
     // `Crypto_A` first, with left/right as in the base scene; `crypto_a` has them swapped.
