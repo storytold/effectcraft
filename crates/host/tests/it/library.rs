@@ -294,10 +294,8 @@ fn an_update_that_would_not_load_keeps_the_loaded_version() {
     let mut s = session(&dir);
     s.execute("library.refresh", json!({"catalog": catalog, "wait": true})).unwrap();
     s.execute("library.install", json!({"id": "org.test.badupdate", "wait": true})).unwrap();
-    let catalog = write_catalog(
-        &dir,
-        json!([{"id": "org.test.badupdate", "name": "Bad Update", "versions": [release("1.0.0", &v1, fx), release("2.0.0", &v2, fx)]}]),
-    );
+    let catalog =
+        write_catalog(&dir, json!([{"id": "org.test.badupdate", "name": "Bad Update", "versions": [release("1.0.0", &v1, fx), release("2.0.0", &v2, fx)]}]));
     s.execute("library.refresh", json!({"catalog": catalog, "wait": true})).unwrap();
     // Version 1 is loaded in this session, so version 2 would only load at the next start.
     let e = s.execute("library.update", json!({"id": "org.test.badupdate", "wait": true})).unwrap_err().to_string();
