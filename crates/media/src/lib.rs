@@ -20,6 +20,7 @@ mod convert;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
+pub mod foreign;
 mod gif_anim;
 mod layered;
 pub use layered::vector_doc;
