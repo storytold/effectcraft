@@ -112,6 +112,11 @@ fn extractor_channel_info_layout() {
     assert!(!c.is_default());
     assert_eq!(c.channels[0], (1, "Z".to_string()));
     assert_eq!(ExtractorChannels::parse(&[0u8; 10]), None);
+    // The kind is byte 0 of a record: the definition default of `extractor-00-defaults` has
+    // `02 00 00 32` on Alpha, still the input's own channel.
+    let c = ExtractorChannels::parse(&channels([(1, "R"), (1, "G"), (1, "B"), (0x3200_0002, "(copy)")])).expect("parses");
+    assert!(c.is_default());
+    assert_eq!(c.sources(), Ok(["R", "G", "B", "A"].map(String::from)));
 }
 
 #[test]
@@ -129,12 +134,32 @@ fn extractor_points_unmult_and_default_channels() {
     }
 }
 
+/// `extractor-07-preset-channel-z` (a preset of our own): `Z` into Red, Green and Blue, Alpha
+/// `(copy)`. EffectCraft's EXtractoR reads the footage's channel by the same name.
 #[test]
-fn extractor_channels_other_than_the_default_are_reported() {
+fn extractor_channels_are_imported_by_name() {
     let (g, r) = run(&extractor(vec![], channels([(1, "Z"), (1, "Z"), (1, "Z"), (2, "(copy)")])), "ec.3d.extractor");
-    let found = losses(&r, LossCategory::Effects, "EXtractoR");
-    assert!(found.len() == 1 && found[0].contains("the channels Z, Z, Z, (copy) are not imported"), "{found:?}");
-    assert_eq!(v(&g.expect("imported"), "red"), Value::Str("R".into()));
+    assert_eq!(losses(&r, LossCategory::Effects, "EXtractoR"), Vec::<String>::new());
+    let g = g.expect("imported");
+    for (id, want) in [("red", "Z"), ("green", "Z"), ("blue", "Z"), ("alpha", "A")] {
+        assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
+    }
+    // `(copy)` on another channel is that channel of the input.
+    let (g, _) = run(&extractor(vec![], channels([(2, "(copy)"), (1, "CryptoObject00.R"), (2, "(copy)"), (1, "Z")])), "ec.3d.extractor");
+    let g = g.expect("imported");
+    for (id, want) in [("red", "R"), ("green", "CryptoObject00.R"), ("blue", "B"), ("alpha", "Z")] {
+        assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
+    }
+}
+
+#[test]
+fn extractor_channels_of_an_unknown_kind_are_reported() {
+    for recs in [[(1, "Z"), (3, "Z"), (1, "Z"), (2, "(copy)")], [(1, "Z"), (1, ""), (1, "Z"), (2, "(copy)")]] {
+        let (g, r) = run(&extractor(vec![], channels(recs)), "ec.3d.extractor");
+        let found = losses(&r, LossCategory::Effects, "EXtractoR");
+        assert!(found.len() == 1 && found[0].contains("are not imported (record 2 is of an unknown kind or names no channel)"), "{recs:?}: {found:?}");
+        assert_eq!(v(&g.expect("imported"), "red"), Value::Str("R".into()), "{recs:?}");
+    }
 }
 
 /// IDentifier's Channel Info: the channel type's name at 19 among bytes that are not read.
@@ -164,16 +189,31 @@ fn identifier(values: Vec<(usize, f64)>, data: Vec<u8>) -> Fx {
 #[test]
 fn identifier_display_id_and_channel_type() {
     assert_eq!(identifier_channel_type(&id_info("Object ID")), Some("Object ID"));
-    // `identifier-01-set-all` (ID 10) and `identifier-05-pop2-3` (Alpha Matte).
+    // `identifier-01-set-all` (ID 10) and `identifier-05-pop2-3` (Alpha Matte): no channel chosen
+    // (After Effects found none or none was picked), so After Effects leaves the layer unchanged.
     let (g, r) = run(&identifier(vec![(2, 3.0), (3, 10.0)], id_info("Object ID")), "ec.3d.identifier");
-    // Which channel After Effects reads is not decoded (it left the sampled EXR unchanged): reported.
     let found = losses(&r, LossCategory::Effects, "IDentifier");
-    assert!(found.len() == 1 && found[0].contains("is not decoded"), "{found:?}");
+    assert!(found.len() == 1 && found[0].contains("no ID channel is chosen"), "{found:?}");
     let g = g.expect("imported");
     assert_eq!((v(&g, "display"), v(&g, "channelType")), (Value::Enum(2), Value::Enum(0)));
     near(&g, "id", 10.0);
-    // A channel type that is not sampled is reported.
-    let (_, r) = run(&identifier(vec![], id_info("Material ID")), "ec.3d.identifier");
-    let found = losses(&r, LossCategory::Effects, "IDentifier");
-    assert!(found.len() == 1 && found[0].contains("\"Material ID\""), "{found:?}");
+}
+
+/// `identifier-09-preset-channel-objectid-id2` (1310, a preset of our own): the UINT channel
+/// `objectId` chosen and ID 2. EffectCraft's IDentifier reads that channel itself (`ObjectID`
+/// without regard to case), so nothing is lost; another name is reported.
+#[test]
+fn identifier_chosen_channels_by_name() {
+    for (name, kind) in [("objectId", 0), ("ObjectID", 0), ("materialid", 1)] {
+        let (g, r) = run(&identifier(vec![(3, 2.0)], id_info(name)), "ec.3d.identifier");
+        assert_eq!(losses(&r, LossCategory::Effects, "IDentifier"), Vec::<String>::new(), "{name}");
+        let g = g.expect("imported");
+        assert_eq!(v(&g, "channelType"), Value::Enum(kind), "{name}");
+        near(&g, "id", 2.0);
+    }
+    for name in ["IndexOB.X", "ID", "Material ID"] {
+        let (_, r) = run(&identifier(vec![], id_info(name)), "ec.3d.identifier");
+        let found = losses(&r, LossCategory::Effects, "IDentifier");
+        assert!(found.len() == 1 && found[0].contains(&format!("the ID channel '{name}' (Channel Info) is not imported")), "{name}: {found:?}");
+    }
 }

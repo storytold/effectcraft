@@ -542,12 +542,24 @@ data layouts, read from default instances only):**
 | `EXtractoR` (2.6.6) | 1 Channel Info (`EXtractoR-0013`): arbitrary data, 688 bytes, below; 2-6 the Process group: 3 Black Point and 4 White Point float sliders, valid ±3.4028235e38 (the float32 range; slider ±1 000), default 0 / 1; 5 UnMult: checkbox (empty `pard` name, the label in `pdnm`), default off |
 | `IDentifier` (2.6.6) | 1 Channel Info (`IDentifier-0005`): arbitrary data, 148 bytes, below; 2 Display: popup (Colors, Luma Matte, Alpha Matte, Raw), default 1; 3 ID: integer slider, max 2 147 483 647, default 0 |
 
-EXtractoR's Channel Info is the plug-in's own **little-endian** layout: `u32` 1 and 28 zero bytes,
-then four 164-byte records (Red, Green, Blue, Alpha), each a `u32` kind (1 in R, G, B; 2 in Alpha,
-whose name is `(copy)`) and the channel name NUL-terminated from record byte 35 (`R`, `G`, `B`).
-The data is the same in every composition of the block. IDentifier's data differs between
-instances with the same settings except for the channel type's name, NUL-terminated from byte 19
-(`Object ID`); the other bytes are not read. API: `ExtractorChannels`, `identifier_channel_type`.
+EXtractoR's Channel Info is the plug-in's own **little-endian** layout: `u32` 1 and 28 bytes, then
+four 164-byte records (Red, Green, Blue, Alpha), each a kind in byte 0 (1 a channel of the footage by
+name: `R`, `G`, `B` by default; 2 the input's own channel, named `(copy)`: Alpha by default) and the
+channel name NUL-terminated from record byte 35. The rest is not read: it differs between instances
+with the same channels (uninitialised-looking values, also in bytes 1..4 of a record: `02 00 00 32`
+on Alpha in one definition's default, which is why only byte 0 is the kind). **A chosen channel**
+(`extractor-07-preset-channel-z`, a preset of our own that reads `Z` into Red, Green and Blue) is kind
+1 with its name (`Z`), and the `u32` at record byte 4 is then 13, which looks like the channel's
+position in the EXR's sorted channel list of 14 (the defaults hold 0 there: H). IDentifier's data
+differs between instances with the same settings except for **the chosen channel's name**,
+NUL-terminated from byte 19, which is `Object ID` when no channel is chosen. After Effects lists
+only integer (UINT) channels: in 1300's EXR (a FLOAT `ID` channel) it found none ("No ID channels
+available"), so that block's preset `identifier-09-preset-channel-id` only sets ID 2; in 1310's
+EXR (UINT `objectId` and `IndexOB.X` added) the preset `identifier-09-preset-channel-objectid-id2`
+stores `objectId`, with 15 at byte 4 (the channel's position in the sorted list of 16, as for
+EXtractoR: H). Without a chosen channel After Effects leaves the layer unchanged (1300 and 1310
+defaults). The other bytes are not read. API: `ExtractorChannels`,
+`identifier_channel_type`.
 
 **Curves and Mesh Warp** (961-965, 985; applied from presets, the data is not scriptable): their
 arbitrary-data parameter (type 11) always has a record (`tdbs` with a 4-byte `cdat`) and a `LIST

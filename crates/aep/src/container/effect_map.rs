@@ -138,9 +138,9 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
-    /// EXtractoR's Channel Info (`ExtractorChannels`): the default channels only.
+    /// EXtractoR's Channel Info (`ExtractorChannels`): the channels by name.
     Extractor,
-    /// IDentifier's Channel Info (`identifier_channel_type`): Object ID only.
+    /// IDentifier's Channel Info (`identifier_channel_type`): the chosen channel by name.
     Identifier,
 }
 
