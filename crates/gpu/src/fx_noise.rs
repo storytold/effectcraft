@@ -620,8 +620,7 @@ fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         e.pixels("fxn_echo", &p, a, Some(&frame), o, None);
         acc.swap(0, 1);
     }
-    let mut p = with_u0([op, 0, 0, 0]);
-    p.f[0][0] = (n + 1) as f32;
+    let p = with_u0([op, 0, 0, 0]);
     let img = run(e, "fxn_echo_fin", &p, &acc[0], None, None);
     Some(GBuf { img, offset: grid.offset, scale: grid.scale })
 }

@@ -422,7 +422,7 @@ fn fxn_echo(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, acc);
 }
 
-// Echo's finish. u[0].x = operator; f[0].x = number of frames.
+// Echo's finish. u[0].x = operator. Blend sums like Add (time_fx.rs echo), so nothing divides.
 @compute @workgroup_size(16, 16)
 fn fxn_echo_fin(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = fxn_pixel(gid);
@@ -431,9 +431,6 @@ fn fxn_echo_fin(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let op = P.u[0].x;
     var acc = textureLoad(src, p, 0);
-    if (op == 6u) {
-        acc = acc / P.f[0].x;
-    }
     if (op == 2u && acc.x == FXN_MAX) {
         acc = vec4<f32>(0.0);
     }
