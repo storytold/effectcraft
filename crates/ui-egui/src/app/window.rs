@@ -27,6 +27,7 @@ impl EffectcraftApp {
             self.ui.start_screen = false;
             self.ui.home_learn = false;
         }
+        crate::workspace_state::script_panels::bind(&mut self.ui, &self.session.script_ui);
         self.ui.workspace = name.to_string();
         self.ui.dock = self.ui.saved_workspaces.get(name).cloned().unwrap_or_else(|| dock::Workspace::new(dock::workspace(name)));
         self.ui.maximized = None;

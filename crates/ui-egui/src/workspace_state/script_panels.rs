@@ -3,16 +3,23 @@
 //! script name beside the layouts (`script_panels`, id → name). The name is the only thing that
 //! carries over; it is compared with open windows and never runs a script.
 //!
+//! - [`detach`] moves every id of a file into a range no window reaches, all at once, so an id
+//!   from another process can't name a window of this one. An id without a name, or repeating a
+//!   name, says nothing about which script it was and is dropped.
 //! - [`bind`] gives each open script its references back at its window's id, in every workspace.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use effectcraft_engine::Session;
 use effectcraft_engine::scriptui::{ScriptUi, WindowKind};
 use serde_json::Value;
 
+use super::Snapshot;
 use crate::dock::{PanelKind, Workspace};
 use crate::state::UiState;
 
+/// Script window ids count up from 1 in each process and never get here.
+const DETACHED: u32 = 1 << 31;
 /// A dock tree level nests its panels a few JSON levels deeper.
 const MAX_JSON_DEPTH: usize = 4 * craft_ui::docking::MAX_DEPTH + 16;
 
@@ -66,6 +73,50 @@ fn remap_panel(panel: PanelKind, map: &mut impl FnMut(u32) -> u32) -> PanelKind 
     }
 }
 
+/// Moves the panels `shown` rejects to `hidden`, with their places. craft-ui's `reconcile` does
+/// this without going through the lock; an empty default adds nothing back, and it would replace
+/// an invalid workspace with that default.
+fn hide_unless(workspace: &mut Workspace, shown: impl Fn(&PanelKind) -> bool) {
+    if workspace.validate().is_ok() && crate::dock::referenced_panels(workspace).iter().any(|panel| !shown(panel)) {
+        workspace.reconcile(shown, crate::dock::permissions, &Workspace::default());
+    }
+}
+
+/// See the module docs. Runs on a validated snapshot; an `Err` rejects the file.
+pub(super) fn detach(snapshot: &mut Snapshot) -> Result<(), String> {
+    let (mut moved, mut names, mut seen) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
+    let next = |moved: &BTreeMap<u32, u32>| DETACHED.saturating_add(u32::try_from(moved.len()).unwrap_or(u32::MAX));
+    for (id, name) in std::mem::take(&mut snapshot.script_panels) {
+        if seen.insert(name.clone()) {
+            let to = next(&moved);
+            moved.insert(id, to);
+            names.insert(to, name);
+        }
+    }
+    // An id without a name moves too: left as it was, a later window could take its number.
+    let mut map = |id| {
+        let to = next(&moved);
+        *moved.entry(id).or_insert(to)
+    };
+    for workspace in std::iter::once(&mut snapshot.dock).chain(snapshot.saved_workspaces.values_mut()) {
+        remap(workspace, &mut map)?;
+    }
+    snapshot.focused = remap_panel(snapshot.focused, &mut map);
+    snapshot.maximized = snapshot.maximized.map(|panel| remap_panel(panel, &mut map));
+
+    let named = |panel: &PanelKind| !matches!(panel, PanelKind::ScriptPanel(id) if !names.contains_key(id));
+    for workspace in std::iter::once(&mut snapshot.dock).chain(snapshot.saved_workspaces.values_mut()) {
+        hide_unless(workspace, named);
+        workspace.hidden.retain(|(panel, _)| named(panel));
+    }
+    if !named(&snapshot.focused) {
+        snapshot.focused = UiState::default().focused;
+    }
+    snapshot.maximized = snapshot.maximized.filter(named);
+    snapshot.script_panels = names;
+    Ok(())
+}
+
 /// Each open script's references move to its window's id, keeping one id per script. Idempotent.
 /// A script with several panel windows binds the last, the one `window.scriptPanel` docks.
 pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
@@ -87,6 +138,11 @@ pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
     }
     ui.focused = remap_panel(ui.focused, &mut map);
     ui.maximized = ui.maximized.map(|panel| remap_panel(panel, &mut map));
+}
+
+/// A new app's workspace meets the panels the frontend already opened.
+pub(crate) fn restore(ui: &mut UiState, session: &mut Session) {
+    bind(ui, &session.script_ui);
 }
 
 /// The names of the panels `ui` still refers to, as the file holds them.
