@@ -104,7 +104,7 @@ fn shape_kind(tool: Tool) -> &'static str {
 }
 
 /// What a shape tool drag from `start` to `end` makes, or `None` while it is too small to make
-/// anything. Alt (Option) draws from the press point and Shift squares the box; the live ghost and
+/// anything. Ctrl/Cmd draws from the press point and Shift squares the box; the live ghost and
 /// [`create_shape`] both go through this, so the drag always shows what it will commit.
 pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<ShapeDrag> {
     let comp = app.session.active_comp()?;
