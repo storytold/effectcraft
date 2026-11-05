@@ -1970,6 +1970,7 @@ dependencies = [
  "effectcraft-gpu",
  "effectcraft-host",
  "effectcraft-keyframe",
+ "effectcraft-media",
  "effectcraft-path",
  "effectcraft-project",
  "effectcraft-render",

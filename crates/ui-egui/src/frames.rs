@@ -28,7 +28,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
+use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
@@ -337,12 +337,26 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64, 
 /// hands out), and by value the project settings and the footage, solids and proxies it uses.
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
-    comp_content_with(project, comp, project, |_, c| c)
+    comp_content_with(project, comp, project, |_, c| c, true)
+}
+
+/// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
+/// ([`Project::dirty_spans`]), a frame wider either side for rounding.
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard, outside: bool) -> Option<Vec<(i64, i64)>> {
+    let fr = new.comp(comp)?.frame_rate;
+    Some(new.dirty_spans(old, comp, heard, outside)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
-/// Sources removed by undo are read from `base`.
-fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
+/// Sources removed by undo are read from `base`. Only the comps and items it draws count unless
+/// `everything` and an expression (which can read any item) is among them.
+fn comp_content_with<'a>(
+    project: &'a Project,
+    comp: ItemId,
+    base: &'a Project,
+    version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>,
+    everything: bool,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     fn has_expression(g: &PropGroup) -> bool {
         g.children.iter().any(|c| match c {
@@ -366,7 +380,7 @@ fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, 
             if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                 stack.push(item);
             }
-            expressions = expressions || has_expression(&l.props);
+            expressions = expressions || (everything && has_expression(&l.props));
         }
     }
     let ids: Vec<ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
@@ -505,7 +519,40 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
+    /// Disk keys [`Frames::persist_missing`] is converting (the disk cache tracks them once
+    /// queued, so an evicted or refused frame is written again).
+    #[cfg(not(target_arch = "wasm32"))]
+    persisted: Arc<Mutex<HashSet<u128>>>,
+    /// The disk limit and how often each disk key was written under it: a frame is rewritten
+    /// once after an eviction, not again (a disk cache smaller than the RAM preview, or a frame
+    /// that can't fit, would otherwise be rewritten on every idle pass). A new limit resets it.
+    #[cfg(not(target_arch = "wasm32"))]
+    written: Arc<Mutex<(u64, HashMap<u128, u8>)>>,
+    /// Edits whose kept frames are still to be found on disk under the new content key
+    /// ([`Frames::carry_disk`]), oldest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_carries: Arc<Mutex<VecDeque<DiskCarry>>>,
+    /// A carry job is scheduled or running: at most one at a time, draining the edits in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    carry_scheduled: Arc<AtomicBool>,
+    /// The disk series (scale, view and options hash) each comp's frames are cached in.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_series: Arc<Mutex<HashMap<u64, Vec<(u32, u64)>>>>,
 }
+
+/// An edit's kept frames, to find on disk under the comp's new content key: those of `comp` in
+/// `from` outside `dirty` (inclusive frame ranges) also draw `to`'s.
+#[cfg(not(target_arch = "wasm32"))]
+struct DiskCarry {
+    comp: u64,
+    from: Arc<Project>,
+    to: Arc<Project>,
+    dirty: Vec<(i64, i64)>,
+}
+
+/// Disk series remembered per comp (see [`Frames::disk_series`]).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DISK_SERIES: usize = 8;
 
 impl Default for Frames {
     fn default() -> Self {
@@ -554,6 +601,16 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            persisted: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            written: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_carries: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            carry_scheduled: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_series: Arc::default(),
         }
     }
 }
@@ -789,29 +846,51 @@ impl Frames {
         let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
         // Markers are pixels only to the expressions that read them (#1083).
         let markers = project.reads_markers();
+        // Whose audio is drawn, before or after the edit (a waveform added or removed counts).
+        let heard = bases.get(&comp.0).map_or_else(|| project.heard_layers(), |(_, base)| project.heard_layers().union(&base.heard_layers()));
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
-            && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
-                _ => c,
-            }) == *base_id
+            && comp_content_with(
+                project,
+                comp,
+                project,
+                |id, c| match base.item(id).map(|i| &i.kind) {
+                    Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+                    _ => c,
+                },
+                true,
+            ) == *base_id
         {
             return (*base_id, Some(base.clone()));
         }
-        // Only layers of this comp changed: its frames outside their span (and a frame either
-        // side for rounding) keep drawing the same pixels, so a cut or trim recaches only the
-        // layers it touched (#1641).
+        // Only comps changed (not the footage, solids or settings they draw): its frames outside
+        // the spans the edit reaches (and a frame either side for rounding) keep drawing the same
+        // pixels, so a nudge, cut or trim, here or in a precomp, recaches only the frames it
+        // touched (#1641). Expressions can read anything at any time, so with them a change
+        // elsewhere in the project (another comp, an item's name) reaches the frames of the
+        // layers that have one.
+        let base_comp = |id: ItemId| bases.get(&comp.0).and_then(|(_, base)| base.item(id)).map(|i| &i.kind);
+        let base_tree = |id, c| match base_comp(id) {
+            Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+            _ => c,
+        };
+        let base_comps = |id, c| match base_comp(id) {
+            Some(ItemKind::Comp(b)) => b,
+            _ => c,
+        };
         if let Some((base_id, base)) = bases.get(&comp.0)
-            && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
-            && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
-                _ => c,
-            }) == *base_id
-            && let Some((s, e)) = new.changed_span(old)
+            && comp_content_with(project, comp, base, base_comps, false) == comp_content_with(base, comp, base, |_, c| c, false)
+            && let Some(dirty) = dirty_frames(base, project, comp, &heard, comp_content_with(project, comp, base, base_tree, true) != *base_id)
             && let Ok(mut cache) = self.cache.lock()
         {
-            let (first, last) = (new.frame_rate.frame_at(s).saturating_sub(1), new.frame_rate.frame_at(e).saturating_add(1));
-            cache.carry(*base_id, plain, |f| f < first || f > last);
+            cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Ok(mut q) = self.disk_carries.lock() {
+                if q.len() >= MAX_KEEPERS {
+                    q.pop_front();
+                }
+                q.push_back(DiskCarry { comp: comp.0, from: base.clone(), to: project.clone(), dirty });
+            }
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
@@ -857,6 +936,11 @@ impl Frames {
         }
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.note_disk_series(base.comp, base.scale, base.view ^ opts_hash(opts));
+            self.carry_disk(src);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let content = {
             let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
             let Some(content) = known else {
@@ -870,6 +954,145 @@ impl Frames {
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
         let oh = opts_hash(opts);
         (start..end).filter(|f| !ram.contains(f)).filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh))).collect()
+    }
+
+    /// Write the RAM frames of `base`'s series that the disk cache lacks: frames an edit kept
+    /// (written under the comp's previous content key) and writes the disk cache dropped. They
+    /// are converted on the frame pool, each queued once. `true` while there may be more to
+    /// write (a content key being computed, frames being converted): call again soon, since a
+    /// refused write is only retried by a later call. Disk keys hash `opts` the way the worker
+    /// writes them (`base.opts` also carries the Roto Brush model stamp).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey, opts: &RenderOpts) -> bool {
+        let Some(dc) = src.disk.clone() else { return false };
+        let oh = opts_hash(opts);
+        self.note_disk_series(base.comp, base.scale, base.view ^ oh);
+        self.carry_disk(src);
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
+        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
+        let Some(content) = known else {
+            self.request_content_key(src.project.clone(), base.revision, base.comp);
+            return true;
+        };
+        let (missing, converting): (Vec<(u128, Arc<egui::ColorImage>)>, bool) = {
+            let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
+            if queued.len() > 100_000 {
+                queued.clear();
+            }
+            let limit = dc.limit_bytes();
+            if written.0 != limit || written.1.len() > 100_000 {
+                *written = (limit, HashMap::new());
+            }
+            let missing = c
+                .map
+                .iter()
+                .filter(|(k, _)| k.same_series(base))
+                .filter_map(|(k, img)| {
+                    let FrameImage::Cpu(img) = img else { return None };
+                    let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
+                    let tries = written.1.get(&dk).copied().unwrap_or(0);
+                    (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                })
+                .collect();
+            (missing, !queued.is_empty())
+        };
+        if missing.is_empty() {
+            return converting;
+        }
+        let (persisted, written) = (self.persisted.clone(), self.written.clone());
+        let work = move || {
+            for (dk, img) in missing {
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                // (accepted: the disk cache tracks it until written, and it counts as a try;
+                // refused by a full queue: retried, without counting)
+                if dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    && let Ok(mut w) = written.lock()
+                {
+                    let n = w.1.entry(dk).or_default();
+                    *n = n.saturating_add(1);
+                }
+                if let Ok(mut q) = persisted.lock() {
+                    q.remove(&dk);
+                }
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
+        true
+    }
+
+    /// Remember that `comp`'s frames are cached on disk at `scale` with view and options hash
+    /// `view` (the most recent [`MAX_DISK_SERIES`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_disk_series(&self, comp: u64, scale: u32, view: u64) {
+        if let Ok(mut m) = self.disk_series.lock() {
+            let v = m.entry(comp).or_default();
+            if v.first() != Some(&(scale, view)) {
+                v.retain(|s| *s != (scale, view));
+                v.insert(0, (scale, view));
+                v.truncate(MAX_DISK_SERIES);
+            }
+        }
+    }
+
+    /// Find the frames edits kept ([`Frames::identity`]) on disk under their comps' new content
+    /// keys: link each kept frame of every disk series of the comp to its new key, on the frame
+    /// pool, oldest edit first.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn carry_disk(&self, src: &RenderSource) {
+        let Some(dc) = src.disk.clone() else { return };
+        let pending = |q: &Mutex<VecDeque<DiskCarry>>| q.lock().is_ok_and(|q| !q.is_empty());
+        // (called on every paint: one job drains every carry queued meanwhile)
+        if !pending(&self.disk_carries) || self.carry_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (carries, scheduled, series, ctx) = (self.disk_carries.clone(), self.carry_scheduled.clone(), self.disk_series.clone(), self.ctx.clone());
+        let virtual_id = self.virtual_id.clone();
+        let work = move || {
+            let mut linked = false;
+            loop {
+                let todo: Vec<DiskCarry> = carries.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+                if todo.is_empty() {
+                    scheduled.store(false, Ordering::Release);
+                    // (a carry queued after the drain and before the store: keep it, unless a new job took it)
+                    if pending(&carries) && !scheduled.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    break;
+                }
+                for c in todo {
+                    // (a panicking carry is skipped: the others still carry, and the flag is
+                    // still cleared below)
+                    let carry = || {
+                        let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { return false };
+                        let comp = ItemId(c.comp);
+                        let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
+                        let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
+                        let (a, b) = (key(&c.from), key(&c.to));
+                        if a == b {
+                            return false;
+                        }
+                        let mut linked = false;
+                        for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
+                            for (scale, view) in &series {
+                                linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                            }
+                        }
+                        linked
+                    };
+                    linked |= std::panic::catch_unwind(std::panic::AssertUnwindSafe(carry)).unwrap_or(false);
+                }
+            }
+            if linked && let Some(ctx) = &ctx {
+                ctx.request_repaint();
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

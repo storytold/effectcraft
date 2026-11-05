@@ -193,7 +193,7 @@ pub fn specs() -> Vec<EffectSpec> {
 
 /// Is `id` an audio effect (applied by the mixdown rather than the compositor)?
 pub fn is_audio_effect(id: &str) -> bool {
-    id.starts_with("ec.audio.")
+    effectcraft_project::is_audio_effect(id)
 }
 
 /// Does the effect produce sound on its own (so a layer without audio becomes audible)?
