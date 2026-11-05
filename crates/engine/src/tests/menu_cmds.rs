@@ -2171,6 +2171,34 @@ fn quick_set_anchor_skips_layers_whose_anchor_scale_or_rotation_is_keyed() {
     }
 }
 
+/// An expression on Position (or on the separated X / Y) would override the shifted value, and
+/// Auto-Orient along the path adds a rotation the shift does not know: those layers are skipped.
+#[test]
+fn quick_set_anchor_skips_position_expressions_and_along_path_layers() {
+    for case in ["position", "positionX", "alongPath"] {
+        let mut s = comp();
+        let flat = solid(&mut s, "#00ff00");
+        let other = solid(&mut s, "#0000ff");
+        match case {
+            "alongPath" => {
+                s.execute("layer.autoOrient", json!({"layers": [other], "mode": "alongPath"})).unwrap();
+            }
+            "position" => {
+                s.execute("prop.setExpression", json!({"layer": other, "path": "transform/position", "expression": "[100, 50]"})).unwrap();
+            }
+            _ => {
+                s.execute("prop.separateDimensions", json!({"layer": other, "value": true})).unwrap();
+                s.execute("prop.setExpression", json!({"layer": other, "path": "transform/positionX", "expression": "100"})).unwrap();
+            }
+        }
+        let before = layer(&s, other);
+        let r = s.execute("layer.quickSetAnchor", json!({"layers": [flat, other], "point": "topLeft"})).unwrap();
+        assert_eq!(r["layers"], 1, "{case}: only the plain layer changed");
+        assert_eq!(layer(&s, other), before, "{case}: the layer is untouched");
+        assert!(s.execute("layer.quickSetAnchor", json!({"layers": [other], "point": "top"})).is_err(), "{case}: nothing to do");
+    }
+}
+
 /// A child of a rotated, scaled parent keeps its place when its anchor moves (Position is in the
 /// parent's space).
 #[test]
