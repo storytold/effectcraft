@@ -307,3 +307,103 @@ impl MeshData {
         Some(out)
     }
 }
+
+/// The Cryptomatte plug-in's Settings data (`Cryptomatte-0001`, the plug-in's own layout,
+/// little-endian; read from 88 instances of one project, docs/aep-format.md 3.7): the magic
+/// `cry1`; bytes 4..32 are not read (they differ between instances holding the same settings);
+/// the Cryptomatte layer's name at 32, NUL-padded to 64 bytes; at 96 a `u32` 1 and a `u32` that
+/// is the same in every sample (neither read); at 104 the `u32` length of the selection text
+/// including its NUL, a `u32` that changes with the text (not read) and a zero byte; the
+/// selection text from byte 113 (`<0000002a>, <deadbeef>`, the matte list as ID hashes).
+/// Bytes after it are left-overs of a longer earlier text. The definition's default is `cry1`
+/// and zeros: no layer, no selection.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CryptomatteData {
+    /// The Cryptomatte layer's name (`Crypto_Material`); empty when none is chosen.
+    pub layer: String,
+    /// The selection (matte list) as the plug-in stores it.
+    pub selection: String,
+}
+
+impl CryptomatteData {
+    /// Decodes the data; `None` when it is not this layout (no `cry1`, too short, a length past
+    /// the end, no zero byte before the text, text that is not UTF-8).
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.get(..4)? != b"cry1" {
+            return None;
+        }
+        let text = |b: &[u8]| -> Option<String> {
+            let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+            String::from_utf8(b.get(..end)?.to_vec()).ok()
+        };
+        let layer = text(data.get(32..96)?)?;
+        let len = usize::try_from(u32::from_le_bytes(data.get(104..108)?.try_into().ok()?)).ok()?;
+        let selection = if len == 0 {
+            String::new()
+        } else {
+            if *data.get(112)? != 0 {
+                return None;
+            }
+            text(data.get(113..113usize.checked_add(len)?)?)?
+        };
+        Some(Self { layer, selection })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CryptomatteData;
+
+    /// Settings data in the layout [`CryptomatteData::parse`] reads, with `noise` in the bytes it
+    /// does not read.
+    fn crypto(layer: &str, selection: &str, noise: u8) -> Vec<u8> {
+        let mut d = b"cry1".to_vec();
+        d.resize(32, noise);
+        d.extend(layer.as_bytes());
+        d.resize(96, 0);
+        d.extend(1u32.to_le_bytes());
+        d.extend([noise; 4]);
+        let len = if selection.is_empty() { 0 } else { selection.len() + 1 };
+        d.extend(u32::try_from(len).unwrap_or(0).to_le_bytes());
+        d.extend([noise; 4]);
+        d.push(0);
+        d.extend(selection.as_bytes());
+        d.push(0);
+        // Left-overs of an earlier, longer text.
+        d.extend(b" <de");
+        d
+    }
+
+    #[test]
+    fn cryptomatte_settings_are_read() {
+        for noise in [0, 0x5a] {
+            let d = CryptomatteData::parse(&crypto("Layer_A", "<0000002a>, <deadbeef>", noise));
+            assert_eq!(d, Some(CryptomatteData { layer: "Layer_A".into(), selection: "<0000002a>, <deadbeef>".into() }), "noise {noise}");
+        }
+    }
+
+    #[test]
+    fn the_default_cryptomatte_settings_are_empty() {
+        let mut d = b"cry1".to_vec();
+        d.resize(116, 0);
+        assert_eq!(CryptomatteData::parse(&d), Some(CryptomatteData::default()));
+    }
+
+    #[test]
+    fn damaged_cryptomatte_settings_are_not_read() {
+        let good = crypto("L", "<00000001>", 0);
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'x';
+        let mut past_end = good.clone();
+        past_end[104..108].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut no_zero = good.clone();
+        no_zero[112] = b'<';
+        let mut not_utf8 = good.clone();
+        not_utf8[32] = 0xff;
+        for (what, d) in
+            [("magic", bad_magic), ("length", past_end), ("zero byte", no_zero), ("utf-8", not_utf8), ("short", good[..100].to_vec()), ("empty", Vec::new())]
+        {
+            assert_eq!(CryptomatteData::parse(&d), None, "{what}");
+        }
+    }
+}

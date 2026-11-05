@@ -155,6 +155,17 @@ impl AuxChannels {
         layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).or(layers.first()).cloned()
     }
 
+    /// [`AuxChannels::resolve_crypto_layer`] with a layer named in full first: the layer called
+    /// exactly `name` when it is not empty and the footage has it (`Crypto_Material`, a name an
+    /// imported After Effects project carries), else the layer for `want`.
+    pub fn resolve_crypto_layer_named(&self, name: &str, want: &str) -> Option<String> {
+        let name = name.trim();
+        if !name.is_empty() && self.crypto_layers().iter().any(|l| l == name) {
+            return Some(name.to_string());
+        }
+        self.resolve_crypto_layer(want)
+    }
+
     /// The ID (its hash, `f32::to_bits`) with the most coverage at aux pixel `i` of Cryptomatte
     /// layer `layer`, summed over the ranks it appears in. Ties go to the lower rank; IDs with
     /// no positive coverage don't count. `None` when nothing covers the pixel.
@@ -256,6 +267,12 @@ mod tests {
         let at = |i| a.crypto_id_at(&l, i);
         assert_eq!([at(0), at(1), at(2), at(3), at(9)], [Some(crypto_hash("y")), Some(crypto_hash("x")), None, Some(crypto_hash("x")), None]);
         assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer("CryptoObject"), None);
+        // A layer named in full wins; an empty or missing name falls back to `want`.
+        assert_eq!(a.resolve_crypto_layer_named("Other", "CryptoObject").as_deref(), Some("Other"));
+        assert_eq!(a.resolve_crypto_layer_named(" Other ", "CryptoObject").as_deref(), Some("Other"));
+        assert_eq!(a.resolve_crypto_layer_named("", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
+        assert_eq!(a.resolve_crypto_layer_named("Crypto_Name", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
+        assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer_named("Other", "CryptoObject"), None);
     }
 
     #[test]

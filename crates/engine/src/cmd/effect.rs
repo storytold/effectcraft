@@ -522,7 +522,7 @@ impl CryptoProbe {
             if !live() {
                 return Ok(None);
             }
-            let layer_name = aux.resolve_crypto_layer(want).ok_or(NO_CRYPTO)?;
+            let layer_name = aux.resolve_crypto_layer_named(params.s("layerName"), want).ok_or(NO_CRYPTO)?;
             // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
             // up, proxies have their own size, earlier effects can pad it), rendered and cached.
             if !live() {

@@ -534,6 +534,22 @@ suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
 
+**Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in; read from 88
+instances in one production project, not made by us, so H for what the samples do not vary):
+`parT` 0 the input layer; 1 Settings: **arbitrary data** (type 11, `Cryptomatte-0001`, a record and
+`aRbs` / `aRbp` in every instance, `parT` default `cry1` + 112 zero bytes); 2 Output: popup
+(Colors, Matted Colors, Matted RGBA, Matte Only; stored in every instance: 3 in 81, 4 in 7);
+3 Selection Mode: checkbox (no record in any instance, `pdnm` `fnord!`); the built-in entry. The
+Settings data is the plug-in's own layout, **little-endian**: `cry1`; bytes 4..32 differ between
+instances with the same settings (zeros in one, pointer-like values in others: not read); the
+layer name at 32, NUL-padded to 64 bytes (`Crypto_Material`, `Crypto_Name`: the channel prefix
+of the EXR's Cryptomatte layer); at 96 a `u32` 1 and a `u32` that is the same in every instance;
+at 104 the `u32` length of the selection text including its NUL; at 108 a `u32` that follows the
+text (equal texts, equal values: not read); a zero byte at 112; the selection text from 113, the
+matte list as comma-and-space separated ID hashes `<0000002a>, <deadbeef>` (303 tokens, all in
+that form). After the text 2 to 3 bytes, zeros or left-overs of a longer earlier text. API:
+`CryptomatteData` (refuses data without `cry1`, a length past the end or a non-zero byte at 112).
+
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
 | Field | Chunk path | Offset | Type | Meaning | Evidence | Conf. |

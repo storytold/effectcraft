@@ -498,7 +498,7 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
         return b;
     }
     let want = CRYPTO_LAYERS[(ctx.params.e("layer") as usize).min(2)];
-    let layer = layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).unwrap_or(&layers[0]).clone();
+    let Some(layer) = a.resolve_crypto_layer_named(ctx.params.s("layerName"), want) else { return b };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);
@@ -621,6 +621,8 @@ pub fn specs() -> Vec<EffectSpec> {
             "Cryptomatte",
             vec![
                 p("layer", "Layer", Value::Enum(0), popup(&CRYPTO_LAYERS)),
+                // A layer named in full (`Crypto_Material`); empty uses Layer.
+                text("layerName", "Layer Name", ""),
                 text("selection", "Selection", ""),
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
