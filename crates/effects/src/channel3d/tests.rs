@@ -442,3 +442,27 @@ fn instance3d_replaces_the_pixels_with_the_referenced_layer() {
     let out = run_fx("ec.3d.instance3d", &[], solid(), 0.0, EffectEnv::default());
     assert_eq!(out.img.data, solid().data);
 }
+
+/// #474: [`reads_aux`] names exactly the 3D Channel effects that ask the host for channels.
+#[test]
+fn reads_aux_names_the_effects_that_read_channels() {
+    struct Counting(AuxHost, std::sync::atomic::AtomicUsize);
+    impl EffectHost for Counting {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn aux(&self) -> Option<Arc<AuxChannels>> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.aux()
+        }
+    }
+    for s in specs() {
+        let host = Counting(scene(), Default::default());
+        run_fx(s.id, &[], img(), 0.0, EffectEnv { host: Some(&host), ..Default::default() });
+        assert_eq!(host.1.into_inner() > 0, reads_aux(s.id), "{}", s.id);
+    }
+    assert!(READS_AUX.iter().all(|id| specs().iter().any(|s| s.id == *id)), "every listed effect exists");
+}
