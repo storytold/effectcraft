@@ -44,6 +44,7 @@ fn neutralizer(values: Vec<(usize, f64)>) -> Fx {
         ],
         values,
         data: vec![],
+        keys: vec![],
     }
 }
 
@@ -101,6 +102,7 @@ fn extractor(values: Vec<(usize, f64)>, data: Vec<u8>) -> Fx {
         ],
         values,
         data: vec![(1, data)],
+        keys: vec![],
     }
 }
 
@@ -183,6 +185,7 @@ fn identifier(values: Vec<(usize, f64)>, data: Vec<u8>) -> Fx {
         ],
         values,
         data: vec![(1, data)],
+        keys: vec![],
     }
 }
 
@@ -216,4 +219,72 @@ fn identifier_chosen_channels_by_name() {
         let found = losses(&r, LossCategory::Effects, "IDentifier");
         assert!(found.len() == 1 && found[0].contains(&format!("the ID channel '{name}' (Channel Info) is not imported")), "{name}: {found:?}");
     }
+}
+
+/// EXtractoR's data with the name of record `k` from byte 35 replaced by `name` (no NUL added; the
+/// rest of the record's name field is left as `fill`).
+fn channels_with_raw_name(k: usize, name: &[u8], fill: u8) -> Vec<u8> {
+    let mut d = channels(DEFAULT_CHANNELS);
+    let at = 32 + k * 164 + 35;
+    d[at..at + 129].fill(fill);
+    d[at..at + name.len()].copy_from_slice(name);
+    d
+}
+
+/// A channel name that never ends (no NUL up to the end of its record) or is not UTF-8 is
+/// refused by the decoder and reported at the importer; the defaults R, G, B, A stay.
+#[test]
+fn extractor_names_without_a_terminator_or_in_invalid_utf8_are_refused() {
+    let unterminated = channels_with_raw_name(2, b"Z", b'Z');
+    let invalid = channels_with_raw_name(1, &[0x5a, 0xff, 0xfe, 0x00], 0);
+    for (what, data) in [("unterminated", unterminated), ("invalid UTF-8", invalid)] {
+        assert_eq!(ExtractorChannels::parse(&data), None, "{what}");
+        let (g, r) = run(&extractor(vec![], data), "ec.3d.extractor");
+        let found = losses(&r, LossCategory::Effects, "EXtractoR");
+        assert!(found.len() == 1 && found[0].contains("not in the sampled layout"), "{what}: {found:?}");
+        let g = g.expect("imported");
+        for (id, want) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "A")] {
+            assert_eq!(v(&g, id), Value::Str(want.into()), "{what}: {id}");
+        }
+    }
+}
+
+/// The same for IDentifier: a channel name without NUL up to the end of the data, or in invalid
+/// UTF-8, is refused and reported; the Object ID channel stays.
+#[test]
+fn identifier_names_without_a_terminator_or_in_invalid_utf8_are_refused() {
+    let mut unterminated = id_info("objectId");
+    unterminated[19..].fill(b'x');
+    let mut invalid = id_info("objectId");
+    invalid[19..22].copy_from_slice(&[b'o', 0xff, 0]);
+    for (what, data) in [("unterminated", unterminated), ("invalid UTF-8", invalid)] {
+        assert_eq!(identifier_channel_type(&data), None, "{what}");
+        let (g, r) = run(&identifier(vec![], data), "ec.3d.identifier");
+        let found = losses(&r, LossCategory::Effects, "IDentifier");
+        assert!(found.len() == 1 && found[0].contains("not in the sampled layout"), "{what}: {found:?}");
+        assert_eq!(v(&g.expect("imported"), "channelType"), Value::Enum(0), "{what}");
+    }
+    // Data too short to reach the name.
+    assert_eq!(identifier_channel_type(&[1; 10]), None);
+}
+
+/// A Channel Info value record without its arbitrary data (no `aRbs`): the effect still imports,
+/// with the defaults, and nothing panics.
+#[test]
+fn a_missing_channel_info_payload_leaves_the_defaults() {
+    let mut fx = extractor(vec![], vec![]);
+    fx.data.clear();
+    let (g, r) = run(&fx, "ec.3d.extractor");
+    assert_eq!(losses(&r, LossCategory::Effects, "EXtractoR"), Vec::<String>::new());
+    let g = g.expect("imported");
+    for (id, want) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "A")] {
+        assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
+    }
+    let mut fx = identifier(vec![(3, 5.0)], vec![]);
+    fx.data.clear();
+    let (g, r) = run(&fx, "ec.3d.identifier");
+    assert_eq!(losses(&r, LossCategory::Effects, "IDentifier"), Vec::<String>::new());
+    let g = g.expect("imported");
+    assert_eq!(v(&g, "channelType"), Value::Enum(0));
+    near(&g, "id", 5.0);
 }
