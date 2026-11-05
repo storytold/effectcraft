@@ -339,6 +339,61 @@ fn cryptomatte_values_without_a_counterpart_are_reported() {
     assert_eq!((v(&g.expect("effect"), "layerName")), str(""));
 }
 
+/// `bytes` with `f` applied to the children of every value group (`tdgp`) that holds the
+/// parameter `match_name`, given the position of its match name.
+fn edit_values(bytes: &[u8], match_name: &str, f: &dyn Fn(&mut Vec<Chunk<'static>>, usize)) -> Vec<u8> {
+    fn walk(chunks: &mut [Chunk<'_>], match_name: &str, f: &dyn Fn(&mut Vec<Chunk<'static>>, usize)) {
+        for c in chunks {
+            if c.is_list(b"tdgp") {
+                let mut kids: Vec<Chunk<'static>> = c.children().iter().cloned().map(Chunk::into_owned).collect();
+                if let Some(at) = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(format!("{match_name} ").as_bytes()))) {
+                    f(&mut kids, at);
+                    *c = Chunk::list(*b"tdgp", kids);
+                    continue;
+                }
+            }
+            walk(c.children_mut(), match_name, f);
+        }
+    }
+    let mut file = parse(bytes).unwrap();
+    walk(&mut file.chunks, match_name, f);
+    write(&file).unwrap()
+}
+
+fn import_bytes(bytes: &[u8]) -> ImportResult {
+    let mut project = Project::default();
+    let none = |_: &str| false;
+    import(&mut project, bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap()
+}
+
+/// A stored record that has lost its data is reported as damaged, not read as the default.
+#[test]
+fn cryptomatte_records_without_their_data_are_reported() {
+    let c = Crypto { settings: Some(settings("L", "<00000001>")), output: None, selection_mode: Some((true, 3)), borrowed: false, items: Some(OUTPUT) };
+    let bytes = bytes_with(&c);
+    // The Settings record without its `aRbs` list.
+    let no_data = edit_values(&bytes, "Cryptomatte-0001", &|kids, at| {
+        if kids.get(at + 2).is_some_and(|k| k.is_list(b"aRbs")) {
+            kids.remove(at + 2);
+        }
+    });
+    let found = losses(&import_bytes(&no_data), LossCategory::DamagedData);
+    assert!(found.len() == 1 && found[0].contains("settings (layer, selection) have no data"), "{found:?}");
+    // The Selection Mode record without a readable value: damaged, not the `pard` default.
+    let unreadable = edit_values(&bytes, "Cryptomatte-0003", &|kids, at| {
+        if let Some(rec) = kids.get_mut(at + 1) {
+            let inner: Vec<Chunk<'static>> = rec.children().iter().filter(|k| !k.is(b"cdat")).cloned().map(Chunk::into_owned).collect();
+            *rec = Chunk::list(*b"tdbs", inner);
+        }
+    });
+    let r = import_bytes(&unreadable);
+    let found = losses(&r, LossCategory::DamagedData);
+    assert!(found.len() == 1 && found[0].contains("Selection Mode") && found[0].contains("unreadable value, off used"), "{found:?}");
+    assert!(losses(&r, LossCategory::Effects).iter().all(|d| !d.contains("is on")));
+    // Both intact: nothing damaged.
+    assert_eq!(losses(&import_bytes(&bytes), LossCategory::DamagedData), Vec::<String>::new());
+}
+
 /// Our own After Effects 2026 sample of the plug-in (2.6.6), corpus `aep/cryptomatte.aep`: one
 /// Cryptomatte on an EXR layer per composition. The first instance has its own definitions, the
 /// others borrow the project's. The first six hold the fresh Settings data (no layer, no

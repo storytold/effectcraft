@@ -331,7 +331,7 @@ pub struct CryptomatteData {
 
 impl CryptomatteData {
     /// Decodes the data; `None` when it is not this layout (no `cry1`, too short, a length past
-    /// the end, no zero byte before the text, text that is not UTF-8).
+    /// the end, no zero byte at 112, a text without its NUL, text that is not UTF-8).
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.get(..4)? != b"cry1" {
             return None;
@@ -342,13 +342,18 @@ impl CryptomatteData {
         };
         let layer = text(data.get(32..96)?)?;
         let len = usize::try_from(u32::from_le_bytes(data.get(104..108)?.try_into().ok()?)).ok()?;
+        if *data.get(112)? != 0 {
+            return None;
+        }
         let selection = if len == 0 {
             String::new()
         } else {
-            if *data.get(112)? != 0 {
+            // The length counts the text's NUL: a text without one is not this layout.
+            let b = data.get(113..113usize.checked_add(len)?)?;
+            if !b.contains(&0) {
                 return None;
             }
-            text(data.get(113..113usize.checked_add(len)?)?)?
+            text(b)?
         };
         Some(Self { layer, selection })
     }
@@ -438,9 +443,22 @@ mod tests {
         no_zero[112] = b'<';
         let mut not_utf8 = good.clone();
         not_utf8[32] = 0xff;
-        for (what, d) in
-            [("magic", bad_magic), ("length", past_end), ("zero byte", no_zero), ("utf-8", not_utf8), ("short", good[..100].to_vec()), ("empty", Vec::new())]
-        {
+        // The length covers the text without its NUL (`<00000001>` is 10 bytes, its NUL the 11th).
+        let mut no_nul = good.clone();
+        no_nul[104..108].copy_from_slice(&10u32.to_le_bytes());
+        // No zero byte at 112 with an empty text.
+        let mut empty_no_zero = crypto("L", "", 0);
+        empty_no_zero[112] = b'<';
+        for (what, d) in [
+            ("magic", bad_magic),
+            ("length", past_end),
+            ("zero byte", no_zero),
+            ("utf-8", not_utf8),
+            ("no NUL", no_nul),
+            ("empty text, zero byte", empty_no_zero),
+            ("short", good[..100].to_vec()),
+            ("empty", Vec::new()),
+        ] {
             assert_eq!(CryptomatteData::parse(&d), None, "{what}");
         }
     }

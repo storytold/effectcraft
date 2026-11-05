@@ -485,8 +485,14 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
                 if moving {
                     col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
                 }
-                // No data: the definition's default, no layer and no selection.
-                let Some(data) = fx.arbitrary_data(&p.match_name) else { continue };
+                // No record: the definition's default, no layer and no selection. A record
+                // without its data (every sampled record has it) is damaged.
+                let Some(data) = fx.arbitrary_data(&p.match_name) else {
+                    if p.stored().is_some() {
+                        col.lose(LossCategory::DamagedData, format!("{here}: the Cryptomatte settings (layer, selection) have no data, none used"));
+                    }
+                    continue;
+                };
                 match CryptomatteData::parse(data) {
                     Some(d) => {
                         set(group, "layerName", Value::Str(d.layer));
@@ -507,9 +513,13 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
             (3, ParamKind::Checkbox) => {
                 if moving {
                     col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
-                } else if selection_mode_on(p) {
-                    // A picking switch of the plug-in; EffectCraft picks with its own tool.
-                    col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart"));
+                } else {
+                    match selection_mode_on(p) {
+                        // A picking switch of the plug-in; EffectCraft picks with its own tool.
+                        Some(true) => col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart")),
+                        Some(false) => {}
+                        None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, off used")),
+                    }
                 }
             }
             _ => {
@@ -527,11 +537,12 @@ const CRYPTO_COLORS: (u32, bool) = (0, false);
 /// Is Selection Mode on? The plug-in writes it, when on, as a record in the default state
 /// (`tdsb` 3) holding 1.0, which [`EffectParam::stored_value`] does not read; After Effects
 /// reads it back as on and renders it (1400 `crypto-01-set-all`, `crypto-02-chk-toggled`). So
-/// the record's value counts whatever its state; no record is off (the `pard` default).
-fn selection_mode_on(p: &EffectParam<'_, '_>) -> bool {
+/// the record's value counts whatever its state; no record is off (the `pard` default). `None`
+/// when a record is there but its value cannot be read (never the definition's default then).
+fn selection_mode_on(p: &EffectParam<'_, '_>) -> Option<bool> {
     match p.stored() {
-        Some(s) => s.static_value().and_then(|v| v.first().copied()).is_some_and(|v| v != 0.0),
-        None => p.value() == Some(ParamValue::Bool(true)),
+        Some(s) => s.static_value().and_then(|v| v.first().copied()).map(|v| v != 0.0),
+        None => Some(p.value() == Some(ParamValue::Bool(true))),
     }
 }
 

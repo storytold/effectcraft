@@ -621,11 +621,13 @@ pub fn specs() -> Vec<EffectSpec> {
             "Cryptomatte",
             vec![
                 p("layer", "Layer", Value::Enum(0), popup(&CRYPTO_LAYERS)),
-                // A layer named in full (`Crypto_Material`); empty uses Layer.
-                text("layerName", "Layer Name", ""),
                 text("selection", "Selection", ""),
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
+                // A layer named in full (`CryptoMaterial`); empty uses Layer. Last, so the
+                // earlier parameters keep their indexes and saved instances, which get it
+                // appended, have the same order as new ones.
+                text("layerName", "Layer Name", ""),
             ],
             cryptomatte,
         ),

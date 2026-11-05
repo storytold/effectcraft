@@ -158,10 +158,13 @@ impl AuxChannels {
     /// [`AuxChannels::resolve_crypto_layer`] with a layer named in full first: the layer called
     /// exactly `name` when it is not empty and the footage has it (`Crypto_Material`, a name an
     /// imported After Effects project carries), else the layer for `want`.
+    /// The name as given is tried first (EXR channel names may carry spaces), then trimmed.
     pub fn resolve_crypto_layer_named(&self, name: &str, want: &str) -> Option<String> {
-        let name = name.trim();
-        if !name.is_empty() && self.crypto_layers().iter().any(|l| l == name) {
-            return Some(name.to_string());
+        let layers = self.crypto_layers();
+        for name in [name, name.trim()] {
+            if !name.is_empty() && layers.iter().any(|l| l == name) {
+                return Some(name.to_string());
+            }
         }
         self.resolve_crypto_layer(want)
     }
@@ -273,6 +276,13 @@ mod tests {
         assert_eq!(a.resolve_crypto_layer_named("", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
         assert_eq!(a.resolve_crypto_layer_named("Crypto_Name", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
         assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer_named("Other", "CryptoObject"), None);
+        // A layer whose name ends in a space is matched as named, before the trimmed name.
+        let mut b = AuxChannels::new(1, 1, 1.0);
+        for l in ["Mat", "Mat "] {
+            b.channels.push((format!("{l}00.R"), vec![0.0]));
+        }
+        assert_eq!(b.resolve_crypto_layer_named("Mat ", "CryptoObject").as_deref(), Some("Mat "));
+        assert_eq!(b.resolve_crypto_layer_named(" Mat", "CryptoObject").as_deref(), Some("Mat"));
     }
 
     #[test]
