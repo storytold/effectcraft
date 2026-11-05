@@ -159,18 +159,7 @@ impl AuxChannels {
     /// layer `layer`, summed over the ranks it appears in. Ties go to the lower rank; IDs with
     /// no positive coverage don't count. `None` when nothing covers the pixel.
     pub fn crypto_id_at(&self, layer: &str, i: usize) -> Option<u32> {
-        let mut ids: Vec<(u32, f32)> = vec![];
-        for (id, cov) in self.crypto_rank_planes(layer) {
-            let (Some(id), Some(&c)) = (id.get(i), cov.get(i)) else { continue };
-            if c > 0.0 {
-                match ids.iter_mut().find(|(h, _)| *h == id.to_bits()) {
-                    Some((_, sum)) => *sum += c,
-                    None => ids.push((id.to_bits(), c)),
-                }
-            }
-        }
-        // `min_by` keeps the first of equal elements: a tie goes to the lower rank.
-        ids.into_iter().min_by(|a, b| b.1.total_cmp(&a.1)).map(|(h, _)| h)
+        crypto_top(&self.crypto_rank_planes(layer), i)
     }
 
     /// Aux pixel index of a layer-space point (nearest; `None` outside).
@@ -188,6 +177,22 @@ impl AuxChannels {
     pub fn manifest_name(&self, layer: &str, hash: u32) -> Option<&str> {
         self.manifests.iter().find(|(l, _)| l == layer)?.1.iter().find(|(_, h)| *h == hash).map(|(n, _)| n.as_str())
     }
+}
+
+/// [`AuxChannels::crypto_id_at`] from rank planes resolved once, for loops over pixels.
+pub fn crypto_top(planes: &[(&[f32], &[f32])], i: usize) -> Option<u32> {
+    let mut ids: Vec<(u32, f32)> = vec![];
+    for (id, cov) in planes {
+        let (Some(id), Some(&c)) = (id.get(i), cov.get(i)) else { continue };
+        if c > 0.0 {
+            match ids.iter_mut().find(|(h, _)| *h == id.to_bits()) {
+                Some((_, sum)) => *sum += c,
+                None => ids.push((id.to_bits(), c)),
+            }
+        }
+    }
+    // `min_by` keeps the first of equal elements: a tie goes to the lower rank.
+    ids.into_iter().min_by(|a, b| b.1.total_cmp(&a.1)).map(|(h, _)| h)
 }
 
 /// MurmurHash3 x86 32-bit (public-domain algorithm by Austin Appleby).

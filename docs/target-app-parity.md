@@ -453,7 +453,7 @@ Mocha and Cineware are third-party and not counted.
 
 | Category | Effects | Notes |
 |---|---|---|
-| 3D Channel | 3D Channel Extract, Cryptomatte, Depth Matte, Depth of Field, EXtractoR, Fog 3D, ID Matte, IDentifier | Read auxiliary channels: multi-layer OpenEXR (any `layer.channel`, Cryptomatte manifests from the header; EXtractoR picks a layer and channels from popups of the footage's layers and channels, `layer.channels`, #295; the footage itself shows the beauty pass, never Cryptomatte or depth, #412) or the compositor's own depth / layer-ID / normal / UV / Cryptomatte pass for precomps of 3D comps. |
+| 3D Channel | 3D Channel Extract, Cryptomatte, Depth Matte, Depth of Field, EXtractoR, Fog 3D, ID Matte, IDentifier | Read auxiliary channels: multi-layer OpenEXR (any `layer.channel`, Cryptomatte manifests from the header; EXtractoR picks a layer and channels from popups of the footage's layers and channels, `layer.channels`, #295; the footage itself shows the beauty pass, never Cryptomatte or depth, #412) or the compositor's own depth / layer-ID / normal / UV / Cryptomatte pass for precomps of 3D comps. The Cryptomatte Selection is picked in the viewer with an eyedropper, and agents list, locate and pick IDs by name (#473). |
 | Immersive Video | VR Blur, VR Chromatic Aberrations, VR Color Gradients, VR Converter, VR De-Noise, VR Digital Glitch, VR Fractal Noise, VR Glow, VR Plane to Sphere, VR Rotate Sphere, VR Sharpen, VR Sphere to Plane | Seam-aware equirectangular processing (wrap-around, pole continuation, latitude-scaled filters), mono / over-under / side-by-side layouts; VR Converter between equirectangular, cube maps (4:3, 3:2, 6:1), sphere map and 2D. |
 | Color Correction | OCIO CDL / Color Space / Display / File / Look Transform, Color Stabilizer | Built-in minimal OCIO-style config (ACES2065-1, ACEScg, ACEScct, sRGB, Rec.709, Rec.2020, Display P3, linear variants, XYZ) from published matrices and transfer functions; `.cube` / `.3dl` / `.csp` / `.spi1d` / `.spi3d` / `.spimtx` LUTs and ASC `.cc` / `.ccc` / `.cdl`. Custom `.ocio` config files are read from the OCIO v2 documentation (Configuration ▸ Custom: colorspaces and display colorspaces with the scene / display reference spaces joined by the default view transform, roles, displays with v1 and v2 views, view transforms, looks; Matrix, File, Exponent, ExponentWithLinear, Log, LogAffine, CDL, Range, Allocation, ColorSpace, Look, DisplayView, Builtin (matrices and display curves) and Group transforms), so Blender 4.x / 5.x configs give the Standard, AgX, Filmic and False Color views (#410). Grading Primary / Tone transforms, the ACES output and gamut-compression builtins and HLG pass colours through, and the effect shows a warning naming them (`effect.warning`). |
 | Distort | CC Flo Motion, Liquify, Rolling Shutter Repair | Liquify strokes are effect data replayed into a displacement mesh (`liquify.stroke` / `liquify.clear` commands; no interactive viewer brush yet). Rolling Shutter Repair uses the KLT tracker. |
@@ -859,6 +859,18 @@ Black / White, render). The colour eyedroppers of Keying effects sample the effe
 rather than the keyed frame (Ctrl/Cmd+click averages 5 × 5 pixels); agents do the same with
 `effect.pickColor {effect, param, x, y, average?}` (effect space). Searching "keylight" in
 Effects & Presets, or `list_effects`, finds it.
+
+Since (#473): Cryptomatte IDs are picked in the Composition viewer. After Effects' Cryptomatte
+(fnord's plug-in, built in since 17.0) picks when the effect is selected: a click with the
+Selection tool replaces the Selection, Shift adds, any other modifier removes, and a click on an
+empty pixel empties it ([fnord's openexrAE source](https://gitlab.com/fnordware/openexrAE/-/blob/master/src/Cryptomatte_AE_UI.cpp),
+[Adobe, 17.0](https://blog.adobe.com/en/publish/2019/11/04/adobe-after-effects-is-faster-than-ever)).
+EffectCraft keeps the modifiers (Alt or Ctrl removes; Option, Cmd or Ctrl on a Mac) behind an
+eyedropper button that stays on until Esc, names and highlights the ID under the cursor before
+the click, makes each pick one undo step and ignores clicks off the IDs. After Effects' Selection
+can't be set from scripts ([Psyop/Cryptomatte#166](https://github.com/Psyop/Cryptomatte/issues/166));
+here it is text, and agents use `effect.cryptomatteIds`, `effect.cryptomatteCoverage`,
+`effect.cryptomatteAt` and `effect.pickCryptomatte {name | hash | x, y, mode}`.
 
 ### Update: M4.9–M4.11 nested comps and motion blur
 
