@@ -307,12 +307,12 @@ fn hidden_and_floating_panels_are_remapped() {
     dock.apply(Action::Float { panel: alpha, rect: [20.0, 30.0, 400.0, 300.0] }, dock::permissions).unwrap();
     dock.apply(Action::Close { panel: beta }, dock::permissions).unwrap();
     store.write(WORKSPACES_FILE, &file(&dock, &[(900_001, "Alpha.jsx"), (900_002, "Beta.jsx"), (900_003, "Gamma.jsx")])).unwrap();
-    // Each script's window has the number of the next script in the file.
-    let app = EffectcraftApp::new(session_with_windows(&store, &[(900_002, "Alpha.jsx"), (900_003, "Beta.jsx"), (900_001, "Gamma.jsx")]));
-    let [alpha, beta, gamma] = [panel_of(&app.session, "Alpha.jsx"), panel_of(&app.session, "Beta.jsx"), panel_of(&app.session, "Gamma.jsx")];
+    // Beta's script is closed, and each open script's window has the number of another in the file.
+    let app = EffectcraftApp::new(session_with_windows(&store, &[(900_002, "Alpha.jsx"), (900_001, "Gamma.jsx")]));
+    let [alpha, gamma] = [panel_of(&app.session, "Alpha.jsx"), panel_of(&app.session, "Gamma.jsx")];
     assert!(app.ui.dock.is_floating(alpha), "{:?}", app.ui.dock);
     assert!(app.ui.dock.is_docked(gamma), "{:?}", app.ui.dock);
-    let (_, location) = app.ui.dock.hidden.iter().find(|(p, _)| *p == beta).unwrap_or_else(|| panic!("{:?}", app.ui.dock));
+    let (_, location) = app.ui.dock.hidden.iter().find(|(p, _)| matches!(p, PanelKind::ScriptPanel(_))).unwrap_or_else(|| panic!("{:?}", app.ui.dock));
     assert_eq!(location.anchor, Some(gamma));
     assert_eq!(location.placement, Placement::Tab { before: Some(gamma) });
 }
@@ -497,4 +497,24 @@ fn showing_a_panel_whose_script_is_closed_opens_no_tab() {
         assert_eq!(dead_tabs(&app), [], "locked {locked}");
         assert_eq!(app.ui.focused, focused, "locked {locked}");
     }
+}
+
+#[test]
+fn a_panel_closed_in_a_workspace_shows_there_while_its_script_is_open() {
+    let store = store_with(&["Alpha.jsx"]);
+    let mut h = harness(EffectcraftApp::new(restored(&store)));
+    let closed = panel_of(&h.state().session, "Alpha.jsx");
+    tab_beside(&mut h, closed, PanelKind::Project);
+    h.state_mut().close_panel(closed);
+    h.run_steps(2);
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &egui::Context::default(), "window.saveWorkspaceAs", json!({"name": "W"})).unwrap();
+    assert!(h.state().ui.saved_workspaces["W"].hidden.iter().any(|(p, _)| *p == closed));
+    h.state_mut().set_workspace("Default");
+    h.run_steps(2);
+    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Alpha.jsx"})).unwrap();
+    h.run_steps(3);
+    let alpha = panel_of(&h.state().session, "Alpha.jsx");
+    h.state_mut().set_workspace("W");
+    assert!(h.state().ui.dock.group_of(alpha).contains(&PanelKind::Project), "Alpha is with {:?}", h.state().ui.dock.group_of(alpha));
+    assert_eq!(h.state().session.script_ui.windows.len(), 1, "the same window, not a second run");
 }

@@ -8,7 +8,8 @@
 //!   name, says nothing about which script it was and is dropped.
 //! - [`bind`] gives each open script its references back at its window's id, in every workspace.
 //! - [`fit`] hides what the current workspace shows of scripts that aren't open. Their place stays
-//!   in `hidden` and in the stored workspaces, for [`bind`] to find when the script opens.
+//!   in `hidden` and in the stored workspaces, for [`bind`] to find when the script opens, and
+//!   brings back a hidden panel whose script is open.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -145,10 +146,18 @@ pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
     ui.maximized = ui.maximized.map(|panel| remap_panel(panel, &mut map));
 }
 
-/// `ui.dock` shows no panel whose script window isn't open. Focus and the maximized panel follow.
+/// `ui.dock` shows no panel whose script window isn't open, and shows each one whose window is
+/// open and that it holds a place for. Focus and the maximized panel follow.
 pub(crate) fn fit(ui: &mut UiState, script_ui: &ScriptUi) {
     let live = |panel: &PanelKind| !matches!(panel, PanelKind::ScriptPanel(id) if script_ui.window(*id).is_none());
     hide_unless(&mut ui.dock, live);
+    let waiting: Vec<PanelKind> =
+        ui.dock.hidden.iter().map(|(panel, _)| *panel).filter(|panel| matches!(panel, PanelKind::ScriptPanel(_)) && live(panel)).collect();
+    for panel in waiting {
+        if let Err(error) = ui.dock.set_visible(panel, true, None, crate::dock::permissions) {
+            log::warn!("An open ScriptUI panel stays hidden: {error}");
+        }
+    }
     if !live(&ui.focused) {
         ui.focused = UiState::default().focused;
     }
