@@ -564,7 +564,8 @@ fn noise(seed: u64, idx: u64, t: f64) -> f64 {
     let i = t.floor();
     let f = t - i;
     let i = i as i64;
-    let p = |k: i64| hash(seed, idx, i + k);
+    // `i` saturates at the i64 ends for an absurd `t`, so the neighbours wrap rather than overflow.
+    let p = |k: i64| hash(seed, idx, i.wrapping_add(k));
     // Catmull-Rom through four lattice values keeps the motion C1-continuous.
     let (p0, p1, p2, p3) = (p(-1), p(0), p(1), p(2));
     let v = 0.5 * (2.0 * p1 + (-p0 + p2) * f + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f * f * f);

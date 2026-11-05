@@ -140,6 +140,41 @@ fn gizmo_segments_clip_at_the_near_plane() {
     assert!(project_segment(&pc, vec3(0.0, 0.0, -200.0), vec3(0.0, 0.0, -300.0)).is_none());
 }
 
+/// A 640×360 comp whose Box (anchor 40,40) is a child of Parent (anchor 50,50) at (100, 60).
+fn parented_session(parent: serde_json::Value) -> (effectcraft_engine::Session, u64) {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 640, "height": 360, "duration": 1})).unwrap();
+    let id = |v: serde_json::Value| v["layer"].as_u64().unwrap();
+    let p = id(s.execute("layer.newSolid", json!({"name": "Parent", "color": "#000000", "width": 100, "height": 100})).unwrap());
+    let c = id(s.execute("layer.newSolid", json!({"name": "Box", "color": "#000000", "width": 80, "height": 80})).unwrap());
+    for (path, value) in parent.as_object().unwrap() {
+        s.execute("prop.set", json!({"layer": p, "path": format!("transform/{path}"), "value": value})).unwrap();
+    }
+    s.execute("layer.setParent", json!({"layers": [c], "parent": p, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": c, "path": "transform/position", "value": [100.0, 60.0]})).unwrap();
+    (s, c)
+}
+
+fn with_ctx<T>(s: &effectcraft_engine::Session, f: impl FnOnce(&EvalCtx) -> T) -> T {
+    let comp = s.active_comp().unwrap();
+    f(&EvalCtx::new(&s.project, s.active_comp_id().unwrap(), comp, Tick::ZERO))
+}
+
+/// #2870: the pivot of a child follows its parent, through the camera for a 3D layer
+/// and none behind it.
+#[test]
+fn anchor_in_comp_follows_the_parent_and_the_camera() {
+    let (mut s, c) = parented_session(json!({"position": [400.0, 200.0]}));
+    with_ctx(&s, |ctx| assert_eq!(anchor_in_comp(ctx, ctx.comp.layer(LayerId(c)).unwrap()), Some([450.0, 210.0])));
+    s.execute("layer.setSwitch", json!({"layers": [c], "switch": "threeD", "value": true})).unwrap();
+    with_ctx(&s, |ctx| {
+        let a = anchor_in_comp(ctx, ctx.comp.layer(LayerId(c)).unwrap()).unwrap();
+        assert!((a[0] - 450.0).abs() < 1e-6 && (a[1] - 210.0).abs() < 1e-6, "{a:?}");
+    });
+    s.execute("prop.set", json!({"layer": c, "path": "transform/position", "value": [100.0, 60.0, -1e6]})).unwrap();
+    with_ctx(&s, |ctx| assert_eq!(anchor_in_comp(ctx, ctx.comp.layer(LayerId(c)).unwrap()), None));
+}
+
 /// #999: a vertex drag pans the view only near or past the edge, toward it, faster further out.
 #[test]
 fn edge_pan_speed_moves_toward_the_edge() {
@@ -150,4 +185,15 @@ fn edge_pan_speed_moves_toward_the_edge() {
     assert!(edge_pan_speed(area, pos2(20.0, 350.0)).x > left.x, "faster past the edge");
     let corner = edge_pan_speed(area, pos2(950.0, 700.0));
     assert!(corner.x < 0.0 && corner.y < 0.0, "{corner:?}");
+}
+
+/// Every 3D view names its own `view.3d.*` command: a typo in that mapping would fall back to the
+/// English label silently, which is what the viewer showed before (#2691).
+#[test]
+fn every_3d_view_finds_its_japanese_row() {
+    crate::i18n::ui::set_current("ja");
+    for v in View3D::ALL {
+        assert_ne!(view3d_label(v), v.label(), "{v:?} has no Japanese row");
+    }
+    crate::i18n::ui::set_current("en");
 }

@@ -299,6 +299,51 @@ fn save_dialogs_offer_the_file_extension() {
     assert_eq!(*asked.borrow(), ["project Frame.png"]);
 }
 
+/// #2788: Save As, Save a Copy (`<name> copy`) and Save a Copy As XML start from the open
+/// project's name (in its folder), not Untitled Project.
+#[test]
+fn save_as_dialogs_start_from_the_open_project() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "A", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("ec-save-as-name-{}", std::process::id()));
+    let project = dir.join("Intro.ecproj");
+    app.session.path = Some(project.to_string_lossy().to_string());
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (a, b) = (asked.clone(), asked.clone());
+    app.hooks.pick_save = Some(Box::new(move |name: &str| {
+        a.borrow_mut().push(format!("project {name}"));
+        None
+    }));
+    app.hooks.pick_save_file = Some(Box::new(move |name: &str, ext: &str| {
+        b.borrow_mut().push(format!("file {name} [{ext}]"));
+        None
+    }));
+    for id in ["file.saveAs", "file.saveCopy", "file.saveCopyAsXml"] {
+        invoke(&mut app, &ctx, id, json!({})).unwrap();
+    }
+    let xml = dir.join("Intro.ecprojx").to_string_lossy().to_string();
+    // Save a Copy names another file: it would refuse to write over the open project.
+    assert_eq!(*asked.borrow(), ["project Intro.ecproj".to_string(), "project Intro copy.ecproj".into(), format!("file {xml} [ecprojx]")]);
+    // An open XML project's XML copy is another file too.
+    app.session.path = Some(dir.join("Intro.ecprojx").to_string_lossy().to_string());
+    asked.borrow_mut().clear();
+    invoke(&mut app, &ctx, "file.saveCopyAsXml", json!({})).unwrap();
+    let copy = dir.join("Intro copy.ecprojx").to_string_lossy().to_string();
+    assert_eq!(*asked.borrow(), [format!("file {copy} [ecprojx]")]);
+    app.session.path = Some(project.to_string_lossy().to_string());
+    // The non-blocking dialog gets the whole path, so it opens in the project's folder.
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
+    let dialog = pending.lock().unwrap().pop().expect("a dialog was shown");
+    assert_eq!(dialog, crate::FileDialog::Save { default: project.to_string_lossy().to_string(), ext: "ecproj".into(), project: true });
+}
+
 /// File ▸ Scripts ▸ Recent Script Files and its key run a script again without a file dialog.
 #[test]
 fn recent_script_files_run_without_a_dialog() {
@@ -591,4 +636,52 @@ fn queue_close_keeps_passive_viewer_focus_across_frames() {
 fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
+}
+
+/// A successful command that reports per-item problems (`errors`) shows a compact, readable
+/// report in the status line: `file: error; …`, first three and a count, never raw JSON.
+#[test]
+fn bundle_result_errors_show_compactly_in_the_status_line() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let result = json!({"installed": [], "errors": [
+        {"file": "a.wasm", "error": "already installed"},
+        {"file": "b.wasm", "error": "does not load"},
+        {"file": "c.wasm", "error": "cannot read it"},
+        {"error": "cannot read the bundle folder"},
+    ]});
+    super::frontend::show_result_errors(&mut app, &result);
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+    // A clean success leaves the status line alone.
+    super::frontend::show_result_errors(&mut app, &json!({"installed": ["x.wasm"], "errors": []}));
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+}
+
+/// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,
+/// a plain install asks for a `.wasm`, and with both given inline nothing asks at all.
+#[test]
+fn effect_plugin_install_dialog_router() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    // The bundle menu entry: a folder picker.
+    assert_eq!(invoke(&mut app, &ctx, "effect.plugins.install", json!({"bundle": true})).unwrap(), json!({"dialog": "effect.plugins.install"}));
+    assert_eq!(pending.lock().unwrap().pop().unwrap(), crate::FileDialog::Folder, "the bundle asks for a folder");
+    // The plain command: a `.wasm` file picker.
+    assert_eq!(invoke(&mut app, &ctx, "effect.plugins.install", json!({})).unwrap(), json!({"dialog": "effect.plugins.install"}));
+    let crate::FileDialog::Open { exts, many } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
+    assert_eq!(exts, vec!["wasm".to_string()], "{exts:?}");
+    assert!(!many);
+    // `path` given inline overrides the bundle ask: the command runs directly, opening no dialog
+    // (this session has no plug-in loader, so it errors — but nothing was asked).
+    let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"bundle": true, "path": "x.wasm"}));
+    assert!(r.is_err(), "{r:?}");
+    assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline path");
+    // A supplied `folder` is a bundle source too: asking for a file would let the install take
+    // the picked file and ignore the folder, so nothing is asked.
+    let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"folder": "some/where"}));
+    assert!(r.is_err(), "{r:?}");
+    assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline folder");
 }
