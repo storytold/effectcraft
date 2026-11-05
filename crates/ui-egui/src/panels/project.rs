@@ -508,11 +508,22 @@ fn name_fit(app: &EffectcraftApp, p: &egui::Painter, rows: &[(ItemId, usize)]) -
         .fold(0.0, f32::max)
 }
 
+/// The part of the panel the optional columns keep next to a widest Name column (points): room
+/// for some of their content and a horizontal scroll bar track that can be dragged.
+const MIN_OPTIONAL_VIEW: f32 = 40.0;
+
+/// The widest the Name column gets in a panel `width` points wide: the width less the Label
+/// column (40 points), and less [`MIN_OPTIONAL_VIEW`] while optional columns are shown.
+fn name_max_w(app: &EffectcraftApp, width: f32) -> f32 {
+    let optional = if app.ui.project_columns.iter().any(|k| COLUMNS.iter().any(|c| c.0 == k)) { MIN_OPTIONAL_VIEW } else { 0.0 };
+    (width - 40.0 - optional).max(MIN_NAME_W)
+}
+
 /// Column positions. The Name column is as wide as the user dragged it, else wide enough for
-/// the names listed (`fit`), as After Effects shows full names; at most the panel's width less
-/// the Label column (the optional columns scroll under it).
+/// the names listed (`fit`), as After Effects shows full names; at most [`name_max_w`] (the
+/// optional columns scroll under it).
 fn layout_columns(app: &mut EffectcraftApp, rect: Rect, fit: f32) -> Columns {
-    let max_w = (rect.width() - 40.0).max(MIN_NAME_W);
+    let max_w = name_max_w(app, rect.width());
     let auto = (rect.width() * 0.40).clamp(MIN_NAME_W, 260.0).max(fit);
     let name_w = app.ui.project_name_w.filter(|w| w.is_finite()).unwrap_or(auto).clamp(MIN_NAME_W, max_w);
     let label_x = rect.min.x + name_w + 14.0;
@@ -599,7 +610,7 @@ fn draw_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, h
     if eresp.double_clicked() {
         app.ui.project_name_w = None;
     } else if eresp.dragged() {
-        let max_w = (hdr.width() - 40.0).max(MIN_NAME_W);
+        let max_w = name_max_w(app, hdr.width());
         app.ui.project_name_w = Some((app.ui.project_name_w.unwrap_or(cl.name_w).min(max_w) + eresp.drag_delta().x).clamp(MIN_NAME_W, max_w));
     }
     eresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::tr("Resize the Name column")));
@@ -1200,7 +1211,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gutter_id = egui::Id::unique("project-gutter");
     let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
     let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
-    let fit = name_fit(app, &p, &visible_rows(app));
+    // Only an automatic width (or an invalid saved one) measures the names.
+    let fit = if app.ui.project_name_w.is_some_and(f32::is_finite) { 0.0 } else { name_fit(app, &p, &visible_rows(app)) };
     let cl = layout_columns(app, content, fit);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
@@ -1445,14 +1457,19 @@ mod tests {
     }
 
     /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")
-    /// up to the panel's width less the Label column; a width the user dragged wins.
+    /// up to the panel's width less the Label column and, while optional columns show, room for
+    /// them; a width the user dragged wins.
     #[test]
     fn the_name_column_fits_the_names_up_to_the_panel_width() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 400.0));
         assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 260.0);
         assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
-        assert_eq!(layout_columns(&mut app, rect, 2000.0).name_w, 660.0);
+        // The optional columns keep 40 points more: some content and a usable scroll bar track.
+        assert!(!app.ui.project_columns.is_empty());
+        let cl = layout_columns(&mut app, rect, 2000.0);
+        assert_eq!(cl.name_w, 620.0);
+        assert!(rect.max.x - cl.opt_x0 >= 50.0, "the optional columns keep {} points", rect.max.x - cl.opt_x0);
         let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 400.0));
         assert_eq!(layout_columns(&mut app, narrow, 400.0).name_w, MIN_NAME_W);
         app.ui.project_name_w = Some(150.0);
@@ -1460,6 +1477,9 @@ mod tests {
         app.ui.project_name_w = Some(f32::NAN);
         assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
         app.ui.project_name_w = Some(5000.0);
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 620.0);
+        // Without optional columns the Name column may take all but the Label column.
+        app.ui.project_columns.clear();
         assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 660.0);
     }
 
