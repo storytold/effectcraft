@@ -36,8 +36,8 @@
 
 use crate::effect_map::{Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, popup_key};
 use crate::{
-    CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef, LevelsData, MeshData,
-    ParamKind, ParamValue,
+    CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, ExtractorChannels, HueSaturationData, Layer as AepLayer, LayerRef,
+    LevelsData, MeshData, ParamKind, ParamValue,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
@@ -464,6 +464,40 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
         Extra::MeshWarp => match MeshData::parse(data) {
             Some(m) => import_mesh(&m, here, size, group, col),
             None => col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh is unreadable, defaults used")),
+        },
+        Extra::Extractor => match ExtractorChannels::parse(data) {
+            // The fresh channels: EffectCraft's own R, G, B, A (its A is the input's alpha, After
+            // Effects' `(copy)`).
+            Some(c) if c.is_default() => {
+                for (id, name) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "A")] {
+                    if let Some(prop) = group.prop_mut(id) {
+                        prop.value = Value::Str(name.into());
+                    }
+                }
+            }
+            Some(c) => {
+                let names: Vec<&str> = c.channels.iter().map(|(_, n)| n.as_str()).collect();
+                col.lose(
+                    LossCategory::Effects,
+                    format!("{here}: the channels {} are not imported (only the default channels are sampled), R, G, B, A used", names.join(", ")),
+                );
+            }
+            None => col.lose(LossCategory::Effects, format!("{here}: the Channel Info data is not in the sampled layout, R, G, B, A used")),
+        },
+        Extra::Identifier => match crate::identifier_channel_type(data) {
+            Some("Object ID") => {
+                if let Some(prop) = group.prop_mut("channelType") {
+                    prop.value = Value::Enum(0);
+                }
+                // The data names the type, not the channel After Effects reads: with this Channel
+                // Info After Effects left the sampled EXR unchanged, where EffectCraft draws the
+                // footage's object ID channel.
+                col.lose(
+                    LossCategory::Effects,
+                    format!("{here}: the channel IDentifier reads (Channel Info) is not decoded; EffectCraft uses the footage's object ID channel"),
+                );
+            }
+            other => col.lose(LossCategory::Effects, format!("{here}: the channel type {other:?} is not imported (only Object ID is sampled), Object ID used")),
         },
         Extra::None => {}
     }

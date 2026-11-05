@@ -307,3 +307,54 @@ impl MeshData {
         Some(out)
     }
 }
+
+/// EXtractoR's Channel Info data (`EXtractoR-0013`, 688 bytes, the plug-in's own little-endian
+/// layout; read from the default instances of the importer block of 2026-11-05, where no channel
+/// was changed): a `u32` 1 and 28 bytes, then four records of 164 bytes (Red, Green, Blue, Alpha),
+/// each a `u32` kind (1 a named channel, 2 the input's channel: `(copy)` on Alpha) and the channel
+/// name from byte 35, NUL-terminated. Only the default (`R`, `G`, `B`, `(copy)`) is sampled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractorChannels {
+    /// Per output channel (red, green, blue, alpha): the kind and the name.
+    pub channels: [(u32, String); 4],
+}
+
+impl ExtractorChannels {
+    /// The data's length.
+    pub const LEN: usize = 688;
+    const RECORD: usize = 164;
+
+    /// `None` when the data does not have this layout.
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() != Self::LEN || data.get(..4)? != 1u32.to_le_bytes() {
+            return None;
+        }
+        let mut channels: [(u32, String); 4] = Default::default();
+        for (k, slot) in channels.iter_mut().enumerate() {
+            let at = 32usize.checked_add(k.checked_mul(Self::RECORD)?)?;
+            let rec = data.get(at..at.checked_add(Self::RECORD)?)?;
+            let kind = u32::from_le_bytes(*rec.first_chunk::<4>()?);
+            let name = rec.get(35..)?;
+            let end = name.iter().position(|b| *b == 0)?;
+            let name = std::str::from_utf8(name.get(..end)?).ok()?;
+            *slot = (kind, name.to_string());
+        }
+        Some(Self { channels })
+    }
+
+    /// The channels of a fresh EXtractoR: Red, Green and Blue from the channels of those names,
+    /// Alpha copied from the input.
+    pub fn is_default(&self) -> bool {
+        let want = [(1, "R"), (1, "G"), (1, "B"), (2, "(copy)")];
+        self.channels.iter().zip(want).all(|((k, n), (wk, wn))| *k == wk && n == wn)
+    }
+}
+
+/// IDentifier's Channel Info data (`IDentifier-0005`, 148 bytes): the channel type's name,
+/// NUL-terminated from byte 19 (`Object ID` in every sample of the importer block of 2026-11-05;
+/// the bytes around it differ between instances with the same settings and are not read).
+pub fn identifier_channel_type(data: &[u8]) -> Option<&str> {
+    let s = data.get(19..)?;
+    let end = s.iter().position(|b| *b == 0)?;
+    std::str::from_utf8(s.get(..end)?).ok()
+}

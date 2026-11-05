@@ -14,6 +14,7 @@ mod effects_batch5;
 mod effects_quickwins;
 mod effects_round2;
 mod effects_round3;
+mod effects_thirdparty;
 mod fx_inject;
 mod markers;
 mod masks;
