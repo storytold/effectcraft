@@ -264,7 +264,10 @@ impl DisplayGpu {
         let f16 = wgpu::TextureFormat::Rgba16Float;
         let rgba8 = wgpu::TextureFormat::Rgba8Unorm;
         match src {
-            Source::F16(f) => write(f.width, f.height, f16, bytemuck::cast_slice(f.bits())),
+            Source::F16(f) => {
+                debug_assert_eq!(k, 1, "half-float frames past the texture limit take the CPU pass");
+                write(f.width, f.height, f16, bytemuck::cast_slice(f.bits()))
+            }
             Source::Rgba8(c) if k > 1 => {
                 let c = crate::frames::fit_texture_by((**c).clone(), usize::MAX, k);
                 write(c.size[0] as u32, c.size[1] as u32, rgba8, c.as_raw())

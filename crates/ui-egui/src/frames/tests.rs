@@ -1163,7 +1163,8 @@ fn oversized_half_float_frames_convert_before_averaging() {
     use effectcraft_engine::viewer::{Channel, DisplayPass};
     let mut img = effectcraft_engine::render::Image::new(2, 1);
     img.data.copy_from_slice(&[[8.0, 8.0, 8.0, 1.0], [0.0, 0.0, 0.0, 1.0]]);
-    let lin = effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Linear, hdr: effectcraft_engine::project::HdrMode::Clip };
+    let lin =
+        effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Linear, hdr: effectcraft_engine::project::HdrMode::Clip };
     let f = Arc::new(F16Frame::from_image(&img, lin));
     let pass = DisplayPass::new(Channel::Rgb, false, -2.0, lin, None);
     let src = Source::F16(f.clone());
