@@ -590,6 +590,11 @@ pub(crate) fn import_lumetri(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '
             Role::Lut { lut } => note_lut(p, row.suffix, data(), &mut luts[usize::from(!lut)]),
             // The Look's colour space only applies to a Look, which is reported.
             Role::LookSpace => {}
+            Role::Data(_) if p.stored().is_some() && data().is_none() => {
+                // The value record is there but its aRbs/aRbp payload is not: damaged, not the
+                // default (a parameter without a record is the default).
+                col.lose(LossCategory::DamagedData, format!("{here}: the data of {label} is missing, not imported (the default used)"));
+            }
             Role::Data(Data::HslKey) => import_hsl_key(data(), &here, &mut *group, &mut *col),
             Role::Data(d) => {
                 if p.is_animated() || p.stored().is_some_and(|s| s.expression().is_some()) {

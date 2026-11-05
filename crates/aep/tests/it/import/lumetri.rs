@@ -84,6 +84,8 @@ enum Rec {
     Num(f64, u32),
     /// Arbitrary data.
     Data(Vec<u8>),
+    /// A value record whose arbitrary data (`aRbs`) is missing.
+    NoData,
 }
 
 /// A static value record after the one After Effects wrote for Glow's A & B Midpoint (its header,
@@ -229,6 +231,7 @@ fn sspc(defs: &[(u16, Def)], recs: &[(u16, Rec)], template: &Chunk<'_>) -> Chunk
                 values.push(record(template, 1, 0.0));
                 values.push(Chunk::list(*b"aRbs", vec![Chunk::data(*b"aRbp", d)]));
             }
+            Rec::NoData => values.push(record(template, 1, 0.0)),
         }
     }
     Chunk::list(*b"sspc", vec![nested(*b"fnam", b"Lumetri Color"), Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)])
@@ -434,6 +437,21 @@ fn the_master_rgb_curve_arrives_moved_channel_curves_are_reported() {
     // Damaged: the wrong length.
     let (_, r) = run(&[(39, Rec::Data(master))]);
     assert!(losses(&r).iter().any(|x| x.contains("RGB Curve (ADBE Lumetri-0039) is unreadable")), "{:?}", losses(&r));
+}
+
+/// A value record without its arbitrary data is damaged, not the default: reported for the RGB
+/// curve and the HSL key, the neighbours stay as they were.
+#[test]
+fn a_value_record_without_its_data_is_reported_as_damaged() {
+    for (suffix, name) in [(39, "RGB Curve (ADBE Lumetri-0039)"), (73, "HSL Sliders (ADBE Lumetri-0073)")] {
+        let (g, r) = run(&[(suffix, Rec::NoData)]);
+        let l = losses(&r);
+        assert!(l.len() == 1 && l[0].contains(name) && l[0].contains("is missing"), "{suffix}: {l:?}");
+        assert!(r.report.losses.iter().any(|x| x.category == LossCategory::DamagedData), "{suffix}");
+        // The grade stays at the default.
+        assert_eq!(val(&g, "curves/rgbCurves/master"), Value::Str("0,0 1,1".into()));
+        assert_eq!(num(&g, "hslSecondary/key/hueRange"), 180.0);
+    }
 }
 
 #[test]
