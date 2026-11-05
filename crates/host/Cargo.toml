@@ -18,10 +18,13 @@ effectcraft-expr = { workspace = true }
 effectcraft-script = { workspace = true }
 effectcraft-export = { workspace = true }
 effectcraft-plugin = { workspace = true }
+serde_json = { workspace = true }
 
 # WebAssembly effect plug-ins run in wasmi on native builds.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 effectcraft-plugin = { workspace = true, features = ["wasm"] }
+# External effect helpers: separate processes, so their native code can't take the app down.
+effectcraft-helper-host = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

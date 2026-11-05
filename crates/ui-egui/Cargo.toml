@@ -48,6 +48,7 @@ egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 pollster = "1"
 effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
+effectcraft-media = { workspace = true }
 exr = { workspace = true }
 
 [build-dependencies]

@@ -131,3 +131,6 @@ sync_github_name = false
 [people.JonRC]
 real_name = "Jonathan Cardoso"
 display_name = "Jonathan Cardoso"
+
+[people.nazar-gavrylyk]
+sync_github_name = true
