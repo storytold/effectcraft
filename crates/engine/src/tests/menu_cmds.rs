@@ -2138,6 +2138,39 @@ fn quick_set_anchor_skips_locked_and_3d_layers_and_checks_its_point() {
     assert!(s.execute("layer.quickSetAnchor", json!({"layers": [flat]})).is_err());
 }
 
+/// The anchor is set at the current time and the Position shift comes from the current Anchor
+/// Point, Scale and Rotation, so a layer where one of them is keyed would move at other frames:
+/// it is skipped, and alone it is an error.
+#[test]
+fn quick_set_anchor_skips_layers_whose_anchor_scale_or_rotation_is_keyed() {
+    for path in ["transform/anchor", "transform/scale", "transform/rotation"] {
+        let mut s = comp();
+        let flat = solid(&mut s, "#00ff00");
+        let keyed = solid(&mut s, "#0000ff");
+        let value = if path.ends_with("rotation") {
+            json!(0)
+        } else if path.ends_with("scale") {
+            json!([100, 100])
+        } else {
+            json!([100, 50])
+        };
+        let later = if path.ends_with("rotation") {
+            json!(90)
+        } else if path.ends_with("scale") {
+            json!([50, 50])
+        } else {
+            json!([20, 10])
+        };
+        s.execute("prop.addKey", json!({"layer": keyed, "path": path, "time": 0, "value": value})).unwrap();
+        s.execute("prop.addKey", json!({"layer": keyed, "path": path, "time": 2, "value": later})).unwrap();
+        let before = layer(&s, keyed);
+        let r = s.execute("layer.quickSetAnchor", json!({"layers": [flat, keyed], "point": "topLeft"})).unwrap();
+        assert_eq!(r["layers"], 1, "{path}: only the layer without keys changed");
+        assert_eq!(layer(&s, keyed), before, "{path}: the keyed layer is untouched");
+        assert!(s.execute("layer.quickSetAnchor", json!({"layers": [keyed], "point": "top"})).is_err(), "{path}: nothing to do");
+    }
+}
+
 /// A child of a rotated, scaled parent keeps its place when its anchor moves (Position is in the
 /// parent's space).
 #[test]

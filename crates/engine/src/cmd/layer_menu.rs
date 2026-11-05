@@ -262,8 +262,9 @@ const ANCHOR_POINTS: [(&str, u8, u8); 9] = [
 
 /// `layer.quickSetAnchor {point, layers?}`: move the Anchor Point of the 2D layers to one of the
 /// nine points of their content (corners, edge midpoints, centre) and shift Position, and every
-/// Position key, so nothing moves on screen. 3D and locked layers are skipped; an error when no
-/// layer is left.
+/// Position key, so nothing moves on screen. 3D and locked layers, and layers with an animated
+/// (or expression-driven) Anchor Point, Scale or Rotation, are skipped; an error when no layer is
+/// left.
 fn quick_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "layer.quickSetAnchor";
     let name = str_p(p, "point").ok_or_else(|| bad(c, "missing `point`"))?;
@@ -275,9 +276,15 @@ fn quick_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let ids = super::unlocked(s, cid, ids, c)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let flat: Vec<LayerId> = ids.into_iter().filter(|id| comp.layer(*id).is_some_and(|l| !l.is_3d())).collect();
+    // The anchor is set at the current time and the Position shift is worked out from the current
+    // Anchor Point, Scale and Rotation, so a layer where any of them changes over time would move
+    // at other frames: it is skipped like a 3D one.
+    let changes = |l: &effectcraft_project::Layer| {
+        l.transform().is_some_and(|tr| ["anchor", "scale", "rotation"].iter().any(|m| tr.get(m).is_some_and(|p| p.is_animated() || p.has_expression())))
+    };
+    let flat: Vec<LayerId> = ids.into_iter().filter(|id| comp.layer(*id).is_some_and(|l| !l.is_3d() && !changes(l))).collect();
     if flat.is_empty() {
-        return Err(bad(c, "Quick Set Anchor works on 2D layers only"));
+        return Err(bad(c, "Quick Set Anchor works on 2D layers whose Anchor Point, Scale and Rotation are not animated"));
     }
     let at = |lo: f64, hi: f64, i: u8| lo + (hi - lo) * f64::from(i) / 2.0;
     move_anchor(s, cid, &flat, "Quick Set Anchor", |[x0, y0, x1, y1]| [at(x0, x1, col), at(y0, y1, row)])
@@ -950,7 +957,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Quick Set Anchor",
             ["Layer", "Transform", "Quick Set Anchor"],
             None,
-            "{point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?} → {layers}: moves the Anchor Point of 2D layers to that point of their content and compensates Position (and its keys)",
+            "{point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?} → {layers}: moves the Anchor Point of 2D layers to that point of their content and compensates Position (and its keys); skips 3D and locked layers and those with an animated Anchor Point, Scale or Rotation",
             has_layers,
             quick_set_anchor
         ),
