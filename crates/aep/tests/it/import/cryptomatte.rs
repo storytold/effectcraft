@@ -341,7 +341,11 @@ fn cryptomatte_values_without_a_counterpart_are_reported() {
 
 /// Our own After Effects 2026 sample of the plug-in (2.6.6), corpus `aep/cryptomatte.aep`: one
 /// Cryptomatte on an EXR layer per composition. The first instance has its own definitions, the
-/// others borrow the project's; every Settings data is the fresh one (no layer, no selection).
+/// others borrow the project's. The first six hold the fresh Settings data (no layer, no
+/// selection); the last two come from presets that chose a layer and picked one object
+/// (`box_red` on CryptoObject) or one material (`mat_paint` on CryptoMaterial) in the plug-in's
+/// UI. The EXR's manifest names those hashes, and After Effects draws exactly those objects as
+/// selected.
 #[test]
 #[ignore = "needs aep/cryptomatte.aep in the corpus (EFFECTCRAFT_AEP_FIXTURES); not pinned yet"]
 fn the_after_effects_sample_arrives_as_after_effects_shows_it() {
@@ -351,17 +355,19 @@ fn the_after_effects_sample_arrives_as_after_effects_shows_it() {
     let r = import(&mut project, &bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap();
     assert_eq!(losses(&r, LossCategory::DamagedData), Vec::<String>::new());
     let found = losses(&r, LossCategory::Effects);
-    // (composition, Display, Matte Only, the loss it reports): the readbacks are Output 1
-    // (fresh), 1, 1, 2, 3, 4 and Selection Mode 0, 1, 1, 0, 0, 0.
+    // (composition, Display, Matte Only, layer, selection, the loss it reports): the readbacks
+    // are Output 1 (fresh), 1, 1, 2, 3, 4, 1, 1 and Selection Mode 0, 1, 1, 0, 0, 0, 0, 0.
     let want = [
-        ("crypto-00-defaults", 0, false, None),
-        ("crypto-01-set-all", 0, false, Some("Selection Mode")),
-        ("crypto-02-chk-toggled", 0, false, Some("Selection Mode")),
-        ("crypto-03-pop2-2", 1, false, Some("'Matted Colors'")),
-        ("crypto-04-pop2-3", 1, false, None),
-        ("crypto-05-pop2-4", 1, true, None),
+        ("crypto-00-defaults", 0, false, "", "", None),
+        ("crypto-01-set-all", 0, false, "", "", Some("Selection Mode")),
+        ("crypto-02-chk-toggled", 0, false, "", "", Some("Selection Mode")),
+        ("crypto-03-pop2-2", 1, false, "", "", Some("'Matted Colors'")),
+        ("crypto-04-pop2-3", 1, false, "", "", None),
+        ("crypto-05-pop2-4", 1, true, "", "", None),
+        ("crypto-06-preset-object-box", 0, false, "CryptoObject", "<11a97486>", None),
+        ("crypto-07-preset-material-paint", 0, false, "CryptoMaterial", "<a5deeb9e>", None),
     ];
-    for (comp, display, matte_only, loss) in want {
+    for (comp, display, matte_only, layer, selection, loss) in want {
         let c = project.find_by_name(comp).and_then(|i| i.as_comp()).unwrap_or_else(|| panic!("no {comp}"));
         let g = c.layers.iter().find_map(|l| {
             l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == "ec.3d.cryptomatte").cloned())
@@ -369,7 +375,7 @@ fn the_after_effects_sample_arrives_as_after_effects_shows_it() {
         let g = g.unwrap_or_else(|| panic!("{comp}: no Cryptomatte"));
         assert_eq!(
             (v(&g, "display"), v(&g, "matteOnly"), v(&g, "layerName"), v(&g, "selection")),
-            (Value::Enum(display), Value::Bool(matte_only), str(""), str("")),
+            (Value::Enum(display), Value::Bool(matte_only), str(layer), str(selection)),
             "{comp}"
         );
         let mine: Vec<_> = found.iter().filter(|d| d.starts_with(&format!("{comp}:"))).collect();
@@ -379,4 +385,10 @@ fn the_after_effects_sample_arrives_as_after_effects_shows_it() {
         }
     }
     assert_eq!(found.len(), 3, "{found:?}");
+    // The picked tokens are the manifest's hashes, which are the hashes of the names: EffectCraft
+    // reads `<11a97486>` and `box_red` as the same object.
+    for (name, token) in [("box_red", "<11a97486>"), ("mat_paint", "<a5deeb9e>")] {
+        assert_eq!(effectcraft_effects::selection_hashes(token, None), effectcraft_effects::selection_hashes(name, None), "{name}");
+    }
+    assert_eq!(effectcraft_effects::selection_hashes("<11a97486>", None), vec![0x11a9_7486]);
 }

@@ -537,7 +537,8 @@ S]
 **Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
 sample; read from 88 instances in one production project, not made by us, and from our own After
 Effects 2026 sample 1400 (corpus `aep/cryptomatte.aep`: a fresh instance, Selection Mode on, each
-Output item; scripting read-backs and renders per composition); H for what neither varies):
+Output item, and two presets of our own that choose a layer and pick one object or material in the
+plug-in's UI; scripting read-backs and renders per composition); H for what neither varies):
 `parT` 0 the input layer; 1 Settings: **arbitrary data** (type 11, `Cryptomatte-0001`, a record and
 `aRbs` / `aRbp` in every instance); 2 Output: popup (Colors, Matted Colors, Matted RGBA, Matte
 Only), **`pard` default 1 = Colors** (bytes 56..64 `00000001 0004 0001`, in the instance's own and
@@ -550,19 +551,24 @@ values, so the importer reads this one itself); the built-in entry. As in every 
 first instance has its own `parT`; the others borrow the project's (1400). The Settings data is
 the plug-in's own layout, **little-endian**: `cry1`; bytes 4..32 differ between instances with
 the same settings (zeros in one, pointer-like values in others: not read); the layer name at 32,
-NUL-padded to 64 bytes (`Crypto_Material`, `Crypto_Name`: the channel prefix of the EXR's
-Cryptomatte layer); at 96 a `u32` 1 and a `u32` that is the same in every instance; at 104 the
-`u32` length of the selection text including its NUL; at 108 a `u32` that follows the text (equal
-texts, equal values: not read); a zero byte at 112; the selection text from 113, the matte list as
-comma-and-space separated ID hashes `<0000002a>, <deadbeef>` (303 tokens, all in that form). After
-the text 2 to 3 bytes, zeros or left-overs of a longer earlier text. **A fresh effect** (the `parT`
+NUL-padded to 64 bytes (`CryptoObject`, `CryptoMaterial` in 1400: the EXR layer's name, which is
+also its channel prefix there, so the sample cannot tell which of the two the plug-in stores); at
+96 a `u32` 1 and a `u32` that is the same in every instance; at 104 the `u32` length of the
+selection text including its NUL; at 108 **the MurmurHash3 (x86, 32-bit, seed 0) of the selection
+text with its NUL** (V on the three texts of 1400: `<11a97486>` `0x27880767`, `<a5deeb9e>`
+`0xf7374a5b`, the empty text `0x514e28b7`; not read); a zero byte at 112; the selection text from
+113, the matte list as comma-and-space separated ID hashes `<11a97486>, <deadbeef>` (303 tokens in
+production, all in that form). Each token is the 8-digit hash of a picked name as the EXR's
+manifest lists it, i.e. the MurmurHash3 of the name (1400: `box_red` `11a97486` picked on
+CryptoObject, `mat_paint` `a5deeb9e` on CryptoMaterial). After the text 2 to 3 bytes, zeros or
+left-overs of a longer earlier text (1400's presets: 127 bytes, three zeros after the text). **A fresh effect** (the `parT`
 default and the record alike, 116 bytes, 1400) is `cry1`, zeros to 96, then `u32`s 1,
 `0x514e28b7`, 1, `0x514e28b7` and four zero bytes: no layer and an empty text (length 1, its NUL).
-`0x514e28b7` is MurmurHash3 (x86, 32-bit, seed 0) of a single NUL byte, so the `u32`s at 100 and
-108 look like the hashes of the texts whose lengths precede them, and the zero byte at 112 like a
-first text that is empty in every sample (H: one value). Layer and selection are decoded from the
-production project only; every 1400 instance holds the fresh data (presets that set them are
-still to be made). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
+`0x514e28b7` is the hash of a single NUL byte, so the `u32` at 100 looks like the hash of a first
+text that is empty in every sample, its length the `u32` 1 at 96 and its NUL the zero byte at 112
+(H: one value). Layer and selection decode the same in the production project and in 1400's two
+presets, and After Effects draws exactly the picked objects as selected (`crypto-06`: the box,
+`crypto-07`: box and disc, the two objects of `mat_paint`). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
 a non-zero byte at 112).
 
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)

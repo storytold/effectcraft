@@ -309,19 +309,21 @@ impl MeshData {
 }
 
 /// The Cryptomatte plug-in's Settings data (`Cryptomatte-0001`, the plug-in's own layout,
-/// little-endian; read from 88 instances of one project and the fresh instances of our own
-/// sample 1400, docs/aep-format.md 3.7): the magic `cry1`; bytes 4..32 are not read (they differ
-/// between instances holding the same settings); the Cryptomatte layer's name at 32, NUL-padded to
-/// 64 bytes; at 96 a `u32` 1 and a `u32` (neither read); at 104 the `u32` length of the selection
-/// text including its NUL, a `u32` that changes with the text (not read) and a zero byte; the
-/// selection text from byte 113 (`<0000002a>, <deadbeef>`, the matte list as ID hashes). Bytes
-/// after it are left-overs of a longer earlier text. A fresh effect stores no layer and an empty
-/// text (length 1, its NUL); the `u32`s at 100 and 108 are then both `0x514e28b7`, which is
-/// MurmurHash3 (x86, 32-bit, seed 0) of one NUL byte: each looks like the hash of the text whose
-/// length precedes it, the zero byte at 112 like a first text that is empty in every sample.
+/// little-endian; read from 88 instances of one project and from our own sample 1400, fresh
+/// instances and two presets that pick a layer and an object, docs/aep-format.md 3.7): the magic
+/// `cry1`; bytes 4..32 are not read (they differ between instances holding the same settings);
+/// the Cryptomatte layer's name at 32, NUL-padded to 64 bytes (`CryptoObject`); at 96 a `u32` 1
+/// and a `u32` (neither read); at 104 the `u32` length of the selection text including its NUL,
+/// the `u32` MurmurHash3 (x86, 32-bit, seed 0) of that text with its NUL (not read) and a zero
+/// byte; the selection text from byte 113 (`<11a97486>, <deadbeef>`, the matte list as ID hashes,
+/// the hashes of the picked names). Bytes after it are left-overs of a longer earlier text. A
+/// fresh effect stores no layer and an empty text (length 1, its NUL); the `u32`s at 100 and 108
+/// are then both `0x514e28b7`, the hash of one NUL byte: the one at 100 looks like the hash of a
+/// first text that is empty in every sample, the zero byte at 112 like that text.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CryptomatteData {
-    /// The Cryptomatte layer's name (`Crypto_Material`); empty when none is chosen.
+    /// The Cryptomatte layer's name (`CryptoMaterial`: the EXR layer's name, which is also its
+    /// channel prefix in every sample); empty when none is chosen.
     pub layer: String,
     /// The selection (matte list) as the plug-in stores it.
     pub selection: String,
@@ -401,6 +403,28 @@ mod tests {
         fresh.extend([0; 4]);
         assert_eq!(fresh.len(), 116);
         assert_eq!(CryptomatteData::parse(&fresh), Some(CryptomatteData::default()));
+    }
+
+    /// The Settings data After Effects 2026 wrote for the two presets of sample 1400 (plug-in
+    /// 2.6.6, `crypto-06-preset-object-box` and `crypto-07-preset-material-paint`: a layer chosen
+    /// and one object or material picked in the plug-in's UI), byte for byte: 127 bytes, the `u32`
+    /// at 108 the MurmurHash3 of the text with its NUL, three zero bytes after the text.
+    #[test]
+    fn the_presets_of_our_sample_are_read() {
+        for (layer, selection, hash) in [("CryptoObject", "<11a97486>", 0x2788_0767u32), ("CryptoMaterial", "<a5deeb9e>", 0xf737_4a5b)] {
+            let mut d = b"cry1".to_vec();
+            d.resize(32, 0);
+            d.extend(layer.as_bytes());
+            d.resize(96, 0);
+            for v in [1, 0x514e_28b7, 11, hash] {
+                d.extend(u32::to_le_bytes(v));
+            }
+            d.push(0);
+            d.extend(selection.as_bytes());
+            d.extend([0; 4]);
+            assert_eq!(d.len(), 127);
+            assert_eq!(CryptomatteData::parse(&d), Some(CryptomatteData { layer: layer.into(), selection: selection.into() }), "{layer}");
+        }
     }
 
     #[test]
