@@ -1008,7 +1008,7 @@ impl Frames {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
             return true;
         };
-        let (missing, converting): (Vec<(u128, Arc<egui::ColorImage>)>, bool) = {
+        let (missing, converting): (Vec<(u128, FrameImage)>, bool) = {
             let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
             if queued.len() > 100_000 {
                 queued.clear();
@@ -1022,7 +1022,10 @@ impl Frames {
                 .iter()
                 .filter(|(k, _)| k.same_series(base))
                 .filter_map(|(k, img)| {
-                    let FrameImage::Cpu(img) = img else { return None };
+                    // (GPU frames have no CPU pixels to write)
+                    if img.is_gpu() {
+                        return None;
+                    }
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
@@ -1036,12 +1039,17 @@ impl Frames {
         let (persisted, written) = (self.persisted.clone(), self.written.clone());
         let work = move || {
             for (dk, img) in missing {
-                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
                 // (accepted: the disk cache tracks it until written, and it counts as a try;
                 // refused by a full queue: retried, without counting)
-                if dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
-                    && let Ok(mut w) = written.lock()
-                {
+                let accepted = match &img {
+                    FrameImage::Cpu(img) => {
+                        let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                        dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    }
+                    FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits()),
+                    FrameImage::Gpu(_) => false,
+                };
+                if accepted && let Ok(mut w) = written.lock() {
                     let n = w.1.entry(dk).or_default();
                     *n = n.saturating_add(1);
                 }

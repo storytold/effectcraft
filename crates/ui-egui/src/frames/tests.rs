@@ -1584,9 +1584,19 @@ fn disk_keys_survive_save_and_reopen() {
 /// Roto Brush model stamp in its opts; the disk keys are the worker's, without it.
 #[test]
 fn ram_frames_missing_on_disk_are_written() {
+    ram_frames_missing_on_disk_are_written_as(false);
+}
+
+/// Same for a 32 bpc project, whose RAM frames are half-float.
+#[test]
+fn half_float_ram_frames_missing_on_disk_are_written() {
+    ram_frames_missing_on_disk_are_written_as(true);
+}
+
+fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     use effectcraft_engine::Session;
     use serde_json::json;
-    let dir = std::env::temp_dir().join(format!("ec-persist-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ec-persist-{}-{half}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let disk = DiskCache::open(&dir, 1 << 30).unwrap();
     let mut s = Session::default();
@@ -1605,7 +1615,8 @@ fn ram_frames_missing_on_disk_are_written() {
     let series =
         FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
     for fr in 0..10 {
-        insert(&f, FrameKey { frame: fr, ..series });
+        let frame = if half { FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(8, 8), SRGB))) } else { img() };
+        f.cache.lock().unwrap().insert(FrameKey { frame: fr, ..series }, frame);
     }
     let on_disk = |fr: i64| {
         disk.contains(
