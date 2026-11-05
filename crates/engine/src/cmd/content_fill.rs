@@ -382,6 +382,12 @@ pub(crate) async fn run_plan(
     let mut sink_error: Option<String> = None;
     let mut sink = |idx: usize, img: &Image| -> std::result::Result<(), String> {
         let r = (|| -> std::result::Result<(), String> {
+            // A failed spilled read returns a black fallback frame; never publish it (#2570
+            // review).
+            #[cfg(not(target_arch = "wasm32"))]
+            if spill_probe.has_error() {
+                return Err(spill_probe.take_error().unwrap_or_else(|| "spill: read failed".to_string()));
+            }
             services.store_file(&paths[idx], &png(img)?).map_err(|e| format!("{}: {e}", paths[idx]))?;
             paths_out.push(paths[idx].clone());
             if !report(2 * n + idx as u64 + 1) {

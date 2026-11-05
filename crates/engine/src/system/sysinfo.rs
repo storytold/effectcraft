@@ -224,10 +224,13 @@ pub fn is_memory_backed(path: &std::path::Path) -> bool {
     }
 }
 
-/// The canonical path of `path`'s nearest existing ancestor (or itself).
+/// The canonical path of `path`'s nearest existing ancestor (or itself). Relative paths are
+/// resolved against the current directory first, so a new relative output folder still names
+/// the volume it will be created on.
 #[cfg(target_os = "linux")]
 fn canonical_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut p = path;
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().ok()?.join(path) };
+    let mut p = absolute.as_path();
     loop {
         if let Ok(canonical) = std::fs::canonicalize(p) {
             return Some(canonical);
@@ -237,7 +240,7 @@ fn canonical_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 /// Whether a `/proc/self/mountinfo` listing mounts `path` on `tmpfs` or `ramfs`; the deepest
-/// matching mount point wins.
+/// matching mount point wins, and a later entry at the same mount point is the visible one.
 #[cfg(target_os = "linux")]
 pub(crate) fn mountinfo_is_memory_backed(mountinfo: &str, path: &std::path::Path) -> bool {
     let mut best: Option<(usize, &str)> = None;
@@ -245,7 +248,7 @@ pub(crate) fn mountinfo_is_memory_backed(mountinfo: &str, path: &std::path::Path
         let Some(mount) = line.split_whitespace().nth(4) else { continue };
         let Some(fstype) = line.split(" - ").nth(1).and_then(|rest| rest.split_whitespace().next()) else { continue };
         let mount = unescape_mount(mount);
-        if path.starts_with(&mount) && best.is_none_or(|(longest, _)| mount.len() > longest) {
+        if path.starts_with(&mount) && best.is_none_or(|(longest, _)| mount.len() >= longest) {
             best = Some((mount.len(), fstype));
         }
     }
@@ -428,5 +431,19 @@ mod tests {
         // Escaped spaces in a mount point decode before matching.
         assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/media/My Disk/fill")));
         assert_eq!(unescape_mount("/media/My\\040Disk"), "/media/My Disk");
+        // The later entry at the same mount point is the visible mount: a disk mount stacked on
+        // a tmpfs is disk-backed, and the reverse order is memory-backed (#2570 review).
+        let stacked_disk = "\
+30 25 0:30 / /tmp/stack rw - tmpfs tmpfs rw
+31 25 0:31 / /tmp/stack rw - ext4 /dev/sdb2 rw
+";
+        let stacked_ram = "\
+30 25 0:30 / /tmp/stack rw - ext4 /dev/sdb2 rw
+31 25 0:31 / /tmp/stack rw - tmpfs tmpfs rw
+";
+        assert!(!mountinfo_is_memory_backed(stacked_disk, std::path::Path::new("/tmp/stack/fill")));
+        assert!(mountinfo_is_memory_backed(stacked_ram, std::path::Path::new("/tmp/stack/fill")));
+        // A new relative folder resolves against the current directory before walking up.
+        assert!(canonical_ancestor(std::path::Path::new("no-such-relative-folder/fill")).is_some());
     }
 }
