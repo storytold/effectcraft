@@ -1634,6 +1634,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-helper-host"
+version = "0.21.0"
+dependencies = [
+ "bytemuck",
+ "effectcraft-effects",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "effectcraft-hevcenc"
 version = "0.21.0"
 dependencies = [
@@ -1647,6 +1658,7 @@ dependencies = [
  "effectcraft-engine",
  "effectcraft-export",
  "effectcraft-expr",
+ "effectcraft-helper-host",
  "effectcraft-interchange",
  "effectcraft-media",
  "effectcraft-pdf",
@@ -1663,6 +1675,7 @@ dependencies = [
  "log",
  "rayon",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1958,6 +1971,7 @@ dependencies = [
  "effectcraft-gpu",
  "effectcraft-host",
  "effectcraft-keyframe",
+ "effectcraft-media",
  "effectcraft-path",
  "effectcraft-project",
  "effectcraft-render",

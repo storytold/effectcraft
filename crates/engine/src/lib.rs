@@ -200,6 +200,9 @@ pub struct Session {
     /// Loads WebAssembly effect plug-ins (set by the host that links `effectcraft-plugin` with
     /// its runtime): `effect.plugins.load`.
     pub plugin_loader: Option<PluginLoader>,
+    /// External effect helpers (native hosts link `effectcraft-helper-host`):
+    /// `effect.helpers.list`, `effect.helpers.scan`, `effect.helpers.load`.
+    pub helpers: Option<HelperHooks>,
     /// Renders a module without registering it (`library.preview`; set with `plugin_loader`).
     pub plugin_previewer: Option<PluginPreviewer>,
     /// Where effect plug-ins live (hosts set it; else `Plug-ins` next to the settings): the
@@ -283,6 +286,18 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
 
+/// What a host that runs external effect helpers provides (`docs/external-helpers.md`).
+#[derive(Clone, Copy)]
+pub struct HelperHooks {
+    /// Start the helpers installed in the host's search paths and register their effects
+    /// (`retry` forgets the block list first) → `{paths, helpers, loaded, errors}`.
+    pub scan: fn(bool) -> Value,
+    /// Load a file or folder through the helpers that accept it → `{loaded, errors}`.
+    pub load: fn(&str) -> std::result::Result<Value, String>,
+    /// The helpers and their state → `{helpers, blocked}`.
+    pub list: fn() -> Value,
+}
+
 /// Renders one WebAssembly effect module without registering it (the Plug-in Library preview):
 /// `(bytes, width, height, premultiplied RGBA pixels, times in seconds)` → (manifest JSON, one frame
 /// per time).
@@ -343,6 +358,7 @@ impl Default for Session {
             snapshot: None,
             script: None,
             plugin_loader: None,
+            helpers: None,
             plugin_previewer: None,
             plugins_dir: None,
             library: Default::default(),
