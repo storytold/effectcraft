@@ -706,7 +706,8 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
         rows.push(Row { layer: LayerId(*id), depth: 1, kind: RowKind::Prop { uid: uid(*id) } });
     }
     // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
-    let hit_rows: Vec<(Rect, Row)> = rows.iter().enumerate().map(|(i, r)| (Rect::from_min_size(pos2(0.0, 20.0 * i as f32), vec2(400.0, 20.0)), r.clone())).collect();
+    let hit_rows: Vec<(Rect, Row)> =
+        rows.iter().enumerate().map(|(i, r)| (Rect::from_min_size(pos2(0.0, 20.0 * i as f32), vec2(400.0, 20.0)), r.clone())).collect();
     let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
     let go = |br: Rect| box_targets(comp, &rows, &hit_rows, &tm, 0.0, 20.0, 200.0, false, br);
     let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();

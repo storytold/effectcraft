@@ -4686,7 +4686,17 @@ fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect
 /// scrolled out under the outline isn't touched).
 /// `graph_on`: the Graph Editor shows no key markers here.
 #[allow(clippy::too_many_arguments)]
-fn box_targets(comp: &Comp, rows: &[Row], hit_rows: &[(Rect, Row)], tm: &TMap, top: f32, rh: f32, graph_x0: f32, graph_on: bool, br: Rect) -> (Vec<u64>, Vec<effectcraft_engine::KeyRef>) {
+fn box_targets(
+    comp: &Comp,
+    rows: &[Row],
+    hit_rows: &[(Rect, Row)],
+    tm: &TMap,
+    top: f32,
+    rh: f32,
+    graph_x0: f32,
+    graph_on: bool,
+    br: Rect,
+) -> (Vec<u64>, Vec<effectcraft_engine::KeyRef>) {
     let layers = hit_rows
         .iter()
         .filter(|(r, row)| br.min.x < graph_x0 && matches!(row.kind, RowKind::Layer) && r.intersects(br))
