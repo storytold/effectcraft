@@ -222,6 +222,21 @@ fn probs_defaults() -> &'static probs::Probs {
     D.get_or_init(probs::Probs::defaults)
 }
 
+/// SAD of two N×N blocks: per-column 16-bit sums (at most 16 · 255), summed once.
+#[inline(always)]
+fn sad_n<const N: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize) -> u32 {
+    let mut acc = [0u16; N];
+    for i in 0..N {
+        let (Some(ra), Some(rb)) = (a.get(i * sa..).and_then(|r| r.first_chunk::<N>()), b.get(i * sb..).and_then(|r| r.first_chunk::<N>())) else {
+            return u32::MAX / 4;
+        };
+        for j in 0..N {
+            acc[j] += ra[j].abs_diff(rb[j]) as u16;
+        }
+    }
+    acc.iter().map(|&v| v as u32).sum()
+}
+
 // ---------------------------------------------------------------- the tile
 
 /// Per-frame coding parameters shared by the tiles.
@@ -601,12 +616,18 @@ impl<'a> Tile<'a> {
         let (x16, y16) = (((c * 8) << 4) as i32 + 2 * mv.col, ((r * 8) << 4) as i32 + 2 * mv.row);
         let mut s = 0u32;
         if let Some((pl, o, st)) = self.f.phases.as_ref().and_then(|ph| ph.block(x16, y16, n)) {
-            for i in 0..n {
-                let a = &p.src[(r * 8 + i) * p.w + c * 8..][..n];
-                let b = &pl[o + i * st..o + i * st + n];
-                s += a.iter().zip(b).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs()).sum::<u32>();
-            }
-            return s;
+            let a = &p.src[(r * 8) * p.w + c * 8..];
+            let b = &pl[o..];
+            return match n {
+                8 => sad_n::<8>(a, p.w, b, st),
+                16 => sad_n::<16>(a, p.w, b, st),
+                _ => {
+                    for i in 0..n {
+                        s += a[i * p.w..][..n].iter().zip(&b[i * st..][..n]).map(|(a, b)| a.abs_diff(*b) as u32).sum::<u32>();
+                    }
+                    s
+                }
+            };
         }
         // Inter search only runs on frames with a reference.
         let Some(refs) = self.f.refs.as_ref() else { return u32::MAX / 4 };
@@ -630,7 +651,7 @@ impl<'a> Tile<'a> {
         let d = &probs_defaults().0;
         let mb: [u32; 4] = std::array::from_fn(|m| tree_cost(&INTER_MODE_TREE, &d[probs::INTER_MODE + mctx * 3..], m as u8));
         let mode_bits = |m: u8| mb[(m - NEARESTMV) as usize];
-        let cost = |mv: Mv| -> f64 {
+        let cost_raw = |mv: Mv| -> f64 {
             let bits = if mv == nearest {
                 mode_bits(NEARESTMV)
             } else if mv == Mv::ZERO {
@@ -641,6 +662,21 @@ impl<'a> Tile<'a> {
                 mode_bits(NEWMV) + mv_cost(mv.minus(nearest))
             };
             self.sad(r, c, n, mv) as f64 + lambda * bits as f64
+        };
+        // The cost is a pure function of the vector: points the search revisits (the centre it
+        // came from, candidates on the diamond) are looked up instead of predicted again.
+        let mut seen = [(Mv::ZERO, 0.0f64); 64];
+        let mut nseen = 0usize;
+        let mut cost = |mv: Mv| -> f64 {
+            if let Some(&(_, j)) = seen[..nseen].iter().find(|e| e.0 == mv) {
+                return j;
+            }
+            let j = cost_raw(mv);
+            if nseen < seen.len() {
+                seen[nseen] = (mv, j);
+                nseen += 1;
+            }
+            j
         };
         let mut best = (Mv::ZERO, cost(Mv::ZERO));
         let prev = self.f.prev_mvs.map(|p| p[r * self.f.mi_cols + c]);

@@ -126,7 +126,7 @@ pub(crate) fn js_str(s: &str) -> JsValue {
 fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_string(args, 0, ctx)?;
     let mut params = arg_json(args, 1, ctx)?;
-    if id == "script.run" || id == "file.runScript" {
+    if effectcraft_engine::commands::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
         return Err(throw("scripts can't run scripts"));
     }
     let keys = params.as_object_mut().and_then(|o| o.remove("__keys"));

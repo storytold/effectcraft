@@ -56,6 +56,18 @@ impl EffectcraftApp {
         &mut self.dialog_state.gradient
     }
 
+    /// The open settings dialog's draft and Preview state (`panels::dialogs`): Solid, Camera,
+    /// Light and Composition Settings keep what OK would apply here.
+    pub fn dialog_state(&self) -> &panels::dialogs::DialogState {
+        &self.dialog_state
+    }
+
+    /// The open settings dialog's draft, to edit (tests and automation; the dialog's own fields
+    /// do the same).
+    pub fn dialog_state_mut(&mut self) -> &mut panels::dialogs::DialogState {
+        &mut self.dialog_state
+    }
+
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
     /// give it the focus: Window ▸ `<panel>`.
     pub fn show_panel(&mut self, p: PanelKind) {

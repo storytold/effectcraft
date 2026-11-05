@@ -4,10 +4,13 @@
 //! (Effect > Audio, see [`effectcraft_effects::audio_fx`]) run on each layer's audio before
 //! its levels; Backwards plays the layer's [in, out) span reversed.
 //!
-//! Callers mix in short blocks (one video frame, or an audio device buffer). Effects and levels
-//! are evaluated once per block. To make the result independent of block boundaries, layer
-//! effects are run from a cleared state over a pre-roll of earlier audio and only the block's
-//! tail is kept — so preview playback and export produce identical samples.
+//! Callers mix in short blocks (one video frame, an audio device buffer, or a second of export).
+//! Effect parameters are evaluated once per block. Animated Audio Levels, and animated effects
+//! that work sample by sample (Stereo Mixer), are evaluated on a grid of comp samples every
+//! millisecond instead, so keyframed fades ramp smoothly whatever the block size. To make the
+//! result independent of block boundaries, layer effects are run from a cleared state over a
+//! pre-roll of earlier audio and only the block's tail is kept — so preview playback and export
+//! produce identical samples.
 //!
 //! Time-stretched layers are resampled nearest-sample; reversed (negative stretch) layers are
 //! silent for now.
@@ -83,6 +86,20 @@ fn units_ceil(t: Tick, rate: u32) -> i64 {
     let n = t.0 as i128 * rate as i128;
     let d = TICKS_PER_SECOND as i128;
     (n.div_euclid(d) + i128::from(n.rem_euclid(d) != 0)) as i64
+}
+
+/// Samples between evaluations of animated levels and per-sample effects: one millisecond, on
+/// a grid of comp sample indices so the result does not depend on where a block starts.
+fn param_step(rate: u32) -> i64 {
+    i64::from(rate / 1000).max(1)
+}
+
+/// Does any property of the group change over time?
+fn animated(g: &effectcraft_project::PropGroup) -> bool {
+    g.children.iter().any(|c| match c {
+        Node::Prop(p) => p.is_animated() || p.has_expression(),
+        Node::Group(sub) => animated(sub),
+    })
 }
 
 fn sample_tick(i: i64, rate: u32) -> Tick {
@@ -189,20 +206,69 @@ impl MixEnv<'_> {
     /// `i0 .. i0 + n`.
     fn layer_audio(&self, l: &Layer, i0: i64, n: usize) -> Vec<f32> {
         let t = sample_tick(i0, self.rate);
-        let fx: Vec<(&str, Params)> = audio_effect_groups(l).map(|(id, g)| (id, self.params(l, g, t))).collect();
+        let fx: Vec<(&str, &effectcraft_project::PropGroup, Params)> = audio_effect_groups(l).map(|(id, g)| (id, g, self.params(l, g, t))).collect();
         if fx.is_empty() {
             return self.layer_raw(l, i0, n, false);
         }
-        let reversed = fx.iter().any(|(id, _)| audio_fx::reverses(id));
-        let pre_s: f64 = fx.iter().map(|(id, p)| audio_fx::preroll(id, p)).sum();
+        let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
+        let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum();
         let pre = (pre_s * self.rate as f64).ceil() as usize;
-        let mut buf = self.layer_raw(l, i0 - pre as i64, n + pre, reversed);
-        let start = l.layer_time(sample_tick(i0 - pre as i64, self.rate)).seconds();
-        for (id, p) in &fx {
-            audio_fx::process(id, p, &mut buf, self.rate, start);
+        let b0 = i0 - pre as i64;
+        let mut buf = self.layer_raw(l, b0, n + pre, reversed);
+        let start = l.layer_time(sample_tick(b0, self.rate)).seconds();
+        for (id, g, p) in &fx {
+            if audio_fx::per_sample(id) && animated(g) {
+                self.process_stepped(l, id, g, &mut buf, b0);
+            } else {
+                audio_fx::process(id, p, &mut buf, self.rate, start);
+            }
         }
         buf.drain(..pre * 2);
         buf
+    }
+
+    /// Run per-sample effect `id` over `buf` (comp samples from `b0`) in pieces of the parameter
+    /// grid, each with the parameters at its first sample.
+    fn process_stepped(&self, l: &Layer, id: &str, g: &effectcraft_project::PropGroup, buf: &mut [f32], b0: i64) {
+        let step = param_step(self.rate);
+        let frames = buf.len() / 2;
+        let mut k = 0usize;
+        while k < frames {
+            let i = b0.saturating_add(k as i64);
+            let next = i.div_euclid(step).saturating_add(1).saturating_mul(step);
+            let end = usize::try_from(next.saturating_sub(b0)).unwrap_or(frames).clamp(k + 1, frames);
+            let t = sample_tick(i, self.rate);
+            if let Some(piece) = buf.get_mut(k * 2..end * 2) {
+                audio_fx::process(id, &self.params(l, g, t), piece, self.rate, l.layer_time(t).seconds());
+            }
+            k = end;
+        }
+    }
+
+    /// Linear gains (left, right) of the layer's Audio Levels for comp samples `i0 .. i0 + n`.
+    /// Animated levels are evaluated on the parameter grid and interpolated in dB in between.
+    fn level_gains(&self, l: &Layer, i0: i64, n: usize) -> Vec<[f32; 2]> {
+        let Some(pr) = l.props.sub("audio").and_then(|g| g.get("levels")) else { return vec![[1.0, 1.0]; n] };
+        let db = |i: i64| self.ctx(sample_tick(i, self.rate)).value(l, pr).as_vec2();
+        let gain = |[a, b]: [f64; 2]| [db_to_gain(a), db_to_gain(b)];
+        if !pr.is_animated() && !pr.has_expression() {
+            return vec![gain(db(i0)); n];
+        }
+        let step = param_step(self.rate);
+        let end = i0.saturating_add(n as i64);
+        let mut out = Vec::with_capacity(n);
+        let mut k = i0.div_euclid(step).saturating_mul(step);
+        let mut lo = db(k);
+        while k < end {
+            let hi = db(k.saturating_add(step));
+            for i in k.max(i0)..k.saturating_add(step).min(end) {
+                let f = (i - k) as f64 / step as f64;
+                out.push(gain([lo[0] + (hi[0] - lo[0]) * f, lo[1] + (hi[1] - lo[1]) * f]));
+            }
+            k = k.saturating_add(step);
+            lo = hi;
+        }
+        out
     }
 }
 
@@ -234,23 +300,16 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
         if a >= b {
             continue;
         }
-        let t_a = sample_tick(s0 + a as i64, rate);
-        let (ll, lr) = levels(&env, l, t_a);
-        if ll == 0.0 && lr == 0.0 {
+        let gains = env.level_gains(l, s0 + a as i64, b - a);
+        if gains.iter().all(|g| *g == [0.0, 0.0]) {
             continue;
         }
         let buf = env.layer_audio(l, s0 + a as i64, b - a);
-        for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
-            out[(a + i) * 2] += f[0] * ll;
-            out[(a + i) * 2 + 1] += f[1] * lr;
+        for (i, (f, g)) in buf.as_chunks::<2>().0.iter().zip(&gains).enumerate() {
+            out[(a + i) * 2] += f[0] * g[0];
+            out[(a + i) * 2 + 1] += f[1] * g[1];
         }
     }
-}
-
-fn levels(env: &MixEnv, l: &Layer, t: Tick) -> (f32, f32) {
-    let Some(g) = l.props.sub("audio") else { return (1.0, 1.0) };
-    let [a, b] = env.ctx(t).v2(l, g, "levels", [0.0, 0.0]);
-    (db_to_gain(a), db_to_gain(b))
 }
 
 /// A min/max peak summary of interleaved stereo audio for waveform drawing: one entry per
@@ -347,7 +406,7 @@ mod tests {
             pr.value = effectcraft_project::Value::Vec2([-6.0206, -96.0]);
         }
         let mut comp = comp;
-        comp.layers = vec![l1, l2];
+        comp.layers = vec![l1, l2].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         assert!(comp_has_audio(&p, cid));
         let rate = 1000;
@@ -393,11 +452,11 @@ mod tests {
         let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
         let tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         let mut inner = base.clone();
-        inner.layers = vec![tone];
+        inner.layers = vec![tone].into();
         let inner_id = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let pre = build::layer(&mut p, &base, "pre", LayerSource::Comp { item: inner_id }, (64, 64), None);
         let mut outer = base.clone();
-        outer.layers = vec![pre];
+        outer.layers = vec![pre].into();
         let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
         let rate = 8000;
         let t = Tick::from_seconds_f64(0.5);
@@ -424,7 +483,7 @@ mod tests {
         let mut tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         tone.stretch = stretch;
         let mut comp = base.clone();
-        comp.layers = vec![tone];
+        comp.layers = vec![tone].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let n = 2000usize;
         let t = Tick::from_seconds_f64(0.5);

@@ -69,28 +69,55 @@ pub fn levinson(r: &[f64], order: usize) -> Vec<f64> {
 }
 
 /// Evaluates the symmetric polynomial `p` (length `d + 1`, `d` even) as the cosine series
-/// `e^{jωd/2} P(e^{jω})`.
-fn cos_series(p: &[f64], w: f64) -> f64 {
+/// `e^{jωd/2} P(e^{jω})`, with `cos_m(m)` giving `cos(m ω)`.
+#[inline]
+fn cos_series_with(p: &[f64], cos_m: impl Fn(usize) -> f64) -> f64 {
     let h = (p.len() - 1) / 2;
     let mut s = p[h];
     for k in 0..h {
-        s += 2.0 * p[k] * ((h - k) as f64 * w).cos();
+        s += 2.0 * p[k] * cos_m(h - k);
     }
     s
 }
 
+fn cos_series(p: &[f64], w: f64) -> f64 {
+    cos_series_with(p, |m| (m as f64 * w).cos())
+}
+
+/// Number of grid intervals the root search scans over `[0, π]`.
+const GRID: usize = 1024;
+/// Largest multiple of ω in the series (half the LPC order, at most 16 / 2).
+const MAX_H: usize = 8;
+/// Bisection steps per root: the bracket shrinks to 3e-9 rad, far below one Q15 NLSF step (9.6e-5 rad).
+const BISECT_STEPS: usize = 20;
+
+/// `cos(m · π g / GRID)` for every grid point `g` and `m` in `0..=MAX_H`, computed with the same
+/// expression as [`cos_series`], so the table values are bit-identical to calling `cos` there.
+fn grid_cos() -> &'static [[f64; MAX_H + 1]] {
+    static TABLE: std::sync::OnceLock<Vec<[f64; MAX_H + 1]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=GRID)
+            .map(|g| {
+                let w = std::f64::consts::PI * g as f64 / GRID as f64;
+                std::array::from_fn(|m| (m as f64 * w).cos())
+            })
+            .collect()
+    })
+}
+
 fn roots(p: &[f64], out: &mut Vec<f64>) {
-    const GRID: usize = 1024;
+    let grid = grid_cos();
+    let at_grid = |g: usize| cos_series_with(p, |m| grid[g][m]);
     let mut w0 = 0.0;
-    let mut f0 = cos_series(p, w0);
+    let mut f0 = at_grid(0);
     for g in 1..=GRID {
         let w1 = std::f64::consts::PI * g as f64 / GRID as f64;
-        let f1 = cos_series(p, w1);
+        let f1 = at_grid(g);
         if f0 == 0.0 {
             out.push(w0);
         } else if f0 * f1 < 0.0 {
             let (mut lo, mut hi, mut flo) = (w0, w1, f0);
-            for _ in 0..40 {
+            for _ in 0..BISECT_STEPS {
                 let mid = 0.5 * (lo + hi);
                 let fm = cos_series(p, mid);
                 if fm * flo <= 0.0 {
@@ -111,6 +138,9 @@ fn roots(p: &[f64], out: &mut Vec<f64>) {
 /// when the root search fails (unstable or degenerate filter).
 pub fn a2nlsf(a: &[f64]) -> Option<Vec<f64>> {
     let d = a.len();
+    if d > 2 * MAX_H {
+        return None;
+    }
     let mut c = vec![0f64; d + 2];
     c[0] = 1.0;
     for k in 0..d {
@@ -199,9 +229,20 @@ pub fn pitch_search(x: &[f32], start: usize, len: usize, fs_khz: usize) -> Pitch
     let score = full[(lag - min_lag) as usize];
     // Contour: per-subframe lag offsets around the chosen lag.
     let cb: &[[i32; 4]] = if fs_khz == 8 { &CB_NB_20 } else { &CB_WB_20 };
+    // The contour search revisits the same (subframe, lag) pairs for neighbouring base lags and
+    // codebook entries, so each correlation is computed once.
+    let span = (18 * fs - min_lag + 1) as usize;
+    let memo = std::cell::RefCell::new(vec![f64::NAN; 4 * span]);
     let sub_score = |k: usize, l: i32| -> f64 {
         let l = l.clamp(min_lag, 18 * fs);
-        ncorr(x, start + k * sub..start + (k + 1) * sub, l as usize)
+        let slot = k * span + (l - min_lag) as usize;
+        let cached = memo.borrow()[slot];
+        if !cached.is_nan() {
+            return cached;
+        }
+        let v = ncorr(x, start + k * sub..start + (k + 1) * sub, l as usize);
+        memo.borrow_mut()[slot] = v;
+        v
     };
     let mut best = (f64::MIN, lag, 0usize);
     for l0 in (lag - 2).max(min_lag)..=(lag + 2).min(max_lag) {
@@ -318,5 +359,60 @@ mod tests {
                 assert!((a_q12[j] as f64 / 4096.0 - a[j]).abs() < 0.02, "order {order} coef {j}: {} vs {}", a_q12[j] as f64 / 4096.0, a[j]);
             }
         }
+    }
+
+    /// The root search as it was before the grid table: `cos` called for every evaluation.
+    fn roots_reference(p: &[f64], out: &mut Vec<f64>) {
+        let mut w0 = 0.0;
+        let mut f0 = cos_series(p, w0);
+        for g in 1..=GRID {
+            let w1 = std::f64::consts::PI * g as f64 / GRID as f64;
+            let f1 = cos_series(p, w1);
+            if f0 == 0.0 {
+                out.push(w0);
+            } else if f0 * f1 < 0.0 {
+                let (mut lo, mut hi, mut flo) = (w0, w1, f0);
+                for _ in 0..BISECT_STEPS {
+                    let mid = 0.5 * (lo + hi);
+                    let fm = cos_series(p, mid);
+                    if fm * flo <= 0.0 {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                        flo = fm;
+                    }
+                }
+                out.push(0.5 * (lo + hi));
+            }
+            w0 = w1;
+            f0 = f1;
+        }
+    }
+
+    #[test]
+    fn grid_table_roots_are_bit_identical_to_direct_cos() {
+        let mut seed = 7u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let mut found = 0;
+        for len in [11usize, 17] {
+            for _ in 0..300 {
+                let mut p = vec![0f64; len];
+                for k in 0..len / 2 + 1 {
+                    p[k] = rnd();
+                    p[len - 1 - k] = p[k];
+                }
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                roots(&p, &mut a);
+                roots_reference(&p, &mut b);
+                assert_eq!(a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), b.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                found += a.len();
+            }
+        }
+        assert!(found > 1000, "{found}");
     }
 }

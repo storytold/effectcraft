@@ -44,7 +44,7 @@ fn scene(color: [f32; 3], bg: Option<[f32; 3]>, f: impl FnOnce(&mut Project, &Co
     if let Some(bg) = bg {
         layers.push(solid(&mut p, &comp, bg, 200, 100));
     }
-    p.comp_mut(cid).unwrap().layers = layers;
+    p.comp_mut(cid).unwrap().layers = layers.into();
     (p, cid)
 }
 

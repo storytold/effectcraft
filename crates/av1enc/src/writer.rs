@@ -70,6 +70,8 @@ pub(crate) struct TileWriter<'a> {
     left_dc: [Vec<u8>; 3],
     /// LoopfilterTxSizes per plane (row stride mi_cols + 32).
     lf_tx: [Vec<u8>; 3],
+    /// Scratch for the levels coded so far in `coeffs`.
+    quant: Vec<i32>,
     // current block
     r: usize,
     c: usize,
@@ -122,6 +124,7 @@ impl<'a> TileWriter<'a> {
             left_level: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
             left_dc: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
             lf_tx: std::array::from_fn(|_| vec![0; (g.mi_cols + 32) * (g.mi_rows + 32)]),
+            quant: Vec::new(),
             r: 0,
             c: 0,
             bsize: 0,
@@ -189,10 +192,10 @@ impl<'a> TileWriter<'a> {
             self.sw.symbol(partition, cdf);
         } else if has_cols || has_rows {
             assert!(split, "blocks crossing the frame edge are split");
-            let pcdf: Vec<u16> = match bsl {
-                2 => self.cdf.partition_w16[ctx].to_vec(),
-                3 => self.cdf.partition_w32[ctx].to_vec(),
-                _ => self.cdf.partition_w64[ctx].to_vec(),
+            let pcdf: &[u16] = match bsl {
+                2 => &self.cdf.partition_w16[ctx],
+                3 => &self.cdf.partition_w32[ctx],
+                _ => &self.cdf.partition_w64[ctx],
             };
             let pr = |k: usize| pcdf[k] as i32 - if k == 0 { 0 } else { pcdf[k - 1] as i32 };
             let psum = if has_cols {
@@ -493,7 +496,9 @@ impl<'a> TileWriter<'a> {
             let height = TX_HEIGHT[tx_sz] as usize;
             let width = 1usize << bwl;
             // Quant[] as the decoder sees it while parsing: the levels coded so far (capped)
-            let mut quant = vec![0i32; width * height];
+            let mut quant = std::mem::take(&mut self.quant);
+            quant.clear();
+            quant.resize(width * height, 0);
             for c in (0..eob).rev() {
                 let pos = scan[c] as usize;
                 let a = levels[pos].unsigned_abs().min(15) as i32;
@@ -518,6 +523,7 @@ impl<'a> TileWriter<'a> {
                 }
                 quant[pos] = a;
             }
+            self.quant = quant;
             for c in 0..eob {
                 let pos = scan[c] as usize;
                 let v = levels[pos];

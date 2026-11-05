@@ -37,6 +37,8 @@ pub(crate) fn label_keys(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("keys.label", "select keyframes first"));
     }
     let cid = comp_id(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let keys = super::prop::editable_keys(comp, &keys);
     let n = s.edit("Keyframe Label", None, |proj, _| {
         let mut n = 0;
         for k in &keys {

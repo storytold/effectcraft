@@ -48,7 +48,19 @@ struct KeyPt {
     t: f64,
     v: f64,
     sel: bool,
+    muted: bool,
     handles: Vec<Handle>,
+}
+
+/// A graph key's fill and edge colours: muted keys stay visible and selectable, dimmed.
+fn key_colors(t: &Tokens, edge: Color32, k: &KeyPt) -> (Color32, Color32) {
+    let fill = match (k.muted, k.sel) {
+        (true, true) => t.keyframe_selected.gamma_multiply(0.5),
+        (true, false) => Color32::from_gray(0x70),
+        (false, true) => t.keyframe_selected,
+        (false, false) => Color32::from_gray(0xe0),
+    };
+    (fill, if k.muted { edge.gamma_multiply(0.4) } else { edge })
 }
 
 struct Curve<'a> {
@@ -153,7 +165,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                     let dt = e.influence * dur * if out_side { 1.0 } else { -1.0 };
                     let (hv, show) = if speed { (e.speed.abs(), true) } else { (k.value.components().get(d).copied().unwrap_or(0.0) + e.speed * dt, !spatial) };
                     let bezier = if out_side { k.out_interp == Interp::Bezier } else { k.in_interp == Interp::Bezier };
-                    if ks && show && (bezier || speed) {
+                    if ks && !k.muted && show && (bezier || speed) {
                         handles.push(Handle { out: out_side, t: kt + dt, v: hv, speed: e.speed, dur });
                     }
                 }
@@ -162,7 +174,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 } else {
                     k.value.components().get(d).copied().unwrap_or(0.0)
                 };
-                keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, handles });
+                keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, muted: k.muted, handles });
             }
             out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial });
         }
@@ -221,7 +233,7 @@ impl ButtonBar {
         let chosen = widgets::popup_list(ui, pid, pos, r, rows, 0, |ui| {
             let mut chosen = None;
             for (id, label, on, tip) in &self.hidden {
-                let item = ui.selectable_label(*on, label.as_str()).on_hover_text(tip.as_str());
+                let item = ui.selectable_label(*on, crate::i18n::tr(label)).on_hover_text(crate::i18n::tr(tip));
                 app.auto.add(&format!("timeline.graph.more.{id}"), item.rect, tip);
                 if item.clicked() {
                     chosen = Some(id.clone());
@@ -251,14 +263,16 @@ struct BarBtn<'a> {
 fn text_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, bar: &mut ButtonBar, y: f32, btn: BarBtn) -> bool {
     let BarBtn { label, on, id, tip } = btn;
     let t = app.tokens;
-    let w = p.layout_no_wrap(label.to_string(), Tokens::ui(11.0), t.text).size().x + 14.0;
+    let (shown, shown_tip) = (crate::i18n::tr(label), crate::i18n::tr(tip));
+    let w = p.layout_no_wrap(shown.to_string(), Tokens::ui(11.0), t.text).size().x + 14.0;
     // Once one button overflows, the rest follow it into the menu (they keep their order).
     if !bar.hidden.is_empty() || bar.x + w > bar.limit {
+        // The menu translates these English labels when it draws them; automation keeps them.
         bar.hidden.push((id.to_string(), label.to_string(), on, tip.to_string()));
         return bar.chosen.as_deref() == Some(id);
     }
     let r = Rect::from_min_size(pos2(bar.x, y - 9.0), vec2(w, 18.0));
-    let resp = ui.interact(r, egui::Id::unique(("graph-btn", id)), Sense::click()).on_hover_text(tip);
+    let resp = ui.interact(r, egui::Id::unique(("graph-btn", id)), Sense::click()).on_hover_text(shown_tip);
     p.rect_filled(
         r,
         3.0,
@@ -270,7 +284,7 @@ fn text_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, b
             Color32::from_rgb(0x2c, 0x2c, 0x2c)
         },
     );
-    p.text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(11.0), if on { Color32::WHITE } else { t.text });
+    p.text(r.center(), Align2::CENTER_CENTER, shown, Tokens::ui(11.0), if on { Color32::WHITE } else { t.text });
     app.auto.add(&format!("timeline.graph.{id}"), r, tip);
     bar.x += w + 4.0;
     resp.clicked()
@@ -456,6 +470,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let mut key_screens: Vec<(serde_json::Value, Pos2)> = vec![];
     for c in &cs {
         let (lid, uid, d) = (c.layer.id, c.prop.uid, c.dim);
+        let unlocked = !c.layer.switches.locked;
         for k in &c.keys {
             let kp = pos2(tm.x(k.t), ymap(k.v));
             // In the speed graph an end key rises with the handle being dragged; skipping it once it
@@ -477,9 +492,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 app.auto.add(&format!("timeline.graph.handle.{uid}.{d}.{}.{side}", k.idx), hr, "Bezier handle");
                 // The same side's handles of every selected key move with it, by as much as the
                 // pointer moved (After Effects), in one undo step.
-                if hresp.drag_started() {
+                if unlocked && hresp.drag_started() {
                     let grabs: Vec<HandleGrab> = cs
                         .iter()
+                        .filter(|c2| !c2.layer.switches.locked)
                         .flat_map(|c2| {
                             c2.keys.iter().flat_map(move |k2| {
                                 k2.handles.iter().filter(|h2| h2.out == h.out).map(move |h2| HandleGrab {
@@ -499,7 +515,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(hp);
                     ctx.data_mut(|dd| dd.insert_temp::<HandleDrag>(handle_drag_id(), (press, grabs)));
                 }
-                if hresp.dragged()
+                if unlocked
+                    && hresp.dragged()
                     && let Some(pt) = hresp.interact_pointer_pos()
                     && let Some((press, grabs)) = ctx.data(|dd| dd.get_temp::<HandleDrag>(handle_drag_id()))
                 {
@@ -522,15 +539,15 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 }
             }
             // The key itself.
-            let col = if k.sel { t.keyframe_selected } else { Color32::from_gray(0xe0) };
+            let (col, edge) = key_colors(&t, c.color, k);
             pc.rect_filled(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, col);
-            pc.rect_stroke(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, c.color), StrokeKind::Outside);
+            pc.rect_stroke(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, edge), StrokeKind::Outside);
             let kr = Rect::from_center_size(kp, vec2(11.0, 11.0));
             let kresp = ui.interact(kr, egui::Id::unique(("gkey", uid, d, k.idx)), Sense::click_and_drag());
             app.auto.add(&format!("timeline.graph.key.{uid}.{d}.{}", k.idx), kr, &c.prop.name);
             let mods = ui.input(|i| i.modifiers);
             let key = &c.prop.keys[k.idx];
-            if kresp.clicked() && mods.command {
+            if unlocked && kresp.clicked() && mods.command {
                 // Ctrl+click: Linear ↔ Auto Bezier; Ctrl+Alt+click: Hold on / off (as in the Timeline).
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()]})));
                 if mods.alt {
@@ -539,20 +556,22 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     let linear = key.in_interp == Interp::Linear && key.out_interp == Interp::Linear;
                     actions.push(("keys.interpolation".into(), json!({"interpolation": if linear { "autoBezier" } else { "linear" }})));
                 }
-            } else if kresp.clicked() && mods.shift {
+            } else if unlocked && kresp.clicked() && mods.shift {
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()], "toggle": true})));
-            } else if (kresp.clicked() || kresp.drag_started()) && !k.sel {
+            } else if unlocked && (kresp.clicked() || kresp.drag_started() || kresp.secondary_clicked()) && !k.sel {
                 actions.push(("keys.select".into(), json!({"keys": [kjson.clone()], "add": mods.shift})));
             }
             // A drag moves every selected key, by how far the pointer went from where the button
             // went down (the key doesn't jump under the pointer); Shift keeps it to the time or
             // the value axis, whichever moved more.
-            if kresp.drag_started()
+            if unlocked
+                && kresp.drag_started()
                 && let Some(o) = ui.input(|i| i.pointer.press_origin())
             {
                 ctx.data_mut(|dd| dd.insert_temp(key_grab_id(), KeyGrab { press: o, t: k.t }));
             }
-            if kresp.dragged()
+            if unlocked
+                && kresp.dragged()
                 && let Some(pt) = kresp.interact_pointer_pos()
                 && let Some(g) = ctx.data(|dd| dd.get_temp::<KeyGrab>(key_grab_id()))
             {
@@ -573,6 +592,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 ctx.data_mut(|dd| dd.insert_temp(drag_id, false));
                 actions.push(("__endMerge".into(), json!({})));
             }
+            // Right-click: the Timeline's key menu, with the same commands.
+            crate::widgets::context_menu(&kresp, |ui| super::timeline::key_menu(ui, app, c.layer, c.prop, key, k.sel, actions));
         }
     }
 

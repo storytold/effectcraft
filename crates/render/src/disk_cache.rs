@@ -12,9 +12,11 @@
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
 //!   reused whenever the same frames, settings and prompt come back, also after a restart). Every file ends in a checksum; damaged files read as misses and
 //!   are deleted.
-//! * Size limit with least-recently-used eviction. The in-memory index is rebuilt from the
-//!   folder when the cache opens (file modification times order it), so the cache survives
-//!   restarts; reads refresh a file's time.
+//! * Size limit with least-recently-used eviction, down to 90% of the limit so the eviction scan
+//!   runs once per tenth of the limit written, not on every write. The limit shrinks to keep
+//!   free space on the cache's disk ([`DiskCache::set_disk_space`]). The in-memory index is
+//!   rebuilt from the folder when the cache opens (file modification times order it), so the
+//!   cache survives restarts; reads refresh a file's time.
 //! * Safe concurrent access: writes go to a unique temporary file that is renamed into place
 //!   (atomic on every desktop OS), so readers in this or another process never see a partial
 //!   entry; a missing or damaged file is just a miss. Writes run on a background thread with a
@@ -22,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use effectcraft_effects::Buf;
@@ -31,9 +33,14 @@ use effectcraft_raster::Image;
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
 const MAGIC: &[u8; 4] = b"ECDC";
-/// Pending writes before new ones are dropped.
+/// Pending layer and matte writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// Pending frame bytes before new frames are dropped. Frames have their own lane, written
+/// before layer buffers: a burst of large layer writes used to fill the shared queue and drop
+/// frames, so a fully cached comp came back with gaps in its blue bar.
+#[cfg(not(target_arch = "wasm32"))]
+const FRAME_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -75,11 +82,15 @@ pub struct DiskStats {
     pub entries: usize,
     pub bytes: u64,
     pub max_bytes: u64,
+    /// The limit in effect: `max_bytes`, or less when the disk is short of free space.
+    pub limit_bytes: u64,
     pub hits: u64,
     pub misses: u64,
     pub writes: u64,
     pub evictions: u64,
     pub dropped: u64,
+    /// Writes that failed (a full disk, permissions).
+    pub failed: u64,
 }
 
 struct Meta {
@@ -157,15 +168,17 @@ impl DiskIndex {
         v.into_iter().map(|e| e.1).collect()
     }
 
-    /// Remove least recently used entries until the total fits `max` bytes; returns them (the
-    /// caller deletes their files).
+    /// When the total exceeds `max` bytes, remove least recently used entries down to 90% of
+    /// it (so the sort runs once per tenth of `max` written, not on every write); returns them
+    /// (the caller deletes their files).
     pub fn evict(&mut self, max: u64) -> Vec<(Kind, u128)> {
         if self.total <= max {
             return vec![];
         }
+        let target = max - max / 10;
         let mut out = vec![];
         for k in self.lru_order() {
-            if self.total <= max {
+            if self.total <= target {
                 break;
             }
             self.remove(k.0, k.1);
@@ -217,19 +230,46 @@ enum Job {
 }
 
 struct Queue {
+    /// Frame writes (taken first) and their payload bytes.
+    frames: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    frame_bytes: usize,
+    /// Layer and matte writes.
     jobs: std::collections::VecDeque<Job>,
     busy: bool,
+    /// Keys of frames queued or being written.
+    pending_frames: std::collections::HashSet<u128>,
+}
+
+impl Queue {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pop(&mut self) -> Option<Job> {
+        if let Some(j) = self.frames.pop_front() {
+            let Job::Write(_, _, p) = &j;
+            self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+            return Some(j);
+        }
+        self.jobs.pop_front()
+    }
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty() && self.jobs.is_empty()
+    }
 }
 
 pub struct DiskCache {
     dir: PathBuf,
     index: Mutex<DiskIndex>,
     max_bytes: AtomicU64,
+    /// The size free disk space allows (`u64::MAX` = unknown), see [`DiskCache::set_disk_space`].
+    disk_cap: AtomicU64,
+    /// Free space is limiting the cache (warned once per episode).
+    space_limited: AtomicBool,
     hits: AtomicU64,
     misses: AtomicU64,
     writes: AtomicU64,
     evictions: AtomicU64,
     dropped: AtomicU64,
+    failed: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
@@ -298,16 +338,30 @@ impl DiskCache {
             dir,
             index: Mutex::new(DiskIndex::default()),
             max_bytes: AtomicU64::new(max_bytes),
+            disk_cap: AtomicU64::new(u64::MAX),
+            space_limited: AtomicBool::new(false),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: false }), Condvar::new())),
+            queue: Arc::new((
+                Mutex::new(Queue {
+                    frames: Default::default(),
+                    frame_bytes: 0,
+                    jobs: Default::default(),
+                    busy: cfg!(not(target_arch = "wasm32")),
+                    pending_frames: Default::default(),
+                }),
+                Condvar::new(),
+            )),
             min_layer_ms: AtomicU64::new(30),
         });
         dc.rescan();
+        // Shrinking a large cache deletes many files: the writer thread does it.
+        #[cfg(target_arch = "wasm32")]
         dc.evict();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -371,6 +425,32 @@ impl DiskCache {
         self.evict();
     }
 
+    /// The limit in effect: the setting, or less when the disk is short of free space.
+    pub fn limit_bytes(&self) -> u64 {
+        self.max_bytes().min(self.disk_cap.load(Ordering::Relaxed))
+    }
+
+    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves at least
+    /// 2 GB or 5% of the disk free, whichever is more (evicting when it must).
+    pub fn set_disk_space(&self, space: Option<(u64, u64)>) {
+        let cap = match space {
+            // (a disk reported as 0 bytes, such as an automount map, is unknown)
+            Some((total, available)) if total > 0 => {
+                let reserve = (2u64 << 30).max(total / 20);
+                let used = self.index.lock().map(|g| g.total()).unwrap_or_default();
+                // The cache's own files count as free: below the reserve it gives space back.
+                used.saturating_add(available).saturating_sub(reserve)
+            }
+            _ => u64::MAX,
+        };
+        self.disk_cap.store(cap, Ordering::Relaxed);
+        let limited = cap < self.max_bytes();
+        if self.space_limited.swap(limited, Ordering::Relaxed) != limited && limited {
+            log::warn!("disk cache at {}: little free disk space, limiting the cache to {} MB", self.folder().display(), cap >> 20);
+        }
+        self.evict();
+    }
+
     /// Layer buffers faster to render than this are not worth a disk write.
     pub fn set_min_layer_ms(&self, ms: u64) {
         self.min_layer_ms.store(ms, Ordering::Relaxed);
@@ -384,6 +464,11 @@ impl DiskCache {
         self.index.lock().is_ok_and(|g| g.contains(kind, key))
     }
 
+    /// A frame write is queued or in progress.
+    pub fn frame_pending(&self, key: u128) -> bool {
+        self.queue.0.lock().is_ok_and(|q| q.pending_frames.contains(&key))
+    }
+
     /// Keys of one kind (unordered).
     pub fn keys(&self, kind: Kind) -> Vec<u128> {
         self.index.lock().map(|g| g.keys(kind)).unwrap_or_default()
@@ -395,11 +480,13 @@ impl DiskCache {
             entries,
             bytes,
             max_bytes: self.max_bytes(),
+            limit_bytes: self.limit_bytes(),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             writes: self.writes.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
         }
     }
 
@@ -421,8 +508,10 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.frames.clear();
+            q.pending_frames.clear();
         }
-        while !q.jobs.is_empty() || q.busy {
+        while !q.is_empty() || q.busy {
             q = match cv.wait(q) {
                 Ok(q) => q,
                 Err(_) => return,
@@ -469,21 +558,34 @@ impl DiskCache {
         }
     }
 
-    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) {
+    /// Queue a write; `false` when it was dropped (a full queue).
+    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
             self.write_now(kind, key, &payload);
+            true
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (m, cv) = &*self.queue;
-            let Ok(mut q) = m.lock() else { return };
-            if q.jobs.len() >= QUEUE_LIMIT {
+            let Ok(mut q) = m.lock() else { return false };
+            let full = match kind {
+                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
+                _ => q.jobs.len() >= QUEUE_LIMIT,
+            };
+            if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
+                return false;
             }
-            q.jobs.push_back(Job::Write(kind, key, payload));
+            if kind == Kind::Frame {
+                q.pending_frames.insert(key);
+                q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
+                q.frames.push_back(Job::Write(kind, key, payload));
+            } else {
+                q.jobs.push_back(Job::Write(kind, key, payload));
+            }
             cv.notify_all();
+            true
         }
     }
 
@@ -494,30 +596,44 @@ impl DiskCache {
         }
         let path = self.path(kind, key);
         let Some(parent) = path.parent() else { return };
-        if std::fs::create_dir_all(parent).is_err() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            self.write_failed(&e);
             return;
         }
         let data = seal(kind, payload);
-        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        let tmp = parent.join(format!("{key:032x}.tmp.{}.{n}", std::process::id()));
-        if std::fs::write(&tmp, &data).is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        // An entry that cannot fit would be evicted straight away.
+        if data.len() as u64 > self.limit_bytes() {
             return;
         }
-        if std::fs::rename(&tmp, &path).is_err() {
+        // Make room first, so the cache never exceeds its limit (or the free-space reserve).
+        self.evict_to(self.limit_bytes().saturating_sub(data.len() as u64));
+        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!("{key:032x}.tmp.{}.{n}", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, &data).and_then(|()| std::fs::rename(&tmp, &path)) {
             let _ = std::fs::remove_file(&tmp);
+            self.write_failed(&e);
             return;
         }
         self.writes.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut g) = self.index.lock() {
             g.insert(kind, key, data.len() as u64);
         }
-        self.evict();
+    }
+
+    /// Count a failed write; the first one is logged (a full disk shouldn't go unnoticed).
+    fn write_failed(&self, e: &std::io::Error) {
+        if self.failed.fetch_add(1, Ordering::Relaxed) == 0 {
+            log::warn!("disk cache at {}: a write failed: {e}", self.folder().display());
+        }
     }
 
     /// Remove least recently used entries until the cache fits its limit.
     fn evict(&self) {
-        let max = self.max_bytes();
+        self.evict_to(self.limit_bytes());
+    }
+
+    /// Remove least recently used entries until the cache fits `max` bytes.
+    fn evict_to(&self, max: u64) {
         let victims = match self.index.lock() {
             Ok(mut g) => g.evict(max),
             Err(_) => return,
@@ -535,12 +651,13 @@ impl DiskCache {
         decode_frame(&p)
     }
 
-    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes).
-    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        if self.contains(Kind::Frame, key) || rgba.len() != width as usize * height as usize * 4 {
-            return;
+    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes). `true`
+    /// when it is on disk or queued; `false` when refused (wrong size, a full queue).
+    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) -> bool {
+        if rgba.len() != width as usize * height as usize * 4 {
+            return false;
         }
-        self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba));
+        self.contains(Kind::Frame, key) || self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba))
     }
 
     pub fn get_layer(&self, key: u128) -> Option<Buf> {
@@ -553,7 +670,7 @@ impl DiskCache {
         if self.contains(Kind::Layer, key) {
             return;
         }
-        self.enqueue(Kind::Layer, key, encode_layer(buf));
+        let _ = self.enqueue(Kind::Layer, key, encode_layer(buf));
     }
 
     /// Write a layer buffer synchronously (tests).
@@ -574,7 +691,39 @@ impl DiskCache {
         if self.contains(Kind::Matte, k) {
             return;
         }
-        self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
+        let _ = self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
+    }
+
+    /// Make the frame at key `from` the frame at key `to` too (an edit that can't change it gave
+    /// its comp a new content key): a hard link to the same file, or a copy where the file system
+    /// has no links. `false` when `from` isn't cached, `to` already is, or the file system
+    /// refused. (Entries don't contain their key, so the same file serves both.)
+    pub fn link_frame(&self, from: u128, to: u128) -> bool {
+        if !self.contains(Kind::Frame, from) || self.contains(Kind::Frame, to) {
+            return false;
+        }
+        let (src, dst) = (self.path(Kind::Frame, from), self.path(Kind::Frame, to));
+        let Some(parent) = dst.parent() else { return false };
+        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!("{to:032x}.tmp.{}.{n}", std::process::id()));
+        let linked = std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::hard_link(&src, &tmp).or_else(|_| std::fs::copy(&src, &tmp).map(|_| ())))
+            .and_then(|()| std::fs::metadata(&tmp))
+            .and_then(|m| std::fs::rename(&tmp, &dst).map(|()| m.len()));
+        let bytes = match linked {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // (gone meanwhile: another process evicted it)
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+        };
+        // (a link shares its file, but counts in full: the cache only ever errs small)
+        self.evict_to(self.limit_bytes().saturating_sub(bytes));
+        if let Ok(mut g) = self.index.lock() {
+            g.insert(Kind::Frame, to, bytes);
+        }
+        true
     }
 
     /// Write a frame synchronously (tests).
@@ -586,11 +735,20 @@ impl DiskCache {
 #[cfg(not(target_arch = "wasm32"))]
 fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     let (m, cv) = &*q;
+    // The eviction at open (a lower limit than the folder holds), off the opening thread;
+    // `busy` starts set, so `flush` waits for it.
+    if let Some(cache) = dc.upgrade() {
+        cache.evict();
+    }
+    if let Ok(mut g) = m.lock() {
+        g.busy = false;
+    }
+    cv.notify_all();
     loop {
         let job = {
             let Ok(mut g) = m.lock() else { return };
             loop {
-                if let Some(j) = g.jobs.pop_front() {
+                if let Some(j) = g.pop() {
                     g.busy = true;
                     break j;
                 }
@@ -604,12 +762,14 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
-        match job {
-            Job::Write(kind, key, payload) => cache.write_now(kind, key, &payload),
-        }
+        let Job::Write(kind, key, payload) = job;
+        cache.write_now(kind, key, &payload);
         drop(cache);
         if let Ok(mut g) = m.lock() {
             g.busy = false;
+            if kind == Kind::Frame {
+                g.pending_frames.remove(&key);
+            }
         }
         cv.notify_all();
     }
@@ -652,7 +812,7 @@ pub fn read_layer_entry(data: &[u8]) -> Option<Buf> {
 /// The disk key of a segmentation: its chain key and scale.
 fn seg_key(key: u64, scale: f64) -> u128 {
     let mut h = Hash128::default();
-    h.write(b"segmentation-v1");
+    h.write(b"segmentation-v2");
     h.write_u64(key);
     h.write_u64(scale.to_bits());
     h.finish()
@@ -772,7 +932,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-2";
+const RENDER_VERSION: &str = "effectcraft-render-6";
 
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
@@ -820,8 +980,26 @@ pub fn footage_salt(project: &effectcraft_project::Project) -> u64 {
 pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Option<VirtualFileId<'_>>) -> u64 {
     let mut h = Hash128::default();
     h.write(RENDER_VERSION.as_bytes());
+    // Footage another layer reads (Audio Spectrum's Audio Layer); a read precomp can hold any.
+    let mut read = std::collections::BTreeSet::new();
+    let mut read_comp = false;
+    for (_, c) in project.comps() {
+        for l in c.layers.iter() {
+            for r in l.referenced_layers().into_iter().filter(|r| *r != l.id) {
+                match c.layer(r).map(|x| &x.source) {
+                    Some(effectcraft_project::LayerSource::Footage { item }) => _ = read.insert(*item),
+                    Some(effectcraft_project::LayerSource::Comp { .. }) => read_comp = true,
+                    _ => {}
+                }
+            }
+        }
+    }
     for (id, it) in &project.items {
-        if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
+        // (files without video make layer buffers only through a layer that reads them:
+        // importing music keeps the keys)
+        if let effectcraft_project::ItemKind::Footage(f) = &it.kind
+            && (f.has_video || read_comp || read.contains(id))
+        {
             h.write_u64(id.0);
             hash_debug(&mut h, f);
             footage_stamp(&mut h, f, virtual_id);
@@ -834,43 +1012,67 @@ pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Opt
 /// Content key of a composition's pixels: project render settings, the comp and everything it
 /// uses (nested comps, footage, solids, their proxies and Use Proxy switches, footage and proxy
 /// files' size and time). With expressions in play (which can read any comp) the whole project
-/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count.
+/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count, and
+/// neither do markers unless an expression mentions them.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
     comp_content_key_with(project, comp, None)
 }
 
 /// [`comp_content_key`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
 pub fn comp_content_key_with(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, virtual_id: Option<VirtualFileId<'_>>) -> u128 {
+    comp_content_key_for_renderer(project, comp, virtual_id, RENDER_VERSION)
+}
+
+fn comp_content_key_for_renderer(
+    project: &effectcraft_project::Project,
+    comp: effectcraft_project::ItemId,
+    virtual_id: Option<VirtualFileId<'_>>,
+    renderer: &str,
+) -> u128 {
     use effectcraft_project::{ItemKind, LayerSource};
     let mut h = Hash128::default();
-    h.write(RENDER_VERSION.as_bytes());
+    h.write(renderer.as_bytes());
     hash_debug(&mut h, &project.settings);
+    // Expressions can read anything (every item counts); without them, layers that can't
+    // change the picture (music, hidden layers nothing reads) and their files don't count.
+    let expressions = project.reads_markers();
+    let heard = project.heard_layers();
+    let silent = |id, c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(id, c, &heard) };
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = vec![comp];
-    let mut expressions = false;
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
             continue;
         }
         let Some(it) = project.item(id) else { continue };
         if let ItemKind::Comp(c) = &it.kind {
-            for l in &c.layers {
+            let quiet = silent(id, c);
+            for l in c.layers.iter().filter(|l| !quiet.contains(&l.id)) {
                 if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                     stack.push(item);
-                }
-                if !expressions {
-                    l.props.walk("", &mut |_, p| expressions |= p.expr.is_some());
                 }
             }
         }
     }
+    // Markers are pixels only to the expressions that read them (#1083).
+    let markers = expressions;
     let ids: Vec<effectcraft_project::ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
     for id in ids {
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
         match &it.kind {
-            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form()),
+            ItemKind::Comp(c) => {
+                let quiet = silent(id, c);
+                let heard = |l| heard.contains(id, l);
+                if quiet.is_empty() {
+                    hash_debug(&mut h, &c.pixel_form_with(markers, &heard));
+                } else {
+                    let mut pic = (**c).clone();
+                    pic.layers.retain(|l| !quiet.contains(&l.id));
+                    hash_debug(&mut h, &pic.pixel_form_with(markers, &heard));
+                }
+            }
             k => hash_debug(&mut h, k),
         }
         if let ItemKind::Footage(f) = &it.kind {
@@ -903,6 +1105,26 @@ mod tests {
         let d = std::env::temp_dir().join(format!("effectcraft-disk-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// A linked frame reads back as the original under its new key, survives the original's
+    /// eviction, and is never linked over an existing entry or from a missing one.
+    #[test]
+    fn link_frame_serves_a_frame_under_a_new_key() {
+        let dc = DiskCache::open(tmpdir("link"), 1 << 30).unwrap();
+        let rgba: Vec<u8> = (0..16).collect();
+        dc.put_frame_now(1, 2, 2, &rgba);
+        assert!(dc.link_frame(1, 2));
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        assert!(!dc.link_frame(1, 2), "already there");
+        assert!(!dc.link_frame(3, 4), "nothing to link");
+        assert!(!dc.contains(Kind::Frame, 4));
+        dc.put_frame_now(5, 2, 2, &[7; 16]);
+        assert!(!dc.link_frame(5, 2), "an existing entry stays");
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        let _ = std::fs::remove_file(dc.path(Kind::Frame, 1));
+        dc.forget(Kind::Frame, 1);
+        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba), "the link outlives the original");
     }
 
     fn buf(seed: u32, w: u32, h: u32) -> Buf {
@@ -992,13 +1214,81 @@ mod tests {
         assert_eq!(back.img, b.img);
         assert_eq!((back.offset, back.scale), (b.offset, b.scale));
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
-        dc.put_frame(7, 20, 10, &rgba);
+        assert!(dc.put_frame(7, 20, 10, &rgba));
+        assert!(!dc.put_frame(8, 2, 2, &[0; 3]), "a wrong-size frame is refused");
         dc.flush();
         assert_eq!(dc.get_frame(7).unwrap().rgba, rgba);
         let st = dc.stats();
         assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
         // Wrong kind is a miss.
         assert!(dc.get_frame(42).is_none());
+    }
+
+    /// Music doesn't change a comp's disk keys (adding it to the timeline kept no blue frame);
+    /// hiding a clip does. Importing music keeps the layer-cache salt.
+    #[test]
+    fn music_keeps_the_disk_keys() {
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut p = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Main", Default::default(), None, ItemKind::Comp(comp.clone().into()));
+        let sid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+        let clip = build::layer(&mut p, &comp, "Clip", LayerSource::Solid { item: sid }, (64, 64), None);
+        let clip_id = clip.id;
+        p.comp_mut(cid).unwrap().layers.push(clip);
+        let (key, salt) = (comp_content_key(&p, cid), footage_salt(&p));
+        let song = p.add_item(
+            "song.wav",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+        );
+        assert_eq!(footage_salt(&p), salt, "importing music");
+        let music = build::layer(&mut p, &comp, "Music", LayerSource::Footage { item: song }, (64, 64), None);
+        p.comp_mut(cid).unwrap().layers.insert(0, music);
+        assert_eq!(comp_content_key(&p, cid), key, "music on the timeline");
+        p.comp_mut(cid).unwrap().layer_mut(clip_id).unwrap().switches.video = false;
+        assert_ne!(comp_content_key(&p, cid), key, "a hidden clip");
+    }
+
+    /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
+    /// on disk afterwards (the blue bar came back with gaps).
+    #[test]
+    fn frames_are_kept_when_layer_writes_fill_the_queue() {
+        let dir = tmpdir("burst");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..300 {
+            dc.put_layer(10_000 + k, &buf(1, 64, 64));
+        }
+        let rgba = vec![7u8; 32 * 32 * 4];
+        for k in 0..300 {
+            dc.put_frame(k, 32, 32, &rgba);
+        }
+        dc.flush();
+        assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
+    }
+
+    #[test]
+    fn previous_renderer_frames_are_not_reused() {
+        use effectcraft_project::{Comp, ItemKind, Project};
+        use effectcraft_time::{FrameRate, Tick};
+
+        let mut project = Project::default();
+        let comp = Comp::new(2, 2, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let id = project.add_item("Cached composition", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+        let key = frame_key(comp_content_key(&project, id), 0, 1000, 0);
+        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-5"), 0, 1000, 0);
+        let dir = tmpdir("previous-renderer");
+        {
+            let cache = DiskCache::open(&dir, 1 << 30).unwrap();
+            cache.put_frame_now(previous_key, 2, 2, &[9; 16]);
+        }
+        let cache = DiskCache::open(&dir, 1 << 30).unwrap();
+        assert_eq!(cache.get_frame(previous_key).unwrap().rgba, vec![9; 16]);
+        assert!(cache.get_frame(key).is_none());
+        cache.put_frame_now(key, 2, 2, &[17; 16]);
+        assert_eq!(cache.get_frame(key).unwrap().rgba, vec![17; 16]);
     }
 
     #[test]
@@ -1030,9 +1320,9 @@ mod tests {
         let per = dc.stats().bytes / 6;
         // Touch 0 so it is the most recently used.
         assert!(dc.get_layer(0).is_some());
-        dc.set_max_bytes(per * 3 + per / 2);
+        dc.set_max_bytes(per * 3 + per * 3 / 4);
         let st = dc.stats();
-        assert!(st.bytes <= per * 3 + per / 2, "{st:?}");
+        assert!(st.bytes <= per * 3 + per * 3 / 4, "{st:?}");
         assert_eq!(st.entries, 3);
         assert!(dc.contains(Kind::Layer, 0), "recently used survives");
         assert!(!dc.contains(Kind::Layer, 1) && !dc.contains(Kind::Layer, 2) && !dc.contains(Kind::Layer, 3));
@@ -1042,7 +1332,69 @@ mod tests {
         assert_eq!(files, 3);
         // New writes keep evicting.
         dc.put_layer_now(99, &buf(9, 64, 64));
-        assert!(dc.stats().bytes <= per * 3 + per / 2);
+        assert!(dc.stats().bytes <= per * 3 + per * 3 / 4);
+    }
+
+    #[test]
+    fn eviction_goes_down_to_ninety_percent_in_lru_order() {
+        let mut ix = DiskIndex::default();
+        for k in 0..10u128 {
+            ix.insert(Kind::Layer, k, 100);
+        }
+        assert!(ix.touch(Kind::Layer, 0));
+        // Over 950: down to 855, least recently used first.
+        ix.insert(Kind::Layer, 10, 100);
+        assert_eq!(ix.evict(950), vec![(Kind::Layer, 1), (Kind::Layer, 2), (Kind::Layer, 3)]);
+        assert_eq!(ix.total(), 800);
+        // The slack absorbs the next write without another scan.
+        ix.insert(Kind::Layer, 11, 100);
+        assert!(ix.evict(950).is_empty());
+    }
+
+    #[test]
+    fn free_disk_space_caps_the_limit() {
+        let dir = tmpdir("space");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..4u128 {
+            dc.put_layer_now(k, &buf(k as u32, 64, 64));
+        }
+        let used = dc.stats().bytes;
+        // Unknown space: the setting alone.
+        dc.set_disk_space(None);
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        // A disk reported as 0 bytes is unknown.
+        dc.set_disk_space(Some((0, 0)));
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        // 100 GB disk, 5 GB reserved, exactly 5 GB free: the cache may not grow.
+        dc.set_disk_space(Some((100 << 30, 5 << 30)));
+        let st = dc.stats();
+        assert_eq!((st.max_bytes, st.limit_bytes), (1 << 30, used));
+        dc.put_layer_now(9, &buf(9, 64, 64));
+        let st = dc.stats();
+        assert!(st.bytes <= st.limit_bytes && st.bytes <= used - used / 10 && st.evictions > 0, "{st:?}");
+        assert!(dc.contains(Kind::Layer, 9), "the new entry is the most recently used");
+        // Below the reserve the cache gives its space back, and skips writes that can't fit.
+        dc.set_disk_space(Some((100 << 30, 4 << 30)));
+        dc.put_layer_now(10, &buf(10, 64, 64));
+        let st = dc.stats();
+        assert_eq!((st.limit_bytes, st.entries, st.bytes), (0, 0, 0), "{st:?}");
+        // Plenty of space again: back to the setting.
+        dc.set_disk_space(Some((100 << 30, 50 << 30)));
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_writes_are_counted() {
+        let dir = tmpdir("failed");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        // A file where the layers folder should be: every layer write fails.
+        std::fs::write(dir.join(VERSION).join(Kind::Layer.dir()), b"x").unwrap();
+        dc.put_layer_now(1, &buf(1, 8, 8));
+        dc.put_layer_now(2, &buf(2, 8, 8));
+        let st = dc.stats();
+        assert_eq!((st.failed, st.writes, st.entries), (2, 0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn walk(d: &Path) -> usize {
@@ -1102,6 +1454,32 @@ mod tests {
         }
     }
 
+    /// An audio file nothing reads stays out of the layer salt; one a layer reads (Audio
+    /// Spectrum) is in it, so overwriting it doesn't reuse that layer's buffers.
+    #[test]
+    fn read_audio_counts_in_the_footage_salt() {
+        use effectcraft_project::build;
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, MatteKind, Project, TrackMatte};
+        use effectcraft_time::{FrameRate, Tick};
+
+        let mut p = Project::default();
+        let f = Footage { path: "/song.wav".into(), kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() };
+        let song = p.add_item("song.wav", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+        let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let music = build::layer(&mut p, &comp, "music", LayerSource::Footage { item: song }, (16, 9), None);
+        let mut reader = build::layer(&mut p, &comp, "reader", LayerSource::Null, (16, 9), None);
+        let music_id = music.id;
+        comp.layers = vec![reader.clone(), music].into();
+        let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+
+        let id = |mark: u64| move |path: &str| (path == "/song.wav").then_some((8, mark));
+        let (one, two) = (id(1), id(2));
+        assert_eq!(footage_salt_with(&p, Some(&one)), footage_salt_with(&p, Some(&two)), "unread music stays out");
+        reader.track_matte = Some(TrackMatte { layer: music_id, kind: MatteKind::Alpha });
+        *p.comp_mut(cid).unwrap().layers.first_mut().unwrap() = reader;
+        assert_ne!(footage_salt_with(&p, Some(&one)), footage_salt_with(&p, Some(&two)), "read audio counts");
+    }
+
     /// A path with no native metadata takes its key from the caller's size and content hash (#1253).
     #[test]
     fn virtual_file_bytes_change_content_keys() {
@@ -1113,7 +1491,7 @@ mod tests {
         let f = Footage { path: "/virtual.mov".into(), width: 16, height: 9, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
         let fid = p.add_item("virtual.mov", effectcraft_color::Label::None, None, ItemKind::Footage(f));
         let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
-        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)];
+        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)].into();
         let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
 
         let id = |mark: u64| move |path: &str| (path == "/virtual.mov").then_some((8, mark));

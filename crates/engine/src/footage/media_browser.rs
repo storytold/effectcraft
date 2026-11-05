@@ -197,7 +197,6 @@ fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
 
-const VIDEO: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "avi", "mxf", "gif"];
 const IMAGE: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "exr", "bmp", "webp", "psd", "psb", "svg", "tga", "dpx", "cin", "hdr"];
 const AUDIO: &[&str] = &["wav", "aif", "aiff", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
 const DATA: &[&str] = &["json", "csv", "tsv", "mgjson"];
@@ -207,7 +206,8 @@ const MODEL: &[&str] = &["gltf", "glb", "obj", "stl", "fbx"];
 pub fn kind_of(path: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
     let e = ext.as_str();
-    if VIDEO.contains(&e) {
+    // (An animated GIF plays as a movie.)
+    if e == "gif" || effectcraft_project::VIDEO_EXTENSIONS.contains(&e) {
         Some("video")
     } else if IMAGE.contains(&e) {
         Some("image")
@@ -429,6 +429,15 @@ mod tests {
         let all = list(&d, false).unwrap();
         assert_eq!(all.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Shots", "A.mov", "b.png", "notes.txt", "Ω.csv", "作品.csv"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every movie type the importer reads lists as video, as an animated GIF does.
+    #[test]
+    fn movies_list_as_video() {
+        for ext in effectcraft_project::VIDEO_EXTENSIONS.iter().chain(&["gif"]) {
+            assert_eq!(kind_of(&format!("/clips/A.{}", ext.to_uppercase())), Some("video"), "{ext}");
+        }
+        assert_eq!(kind_of("/clips/capture.avi"), Some("video"));
     }
 
     #[test]

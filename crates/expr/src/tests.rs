@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+mod deep_nesting;
 mod fuzz;
 
 use effectcraft_color::Label;
@@ -76,7 +77,7 @@ fn fx() -> Fx {
 
     let ids = (a.id, b.id, title.id, shape.id);
     let c = p.comp_mut(cid).unwrap();
-    c.layers = vec![a, b, title, shape];
+    c.layers = vec![a, b, title, shape].into();
     c.markers.push(Marker { time: secs(1.5), comment: "comp marker".into(), ..Default::default() });
 
     let other = Comp::new(64, 32, FrameRate::FPS_24, Tick::from_seconds_f64(3.0));
@@ -190,6 +191,315 @@ fn functions_and_let_are_reusable_across_evaluations() {
     let e = "function sq(x) { return x * x }\nlet k = 2;\nconst j = 1;\nsq(time) * k + j";
     assert_close!(f.num(e, 3.0), 19.0);
     assert_close!(f.num(e, 2.0), 9.0);
+}
+
+#[test]
+fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
+    let f = fx();
+    // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
+    // a write to a prelude name used to outlive the expression that made it and poison every later
+    // one — in this session's other projects too.
+    assert_close!(f.num("linear = function () { return 777 };\n50", 0.0), 50.0);
+    assert_close!(f.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    assert_close!(f.num("var clamp = 5;\n10", 0.0), 10.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("Math.sin = function () { return 9 };\n1", 0.0), 1.0);
+    assert_close!(f.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(f.num("Object.prototype.leak = 9;\n2", 0.0), 2.0);
+    assert_close!(f.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
+    // The runtime is one thread-local singleton, so a second project on this thread meets the same
+    // objects: the isolation has to hold between projects, not only between the evaluations of one.
+    let g = fx();
+    assert_close!(g.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    assert_close!(g.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(g.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(g.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+/// The four ways a script can reach a global binding, against a prelude *function* rather than one
+/// of the unqualified accessors: assignment, `var`, `delete` and `defineProperty`. The lock is
+/// `writable: false, configurable: false`, and it is the second half of that pair that answers the
+/// last two — a `delete` of a non-configurable property is false, and a `defineProperty` over one
+/// is a `TypeError`. Asked for by a reviewer on #2176.
+#[test]
+fn a_prelude_function_survives_every_way_a_script_can_reach_its_binding() {
+    let f = fx();
+    // Assignment and `var`: silent, and the next expression still has the original.
+    assert_close!(f.num("clamp = function () { return 777 };\n1", 0.0), 1.0);
+    assert_close!(f.num("var clamp = 5;\n2", 0.0), 2.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // `delete` of a non-configurable binding answers false in sloppy mode rather than throwing.
+    assert_close!(f.num("delete clamp ? 1 : 0", 0.0), 0.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("typeof clamp === 'function' ? 1 : 0", 0.0), 1.0);
+    // `defineProperty` over one is a `TypeError`, so this is the one route the user does see. The
+    // expression fails; what it was reaching for is unchanged for the next one.
+    assert!(f.err("Object.defineProperty(globalThis, 'clamp', { value: 5 })").contains("TypeError"));
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // Reconfiguring it to writable is refused the same way, so the lock cannot be reopened.
+    assert!(f.err("Object.defineProperty(globalThis, 'clamp', { writable: true })").contains("TypeError"));
+    assert_close!(f.num("clamp = 7;\n3", 0.0), 3.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    // A second project on the same thread-local runtime meets the same bindings.
+    let g = fx();
+    assert_close!(g.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(g.num("typeof clamp === 'function' ? 1 : 0", 0.0), 1.0);
+}
+
+/// Which mode a write is silent in decides what the user sees, and the answer is that an expression
+/// cannot reach strict mode at all: `Runtime::script` wraps the text in `try{…}catch(__e){throw __e}`,
+/// so a `"use strict"` the user writes is an expression statement inside a block rather than a
+/// directive prologue, and has no effect. A failed write is therefore always the silent kind.
+/// Asked for by a reviewer on #2176.
+#[test]
+fn a_use_strict_in_an_expression_is_inert_so_a_refused_write_stays_silent() {
+    let f = fx();
+    assert_close!(f.num("\"use strict\";\nlinear = function () { return 777 };\n50", 0.0), 50.0);
+    assert_close!(f.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    // The directive is inert rather than honoured: in strict mode an assignment to an undeclared
+    // name is a ReferenceError, and here it quietly creates a global instead.
+    assert_close!(f.num("\"use strict\";\nundeclared_global = 5;\nundeclared_global", 0.0), 5.0);
+    // Which is also why the refused write above cannot be made to report itself by the user: the
+    // only mode an expression runs in is the one where it is dropped.
+    assert_close!(f.num("\"use strict\";\ntypeof linear === 'function' ? 1 : 0", 0.0), 1.0);
+}
+
+/// The same leak, reached through the objects instead of the names: a prelude constructor keeps its
+/// methods on its `prototype`, the prelude itself calls `Array.isArray` and `Object.setPrototypeOf`
+/// while it answers an expression, and `thisProject` is reachable surface that holds no function at
+/// all (#2133).
+#[test]
+fn an_expression_cannot_tamper_with_a_prelude_object_for_the_next_one() {
+    let f = fx();
+    // An unqualified name is an accessor, so it takes a `defineProperty` or a `delete` rather than
+    // an assignment; the setter an assignment goes through writes per-evaluation state.
+    assert_close!(f.num("try { Object.defineProperty(globalThis, 'width', { value: 777 }) } catch (e) {}\n1", 0.0), 1.0);
+    assert_close!(f.num("delete width;\n2", 0.0), 2.0);
+    assert_close!(f.num("width", 0.0), 20.0);
+    assert_close!(f.num("Comp.prototype = {};\n3", 0.0), 3.0);
+    assert_close!(f.num("Comp.prototype.leak = 9;\n4", 0.0), 4.0);
+    assert_close!(f.num("thisComp.width", 0.0), 200.0);
+    // `add` reads its arguments through `Array.isArray`, and reaching an effect builds a group with
+    // `Object.setPrototypeOf`, so a replacement for either would change the answers below.
+    assert_close!(f.num("Array.isArray = function () { return false };\n5", 0.0), 5.0);
+    assert_close!(f.num("Object.setPrototypeOf = function (o) { return o };\n6", 0.0), 6.0);
+    assert_close!(f.num("add([1, 2], [3, 4])[0]", 0.0), 4.0);
+    assert_close!(f.num("effect(\"Slider Control\")(\"Slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisProject = 5;\nthisProject.leak = 9;\n7", 0.0), 7.0);
+    assert_close!(f.num("typeof thisProject === 'object' && thisProject.leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+/// `Math` and `JSON` are namespaces rather than prototypes: nothing inherits from them, so the
+/// prelude freezes them plainly instead of turning every method into a shadowable accessor, which
+/// would put a getter call on every `Math.sin` of a per-frame expression for a shadowing no object
+/// can do. They still cannot be rewritten, through a member or through the binding (#2176).
+#[test]
+fn math_and_json_are_frozen_and_cannot_be_replaced_for_the_next_expression() {
+    let f = fx();
+    assert_close!(f.num("Object.isFrozen(Math) && Object.isFrozen(JSON) ? 1 : 0", 0.0), 1.0);
+    // Plain data properties, not the accessor repair: the hot path reads the native method directly.
+    assert_close!(f.num("'value' in Object.getOwnPropertyDescriptor(Math, 'sin') ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("'value' in Object.getOwnPropertyDescriptor(JSON, 'stringify') ? 1 : 0", 0.0), 1.0);
+    // A member write is dropped in silence, and the next expression still has the original.
+    assert_close!(f.num("Math.sin = function () { return 9 }; Math.max = function () { return -1 };\n1", 0.0), 1.0);
+    assert_close!(f.num("Math.sin(Math.PI / 2) * 100 + Math.max(3, 7)", 0.0), 107.0);
+    assert_close!(f.num("JSON.stringify = function () { return 'x' }; JSON.parse = null;\n2", 0.0), 2.0);
+    assert_close!(f.num("JSON.stringify(JSON.parse('[1,2]')) === '[1,2]' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("Math.leak = 5; JSON.leak = 6;\n3", 0.0), 3.0);
+    assert_close!(f.num("Math.leak === undefined && JSON.leak === undefined ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("delete Math.floor ? 1 : 0", 0.0), 0.0);
+    assert!(f.err("Object.defineProperty(Math, 'floor', { value: 5 })").contains("TypeError"));
+    // The bindings are locked too: assignment, `var` and `delete` leave both in place.
+    assert_close!(f.num("Math = { sin: function () { return 9 } }; JSON = null;\n4", 0.0), 4.0);
+    assert_close!(f.num("var Math = 5; var JSON = 6;\n5", 0.0), 5.0);
+    assert_close!(f.num("delete Math || delete JSON ? 1 : 0", 0.0), 0.0);
+    assert_close!(f.num("Math.floor(2.7) + JSON.parse('3')", 0.0), 5.0);
+    // A second project on the same thread-local runtime meets the same objects.
+    let g = fx();
+    assert_close!(g.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(g.num("JSON.stringify([1]) === '[1]' ? 1 : 0", 0.0), 1.0);
+}
+
+/// Closing the prototypes must not cost an expression its own objects: once an inherited data
+/// property is non-writable, an assignment meaning to shadow it on an instance is dropped in sloppy
+/// mode rather than creating an own property, and using an object as a dictionary runs into exactly
+/// those names (#2133).
+#[test]
+fn an_expression_can_shadow_an_inherited_name_on_its_own_object() {
+    let f = fx();
+    assert_close!(f.num("var o = {}; o.toString = function () { return 'x' }; o.toString() === 'x' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var d = {}; d.constructor = 3; d.constructor", 0.0), 3.0);
+    assert_close!(f.num("var c = {}; c['valueOf'] = 2; c['valueOf']", 0.0), 2.0);
+    // The shared prototype itself still cannot be written through, which is the point of freezing.
+    assert_close!(f.num("Object.prototype.toString = function () { return 'z' };\n1", 0.0), 1.0);
+    assert_close!(f.num("({}).toString() === 'z' ? 0 : 1", 0.0), 1.0);
+}
+
+/// The names an expression shadows are not only `Object.prototype`'s: giving one array its own
+/// `map` or one function its own `call` is ordinary JavaScript, and a prototype frozen without the
+/// repair takes it away. The two halves fail differently, which is why both are checked here —
+/// `map`, `forEach` and `filter` throw, while `push` and `join` silently run the native method and
+/// return its answer, so an expression using them keeps working and quietly computes something
+/// else (#2133).
+#[test]
+fn an_expression_can_shadow_an_inherited_method_on_its_own_array_or_function() {
+    let f = fx();
+    assert_close!(f.num("var a = []; a.map = function () { return 42 }; a.map()", 0.0), 42.0);
+    assert_close!(f.num("var a = [1, 2]; a.forEach = function () { return 5 }; a.forEach()", 0.0), 5.0);
+    assert_close!(f.num("var a = [1, 2]; a.filter = function () { return 6 }; a.filter()", 0.0), 6.0);
+    // `push` returned the native length and `join` the native string before the repair.
+    assert_close!(f.num("var a = [1]; a.push = function () { return 99 }; a.push(2)", 0.0), 99.0);
+    assert_close!(f.num("var a = [1]; a.push = function () { return 99 }; a.push(2); a.length", 0.0), 1.0);
+    assert_close!(f.num("var a = [1]; a.join = function () { return 'J' }; a.join() === 'J' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var fn = function () {}; fn.call = function () { return 7 }; fn.call()", 0.0), 7.0);
+    assert_close!(f.num("var fn = function () {}; fn.apply = function () { return 8 }; fn.apply()", 0.0), 8.0);
+    // A symbol key on a prototype the loop reaches goes the same way.
+    assert_close!(f.num("var a = [1]; a[Symbol.toPrimitive] = function () { return 11 }; +a", 0.0), 11.0);
+    // Reading an unshadowed method still answers with the native one, through the repair.
+    assert_close!(f.num("[1, 2, 3].map(function (x) { return x * 2 })[2]", 0.0), 6.0);
+    assert_close!(f.num("[1, 2, 3].filter(function (x) { return x > 1 }).length", 0.0), 2.0);
+    assert_close!(f.num("[3, 1, 2].sort()[0]", 0.0), 1.0);
+    assert_close!(f.num("[1, 2].concat([3]).length", 0.0), 3.0);
+    // The shared prototype itself still cannot be written through, which is the point of freezing.
+    assert_close!(f.num("Array.prototype.map = function () { return 0 };\n1", 0.0), 1.0);
+    assert_close!(f.num("[1].map(function (x) { return x + 1 })[0]", 0.0), 2.0);
+    assert_close!(f.num("Function.prototype.call = function () { return 0 };\n1", 0.0), 1.0);
+    assert_close!(f.num("(function () { return 4 }).call(null)", 0.0), 4.0);
+}
+
+/// `name` and `message` on an error's prototype are the one exception to the repair, because the
+/// host reads both off a thrown object to render it and has no context to call a getter with, nor
+/// anywhere safe to call one: formatting happens after the evaluation's time budget stops being
+/// checked. What matters is that the message still names the error and the line, and that the
+/// assignment the exception costs is dropped in silence rather than failing the expression (#2133).
+#[test]
+fn an_error_still_renders_with_its_name_and_the_users_line() {
+    let f = fx();
+    // The write the exception costs: a no-op, not a throw, and the next statement still runs.
+    assert_close!(f.num("var e = new Error('x'); e.name = 'MyError'; 1", 0.0), 1.0);
+    assert_close!(f.num("var e = new Error('x'); e.name === 'Error' ? 1 : 0", 0.0), 1.0);
+    // An own `message` is the instance's, so it is untouched by any of this.
+    assert_close!(f.num("new Error('x').message === 'x' ? 1 : 0", 0.0), 1.0);
+    // The prototype itself still cannot be rebound for the next expression, which is the point.
+    assert_close!(f.num("Error.prototype.name = 'Hacked';\n1", 0.0), 1.0);
+    assert_close!(f.num("new Error('x').name === 'Error' ? 1 : 0", 0.0), 1.0);
+    // A getter the expression installs on its own error is reached through its own property, so it
+    // never goes near the host's read of the prototype.
+    assert_close!(f.num("var e = new Error('x'); Object.defineProperty(e, 'name', { get: function () { return 'Own' } }); e.name === 'Own' ? 1 : 0", 0.0), 1.0);
+}
+
+/// The repair must not turn a dropped assignment into a failed expression: in sloppy mode a write
+/// to a frozen target is ignored, and the setter runs for every receiver that inherits the name,
+/// including the other frozen prototypes and an object the expression froze itself.
+#[test]
+fn assigning_a_repaired_name_on_a_frozen_object_is_dropped_not_an_error() {
+    let f = fx();
+    // `hasOwnProperty` is `Object.prototype`'s, so this runs the repaired setter with a frozen
+    // `Array.prototype` as the receiver.
+    assert_close!(f.num("Array.prototype.hasOwnProperty = function () { return true };\n1", 0.0), 1.0);
+    assert_close!(f.num("[].hasOwnProperty('length') ? 1 : 0", 0.0), 1.0);
+    // The prelude freezes these, and each inherits the repaired names.
+    assert_close!(f.num("Math.toString = function () { return 'm' };\n2", 0.0), 2.0);
+    assert_close!(f.num("JSON.valueOf = 3;\n3", 0.0), 3.0);
+    assert_close!(f.num("thisProject.toLocaleString = 4;\n4", 0.0), 4.0);
+    // An object the expression froze itself behaves as it does outside the prelude.
+    assert_close!(f.num("var o = {}; Object.freeze(o); o.toString = function () { return 'x' };\n5", 0.0), 5.0);
+    assert_close!(f.num("var s = {}; Object.seal(s); s.constructor = 6;\n6", 0.0), 6.0);
+    // Still a no-op where it has to be, and still working where it has to work.
+    assert_close!(f.num("({}).toString() === '[object Object]' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("var k = {}; k.toString = function () { return 'y' }; k.toString() === 'y' ? 1 : 0", 0.0), 1.0);
+    // A primitive target boxes into a throwaway wrapper, and `null` is not extensible, which is why
+    // the receiver check alone is enough.
+    assert_close!(f.num("'abc'.toString = function () { return 'q' };\n7", 0.0), 7.0);
+    assert_close!(f.num("(5).constructor = 8;\n8", 0.0), 8.0);
+    assert_close!(f.num("Object.isExtensible(null) === false && Object.isExtensible(undefined) === false ? 1 : 0", 0.0), 1.0);
+}
+
+/// The repaired name is an accessor standing in for a data property, and an accessor is handed the
+/// receiver while a data property has the receiver's own property consulted first, so the setter
+/// has to do that itself or the substitution shows through. An ordinary assignment finds the own
+/// property and never reaches the setter, so these call it with the receiver directly, which is
+/// what `Reflect.set(Object.prototype, name, v, o)` would do; `Reflect` is not available to
+/// expressions. Every expected value is what that `Reflect.set` answers in node, where the name
+/// is still the data property this one stands in for.
+#[test]
+fn the_repair_answers_a_write_as_the_data_property_it_replaced_would() {
+    let f = fx();
+    let set = "var put = Object.getOwnPropertyDescriptor(Object.prototype, 'toString').set;";
+    // An own writable property is updated in place, even when the receiver takes no new ones.
+    assert_close!(f.num(&format!("{set} var o = {{ toString: 1 }}; Object.preventExtensions(o); put.call(o, 2); o.toString"), 0.0), 2.0);
+    assert_close!(f.num(&format!("{set} var o = {{ toString: 1 }}; put.call(o, 2); o.toString"), 0.0), 2.0);
+    // ... and keeps the attributes it had, rather than being redefined as a fresh enumerable one.
+    assert_close!(
+        f.num(
+            &format!(
+                "{set} var o = {{}}; Object.defineProperty(o, 'toString', {{ value: 1, writable: true, enumerable: false, configurable: true }});
+                 put.call(o, 2); Object.getOwnPropertyDescriptor(o, 'toString').enumerable ? 1 : 0"
+            ),
+            0.0
+        ),
+        0.0
+    );
+    // An own non-writable property drops the write instead of being overwritten.
+    assert_close!(
+        f.num(
+            &format!(
+                "{set} var o = {{}}; Object.defineProperty(o, 'toString', {{ value: 1, writable: false, enumerable: false, configurable: true }});
+                 put.call(o, 2); o.toString"
+            ),
+            0.0
+        ),
+        1.0
+    );
+    // Writing through the prototype itself changes nothing for anyone.
+    assert_close!(f.num(&format!("{set} put.call(Object.prototype, 2); ({{}}).toString === undefined ? 0 : 1"), 0.0), 1.0);
+    // An ordinary assignment finds the own property first and never reaches the setter at all.
+    assert_close!(f.num("var o = { toString: 1 }; o.toString = 2; o.toString", 0.0), 2.0);
+}
+
+/// `for…of`, destructuring and spread all go through the iterator intrinsics, and those are the
+/// `prototype` of no global function, so freezing what the globals reach never touched them (#2133).
+#[test]
+fn an_expression_cannot_poison_iteration_for_the_next_one() {
+    let f = fx();
+    assert_close!(f.num("Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true } };\n1", 0.0), 1.0);
+    assert_close!(f.num("var s = 0; for (var x of [1, 2, 3]) s += x; s", 0.0), 6.0);
+    assert_close!(f.num("var [a, b] = [4, 5]; a + b", 0.0), 9.0);
+    assert_close!(f.num("Math.max(...[1, 7, 3])", 0.0), 7.0);
+}
+
+/// Shadowing an inherited name on an instance has to keep working for symbol keys too: making an
+/// object iterable by assigning `Symbol.iterator` is ordinary JavaScript, and a frozen
+/// `Array.prototype` drops that write in silence, so `for…of` walks the array's own elements and
+/// quietly returns a different number rather than failing (#2133).
+#[test]
+fn an_expression_can_give_its_own_array_an_iterator() {
+    let f = fx();
+    assert_close!(
+        f.num(
+            "var a = [1, 2];
+             a[Symbol.iterator] = function () { var d = false; return { next: function () { if (d) return { done: true }; d = true; return { value: 9, done: false } } } };
+             var s = 0; for (var x of a) s += x; s",
+            0.0
+        ),
+        9.0
+    );
+    assert_close!(f.num("var a = [1, 2]; a[Symbol.iterator] = 1; a[Symbol.iterator] === 1 ? 1 : 0", 0.0), 1.0);
+    // `Object.prototype` carries no symbol keys, so a plain object was never affected.
+    assert_close!(f.num("var o = {}; o[Symbol.iterator] = 1; o[Symbol.iterator] === 1 ? 1 : 0", 0.0), 1.0);
+    // An inherited name that is already non-writable is left alone, as it is outside the prelude:
+    // `Date.prototype[Symbol.toPrimitive]` drops the write on `main` and in node as well.
+    assert_close!(f.num("var d = new Date(0); d[Symbol.toPrimitive] = 1; d[Symbol.toPrimitive] === 1 ? 1 : 0", 0.0), 0.0);
+    // Repairing the key must not reopen it: the shared prototype still cannot be written through.
+    assert_close!(
+        f.num(
+            "Array.prototype[Symbol.iterator] = function () { return { next: function () { return { done: true } } } };
+1",
+            0.0
+        ),
+        1.0
+    );
+    assert_close!(f.num("var s = 0; for (var x of [1, 2, 3]) s += x; s", 0.0), 6.0);
 }
 
 #[test]
@@ -313,8 +623,78 @@ fn interpolation_with_arrays() {
     assert_eq!(f.pos("ease(time, 0, 1, [0, 0], [100, 50])", 1.0), [100.0, 50.0, 0.0]);
 }
 
-// ---- object model -----------------------------------------------------------------------------
+#[test]
+fn cubic_bezier_curves() {
+    let f = fx();
+    // ease(t, …) is cubic-bezier(1/3, 0, 2/3, 1): x(u) = u and y(u) = 3u² - 2u³.
+    assert_close!(f.num("bezier(0.25, 0, 1, 0, 100, [0.3333333333333333, 0, 0.6666666666666666, 1])", 0.0), f.num("ease(0.25, 0, 1, 0, 100)", 0.0));
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.3333333333333333, 0, 0.6666666666666666, 1])", 0.0), 50.0);
+    // Symmetric ease-in-out: slower at both ends, faster in the middle.
+    let early = f.num("bezier(0.25, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0);
+    let late = f.num("bezier(0.75, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0);
+    assert!(early < 25.0 && late > 75.0, "ease-in-out: {early}, {late}");
+    // Control points on the diagonal are linear.
+    assert_close!(f.num("bezier(0.3, 0, 1, 0, 100, [0, 0, 1, 1])", 0.0), 30.0);
+    // t is clamped to tMin..tMax; tMin == tMax behaves like the other helpers.
+    assert_close!(f.num("bezier(-1, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 0.0);
+    assert_close!(f.num("bezier(2, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 100.0);
+    assert_close!(f.num("bezier(5, 2, 2, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 100.0);
+}
 
+#[test]
+fn cubic_bezier_short_form_arrays_and_fallbacks() {
+    let f = fx();
+    // Short form: no tMin / tMax.
+    assert_close!(f.num("bezier(0.25, 10, 20, [0, 0, 1, 1])", 0.0), 12.5);
+    assert_eq!(f.pos("bezier(time, 0, 1, [0, 0], [100, 50], [0.42, 0, 0.58, 1])", 1.0), [100.0, 50.0, 0.0]);
+    // y outside 0..1 overshoots, as CSS allows.
+    let over = f.num("bezier(0.5, 0, 1, 0, 100, [0.5, 2, 0.5, 2])", 0.0);
+    assert!(over > 100.0, "overshoot: {over}");
+    // A curve that is not four finite numbers falls back to linear instead of throwing.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [1, 0])", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, 'ease')", 0.0), 50.0);
+    // A missing or unusable curve must not consume the last value: read the curve by position.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 100, [1, 0])", 0.0), 50.0);
+    let v = f.ev(f.shape, "contents/#1/contents/fill/color", "bezier(0.5, 0, 1, [0, 0, 0, 1], [1, 1, 1, 1])", 0.0).unwrap();
+    assert_eq!(v, Value::Color([0.5, 0.5, 0.5, 1.0]));
+    // Exactly four values are a curve; extra ones mean the curve is malformed, so linear.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.42, 0, 0.58, 1, 0])", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.42, 0, 0.58, 1, 2, 3])", 0.0), 50.0);
+    // x control points outside 0..1 are clamped, as CSS requires.
+    let v = f.num("bezier(0.5, 0, 1, 0, 100, [-1, 0, 2, 1])", 0.0);
+    assert!(v.is_finite(), "clamped curve: {v}");
+}
+
+#[test]
+fn cubic_bezier_is_accurate_near_the_endpoints() {
+    /// The value the curve reaches at `x`, by bisection on its monotone x(u).
+    fn reference(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+        let bx = |u: f64| 3.0 * (1.0 - u) * (1.0 - u) * u * x1 + 3.0 * (1.0 - u) * u * u * x2 + u * u * u;
+        let by = |u: f64| 3.0 * (1.0 - u) * (1.0 - u) * u * y1 + 3.0 * (1.0 - u) * u * u * y2 + u * u * u;
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if bx(mid) < x {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        by(0.5 * (lo + hi))
+    }
+    // Steep curves: a residual in x is not a residual in y near the endpoints (dy/dx is in the
+    // thousands), so the solver stops on the estimated y error instead.
+    let f = fx();
+    for (c, x) in [([0.0, 1000.0, 1.0, 1.0], 1e-6), ([0.0, 100.0, 1.0, 0.0], 1e-9), ([0.8, -500.0, 1.0, 1.0], 0.999999)] {
+        let got = f.num(&format!("bezier({x}, 0, 1, [{}, {}, {}, {}])", c[0], c[1], c[2], c[3]), 0.0);
+        let want = reference(c[0], c[1], c[2], c[3], x);
+        assert!((got - want).abs() < 1e-6, "curve {c:?} at {x}: {got} vs {want}");
+    }
+}
+
+// ---- object model -----------------------------------------------------------------------------
 #[test]
 fn comp_attributes() {
     let f = fx();
@@ -907,6 +1287,49 @@ fn source_rect_at_time() {
     assert!((s[0] + 31.0).abs() < 2.0 && (s[1] + 16.0).abs() < 2.0 && (s[2] - 62.0).abs() < 3.0, "{s:?}");
 }
 
+#[test]
+fn source_dimensions_follow_media_replacement() {
+    let mut p = Project::default();
+    let comp = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Main", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let footage = |p: &mut Project, name: &str, width, height| {
+        p.add_item(
+            name,
+            Label::SeaFoam,
+            None,
+            ItemKind::Footage(effectcraft_project::Footage {
+                path: name.into(),
+                kind: effectcraft_project::FootageKind::Still,
+                width,
+                height,
+                has_video: true,
+                ..Default::default()
+            }),
+        )
+    };
+    let original = footage(&mut p, "original.png", 100, 80);
+    let replacement = footage(&mut p, "replacement.png", 30, 40);
+    let mut l = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item: original }, (100, 80), None);
+    l.props.prop_mut(ROT).unwrap().expr =
+        Some(Expression { text: "thisLayer.width + thisLayer.height + thisLayer.source.width + sourceRectAtTime().width".into(), enabled: true });
+    let lid = l.id;
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = c.layer(lid).unwrap();
+    let media = effectcraft_render::MediaOverride::new(lid, replacement);
+    let ctx = EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: c,
+        time: Tick::ZERO,
+        expr: Some(&Expressions),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[media],
+    };
+    assert_eq!(ctx.value(l, l.props.prop(ROT).unwrap()), Value::Scalar(130.0));
+}
+
 // ---- colour -----------------------------------------------------------------------------------
 
 #[test]
@@ -984,6 +1407,8 @@ fn result_kind_errors() {
 fn shadowing_layer_attribute_names_is_local() {
     let f = fx();
     assert_close!(f.num("var width = 3;\nwidth * 2", 0.0), 6.0);
+    assert_close!(f.num("width", 0.0), 20.0, 1e-9);
+    assert_close!(f.num("function width() { return 4; }\nwidth() * 2", 0.0), 8.0);
     assert_close!(f.num("width", 0.0), 20.0, 1e-9);
 }
 
@@ -1114,7 +1539,16 @@ fn text_expression_selector_values() {
     let sel_of = |p: &Project| {
         let c = p.comp(cid).unwrap();
         let l = c.layer(lid).unwrap();
-        let ctx = EvalCtx { project: p, comp_id: cid, comp: c, time: Tick::ZERO, expr: Some(&Expressions), footage: None };
+        let ctx = EvalCtx {
+            project: p,
+            comp_id: cid,
+            comp: c,
+            time: Tick::ZERO,
+            expr: Some(&Expressions),
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         let doc = effectcraft_render::text::source_text(&ctx, l).unwrap();
         let lay = effectcraft_text::layout_doc(&doc);
         let anim = l.props.group("text/animators/#1").unwrap();
@@ -1277,6 +1711,89 @@ fn layer_source_is_the_layers_source_item() {
     assert_close!(f.num("thisComp.layer('Pre').source.numLayers", 0.0), 1.0);
 }
 
+/// The fixture plus a 20×12 solid "Wide", a 48×36 still "Still" (item "still.png") and a precomp
+/// layer "Pre" of the 64×32 "Other" comp.
+fn implicit_source_fx() -> (Fx, LayerId, LayerId, LayerId) {
+    let mut f = fx();
+    let main = f.p.comp(f.cid).unwrap().clone();
+    let wide = solid(&mut f.p, &main, "Wide", [1.0, 1.0, 0.0], 20, 12);
+    let item = f.p.add_item(
+        "still.png",
+        Label::SeaFoam,
+        None,
+        ItemKind::Footage(effectcraft_project::Footage {
+            path: "still.png".into(),
+            kind: effectcraft_project::FootageKind::Still,
+            width: 48,
+            height: 36,
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let still = build::layer(&mut f.p, &main, "Still", LayerSource::Footage { item }, (48, 36), None);
+    let other = f.p.items.values().find(|i| i.name == "Other").unwrap().id;
+    let pre = build::layer(&mut f.p, &main, "Pre", LayerSource::Comp { item: other }, (64, 32), None);
+    let ids = (wide.id, still.id, pre.id);
+    let c = f.p.comp_mut(f.cid).unwrap();
+    c.layers.push(wide);
+    c.layers.push(still);
+    c.layers.push(pre);
+    (f, ids.0, ids.1, ids.2)
+}
+
+fn num_on(f: &Fx, layer: LayerId, text: &str) -> f64 {
+    match f.ev(layer, ROT, text, 0.0) {
+        Ok(v) => v.as_f64(),
+        Err(e) => panic!("{text}: {e}"),
+    }
+}
+
+#[test]
+fn implicit_source_matches_this_layer_source() {
+    let (f, wide, still, pre) = implicit_source_fx();
+    let same = "['name', 'width', 'height', 'duration', 'frameDuration', 'pixelAspect']\
+                .every(function (k) { return source[k] === thisLayer.source[k]; }) ? 1 : 0";
+    for (layer, name, w, h) in [(wide, "Wide", 20.0, 12.0), (still, "still.png", 48.0, 36.0), (pre, "Other", 64.0, 32.0)] {
+        assert_close!(num_on(&f, layer, "source.width"), w);
+        assert_close!(num_on(&f, layer, "source.height"), h);
+        assert_close!(num_on(&f, layer, &format!("source.name == '{name}' ? 1 : 0")), 1.0);
+        assert_close!(num_on(&f, layer, same), 1.0);
+    }
+    assert_close!(num_on(&f, pre, "source.numLayers"), 1.0);
+}
+
+#[test]
+fn implicit_source_is_null_without_a_source_item() {
+    let f = fx();
+    for layer in [f.title, f.shape] {
+        assert_close!(num_on(&f, layer, "source === null && thisLayer.source === null ? 1 : 0"), 1.0);
+        let bare = f.ev(layer, ROT, "source.width", 0.0).unwrap_err();
+        let qualified = f.ev(layer, ROT, "thisLayer.source.width", 0.0).unwrap_err();
+        assert!(qualified.contains("TypeError"), "{qualified}");
+        assert_eq!(bare, qualified);
+    }
+}
+
+#[test]
+fn implicit_source_can_be_shadowed_locally() {
+    let (f, wide, ..) = implicit_source_fx();
+    assert_close!(num_on(&f, wide, "var source = 7;\nsource * 2"), 14.0);
+    assert_close!(num_on(&f, wide, "source.width"), 20.0);
+    assert_close!(num_on(&f, wide, "var source = thisComp.layer('B').source;\nsource.width"), 40.0);
+    assert_close!(num_on(&f, wide, "source.height"), 12.0);
+}
+
+#[test]
+fn implicit_source_follows_the_current_layer() {
+    let (f, wide, still, pre) = implicit_source_fx();
+    let e = "source === null ? -1 : source.width * 1000 + source.height";
+    for _ in 0..2 {
+        for (layer, want) in [(wide, 20012.0), (still, 48036.0), (pre, 64032.0), (f.title, -1.0), (f.b, 40040.0)] {
+            assert_close!(num_on(&f, layer, e), want);
+        }
+    }
+}
+
 #[test]
 fn layer_control_property_stands_for_its_layer() {
     let mut f = fx();
@@ -1370,4 +1887,141 @@ fn time_to_frames_preserves_coercion_and_small_durations() {
     }
 }
 
+/// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another
+/// layer's `("effects")("Slider Control")` or `(1)`, as the pick whip writes them with Compact
+/// English off (they failed: "not a callable function"). It is still a layer.
+#[test]
+fn layers_are_callable_property_groups() {
+    let f = fx();
+    assert_close!(f.num("thisLayer(\"transform\")(\"opacity\")", 0.0), 100.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"ec.control.slider\")(\"slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"Slider Control\")(1)", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(1)(\"effects\")(1)(1)", 0.0), 42.0);
+    // Its own name, index and methods, and a layer as the result still reads as its index.
+    assert_close!(f.num("thisLayer.name == \"A\" ? thisComp.layer(\"B\").index : 0", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(\"B\")", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(thisComp.layer(\"B\"), -1).index", 0.0), 1.0);
+    assert!(f.err("thisLayer(\"nope\")").contains("no property"), "{}", f.err("thisLayer(\"nope\")"));
+}
+
+/// A layer is kept from one evaluation to the next (it is dear to make) but reads the project
+/// afresh in each, and an expression's own fields on it don't reach the next one.
+#[test]
+fn a_kept_layer_reads_the_project_again() {
+    let mut f = fx();
+    let first = "thisComp.layer(\"B\").index * 10 + thisComp.layer(2).name.length";
+    assert_close!(f.num(first, 0.0), 21.0);
+    f.layer_mut(f.b).name = "Bee".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisComp.layer(\"Bee\").index * 10 + thisComp.layer(2).name.length", 0.0), 11.0);
+    assert_close!(f.num("thisLayer.index", 0.0), 2.0);
+    let _ = f.ev(f.a, ROT, "thisLayer.mine = 5; 0", 0.0);
+    assert_close!(f.num("thisLayer.mine === undefined ? 1 : 0", 0.0), 1.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; L.__c = 'x'; L.__l = 99; L.__i = ['Z', 7]; L.__s = __S; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; delete L.__c; delete L.__l; delete L.__i; delete L.__s; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+    let _ = f.ev(f.a, ROT, "Object.freeze(thisLayer); 0", 0.0);
+    f.layer_mut(f.a).name = "Ay".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 12.0);
+}
+
+/// The kept layers are bounded: past the bound a layer isn't kept, an evaluation that makes more
+/// layers than are kept still sees one object for each layer it had kept, and the evaluations
+/// after it, which start over, read the right layers.
+#[test]
+fn the_kept_layers_are_bounded() {
+    let f = fx();
+    let same = "(thisLayer === thisComp.layer(thisLayer.index) ? 1 : 0)";
+    let many =
+        format!("var c = thisLayer.__c;\nfor (var i = 0; i < 5000; i++) __layer(c, 100000 + i);\n{same} * 10 + (__layer(c, 1e6) === __layer(c, 1e6) ? 0 : 1)");
+    assert_close!(f.num(&many, 0.0), 11.0);
+    assert_close!(f.num(&format!("{same} * 100 + thisLayer.index * 10 + thisLayer.name.length"), 0.0), 111.0);
+    assert_close!(f.num(&format!("{same} * 100 + thisLayer.index * 10 + thisLayer.name.length"), 0.0), 111.0);
+}
+
+/// A change to `Object.prototype` doesn't reach the kept layers: a frozen object put there under
+/// the comp's id, before any of its layers is kept, doesn't stop them being kept.
+#[test]
+fn the_kept_layers_dont_go_through_object_prototype() {
+    let f = fx();
+    let _ = f.ev(f.a, ROT, "try { Object.prototype[thisComp.__c] = Object.freeze({}); } catch (e) {} 0", 0.0);
+    assert_close!(f.num("thisLayer === thisComp.layer(thisLayer.index) ? 1 : 0", 0.0), 1.0);
+}
+
+/// The prelude is kept from one evaluation to the next, so an expression can't change its object
+/// model or internals for the ones after it.
+#[test]
+fn an_expression_cant_change_the_prelude_for_the_next() {
+    let f = fx();
+    let read = "[thisComp.layer(1).index, thisLayer.index, thisLayer('transform').property('rotation').value,                 thisLayer.transform.opacity.value, thisProject.bitsPerChannel, comp(thisComp.name).numLayers, width]";
+    let before = f.ev(f.a, ROT, read, 0.5).unwrap();
+    let attacks = [
+        "Comp.prototype.layer = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer).index = 0",
+        "Object.getPrototypeOf(thisLayer('transform')).property = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer.transform.opacity).value = 0",
+        "Comp = function () {}",
+        "Prop = function () {}",
+        "thisProject = null",
+        "__h = function () { return null; }",
+        "__layer = function () { return null; }",
+        "__child = function () {}",
+        "delete __mkProp",
+        "delete thisLayer",
+        "delete thisComp",
+        "delete width",
+        "Object.defineProperty(globalThis, 'thisComp', { get: function () { return 0; } })",
+    ];
+    for a in attacks {
+        let _ = f.ev(f.a, ROT, &format!("try {{ {a} }} catch (e) {{}} 0"), 0.0);
+        assert_eq!(f.ev(f.a, ROT, read, 0.5).unwrap(), before, "after `{a}`");
+    }
+}
+
 mod property_group;
+
+/// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not
+/// an assertion. `cargo test -p effectcraft-expr --release --lib bench_evaluation -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "timing measurement, not a test"]
+fn bench_evaluation() {
+    let f = fx();
+    // Each case runs on a property whose dimension its answer fits: a scalar handed to `position`
+    // is rejected after the script has already run, so the case would be timing an error path.
+    // Ordinary expressions first, then three that read an inherited name in a loop: the repair
+    // turns each of those reads into an accessor call, and `Array.prototype.map` is the one an
+    // expression is most likely to reach for in quantity.
+    let cases: [(&str, &str, &str, u32); 10] = [
+        ("array maths", POS, "value + [10, 0]", 2500),
+        ("scalar maths", ROT, "time * 100 + 5", 3000),
+        ("prelude call", ROT, "linear(time, 0, 1, 0, 100)", 2500),
+        ("cross-layer read", ROT, "thisComp.layer(\"B\").transform.position[0]", 200),
+        ("effect read", ROT, "effect(\"Slider Control\")(\"Slider\")", 150),
+        ("wiggle", POS, "wiggle(2, 10)", 800),
+        ("dictionary", ROT, "var c = {}; var k = 'constructor'; c[k] = 1; c[k] + value", 2500),
+        ("toString x100", ROT, "var o = {}; var n = 0; for (var i = 0; i < 100; i++) { if (o.toString) n++; } n", 250),
+        ("hasOwnProperty x100", ROT, "var o = {}; var n = 0; for (var i = 0; i < 100; i++) { if (o.hasOwnProperty) n++; } n", 250),
+        ("array method x100", ROT, "var a = [1]; var n = 0; for (var i = 0; i < 100; i++) { if (a.map) n++; } n", 250),
+    ];
+    for (label, path, text, iters) in cases {
+        let mut best = u128::MAX;
+        // Three passes, keeping the fastest: a slower pass is scheduling noise, not the prelude.
+        for _ in 0..3 {
+            // The warm-up checks as it goes, at every time the measured loop uses: that loop drops
+            // its answer by design, so a case that had started failing would be timed on its error
+            // path and still print a number.
+            for i in 0..50 {
+                assert!(f.ev(f.a, path, text, f64::from(i % 10) * 0.1).is_ok(), "{label}");
+            }
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let _ = f.ev(f.a, path, text, f64::from(i % 10) * 0.1);
+            }
+            best = best.min(start.elapsed().as_nanos() / u128::from(iters));
+        }
+        println!("BENCH {best:>9} ns/eval  {label} (min of 3 x {iters})");
+    }
+}

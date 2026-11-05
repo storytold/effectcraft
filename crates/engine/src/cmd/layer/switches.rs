@@ -1,6 +1,6 @@
 use super::{
     BlendMode, EngineError, FrameBlend, ItemId, KV, Layer, LayerId, MatteKind, Quality, Result, Session, TrackMatte, Value, b_p, bad, json, layer_mut, layer_p,
-    layers_p, merge_p, resolve_layer, str_p,
+    layers_p, merge_p, resolve_layer, str_p, unlocked,
 };
 
 pub(super) fn set_switch(s: &mut Session, p: &Value) -> Result<Value> {
@@ -19,7 +19,7 @@ pub(super) fn set_switch(s: &mut Session, p: &Value) -> Result<Value> {
         let first = comp.layers.iter().find(|l| ids.contains(&l.id)).map(|l| switch_value(l, &name)).unwrap_or(Some(false));
         let Some(first) = first else { return Err(bad("layer.setSwitch", format!("unknown switch `{name}`"))) };
         let target = v.unwrap_or(!first);
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             set_switch_value(l, &name, target);
             last = target;
         }
@@ -55,7 +55,7 @@ fn set_switch_others(s: &mut Session, cid: ItemId, ids: &[LayerId], name: &str, 
             alone &= on == (ids.contains(&l.id) == active);
         }
         let others = value.unwrap_or(alone == active);
-        for l in comp.layers.iter_mut().filter(|l| applies(l)) {
+        for l in comp.layers.iter_mut_where(|l| applies(l)) {
             let v = if ids.contains(&l.id) { active } else { others };
             set_switch_value(l, name, v);
         }
@@ -152,7 +152,7 @@ pub(super) fn set_comment(s: &mut Session, p: &Value) -> Result<Value> {
     let text = str_p(p, "comment").ok_or_else(|| bad("layer.setComment", "missing `comment`"))?.to_string();
     s.edit("Layer Comment", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.comment = text.clone();
         }
         Ok(())
@@ -169,7 +169,7 @@ pub(super) fn blend(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.edit("Blending Mode", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.blend_mode = match mode {
                 Some(m) => m,
                 None if step > 0 => l.blend_mode.next(),
@@ -181,33 +181,122 @@ pub(super) fn blend(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// `layer.setTrackMatte`: `layers` (or `layer`, else the first selected layer; locked ones left
+/// as they are) use `matte` as their track matte (none when null), in one undo step. `kind` sets the mode; `preserve` keeps
+/// each layer's own (Alpha for a layer without a matte), so changing the matte of several layers
+/// at once keeps their modes.
 pub(super) fn track_matte(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid) = layer_p(s, p, "layer.setTrackMatte")?;
+    let (cid, ids) = match p.get("layers") {
+        Some(_) => layers_p(s, p)?,
+        None => layer_p(s, p, "layer.setTrackMatte").map(|(c, l)| (c, vec![l]))?,
+    };
+    // Locked layers keep their matte (several at once: the others get it).
+    let ids = unlocked(s, cid, ids, "layer.setTrackMatte")?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let matte = match p.get("matte") {
         None | Some(Value::Null) => None,
         Some(v) => Some(resolve_layer(comp, v).ok_or_else(|| bad("layer.setTrackMatte", "no such matte layer"))?),
     };
-    let kind = str_p(p, "kind")
-        .map(|k| match k.to_ascii_lowercase().replace([' ', '_', '-'], "").as_str() {
+    if ids.is_empty() {
+        return Err(bad("layer.setTrackMatte", "no layers"));
+    }
+    if matte.is_some_and(|m| ids.contains(&m)) {
+        return Err(bad("layer.setTrackMatte", "a layer can't be its own matte"));
+    }
+    // None: each layer keeps its own mode.
+    let kind = match str_p(p, "kind").map(|k| k.to_ascii_lowercase().replace([' ', '_', '-'], "")) {
+        Some(k) if k == "preserve" => None,
+        Some(k) => Some(match k.as_str() {
             "alphainverted" | "alphainv" => MatteKind::AlphaInverted,
             "luma" => MatteKind::Luma,
             "lumainverted" | "lumainv" => MatteKind::LumaInverted,
             _ => MatteKind::Alpha,
-        })
-        .unwrap_or(MatteKind::Alpha);
+        }),
+        None => Some(MatteKind::Alpha),
+    };
     s.edit("Track Matte", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        if let Some(m) = matte {
-            if m == lid {
-                return Err(bad("layer.setTrackMatte", "a layer can't be its own matte"));
-            }
-            if let Some(ml) = comp.layer_mut(m) {
-                ml.switches.video = false;
-            }
+        if let Some(ml) = matte.and_then(|m| comp.layer_mut(m)) {
+            ml.switches.video = false;
         }
-        comp.layer_mut(lid).ok_or(EngineError::NoComp)?.track_matte = matte.map(|layer| TrackMatte { layer, kind });
+        for lid in &ids {
+            let l = comp.layer_mut(*lid).ok_or(EngineError::NoComp)?;
+            let kind = kind.unwrap_or_else(|| l.track_matte.map(|m| m.kind).unwrap_or_default());
+            l.track_matte = matte.map(|layer| TrackMatte { layer, kind });
+        }
         Ok(())
     })?;
     Ok(Value::Null)
+}
+
+#[cfg(test)]
+mod track_matte_batch_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn matte_of(s: &Session, id: u64) -> Option<(u64, MatteKind)> {
+        s.active_comp().unwrap().layer(LayerId(id)).unwrap().track_matte.map(|m| (m.layer.0, m.kind))
+    }
+
+    /// #1260: several layers take one matte layer at once, in one undo step; `kind: "preserve"`
+    /// keeps each one's mode; refused calls change nothing; one `layer` still works.
+    #[test]
+    fn several_layers_take_one_matte_and_keep_their_modes() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name":"Mattes","width":16,"height":16,"duration":1})).unwrap();
+        let [a, b, c, x, y] = ["A", "B", "C", "X", "Y"].map(|n| s.execute("layer.newSolid", json!({"name": n})).unwrap()["layer"].as_u64().unwrap());
+        s.execute("layer.setTrackMatte", json!({"layer": a, "matte": x, "kind": "luma"})).unwrap();
+        s.execute("layer.setTrackMatte", json!({"layer": b, "matte": x})).unwrap();
+        assert_eq!((matte_of(&s, a), matte_of(&s, b)), (Some((x, MatteKind::Luma)), Some((x, MatteKind::Alpha))), "one layer, as before");
+        let (before, undo) = (s.project.clone(), s.history.undo.len());
+        s.execute("layer.setTrackMatte", json!({"layers": [a, b, c], "matte": y, "kind": "preserve"})).unwrap();
+        assert_eq!(
+            [matte_of(&s, a), matte_of(&s, b), matte_of(&s, c)],
+            [Some((y, MatteKind::Luma)), Some((y, MatteKind::Alpha)), Some((y, MatteKind::Alpha))],
+            "each keeps its mode (Alpha without one)"
+        );
+        assert!(!s.active_comp().unwrap().layer(LayerId(y)).unwrap().switches.video, "the matte is hidden");
+        assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(s.project.same_content(&before));
+        // Refused: a layer as its own matte, an unknown layer, no layers. Nothing changes.
+        for p in [
+            json!({"layers": [a, y], "matte": y}),
+            json!({"layers": [a, 9999], "matte": y}),
+            json!({"layers": [], "matte": y}),
+            json!({"layers": [a], "matte": 9999}),
+        ] {
+            let (project, revision) = (s.project.clone(), s.revision);
+            assert!(s.execute("layer.setTrackMatte", p.clone()).is_err(), "{p}");
+            assert!(Arc::ptr_eq(&project, &s.project) && s.revision == revision, "{p} changed nothing");
+        }
+        s.execute("layer.setTrackMatte", json!({"layers": [a, b], "matte": null})).unwrap();
+        assert_eq!((matte_of(&s, a), matte_of(&s, b)), (None, None), "both lose it");
+    }
+
+    /// Locked layers keep their parent and matte when they are among several (the others change),
+    /// and alone they are an error that changes nothing.
+    #[test]
+    fn locked_layers_keep_their_parent_and_matte() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name":"Locks","width":16,"height":16,"duration":1})).unwrap();
+        let [a, b, p, m] = ["A", "B", "P", "M"].map(|n| s.execute("layer.newSolid", json!({"name": n})).unwrap()["layer"].as_u64().unwrap());
+        s.execute("layer.setSwitch", json!({"layers": [b], "switch": "lock", "value": true})).unwrap();
+        let layer = |s: &Session, id: u64| s.active_comp().unwrap().layer(LayerId(id)).unwrap().clone();
+        s.execute("layer.setParent", json!({"layers": [a, b], "parent": p})).unwrap();
+        s.execute("layer.setTrackMatte", json!({"layers": [a, b], "matte": m, "kind": "preserve"})).unwrap();
+        s.execute("layer.trackMatte", json!({"layers": [a, b], "op": "luma"})).unwrap();
+        assert_eq!((layer(&s, a).parent, matte_of(&s, a)), (Some(LayerId(p)), Some((m, MatteKind::Luma))));
+        assert_eq!((layer(&s, b).parent, matte_of(&s, b)), (None, None), "the locked layer is left as it was");
+        for (cmd, p) in [
+            ("layer.setParent", json!({"layers": [b], "parent": p})),
+            ("layer.setTrackMatte", json!({"layers": [b], "matte": m})),
+            ("layer.trackMatte", json!({"layers": [b], "op": "alpha"})),
+        ] {
+            let (project, revision) = (s.project.clone(), s.revision);
+            let err = s.execute(cmd, p).unwrap_err();
+            assert!(err.to_string().contains("is locked"), "{cmd}: {err}");
+            assert!(Arc::ptr_eq(&project, &s.project) && s.revision == revision, "{cmd} changed nothing");
+        }
+    }
 }

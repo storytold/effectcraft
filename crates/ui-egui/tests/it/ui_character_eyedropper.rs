@@ -1,4 +1,5 @@
 //! Character Fill and Stroke can sample a displayed Composition pixel.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, commands::text_edit::layer_doc, project::LayerId};
 use effectcraft_ui_egui::{
     EffectcraftApp,
@@ -37,6 +38,7 @@ fn settle(h: &mut Harness<'_, EffectcraftApp>) {
 
 #[test]
 fn character_fill_eyedropper_samples_viewer_and_keeps_text_selection() {
+    let _device = crate::gpu_test::lock();
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180, "duration": 2})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Background", "color": "#20c040"})).unwrap();
@@ -64,6 +66,7 @@ fn character_fill_eyedropper_samples_viewer_and_keeps_text_selection() {
 
 #[test]
 fn character_stroke_eyedropper_samples_viewer() {
+    let _device = crate::gpu_test::lock();
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180, "duration": 2})).unwrap();
     s.execute("layer.newSolid", json!({"name": "brat green", "color": "#8ACE00"})).unwrap();
@@ -79,7 +82,7 @@ fn character_stroke_eyedropper_samples_viewer() {
     settle(&mut h);
     click_auto(&mut h, "character.stroke.eyedropper");
     if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-        h.render().unwrap().save(format!("{dir}/character-eyedropper.png")).unwrap();
+        h.render_serialized().unwrap().save(format!("{dir}/character-eyedropper.png")).unwrap();
     }
     let sample = comp_to_screen(&h.ctx, [20.0, 20.0]).unwrap();
     click(&mut h, sample);

@@ -174,6 +174,31 @@ fn crop_roi_and_resize() {
     assert_eq!((z.width(), z.height()), (32, 24));
 }
 
+/// Resizing to the cropped frame's own dimensions must preserve every decoded PNG pixel.
+/// Compare against crop-only output for padding and scaled ROIs with both resize qualities.
+#[test]
+fn crop_resize_preserves_pixels_when_the_cropped_size_is_requested() {
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    for (crop, scale, expected) in [
+        (Crop { enabled: true, left: 16, right: 16, ..Default::default() }, 1.0, (32, 48)),
+        (Crop { enabled: true, left: -4, top: -2, ..Default::default() }, 1.0, (68, 50)),
+        (Crop { enabled: true, use_roi: true, roi: Some([0.0, 24.0, 32.0, 24.0]), ..Default::default() }, 0.5, (16, 12)),
+        (Crop { enabled: true, use_roi: true, roi: Some([0.0, 24.0, 32.0, 24.0]), ..Default::default() }, 2.0, (64, 48)),
+    ] {
+        let settings = RenderSettings { resolution: scale, ..custom(0.4, 0.44) };
+        let mut output = OutputModule { crop, ..OutputModule::for_format(OutputFormat::PngSequence) };
+        let reference = png(&run(&p, cid, &settings, &output, "/c/reference_[#####].png"), 0);
+        assert_eq!(reference.dimensions(), expected);
+        assert!(reference.pixels().any(|p| p.0[0] > 150), "the reference contains visible content");
+        for quality in [ResizeQuality::Low, ResizeQuality::High] {
+            output.resize = Resize { enabled: true, width: expected.0, height: 1, lock_aspect: true, quality };
+            let actual = png(&run(&p, cid, &settings, &output, "/c/resized_[#####].png"), 0);
+            assert_eq!(actual.dimensions(), expected);
+            assert!(actual == reference, "crop {crop:?}, scale {scale}, quality {quality:?}: pixels changed");
+        }
+    }
+}
+
 #[test]
 fn alpha_only_and_premultiplied() {
     let (p, cid) = project(FrameRate::new(25, 1), |p, comp| {

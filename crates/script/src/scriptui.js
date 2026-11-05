@@ -745,7 +745,8 @@ function __uiMouseWanted(c, inherited) {
 }
 
 // A ScriptUI MouseEvent. `v`: {x, y (relative to the target control), button (0 left, 1 middle,
-// 2 right), detail (click count), screenX, screenY, altKey, ctrlKey, metaKey, shiftKey}.
+// 2 right), buttons (held: 1 left, 2 right, 4 middle), detail (click count), screenX, screenY,
+// altKey, ctrlKey, metaKey, shiftKey}.
 function __uiMouseEvent(type, target, v) {
   var num = function (x, d) {
     x = Number(x);
@@ -765,6 +766,7 @@ function __uiMouseEvent(type, target, v) {
     timeStamp: new Date(),
     detail: num(v.detail, type === "mousemove" || type === "mouseover" || type === "mouseout" ? 0 : 1),
     button: num(v.button, 0),
+    buttons: num(v.buttons, 0),
     clientX: num(v.x, 0),
     clientY: num(v.y, 0),
     screenX: num(v.screenX, 0),
@@ -908,6 +910,18 @@ function __uiDispatch(winId, id, kind, valueJson) {
   var v = valueJson === undefined || valueJson === "" ? null : JSON.parse(valueJson);
   if (kind === "close") {
     w.close(v === null ? 2 : v);
+    return;
+  }
+  // The host gave the window a new size (a docked panel's dock): take it, lay out, tell the script.
+  if (kind === "resize") {
+    var nw = Number(v && v[0]), nh = Number(v && v[1]);
+    var b = w.__ub || w.__lb;
+    if (nw > 0 && nh > 0 && (b[2] - b[0] !== nw || b[3] - b[1] !== nh)) {
+      w.__ub = [b[0], b[1], b[0] + nw, b[1] + nh];
+      __uiLayout(w);
+      w.__fire("onResizing");
+      w.__fire("onResize");
+    }
     return;
   }
   var c = __uiFind(w, id);

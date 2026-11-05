@@ -239,7 +239,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             .enumerate()
     {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * (w / 2.0), y), vec2(18.0, 20.0));
-        if widgets::checkbox(ui, r, on, &t, egui::Id::unique(key)).clicked() {
+        if widgets::checkbox(ui, r, on, &t, egui::Id::unique(key)).changed() {
             set(app, json!({k: !on}));
         }
         p.text(pos2(r.max.x + 4.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
@@ -273,7 +273,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 26.0;
     let r = Rect::from_min_size(pos2(x0, y), vec2(18.0, 20.0));
-    if widgets::checkbox(ui, r, o.show_overlay, &t, egui::Id::unique("paint.showOverlay")).clicked() {
+    if widgets::checkbox(ui, r, o.show_overlay, &t, egui::Id::unique("paint.showOverlay")).changed() {
         set(app, json!({"showOverlay": !o.show_overlay}));
     }
     app.auto.add("paint.showOverlay", r, "Clone Source Overlay");
@@ -282,7 +282,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         set(app, json!({"overlayOpacity": nv}));
     }
     let dr = Rect::from_min_size(pos2(x0 + w - 18.0, y), vec2(18.0, 20.0));
-    if widgets::checkbox(ui, dr, o.overlay_difference, &t, egui::Id::unique("paint.overlayDifference")).clicked() {
+    if widgets::checkbox(ui, dr, o.overlay_difference, &t, egui::Id::unique("paint.overlayDifference")).changed() {
         set(app, json!({"overlayDifference": !o.overlay_difference}));
     }
     app.auto.add("paint.overlayDifference", dr, "Difference mode overlay");

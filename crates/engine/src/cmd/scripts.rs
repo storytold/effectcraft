@@ -5,7 +5,11 @@
 //!   settings on the desktop, so dropping `.jsx` files in those folders works too. File ▸ Scripts
 //!   lists them with the bundled sample scripts and extensions ([`BUNDLED`]) and runs them by name; ScriptUI
 //!   panels appear at the bottom of the Window menu and open as dockable panels
-//!   (`window.scriptPanel`), running with `this` = the panel as in After Effects.
+//!   (`window.scriptPanel`), running with `this` = the panel as in After Effects. A subfolder of
+//!   either folder (one level) is a submenu named after it; its scripts are named `Folder/File.jsx`.
+//! * **Startup and Shutdown scripts** in `Scripts/Startup/` and `Scripts/Shutdown/` run by
+//!   themselves, in alphabetical order: at launch (`file.runStartupScripts`) and as EffectCraft
+//!   quits, after the project is closed (`file.runShutdownScripts`).
 //! * **ScriptUI windows** (`scriptui.*`): list the open script windows, read their control
 //!   trees, click buttons and set values like a user, close them (see [`crate::scriptui`]).
 //! * **Script settings** (`script.settings.*`): After Effects' `app.settings`, string values by
@@ -22,6 +26,23 @@ use crate::{EngineError, Event, Result, Session, cmd, scriptui};
 /// The settings-store folders of installed scripts.
 pub const SCRIPTS_DIR: &str = "Scripts";
 pub const PANELS_DIR: &str = "Scripts/ScriptUI Panels";
+/// The settings-store folders whose scripts run at launch and as EffectCraft quits.
+pub const STARTUP_DIR: &str = "Scripts/Startup";
+pub const SHUTDOWN_DIR: &str = "Scripts/Shutdown";
+/// Commands that run script files or script code (a ScriptUI panel runs its script when it
+/// opens). Scripts and batches can't run them, and confined automation sessions refuse them.
+pub const RUNS_SCRIPTS: &[&str] =
+    &["script.run", "file.runScript", "file.runStartupScripts", "file.runShutdownScripts", "window.scriptPanel", "window.restoreScriptPanels"];
+/// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
+/// `$.evalFile` allow.
+const MAX_SCRIPT_BYTES: usize = 16 << 20;
+/// Modal dialogs a Shutdown script may open one after another; each closes as if canceled.
+const MAX_SHUTDOWN_DIALOGS: usize = 64;
+/// [`PANELS_DIR`]'s name in [`SCRIPTS_DIR`]: it holds the panels, so it is not a folder of scripts.
+const PANELS_FOLDER: &str = "ScriptUI Panels";
+/// Subfolders of Scripts that hold scripts the app runs itself (panels; launch and quit, as in
+/// After Effects): never listed as File ▸ Scripts submenus.
+const RESERVED_FOLDERS: [&str; 3] = [PANELS_FOLDER, "Startup", "Shutdown"];
 /// The ScriptUI panels open when EffectCraft last quit (settings store), reopened at launch.
 pub const OPEN_PANELS_FILE: &str = "scriptui_panels.json";
 /// Scripts' `app.settings` in the settings store: `{section: {key: value}}`, as After Effects
@@ -111,7 +132,7 @@ pub const BUNDLED: &[(&str, bool, &str, &str)] = &[
 /// A script File ▸ Scripts (or the Window menu, for panels) offers.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScriptEntry {
-    /// File name (`Rename Layers.jsx`): what the menus show and commands take.
+    /// File name (`Rename Layers.jsx`), or `Folder/File.jsx` in a subfolder: what commands take.
     pub name: String,
     /// In the ScriptUI Panels folder: opens as a dockable panel.
     pub panel: bool,
@@ -119,16 +140,23 @@ pub struct ScriptEntry {
     pub source: &'static str,
 }
 
+/// Whether `name` ends in `.jsx` or `.js` (any letter case).
 fn is_script(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
     l.ends_with(".jsx") || l.ends_with(".js")
 }
 
-/// Whether `name` can name an installed script: a bare file name, never a path (names are joined
-/// onto the Scripts folders of the settings store, which takes them as relative paths), and on
-/// Windows none of the names [`windows_unsafe_name`] lists.
+/// Whether `name` can name an installed script: a file name, or `Folder/File` for one in a
+/// subfolder of a Scripts folder (one level, and not one of [`RESERVED_FOLDERS`]: `ScriptUI
+/// Panels/…`, `Startup/…`, `Shutdown/…`). Each part is a bare name, never a path (names are joined onto the Scripts folders of
+/// the settings store, which takes them as relative paths), and on Windows none of the names
+/// [`windows_unsafe_name`] lists.
 fn is_script_name(name: &str) -> bool {
-    is_bare_name(name) && !(cfg!(windows) && windows_unsafe_name(name))
+    let part = |n: &str| is_bare_name(n) && !(cfg!(windows) && windows_unsafe_name(n));
+    match name.split_once('/') {
+        Some((folder, file)) => part(folder) && part(file) && !RESERVED_FOLDERS.iter().any(|r| folder.eq_ignore_ascii_case(r)),
+        None => part(name),
+    }
 }
 
 /// One path component on every platform: not empty, `.` or `..`, and without `/`, `\` or NUL.
@@ -155,8 +183,13 @@ pub fn scripts(s: &Session) -> Vec<ScriptEntry> {
     let mut v: Vec<ScriptEntry> = vec![];
     if let Some(cfg) = &s.config {
         for (dir, panel) in [(SCRIPTS_DIR, false), (PANELS_DIR, true)] {
-            for n in cfg.list(dir).into_iter().filter(|n| is_script(n) && is_script_name(n)) {
-                v.push(ScriptEntry { name: n, panel, source: "installed" });
+            // The folder itself, then each subfolder, whose scripts are named `Folder/File.jsx`.
+            let subfolders = cfg.list_dirs(dir).into_iter().map(|f| (format!("{dir}/{f}"), format!("{f}/")));
+            for (folder, prefix) in std::iter::once((dir.to_string(), String::new())).chain(subfolders) {
+                let names = cfg.list(&folder).into_iter().map(|n| format!("{prefix}{n}"));
+                for n in names.filter(|n| is_script(n) && is_script_name(n)) {
+                    v.push(ScriptEntry { name: n, panel, source: "installed" });
+                }
             }
         }
     }
@@ -203,6 +236,7 @@ fn install(s: &mut Session, p: &Value, panel: bool) -> Result<Value> {
     let cfg = s.config.clone().ok_or_else(|| EngineError::Other("this session has no settings folder to install scripts into".into()))?;
     let dir = if panel { PANELS_DIR } else { SCRIPTS_DIR };
     cfg.write(&format!("{dir}/{name}"), &code).map_err(|e| EngineError::Other(format!("cannot install {name}: {e}")))?;
+    s.scripts_changed();
     // After Effects asks for a restart; our menus pick it up at once.
     s.toast(if panel {
         format!("Installed ScriptUI panel {name}: find it at the bottom of the Window menu")
@@ -216,11 +250,18 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!(scripts(s)))
 }
 
+/// `file.uninstallScript {name}`: delete an installed script or panel at the top of the Scripts
+/// folders.
 fn uninstall(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "file.uninstallScript";
     let name = str_p(p, "name").ok_or_else(|| bad(c, "missing `name`"))?;
     if !is_script(name) || !is_script_name(name) {
         return Err(bad(c, format!("`{name}` is not a script file name")));
+    }
+    // A subfolder can be a link to files outside the settings folder (an extension's own
+    // folder), so only what Install puts at the top is removed, never a file through a folder.
+    if name.contains('/') {
+        return Err(bad(c, format!("`{name}` is in a subfolder: delete it there yourself (only scripts at the top of the Scripts folders are uninstalled)")));
     }
     let cfg = s.config.clone().ok_or_else(|| bad(c, "no settings folder"))?;
     let mut removed = false;
@@ -231,17 +272,22 @@ fn uninstall(s: &mut Session, p: &Value) -> Result<Value> {
             removed = true;
         }
     }
+    s.scripts_changed();
     if removed { Ok(json!({"removed": name})) } else { Err(bad(c, format!("`{name}` is not installed"))) }
 }
 
 /// Run an installed or bundled script by name (File ▸ Scripts ▸ `<name>`). A ScriptUI panel run
-/// this way gets `this` = a floating palette-like panel window.
+/// this way gets `this` = a floating palette-like panel window. A script listed under File ▸
+/// Scripts runs before a panel of the same name.
 pub(crate) fn run_named(s: &mut Session, name: &str) -> Result<Value> {
-    let (panel, code) = script_code(s, name, None).ok_or_else(|| bad("file.runScript", format!("no installed or bundled script `{name}`")))?;
+    let found = script_code(s, name, Some(false)).or_else(|| script_code(s, name, None));
+    let (panel, code) = found.ok_or_else(|| bad("file.runScript", format!("no installed or bundled script `{name}`")))?;
     if panel {
         return open_panel(s, &json!({"name": name}));
     }
-    super::file_more::run_js_named(s, &code, name)
+    let result = super::file_more::run_js_named(s, &code, name)?;
+    super::file_more::remember_script(s, crate::prefs::RecentScript::Name(name.to_string()));
+    Ok(result)
 }
 
 /// The code a ScriptUI panel runs with: `this` is a dockable Panel titled after the script.
@@ -308,17 +354,98 @@ fn restore_panels(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"opened": opened, "failed": failed}))
 }
 
+/// Run the scripts in `dir` of the settings store one after another, in alphabetical order (case
+/// ignored), as After Effects runs its Startup and Shutdown folders. A script that fails is
+/// reported in a toast and the log and listed in `failed`; the next one still runs. A script waiting in a
+/// modal dialog is listed in `waiting` and goes on when the dialog closes; the next one runs
+/// meanwhile. With `quitting`, no window is left to show a dialog in, so each dialog closes as
+/// if canceled (`show()` returns 2) and the script runs on.
+fn run_folder(s: &mut Session, dir: &str, quitting: bool) -> Value {
+    let mut names: Vec<String> = s.config.as_ref().map(|c| c.list(dir)).unwrap_or_default().into_iter().filter(|n| is_script(n) && is_script_name(n)).collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+    let (mut ran, mut waiting, mut failed) = (vec![], vec![], vec![]);
+    for name in names {
+        let code = match s.config.as_ref().map(|c| c.read_bounded(&format!("{dir}/{name}"), MAX_SCRIPT_BYTES)) {
+            Some(Ok(Some(code))) => code,
+            read => {
+                let why = match read {
+                    Some(Err(e)) => format!(": {e}"),
+                    _ => String::new(),
+                };
+                let error = format!("{name}: cannot read the script{why}");
+                log::warn!("{dir}: {error}");
+                s.events.push(Event::Toast { message: error.clone(), error: true });
+                failed.push(json!({"name": name, "error": error}));
+                continue;
+            }
+        };
+        let is_waiting = |r: &Result<Value>| r.as_ref().is_ok_and(|v| v.get("waiting").and_then(Value::as_bool) == Some(true));
+        // In a settings folder on disk, the script runs as its file, so `#include`, `$.fileName`
+        // and `$.evalFile` find the files beside it.
+        let path = s.config.as_ref().and_then(|c| c.dir()).map(|d| d.join(dir).join(&name).to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        // Windows open before this script runs belong to other scripts, perhaps of the same name.
+        let before: Vec<u32> = s.script_ui.windows.iter().map(|w| w.id).collect();
+        let hosts_before = s.script_ui.task_hosts.clone();
+        let mut r = super::file_more::run_js_file(s, &code, &path, &name);
+        if !quitting {
+            // The Startup script's context: the one that scheduled tasks or holds the windows it
+            // opened (a task scheduled after its dialog closes runs there too).
+            let tasks = s.script_ui.task_hosts.iter().filter(|h| !hosts_before.contains(h)).copied();
+            let windows = s.script_ui.windows.iter().filter(|w| !before.contains(&w.id)).map(|w| w.host);
+            let hosts: Vec<u32> = tasks.chain(windows).collect();
+            for h in hosts {
+                if !s.script_ui.startup_hosts.contains(&h) {
+                    s.script_ui.startup_hosts.push(h);
+                }
+            }
+        }
+        let mut closed = 0;
+        while quitting && closed < MAX_SHUTDOWN_DIALOGS && is_waiting(&r) {
+            let Some(id) = s.script_ui.windows.iter().rev().find(|w| w.modal && w.script == path && !before.contains(&w.id)).map(|w| w.id) else { break };
+            // report_js reports an error the script throws after its dialog closes, as it does for an
+            // error in the script's first run.
+            r = scriptui::close(s, &json!({"window": id})).and_then(|out| super::file_more::report_js(s, &name, out));
+            closed += 1;
+        }
+        match r {
+            Ok(_) if is_waiting(&r) => waiting.push(name),
+            Ok(_) => ran.push(name),
+            Err(e) => {
+                // Also in the log: no frame draws a Shutdown script's toast.
+                log::warn!("{dir}: {e}");
+                failed.push(json!({"name": name, "error": e.to_string()}));
+            }
+        }
+    }
+    json!({"ran": ran, "waiting": waiting, "failed": failed})
+}
+
+/// `file.runStartupScripts`: run the scripts in `Scripts/Startup` (frontends call it once at
+/// launch, before a project opens).
+fn run_startup(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(run_folder(s, STARTUP_DIR, false))
+}
+
+/// `file.runShutdownScripts`: close the project, then run the scripts in `Scripts/Shutdown`
+/// (frontends call it as the app quits, after the unsaved-changes prompt).
+fn run_shutdown(s: &mut Session, _: &Value) -> Result<Value> {
+    s.replace_project(effectcraft_project::Project::default(), None);
+    Ok(run_folder(s, SHUTDOWN_DIR, true))
+}
+
 /// Window ▸ `<ScriptUI panel>`: run the panel script (or bring its panel forward).
 fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "window.scriptPanel";
     let name = str_p(p, "name").ok_or_else(|| bad(c, "missing `name` (a script in the ScriptUI Panels folder)"))?.to_string();
-    let title = name.trim_end_matches(".jsx").trim_end_matches(".js").to_string();
+    let file = name.rsplit_once('/').map_or(name.as_str(), |(_, f)| f);
+    let title = file.trim_end_matches(".jsx").trim_end_matches(".js").to_string();
     if let Some(w) = s.script_ui.windows.iter().find(|w| w.kind == scriptui::WindowKind::Panel && w.script == name) {
         let id = w.id;
         s.events.push(Event::Frontend { command: c.into(), params: json!({"window": id}) });
         return Ok(json!({"window": id, "open": true}));
     }
-    let (_, code) = script_code(s, &name, Some(true)).or_else(|| script_code(s, &name, None)).ok_or_else(|| bad(c, format!("no ScriptUI panel `{name}`")))?;
+    // Only panels: a script opened as one would be remembered, then forgotten at the next launch.
+    let (_, code) = script_code(s, &name, Some(true)).ok_or_else(|| bad(c, format!("no ScriptUI panel `{name}`")))?;
     let out = super::file_more::run_js_named(s, &panel_wrapper(&title, &code), &name)?;
     let id = s.script_ui.windows.iter().rev().find(|w| w.kind == scriptui::WindowKind::Panel && w.script == name).map(|w| w.id);
     if let Some(id) = id {
@@ -334,6 +461,7 @@ fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"window": id, "result": out}))
 }
 
+/// The commands of File ▸ Scripts, ScriptUI panels and windows, and script settings.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -354,14 +482,22 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             |s, p| install(s, p, true)
         ),
-        cmd!("file.uninstallScript", "Uninstall Script", [], None, "{name}", always, uninstall),
-        crate::query!("file.scripts.list", "List Scripts", "{} → [{name, panel, source: installed|sample|extension}]", list),
+        cmd!(
+            "file.uninstallScript",
+            "Uninstall Script",
+            [],
+            None,
+            "{name (a script at the top of a Scripts folder, not `Folder/File.jsx`)}",
+            always,
+            uninstall
+        ),
+        crate::query!("file.scripts.list", "List Scripts", "{} → [{name (`Folder/File.jsx` in a subfolder), panel, source: installed|sample|extension}]", list),
         cmd!(
             "window.scriptPanel",
             "ScriptUI Panel",
             [],
             None,
-            "{name (a script in the ScriptUI Panels folder, e.g. `Layer Tools.jsx`)} → opens it as a dockable panel",
+            "{name (a script in the ScriptUI Panels folder, e.g. `Layer Tools.jsx`, or `Folder/Panel.jsx` in a subfolder)} → opens it as a dockable panel",
             always,
             open_panel
         ),
@@ -373,6 +509,24 @@ pub fn specs() -> Vec<CommandSpec> {
             "{} → reopens the ScriptUI panels open when EffectCraft last quit (frontends call it at launch) → {opened: [name], failed: [{name, error}]}",
             always,
             restore_panels
+        ),
+        cmd!(
+            "file.runStartupScripts",
+            "Run Startup Scripts",
+            [],
+            None,
+            "{} → runs the scripts in Scripts/Startup in alphabetical order (frontends call it at launch) → {ran: [name], waiting: [name] (in a modal dialog), failed: [{name, error}]}",
+            always,
+            run_startup
+        ),
+        cmd!(
+            "file.runShutdownScripts",
+            "Run Shutdown Scripts",
+            [],
+            None,
+            "{} → closes the project, then runs the scripts in Scripts/Shutdown in alphabetical order (frontends call it as the app quits; their modal dialogs close as if canceled) → {ran: [name], waiting: [name], failed: [{name, error}]}",
+            always,
+            run_shutdown
         ),
         crate::query!("script.settings.get", "Get Script Setting", "{section, key} → {have, value} (app.settings.haveSetting / getSetting)", settings_get),
         cmd!(
@@ -423,9 +577,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "Mouse Event on Script Window Control",
             [],
             None,
-            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
+            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), buttons? (held: 1 left, 2 right, 4 middle), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
             always,
             scriptui::mouse
+        ),
+        cmd!(
+            "scriptui.resize",
+            "Resize Script Window",
+            [],
+            None,
+            "{window?, size: [width, height] (pixels)} → the window takes the size, lays itself out again and its onResizing / onResize run (a docked ScriptUI panel gets its dock's size)",
+            always,
+            scriptui::resize
         ),
         cmd!(
             "scriptui.close",
@@ -500,13 +663,15 @@ mod tests {
         }
     }
 
+    /// Bundled and ordinary script file names are accepted; paths are not.
     #[test]
     fn script_names_are_bare_file_names() {
         let more = ["..jsx", "a..b.js", "Äpfel ✓.jsx", "console.jsx", "Concert.jsx", "NULL.jsx", "COM10.jsx", "LPT.jsx"];
         for name in BUNDLED.iter().map(|b| b.0).chain(more) {
             assert!(is_script(name) && is_script_name(name), "{name}");
         }
-        for name in PATHS {
+        // `a/b.jsx` is a script in a folder (see below).
+        for name in PATHS.into_iter().filter(|n| *n != "a/b.jsx") {
             assert!(!is_script_name(name), "{name:?}");
         }
         for name in WINDOWS_ONLY {
@@ -522,6 +687,141 @@ mod tests {
             assert!(!root.join("settings").join(SCRIPTS_DIR).join("a\\b.jsx").exists());
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    /// `Folder/File.jsx` is accepted; deeper, upward, absolute and `\` names are not.
+    #[test]
+    fn script_names_may_have_one_folder() {
+        for name in ["Motion Kit/Animate.jsx", "a/b.jsx", "Äpfel/✓.js", "..jsx/x.jsx"] {
+            assert!(is_script_name(name), "{name:?}");
+        }
+        // Deeper, up, absolute, an empty part, a `\` path, and the panels' own folder in `Scripts`.
+        let refused = ["a/b/c.jsx", "../x.jsx", "a/../x.jsx", "./x.jsx", "a/..", "/x.jsx", "a//x.jsx", "a/", "a\\b.jsx", "a/b\\c.jsx", "a\0/x.jsx"];
+        for name in refused.into_iter().chain(["ScriptUI Panels/x.jsx", "scriptui panels/x.jsx"]) {
+            assert!(!is_script_name(name), "{name:?}");
+        }
+        for name in ["In:Out/x.jsx", "con/x.jsx", "x/COM1.jsx", "x./y.jsx"] {
+            assert_eq!(is_script_name(name), !cfg!(windows), "{name:?}");
+        }
+    }
+
+    /// Writes `code` to `rel` in the settings folder of [`session_in_tmp`]'s `root`.
+    fn put(root: &std::path::Path, rel: &str, code: &str) {
+        let p = root.join("settings").join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, code).unwrap();
+    }
+
+    /// Every script command takes `Folder/File.jsx` names and refuses names outside one folder level.
+    #[test]
+    fn scripts_in_a_subfolder_are_listed_run_and_opened_as_folder_and_file() {
+        let (mut s, root) = session_in_tmp("folders");
+        put(&root, "Scripts/Tools/Hello.jsx", "hello");
+        put(&root, "Scripts/ScriptUI Panels/Motion Kit/Animate.jsx", "animate");
+        put(&root, "Scripts/ScriptUI Panels/Top.jsx", "top");
+        // Two folders deep: neither listed nor run.
+        put(&root, "Scripts/a/b/c.jsx", "too deep");
+        put(&root, "Scripts/ScriptUI Panels/Motion Kit/sub/Deep.jsx", "too deep");
+        let list = s.execute("file.scripts.list", json!({})).unwrap();
+        let installed: Vec<(&str, bool)> =
+            list.as_array().unwrap().iter().filter(|e| e["source"] == "installed").map(|e| (e["name"].as_str().unwrap(), e["panel"] == true)).collect();
+        assert_eq!(installed, [("Tools/Hello.jsx", false), ("Motion Kit/Animate.jsx", true), ("Top.jsx", true)]);
+        assert_eq!(s.execute("file.runScript", json!({"name": "Tools/Hello.jsx"})).unwrap()["ran"], "hello");
+        // A panel in a folder is titled after its file.
+        let r = s.execute("window.scriptPanel", json!({"name": "Motion Kit/Animate.jsx"})).unwrap();
+        let ran = r["result"]["ran"].as_str().unwrap_or_default();
+        assert!(ran.contains("animate") && ran.contains(r#"__uiDockPanel("Animate")"#), "{r}");
+        assert_eq!(script_code(&s, "Motion Kit/Animate.jsx", Some(true)), Some((true, "animate".to_string())));
+        // A script that is not a panel doesn't open as one.
+        for name in ["Tools/Hello.jsx", "Rename Layers.jsx"] {
+            assert!(bad_params(&s.execute("window.scriptPanel", json!({"name": name}))), "{name}");
+        }
+        for name in [
+            "../x.jsx",
+            "a/b/c.jsx",
+            "a\\b.jsx",
+            "Motion Kit/sub/Deep.jsx",
+            "ScriptUI Panels/Top.jsx",
+            "Startup/Run.jsx",
+            "shutdown/Run.jsx",
+            "Tools/../../../outside.jsx",
+        ] {
+            assert_eq!(script_code(&s, name, None), None, "{name:?}");
+            for c in ["file.runScript", "window.scriptPanel", "file.uninstallScript"] {
+                let r = s.execute(c, json!({"name": name}));
+                assert!(bad_params(&r), "{c} `{name}`: {r:?}");
+            }
+        }
+        assert!(["Scripts/a/b/c.jsx", "Scripts/ScriptUI Panels/Top.jsx"].iter().all(|p| root.join("settings").join(p).is_file()));
+        assert!(root.join("outside.jsx").is_file());
+        // Uninstall removes only scripts at the top; one in a folder is deleted there by hand.
+        for name in ["Tools/Hello.jsx", "Motion Kit/Animate.jsx"] {
+            assert!(bad_params(&s.execute("file.uninstallScript", json!({"name": name}))), "{name}");
+        }
+        assert!(["Scripts/Tools/Hello.jsx", "Scripts/ScriptUI Panels/Motion Kit/Animate.jsx"].iter().all(|p| root.join("settings").join(p).is_file()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A subfolder can be a link to an extension's own folder, outside the settings folder: its
+    /// scripts are listed and run from there, but uninstall never deletes through it.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_never_deletes_through_a_linked_subfolder() {
+        let (mut s, root) = session_in_tmp("linked");
+        std::fs::create_dir_all(root.join("extension")).unwrap();
+        std::fs::write(root.join("extension").join("Animate.jsx"), "animate").unwrap();
+        std::os::unix::fs::symlink(root.join("extension"), root.join("settings").join(PANELS_DIR).join("Motion Kit")).unwrap();
+        let list = s.execute("file.scripts.list", json!({})).unwrap();
+        assert!(list.as_array().unwrap().iter().any(|e| e["name"] == "Motion Kit/Animate.jsx" && e["panel"] == true), "{list}");
+        assert_eq!(script_code(&s, "Motion Kit/Animate.jsx", Some(true)), Some((true, "animate".to_string())));
+        let r = s.execute("file.uninstallScript", json!({"name": "Motion Kit/Animate.jsx"}));
+        assert!(bad_params(&r), "{r:?}");
+        assert!(root.join("extension").join("Animate.jsx").is_file(), "the extension's own file was deleted");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Window ▸ Motion Kit ▸ Animate.jsx: a subfolder is a submenu named after it, where the folder
+    /// sorts; the entries outside folders stay as they were.
+    #[test]
+    fn a_subfolder_is_a_submenu() {
+        use crate::menus::{MenuNode, dynamic, dynamic_nodes};
+        let (s, root) = session_in_tmp("submenus");
+        put(&root, "Scripts/ScriptUI Panels/Motion Kit/Animate.jsx", "");
+        put(&root, "Scripts/ScriptUI Panels/Motion Kit/Rig.jsx", "");
+        put(&root, "Scripts/ScriptUI Panels/Top.jsx", "");
+        put(&root, "Scripts/Tools/Hello.jsx", "");
+        let cx = Default::default();
+        let item =
+            |label: &str, command: &str, name: &str| json!({"type": "item", "label": label, "command": command, "params": {"name": name}, "shortcut": null});
+        let menus = [
+            (
+                "scriptPanels",
+                json!({"type": "submenu", "label": "Motion Kit", "children": [
+                    item("Animate.jsx", "window.scriptPanel", "Motion Kit/Animate.jsx"),
+                    item("Rig.jsx", "window.scriptPanel", "Motion Kit/Rig.jsx"),
+                ]}),
+            ),
+            ("scripts", json!({"type": "submenu", "label": "Tools", "children": [item("Hello.jsx", "file.runScript", "Tools/Hello.jsx")]})),
+        ];
+        for (menu, folder) in menus {
+            let (nodes, _) = dynamic_nodes(&s, menu, &cx);
+            let (entries, _) = dynamic(&s, menu, &cx);
+            let items: Vec<_> = nodes.iter().filter_map(|n| if let MenuNode::Item(e) = n { Some(e) } else { None }).collect();
+            assert_eq!(items, entries.iter().filter(|e| !e.label.contains('/')).collect::<Vec<_>>(), "{menu}");
+            let folders: Vec<Value> = nodes.iter().filter(|n| matches!(n, MenuNode::Submenu { .. })).map(|n| serde_json::to_value(n).unwrap()).collect();
+            assert_eq!(folders, [folder], "{menu}");
+        }
+        let (panels, _) = dynamic_nodes(&s, "scriptPanels", &cx);
+        let labels: Vec<&str> = panels
+            .iter()
+            .filter_map(|n| match n {
+                MenuNode::Item(e) => Some(e.label.as_str()),
+                MenuNode::Submenu { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["Ease Presets.jsx", "Layer Tools.jsx", "Motion Kit", "Top.jsx"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -551,6 +851,175 @@ mod tests {
         assert_eq!(script_code(&s, "../../outside.jsx", None), None);
         assert_eq!(script_code(&s, "../../../outside.jsx", Some(true)), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// File ▸ Scripts ▸ Recent Script Files: the ten scripts run last, newest first, kept in the
+    /// settings; Cmd+Alt+Shift+D runs the first one again.
+    #[test]
+    fn recent_script_files_run_again() {
+        use crate::prefs::{MAX_RECENT_SCRIPTS, PREFS_FILE, Prefs, RecentScript};
+        let (mut s, root) = session_in_tmp("recent");
+        assert_eq!(crate::menus::dynamic(&s, "recentScripts", &Default::default()), (vec![], Some("No Recent Script Files")));
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": 0}))));
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &json!({"recent": 0})), Some("Cmd+Alt+Shift+D"));
+        let tool = root.join("Tool.jsx");
+        std::fs::write(&tool, "tool").unwrap();
+        let tool = tool.to_string_lossy().into_owned();
+        s.execute("file.runScript", json!({"path": tool})).unwrap();
+        s.execute("file.runScript", json!({"name": "Rename Layers.jsx"})).unwrap();
+        // A ScriptUI panel opened from File ▸ Scripts is not a recent script file.
+        std::fs::write(root.join("settings").join(PANELS_DIR).join("Panel.jsx"), "panel").unwrap();
+        s.execute("file.runScript", json!({"name": "Panel.jsx"})).unwrap();
+        let (path, name) = (RecentScript::Path(tool.clone()), RecentScript::Name("Rename Layers.jsx".into()));
+        assert_eq!(s.prefs.recent_scripts, [name.clone(), path.clone()]);
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Rename Layers.jsx", "Tool.jsx"]);
+        assert_eq!((e[1].command.as_str(), &e[1].params), ("file.runScript", &json!({"recent": 1})));
+        // Running one again runs that file and moves it to the top.
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], "tool");
+        assert_eq!(s.prefs.recent_scripts, [path.clone(), name.clone()]);
+        let sample = BUNDLED.iter().find(|b| b.0 == "Rename Layers.jsx").unwrap().3;
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], sample);
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": 2}))));
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": "Tool.jsx"}))));
+        // A file named like a bundled script runs again as that file.
+        let local = root.join("Rename Layers.jsx");
+        std::fs::write(&local, "local").unwrap();
+        s.execute("file.runScript", json!({"path": local.to_string_lossy()})).unwrap();
+        assert_eq!(s.execute("file.runScript", json!({"recent": 0})).unwrap()["ran"], "local");
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], sample);
+        // Ten at most, saved with the settings.
+        let mut last = String::new();
+        for i in 0..MAX_RECENT_SCRIPTS + 2 {
+            let f = root.join(format!("Step {i}.jsonl"));
+            std::fs::write(&f, "").unwrap();
+            last = f.to_string_lossy().into_owned();
+            s.execute("file.runScript", json!({"path": last})).unwrap();
+        }
+        assert_eq!(s.prefs.recent_scripts.len(), MAX_RECENT_SCRIPTS);
+        assert_eq!(s.prefs.recent_scripts[0], RecentScript::Path(last));
+        let saved = std::fs::read_to_string(root.join("settings").join(PREFS_FILE)).unwrap();
+        assert_eq!(Prefs::from_json(&saved).recent_scripts, s.prefs.recent_scripts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recent_script_history_uses_the_selected_script() {
+        let (mut s, root) = session_in_tmp("recent-panel-collision");
+        let name = "Rename Layers.jsx";
+        std::fs::write(root.join("settings").join(PANELS_DIR).join(name), "panel").unwrap();
+        assert!(super::scripts(&s).iter().any(|entry| entry.name == name && !entry.panel));
+        assert!(script_code(&s, name, None).unwrap().0);
+        let sample = BUNDLED.iter().find(|b| b.0 == name).unwrap().3;
+        assert_eq!(s.execute("file.runScript", json!({"name": name})).unwrap()["ran"], sample);
+        assert!(super::open_panel_names(&s).is_empty(), "the listed script runs instead of the panel");
+        assert_eq!(s.prefs.recent_scripts, [crate::prefs::RecentScript::Name(name.to_string())]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recent_script_history_keeps_successful_entries_when_scripts_fail() {
+        fn fail_or_echo(_: &mut Session, request: &ScriptRequest) -> Value {
+            if request.code == "fail" { json!({"error": {"message": "script failed"}}) } else { json!({"ran": request.code}) }
+        }
+        let (mut s, root) = session_in_tmp("recent-failed");
+        s.script = Some(fail_or_echo);
+        let good = root.join("good.jsonl");
+        std::fs::write(&good, "[]").unwrap();
+        s.execute("file.runScript", json!({"path": good})).unwrap();
+        let remembered = s.prefs.recent_scripts.clone();
+        for (name, code) in [("parse.jsonl", "{"), ("step.jsonl", r#"{"command":"does.not.exist"}"#), ("missing-command.jsonl", "{}"), ("runtime.jsx", "fail")]
+        {
+            let path = root.join(name);
+            std::fs::write(&path, code).unwrap();
+            assert!(s.execute("file.runScript", json!({"path": path})).is_err(), "{name}");
+            assert_eq!(s.prefs.recent_scripts, remembered, "{name}");
+        }
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Failed.jsx"), "fail").unwrap();
+        assert!(s.execute("file.runScript", json!({"name": "Failed.jsx"})).is_err());
+        assert_eq!(s.prefs.recent_scripts, remembered);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Reads relative paths from a working directory that a test can change.
+    struct InFolder(std::sync::Mutex<PathBuf>);
+
+    impl InFolder {
+        fn at(&self, path: &str) -> PathBuf {
+            self.0.lock().unwrap().join(path)
+        }
+    }
+
+    impl crate::Services for InFolder {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            std::fs::read(self.at(path))
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            std::fs::write(self.at(path), data)
+        }
+        fn full_path(&self, path: &str) -> Option<String> {
+            Some(self.at(path).to_string_lossy().into_owned())
+        }
+    }
+
+    /// Reads from a folder but can't make paths absolute.
+    struct NoFullPath(PathBuf);
+
+    impl crate::Services for NoFullPath {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            std::fs::read(self.0.join(path))
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            std::fs::write(self.0.join(path), data)
+        }
+        fn full_path(&self, _path: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// A script whose path can't be made absolute still runs, and Recent Script Files does not
+    /// keep its relative path.
+    #[test]
+    fn unresolved_script_paths_are_not_remembered() {
+        let (mut s, root) = session_in_tmp("recent-unresolved");
+        std::fs::write(root.join("Tool.jsx"), "a").unwrap();
+        std::fs::write(root.join("steps.jsonl"), "[]").unwrap();
+        s.services = Arc::new(NoFullPath(root.clone()));
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "a");
+        s.execute("file.runScript", json!({"path": "steps.jsonl"})).unwrap();
+        assert!(s.prefs.recent_scripts.is_empty(), "{:?}", s.prefs.recent_scripts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A script run from a relative path runs the same file again from Recent Script Files after
+    /// the working directory changes, and two scripts with the same file name show their paths.
+    #[test]
+    fn recent_script_files_keep_the_file_that_ran() {
+        let (mut s, root) = session_in_tmp("recent-relative");
+        let (a, b) = (root.join("a"), root.join("b"));
+        for (dir, code) in [(&a, "a"), (&b, "b")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("Tool.jsx"), code).unwrap();
+        }
+        let services = Arc::new(InFolder(std::sync::Mutex::new(a.clone())));
+        s.services = services.clone();
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "a");
+        *services.0.lock().unwrap() = b.clone();
+        assert_eq!(s.execute("file.runScript", json!({"recent": 0})).unwrap()["ran"], "a");
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Tool.jsx"]);
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "b");
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        let (a, b) = (a.join("Tool.jsx").to_string_lossy().into_owned(), b.join("Tool.jsx").to_string_lossy().into_owned());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), [b.as_str(), a.as_str()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Native script paths are kept absolute.
+    #[test]
+    fn native_full_paths_are_absolute() {
+        use crate::Services;
+        assert!(crate::FsServices.full_path("Tool.jsx").is_some_and(|p| std::path::Path::new(&p).is_absolute()));
     }
 
     #[test]
@@ -600,6 +1069,66 @@ mod tests {
         s.execute("file.uninstallScript", json!({"name": "Hello.jsx"})).unwrap();
         assert!(installed.iter().all(|p| !p.exists()));
         assert!(bad_params(&s.execute("file.uninstallScript", json!({"name": "Hello.jsx"}))), "no longer installed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Edit ▸ Keyboard Shortcuts lists the scripts File ▸ Scripts lists (not ScriptUI panels),
+    /// as soon as one is installed and until it is uninstalled; a key given to one is saved with
+    /// the preset.
+    #[test]
+    fn file_scripts_entries_take_keyboard_shortcuts() {
+        use crate::shortcuts::{Keymaps, SHORTCUTS_FILE, binding_key};
+        let (mut s, root) = session_in_tmp("shortcuts");
+        let (script, panel) = (root.join("Hello.jsx"), root.join("Hello Panel.jsx"));
+        std::fs::write(&script, "hello").unwrap();
+        std::fs::write(&panel, "panel").unwrap();
+        let listed = |s: &Session, name: &str| {
+            s.shortcuts().find(&binding_key("file.runScript", &json!({"name": name}))).map(|b| (b.label.clone(), b.path.join(" ▸ "), b.defaults.clone()))
+        };
+        assert_eq!(listed(&s, "Rename Layers.jsx"), Some(("Rename Layers.jsx".into(), "File ▸ Scripts".into(), vec![])), "the bundled samples");
+        assert_eq!(listed(&s, "Hello.jsx"), None);
+        s.execute("file.installScript", json!({"path": script.to_string_lossy()})).unwrap();
+        s.execute("file.installScriptUIPanel", json!({"path": panel.to_string_lossy()})).unwrap();
+        assert_eq!(listed(&s, "Hello.jsx"), Some(("Hello.jsx".into(), "File ▸ Scripts".into(), vec![])));
+        assert_eq!(listed(&s, "Hello Panel.jsx"), None, "panels are in the Window menu");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Hello.jsx"}, "keys": "Cmd+Alt+Shift+F7"})).unwrap();
+        let key = binding_key("file.runScript", &json!({"name": "Hello.jsx"}));
+        assert_eq!((&r["command"], &r["keys"]), (&json!(key), &json!(["Cmd+Alt+Shift+F7"])), "{r}");
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &json!({"name": "Hello.jsx"})), Some("Cmd+Alt+Shift+F7"));
+        let saved = Keymaps::from_json(&std::fs::read_to_string(root.join("settings").join(SHORTCUTS_FILE)).unwrap());
+        assert_eq!(saved.active_preset().and_then(|p| p.overrides.get(&key)), Some(&vec!["Cmd+Alt+Shift+F7".to_string()]));
+        s.execute("file.uninstallScript", json!({"name": "Hello.jsx"})).unwrap();
+        assert_eq!(listed(&s, "Hello.jsx"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `shortcuts.list` and `shortcuts.set` see a script copied into the Scripts folder by hand
+    /// after the shortcut table was built; a script the folder doesn't hold (never there, or
+    /// removed by hand) can't take a key, and Run Script File… keeps its own keys.
+    #[test]
+    fn shortcut_commands_find_scripts_copied_into_the_folder() {
+        let (mut s, root) = session_in_tmp("copied");
+        assert!(s.shortcuts().find("file.runScript").is_some(), "the table is built");
+        std::fs::create_dir_all(root.join("settings").join(SCRIPTS_DIR)).unwrap();
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Copied.jsx"), "copied").unwrap();
+        let list = s.execute("shortcuts.list", json!({"query": "copied.jsx"})).unwrap();
+        assert_eq!(list["count"], 1, "{list}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Copied.jsx"}, "keys": "Cmd+Alt+Shift+F7"})).unwrap();
+        assert_eq!(r["command"], r#"file.runScript {"name":"Copied.jsx"}"#, "{r}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Missing.jsx"}, "keys": "Cmd+Alt+Shift+F8"}));
+        assert!(bad_params(&r), "{r:?}");
+        // The binding-key form finds a script copied in since the last lookup, too.
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Second.jsx"), "second").unwrap();
+        let r = s.execute("shortcuts.set", json!({"command": r#"file.runScript {"name":"Second.jsx"}"#, "keys": "Cmd+Alt+Shift+F10"})).unwrap();
+        assert_eq!(r["command"], r#"file.runScript {"name":"Second.jsx"}"#, "{r}");
+        // Removed by hand: no longer in the folder.
+        std::fs::remove_file(root.join("settings").join(SCRIPTS_DIR).join("Copied.jsx")).unwrap();
+        std::fs::remove_file(root.join("settings").join(SCRIPTS_DIR).join("Second.jsx")).unwrap();
+        let r = s.execute("shortcuts.set", json!({"command": r#"file.runScript {"name":"Second.jsx"}"#, "keys": "Cmd+Alt+Shift+F11"}));
+        assert!(bad_params(&r), "{r:?}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Copied.jsx"}, "keys": "Cmd+Alt+Shift+F9"}));
+        assert!(bad_params(&r), "{r:?}");
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &Value::Null), None, "Run Script File… has no key");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

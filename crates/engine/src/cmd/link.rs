@@ -102,11 +102,39 @@ fn quote(s: &str) -> String {
 
 /// The AE expression reference to property `uid` of `target` as seen from a property of `from`.
 pub(crate) fn reference(comp: &Comp, from: &Layer, target: &Layer, uid: Uid, compact: bool) -> Option<String> {
+    reference_with(comp, from, target, uid, compact, false)
+}
+
+/// [`reference`], with the properties inside an effect selected by their index (`by_index`, an
+/// Alt pick whip in After Effects): `effect("Color Control")(1)` rather than `("Color")`. The
+/// effect keeps its name. An index is the property's place among its group's children, as an
+/// expression's `(1)` reads it: it follows a renamed parameter, not one moved to another place.
+pub(crate) fn reference_with(comp: &Comp, from: &Layer, target: &Layer, uid: Uid, compact: bool, by_index: bool) -> Option<String> {
     let chain = target.props.node_chain(uid)?;
+    // Each node's one-based index among its group's children, and whether it lies inside an
+    // effect (below the effect itself): those are selected by index with `by_index`.
+    let mut parent = &target.props;
+    let mut depth_in_effects: Option<usize> = None;
+    let mut by_number: Vec<Option<usize>> = vec![];
+    for n in &chain {
+        let at = parent.children.iter().position(|c| c.uid() == n.uid()).map(|i| i + 1);
+        by_number.push(at.filter(|_| by_index && depth_in_effects.is_some_and(|d| d >= 1)));
+        depth_in_effects = match depth_in_effects {
+            Some(d) => Some(d + 1),
+            None => (n.match_id() == "effects").then_some(0),
+        };
+        if let Node::Group(g) = n {
+            parent = g;
+        }
+    }
+    let selector = |i: usize, label: &str| match by_number.get(i).copied().flatten() {
+        Some(at) => format!("({at})"),
+        None => format!("({})", quote(label)),
+    };
     let mut parts: Vec<String> = vec![];
     let mut pending: Option<&str> = None;
     let mut in_effect = false;
-    for n in chain {
+    for (i, n) in chain.iter().copied().enumerate() {
         if let Some(f) = pending.take() {
             parts.push(format!("{f}({})", quote(n.name())));
             in_effect |= f == "effect";
@@ -119,7 +147,7 @@ pub(crate) fn reference(comp: &Comp, from: &Layer, target: &Layer, uid: Uid, com
             (Node::Group(_), "transform") if !in_effect => parts.push("transform".into()),
             (Node::Group(_), "text") if !in_effect => parts.push("text".into()),
             (Node::Prop(_), "sourceText") => parts.push("sourceText".into()),
-            _ if in_effect => parts.push(format!("({})", quote(n.name()))),
+            _ if in_effect => parts.push(selector(i, n.name())),
             _ => parts.push(camel(n.name())),
         }
     }
@@ -127,10 +155,9 @@ pub(crate) fn reference(comp: &Comp, from: &Layer, target: &Layer, uid: Uid, com
     let _ = comp;
     if !compact {
         // Match names: language-independent, like After Effects with Compact English off.
-        let chain = target.props.node_chain(uid)?;
         let mut out = if from.id == target.id { "thisLayer".to_string() } else { format!("thisComp.layer({})", quote(&target.name)) };
-        for n in chain {
-            out.push_str(&format!("({})", quote(n.match_id())));
+        for (i, n) in chain.iter().copied().enumerate() {
+            out.push_str(&selector(i, n.match_id()));
         }
         return Some(out);
     }
@@ -161,7 +188,9 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let from = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let target = comp.layer(tl).ok_or(EngineError::NoComp)?;
-    let r = reference(comp, from, target, tu, s.prefs.general.expression_pick_whip_compact).ok_or_else(|| bad("prop.pickWhip", "no such target property"))?;
+    let by_index = b_p(p, "byIndex").unwrap_or(false);
+    let r = reference_with(comp, from, target, tu, s.prefs.general.expression_pick_whip_compact, by_index)
+        .ok_or_else(|| bad("prop.pickWhip", "no such target property"))?;
     let (me, them) = (from.props.find(uid).ok_or(EngineError::NoComp)?, target.props.find(tu).ok_or(EngineError::NoComp)?);
     let (dm, dt) = (dims(from, me), dims(target, them));
     // Dropped on one of the target's values: that dimension (`position[0]`), as in After Effects.
@@ -206,7 +235,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Whip (Link Property)",
             [],
             None,
-            "{layer?, path|prop, target: {layer, path|prop, dimension?}, expression?, range?: [start, end]} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; with `expression`: inserts it there, replacing the characters in `range`, default the end)",
+            "{layer?, path|prop, target: {layer, path|prop, dimension?}, expression?, range?: [start, end], byIndex?: bool} → sets an AE reference expression (`dimension`: one of the target's values, `position[0]`; with `expression`: inserts it there, replacing the characters in `range`, default the end; `byIndex`: an effect's properties by their index, `effect(\"Color Control\")(1)`, as an Alt pick whip does)",
             has_layers,
             pick_whip
         ),

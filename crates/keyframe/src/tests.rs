@@ -395,3 +395,59 @@ proptest::proptest! {
         proptest::prop_assert!((-1e-9..=10.0 + 1e-9).contains(&v));
     }
 }
+
+#[test]
+fn muted_keys_are_skipped_by_evaluation() {
+    let mut keys = vec![Keyframe::new(s(0.0), Value::Scalar(0.0)), Keyframe::new(s(1.0), Value::Scalar(100.0)), Keyframe::new(s(2.0), Value::Scalar(300.0))];
+    let at = |keys: &[Keyframe], t: f64| evaluate(keys, s(t), false).unwrap().as_f64();
+    assert!((at(&keys, 0.5) - 50.0).abs() < 1e-9);
+    assert!((at(&keys, 1.5) - 200.0).abs() < 1e-9);
+    keys[1].muted = true;
+    // The 0 → 300 segment now spans 0 → 2 s.
+    assert!((at(&keys, 0.5) - 75.0).abs() < 1e-9);
+    assert!((at(&keys, 1.0) - 150.0).abs() < 1e-9);
+    assert!((at(&keys, 1.5) - 225.0).abs() < 1e-9);
+    for k in &mut keys {
+        k.muted = true;
+    }
+    assert!(evaluate(&keys, s(0.5), false).is_none());
+}
+
+#[test]
+fn muted_key_automation_uses_the_active_neighbours() {
+    let mut keys = vec![
+        Keyframe::new(s(0.0), Value::Vec2([0.0, 0.0])),
+        Keyframe::new(s(1.0), Value::Vec2([50.0, 100.0])),
+        Keyframe::new(s(2.0), Value::Vec2([100.0, 0.0])),
+    ];
+    for k in &mut keys {
+        k.auto_bezier = true;
+        k.in_interp = Interp::Bezier;
+        k.out_interp = Interp::Bezier;
+    }
+    let all = keys.clone();
+    let mut active = keys.clone();
+    active.remove(1);
+    keys[1].muted = true;
+    for t in [0.0, 0.25, 0.5, 1.0, 1.5, 1.75, 2.0] {
+        assert_eq!(evaluate(&keys, s(t), true), evaluate(&active, s(t), true), "{t}");
+    }
+    // The muted auto-Bezier key no longer bulges the motion path.
+    assert_ne!(evaluate(&keys, s(0.5), true), evaluate(&all, s(0.5), true));
+}
+
+#[test]
+fn mute_round_trips_and_survives_value_replacement() {
+    let mut k = Keyframe::new(s(0.0), Value::Scalar(1.0));
+    let json = serde_json::to_value(&k).unwrap();
+    assert!(json.get("muted").is_none(), "false is the default and is skipped");
+    k.muted = true;
+    let json = serde_json::to_value(&k).unwrap();
+    assert_eq!(json["muted"], serde_json::json!(true));
+    let back: Keyframe = serde_json::from_value(json).unwrap();
+    assert!(back.muted);
+    let mut keys = vec![k];
+    set_key(&mut keys, Keyframe::new(s(0.0), Value::Scalar(2.0)));
+    assert!(keys[0].muted);
+    assert_eq!(keys[0].value, Value::Scalar(2.0));
+}

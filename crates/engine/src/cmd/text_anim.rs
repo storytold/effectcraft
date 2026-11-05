@@ -49,8 +49,9 @@ fn per_char_on(l: &Layer) -> bool {
     l.props.prop("text/perChar3d").is_some_and(|p| p.value.as_bool())
 }
 
-/// The animator a command targets: `animator` (uid or 1-based index), else the animator holding
-/// a selected property, else the last one.
+/// The animator a command targets: `animator` (uid or 1-based index; a uid match wins, so an
+/// animator whose uid equals an index is picked over the one at that position), else the animator
+/// holding a selected property, else the last one.
 fn animator_uid(s: &Session, l: &Layer, p: &Value, cmd: &str) -> Result<u64> {
     let anims = l.props.group("text/animators").ok_or_else(|| bad(cmd, "not a text layer"))?;
     let list: Vec<&PropGroup> = anims.groups().collect();
@@ -59,7 +60,11 @@ fn animator_uid(s: &Session, l: &Layer, p: &Value, cmd: &str) -> Result<u64> {
         if let Some(g) = list.iter().find(|g| g.uid == n) {
             return Ok(g.uid);
         }
-        return list.get((n as usize).wrapping_sub(1)).map(|g| g.uid).ok_or_else(|| bad(cmd, format!("no animator {n}")));
+        let count = if list.len() == 1 { "1 animator".to_string() } else { format!("{} animators", list.len()) };
+        return list
+            .get((n as usize).wrapping_sub(1))
+            .map(|g| g.uid)
+            .ok_or_else(|| bad(cmd, format!("no animator {n}: `animator` is a uid or a 1-based index, and the layer has {count}")));
     }
     for (lid, uid) in &s.state.selected_props {
         if *lid != l.id {
@@ -142,6 +147,7 @@ fn add_animator_prop(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).cloned().ok_or_else(|| bad(C, "no layer"))?;
     let auid = animator_uid(s, &layer, p, C)?;
+    let mut index = 0;
     s.edit("Add Text Animator Property", None, |proj, _| {
         let mut next = proj.next_id;
         let mut ids = Ids(&mut next);
@@ -151,10 +157,13 @@ fn add_animator_prop(s: &mut Session, p: &Value) -> Result<Value> {
         for k in &kinds {
             add_props(&mut ids, anim, k, three);
         }
+        // The requested property's 1-based position in the Properties group. A companion (such as
+        // Tracking Type) is added before it, so the first new child is not always the one asked for.
+        index = kinds.first().and_then(|k| anim.sub("properties")?.children.iter().position(|n| n.match_id() == k.as_str())).map_or(0, |i| i + 1);
         proj.next_id = next;
         Ok(())
     })?;
-    Ok(json!({"animator": auid}))
+    Ok(json!({"animator": auid, "index": index}))
 }
 
 pub(crate) fn add_selector(s: &mut Session, p: &Value) -> Result<Value> {
@@ -450,7 +459,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Property",
             [],
             None,
-            "{layer?, animator?: uid|index, property: (see layer.addTextAnimator)}",
+            "{layer?, animator?: uid|index (1-based; a uid match wins over an index), property: (see layer.addTextAnimator)}",
             has_animator,
             add_animator_prop
         ),
@@ -459,7 +468,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Text Selector",
             [],
             None,
-            "{layer?, animator?: uid|index, kind: range|wiggly|expression}",
+            "{layer?, animator?: uid|index (1-based; a uid match wins over an index), kind: range|wiggly|expression}",
             has_animator,
             add_selector
         ),
@@ -478,7 +487,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Variable Font Axes",
             ["Animation", "Animate Text"],
             None,
-            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index}",
+            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index (1-based; a uid match wins over an index)}",
             has_text_layer,
             font_axes
         ),

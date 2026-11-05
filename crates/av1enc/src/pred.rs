@@ -297,7 +297,8 @@ pub(crate) fn predict_inter(refp: &Plane, block: &InterBlock, pred: &mut [u16]) 
 
 /// The visible `w x h` area of a reference plane interpolated at the sub-sample phase
 /// (`fx`, `fy`) (1/16 units) with the EIGHTTAP filter, as `predict_inter` computes it for
-/// blocks wider and taller than 4. Used for motion search.
+/// blocks wider and taller than 4. The reference for `half_planes`, which the encoder uses.
+#[cfg(test)]
 pub(crate) fn subpel_plane(refp: &Plane, w: usize, h: usize, fx: usize, fy: usize, bit_depth: u32) -> Vec<u16> {
     let kh = &SUBPEL_FILTERS[EIGHTTAP][fx];
     let kv = &SUBPEL_FILTERS[EIGHTTAP][fy];
@@ -325,6 +326,66 @@ pub(crate) fn subpel_plane(refp: &Plane, w: usize, h: usize, fx: usize, fy: usiz
         }
     }
     out
+}
+
+/// The three half-sample planes (8, 0), (0, 8), (8, 8) of `subpel_plane` in one pass: the
+/// horizontal half-sample pass is shared by (8, 0) and (8, 8), and the phase-0 kernels reduce to
+/// exact shifts (Round2( 128 * v, 11 ) = Round2( v, 4 ), Round2( 16 * s, 11 ) = Round2( s, 7 )),
+/// so the result equals three `subpel_plane` calls bit for bit.
+pub(crate) fn half_planes(refp: &Plane, w: usize, h: usize, bit_depth: u32) -> [Vec<u16>; 3] {
+    let k = &SUBPEL_FILTERS[EIGHTTAP][8];
+    let max = (1i32 << bit_depth) - 1;
+    let (lx, ly) = (w as i32 - 1, h as i32 - 1);
+    // horizontal pass at phase 8: Round2( sum, 3 )
+    let mut hp = vec![0i32; w * h];
+    for y in 0..h {
+        let row = &refp.row(y)[..w];
+        let out = &mut hp[y * w..y * w + w];
+        let tap = |x: i32| -> i32 {
+            let mut s = 0i32;
+            for t in 0..8 {
+                s += k[t] as i32 * row[(x + t as i32 - 3).clamp(0, lx) as usize] as i32;
+            }
+            round2(s, 3)
+        };
+        if w >= 8 {
+            for x in 0..3 {
+                out[x] = tap(x as i32);
+            }
+            for (x, o) in out.iter_mut().enumerate().take(w - 4).skip(3) {
+                let seg = &row[x - 3..x + 5];
+                let mut s = 0i32;
+                for t in 0..8 {
+                    s += k[t] as i32 * seg[t] as i32;
+                }
+                *o = round2(s, 3);
+            }
+            for x in w - 4..w {
+                out[x] = tap(x as i32);
+            }
+        } else {
+            for (x, o) in out.iter_mut().enumerate() {
+                *o = tap(x as i32);
+            }
+        }
+    }
+    let p80: Vec<u16> = hp.iter().map(|&v| round2(v, 4).clamp(0, max) as u16).collect();
+    let mut p08 = vec![0u16; w * h];
+    let mut p88 = vec![0u16; w * h];
+    for y in 0..h {
+        let rows: [usize; 8] = std::array::from_fn(|t| (y as i32 + t as i32 - 3).clamp(0, ly) as usize);
+        let (o08, o88) = (&mut p08[y * w..y * w + w], &mut p88[y * w..y * w + w]);
+        for x in 0..w {
+            let (mut a, mut b) = (0i32, 0i32);
+            for t in 0..8 {
+                a += k[t] as i32 * refp.data[rows[t] * refp.stride + x] as i32;
+                b += k[t] as i32 * hp[rows[t] * w + x];
+            }
+            o08[x] = round2(a, 7).clamp(0, max) as u16;
+            o88[x] = round2(b, 11).clamp(0, max) as u16;
+        }
+    }
+    [p80, p08, p88]
 }
 
 #[cfg(test)]
@@ -357,6 +418,20 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn half_planes_match_subpel_plane() {
+        for (w, h) in [(37usize, 29usize), (5, 3), (1, 1), (64, 64)] {
+            let mut p = Plane::new(64, 64);
+            for (i, v) in p.data.iter_mut().enumerate() {
+                *v = ((i * 7919) % 1024) as u16;
+            }
+            let hp = half_planes(&p, w, h, 10);
+            for (i, (fx, fy)) in [(8, 0), (0, 8), (8, 8)].into_iter().enumerate() {
+                assert_eq!(hp[i], subpel_plane(&p, w, h, fx, fy, 10), "{w}x{h} phase ({fx}, {fy})");
             }
         }
     }

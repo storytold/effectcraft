@@ -1362,14 +1362,18 @@ fn key_event(
             exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "size": ns}));
         }
         // The app-wide shortcut dispatcher is skipped while this editor holds the
-        // keyboard, so the Deselect All chord (Cmd/Ctrl+Shift+A or F2 by default)
-        // must be matched here and run through the command dispatcher like undo
-        // above. Matching the command's current binding, not a fixed key, keeps
-        // rebound shortcuts working and gives every route one final state; the
-        // forwarding test also refuses chords a focused editor must never surrender
-        // (see `forwardable_during_text_edit`).
-        _ if crate::menus::chord_matches(&app.session, "edit.deselectAll", key, m) && crate::menus::forwardable_during_text_edit(m, key) => {
-            let _ = crate::menus::invoke(app, ctx, "edit.deselectAll", json!({}));
+        // keyboard, so commands that end the edit by moving the selection — Deselect
+        // All (Cmd/Ctrl+Shift+A or F2 by default) and Duplicate (Cmd/Ctrl+D) — must be
+        // matched here and run through the command dispatcher like undo above.
+        // Matching each command's current binding, not a fixed key, keeps rebound
+        // shortcuts working and gives every route one final state; a chord bound to
+        // both commands resolves in list order. The forwarding test also refuses
+        // chords a focused editor must never surrender (see
+        // `forwardable_during_text_edit`).
+        _ if crate::menus::forwardable_during_text_edit(m, key)
+            && let Some(cmd_id) = ["edit.deselectAll", "edit.duplicate"].into_iter().find(|id| crate::menus::chord_matches(&app.session, id, key, m)) =>
+        {
+            let _ = crate::menus::invoke(app, ctx, cmd_id, json!({}));
         }
         _ => {}
     }

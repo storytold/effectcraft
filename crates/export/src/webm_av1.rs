@@ -42,7 +42,8 @@ fn cluster(blocks: &mut [Block]) -> Vec<u8> {
 
 pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
     let rate = job.settings.rate(comp);
-    let mut venc = crate::hevc_av1::Av1::new(w, h, rate, job.output)?;
+    let codes = crate::encode::output_codes(&job.project.settings, job.output.channels);
+    let mut venc = crate::hevc_av1::Av1::new(w, h, rate, job.output, codes)?;
     let with_audio = wants_audio(job);
     let opus_channels = if job.output.audio_channels == 1 { 1usize } else { 2 };
     let mut opus = with_audio.then(|| opus_encoder(job));

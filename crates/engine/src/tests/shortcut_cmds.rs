@@ -185,6 +185,28 @@ fn in_and_out_points_stretch_to_the_current_time() {
 }
 
 #[test]
+fn trimming_out_to_the_playhead_keeps_its_frame_visible() {
+    let (mut s, ids) = session([(1.0, 9.0); 3]);
+    let frame = 1.0 / 30.0;
+    // Alt+] at 4 s: the Out edge lands one frame after the playhead, so 4 s is the layer's last
+    // visible frame — it must not be cut away at the playhead (as in After Effects).
+    s.execute("time.set", json!({"time": 4.0})).unwrap();
+    s.execute("layer.timing", json!({"layers": [ids[0]], "op": "trimOutToTime"})).unwrap();
+    assert!((span(&s, ids[0]).1 - (4.0 + frame)).abs() < 1e-9, "{:?}", span(&s, ids[0]));
+    // Alt+[ at 2 s: the playhead's frame becomes the layer's first visible one.
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("layer.timing", json!({"layers": [ids[1]], "op": "trimInToTime"})).unwrap();
+    assert!((span(&s, ids[1]).0 - 2.0).abs() < 1e-9, "{:?}", span(&s, ids[1]));
+    // Trimmed before the In point, the Out point keeps one frame of layer.
+    s.execute("time.set", json!({"time": 0.5})).unwrap();
+    s.execute("layer.timing", json!({"layers": [ids[2]], "op": "trimOutToTime"})).unwrap();
+    assert!((span(&s, ids[2]).1 - (1.0 + frame)).abs() < 1e-9, "{:?}", span(&s, ids[2]));
+    // One undo step back to the original span.
+    assert!(s.undo());
+    assert!((span(&s, ids[2]).1 - 9.0).abs() < 1e-9);
+}
+
+#[test]
 fn masks_are_stepped_through_and_wrap() {
     let (mut s, ids) = session([(0.0, 10.0); 3]);
     s.execute("layer.select", json!({"layers": [ids[0]]})).unwrap();

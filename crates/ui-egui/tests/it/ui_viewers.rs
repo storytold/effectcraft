@@ -2,6 +2,7 @@
 //! comp goes to an unlocked viewer (a new one when every viewer is locked); a click on another
 //! viewer makes it the active one; closing a viewer forgets it.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -171,5 +172,5 @@ fn viewers_snapshot() {
     h.run_steps(4);
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out");
     std::fs::create_dir_all(dir).unwrap();
-    h.render().unwrap().save(format!("{dir}/viewers.png")).unwrap();
+    h.render_serialized().unwrap().save(format!("{dir}/viewers.png")).unwrap();
 }

@@ -86,6 +86,10 @@ pub struct EditorState {
     /// Paste sets the same properties of the selected layers.
     #[serde(skip)]
     pub value_clipboard: Vec<(String, effectcraft_keyframe::Value)>,
+    /// The copied keyframes and values as After Effects keyframe text (one layer's Transform
+    /// properties), for the system clipboard.
+    #[serde(skip)]
+    pub keyframe_text: Option<String>,
     /// Copied effect instances, with comp-time key offsets from the earliest copied key.
     /// Paste adds them to the selected layers at the destination comp's CTI.
     #[serde(skip)]
@@ -94,6 +98,9 @@ pub struct EditorState {
     /// a shape layer's Contents); Paste adds them to the selected shape layers.
     #[serde(skip)]
     pub contents_clipboard: Vec<effectcraft_project::PropGroup>,
+    /// Copied masks (Edit ▸ Copy with masks selected); Paste adds them to the selected layers.
+    #[serde(skip)]
+    pub mask_clipboard: Vec<effectcraft_project::PropGroup>,
     /// Selected mask vertices (viewer Selection tool / pen).
     #[serde(default)]
     pub selected_vertices: Vec<VertexRef>,

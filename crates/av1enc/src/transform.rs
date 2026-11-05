@@ -32,6 +32,7 @@ fn sin128(angle: i32) -> i64 {
     cos128(angle - 64)
 }
 
+#[inline(always)]
 fn brev(num_bits: u32, x: usize) -> usize {
     let mut t = 0;
     for i in 0..num_bits {
@@ -63,8 +64,11 @@ fn hd(t: &mut [i32], a: usize, b: usize, flip: bool, r: u32) {
     t[b] = (x - y).clamp(lo, hi);
 }
 
-/// Inverse DCT of length 2^n, n = 2..=5 (7.13.2.3), in place.
-fn inverse_dct(t: &mut [i32], n: u32, r: u32) {
+/// Inverse DCT of length 2^N, N = 2..=5 (7.13.2.3), in place. `N` is a const generic so that the
+/// bit-reversal permutations and loop bounds fold at compile time.
+#[inline(always)]
+fn inverse_dct_n<const N: u32>(t: &mut [i32], r: u32) {
+    let n = N;
     let len = 1usize << n;
     let mut copy = [0i32; 32];
     copy[..len].copy_from_slice(&t[..len]);
@@ -76,6 +80,7 @@ fn inverse_dct(t: &mut [i32], n: u32, r: u32) {
 }
 
 /// Rotate the high-frequency branches before the four-point core.
+#[inline(always)]
 fn inverse_dct_initial_stages(t: &mut [i32], n: u32, r: u32) {
     if n >= 5 {
         for i in 0..8 {
@@ -112,6 +117,7 @@ fn inverse_dct_initial_stages(t: &mut [i32], n: u32, r: u32) {
 }
 
 /// Evaluate the four-point core and merge progressively larger branches.
+#[inline(always)]
 fn inverse_dct_final_stages(t: &mut [i32], n: u32, r: u32) {
     for i in 0..2 {
         bf(t, 2 * i, 2 * i + 1, 32 + 16 * i as i32, i == 0);
@@ -190,6 +196,7 @@ const SINPI_2_9: i64 = 2482;
 const SINPI_3_9: i64 = 3344;
 const SINPI_4_9: i64 = 3803;
 
+#[inline(always)]
 fn inverse_adst4(t: &mut [i32]) {
     let (t0, t1, t2, t3) = (t[0] as i64, t[1] as i64, t[2] as i64, t[3] as i64);
     let mut s = [SINPI_1_9 * t0, SINPI_2_9 * t0, SINPI_3_9 * t1, SINPI_4_9 * t2, SINPI_1_9 * t2, SINPI_2_9 * t3, SINPI_4_9 * t3];
@@ -207,7 +214,9 @@ fn inverse_adst4(t: &mut [i32]) {
     }
 }
 
-fn adst_in_permute(t: &mut [i32], n: u32) {
+#[inline(always)]
+fn adst_in_permute<const N: u32>(t: &mut [i32]) {
+    let n = N;
     let n0 = 1usize << n;
     let mut copy = [0i32; 16];
     copy[..n0].copy_from_slice(&t[..n0]);
@@ -217,7 +226,9 @@ fn adst_in_permute(t: &mut [i32], n: u32) {
     }
 }
 
-fn adst_out_permute(t: &mut [i32], n: u32) {
+#[inline(always)]
+fn adst_out_permute<const N: u32>(t: &mut [i32]) {
+    let n = N;
     let n0 = 1usize << n;
     let mut copy = [0i32; 16];
     copy[..n0].copy_from_slice(&t[..n0]);
@@ -231,8 +242,9 @@ fn adst_out_permute(t: &mut [i32], n: u32) {
     }
 }
 
+#[inline(always)]
 fn inverse_adst8(t: &mut [i32], r: u32) {
-    adst_in_permute(t, 3);
+    adst_in_permute::<3>(t);
     for i in 0..4 {
         bf(t, 2 * i, 2 * i + 1, 60 - 16 * i as i32, true);
     }
@@ -250,11 +262,12 @@ fn inverse_adst8(t: &mut [i32], r: u32) {
     for i in 0..2 {
         bf(t, 2 + 4 * i, 3 + 4 * i, 32, true);
     }
-    adst_out_permute(t, 3);
+    adst_out_permute::<3>(t);
 }
 
+#[inline(always)]
 fn inverse_adst16(t: &mut [i32], r: u32) {
-    adst_in_permute(t, 4);
+    adst_in_permute::<4>(t);
     for i in 0..8 {
         bf(t, 2 * i, 2 * i + 1, 62 - 8 * i as i32, true);
     }
@@ -283,7 +296,7 @@ fn inverse_adst16(t: &mut [i32], r: u32) {
     for i in 0..4 {
         bf(t, 2 + 4 * i, 3 + 4 * i, 32, true);
     }
-    adst_out_permute(t, 4);
+    adst_out_permute::<4>(t);
 }
 
 /// 1-D transform kind.
@@ -308,6 +321,17 @@ pub(crate) fn kinds(tx_type: usize) -> (Kind, Kind) {
     }
 }
 
+#[inline(always)]
+fn inverse_dct(t: &mut [i32], n: u32, r: u32) {
+    match n {
+        2 => inverse_dct_n::<2>(t, r),
+        3 => inverse_dct_n::<3>(t, r),
+        4 => inverse_dct_n::<4>(t, r),
+        _ => inverse_dct_n::<5>(t, r),
+    }
+}
+
+#[inline(always)]
 fn inverse_1d(t: &mut [i32], kind: Kind, n: u32, r: u32) {
     match kind {
         Kind::Dct => inverse_dct(t, n, r),
@@ -322,7 +346,17 @@ fn inverse_1d(t: &mut [i32], kind: Kind, n: u32, r: u32) {
 /// 2-D inverse transform (7.13.3) of a square `n x n` block (n = 4..=32) of dequantised
 /// coefficients (row stride `n`) into `residual` (row stride `n`).
 pub(crate) fn inverse_2d(dequant: &[i32], residual: &mut [i32], tx_sz: usize, tx_type: usize, bit_depth: u32) {
-    let log2 = TX_WIDTH_LOG2[tx_sz] as u32;
+    match TX_WIDTH_LOG2[tx_sz] {
+        2 => inverse_2d_n::<2>(dequant, residual, tx_sz, tx_type, bit_depth),
+        3 => inverse_2d_n::<3>(dequant, residual, tx_sz, tx_type, bit_depth),
+        4 => inverse_2d_n::<4>(dequant, residual, tx_sz, tx_type, bit_depth),
+        _ => inverse_2d_n::<5>(dequant, residual, tx_sz, tx_type, bit_depth),
+    }
+}
+
+/// `inverse_2d` for a block of width `1 << LOG2`.
+fn inverse_2d_n<const LOG2: u32>(dequant: &[i32], residual: &mut [i32], tx_sz: usize, tx_type: usize, bit_depth: u32) {
+    let log2 = LOG2;
     let n = 1usize << log2;
     let row_shift = TRANSFORM_ROW_SHIFT[tx_sz] as u32;
     let row_clamp = bit_depth + 8;
@@ -429,6 +463,51 @@ fn basis(kind: Kind, n: usize) -> &'static [f32] {
 /// Forward 2-D transform of the `n x n` residual (row stride `n`) into orthonormal-domain
 /// coefficients scaled by 8 (so that `level = out / q` with the spec's dequantiser).
 pub(crate) fn forward_2d(residual: &[i32], out: &mut [f32], n: usize, tx_type: usize) {
+    match n {
+        4 => forward_2d_n::<4, 16>(residual, out, tx_type),
+        8 => forward_2d_n::<8, 64>(residual, out, tx_type),
+        16 => forward_2d_n::<16, 256>(residual, out, tx_type),
+        _ => forward_2d_dyn(residual, out, n, tx_type),
+    }
+}
+
+/// `forward_2d` for a fixed size, so `tmp` is exactly `NN = N * N` floats (no 4 KiB zeroing).
+#[inline(always)]
+fn forward_2d_n<const N: usize, const NN: usize>(residual: &[i32], out: &mut [f32], tx_type: usize) {
+    let n = N;
+    let (ck, rk) = kinds(tx_type);
+    let bc = &basis(ck, n)[..NN];
+    let brt = &basis_t(rk, n)[..NN];
+    let residual = &residual[..NN];
+    let out = &mut out[..NN];
+    let mut tmp = [0f32; NN];
+    for i in 0..n {
+        let t = &mut tmp[i * n..i * n + n];
+        for j in 0..n {
+            let r = residual[i * n + j];
+            if r == 0 {
+                continue;
+            }
+            let r = r as f32;
+            for (o, &b) in t.iter_mut().zip(&brt[j * n..j * n + n]) {
+                *o += r * b;
+            }
+        }
+    }
+    out.iter_mut().for_each(|v| *v = 0.0);
+    for k in 0..n {
+        let o = &mut out[k * n..k * n + n];
+        for i in 0..n {
+            let b = 8.0 * bc[k * n + i];
+            for (v, &t) in o.iter_mut().zip(&tmp[i * n..i * n + n]) {
+                *v += b * t;
+            }
+        }
+    }
+}
+
+/// 32x32 (and any other size): a const-generic 32 version measured slower.
+fn forward_2d_dyn(residual: &[i32], out: &mut [f32], n: usize, tx_type: usize) {
     let (ck, rk) = kinds(tx_type);
     let bc = basis(ck, n);
     let brt = basis_t(rk, n);

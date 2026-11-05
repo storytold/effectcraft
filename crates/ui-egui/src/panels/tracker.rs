@@ -257,10 +257,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ("scale", "Scale", settings.as_ref().is_some_and(|s| s.scale)),
     ] {
         let cr = Rect::from_min_size(pos2(xx, y + 2.0), vec2(16.0, 16.0));
-        let resp = widgets::checkbox(ui, cr, on && transformish, &t, egui::Id::unique(("tracker-cb", key)));
+        let resp = ui.add_enabled_ui(transformish, |ui| widgets::checkbox(ui, cr, on && transformish, &t, egui::Id::unique(("tracker-cb", key)))).inner;
         app.auto.add(&format!("tracker.{key}"), cr, text);
         p.text(pos2(cr.max.x + 4.0, cr.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), if transformish { t.text } else { t.text_faint });
-        if resp.clicked() && transformish {
+        if resp.changed() && transformish {
             run(app, &ctx, "track.setType", with(json!({ key: !on })));
         }
         xx += 84.0;
@@ -517,20 +517,20 @@ pub fn options_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens)
         ui.add_space(8.0);
         ui.label(egui::RichText::new(crate::i18n::tr("Process Before Match")).font(Tokens::medium(12.5)));
         ui.horizontal(|ui| {
-            let r = ui.checkbox(&mut d.blur_on, crate::i18n::tr("Blur"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.blur_on, crate::i18n::tr("Blur"));
             app.auto.add("dialog.trackOptions.blurOn", r.rect, "Blur");
             let r =
                 ui.add_enabled(d.blur_on, crate::widgets::drag_value(egui::DragValue::new(&mut d.opts.blur).speed(0.1).range(0.5..=50.0).suffix(" pixels")));
             app.auto.add("dialog.trackOptions.blur", r.rect, "Blur pixels");
-            let r = ui.checkbox(&mut d.opts.enhance, crate::i18n::tr("Enhance"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.opts.enhance, crate::i18n::tr("Enhance"));
             app.auto.add("dialog.trackOptions.enhance", r.rect, "Enhance");
         });
         ui.add_space(8.0);
-        let r = ui.checkbox(&mut d.opts.subpixel, crate::i18n::tr("Subpixel Positioning"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.opts.subpixel, crate::i18n::tr("Subpixel Positioning"));
         app.auto.add("dialog.trackOptions.subpixel", r.rect, "Subpixel Positioning");
-        let r = ui.checkbox(&mut d.opts.adapt_every_frame, crate::i18n::tr("Adapt Feature On Every Frame"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.opts.adapt_every_frame, crate::i18n::tr("Adapt Feature On Every Frame"));
         app.auto.add("dialog.trackOptions.adaptEveryFrame", r.rect, "Adapt Feature On Every Frame");
-        let r = ui.checkbox(&mut d.opts.track_shape, crate::i18n::tr("Follow Feature Rotation and Scale"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.opts.track_shape, crate::i18n::tr("Follow Feature Rotation and Scale"));
         app.auto.add("dialog.trackOptions.trackShape", r.rect, "Follow Feature Rotation and Scale");
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -626,7 +626,7 @@ pub fn apply_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     super::dialogs::modal(ctx, "Motion Tracker Apply Options", vec2(380.0, 170.0), t, |ui| {
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Apply Dimensions:"));
-            let labels = ["X and Y", "X only", "Y only"];
+            let labels = [crate::i18n::tr("X and Y"), crate::i18n::tr("X only"), crate::i18n::tr("Y only")];
             let r = craft_ui::ComboBox::from_id_salt("track-apply-dims")
                 .selected_text(labels[d.dims.min(2)])
                 .show_ui(ui, |ui| {

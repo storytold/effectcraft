@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use effectcraft_engine::Session;
 
-use crate::{api, audio, browse, diskcache, files, frames, persist, storage, worker};
+use crate::startup::Startup;
+use crate::{api, audio, browse, config_file, diskcache, files, frames, persist, storage, worker};
 use effectcraft_ui_egui::EffectcraftApp;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -15,6 +16,8 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_name = showDeviceLost)]
     fn show_device_lost(message: &str, kept: bool);
+    #[wasm_bindgen(js_name = installCanvasShortcuts)]
+    fn install_canvas_shortcuts(canvas: &web_sys::HtmlCanvasElement);
 }
 
 /// Work for the UI thread with access to the app (posted by async tasks: picked files…).
@@ -81,8 +84,14 @@ pub(crate) fn open_or_import(app: &mut EffectcraftApp, paths: Vec<String>) {
 /// The eframe app: the shared EffectCraft UI plus the browser host's per-frame duties.
 pub struct WebApp {
     pub app: EffectcraftApp,
-    /// Keep the session snapshot (off with `?empty`).
+    /// Keep the session snapshot (off with `?empty`; off with an explicit `"demo"` startup until
+    /// the user's own work begins, see `demo_start`).
     pub persist: bool,
+    /// Started on the demo by the config: the snapshot stays off, so the demo never replaces the
+    /// last visit's project, until the user opens a project from a file or edits the demo.
+    pub demo_start: bool,
+    /// The last title written to `document.title`.
+    pub document_title: String,
 }
 
 impl eframe::App for WebApp {
@@ -112,9 +121,19 @@ impl eframe::App for WebApp {
             f(&mut self.app);
         }
         self.app.tick(ctx, frame);
+        // eframe on the web ignores `ViewportCommand::Title`: the tab title follows the open document here.
+        if self.app.window_title() != self.document_title {
+            self.document_title = self.app.window_title().to_owned();
+            set_document_title(&self.document_title);
+        }
         api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
+        // The user's own work after a demo start is worth keeping too: turn the snapshot on.
+        if self.demo_start && (self.app.session.path.is_some() || self.app.session.is_dirty()) {
+            self.demo_start = false;
+            self.persist = true;
+        }
         // What a reload comes back to.
         if self.persist {
             // The app's monotonic clock: `ctx.input(|i| i.time)` is stale in a logic-only tick.
@@ -131,6 +150,13 @@ impl eframe::App for WebApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+    }
+}
+
+/// The browser tab's title.
+fn set_document_title(title: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        doc.set_title(title);
     }
 }
 
@@ -187,8 +213,24 @@ fn install_hooks(app: &mut EffectcraftApp) {
         }
         None
     }));
-    // Saving downloads the file: the chosen name is all a "save dialog" needs.
-    app.hooks.pick_save = Some(Box::new(|name: &str| Some(files::path_for(if name.is_empty() { "Untitled Project.ecproj" } else { name }))));
+    // Saving downloads the file: the chosen name is all a "save dialog" needs. A project (Save As,
+    // Save a Copy) asks for the name, starting from the open project's (#2788): without asking,
+    // Save As would replace the open project's file; Cancel cancels. A name that is already in
+    // browser storage asks before replacing it, as the desktop's save dialogs do.
+    app.hooks.pick_save = Some(Box::new(|name: &str| {
+        let name = if name.is_empty() { "Untitled Project.ecproj" } else { name };
+        if !std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("ecproj") || e.eq_ignore_ascii_case("ecprojx")) {
+            return Some(files::path_for(name));
+        }
+        let window = web_sys::window()?;
+        let typed = window.prompt_with_message_and_default("Save project as:", name).ok().flatten();
+        let typed = crate::store::typed_save_name(name, typed)?;
+        let path = files::path_for(&typed);
+        if files::get(&path).is_some() && !window.confirm_with_message(&format!("{typed} already exists. Replace it?")).unwrap_or(false) {
+            return None;
+        }
+        Some(path)
+    }));
     app.hooks.audio_device = Some(Box::new(audio::open));
     app.hooks.audio_devices = Some(Box::new(|| vec!["Browser default output".into()]));
 }
@@ -204,6 +246,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     effectcraft_ui_egui::i18n::set_system_locales(query_value("lang"), browser.collect());
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
+    install_canvas_shortcuts(&canvas);
     let empty = query_flag("empty");
     let home = query_flag("home");
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
@@ -220,6 +263,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     };
     api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": t0.elapsed().as_secs_f64() * 1000.0}));
     audio::install_unlock();
+    // `./effectcraft-config.json`: what to open on load.
+    // `?empty` and `?demo` decide by themselves, so they skip the request.
+    let startup = if empty || query_flag("demo") { Startup::default() } else { config_file::startup().await };
+    // An explicit `"demo"` start leaves the saved session alone until the user opens or edits something.
+    let keep_session = !empty && startup.keeps_session();
     browse::restore();
     diskcache::init();
     storage::refresh();
@@ -245,7 +293,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                     // The canvas can't present any more (#225): the page says so over it and
                     // offers a reload, which brings the session back when browser storage keeps it.
                     let lost = gpu_failures.clone();
-                    let kept = !empty && persist::backend() != "memory";
+                    let kept = keep_session && persist::backend() != "memory";
                     rs.device.set_device_lost_callback(move |reason, message| {
                         let message = format!("GPU device lost ({reason:?}): {message}");
                         lost.report(&message, true);
@@ -254,11 +302,14 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 }
                 let mut session = session();
                 session.load_settings();
+                // Scripts in Scripts/Startup run before a project opens.
+                let _ = session.execute("file.runStartupScripts", json!({}));
                 let recovery = session.begin_recovery();
-                // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
-                // project (the demo on a first visit).
-                let restored = !empty && !query_flag("demo") && persist::restore(&mut session);
-                if !restored && !empty {
+                // `?empty`: a blank project; `?demo`: the demo project; otherwise what the config's
+                // `startup` says (default: the last visit's project, the demo on a first visit).
+                let demo = query_flag("demo");
+                let restored = !empty && !demo && startup.restores() && persist::restore(&mut session);
+                if !restored && !empty && (demo || startup.demo_when_nothing_restored()) {
                     let _ = session.execute("file.openDemoProject", json!({}));
                 }
                 api::set_info("restored", json!(restored));
@@ -284,7 +335,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: !empty }))
+                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session, document_title: String::new() }))
             }),
         )
         .await?;

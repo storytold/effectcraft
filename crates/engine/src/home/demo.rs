@@ -121,7 +121,7 @@ fn lower_third(p: &mut Project) -> Comp {
         [440.0, 914.0],
     );
     anim(&mut title, "transform/opacity", keys(&[(0.4, Value::Scalar(0.0)), (0.9, Value::Scalar(100.0))]));
-    c.layers = vec![title, bar];
+    c.layers = vec![title, bar].into();
     c
 }
 
@@ -270,7 +270,7 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     );
     anim(&mut caption, "transform/opacity", keys(&[(0.3, Value::Scalar(0.0)), (1.2, Value::Scalar(100.0))]));
 
-    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor];
+    c.layers = vec![caption, cam, key, fill, title, left, right, x1, x2, floor].into();
     c
 }
 
@@ -463,7 +463,7 @@ pub fn demo_project() -> Project {
     lower.out_point = t(9.5);
 
     // Stack: top first.
-    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg];
+    comp.layers = vec![lower, title, sub, line, burst, rings, null, bg].into();
     for l in &mut comp.layers {
         if l.name == "Controller" {
             l.switches.video = false;

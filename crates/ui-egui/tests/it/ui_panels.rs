@@ -2,6 +2,7 @@
 //! registers its automation ids; the Footage panel's buttons edit into the comp; the Progress
 //! panel lists and cancels a job; Lumetri Scopes switch scope through their dropdown.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use std::sync::Arc;
 
@@ -448,7 +449,7 @@ fn panels_snapshot() {
         }
         open(&mut h, panel);
         h.run_steps(3);
-        let img = h.render().expect("render");
+        let img = h.render_serialized().expect("render");
         img.save(format!("{dir}/{panel}{scope}.png")).unwrap();
     }
 }
@@ -663,4 +664,34 @@ fn transition_presets_apply_from_effects_and_presets() {
     let fx = comp.layers[0].effects().unwrap().groups().next().expect("an effect was added").clone();
     assert_eq!(fx.name, "Radial Wipe");
     assert_eq!(fx.prop("completion").unwrap().keys.len(), 2);
+}
+
+/// #2582: dragging Settings' UI Scale doesn't resize the interface under the pointer; the value
+/// applies once the button is released.
+#[test]
+fn ui_scale_applies_when_the_drag_ends() {
+    let mut h = harness();
+    open_settings(&mut h);
+    let e = h.state().auto.find("settings.appearance.uiScale").expect("the UI Scale field");
+    let from = pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for k in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + egui::vec2(10.0 * k as f32, 0.0)));
+        h.step();
+        assert_eq!(scale(&h), (100, 1.0), "nothing applies mid-drag");
+    }
+    h.input_mut().events.push(Event::PointerButton {
+        pos: from + egui::vec2(80.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run_steps(4);
+    let (pct, zoom) = scale(&h);
+    assert!(pct > 100 && (zoom - pct as f32 / 100.0).abs() < 1e-6, "applied on release: {pct} {zoom}");
+    click(&mut h, "settings.cancel");
+    h.run_steps(2);
+    assert_eq!(scale(&h), (100, 1.0));
 }

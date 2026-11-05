@@ -70,10 +70,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let project = app.session.project.clone();
     let expr = app.session.expr.clone();
     let now = app.session.time();
-    let ectx = EvalCtx { project: &project, comp_id: cid, comp: &comp, time: now, expr: expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &project,
+        comp_id: cid,
+        comp: &comp,
+        time: now,
+        expr: expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
+    let rect = scroll.content;
+    let p = p.with_clip_rect(rect);
     let x0 = rect.min.x + PAD;
     let w = rect.width() - 2.0 * PAD;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
     let top = rect.min.y + 8.0 - scroll.offset;
     let mut y = top;
     let mut actions: Actions = vec![];
@@ -200,6 +211,8 @@ fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
 #[allow(clippy::too_many_arguments)]
 fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, pr: &Property, ectx: &EvalCtx, r: Rect, actions: &mut Actions) {
     let t = app.tokens;
+    // The values themselves: red while an expression drives the property (#1306).
+    let vt = t.for_value(pr.has_expression());
     let cy = r.center().y;
     let uid = pr.uid;
     let lid = layer.id.0;
@@ -253,6 +266,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
     let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
     let resp = ui.interact(label, egui::Id::unique(("props-label", uid)), Sense::click());
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, &pr.name);
     app.auto.add(&format!("{base}.label"), label, &pr.name);
     if resp.double_clicked() {
         app.ui.timeline.search.clear();
@@ -276,7 +290,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     match &value {
         Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
-            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &t);
+            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
             app.auto.add(&format!("{base}.revolutions"), rr, &pr.name);
             if let Some(nv) = nv {
@@ -291,7 +305,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 egui::Id::unique(("props-v", uid)),
                 *v,
                 &widgets::HotSpec { speed: 0.5, range, decimals: decimals(*v), suffix },
-                &t,
+                &vt,
             );
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
@@ -323,7 +337,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                     egui::Id::unique(("props-v", uid, d)),
                     c[d],
                     &widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: decimals(c[d]), suffix },
-                    &t,
+                    &vt,
                 );
                 app.auto.add(&format!("{base}.value.{d}"), vr, &pr.name);
                 if let Some(nv) = nv {
@@ -445,7 +459,7 @@ fn text_section(
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let ry = y + i as f32 * 24.0;
         let cr = Rect::from_min_size(pos2(x0, ry + 2.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("props-apply", key))).clicked() {
+        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("props-apply", key))).changed() {
             let k = if key == "fill" { "applyFill" } else { "applyStroke" };
             set(actions, json!({k: !on}));
         }

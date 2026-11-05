@@ -1,7 +1,7 @@
 use super::common::{Actions, DIAL_ROW, PARAM_NAME_X, ROW, TREE_INDENT, gesture_key};
 use super::{
-    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw, icons, json,
-    pos2, vec2, widgets,
+    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, GroupKind, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw,
+    icons, json, pos2, vec2, widgets,
 };
 
 fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
@@ -65,6 +65,9 @@ pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, p
         app.ui.text_color_pick = None;
         app.ui.status = if kind == "point" {
             format!("Click in the Composition panel to set {}", prop.name)
+        } else if kind == crate::panels::crypto_pick::KIND {
+            let keys = crate::panels::crypto_pick::remove_keys(egui::os::OperatingSystem::from_target_os());
+            crate::i18n::tr_args("Click IDs in the Composition panel: Shift adds, {} removes, Esc ends", &[&keys])
         } else {
             format!("Click in the Composition panel to sample {}", prop.name)
         };
@@ -88,8 +91,24 @@ struct PropCx<'a> {
 }
 
 impl PropCx<'_> {
+    /// The tokens of the value fields: red while an expression drives the parameter (#1306).
+    fn value_tokens(&self) -> Tokens {
+        self.t.for_value(self.prop.has_expression())
+    }
+
+    /// Queues the `prop.set` of one edit; consecutive edits of the parameter (a scrub) are one undo step.
     fn set(&self, actions: &mut Actions, v: serde_json::Value) {
-        let (layer, uid, merge, scrub) = (self.layer, self.uid, format!("ec-{}", self.uid), self.scrub);
+        self.push(actions, v, Some(format!("ec-{}", self.uid)));
+    }
+
+    /// Queues the `prop.set` of a discrete choice (a pop-up pick, a check box): its own undo step,
+    /// never merged with the parameter's previous edit (#2152).
+    fn set_step(&self, actions: &mut Actions, v: serde_json::Value) {
+        self.push(actions, v, None);
+    }
+
+    fn push(&self, actions: &mut Actions, v: serde_json::Value, merge: Option<String>) {
+        let (layer, uid, scrub) = (self.layer, self.uid, self.scrub);
         actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub})))
     }
 
@@ -235,7 +254,7 @@ fn value_mask(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     }
     app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
     if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(i)) {
-        cx.set(actions, json!(ni as f64));
+        cx.set_step(actions, json!(ni as f64));
     }
 }
 
@@ -243,8 +262,8 @@ fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
     let Value::Scalar(v) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, prop, .. } = *cx;
-    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &t);
+    let PropCx { uid, cy, vx, prop, .. } = *cx;
+    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
     app.auto.add(&format!("effectControls.prop.{uid}.value"), rr.union(dr), &fw::format_angle(*v, 1));
     app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &prop.name);
     if let Some(nv) = nv {
@@ -257,7 +276,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     let Value::Scalar(v) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, prop, .. } = *cx;
+    let PropCx { uid, cy, vx, prop, .. } = *cx;
     let (min, max, dec) = match &prop.ui {
         ParamUi::Slider { min, max, decimals, .. } => (*min, *max, *decimals as usize),
         _ => (-1e9, 1e9, 1),
@@ -273,7 +292,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         egui::Id::unique(("ec-v", uid)),
         *v,
         &widgets::HotSpec { speed, range: (min, max), decimals: dec.max(if dec == 0 { 0 } else { 1 }), suffix },
-        &t,
+        &cx.value_tokens(),
     );
     app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &prop.name);
     if let Some(nv) = nv {
@@ -290,6 +309,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     let PropCx { t, uid, cy, vx, layer, prop, .. } = *cx;
     let c = value.components();
     let n = shown_dims(layer, prop, value);
+    let vt = cx.value_tokens();
     let mut x = vx;
     if matches!(prop.ui, ParamUi::Point | ParamUi::Point3) {
         let cr = Rect::from_center_size(pos2(x + 8.0, cy), vec2(18.0, 18.0));
@@ -310,7 +330,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
             egui::Id::unique(("ec-v", uid, d)),
             c[d],
             &widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: "" },
-            &t,
+            &vt,
         );
         app.auto.add(&format!("effectControls.prop.{uid}.value.{d}"), vr, &prop.name);
         dims.push(vr);
@@ -361,8 +381,8 @@ fn value_toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     };
     let PropCx { t, uid, cy, vx, p, prop, .. } = *cx;
     let cr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(16.0, 16.0));
-    if widgets::checkbox(ui, cr, *b, &t, egui::Id::unique(("ec-b", uid))).clicked() {
-        cx.set(actions, json!(!b));
+    if widgets::checkbox(ui, cr, *b, &t, egui::Id::unique(("ec-b", uid))).changed() {
+        cx.set_step(actions, json!(!b));
     }
     p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text_dim);
     app.auto.add(&format!("effectControls.prop.{uid}.value"), cr, &prop.name);
@@ -382,7 +402,7 @@ fn value_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         }
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
         if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
-            cx.set(actions, json!(ni));
+            cx.set_step(actions, json!(ni));
         }
     }
 }
@@ -396,7 +416,7 @@ fn value_layer_ref(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, val
     if let Some(comp) = comp {
         let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
         if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::unique(("ec-l", uid))) {
-            cx.set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+            cx.set_step(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
         }
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
         // Source / Masks / Effects & Masks (the hidden companion parameter).
@@ -468,11 +488,27 @@ fn value_text(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     let Value::Str(s) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, r, layer, prop, .. } = *cx;
-    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - 12.0).clamp(80.0, 320.0), 18.0));
+    let PropCx { t, uid, cy, vx, r, layer, group, prop, .. } = *cx;
+    // Cryptomatte's Selection also has an eyedropper that picks IDs in the viewer (#473).
+    let crypto = matches!(&group.kind, GroupKind::Effect { effect } if effect == "ec.3d.cryptomatte") && prop.match_id == "selection";
+    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - if crypto { 36.0 } else { 12.0 }).clamp(80.0, 320.0), 18.0));
+    if crypto {
+        let er = Rect::from_center_size(pos2(fr.max.x + 14.0, cy), vec2(18.0, 18.0));
+        let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == crate::panels::crypto_pick::KIND);
+        if fw::eyedropper_button(ui, er, active, egui::Id::unique(("ec-eye", uid)), &t)
+            .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
+            .clicked()
+        {
+            toggle_pick(app, crate::panels::crypto_pick::KIND, layer, prop);
+        }
+        app.auto.add(&format!("effectControls.prop.{uid}.eyedropper"), er, &prop.name);
+    }
     let bid = egui::Id::unique(("ec-text", uid));
     let mut buf: String = ui.data(|d| d.get_temp(bid)).unwrap_or_else(|| s.to_owned());
     let resp = widgets::text_field(ui, fr, &mut buf, "", &t);
+    // Cut off by a narrow panel (a long Selection): the whole text on hover.
+    let cut = !resp.has_focus() && ui.painter().layout_no_wrap(buf.clone(), egui::TextStyle::Body.resolve(ui.style()), t.text).size().x > fr.width() - 17.0;
+    let resp = if cut { resp.on_hover_text(buf.clone()) } else { resp };
     // The field has no visible hint: give the screen reader the parameter's name.
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, ui.is_enabled(), &prop.name));
     app.auto.add(&format!("effectControls.prop.{uid}.value"), fr, &prop.name);

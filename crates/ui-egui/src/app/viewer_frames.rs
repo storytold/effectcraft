@@ -84,8 +84,18 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp(),
         }
+    }
+
+    /// Changes when the Roto Brush model in use does: a frame drawn with the classic fallback while the model loaded
+    /// is not the frame the model gives, so the two must not share a cache entry.
+    fn roto_model_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(id) = self.session.models_roto_active() else { return 0 };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish() | 1
     }
 
     /// The frame series the viewer of `comp` shows now (its scale, view and options, for the
@@ -93,6 +103,15 @@ impl EffectcraftApp {
     pub fn shown_series(&self, comp: ItemId) -> FrameKey {
         let scale = self.viewer_shown.as_ref().filter(|(_, k)| k.comp == comp.0).map_or(1000, |(_, k)| k.scale);
         self.frame_series(comp, scale as f64 / 1000.0)
+    }
+
+    /// The frame series a preview with options `o` plays: at its Resolution, or the one the
+    /// viewer shows with Auto (it follows the zoom). The Preview panel's cache bar counts it.
+    pub fn preview_series(&self, comp: ItemId, o: &effectcraft_engine::preview::PreviewPreset) -> FrameKey {
+        match o.resolution.factor(o.custom_resolution) {
+            Some(n) => self.frame_series(comp, 1.0 / f64::from(n)),
+            None => self.shown_series(comp),
+        }
     }
 
     /// Hash of the comp viewer's 3D view camera (0 for the active camera view).
@@ -126,12 +145,18 @@ impl EffectcraftApp {
 
     /// Request a prefetch frame render (no-op if cached/in flight).
     pub fn request_frame(&self, comp: ItemId, frame: i64, scale: f64) {
-        self.request_frame_with(comp, frame, scale, false);
+        self.request_frame_with(comp, frame, scale, frames::Frames::request);
     }
 
     /// Request the frame on screen: rendered before any queued prefetch.
     pub fn request_frame_urgent(&self, comp: ItemId, frame: i64, scale: f64) {
-        self.request_frame_with(comp, frame, scale, true);
+        self.request_frame_with(comp, frame, scale, frames::Frames::request_urgent);
+    }
+
+    /// Request a frame nobody waits for (Cache Frames When Idle): rendered on one thread
+    /// (`Frames::request_background`).
+    pub fn request_frame_background(&self, comp: ItemId, frame: i64, scale: f64) {
+        self.request_frame_with(comp, frame, scale, frames::Frames::request_background);
     }
 
     /// Render options of viewer frames of `comp` at `scale`.
@@ -152,15 +177,17 @@ impl EffectcraftApp {
         }
     }
 
-    fn request_frame_with(&self, comp: ItemId, frame: i64, scale: f64, urgent: bool) {
+    fn request_frame_with(
+        &self,
+        comp: ItemId,
+        frame: i64,
+        scale: f64,
+        request: fn(&frames::Frames, &frames::RenderSource, FrameKey, ItemId, Tick, RenderOpts),
+    ) {
         let Some(c) = self.session.project.comp(comp) else { return };
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        if urgent {
-            self.frames.request_urgent(&self.render_source(), key, comp, t, opts);
-        } else {
-            self.frames.request(&self.render_source(), key, comp, t, opts);
-        }
+        request(&self.frames, &self.render_source(), key, comp, t, opts);
     }
 }

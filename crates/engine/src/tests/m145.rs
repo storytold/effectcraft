@@ -708,6 +708,11 @@ fn dynamic_menus_and_window_viewer_labels() {
     s.prefs.push_recent("/p/One.ecproj");
     let (e, _) = crate::menus::dynamic(&s, "recentProjects", &Default::default());
     assert_eq!((e[0].label.as_str(), e[0].command.as_str()), ("One.ecproj", "file.openRecent"));
+    // Two projects with the same file name show their paths.
+    s.prefs.push_recent("/q/One.ecproj");
+    s.prefs.push_recent("/p/Two.ecproj");
+    let (e, _) = crate::menus::dynamic(&s, "recentProjects", &Default::default());
+    assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Two.ecproj", "/q/One.ecproj", "/p/One.ecproj"]);
     assert_eq!(crate::menus::dynamic(&s, "history", &Default::default()).0.len(), s.history.undo.len());
     let a = solid(&mut s, "#ff0000");
     s.state.selected_layers = vec![LayerId(a)];

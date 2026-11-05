@@ -7,6 +7,11 @@
 //! pass for a precomp of a 3D comp. Without auxiliary channels they pass the layer through
 //! (EXtractoR still maps the layer's own R, G, B and A).
 //!
+//! 3D Layer Instance (Create 3D Layer Instance's own effect, Layer ▸ Create) is not an aux
+//! reader: it replaces the layer's pixels with a referenced layer's render — for a 3D model
+//! layer, its render on its own through the comp's camera — so 2D effects can be applied to a
+//! 3D layer's render.
+//!
 //! Aux pixels are looked up nearest-neighbour (IDs must not be interpolated) at each buffer
 //! pixel's layer position, so render scale and layer padding are respected.
 
@@ -582,6 +587,19 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// A 2D copy of a referenced layer (Create 3D Layer Instance's solid): the layer's pixels
+/// replaced with the referenced layer's render, alpha included — the copy is transparent
+/// where the referenced layer isn't. A 3D model or primitive layer is rendered on its own
+/// through the comp's camera, as After Effects renders 3D layers; another layer is read with
+/// its masks and effects. With no layer chosen the effect passes the layer through, as a layer
+/// parameter with nothing chosen does.
+fn instance_3d(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    if let Some(o) = ctx.layer_param("layer", true) {
+        b.img = crate::util::fit_layer(ctx, &b, &o, false);
+    }
+    b
+}
+
 pub fn specs() -> Vec<EffectSpec> {
     let text = |id: &'static str, name: &'static str, d: &str| p(id, name, Value::Str(d.into()), ParamUi::Text);
     vec![
@@ -682,6 +700,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             identifier,
         ),
+        spec("ec.3d.instance3d", "3D Layer Instance", vec![p("layer", "Layer", Value::Layer(None), ParamUi::Layer)], instance_3d),
     ]
 }
 

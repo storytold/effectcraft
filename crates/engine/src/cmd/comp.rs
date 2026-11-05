@@ -35,7 +35,7 @@ fn apply_settings(c: &mut Comp, p: &Value) {
         let dx = (c.width as f64 - ow as f64) * (a % 3) as f64 / 2.0;
         let dy = (c.height as f64 - oh as f64) * (a / 3) as f64 / 2.0;
         if dx != 0.0 || dy != 0.0 {
-            for l in c.layers.iter_mut().filter(|l| l.parent.is_none()) {
+            for l in c.layers.iter_mut_where(|l| l.parent.is_none()) {
                 if let Some(tr) = l.transform_mut() {
                     super::layer::offset_position(tr, dx, dy);
                 }
@@ -272,6 +272,20 @@ fn poster(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+fn delete_all_markers(s: &mut Session, p: &Value) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    s.edit("Delete All Markers", None, |proj, _| {
+        proj.comp_mut(cid).ok_or(EngineError::NoComp)?.markers.clear();
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
+fn has_comp_markers(s: &Session) -> std::result::Result<(), String> {
+    let c = s.active_comp().ok_or("no composition")?;
+    if !c.markers.is_empty() { Ok(()) } else { Err("the composition has no markers".into()) }
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -299,5 +313,6 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("comp.workArea", "Set Work Area", [], None, "{start?, end?, set?: begin|end (at CTI)}", has_comp, work_area),
         cmd!("comp.setSwitch", "Composition Switch", [], None, "{switch: hideShy|motionBlur|frameBlending|draft3d, value?}", has_comp, comp_switch),
         cmd!("comp.addMarker", "Add Marker", [], Some("Num*"), "{time?, comment?}", has_comp, add_marker),
+        cmd!("comp.deleteAllMarkers", "Delete All Markers", [], None, "{comp?}", has_comp_markers, delete_all_markers),
     ]
 }

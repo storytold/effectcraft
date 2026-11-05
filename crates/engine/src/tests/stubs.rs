@@ -519,9 +519,10 @@ fn convert_to_bezier_turns_a_parametric_shape_into_an_editable_path() {
     };
     let radius = |v: [f64; 2]| v[0].hypot(v[1]);
 
-    // A 120 x 80 rectangle is its four corners, joined by straight edges.
+    // A 120 x 80 rectangle is its four corners, joined by straight edges, from the top-right
+    // corner clockwise as After Effects draws it.
     let (mut s, l, was, rect) = convert(json!({"kind": "rect", "size": [120, 80]}));
-    assert_eq!(rect.vertices, vec![[-60.0, -40.0], [60.0, -40.0], [60.0, 40.0], [-60.0, 40.0]]);
+    assert_eq!(rect.vertices, vec![[60.0, -40.0], [60.0, 40.0], [-60.0, 40.0], [-60.0, -40.0]]);
     assert!(rect.in_tangents.iter().chain(&rect.out_tangents).all(|t| *t == [0.0, 0.0]), "straight edges: {rect:?}");
     // Undo brings the parametric shape back.
     s.execute("edit.undo", json!({})).unwrap();
@@ -582,4 +583,87 @@ fn convert_to_bezier_reads_the_shape_as_it_is_set() {
     let ys: Vec<f64> = path.vertices.iter().map(|v| v[1]).collect();
     let mid = |v: &[f64]| (v.iter().copied().fold(f64::MAX, f64::min) + v.iter().copied().fold(f64::MIN, f64::max)) / 2.0;
     assert!((mid(&xs) - 10.0).abs() < 1e-6 && (mid(&ys) - 5.0).abs() < 1e-6, "centred on the position: {:?} {:?}", mid(&xs), mid(&ys));
+}
+
+/// #1896: Convert To Bezier Path reads Per-Corner Roundness, not just the uniform Roundness, so
+/// the editable path is the shape that was on screen.
+#[test]
+fn convert_to_bezier_honours_per_corner_roundness() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (uid, _) = first_shape(&s, l);
+    let uid_of = |s: &Session, id: &str| layer(s, l).props.sub("contents").unwrap().find_group(uid).unwrap().get(id).unwrap().uid;
+    let per_corner = uid_of(&s, "perCorner");
+    let top_left = uid_of(&s, "topLeftRoundness");
+    let bottom_right = uid_of(&s, "bottomRightRoundness");
+    for (u, v) in [(per_corner, json!(true)), (top_left, json!(20.0)), (bottom_right, json!(10.0))] {
+        s.execute("prop.set", json!({"layer": l, "path": format!("@{u}"), "value": v})).unwrap();
+    }
+
+    s.state.selected_props = vec![(LayerId(l), uid)];
+    s.execute("path.convertToBezier", json!({})).unwrap();
+    let (new_uid, now) = first_shape(&s, l);
+    assert_eq!(now, "path");
+    let path = shape_path_of(&s, l, new_uid);
+    let expected = effectcraft_path::from_kurbo(&effectcraft_path::rect_radii([120.0, 80.0], [0.0, 0.0], [20.0, 0.0, 10.0, 0.0])).into_iter().next().unwrap();
+    assert_eq!(path, expected, "the converted path has the per-corner geometry");
+}
+
+/// #1896: Convert To Bezier Path evaluates the shape's expressions, so an expression-driven
+/// Per-Corner checkbox and radius convert to the geometry on screen.
+#[test]
+fn convert_to_bezier_evaluates_corner_expressions() {
+    struct Corners;
+    impl effectcraft_render::ExprHost for Corners {
+        fn eval(
+            &self,
+            _: &effectcraft_render::EvalCtx,
+            _: &effectcraft_project::Layer,
+            prop: &effectcraft_project::Property,
+            value: &KV,
+        ) -> std::result::Result<KV, String> {
+            Ok(match prop.match_id.as_str() {
+                "perCorner" => KV::Bool(true),
+                "topLeftRoundness" => KV::Scalar(20.0),
+                _ => value.clone(),
+            })
+        }
+    }
+
+    let mut s = comp();
+    s.expr = Some(Arc::new(Corners));
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (uid, _) = first_shape(&s, l);
+    let uid_of = |s: &Session, id: &str| layer(s, l).props.sub("contents").unwrap().find_group(uid).unwrap().get(id).unwrap().uid;
+    for (id, expression) in [("perCorner", "true"), ("topLeftRoundness", "20")] {
+        let u = uid_of(&s, id);
+        s.execute("prop.setExpression", json!({"layer": l, "path": format!("@{u}"), "expression": expression})).unwrap();
+    }
+
+    s.state.selected_props = vec![(LayerId(l), uid)];
+    s.execute("path.convertToBezier", json!({})).unwrap();
+    let (new_uid, now) = first_shape(&s, l);
+    assert_eq!(now, "path");
+    let path = shape_path_of(&s, l, new_uid);
+    let expected = effectcraft_path::from_kurbo(&effectcraft_path::rect_radii([120.0, 80.0], [0.0, 0.0], [20.0, 0.0, 0.0, 0.0])).into_iter().next().unwrap();
+    assert_eq!(path, expected, "the expression-evaluated corner is converted");
+}
+
+/// #2201: a viewer drag on the free-transform box sends one `path.freeTransform` per frame with a
+/// shared merge key; one undo must revert the whole drag, not the last frame.
+#[test]
+fn free_transform_drag_undoes_in_one_step() {
+    let mut s = comp();
+    let (l, m) = masked(&mut s);
+    s.state.selected_vertices.clear();
+    let before = mask_path(&s, l, m);
+    for k in [90, 90, 90, 90] {
+        s.execute("path.freeTransform", json!({"layer": l, "scale": k, "merge": "viewer-drag-1"})).unwrap();
+    }
+    let after = mask_path(&s, l, m);
+    assert_ne!(after, before);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, l, m), before, "one undo reverts the whole drag");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, l, m), after, "redo restores the whole drag");
 }

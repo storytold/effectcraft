@@ -16,8 +16,9 @@
 //! on it draws the solved points (as the viewer shows them) into the frame. The viewer overlay, target and the Create
 //! commands live in the engine and the UI.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+
+use crate::analysis_cache::AnalysisCache;
 
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
@@ -122,50 +123,24 @@ pub fn solve_key(st: &SolveSettings) -> String {
     format!("{:?}|{hfov}|{:?}|{:?}{lens}", st.shot, st.method, st.deleted)
 }
 
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
-type Cache<T> = Mutex<HashMap<u64, Arc<T>>>;
-
-fn cached<T>(c: &'static OnceLock<Cache<T>>, json: &str, parse: impl Fn(&str) -> Option<T>) -> Option<Arc<T>> {
-    let key = fnv(json.as_bytes());
-    let c = c.get_or_init(Default::default);
-    if let Some(a) = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
-        return Some(a.clone());
-    }
-    let a = Arc::new(parse(json)?);
-    let mut m = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if m.len() > 8 {
-        m.clear();
-    }
-    m.insert(key, a.clone());
-    Some(a)
-}
-
 /// The stored feature tracks of an instance (`None` when not analysed).
 pub fn tracks(params: &Params) -> Option<Arc<CameraTracks>> {
-    static C: OnceLock<Cache<CameraTracks>> = OnceLock::new();
+    static C: AnalysisCache<CameraTracks> = AnalysisCache::new();
     let j = s(params, TRACKS);
     if j.is_empty() {
         return None;
     }
-    cached(&C, j, CameraTracks::from_json).filter(|t| !t.is_empty())
+    C.get(j, CameraTracks::from_json).map(|(_, a)| a).filter(|t| !t.is_empty())
 }
 
 /// The stored camera solve of an instance (`None` when not solved).
 pub fn solve(params: &Params) -> Option<Arc<CameraSolve>> {
-    static C: OnceLock<Cache<CameraSolve>> = OnceLock::new();
+    static C: AnalysisCache<CameraSolve> = AnalysisCache::new();
     let j = s(params, SOLVE);
     if j.is_empty() {
         return None;
     }
-    cached(&C, j, CameraSolve::from_json).filter(|t| !t.is_empty())
+    C.get(j, CameraSolve::from_json).map(|(_, a)| a).filter(|t| !t.is_empty())
 }
 
 /// Screen size (layer pixels) of a target drawn for a point at depth `z`, relative to the
@@ -336,6 +311,27 @@ mod tests {
         assert_eq!(st.shot, ShotType::FixedAngle);
         assert!(solve_key(&st).contains("FixedAngle"));
         assert!(!st.lens_distortion && !solve_key(&st).contains("lens"));
+    }
+
+    #[test]
+    fn tracks_and_solve_follow_analysis_replacements() {
+        let mut t = CameraTracks { frames: 3, start: 1.0, ..Default::default() };
+        let mut sol = CameraSolve { frames: vec![SolvedFrame::default()], start: 1.0, ..Default::default() };
+        let mut ps = params_with(&sol, false);
+        ps.values.insert(TRACKS.into(), Value::Str(t.to_json()));
+        assert_eq!(*tracks(&ps).unwrap(), t);
+        assert_eq!(*solve(&ps).unwrap(), sol);
+        t.start = 2.0;
+        sol.start = 2.0;
+        ps.values.insert(TRACKS.into(), Value::Str(t.to_json()));
+        ps.values.insert(SOLVE.into(), Value::Str(sol.to_json()));
+        assert_eq!(*tracks(&ps).unwrap(), t);
+        assert_eq!(*solve(&ps).unwrap(), sol);
+        assert_eq!(*tracks(&ps.clone()).unwrap(), t);
+        ps.values.insert(TRACKS.into(), Value::Str("invalid".into()));
+        ps.values.insert(SOLVE.into(), Value::Str(String::new()));
+        assert!(tracks(&ps).is_none());
+        assert!(solve(&ps).is_none());
     }
 
     #[test]

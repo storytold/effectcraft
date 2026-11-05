@@ -155,7 +155,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
         });
         ui.add_space(8.0);
-        let r = ui.checkbox(&mut d.cue, tr("Cue Point"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.cue, tr("Cue Point"));
         app.auto.add("dialog.marker.cue", r.rect, "Cue Point");
         ui.add_enabled_ui(d.cue, |ui| {
             ui.horizontal(|ui| {
@@ -191,7 +191,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let r = ui.checkbox(&mut d.protected, tr("Protected Region"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.protected, tr("Protected Region"));
             app.auto.add("dialog.marker.protected", r.rect, "Protected Region");
             ui.add_space(20.0);
             ui.label(tr("Label:"));
@@ -285,8 +285,8 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     let x = tm.x(comp_t);
     let col = marker_color(&t, m.label);
     let h = (y1 - y0).min(10.0);
-    if m.duration > Tick(0) {
-        let xe = tm.x(comp_t + m.duration.seconds());
+    let end = (m.duration > Tick(0)).then(|| tm.x(comp_t + m.duration.seconds()));
+    if let Some(xe) = end {
         let bar = Rect::from_min_max(pos2(x, y0 + 1.0), pos2(xe, y0 + h - 1.0));
         p.rect_filled(bar, 1.0, col.gamma_multiply(if m.protected { 0.35 } else { 0.5 }));
         if m.protected {
@@ -296,11 +296,16 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
                 hx += 5.0;
             }
         }
-        p.line_segment([pos2(xe, y0), pos2(xe, y0 + h)], Stroke::new(1.0, col));
     }
-    p.add(egui::Shape::convex_polygon(marker_shape(x, y0, h), col, Stroke::NONE));
     if !m.comment.is_empty() {
-        p.text(pos2(x + 7.0, y0 + h / 2.0), Align2::LEFT_CENTER, m.comment.lines().next().unwrap_or_default(), Tokens::ui(10.0), t.text);
+        // The name sits in a small outlined box beside the flag, as in After Effects. It is drawn in the theme's field
+        // colours, so it follows Dark, Darker and Light.
+        let galley = p.layout_no_wrap(m.comment.lines().next().unwrap_or_default().to_string(), Tokens::ui(10.0), t.text);
+        let box_w = galley.size().x + 8.0;
+        let box_x = name_box_x(x, box_w, end, p.clip_rect());
+        let box_rect = Rect::from_min_size(pos2(box_x, y0), vec2(box_w, h.max(galley.size().y + 2.0)));
+        p.rect(box_rect, t.radius_sm, t.field_bg, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+        p.galley(pos2(box_rect.min.x + 4.0, box_rect.center().y - galley.size().y / 2.0), galley, t.text);
     }
     let hit = Rect::from_min_max(pos2(x - 5.0, y0 - 1.0), pos2(x + 5.0, y1));
     let id = egui::Id::unique(("marker", r.layer, r.index));
@@ -368,8 +373,37 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
         run(ui, "Delete This Marker", "markers.delete", r.params(), app);
         if let Some(l) = r.layer {
             run(ui, "Delete All Markers", "layer.deleteAllMarkers", json!({"layers": [l]}), app);
+        } else {
+            run(ui, "Delete All Markers", "comp.deleteAllMarkers", json!({}), app);
         }
     });
+}
+
+fn name_box_x(x: f32, width: f32, end: Option<f32>, clip: Rect) -> f32 {
+    let start = x + 6.0;
+    let right = match end {
+        Some(end) if end > start && end < start + width => end + 3.0,
+        _ => start,
+    };
+    if right + width <= clip.right() {
+        return right;
+    }
+    let left = x - 6.0 - width;
+    if left >= clip.left() {
+        return left;
+    }
+    start
+}
+
+/// Flags and duration handles sit above every name box in their marker strip.
+fn marker_glyphs(p: &egui::Painter, tokens: &Tokens, tm: TMap, marker: &Marker, time: f64, y0: f32, y1: f32) {
+    let color = marker_color(tokens, marker.label);
+    let h = (y1 - y0).min(10.0);
+    p.add(egui::Shape::convex_polygon(marker_shape(tm.x(time), y0, h), color, Stroke::NONE));
+    if marker.duration > Tick(0) {
+        let end = tm.x(time + marker.duration.seconds());
+        p.line_segment([pos2(end, y0), pos2(end, y0 + h)], Stroke::new(1.0, color));
+    }
 }
 
 /// Composition markers in the ruler strip `[y0, y1]`, protected regions over `rows`.
@@ -385,15 +419,27 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
     for (i, m) in comp.markers.iter().enumerate() {
         marker(app, ui, &p, comp, tm, m, m.time.seconds(), MarkerRef { layer: None, index: i }, strip.min.y, strip.max.y);
     }
+    for m in &comp.markers {
+        marker_glyphs(&p, &app.tokens, tm, m, m.time.seconds(), strip.min.y, strip.max.y);
+    }
 }
 
 /// The composition marker bin at the right end of the time ruler (`bin`), as in After Effects
 /// (#275): drag a marker out of it and it follows the pointer along the marker strip `strip`
 /// (snapping like a dragged marker); dropping it there adds a composition marker at that time,
 /// one undo step. Dropped back on the bin or outside the time graph's width, nothing is added.
+/// A double-click on the bin adds one at the current time (#1826).
 pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, bin: Rect, strip: Rect) {
     let t = app.tokens;
     let resp = ui.interact(bin, egui::Id::unique("marker-bin"), Sense::drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
+    // The bin senses drags only, so a drag starts as soon as it is pressed: sensing clicks too
+    // would hold that back until the pointer moved, and a drag out released within that frame
+    // would add nothing. The double-click is read from the pointer instead.
+    if bin_double_clicked(ui, resp.id, bin, resp.enabled() && (resp.contains_pointer() || resp.dragged() || resp.drag_stopped()))
+        && let Err(e) = app.session.execute("comp.addMarker", json!({}))
+    {
+        app.ui.status = e.to_string();
+    }
     app.auto.add("timeline.markerBin", bin, "Composition marker bin");
     let hot = resp.hovered() || resp.dragged();
     if hot {
@@ -418,6 +464,64 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     }
 }
 
+/// What the marker bin keeps of the primary button between frames: the press being held (when,
+/// where, and whether it has moved too far since to be a click), and the last click (when,
+/// where, and whether it was on the bin: both pressed and released there).
+#[derive(Clone, Copy, Default)]
+struct BinClicks {
+    press: Option<(f64, Pos2, bool)>,
+    last: Option<(f64, Pos2, bool)>,
+}
+
+/// Whether the marker bin `bin` (widget `id`; `over` when it is enabled and has the pointer, not
+/// something above it) was double-clicked this frame: two clicks in a row, both on the bin, each
+/// in a frame when it was `over`. egui's own
+/// double-click takes any click within a few points of the last for the first one, so a click on
+/// the ruler right beside the bin and then one on the bin would count. The bin pairs the clicks
+/// itself, in the order they came, by egui's rules: a click is released within `max_click_dist`
+/// of where it was pressed and within `max_click_duration`, and the second of a double-click comes
+/// within `max_double_click_delay` and `max_click_dist` of the first. A third click starts over.
+fn bin_double_clicked(ui: &egui::Ui, id: egui::Id, bin: Rect, over: bool) -> bool {
+    use egui::{Event, PointerButton};
+    let (dist, duration, delay) = ui.ctx().options(|o| {
+        let i = &o.input_options;
+        (i.max_click_dist, i.max_click_duration, i.max_double_click_delay)
+    });
+    let id = id.with("clicks");
+    let mut s = ui.data(|d| d.get_temp::<BinClicks>(id)).unwrap_or_default();
+    let double = ui.input(|i| {
+        let mut double = false;
+        for e in &i.events {
+            match *e {
+                Event::PointerMoved(p) => {
+                    if let Some((_, at, moved)) = &mut s.press {
+                        *moved |= at.distance(p) > dist;
+                    }
+                }
+                Event::PointerButton { button: PointerButton::Primary, pressed: true, pos, .. } => s.press = Some((i.time, pos, false)),
+                Event::PointerButton { button: PointerButton::Primary, pressed: false, pos, .. } => {
+                    let Some((pressed_at, at, moved)) = s.press.take() else { continue };
+                    if moved || at.distance(pos) > dist || i.time - pressed_at >= duration {
+                        continue;
+                    }
+                    let on = over && bin.contains(at) && bin.contains(pos);
+                    let pair = s.last.is_some_and(|(t, p, was_on)| was_on && on && i.time - t < delay && p.distance(pos) < dist);
+                    if pair {
+                        double = true;
+                        s.last = None;
+                    } else {
+                        s.last = Some((i.time, pos, on));
+                    }
+                }
+                _ => {}
+            }
+        }
+        double
+    });
+    ui.data_mut(|d| d.insert_temp(id, s));
+    double
+}
+
 /// Layer markers on a layer's row `r`; on a precomp layer, its comp's markers too (read-only,
 /// outlined: hover names them, a double-click opens the nested comp at the marker).
 pub(crate) fn layer_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, clip: Rect, comp: &Comp, layer: &Layer, tm: TMap, r: Rect) {
@@ -425,6 +529,9 @@ pub(crate) fn layer_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, clip: R
     nested_markers(app, ui, &p, comp, layer, tm, r);
     for (i, m) in layer.markers.iter().enumerate() {
         marker(app, ui, &p, comp, tm, m, layer.comp_time(m.time).seconds(), MarkerRef { layer: Some(layer.id.0), index: i }, r.min.y + 3.0, r.max.y - 3.0);
+    }
+    for m in &layer.markers {
+        marker_glyphs(&p, &app.tokens, tm, m, layer.comp_time(m.time).seconds(), r.min.y + 3.0, r.max.y - 3.0);
     }
 }
 
@@ -474,6 +581,21 @@ fn nested_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_name_box_stays_visible_near_the_right_clip_edge() {
+        let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 20.0));
+        let x = name_box_x(70.0, 20.0, Some(85.0), clip);
+        assert!(x >= clip.left() && x + 20.0 <= clip.right());
+        assert!(x + 20.0 < 70.0 - 4.0, "the left-hand box must not cover its own marker flag");
+        assert!(85.0 < x || 85.0 > x + 20.0, "the end cap must remain outside the box");
+        assert_eq!(name_box_x(20.0, 20.0, Some(35.0), clip), 38.0);
+        for end in [None, Some(72.0), Some(110.0)] {
+            let x = name_box_x(90.0, 20.0, end, clip);
+            assert!(x >= clip.left() && x + 20.0 <= clip.right(), "all right-edge names must remain visible: {end:?}");
+            assert!(x + 20.0 < 90.0 - 4.0);
+        }
+    }
 
     #[test]
     fn marker_dialog_reads_and_writes_every_field() {

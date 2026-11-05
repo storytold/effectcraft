@@ -168,7 +168,7 @@ pub fn velocity(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             });
             ui.add_space(8.0);
         }
-        let r = ui.checkbox(&mut d.continuous, tr("Continuous (Lock Outgoing to Incoming)"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.continuous, tr("Continuous (Lock Outgoing to Incoming)"));
         app.auto.add("dialog.velocity.continuous", r.rect, "Continuous");
         if d.continuous {
             d.out_speed = d.in_speed.clone();

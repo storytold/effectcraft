@@ -13,6 +13,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use effectcraft_raster::AuxChannels;
 use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, split_channel};
 
+/// The largest display window decoded (16384²; vector footage and Continuously Rasterize
+/// stop at the same size).
+const MAX_DISPLAY_PIXELS: usize = 1 << 28;
+
 fn is_depth(name: &str) -> bool {
     let last = name.rsplit('.').next().unwrap_or(name);
     last.eq_ignore_ascii_case("z") || name.to_ascii_lowercase().contains("depth")
@@ -75,7 +79,9 @@ pub fn read_exr_channels(bytes: &[u8]) -> Option<AuxChannels> {
         }
     };
     collect_meta(&img.attributes.other);
-    let n = w.checked_mul(h)?;
+    // Each channel is a display-window plane: a 60000² window over a 1×1 data window was a
+    // multi-gigabyte allocation per channel (#2141).
+    let n = w.checked_mul(h).filter(|n| *n <= MAX_DISPLAY_PIXELS)?;
     // The decoded image is consumed channel by channel, so each channel's samples are freed (or
     // moved) as its plane is made instead of the whole file being held twice (#474).
     for layer in img.layer_data {
@@ -335,6 +341,18 @@ mod tests {
         pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap();
         let aux = cached(path, || panic!("the frame's decode is reused, the file is not read again")).unwrap();
         assert_eq!(aux.get("GlossDir.R").and_then(|p| p.first()).copied(), Some(0.25));
+    }
+
+    /// #2141: one pixel of data in a 60000² display window is refused, not allocated per channel.
+    #[test]
+    fn a_huge_display_window_is_refused_not_allocated() {
+        use exr::prelude::*;
+        let channels = AnyChannels::sort(vec![AnyChannel::new("R", FlatSamples::F32(vec![0.5]))].into());
+        let mut image = Image::from_layer(Layer::new((1, 1), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels));
+        image.attributes.display_window = IntegerBounds::new((0, 0), (60000, 60000));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write().to_buffered(&mut bytes).unwrap();
+        assert!(read_exr_channels(&bytes.into_inner()).is_none());
     }
 
     #[test]

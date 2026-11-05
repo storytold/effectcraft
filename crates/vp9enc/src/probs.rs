@@ -216,7 +216,32 @@ fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
 
 /// The `decode_term_subexp` value that moves `old` to `new`.
 fn delta_for(old: u8, new: u8) -> Option<usize> {
-    (0..255).find(|&d| inv_remap_prob(d, old) == new)
+    match delta_table().get(old as usize * 256 + new as usize) {
+        Some(&d) if d != NO_DELTA => Some(d as usize),
+        _ => None,
+    }
+}
+
+/// Marks "no delta reaches this probability" in [`delta_table`].
+const NO_DELTA: u8 = 255;
+
+/// `delta_for` for every (old, new) pair, indexed `old * 256 + new`: the smallest delta that
+/// moves `old` to `new`. Filled from the largest delta down so the smallest one wins.
+fn delta_table() -> &'static [u8] {
+    use std::sync::OnceLock;
+    static T: OnceLock<Vec<u8>> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = vec![NO_DELTA; 256 * 256];
+        for old in 0..=255u8 {
+            for d in (0..255usize).rev() {
+                let new = inv_remap_prob(d, old);
+                if let Some(e) = t.get_mut(old as usize * 256 + new as usize) {
+                    *e = d as u8;
+                }
+            }
+        }
+        t
+    })
 }
 
 /// Bits of `decode_term_subexp` for `d`.
@@ -415,6 +440,16 @@ mod tests {
                 if new != old {
                     assert!(delta_for(old, new).is_some(), "{old} -> {new}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn delta_table_matches_the_linear_search() {
+        for old in 0..=255u8 {
+            for new in 0..=255u8 {
+                let slow = (0..255).find(|&d| inv_remap_prob(d, old) == new);
+                assert_eq!(delta_for(old, new), slow, "{old} -> {new}");
             }
         }
     }

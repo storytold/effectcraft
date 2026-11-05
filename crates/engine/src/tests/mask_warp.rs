@@ -184,6 +184,51 @@ fn mask_interpolation_creates_matching_keys() {
     assert!(s.execute_checked("mask.interpolate", json!({"matchingMethod": "magic", "times": [0, 0.8], "layer": clip.0})).is_err());
 }
 
+#[test]
+fn mask_interpolation_skips_locked_selection_and_rejects_explicit_locked_targets() {
+    let (mut s, locked, _) = setup(patch_frames(rotating_pose));
+    let unlocked = effectcraft_project::LayerId(s.execute("layer.newSolid", json!({"width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap());
+    let a = ShapePath::rect([20.0, 20.0], 10.0, 10.0);
+    let b = ShapePath::rect([40.0, 30.0], 20.0, 20.0);
+    let cid = s.active_comp_id().unwrap();
+    let mut selected = vec![];
+    let mut masks = vec![];
+    for layer in [locked, unlocked] {
+        let uid = new_mask(&mut s, layer, &a);
+        masks.push(uid);
+        s.edit("keys", None, |project, _| {
+            let pr = project.comp_mut(cid).unwrap().layer_mut(layer).unwrap().props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+            pr.keys = vec![Keyframe::new(frame_time(0), KV::Path(a.clone())), Keyframe::new(frame_time(20), KV::Path(b.clone()))];
+            selected.extend(pr.keys.iter().map(|key| crate::KeyRef { layer, prop: pr.uid, time: key.time }));
+            Ok(())
+        })
+        .unwrap();
+    }
+    s.execute("layer.setSwitch", json!({"layers": [locked.0], "switch": "locked", "value": true})).unwrap();
+    s.state.selected_keys = selected.clone();
+    let before = mask_path(&s, locked, masks[0]).keys;
+    let options = serde_json::to_value(&s.state.mask_interp).unwrap();
+    let project = serde_json::to_value(&*s.project).unwrap();
+    let error = s.execute_checked("mask.interpolate", json!({"layer": locked.0, "mask": masks[0], "times": [0.0, 0.8], "quality": 75})).unwrap_err();
+    assert!(error.to_string().contains("locked"), "{error}");
+    assert_eq!(serde_json::to_value(&*s.project).unwrap(), project);
+    assert_eq!(serde_json::to_value(&s.state.mask_interp).unwrap(), options);
+    assert_eq!(s.state.selected_keys, selected);
+    s.execute_checked("mask.interpolate", json!({})).unwrap();
+    assert_eq!(mask_path(&s, locked, masks[0]).keys, before);
+    assert_eq!(mask_path(&s, unlocked, masks[1]).keys.len(), 21);
+    assert_eq!(s.state.selected_keys, selected);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, unlocked, masks[1]).keys.len(), 2);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, unlocked, masks[1]).keys.len(), 21);
+    s.state.selected_keys.retain(|key| key.layer == locked);
+    let selection = s.state.selected_keys.clone();
+    assert!(s.execute_checked("mask.interpolate", json!({})).is_err());
+    assert_eq!(mask_path(&s, locked, masks[0]).keys, before);
+    assert_eq!(s.state.selected_keys, selection);
+}
+
 // ---------------------------------------------------------------- Warp Stabilizer
 
 /// Camera offset on frame `f`: a slow pan plus jitter.

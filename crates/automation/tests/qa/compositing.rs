@@ -35,7 +35,7 @@ fn import_footage(qa: &mut Qa) -> (Value, Value) {
     // Footage: the sequence, and a layered PSD written by the app itself (Save Frame As ▸
     // Photoshop Layers) from a small comp.
     let seq = write_sequence(qa);
-    let imp = qa.exec("file.import", json!({"paths": [seq]}));
+    let imp = qa.exec("file.import", json!({"paths": [seq], "sequence": true}));
     let seq_item = imp["items"][0].clone();
     let project = qa.tool("get_project", json!({}));
     let it = project["items"].as_array().unwrap().iter().find(|i| i["id"] == seq_item).unwrap().clone();

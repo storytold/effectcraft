@@ -104,7 +104,16 @@ fn render_tex(
     match cached {
         Some(c) if c.key == key => Some(c),
         _ => {
-            let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time, expr: app.session.expr.as_deref(), footage: None };
+            let ectx = EvalCtx {
+                project: &app.session.project,
+                comp_id: cid,
+                comp,
+                time,
+                expr: app.session.expr.as_deref(),
+                footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
+            };
             let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
             r.expr = app.session.expr.as_deref();
             r.cache = Some(&app.session.layer_cache);
@@ -310,13 +319,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("layerPanel.canvas", frame, &layer.name);
     app.auto.add("layerPanel.area", area, "Layer panel");
 
-    // Navigation (as the Composition panel): the wheel / pinch zooms around the pointer with any
-    // tool; the Hand tool or Space-drag pans and the Zoom tool clicks zoom in (Alt: out).
+    // Navigation (as the Composition panel): the wheel / pinch zooms around the pointer and a
+    // two-finger trackpad scroll pans with any tool; the Hand tool or Space-drag pans and the
+    // Zoom tool clicks zoom in (Alt: out).
     let hovered = ui.rect_contains_pointer(area);
     if let Some(hp) = ui.input(|i| i.pointer.hover_pos()).filter(|_| hovered) {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
-        if scroll.is_finite() && scroll.abs() > 0.1 {
-            zoom_at(app, area, [lw, lh], hp, to_layer(hp), zoom as f32 * (scroll / 300.0).exp());
+        let scroll = super::viewer_scroll(&ctx);
+        if (scroll.zoom - 1.0).abs() > 3e-4 {
+            zoom_at(app, area, [lw, lh], hp, to_layer(hp), zoom as f32 * scroll.zoom);
+        } else if scroll.pan != egui::Vec2::ZERO {
+            app.ui.layer_zoom.get_or_insert(zoom as f32);
+            app.ui.layer_pan = [pan.x + scroll.pan.x, pan.y + scroll.pan.y];
         }
     }
     // A middle-drag pans with any tool; painting and Roto Brush strokes don't run meanwhile.

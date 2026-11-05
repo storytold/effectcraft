@@ -18,6 +18,7 @@ pub mod history;
 mod home;
 mod interchange;
 pub mod menus;
+mod output_guard;
 pub mod preview;
 pub mod render_queue;
 pub mod scriptui;
@@ -70,12 +71,14 @@ pub use home::templates;
 pub use interchange::psd_import;
 pub use interchange::vector;
 pub use interchange::xml_project;
+use interchange::{keyframe_text, keyframe_text_effects};
 pub use render_queue::{ExportJob, ExportResult, Exporter, JobState};
 pub use settings::autosave;
 pub use settings::config;
 pub use settings::prefs;
 pub use settings::shortcuts;
 pub use system::guard;
+pub use system::library;
 pub use system::logging;
 pub use system::perf;
 pub use system::storage;
@@ -162,6 +165,10 @@ pub struct Session {
     pub journal: Vec<(String, Value)>,
     /// Processed-layer pixels reused across frames and edits (content-keyed, never stale).
     pub layer_cache: Arc<LayerCache>,
+    /// The last Cryptomatte pick probe (see [`Session::crypto_probe_job`]). Public only so that
+    /// other crates can build a `Session { .. }`; its type is crate-private.
+    #[doc(hidden)]
+    pub crypto_probe: Arc<std::sync::Mutex<commands::CryptoProbeSlot>>,
     /// The persistent disk cache (Settings ▸ Media & Disk Cache), when enabled.
     pub disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
     /// Settings (Preferences).
@@ -193,6 +200,16 @@ pub struct Session {
     /// Loads WebAssembly effect plug-ins (set by the host that links `effectcraft-plugin` with
     /// its runtime): `effect.plugins.load`.
     pub plugin_loader: Option<PluginLoader>,
+    /// External effect helpers (native hosts link `effectcraft-helper-host`):
+    /// `effect.helpers.list`, `effect.helpers.scan`, `effect.helpers.load`.
+    pub helpers: Option<HelperHooks>,
+    /// Renders a module without registering it (`library.preview`; set with `plugin_loader`).
+    pub plugin_previewer: Option<PluginPreviewer>,
+    /// Where effect plug-ins live (hosts set it; else `Plug-ins` next to the settings): the
+    /// Plug-in Library installs into its `Library` folder ([`library`]).
+    pub plugins_dir: Option<std::path::PathBuf>,
+    /// The Plug-in Library's catalog, worker status and the packages this session loaded.
+    pub library: library::Library,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -202,6 +219,8 @@ pub struct Session {
     pub key_move: Option<KeyMove>,
     /// Reads the system's memory in the background for [`Session::memory_tick`].
     pub memory_watch: sysinfo::MemoryWatch,
+    /// Reads the disk cache's free disk space in the background for [`Session::memory_tick`].
+    pub disk_watch: sysinfo::DiskWatch,
     /// Switches Affect Nested Comps as last applied (a change empties the layer cache).
     pub applied_nested_switches: Option<bool>,
     /// Runs renders and analyses off the UI thread where there are no threads (the web app's
@@ -234,8 +253,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// The stamps being taken on a worker thread ([`footage_reload::start_scan`]).
-    pub footage_scan: Option<footage_reload::Scan>,
     /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
     pub disk_salt: Option<(u64, u64)>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
@@ -268,6 +285,23 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// Loads one WebAssembly effect plug-in (`bytes`, `source` path) into the effect registry and
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
+
+/// What a host that runs external effect helpers provides (`docs/external-helpers.md`).
+#[derive(Clone, Copy)]
+pub struct HelperHooks {
+    /// Start the helpers installed in the host's search paths and register their effects
+    /// (`retry` forgets the block list first) → `{paths, helpers, loaded, errors}`.
+    pub scan: fn(bool) -> Value,
+    /// Load a file or folder through the helpers that accept it → `{loaded, errors}`.
+    pub load: fn(&str) -> std::result::Result<Value, String>,
+    /// The helpers and their state → `{helpers, blocked}`.
+    pub list: fn() -> Value,
+}
+
+/// Renders one WebAssembly effect module without registering it (the Plug-in Library preview):
+/// `(bytes, width, height, premultiplied RGBA pixels, times in seconds)` → (manifest JSON, one frame
+/// per time).
+pub type PluginPreviewer = fn(&[u8], u32, u32, &[[f32; 4]], &[f64]) -> std::result::Result<(Value, Vec<Vec<[f32; 4]>>), String>;
 
 impl Default for Session {
     /// A new unsaved session: a default project that is both current and saved, no path, no
@@ -310,6 +344,7 @@ impl Default for Session {
             events: vec![],
             journal: vec![],
             layer_cache: Arc::new(LayerCache::default()),
+            crypto_probe: Default::default(),
             disk_cache: None,
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
@@ -323,10 +358,15 @@ impl Default for Session {
             snapshot: None,
             script: None,
             plugin_loader: None,
+            helpers: None,
+            plugin_previewer: None,
+            plugins_dir: None,
+            library: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,
             memory_watch: Default::default(),
+            disk_watch: Default::default(),
             applied_nested_switches: None,
             offload: None,
             offloaded: vec![],
@@ -342,7 +382,6 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             disk_salt: None,
-            footage_scan: None,
             script_calls: ScriptCalls::default(),
         }
     }

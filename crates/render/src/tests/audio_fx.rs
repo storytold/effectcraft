@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid};
 use effectcraft_time::{FrameRate, Tick};
@@ -78,7 +78,7 @@ fn comp_with(id: Option<&str>, vals: &[(&str, Value)], solid: bool) -> (Project,
         l.props.sub_mut("effects").unwrap().children.push(g.into());
     }
     let mut comp = comp;
-    comp.layers = vec![l];
+    comp.layers = vec![l].into();
     let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
     (p, cid)
 }
@@ -146,6 +146,42 @@ fn stereo_mixer_pans() {
     let (p, cid) = comp_with(Some("ec.audio.stereomixer"), &[("leftPan", Value::Scalar(100.0))], false);
     let m = mix(&p, &Signal(left), cid, 0.2, 10);
     assert!(m.chunks(2).all(|f| f[0].abs() < 1e-6 && (f[1] - 0.5).abs() < 1e-6), "{:?}", &m[..4]);
+}
+
+/// Key `prop` of layer 0 (`effect`: in its first effect, else in Audio) from `a` at 0 s to `b` at 1 s.
+fn key(p: &mut Project, cid: ItemId, effect: bool, prop: &str, a: Value, b: Value) {
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    let g = if effect { l.props.sub_mut("effects").unwrap().children[0].as_group_mut().unwrap() } else { l.props.sub_mut("audio").unwrap() };
+    g.get_mut(prop).unwrap().keys = vec![Keyframe::new(Tick::ZERO, a), Keyframe::new(Tick::from_seconds_f64(1.0), b)];
+}
+
+/// Left samples of a mix of constant 0.5 audio over the layer's 1 s, in blocks of `block` samples.
+fn left_ramp(p: &Project, cid: ItemId, block: usize) -> Vec<f32> {
+    fn half(_: f64) -> (f32, f32) {
+        (0.5, 0.5)
+    }
+    let mut m = vec![];
+    for k in 0..SR as usize / block {
+        m.extend(mix(p, &Signal(half), cid, (k * block) as f64 / SR as f64, block));
+    }
+    m.iter().step_by(2).copied().collect()
+}
+
+/// Keyframed Audio Levels and Stereo Mixer levels ramp smoothly inside a block (export mixes one
+/// second at a time), instead of holding the value at the block's first sample.
+#[test]
+fn animated_levels_ramp_within_a_block() {
+    let (mut levels, lc) = comp_with(None, &[], false);
+    key(&mut levels, lc, false, "levels", Value::Vec2([-60.0, -60.0]), Value::Vec2([0.0, 0.0]));
+    let (mut mixer, mc) = comp_with(Some("ec.audio.stereomixer"), &[], false);
+    key(&mut mixer, mc, true, "leftLevel", Value::Scalar(0.0), Value::Scalar(100.0));
+    for (name, p, cid, mid) in [("levels", &levels, lc, 0.5 * 10f32.powf(-1.5)), ("stereo mixer", &mixer, mc, 0.25)] {
+        let one = left_ramp(p, cid, SR as usize);
+        assert!(one.windows(2).all(|w| w[1] >= w[0]), "{name}: not monotonic");
+        assert!(one[100] < one[4000] && one[4000] < one[7900], "{name}: {} {} {}", one[100], one[4000], one[7900]);
+        assert!((one[4000] / mid - 1.0).abs() < 0.05, "{name}: {} at 0.5 s, want {mid}", one[4000]);
+        assert_eq!(one, left_ramp(p, cid, 320), "{name}: block size changes the result");
+    }
 }
 
 #[test]
@@ -236,7 +272,7 @@ fn audio_spectrum_follows_time_through_the_layer_cache() {
     g.prop_mut("audioLayer").unwrap().value = Value::Layer(Some(a.id.0));
     s.props.sub_mut("effects").unwrap().children.push(g.into());
     let mut comp = comp;
-    comp.layers = vec![s, a];
+    comp.layers = vec![s, a].into();
     let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
 
     let src = Signal(late_tone);

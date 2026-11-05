@@ -40,11 +40,16 @@ impl EffectcraftApp {
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_held: false,
+            starting: false,
+            starting_since: now,
+            first_cached: None,
             shown_at: Default::default(),
         };
         if !self.playback.caching {
             if plan.video {
-                self.playback.audio_held = self.audio_plays();
+                let audible = self.audio_plays();
+                self.playback.audio_held = audible;
+                self.playback.starting = audible;
             } else {
                 self.start_audio(fr.tick_of(plan.first));
             }
@@ -104,6 +109,7 @@ impl EffectcraftApp {
         let was = std::mem::replace(&mut self.playback.playing, false);
         self.audio = None;
         self.playback.caching = false;
+        self.playback.starting = false;
         if !was {
             return;
         }

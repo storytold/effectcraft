@@ -72,6 +72,14 @@ impl EffectHost for FxHost<'_, '_, '_> {
             return None;
         }
         let sub = self.r.nested();
+        // A 3D model or primitive layer has no 2D source of its own: an effect referencing one
+        // reads it as After Effects does — the layer rendered on its own through the comp's
+        // camera (Create 3D Layer Instance's effect), in the layer's effect space (the
+        // comp, centred on the layer's anchor).
+        if other.source.is_model() {
+            let buf = sub.solo_3d(self.ctx, other);
+            return Some(self.pixels(other, buf, false));
+        }
         // The cached layer buffer is shared; effects get their own copy.
         let buf = if masks_and_effects { (*sub.content_buf(self.ctx, other)?).clone() } else { sub.source(self.ctx, other)? };
         Some(self.pixels(other, buf, true))
@@ -90,12 +98,13 @@ impl EffectHost for FxHost<'_, '_, '_> {
     fn audio(&self, id: u64, start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         let LayerSource::Footage { item } = &other.source else { return None };
-        let ItemKind::Footage(f) = &self.r.project.item(*item)?.kind else { return None };
+        let item = self.ctx.media_item(other, *item);
+        let ItemKind::Footage(f) = &self.r.project.item(item)?.kind else { return None };
         if !f.has_audio {
             return None;
         }
         let st = other.layer_time(Tick::from_seconds_f64(start));
-        self.r.footage.audio(*item, f, st, frames, rate)
+        self.r.footage.audio(item, f, st, frames, rate)
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
@@ -118,6 +127,19 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(self.layer, pr)))
     }
 
+    fn param_at(&self, effect_index: usize, id: &str, layer_time: f64) -> Option<effectcraft_keyframe::Value> {
+        // Only the one property: a simulation samples it at every step. Its keyframes are read
+        // at the requested layer time exactly (mapping it to comp time and back rounds under a
+        // fractional stretch, so a Hold key there could read its previous value).
+        let p = effect_param(self.layer, effect_index, id)?;
+        let lt = Tick::from_seconds_f64(layer_time);
+        Some(self.ctx.at(self.layer.comp_time(lt)).value_at_layer_time(self.layer, p, lt))
+    }
+
+    fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
+        effect_param(self.layer, effect_index, id).is_some_and(|p| p.keys.is_empty() && !p.has_expression())
+    }
+
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
@@ -138,6 +160,26 @@ impl EffectHost for FxHost<'_, '_, '_> {
             self.pixels(other, (*sub.layer_input(&ctx, other, 0)?).clone(), false)
         })
     }
+}
+
+/// Parameter `id` (a flattened id: match ids joined by `/`) of effect `effect_index` in
+/// `layer`'s stack.
+fn effect_param<'a>(layer: &'a Layer, effect_index: usize, id: &str) -> Option<&'a effectcraft_project::Property> {
+    let mut g = layer.effects()?.groups().nth(effect_index)?;
+    let mut path = id.split('/').peekable();
+    while let Some(m) = path.next() {
+        if path.peek().is_none() {
+            return g.children.iter().find_map(|c| match c {
+                effectcraft_project::Node::Prop(p) if p.match_id == m => Some(p),
+                _ => None,
+            });
+        }
+        g = g.children.iter().find_map(|c| match c {
+            effectcraft_project::Node::Group(sg) if sg.match_id == m => Some(sg),
+            _ => None,
+        })?;
+    }
+    None
 }
 
 /// The Essential Properties overrides of a precomp layer, evaluated at the context time.

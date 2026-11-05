@@ -2,6 +2,7 @@
 //! with wgpu and writes PNGs when `EC_SNAPSHOT_DIR` is set (`cargo test -p effectcraft-ui-egui
 //! --test it ui_3d:: -- --ignored`); the other test only runs the UI logic.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::render::three_d::View3D;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -109,6 +110,7 @@ fn camera_and_light_dialogs_create_layers() {
 #[test]
 #[ignore = "renders with wgpu; run with --ignored (set EC_SNAPSHOT_DIR to keep PNGs)"]
 fn snapshot() {
+    let _device = crate::gpu_test::lock();
     let dir = std::env::var("EC_SNAPSHOT_DIR").ok();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|_| app());
     let shots: [(&str, Option<&str>); 4] =
@@ -118,7 +120,7 @@ fn snapshot() {
             h.state_mut().session.execute(c, json!({})).unwrap();
         }
         settle(&mut h);
-        let img = h.render().expect("render");
+        let img = h.render_serialized().expect("render");
         if let Some(d) = &dir {
             img.save(format!("{d}/ui3d_{name}.png")).unwrap();
         }
@@ -126,14 +128,14 @@ fn snapshot() {
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.newCamera", json!({})).unwrap();
     h.run_steps(3);
-    let img = h.render().expect("render");
+    let img = h.render_serialized().expect("render");
     if let Some(d) = &dir {
         img.save(format!("{d}/ui3d_camera_dialog.png")).unwrap();
     }
     h.state_mut().dialog = None;
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.newLight", json!({})).unwrap();
     h.run_steps(3);
-    let img = h.render().expect("render");
+    let img = h.render_serialized().expect("render");
     if let Some(d) = &dir {
         img.save(format!("{d}/ui3d_light_dialog.png")).unwrap();
     }
@@ -143,7 +145,7 @@ fn snapshot() {
     h.state_mut().session.execute("layer.select", json!({"layers": ["Card Blue"]})).unwrap();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.rotation", json!({})).unwrap();
     settle(&mut h);
-    let img = h.render().expect("render");
+    let img = h.render_serialized().expect("render");
     if let Some(d) = &dir {
         img.save(format!("{d}/ui3d_reveal_rotation.png")).unwrap();
     }
