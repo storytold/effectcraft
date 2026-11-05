@@ -48,11 +48,11 @@ const MAX_BYTES: usize = 256 << 20;
 /// Most XML nodes parsed from one document.
 const MAX_NODES: u32 = 20_000_000;
 
-/// Whether the document type declaration has an internal subset (`<!DOCTYPE x [ … ]>`), the
-/// only place XML can declare entities. Motion writes a bare `<!DOCTYPE ozxmlscene>`.
+/// Whether the document may declare entities: an entity declaration anywhere in the text, or a
+/// document type declaration with an internal subset (`<!DOCTYPE x [ … ]>`). Searching the whole
+/// text means a comment or a quoted `>` can't hide a declaration from the check. Motion writes a
+/// bare `<!DOCTYPE ozxmlscene>`, and text content escapes `<`, so real documents never match.
 fn has_internal_subset(text: &str) -> bool {
-    // Motion never declares entities; refuse any declaration, wherever it sits (a comment or a
-    // quoted `>` must not hide one from the DOCTYPE scan below).
     if text.contains("<!ENTITY") {
         return true;
     }

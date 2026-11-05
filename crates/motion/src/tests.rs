@@ -467,7 +467,11 @@ fn entity_declarations_are_refused() {
     let bomb = format!(r#"<?xml version="1.0"?><!DOCTYPE ozml [<!ENTITY l0 "lol">{laughs}]><ozml><scene><sceneSettings/><layer name="&l9;"/></scene></ozml>"#);
     let external =
         r#"<?xml version="1.0"?><!DOCTYPE ozml [<!ENTITY x SYSTEM "file:///etc/passwd">]><ozml><scene><sceneSettings/><layer name="&x;"/></scene></ozml>"#;
-    for bad in [bomb.as_str(), external] {
+    // Neither a quoted `>` in the DOCTYPE nor a decoy DOCTYPE in an earlier comment hides an entity.
+    let quoted_gt = r#"<?xml version="1.0"?><!DOCTYPE ozml SYSTEM "a>b" [<!ENTITY x "boom">]><ozml><scene><sceneSettings/><layer name="&x;"/></scene></ozml>"#;
+    let commented =
+        r#"<?xml version="1.0"?><!-- <!DOCTYPE decoy> --><!DOCTYPE ozml [<!ENTITY x "boom">]><ozml><scene><sceneSettings/><layer name="&x;"/></scene></ozml>"#;
+    for bad in [bomb.as_str(), external, quoted_gt, commented] {
         let e = import(&mut p, bad.as_bytes(), "X", &none).unwrap_err();
         assert!(e.to_string().contains("internal subset"), "{e}");
         assert!(clip_refs(bad.as_bytes()).is_err());
