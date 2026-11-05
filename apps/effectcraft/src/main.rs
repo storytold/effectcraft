@@ -7,8 +7,8 @@
 //! Without a project the app starts with an empty Untitled Project, as After Effects does;
 //! `--demo` opens the demo project instead (also Help ▸ Open Demo Project).
 //!
-//! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
-//! see `effectcraft_ui_egui::control` for the methods.
+//! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) also binds a localhost TCP control port.
+//! The Craft Link socket is on for every launch. Methods: `effectcraft_ui_egui::control`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -309,7 +309,11 @@ fn main() -> eframe::Result {
             // The ScriptUI panels open when the app last quit open again (a failing one is
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
+            let plugins = start_plugins(&mut session);
             let mut app = EffectcraftApp::new(session);
+            if let Some(host) = plugins {
+                app.hooks.per_frame = Some(Box::new(move |ctx, session| effectcraft_plugins::ui::frame(&host, ctx, session)));
+            }
             app.set_startup_update_check(true);
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
@@ -373,11 +377,11 @@ fn main() -> eframe::Result {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
                 app.hooks.clipboard_text = Some(Box::new(native_menu::clipboard_text));
             }
-            if let Some(port) = control_port {
+            if let Some(_port) = control_port {
                 disable_app_nap();
-                let rx = control_server::start(port, cc.egui_ctx.clone());
-                app = app.with_control(rx);
             }
+            let rx = control_server::start_with(None, control_port, cc.egui_ctx.clone());
+            app = app.with_control(rx);
             log::info!("app created; the window shows after its first frame");
             Ok(Box::new(Desktop {
                 #[cfg(target_os = "macos")]
@@ -399,6 +403,27 @@ fn main() -> eframe::Result {
         startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
     result
+}
+
+/// The plug-in host (craft-abi 1). Plug-ins live in `<config dir>/Plug-ins-host`; legacy `ec_` modules in
+/// `<config dir>/Plug-ins` keep loading through `effect.plugins.load`. A failure leaves the app
+/// running without the host.
+fn start_plugins(session: &mut effectcraft_engine::Session) -> Option<std::sync::Arc<effectcraft_plugins::PluginHost>> {
+    let cfg = effectcraft_plugins::HostConfig {
+        store_dir: effectcraft_host::config_dir().map(|d| d.join("Plug-ins-host")),
+        link: effectcraft_plugins::host::system_link_client(),
+        ..Default::default()
+    };
+    match effectcraft_plugins::PluginHost::start(session, cfg) {
+        Ok(host) => {
+            host.set_file_picker(Box::new(|| rfd::FileDialog::new().add_filter("EffectCraft plug-in", &["wasm"]).pick_file()));
+            Some(host)
+        }
+        Err(e) => {
+            log::error!("plug-ins are unavailable: {e}");
+            None
+        }
+    }
 }
 
 /// The window's wgpu device asks for the adapter's own limits (textures up to 16384 px)

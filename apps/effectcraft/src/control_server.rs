@@ -1,18 +1,23 @@
-//! Localhost JSON-lines control server (one request per line, one reply per line). Loopback only.
+//! Control endpoints of the desktop app. Two listeners feed one request queue.
 //!
-//! The server only ever reads requests: a line that is not a JSON object with a string `method`
-//! (an HTTP request line from a browser's cross-origin `fetch`, a stray `nc`, binary junk) gets
-//! one error reply and the connection is closed, so nothing after it is executed. Lines are
-//! bounded ([`MAX_LINE`]) and so is the number of open connections ([`MAX_CONNECTIONS`]); junk
-//! never reaches the UI thread. See `docs/control-protocol.md`.
+//! The Craft Link socket (`effectcraft-<pid>` under the runtime dir, token handshake in craft-ipc)
+//! is always on; [`start_with`] publishes it. `--control <port>` adds the localhost JSON-lines TCP
+//! server below (one request per line, one reply per line). Loopback only, no token.
+//!
+//! The TCP server only ever reads requests: a line that is not a JSON object with a string
+//! `method` gets one error reply and the connection is closed. Lines are bounded ([`MAX_LINE`])
+//! and so is the number of open connections ([`MAX_CONNECTIONS`]); junk never reaches the UI
+//! thread. See `docs/control-protocol.md`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use craft_ipc::bulk::FrameTickets;
+use craft_ipc::server::{Activate, ControlSink, Frames, Server, ServerConfig};
 use effectcraft_ui_egui::ControlRequest;
 use serde_json::{Value, json};
 
@@ -22,18 +27,87 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+/// The running link server. The next [`start_with`] drops it. Drop joins threads and releases
+/// the lock. It does not call [`Server::shutdown`].
+static SERVER: Mutex<Option<Server>> = Mutex::new(None);
+
+/// The Craft Link socket for `runtime` (the real runtime dir for `None`), plus the localhost TCP
+/// server when `tcp_port` is set. Both feed the receiver that comes back. A failed start is
+/// logged and nothing arrives from that listener.
+pub fn start_with(runtime: Option<craft_ipc::RuntimeDir>, tcp_port: Option<u16>, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
+    start_link(runtime, tx.clone(), ctx.clone());
+    if let Some(port) = tcp_port {
+        start_tcp(port, tx, ctx);
+    }
+    rx
+}
+
+fn start_link(runtime: Option<craft_ipc::RuntimeDir>, tx: Sender<ControlRequest>, ctx: egui::Context) {
+    // Release the previous lock before bind. Same pid cannot publish a second record while the
+    // first server still holds `effectcraft-<pid>.lock`.
+    *server_slot() = None;
+    let sink: Arc<dyn ControlSink> = Arc::new(UiSink { tx, ctx: ctx.clone() });
+    // `app.activate` runs on the UI thread, behind the same request channel as every other method.
+    let activate: Arc<dyn Activate> = Arc::new(effectcraft_link::SinkActivate::new(Arc::clone(&sink)));
+    // Frames are pulled from the newest snapshot the UI thread publishes (`live::tick`).
+    let wake_ctx = ctx;
+    let comp_frames = effectcraft_link::live::install(Arc::new(emit), Arc::new(move || wake_ctx.request_repaint()));
+    let frames: Arc<dyn Frames> = Arc::new(FrameTickets::new(comp_frames));
+    let config = ServerConfig {
+        app: "effectcraft".to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        instance: None,
+        runtime,
+        tcp_port: None,
+        sink,
+        activate,
+        frames,
+    };
+    match Server::start(config) {
+        Ok(server) => *server_slot() = Some(server),
+        Err(err) => log::error!("control server failed to start: {err}"),
+    }
+}
+
+fn start_tcp(port: u16, tx: Sender<ControlRequest>, ctx: egui::Context) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
             log::error!("control server failed to bind 127.0.0.1:{port}: {e}");
-            return rx;
+            return;
         }
     };
     log::info!("control server listening on 127.0.0.1:{port}");
     std::thread::spawn(move || accept_loop(listener, tx, ctx));
-    rx
+}
+
+fn server_slot() -> std::sync::MutexGuard<'static, Option<Server>> {
+    match SERVER.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+struct UiSink {
+    tx: Sender<ControlRequest>,
+    ctx: egui::Context,
+}
+
+impl ControlSink for UiSink {
+    fn submit(&self, method: String, params: Value) -> Option<Receiver<Value>> {
+        let (req, reply) = ControlRequest::new(method, params);
+        self.tx.send(req).ok()?;
+        self.ctx.request_repaint();
+        Some(reply)
+    }
+}
+
+/// Queue a push event on the running link server. Quiet when none runs.
+fn emit(event: &str, data: Value) {
+    if let Some(server) = server_slot().as_ref() {
+        let _ = server.emit(event, data);
+    }
 }
 
 fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
@@ -270,5 +344,44 @@ mod tests {
         BufReader::new(&mut extra).read_line(&mut line).unwrap();
         assert!(line.contains("too many control connections"), "{line}");
         drop(held);
+    }
+
+    /// `Client::call` returns the result payload, or a `LinkError` for `ok: false`.
+    /// Null means the reply was flat: a wrap would return the inner object, and a missing id
+    /// would not match the request.
+    #[test]
+    fn link_socket_passes_finished_replies() {
+        let pid = std::process::id();
+        let tick = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::path::PathBuf::from(format!("/tmp/ec-ctrl-{pid}-{tick:x}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runtime = craft_ipc::RuntimeDir::at(&dir).unwrap();
+        let _keep = RemoveDir(dir);
+        let rx = start_with(Some(runtime.clone()), None, egui::Context::default());
+        let worker = std::thread::spawn(move || {
+            let first = rx.recv_timeout(Duration::from_secs(5)).expect("first request");
+            first.reply.send(json!({"ok": true, "result": null})).expect("first reply");
+            let second = rx.recv_timeout(Duration::from_secs(5)).expect("second request");
+            second.reply.send(json!({"ok": false, "error": "missing command"})).expect("second reply");
+        });
+        let records = craft_ipc::Discovery::scan(&runtime).unwrap();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].app, "effectcraft");
+        let mut client = craft_ipc::client::Client::connect(&records[0]).unwrap();
+        let first = client.call("engine.commands", json!({})).expect("first call");
+        assert_eq!(first, Value::Null, "ok result must be null and not nested");
+        match client.call("engine.commands", json!({})).expect_err("second call") {
+            craft_ipc::LinkError::Invalid(text) => assert_eq!(text, "missing command"),
+            other => panic!("expected the string error, got {other}"),
+        }
+        worker.join().expect("reply thread");
+    }
+
+    struct RemoveDir(std::path::PathBuf);
+
+    impl Drop for RemoveDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
