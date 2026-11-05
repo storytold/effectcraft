@@ -188,11 +188,29 @@ fn per_worker_frames(lighting: bool) -> u64 {
 const SYNTH_FRAMES: u64 = 6;
 
 /// Workers a range of `frames` can keep busy (rayon never runs more tasks than frames). The
-/// scratch estimate must follow the pool that actually runs the parallel stages, which
-/// `RAYON_NUM_THREADS` can size differently from the hardware count.
-fn fill_workers(frames: usize) -> u64 {
-    let pool = rayon::current_num_threads() as u64;
+/// scratch estimate must follow the pool that actually runs the parallel stages: a synchronous
+/// fill stays in the caller's pool, while an asynchronous one runs on `spawn_task`'s own OS
+/// thread and so uses the global pool, whatever pool the command was called from (#2570).
+fn fill_workers(frames: usize, wait: bool) -> u64 {
+    let pool = if wait { rayon::current_num_threads() as u64 } else { global_pool_threads() };
     pool.min(frames.max(1) as u64)
+}
+
+/// The global Rayon pool's thread count, read from a thread outside every pool:
+/// `rayon::current_num_threads()` answers for the caller's pool, not the one the background
+/// task uses. Falls back to the current pool when the probe thread cannot start.
+fn global_pool_threads() -> u64 {
+    let (tx, rx) = std::sync::mpsc::channel();
+    match std::thread::Builder::new().name("fill-pool-probe".into()).spawn(move || {
+        let _ = tx.send(rayon::current_num_threads());
+    }) {
+        Ok(handle) => {
+            let n = rx.recv().map(|n| n as u64).unwrap_or_else(|_| rayon::current_num_threads() as u64);
+            let _ = handle.join();
+            n
+        }
+        Err(_) => rayon::current_num_threads() as u64,
+    }
 }
 
 /// Native builds spill the input, the membrane-filled neighbours and the propagated copies, and
@@ -203,7 +221,7 @@ fn fill_workers(frames: usize) -> u64 {
 /// partway through (#1789, #2570 review).
 #[cfg(test)]
 fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
-    memory_shortfall_with(frames, w, h, available, fill_workers(frames), false)
+    memory_shortfall_with(frames, w, h, available, fill_workers(frames, true), false)
 }
 
 /// `workers` and `lighting` are parameters so the budget is testable: the scratch term used to
@@ -233,6 +251,7 @@ fn memory_shortfall_with(frames: usize, w: u32, h: u32, available: u64, workers:
 
 /// Scratch floor for a native fill: the input, membrane-filled and propagated frames are each
 /// spilled as f32 RGBA (3 × 16 bytes a pixel a frame), plus a tenth for the PNG output.
+#[cfg(not(target_arch = "wasm32"))]
 fn scratch_need(frames: usize, w: u32, h: u32) -> u64 {
     let bytes = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(48);
     bytes.saturating_add(bytes / 10)
@@ -408,6 +427,8 @@ pub(crate) fn apply_plan(s: &mut Session, plan: &FillPlan, paths: Vec<String>) -
     add_fill_layer(s, plan.comp, plan.layer, &plan.name, paths, (plan.width, plan.height), plan.times[0], plan.times.len(), importer)
 }
 
+/// `contentFill.generate`: validate the layer and range, refuse a fill that cannot fit in
+/// memory or scratch space, then run it (in the background unless `wait` is set).
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "contentFill.generate";
     let (cid, lid) = layer_p(s, p, c)?;
@@ -446,8 +467,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
         ..Default::default()
     };
-    if let Some(e) =
-        crate::sysinfo::memory().and_then(|m| memory_shortfall_with(times.len(), w, h, m.available, fill_workers(times.len()), opts.lighting > 0.0))
+    let wait = b_p(p, "wait").unwrap_or(false);
+    // `spawn_task` runs a fill inline on wasm, and `runs_inline` selects the pool it will use.
+    let runs_inline = wait || cfg!(target_arch = "wasm32");
+    if let Some(e) = crate::sysinfo::memory()
+        .and_then(|m| memory_shortfall_with(times.len(), w, h, m.available, fill_workers(times.len(), runs_inline), opts.lighting > 0.0))
     {
         return Err(bad(c, e));
     }
@@ -473,7 +497,6 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         reference,
         dir,
     };
-    let wait = b_p(p, "wait").unwrap_or(false);
     // The browser: a job worker (its own GPU), the page keeps running.
     if !wait && s.offloads() {
         s.offload_analysis(crate::offload::WorkerJob::ContentFill { plan: Box::new(plan) }).map_err(EngineError::Other)?;

@@ -615,6 +615,7 @@ pub struct HoleMask {
 }
 
 impl HoleMask {
+    /// Pack one `bool` a pixel into 64-bit words.
     pub fn from_vec(hole: &[bool]) -> Self {
         let mut words = vec![0u64; hole.len().div_ceil(64)];
         for (i, &h) in hole.iter().enumerate() {
@@ -624,12 +625,15 @@ impl HoleMask {
         }
         HoleMask { words, len: hole.len() }
     }
+    /// An all-known mask of `n` pixels.
     pub fn zeros(n: usize) -> Self {
         HoleMask { words: vec![0u64; n.div_ceil(64)], len: n }
     }
+    /// Whether pixel `i` is in the hole.
     pub fn get(&self, i: usize) -> bool {
         i < self.len && (self.words[i / 64] >> (i % 64)) & 1 == 1
     }
+    /// Mark pixel `i` as missing (`true`) or known (`false`).
     pub fn set(&mut self, i: usize, v: bool) {
         if i >= self.len {
             return;
@@ -640,9 +644,11 @@ impl HoleMask {
             self.words[i / 64] &= !(1u64 << (i % 64));
         }
     }
+    /// Whether any pixel is in the hole.
     pub fn any(&self) -> bool {
         self.words.iter().any(|&w| w != 0)
     }
+    /// Unpack to one `bool` a pixel.
     pub fn to_vec(&self) -> Vec<bool> {
         (0..self.len).map(|i| self.get(i)).collect()
     }
@@ -657,15 +663,18 @@ pub enum Frames {
 }
 
 impl Frames {
+    /// The number of frames in the range.
     pub fn len(&self) -> usize {
         match self {
             Frames::Memory(v) => v.len(),
             Frames::Spilled(h) => h.n,
         }
     }
+    /// Whether the range has no frames.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Frame `k`: a clone from RAM, or a decode from the spill.
     pub fn get(&self, k: usize) -> Image {
         match self {
             Frames::Memory(v) => v[k].clone(),
@@ -694,12 +703,14 @@ impl Frames {
             Frames::Spilled(h) => h.path().parent().map(std::path::Path::to_path_buf),
         }
     }
+    /// Whether a read or write of a spilled frame failed.
     pub fn has_error(&self) -> bool {
         match self {
             Frames::Memory(_) => false,
             Frames::Spilled(h) => h.has_error(),
         }
     }
+    /// Take the first spill failure, clearing it.
     pub fn take_error(&self) -> Option<String> {
         match self {
             Frames::Memory(_) => None,
@@ -746,14 +757,17 @@ impl Drop for SpillInner {
 }
 
 impl SpillHandle {
+    /// The spill file's path.
     pub fn path(&self) -> &std::path::Path {
         &self.inner.path
     }
 
+    /// Bytes a pixel in the spill: RGBA `u8`, or four `f32` above 8 bits a channel.
     fn bytes_per_px(&self) -> usize {
         if self.bpc <= 8 { 4 } else { 16 }
     }
 
+    /// Record a scratch failure in the shared slot, keeping the first.
     pub fn record_error(&self, message: String) {
         if let Ok(mut e) = self.inner.error.lock()
             && e.is_none()
@@ -762,18 +776,22 @@ impl SpillHandle {
         }
     }
 
+    /// The error slot shared with any secondary spill.
     pub fn error_cell(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
         std::sync::Arc::clone(&self.inner.error)
     }
 
+    /// Whether a read or write failed (`true` when the slot is poisoned).
     pub fn has_error(&self) -> bool {
         self.inner.error.lock().map(|e| e.is_some()).unwrap_or(true)
     }
 
+    /// Take the first failure, clearing it.
     pub fn take_error(&self) -> Option<String> {
         self.inner.error.lock().ok().and_then(|mut e| e.take())
     }
 
+    /// Read one whole frame from the spill, reporting a short or failed read.
     fn load_frame(&self, k: usize) -> Image {
         let mut img = Image::new(self.w as u32, self.h as u32);
         let Some(px) = self.w.checked_mul(self.h) else {
@@ -939,6 +957,7 @@ impl SpillHandle {
         o
     }
 
+    /// Write frame `k` into the spill, reporting a disk error.
     pub fn write_frame(&self, k: usize, img: &Image) -> std::result::Result<(), String> {
         if k >= self.n {
             return Err(format!("spill: frame {k} out of range (n = {})", self.n));
@@ -1011,6 +1030,7 @@ impl SpillHandle {
         Ok(SpillHandle { inner, w, h, n, bpc })
     }
 
+    /// Create a spill in the system temporary directory.
     pub fn create(w: usize, h: usize, n: usize, bpc: u8) -> std::io::Result<Self> {
         Self::create_in(None, w, h, n, bpc)
     }
@@ -1140,6 +1160,7 @@ enum PropStore {
 }
 
 impl PropStore {
+    /// Open the propagated-frame store: spilled natively, in RAM on wasm.
     fn new(
         dir: Option<&std::path::Path>,
         w: usize,
@@ -1159,6 +1180,7 @@ impl PropStore {
         }
     }
 
+    /// Store frame `k`, reporting a spill write failure.
     fn put(&self, k: usize, img: Image) -> std::result::Result<(), String> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1194,6 +1216,7 @@ impl PropStore {
         }
     }
 
+    /// Record a failure in the spill, so the caller reports it instead of a bare cancellation.
     fn record_error(&self, message: String) {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1205,6 +1228,7 @@ impl PropStore {
         }
     }
 
+    /// Whether the spill failed (always `false` on wasm, which keeps frames in RAM).
     fn has_error(&self) -> bool {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1271,8 +1295,9 @@ fn flow_pairs(
             (backend.flow(&a, &b, &ha, &hb), backend.flow(&b, &a, &hb, &ha))
         })
         .collect();
+    let store_failed = store.has_error();
     drop(store);
-    if frames.has_error() { None } else { Some(pairs) }
+    if store_failed || frames.has_error() { None } else { Some(pairs) }
 }
 
 /// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
@@ -1584,6 +1609,7 @@ mod tests {
         (0..w * h).map(|i| (x0..x0 + s).contains(&(i % w)) && (y0..y0 + s).contains(&(i / w))).collect()
     }
 
+    /// Packing and unpacking a hole mask round-trips every pixel.
     #[test]
     fn holemask_roundtrip() {
         let v: Vec<bool> = (0..1000).map(|i| i % 3 == 0).collect();
@@ -1825,6 +1851,7 @@ mod tests {
         })
     }
 
+    /// Peak resident set size is only measured on Linux.
     #[cfg(not(target_os = "linux"))]
     fn peak_rss_kb() -> Option<u64> {
         None
