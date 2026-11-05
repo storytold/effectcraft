@@ -687,13 +687,22 @@ fn rounded_rectangle_corner_radius_follows_the_arrow_keys_while_drawing() {
     arrow(&mut h, egui::Key::ArrowUp);
     arrow(&mut h, egui::Key::ArrowUp);
     assert_eq!(radius(&h), 2.0);
-    release(&mut h, b, mods);
+
+    // Right pressed while the pointer is still growing the box rounds the box the drag has
+    // reached, not the one the frame before it drew: 400 × 240 allows 120.
+    let c = screen(&h, [540.0, 340.0]);
+    h.input_mut().events.push(Event::PointerMoved(c));
+    h.input_mut().events.push(Event::Key { key: egui::Key::ArrowRight, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.input_mut().events.push(Event::Key { key: egui::Key::ArrowRight, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(radius(&h), 120.0, "the maximum is the one this box allows");
+    release(&mut h, c, mods);
 
     let comp = h.state().session.active_comp().unwrap().clone();
     let layer = comp.layers.first().expect("a new shape layer").clone();
     let group = layer.props.sub("contents").unwrap().groups().next().unwrap().clone();
     let path = group.sub("contents").unwrap().sub("rect").expect("a Rectangle Path");
-    assert_eq!(path.get("roundness").unwrap().value.components()[0], 2.0, "the drawn shape keeps the radius the drag set");
+    assert_eq!(path.get("roundness").unwrap().value.components()[0], 120.0, "the drawn shape keeps the radius the drag set");
 }
 
 /// The ghost says where the shape lands: a mask on the selected layer is drawn in the mask colour

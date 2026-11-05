@@ -389,7 +389,7 @@ impl EffectcraftApp {
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         // A Rounded Rectangle being drawn owns the arrow keys (they set its corner radius), so
         // it takes them before Nudge Layer and the rest of the table.
-        panels::viewer::shape_drag_keys(self, &ctx);
+        panels::viewer::shape_drag_keys(&ctx);
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {
             self.ui.viewer.property_interacting = false;
