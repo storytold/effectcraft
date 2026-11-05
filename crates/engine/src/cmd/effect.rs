@@ -90,7 +90,9 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
     let loader = s.plugin_loader.ok_or_else(|| EngineError::Other("WebAssembly effect plug-ins are not available in this build".into()))?;
     let cfg = s.config.clone().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
     let root = cfg.dir().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
-    let plug_dir = root.join(PLUGINS_DIR);
+    // The folder the Plug-in Library installs next to (`Session::plugins_dir`: the host's, else
+    // `Plug-ins` next to the settings), so both kinds of install live in one place.
+    let plug_dir = s.plugins_dir().unwrap_or_else(|| root.join(PLUGINS_DIR));
     let single = str_p(p, "path").is_some();
     let mut listing_errors: Vec<Value> = Vec::new();
     let sources: Vec<std::path::PathBuf> = match (str_p(p, "path"), str_p(p, "folder")) {
@@ -123,6 +125,11 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
     for src in &sources {
         let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if name.is_empty() || name.starts_with('.') {
+            // A bundle's hidden files (`.DS_Store`, `._x.wasm` resource forks) are skipped; a
+            // single install must not report success for a file it skipped.
+            if single {
+                return Err(bad(c, format!("`{}` is not a plug-in file name (hidden files are not installed)", src.display())));
+            }
             continue;
         }
         let is_wasm = src.extension().is_some_and(|x| x.eq_ignore_ascii_case("wasm"));
@@ -135,14 +142,23 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             continue; // a bundle may carry readmes, manifests and source: skip them
         }
         let body: std::result::Result<(), String> = (|| {
+            // The name the installed file gets, so it must be one the Scripts menu lists and
+            // `file.uninstallScript` accepts (like `file.installScript`'s): one bare component,
+            // and on Windows not a device name or one Windows rewrites.
+            if !super::scripts::is_bare_name(&name) || (cfg!(windows) && super::scripts::windows_unsafe_name(&name)) {
+                return Err(format!("`{name}` is not a file name that can be installed"));
+            }
             // Never silently replace an installed file: a name collision is either a re-install
             // the user did not ask to overwrite or a bundle that would shadow a working plug-in,
             // and the update path is explicit (remove the old one first).
             if is_panel {
                 let key = format!("{}/{name}", super::scripts::PANELS_DIR);
                 // Listed, not read: an existing panel whose text cannot be read is still a panel
-                // and must not be replaced (reading it would report it as absent).
-                if cfg.list(super::scripts::PANELS_DIR).iter().any(|n| n == &name) {
+                // and must not be replaced (reading it would report it as absent). Compared
+                // ignoring case and checked on disk too: on Windows and macOS `my panel.jsx` is
+                // `My Panel.jsx`, and writing it would replace that panel.
+                let lower = name.to_lowercase();
+                if cfg.list(super::scripts::PANELS_DIR).iter().any(|n| n.to_lowercase() == lower) || cfg.files().is_file(&root.join(&key)) {
                     return Err(format!("{name} is already installed as a ScriptUI panel; remove it from the Scripts/ScriptUI Panels folder first to update"));
                 }
                 let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
@@ -159,7 +175,9 @@ fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
             cfg.files().write(&target, &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
             // Load in-session now: a plug-in that cannot load is rolled back, so a broken
             // plug-in never makes every start fail.
-            match loader(&bytes, &src.to_string_lossy()) {
+            // Its source is the installed copy (what `effect.plugins.list` shows and the next
+            // start loads), not the file it was installed from.
+            match loader(&bytes, &target.to_string_lossy()) {
                 Ok(v) => {
                     loaded.push(v);
                     installed.push(json!(name));
@@ -1286,7 +1304,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Install Effect Plug-in...",
             [],
             None,
-            "{path (.wasm plug-in: copied into the Plug-ins folder and loaded on every start) | folder (a plug-in bundle: every .wasm goes into the Plug-ins folder and every .jsx becomes a ScriptUI panel)}",
+            "{path (.wasm plug-in: copied into the Plug-ins folder and loaded on every start) | folder (a plug-in bundle: every .wasm goes into the Plug-ins folder and every .jsx becomes a ScriptUI panel), bundle? (the menu: ask for a folder)}",
             super::always,
             plugins_install
         ),

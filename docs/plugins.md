@@ -276,6 +276,15 @@ folder the app runs at every start, so:
 * A `.wasm` is uninstalled by deleting it from `Plug-ins` (the next start no longer loads it):
   there is no `effect.plugins.uninstall`. A panel installed here is an installed script, so
   `file.uninstallScript {name}` removes it. Replacing either means removing it first.
+* Hidden files (names starting with `.`, such as macOS `._x.wasm` copies) are skipped in a bundle
+  and refused as a single install. A panel name that differs from an installed panel's only in
+  letter case counts as the same name.
+* Installed plug-ins share the `Plug-ins` folder with the [Plug-in Library](#plug-in-library)
+  (which keeps its packages in `Plug-ins/Library`). An effect id can be registered only once: a
+  plug-in whose id is already loaded, from either kind of install, is refused. At start-up the
+  files installed here load before the library's packages, so if both carry the same id (for
+  example after files were copied by hand), the file here wins and the library package reports
+  the duplicate.
 
 **The sandbox.** A plug-in runs in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter
 with no imports (no file, network or clock access), deterministic floats, a fuel budget per

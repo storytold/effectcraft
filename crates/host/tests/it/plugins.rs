@@ -88,6 +88,15 @@ fn build_example() -> Option<std::path::PathBuf> {
     Some(target.join("wasm32-unknown-unknown/release/posterize_bands.wasm"))
 }
 
+/// A host session whose settings and Plug-ins folder are both in `config`: installs must never
+/// reach the real settings folder the host session points its Plug-ins folder at.
+fn install_session(config: &std::path::Path) -> Session {
+    let mut s = effectcraft_host::session();
+    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(config)));
+    s.plugins_dir = Some(config.join("Plug-ins"));
+    s
+}
+
 #[test]
 fn plugin_bundle_install_copies_wasm_and_installs_panels() {
     let config = tempfile::TempDir::new().unwrap();
@@ -99,8 +108,7 @@ fn plugin_bundle_install_copies_wasm_and_installs_panels() {
     std::fs::write(bundle.join("My Panel.jsx"), "1".as_bytes()).unwrap();
     std::fs::write(bundle.join("notes.txt"), b"not a plug-in".to_vec()).unwrap();
 
-    let mut s = effectcraft_host::session();
-    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    let mut s = install_session(config);
     let r = s.execute("effect.plugins.install", json!({"folder": bundle.to_string_lossy()})).unwrap();
     assert_eq!(r["installed"].as_array().unwrap().len(), 1, "{r}");
     assert_eq!(r["errors"].as_array().unwrap().len(), 0, "{r}");
@@ -146,8 +154,7 @@ fn plugin_install_never_replaces_an_installed_plugin() {
     let src = src.path();
     std::fs::write(src.join("a-good.wasm"), wat_plugin("org.test.host.replace", 1, "i32.const 0")).unwrap();
 
-    let mut s = effectcraft_host::session();
-    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(&config)));
+    let mut s = install_session(config);
     s.execute("effect.plugins.install", json!({"path": src.join("a-good.wasm").to_string_lossy()})).unwrap();
     let installed = std::fs::read(plug_dir.join("a-good.wasm")).unwrap();
 
@@ -179,6 +186,40 @@ fn plugin_install_never_replaces_an_installed_plugin() {
     assert_eq!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/My Panel.jsx").as_deref(), Some("1"));
 }
 
+/// A single install of a hidden file is an error, not a success that installed nothing; a panel
+/// whose name differs from an installed one only in case is refused (on Windows and macOS writing
+/// it would replace that panel); an installed plug-in's source is its installed copy.
+#[test]
+fn plugin_install_refuses_hidden_files_and_case_variant_panels() {
+    let config = tempfile::TempDir::new().unwrap();
+    let config = config.path();
+    let src = tempfile::TempDir::new().unwrap();
+    let src = src.path();
+    let mut s = install_session(config);
+
+    let hidden = src.join(".hidden.wasm");
+    std::fs::write(&hidden, wat_plugin("org.test.host.hidden", 1, "i32.const 0")).unwrap();
+    assert!(s.execute("effect.plugins.install", json!({"path": hidden.to_string_lossy()})).is_err());
+    assert!(!config.join("Plug-ins").join(".hidden.wasm").exists());
+
+    let p1 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p1.path().join("Case Panel.jsx"), "1").unwrap();
+    s.execute("effect.plugins.install", json!({"folder": p1.path().to_string_lossy()})).unwrap();
+    let p2 = tempfile::TempDir::new().unwrap();
+    std::fs::write(p2.path().join("case panel.jsx"), "2").unwrap();
+    let r = s.execute("effect.plugins.install", json!({"folder": p2.path().to_string_lossy()})).unwrap();
+    assert!(r["panels"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(r["errors"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(s.config.as_ref().unwrap().read("Scripts/ScriptUI Panels/Case Panel.jsx").as_deref(), Some("1"));
+
+    let good = src.join("sourced.wasm");
+    std::fs::write(&good, wat_plugin("org.test.host.sourced", 1, "i32.const 0")).unwrap();
+    s.execute("effect.plugins.install", json!({"path": good.to_string_lossy()})).unwrap();
+    let list = s.execute("effect.plugins.list", json!({})).unwrap();
+    let entry = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "org.test.host.sourced").cloned().unwrap();
+    assert_eq!(entry["source"], json!(config.join("Plug-ins").join("sourced.wasm").to_string_lossy()), "{entry}");
+}
+
 /// A huge file is refused before it is read into memory and copied into the folder the app loads
 /// at every start.
 #[test]
@@ -189,8 +230,7 @@ fn plugin_install_refuses_an_oversized_file() {
     // Sparse on every platform we build for: no 64 MiB written, just the length.
     std::fs::File::create(&big).unwrap().set_len((64 << 20) + 1).unwrap();
 
-    let mut s = effectcraft_host::session();
-    s.config = Some(Arc::new(effectcraft_engine::config::DirConfig::new(config.path())));
+    let mut s = install_session(config.path());
     let Err(e) = s.execute("effect.plugins.install", json!({"path": big.to_string_lossy()})) else { panic!("an oversized plug-in was installed") };
     assert!(e.to_string().contains("byte limit"), "{e}");
     assert!(!config.path().join("Plug-ins/big.wasm").exists(), "{e}");
