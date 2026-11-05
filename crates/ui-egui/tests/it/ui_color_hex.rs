@@ -110,6 +110,94 @@ fn a_drag_from_the_swatch_into_the_square_sets_the_colour() {
     assert!(close(midtones(&h), after), "the release keeps the colour the drag set");
 }
 
+/// The pointer can arrive and come up in one frame: the button is already up when the release
+/// lands in the square, so the release's position must still set the colour (#2686).
+#[test]
+fn a_release_in_the_frame_the_pointer_enters_the_square_sets_the_colour() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Release", "width": 320, "height": 180, "duration": 4})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Toner"})).unwrap()["effects"][0].as_u64().unwrap();
+    let uid = s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("midtones").unwrap().uid;
+    s.state.selected_layers = vec![LayerId(layer)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let midtones = |h: &Harness<'_, EffectcraftApp>| {
+        let c = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find(uid).unwrap().value.as_color();
+        [c[0], c[1], c[2]]
+    };
+    let before = midtones(&h);
+
+    let [x, y, w, ht] = h.state().auto.find(&format!("effectControls.prop.{uid}.value")).expect("the Midtones swatch").rect;
+    let swatch = pos2(x + w / 2.0, y + ht / 2.0);
+    // Press on the swatch and keep the button down: the picker opens on this press.
+    h.input_mut().events.push(Event::PointerMoved(swatch));
+    h.input_mut().events.push(Event::PointerButton { pos: swatch, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(4);
+    assert!(h.query_by_label("Color field").is_some(), "the press on the swatch opens the picker");
+    assert!(close(midtones(&h), before), "the press that opens the picker changes nothing: {:?}", midtones(&h));
+    // One frame: onto the square and up together, so the release finds the button already up at
+    // the new position — the case `primary_down()` alone cannot see.
+    let square = h.get_by_label("Color field").rect();
+    let target = pos2(square.min.x + square.width() * 0.25, square.min.y + square.height() * 0.75);
+    h.input_mut().events.push(Event::PointerMoved(target));
+    h.input_mut().events.push(Event::PointerButton { pos: target, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    let after = midtones(&h);
+    assert!(!close(after, before), "the release over the square sets the colour: {:?} -> {:?}", before, after);
+    h.run_steps(2);
+    assert!(h.query_by_label("Color field").is_some(), "and the picker stays open");
+}
+
+/// A press that begins on the slider belongs to the slider: dragging it into the square must not
+/// move the square's channels, and one that begins on the square stays the square's (#2686).
+#[test]
+fn a_drag_across_to_the_other_control_leaves_it_alone() {
+    let mut h = picker([1.0, 0.0, 0.0]);
+    let square = h.get_by_label("Color field").rect();
+    let slider = h.get_by_label("Color slider").rect();
+    // Press on the slider: it takes the gesture and sets its channel to the middle hue.
+    h.input_mut().events.push(Event::PointerMoved(slider.center()));
+    h.input_mut().events.push(Event::PointerButton { pos: slider.center(), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.0, 1.0, 1.0]), "the press sets the slider's hue: {:?}", h.state());
+    // Still held, into the square: the slider keeps the gesture, so the square's channels stay.
+    h.input_mut().events.push(Event::PointerMoved(square.center()));
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.0, 1.0, 1.0]), "the drag into the square leaves the square alone: {:?}", h.state());
+    h.input_mut().events.push(Event::PointerButton { pos: square.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.0, 1.0, 1.0]), "and so does the release: {:?}", h.state());
+}
+
+/// A drag that starts inside the square and leaves it keeps setting the colour, clamped at the
+/// edge, instead of stopping wherever the pointer last was inside (#2686).
+#[test]
+fn a_drag_past_the_edge_of_the_square_clamps_to_it() {
+    let mut h = picker([1.0, 0.0, 0.0]);
+    let square = h.get_by_label("Color field").rect();
+    // Press in the middle: half saturation, half brightness.
+    let mid = square.center();
+    h.input_mut().events.push(Event::PointerMoved(mid));
+    h.input_mut().events.push(Event::PointerButton { pos: mid, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.5, 0.25, 0.25]), "the press sets the middle: {:?}", h.state());
+    // Still held, far past the right edge: full saturation, brightness unchanged — the hue's red
+    // at half brightness, `hsv(0°, 100%, 50%)`.
+    let past = pos2(square.max.x + 200.0, mid.y);
+    h.input_mut().events.push(Event::PointerMoved(past));
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.5, 0.0, 0.0]), "the drag past the edge clamps to it: {:?}", h.state());
+    h.input_mut().events.push(Event::PointerButton { pos: past, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(near(*h.state(), [0.5, 0.0, 0.0]), "the release past the edge keeps it: {:?}", h.state());
+}
+
 /// A colour button in a harness of its own, its picker open.
 fn picker(c: [f32; 3]) -> Harness<'static, [f32; 3]> {
     let mut h = Harness::builder().with_size(vec2(560.0, 400.0)).build_ui_state(
