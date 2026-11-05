@@ -1152,11 +1152,26 @@ fn half_float_frames_keep_over_range_values() {
     assert_eq!((p[2], p[3]), (1000.0, 0.0));
     assert!((p[0] - 0.1).abs() < 1e-4 && (p[1] + 0.25).abs() < 1e-4);
     assert_eq!(f.bytes(), 3 * F16_PIXEL_BYTES);
-    // Averaged down for the texture limit, keeping the range.
-    let big = F16Frame::from_image(&effectcraft_engine::render::Image::filled(5, 3, [8.0, 2.0, 0.5, 1.0]), SRGB);
-    let small = big.averaged_down(2);
-    assert_eq!(small.size(), [3, 2]);
-    assert_eq!(small.pixel(5), Some([8.0, 2.0, 0.5, 1.0]));
+}
+
+/// Oversized half-float frames take the CPU pass: display conversion, then averaging down. Linear
+/// 8 and 0 alternating in Clip mode at -2 EV is white and black (byte 128 averaged); averaging the
+/// scene values first would give 4.0 x 0.25 = 1.0, byte 255.
+#[test]
+fn oversized_half_float_frames_convert_before_averaging() {
+    use crate::display_gpu::Source;
+    use effectcraft_engine::viewer::{Channel, DisplayPass};
+    let mut img = effectcraft_engine::render::Image::new(2, 1);
+    img.data.copy_from_slice(&[[8.0, 8.0, 8.0, 1.0], [0.0, 0.0, 0.0, 1.0]]);
+    let lin = effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Linear, hdr: effectcraft_engine::project::HdrMode::Clip };
+    let f = Arc::new(F16Frame::from_image(&img, lin));
+    let pass = DisplayPass::new(Channel::Rgb, false, -2.0, lin, None);
+    let src = Source::F16(f.clone());
+    assert!(src.needs_cpu_pass(1) && !src.needs_cpu_pass(2));
+    assert!(!Source::Rgba8(Arc::new(egui::ColorImage::new([2, 1], vec![egui::Color32::WHITE; 2]))).needs_cpu_pass(1), "8-bit frames are averaged on the GPU");
+    let out = fit_texture_by(f.to_color_image(&pass), 1, 1);
+    assert_eq!(out.size, [1, 1]);
+    assert_eq!(out.pixels[0].to_array(), [128, 128, 128, 255]);
 }
 
 /// 65 536 colours spread over 0..1 (each channel on its own 16-bit grid), premultiplied by

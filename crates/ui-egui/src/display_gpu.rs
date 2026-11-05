@@ -41,6 +41,13 @@ impl Source {
             Source::Rgba8(c) => c.size,
         }
     }
+
+    /// A half-float frame past the texture limit goes through the CPU pass: the display
+    /// conversion (exposure, HDR) comes before the averaging down, as with the 8-bit mips, and
+    /// the GPU would average the scene-linear values first.
+    pub fn needs_cpu_pass(&self, max_side: usize) -> bool {
+        matches!(self, Source::F16(_)) && crate::frames::fit_factor(self.size(), max_side, 1) > 1
+    }
 }
 
 /// The pass's uniform block (`Params` in the shader).
@@ -224,7 +231,8 @@ impl DisplayGpu {
     }
 
     /// `src` in a texture (half floats or RGBA8), averaged down by `k` first when `k > 1`
-    /// (frames past the texture limit, #201): `reuse` when it has the size and format (a playing
+    /// (8-bit frames past the texture limit, #201; half-float ones never get here, see
+    /// [`Source::needs_cpu_pass`]): `reuse` when it has the size and format (a playing
     /// preview's frames), else a new one.
     fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, src: &Source, k: usize, reuse: Option<wgpu::Texture>) -> wgpu::Texture {
         let write = |w: u32, h: u32, format: wgpu::TextureFormat, bytes: &[u8]| {
@@ -256,10 +264,6 @@ impl DisplayGpu {
         let f16 = wgpu::TextureFormat::Rgba16Float;
         let rgba8 = wgpu::TextureFormat::Rgba8Unorm;
         match src {
-            Source::F16(f) if k > 1 => {
-                let f = f.averaged_down(k);
-                write(f.width, f.height, f16, bytemuck::cast_slice(f.bits()))
-            }
             Source::F16(f) => write(f.width, f.height, f16, bytemuck::cast_slice(f.bits())),
             Source::Rgba8(c) if k > 1 => {
                 let c = crate::frames::fit_texture_by((**c).clone(), usize::MAX, k);
@@ -389,6 +393,9 @@ impl Bake {
     /// The egui texture showing `src` through `pass` (sampled with the Viewer Zoom Quality's
     /// sampler for `smooth`), running the pass again when the frame or the pass changed.
     pub fn show(&mut self, rs: &egui_wgpu::RenderState, gpu: &DisplayGpu, src: &Source, pass: &DisplayPass, smooth: bool) -> Option<egui::TextureId> {
+        if src.needs_cpu_pass(gpu.max_side()) {
+            return None;
+        }
         let (device, queue) = (&rs.device, &rs.queue);
         let params = uniform(pass);
         let new_source = !self.source.as_ref().is_some_and(|s| s.same(src));

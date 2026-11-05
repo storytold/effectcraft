@@ -88,31 +88,4 @@ impl F16Frame {
             .collect();
         egui::ColorImage::new(self.size(), px)
     }
-
-    /// Averaged down by `k` (rounded up at the edges), as `frames::average_down` does for 8-bit
-    /// frames: for frames wider or taller than the GPU's texture limit (#201).
-    pub fn averaged_down(&self, k: usize) -> F16Frame {
-        let [w, h] = self.size();
-        let k = k.max(1);
-        let (fw, fh) = (w.div_ceil(k), h.div_ceil(k));
-        let mut data = vec![0u16; fw * fh * 4];
-        data.par_chunks_mut(4).enumerate().for_each(|(i, o)| {
-            let (x0, y0) = ((i % fw) * k, (i / fw) * k);
-            let (mut sum, mut n) = ([0f32; 4], 0f32);
-            for y in y0..(y0 + k).min(h) {
-                for x in x0..(x0 + k).min(w) {
-                    if let Some(p) = self.pixel(y * w + x) {
-                        for c in 0..4 {
-                            sum[c] += p[c];
-                        }
-                        n += 1.0;
-                    }
-                }
-            }
-            for c in 0..4 {
-                o[c] = f16::from_f32(sum[c] / n.max(1.0)).to_bits();
-            }
-        });
-        F16Frame { width: fw as u32, height: fh as u32, data, encoding: self.encoding }
-    }
 }
