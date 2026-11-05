@@ -59,7 +59,9 @@ ScriptUI Panel…) and it is listed at the bottom of the Window menu under its f
 runs the script and docks its panel as a tab, which you can move, float, maximize and close like any
 other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when EffectCraft
 quits open again at the next launch (`window.restoreScriptPanels`, which the desktop and web apps
-run at start-up; the list is `scriptui_panels.json` in the settings folder).
+run at start-up; the list is `scriptui_panels.json` in the settings folder). A saved workspace
+remembers each panel by its script: the panel returns to its place when the script opens, and until
+then the workspace shows no tab for it and never runs the script.
 
 To group panels, for example the several panels of one extension, make a subfolder of
 `Scripts/ScriptUI Panels/` and put them in it: `Scripts/ScriptUI Panels/My Tools/Animate.jsx` is

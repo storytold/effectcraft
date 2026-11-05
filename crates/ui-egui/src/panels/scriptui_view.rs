@@ -609,8 +609,8 @@ pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
     app.session.script_ui.window(id).map(|w| if w.title.is_empty() { w.script.clone() } else { w.title.clone() })
 }
 
-/// Close the dock panels whose script window has gone (the script closed it, or a saved
-/// workspace from an earlier run).
+/// Close the dock panels whose script window has gone (the script closed it). A saved workspace
+/// never shows one: `crate::workspace_state::script_panels` fits it first.
 pub fn sync_panels(app: &mut EffectcraftApp) {
     for p in app.ui.dock.panels() {
         if let PanelKind::ScriptPanel(id) = p
