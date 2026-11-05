@@ -173,10 +173,14 @@ pub struct FillPlan {
 }
 
 /// Transient full frames one parallel stage holds per worker: the membrane reads a frame and
-/// returns a copy, the flow stage holds the neighbouring pair, and Lighting Correction adds the
-/// mismatch ring (`diff`, its mask) on top.
+/// returns a copy, the flow stage holds the neighbouring pair plus the luma pyramids, and
+/// Lighting Correction adds the mismatch ring (`diff`, its mask) on top.
+///
+/// Measured with `measure_peak_rss_of_a_fill` (90 frames, 640×360, Surface): peak RSS grows by
+/// ~7 frames a rayon worker at the top of its run-to-run spread, and Lighting Correction stays
+/// below the flow stage's peak, so 8 (9 with lighting) is a conservative constant (#2570).
 fn per_worker_frames(lighting: bool) -> u64 {
-    if lighting { 4 } else { 2 }
+    if lighting { 9 } else { 8 }
 }
 
 /// The sequential synthesis stage: the stored frame, the PatchMatch pyramid and its
@@ -626,13 +630,14 @@ mod tests {
     fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
         let e = memory_shortfall_with(300, 1920, 1080, 1_000_000, 8, false).expect("refused");
         assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
-        // Four workers, no lighting: the packed masks and flows plus ~14 scratch frames fit.
+        // Four workers, no lighting: the packed masks and flows plus ~38 scratch frames fit.
         assert_eq!(memory_shortfall_with(30, 1920, 1080, 4_000_000_000, 4, false), None);
-        assert_eq!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 4, false), None);
-        // A wide machine with Lighting Correction holds ~4 frames a worker: 300 frames no longer
-        // fit in 1 GB, which the old fixed 8-frame scratch term missed (#2570 review).
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 2_000_000_000, 4, false), None);
+        // A wide machine with Lighting Correction holds nine frames a worker: 300 frames no
+        // longer fit in 5 GB, which the old fixed 8-frame scratch term missed (#2570 review).
         assert!(memory_shortfall_with(300, 1920, 1080, 1_000_000_000, 16, true).is_some());
-        assert_eq!(memory_shortfall_with(300, 1920, 1080, 4_000_000_000, 16, true), None);
+        assert!(memory_shortfall_with(300, 1920, 1080, 5_000_000_000, 16, true).is_some());
+        assert_eq!(memory_shortfall_with(300, 1920, 1080, 6_000_000_000, 16, true), None);
         // The two packed masks still grow with the range: a very long 1080p range cannot fit.
         assert!(memory_shortfall_with(1000, 1920, 1080, 500_000_000, 8, false).is_some());
         // Hostile sizes saturate instead of overflowing.

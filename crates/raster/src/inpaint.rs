@@ -1769,4 +1769,64 @@ mod tests {
         std::fs::write(&file, b"x").expect("write");
         assert!(SpillHandle::create_in(Some(&file), 4, 4, 1, 32).is_err());
     }
+
+    /// Peak RSS of one synthetic fill, quoted in the PR. Ignored so CI does not run it. Run it
+    /// under `/usr/bin/time -v` and read `VmHWM` (`Maximum resident set size`):
+    ///
+    /// ```text
+    /// cargo test -p effectcraft-raster --lib measure_peak_rss --no-run
+    /// target/debug/deps/effectcraft_raster-* inpaint::tests::measure_peak_rss_of_a_fill \
+    ///     --ignored --exact --nocapture --test-threads=1
+    /// ```
+    ///
+    /// `RAYON_NUM_THREADS`, `MEASURE_LIGHTING=1` and `MEASURE_FRAMES` select the configuration.
+    /// Measured on 18 workers (2026-11-04): 90 frames of 640×360 peak at 340–470 MB across runs
+    /// (35 MB with one worker) and 600 frames at 582 MB, i.e. ~7 frames of scratch a worker, so
+    /// the guard budgets 8 (9 with Lighting Correction) (#2570).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "memory measurement; run explicitly"]
+    fn measure_peak_rss_of_a_fill() {
+        let n: usize = std::env::var("MEASURE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(90);
+        let (w, h) = (640u32, 360u32);
+        let spill = SpillHandle::create_in(None, w as usize, h as usize, n, 32).expect("spill");
+        let hole = rect_hole(w, h, 240, 120, 160);
+        let mut holes = Vec::with_capacity(n);
+        for k in 0..n {
+            let img = background(w, h, 2.0 * k as f32);
+            spill.write_frame(k, &img).expect("write");
+            holes.push(HoleMask::from_vec(&hole));
+        }
+        let input = FillInput { frames: Frames::Spilled(spill), holes, references: vec![] };
+        // MEASURE_LIGHTING=1 exercises the propagation ring too (one process per reading: VmHWM
+        // never goes down).
+        let lighting = std::env::var("MEASURE_LIGHTING").is_ok_and(|v| v == "1");
+        let opts = FillOpts { method: FillMethod::Surface, lighting: if lighting { 1.0 } else { 0.0 }, ..Default::default() };
+        let before = peak_rss_kb();
+        let started = std::time::Instant::now();
+        let mut sink = |_: usize, _: &Image| -> Result<(), String> { Ok(()) };
+        let out = fill_sequence_with(input, &opts, &CpuFill, &mut |_, _| true, Some(&mut sink));
+        eprintln!(
+            "measure_peak_rss: {n} frames of {w}x{h}, surface, lighting={}, {:.2}s, peak RSS {} KB -> {} KB",
+            if lighting { "on" } else { "off" },
+            started.elapsed().as_secs_f64(),
+            before.unwrap_or(0),
+            peak_rss_kb().unwrap_or(0)
+        );
+        assert!(out.is_some_and(|v| v.is_empty()), "the sink consumed every frame");
+    }
+
+    /// Peak resident set size of this process (`VmHWM`), in kilobytes.
+    #[cfg(target_os = "linux")]
+    fn peak_rss_kb() -> Option<u64> {
+        std::fs::read_to_string("/proc/self/status").ok()?.lines().find_map(|l| {
+            let v = l.strip_prefix("VmHWM:")?;
+            v.split_whitespace().next()?.parse().ok()
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn peak_rss_kb() -> Option<u64> {
+        None
+    }
 }
