@@ -775,6 +775,10 @@ fn a_shape_colour_outside_the_range_is_clamped_and_reported() {
     let inside = shape([0.25, 0.5, 1.0, 1.0], None);
     assert_eq!(export_all(&inside).report.count(LossCategory::ShapeLayers), 0);
     assert!(strict(&inside));
+    // Keyed in range: the static value (here over-bright) is not written, so nothing is lost.
+    let keyed = shape([2.0, 0.0, 0.0, 1.0], Some([0.5, 0.5, 0.5, 1.0]));
+    assert_eq!(export_all(&keyed).report.count(LossCategory::ShapeLayers), 0, "{:?}", export_all(&keyed).report.losses);
+    assert!(strict(&keyed));
     for p in [shape([2.0, 0.5, -0.5, 1.0], None), shape([0.0, 1.0, 0.0, 1.0], Some([1.5, 0.0, 0.0, 1.0]))] {
         let r = export_all(&p);
         assert_eq!(r.report.count(LossCategory::ShapeLayers), 1, "{:?}", r.report.losses);

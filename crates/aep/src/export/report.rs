@@ -45,8 +45,8 @@ pub enum LossCategory {
     BlendModes,
     /// Track mattes.
     TrackMattes,
-    /// 3D features that are not written (per-character 3D of a text layer; the layer's 3D switch
-    /// itself is written).
+    /// 3D features that are not written (per-character 3D of a text layer, Material Options other
+    /// than the defaults; the layer's 3D switch itself is written).
     ThreeD,
     /// A time stretch that is not an exact small ratio (the layer is written unstretched).
     TimeStretch,
@@ -204,7 +204,7 @@ pub const LIMITATIONS: &[&str] = &[
     "The render queue (its items are reported), render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
     "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter, motion blur switch and display start are written at After Effects' defaults: other values of preserve frame rate, preserve resolution, motion blur samples and adaptive sample limit are reported; draft 3D, hide shy, the viewer resolution, the poster time and the composition's frame blending switch (layer frame blending is reported, and no layer blends without it) are not exported. The background is stored with 8 bits per channel.",
     "Footage is linked, not embedded: png, jpeg, OpenEXR, TIFF, Targa, Photoshop, Illustrator and EPS stills, png, OpenEXR and jpeg sequences, mp4 and mov clips and WAV audio are written with their path, size, duration and frame rate (a conformed clip rate too); the rest of their interpretation (alpha, colour management, fields, loops) is the default.",
-    "Layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",
+    "Layer comments, a 3D layer's X / Y rotation, orientation and material options (each reported when it is not at its default), parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",
     "Mask colours are not written: After Effects shows its own colour for every exported mask.",
 ];
 

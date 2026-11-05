@@ -315,6 +315,14 @@ fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi, de
     })
 }
 
+/// Whether a popup's items are After Effects' items in the same order (separators included, as
+/// After Effects counts them), so an expression's 1-based result picks the same item in both.
+fn same_popup_order(items: &[&str], ui: &ParamUi, def: &ParDef) -> bool {
+    let ParamUi::Popup { options } = ui else { return false };
+    let file: Vec<&str> = if def.items.is_empty() { items.to_vec() } else { def.items.iter().map(String::as_str).collect() };
+    file.len() == options.len() && file.iter().zip(options).all(|(f, o)| f.trim() != "(-" && popup_key(f) == popup_key(o))
+}
+
 /// [`stored`], reporting what it changes in a value it can store: a colour channel outside 0 to 1
 /// (written as the nearest limit) and a fraction on an integer parameter (rounded).
 fn stored_reported(conv: Conv, kind: PKind, v: &Value, (size, ui, def): ((f64, f64), &ParamUi, &ParDef), what: &str, col: &mut Collector) -> Option<Vec<f64>> {
@@ -699,11 +707,11 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
     let expr = prop.expr.as_ref().filter(|e| !e.text.is_empty()).map(|e| (e.text.clone(), e.enabled));
     if expr.is_some() {
         col.exported.expressions = col.exported.expressions.saturating_add(1);
-        // The expression is written as it is; where the stored value is scaled (a popup counts
-        // from 1, a percent or factor parameter has other units) its result means something else
-        // in After Effects.
+        // The expression is written as it is; where the stored value is scaled (a percent or
+        // factor parameter has other units) or a popup's items are in another order, its result
+        // means something else in After Effects. Popups count from 1 in both programs' expressions.
         let other_units = match conv {
-            Conv::Popup { .. } => true,
+            Conv::Popup { items, .. } => !same_popup_order(items, &prop.ui, def),
             Conv::Percent { valid_max } => (valid_max - 100.0).abs() > 1e-9,
             Conv::Factor { factor, .. } => (factor - 1.0).abs() > 1e-9,
             _ => false,

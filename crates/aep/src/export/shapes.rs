@@ -227,8 +227,8 @@ pub(crate) fn c_point(v: &Value) -> Option<Vec<f64>> {
 }
 
 /// A colour as the file stores it (alpha 255, then red, green and blue from 0 to 255). A channel
-/// outside 0 to 1 is written as the nearest limit, as for lights (`rec` reports it); a value that
-/// is not finite stays so and is reported as invalid.
+/// outside 0 to 1 is written as the nearest limit, as for lights (`rec_value` reports it); a
+/// value that is not finite stays so and is reported as invalid.
 pub(crate) fn c_color(v: &Value) -> Option<Vec<f64>> {
     let ch = |x: f64| if x.is_finite() { x.clamp(0.0, 1.0) * 255.0 } else { x };
     match v {
@@ -237,10 +237,11 @@ pub(crate) fn c_color(v: &Value) -> Option<Vec<f64>> {
     }
 }
 
-/// Whether a colour property's value or one of its keys has a channel outside 0 to 1.
-fn colour_beyond(p: &Property) -> bool {
+/// Whether a colour that is written has a channel outside 0 to 1: the keys of an animated
+/// property (its static value is not written then), else the static value.
+fn colour_beyond(p: &Property, keyed: bool) -> bool {
     let beyond = |v: &Value| matches!(v, Value::Color(c) if c.iter().take(3).any(|x| x.is_finite() && !(0.0..=1.0).contains(x)));
-    beyond(&p.value) || p.keys.iter().any(|k| beyond(&k.value))
+    if keyed { p.keys.iter().any(|k| beyond(&k.value)) } else { beyond(&p.value) }
 }
 
 /// A popup stored 1-based (EffectCraft's items in After Effects' order).
@@ -380,6 +381,10 @@ pub(crate) fn rec_value(
         }
         keys = plan_keys(p, conv, layout, w, cx);
     }
+    // Shape and text animator colours alike (both are planned here).
+    if layout == Layout::Color && colour_beyond(p, !keys.is_empty()) {
+        cx.col.lose(category, format!("{w}: a colour channel outside 0 to 1 is written as the nearest limit"));
+    }
     if keys.is_empty() && expr.is_none() && !differs(&value) {
         return None;
     }
@@ -394,9 +399,6 @@ fn rec(out: &mut Records, g: &PropGroup, names: (&'static str, &str), conv: Conv
     let Some(p) = g.get(id) else { return };
     let Some(kind) = kind_of(name) else { return };
     let w = format!("{what}: {name}");
-    if colour_beyond(p) {
-        cx.col.lose(LossCategory::ShapeLayers, format!("{w}: a colour channel outside 0 to 1 is written as the nearest limit"));
-    }
     if let Some(v) = rec_value(p, conv, kind.layout, Some(default), &w, LossCategory::ShapeLayers, cx) {
         out.push((name, v));
     }

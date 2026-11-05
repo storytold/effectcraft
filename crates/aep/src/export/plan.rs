@@ -990,11 +990,19 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     for (_, what_lost) in unwritten.iter().filter(|(on, _)| *on) {
         col.lose(LossCategory::LayerSwitches, what(&format!("{what_lost} is not written; layer")));
     }
-    // The 3D switch is written (`ldta@38` bit 0x04, 015); a 3D layer's camera, lights and
-    // material options are not, and its X / Y rotation and orientation are reported below.
+    // The 3D switch is written (`ldta@38` bit 0x04, 015); a 3D layer's material options are not
+    // (reported below when changed), and its X / Y rotation and orientation are reported too.
     let per_char_3d = matches!(layer.props.prop("text/perChar3d").map(|p| &p.value), Some(effectcraft_keyframe::Value::Bool(true)));
     if layer.switches.three_d && matches!(src, LayerSrc::Text(_)) && per_char_3d {
         col.lose(LossCategory::ThreeD, what("per-character 3D of the text layer is not written; 3D layer"));
+    }
+    // Material Options change how a 3D layer takes lights and shadows; they are not written, so a
+    // value other than After Effects' default, a key or an expression is reported (review
+    // finding). On a 2D layer they have no effect.
+    if layer.switches.three_d {
+        for name in changed_material_options(layer) {
+            col.lose(LossCategory::ThreeD, what(&format!("the material option {name} is not written; 3D layer")));
+        }
     }
     // Track matte (403-408): the mode and the matte layer's id; a matte layer that is not
     // exported (or the layer itself) is reported in `resolve_mattes`.
@@ -1127,6 +1135,18 @@ fn precomp_loop(project: &Project, from: ItemId, to: ItemId) -> bool {
         }
     }
     false
+}
+
+/// The names of a layer's Material Options that differ from a new layer's (value, keys or an
+/// expression); a property EffectCraft's defaults do not list counts as changed.
+fn changed_material_options(layer: &Layer) -> Vec<String> {
+    let Some(g) = layer.props.sub("materialOptions") else { return Vec::new() };
+    let mut next = 0;
+    let defaults = effectcraft_project::build::material_options(&mut effectcraft_project::build::Ids(&mut next));
+    g.props()
+        .filter(|p| !p.keys.is_empty() || p.has_expression() || defaults.props().find(|d| d.match_id == p.match_id).is_none_or(|d| d.value != p.value))
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// Whether a transform property outside the five carries something (a keyed or changed value).

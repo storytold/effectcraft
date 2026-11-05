@@ -521,6 +521,43 @@ fn hostile_text_animators_never_panic() {
     let _ = reimport(&r.bytes);
 }
 
+/// A text animator's Fill Color outside 0 to 1 is clamped and reported under text layers, like a
+/// shape colour (review finding: the animator path skipped the check); an in-range one is
+/// lossless.
+#[test]
+fn a_text_animator_colour_outside_the_range_is_reported() {
+    use effectcraft_project::build;
+    let with_fill = |colour: [f64; 4]| {
+        let mut d = TextDoc::plain("Glow");
+        d.set_runs(vec![StyleRun { len: 4, style: style("ArialMT", 40.0) }]);
+        let (mut p, c) = text_project(vec![d]);
+        let mut next = p.next_id;
+        {
+            let mut ids = build::Ids(&mut next);
+            let props = build::text_anim_props(&mut ids, "fillColor", false);
+            let mut a = build::text_animator(&mut ids, "A", props);
+            if let Some(pg) = a.sub_mut("properties") {
+                pg.get_mut("fillColor").unwrap().value = Value::Color(colour);
+            }
+            with_layer(&mut p, c, 0, |l| l.props.sub_mut("text").unwrap().sub_mut("animators").unwrap().children = vec![effectcraft_project::Node::Group(a)]);
+        }
+        p.next_id = next;
+        p
+    };
+    let lost = |p: &Project| {
+        let r = export_all(p);
+        r.report
+            .losses
+            .iter()
+            .filter(|l| l.category == LossCategory::TextLayers)
+            .flat_map(|l| l.details.clone())
+            .filter(|d| d.contains("outside 0 to 1"))
+            .count()
+    };
+    assert_eq!(lost(&with_fill([0.2, 0.4, 0.6, 1.0])), 0);
+    assert_eq!(lost(&with_fill([3.0, 0.4, -1.0, 1.0])), 1);
+}
+
 /// Two fonts whose names differ only in bytes a lossy UTF-8 conversion turns into the same text
 /// (U+4E80 and U+4E81 both read as `N` + U+FFFD) get entries of their own (review finding).
 #[test]

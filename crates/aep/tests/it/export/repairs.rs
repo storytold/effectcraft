@@ -323,11 +323,59 @@ fn camera_options_stretch_curves_and_expressions_that_change_are_reported() {
     reported(&p, LossCategory::TimeStretch, "");
     // A curve that is not text.
     reported(&with_effect("ec.color.curves", |g| set(g, "rgb", Value::Scalar(1.0))), LossCategory::InvalidValues, "not text");
-    // An expression on a popup: After Effects counts from 1.
+    // An expression on a popup whose items are After Effects' in another order (Invert's
+    // channels: After Effects counts its separators, EffectCraft has none).
+    let p = with_effect("ec.channel.invert", |g| {
+        g.prop_mut("channel").expect("channel").expr = Some(effectcraft_project::Expression { text: "6".into(), enabled: true });
+    });
+    reported(&p, LossCategory::Expressions, "other units");
+}
+
+/// A 3D layer's Material Options are not written: a value other than a new layer's, a key or an
+/// expression is reported (one loss each), and a strict export refuses (review finding: changed
+/// options were dropped without a report). The defaults, and any value on a 2D layer (where they
+/// do nothing), stay lossless.
+#[test]
+fn changed_material_options_of_a_3d_layer_are_reported() {
+    let three_d = |f: &dyn Fn(&mut PropGroup)| {
+        let (mut p, c, _) = simple();
+        first_layer(&mut p, c, |l| {
+            l.switches.three_d = true;
+            f(l.props.sub_mut("materialOptions").expect("material options"));
+        });
+        p
+    };
+    lossless(&three_d(&|_| {}));
+    for (name, change) in [
+        ("Accepts Lights", &(|g: &mut PropGroup| set(g, "acceptsLights", Value::Bool(false))) as &dyn Fn(&mut PropGroup)),
+        ("Casts Shadows", &|g: &mut PropGroup| set(g, "castsShadows", Value::Enum(1))),
+        ("Diffuse", &|g: &mut PropGroup| g.prop_mut("diffuse").expect("diffuse").keys = vec![key(0.0, Value::Scalar(50.0)), key(1.0, Value::Scalar(80.0))]),
+        ("Ambient", &|g: &mut PropGroup| {
+            g.prop_mut("ambient").expect("ambient").expr = Some(effectcraft_project::Expression { text: "100".into(), enabled: true })
+        }),
+    ] {
+        let p = three_d(change);
+        reported(&p, LossCategory::ThreeD, &format!("material option {name}"));
+        assert_eq!(analyze(&p).count(LossCategory::ThreeD), 1, "{name}");
+    }
+    let (mut flat, c, _) = simple();
+    first_layer(&mut flat, c, |l| set(l.props.sub_mut("materialOptions").expect("material options"), "acceptsLights", Value::Bool(false)));
+    lossless(&flat);
+}
+
+/// A popup expression is written as it is: both programs count popup items from 1, so where the
+/// items are the same in the same order (Fast Box Blur's Blur Dimensions) its result picks the
+/// same item, and nothing is reported (review finding: every popup expression was reported).
+#[test]
+fn a_popup_expression_with_the_same_items_is_not_a_loss() {
     let p = with_effect("ec.blur.fastbox", |g| {
         g.prop_mut("dimensions").expect("dimensions").expr = Some(effectcraft_project::Expression { text: "1".into(), enabled: true });
     });
-    reported(&p, LossCategory::Expressions, "other units");
+    let r = effectcraft_aep::export::export(&p, &effectcraft_aep::export::ExportOptions { allow_losses: true }).expect("export");
+    assert_eq!(r.report.count(LossCategory::Expressions), 0, "{:?}", r.report.losses);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    assert!(effectcraft_aep::export::export(&p, &effectcraft_aep::export::ExportOptions { allow_losses: false }).is_ok());
+    assert_eq!(r.report.exported.expressions, 1);
 }
 
 #[test]
