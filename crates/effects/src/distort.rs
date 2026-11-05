@@ -583,6 +583,40 @@ mod tests {
         assert!(o.img.width >= 1500 && o.img.height >= 1000, "{}x{}", o.img.width, o.img.height);
     }
 
+    #[test]
+    fn corner_pin_with_a_non_finite_pin_returns_a_buffer_without_panicking() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for corner in ["ul", "ur", "lr", "ll"] {
+                let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+                let o = run("ec.distort.cornerpin", &[(corner, Value::Vec2([bad, 5.0]))], im);
+                assert!(o.img.width >= 1 && o.img.height >= 1 && o.img.width <= 16384 && o.img.height <= 16384, "{corner} {bad}: {}x{}", o.img.width, o.img.height);
+                assert!(o.offset.iter().all(|v| v.is_finite()), "{corner} {bad}: offset {:?}", o.offset);
+            }
+        }
+    }
+
+    #[test]
+    fn corner_pin_growth_is_continuous_as_a_pin_moves_far_away() {
+        let mut last: Option<u64> = None;
+        for k in 0..60 {
+            let far = 100.0 * 1.4_f64.powi(k);
+            let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+            let o = run("ec.distort.cornerpin", &[("lr", Value::Vec2([far, far]))], im);
+            let size = (o.img.width, o.img.height);
+            assert!(size.0 >= 20 && size.1 >= 10 && u64::from(size.0) * u64::from(size.1) <= 1 << 24, "pin {far}: {size:?}");
+            let area = u64::from(size.0) * u64::from(size.1);
+            if let Some(prev) = last {
+                // The shared cut factor may trade width for height as the pin direction changes,
+                // but the buffer as a whole does not shrink (beyond whole-pixel flooring at the budget)
+                // as the pin moves further away.
+                assert!(area * 10_000 >= prev * 9_999, "pin {far}: the buffer shrank from {prev} to {area} pixels ({size:?})");
+            }
+            let opaque = (0..o.img.height as i64).any(|y| (0..o.img.width as i64).any(|x| o.img.get(x, y)[3] > 0.0));
+            assert!(opaque, "pin {far}: the pinned layer vanished");
+            last = Some(area);
+        }
+    }
+
     fn differs(a: Px4, b: Px4) -> bool {
         (0..4).any(|i| (a[i] - b[i]).abs() > 1e-4)
     }
