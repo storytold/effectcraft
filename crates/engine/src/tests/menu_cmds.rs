@@ -2119,6 +2119,37 @@ fn quick_set_anchor_moves_the_anchor_without_moving_the_layer_over_its_keys() {
     }
 }
 
+/// Same as above with Position split into X and Y, each with its own keys: both channels get the
+/// shift, so the layer still looks the same on every frame.
+#[test]
+fn quick_set_anchor_keeps_a_layer_with_separated_keyed_position_in_place() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("prop.set", json!({"layer": a, "path": "transform/scale", "value": [150, 80]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/rotation", "value": 30})).unwrap();
+    s.execute("prop.separateDimensions", json!({"layer": a, "value": true})).unwrap();
+    for (path, values) in [("transform/positionX", [100.0, 400.0, 300.0]), ("transform/positionY", [80.0, 250.0, 60.0])] {
+        for (time, value) in [0.0, 1.0, 2.0].into_iter().zip(values) {
+            s.execute("prop.addKey", json!({"layer": a, "path": path, "time": time, "value": value})).unwrap();
+        }
+    }
+    let look = |s: &mut Session| {
+        [0.0, 0.4, 1.0, 1.5, 2.0]
+            .map(|t| {
+                s.execute("time.set", json!({"time": t})).unwrap();
+                seen_bounds(s, a)
+            })
+            .to_vec()
+    };
+    let before = look(&mut s);
+    s.execute("layer.quickSetAnchor", json!({"layers": [a], "point": "topLeft"})).unwrap();
+    let anchor = layer(&s, a).transform().unwrap().get("anchor").unwrap().value.as_vec3();
+    assert_eq!(anchor[..2], [0.0, 0.0], "the anchor moved to the top left");
+    for (b, n) in before.iter().zip(look(&mut s)) {
+        assert!(b.iter().zip(n).all(|(x, y)| (x - y).abs() < 1e-6), "the layer moved, {b:?} → {n:?}");
+    }
+}
+
 #[test]
 fn quick_set_anchor_skips_locked_and_3d_layers_and_checks_its_point() {
     let mut s = comp();
