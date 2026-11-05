@@ -1,14 +1,17 @@
 //! `link.renderResult`: encode the bound comp to `result_path` as ProRes 4444.
 //!
 //! The encode call is [`effectcraft_export::export`], the same function the export tests and
-//! the host's `FileExporter` use. Frames are written to `<result_path>.part` in the same
-//! directory. The part file is renamed onto `result_path` only after that call returns `Ok`.
+//! the host's `FileExporter` use. Frames are written to a part file in the same
+//! directory under a name no other encode uses (`<result_path>.<n>.part`), so two renders of one
+//! link never write the same file. The part file is renamed onto `result_path` only after that
+//! call returns `Ok`.
 //! The control handler calls [`render_result`] on the UI thread and waits for the file.
 //! [`spawn_render`] moves a [`Session`] to a named thread, because the session is not shared
 //! with the interface.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use effectcraft_engine::Session;
@@ -124,7 +127,8 @@ pub fn prepare_render(session: &Session, link_id: &str, epoch: Option<u64>) -> R
 /// A saved project is untrusted, and `result_path` comes from it. The link writes only a movie
 /// named `<link_id>.mov` that sits next to the `<link_id>.ecproj` sidecar that `link.open` made.
 /// A file already at the name must be a QuickTime movie, which is what the link wrote last time.
-/// No symlink is followed at the result or the part name, and no directory is created.
+/// No symlink is followed at the result name, and no directory is created. The part file is
+/// made with [`reserve_part`], which never opens an existing name.
 pub fn check_result_target(link_id: &str, result_path: &str) -> Result<(), RenderError> {
     let path = check_result_name(link_id, result_path)?;
     let Some(dir) = path.parent().filter(|dir| dir.is_dir()) else {
@@ -133,10 +137,6 @@ pub fn check_result_target(link_id: &str, result_path: &str) -> Result<(), Rende
     let sidecar = dir.join(format!("{link_id}.ecproj"));
     if !is_regular_file(&sidecar) {
         return Err(RenderError::refused(format!("{} is not a Craft Link directory (no {link_id}.ecproj); open the link again", dir.display())));
-    }
-    let part = part_path(path);
-    if std::fs::symlink_metadata(&part).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(RenderError::refused(format!("{} is a symlink", part.display())));
     }
     match std::fs::symlink_metadata(path) {
         Err(_) => Ok(()),
@@ -175,7 +175,7 @@ impl RenderPlan {
     /// `Err` with code `cancelled`. The result file is untouched unless this returns `Ok`.
     pub fn encode(&self, keep_going: &dyn Fn() -> bool) -> Result<(), RenderError> {
         let path = Path::new(&self.result_path);
-        let temp = part_path(path);
+        let temp = reserve_part(path, PART_SEQ.fetch_add(1, Ordering::Relaxed))?;
         let temp_str = temp.to_string_lossy().to_string();
         if let Err(e) = encode_prores(self, &temp_str, keep_going) {
             discard_temp(&temp);
@@ -254,15 +254,36 @@ pub fn unusable_footage(session: &Session, comp: ItemId) -> Vec<String> {
     paths
 }
 
-fn part_path(result: &Path) -> PathBuf {
+/// Counter for part file names. Each encode takes the next number.
+static PART_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// How many names [`reserve_part`] tries before it gives up.
+const PART_TRIES: u64 = 1000;
+
+fn part_path(result: &Path, seq: u64) -> PathBuf {
     match result.file_name() {
         Some(name) => {
             let mut part = name.to_os_string();
-            part.push(".part");
+            part.push(format!(".{seq}.part"));
             result.with_file_name(part)
         }
-        None => result.with_extension("part"),
+        None => result.with_extension(format!("{seq}.part")),
     }
+}
+
+/// Create an empty part file for `result`, starting at number `first`. A name that exists
+/// (a file left by a crash, a symlink, another encode) is skipped, never opened, so two encodes
+/// of one link never share a part file and no symlink is followed.
+fn reserve_part(result: &Path, first: u64) -> Result<PathBuf, RenderError> {
+    for seq in first..first.saturating_add(PART_TRIES) {
+        let part = part_path(result, seq);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(_) => return Ok(part),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(RenderError::io(format!("could not create {}: {e}", part.display()))),
+        }
+    }
+    Err(RenderError::io(format!("no free part file name next to {}", result.display())))
 }
 
 fn discard_temp(temp: &Path) {
@@ -379,23 +400,80 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_symlink_at_the_result_or_part_name_is_refused() {
+    fn a_symlink_at_the_result_name_is_refused() {
         let dir = scratch("s02-symlink");
         let victim = dir.join("victim");
         std::fs::write(&victim, b"KEEP").unwrap();
         let result = dir.join(format!("{LINK}.mov"));
-        for link_at in [result.clone(), part_path(&result)] {
-            let _ = std::fs::remove_file(&result);
-            let _ = std::fs::remove_file(part_path(&result));
-            std::os::unix::fs::symlink(&victim, &link_at).unwrap();
-            let mut session = Session::default();
-            let comp = add_comp(&mut session);
-            bind(&mut session, LINK, comp, &result.to_string_lossy());
-            let err = render_result(&mut session, LINK).unwrap_err();
-            assert_eq!(err.code, "result_path_refused", "{}", link_at.display());
-            assert_eq!(std::fs::read(&victim).unwrap(), b"KEEP");
-        }
+        std::os::unix::fs::symlink(&victim, &result).unwrap();
+        let mut session = Session::default();
+        let comp = add_comp(&mut session);
+        bind(&mut session, LINK, comp, &result.to_string_lossy());
+        let err = render_result(&mut session, LINK).unwrap_err();
+        assert_eq!(err.code, "result_path_refused");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"KEEP");
+    }
+
+    /// A part name that already exists is skipped, never opened: a file left by another encode
+    /// is not shared.
+    #[test]
+    fn a_part_name_in_use_is_skipped() {
+        let dir = scratch("part-reserve");
+        let result = dir.join(format!("{LINK}.mov"));
+        std::fs::write(part_path(&result, 5), b"other encode").unwrap();
+        let part = reserve_part(&result, 5).unwrap();
+        assert_eq!(part, part_path(&result, 6));
+        assert_eq!(std::fs::read(part_path(&result, 5)).unwrap(), b"other encode");
+        assert_eq!(reserve_part(&result, 5).unwrap(), part_path(&result, 7));
+    }
+
+    /// A symlink at a part name is not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_a_part_name_is_not_followed() {
+        let dir = scratch("part-symlink");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"KEEP").unwrap();
+        let result = dir.join(format!("{LINK}.mov"));
+        std::os::unix::fs::symlink(&victim, part_path(&result, 5)).unwrap();
+        assert_eq!(reserve_part(&result, 5).unwrap(), part_path(&result, 6));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"KEEP");
+    }
+
+    /// Two renders of one link overlap: the user's edit starts a background render and Back
+    /// starts another. Each writes its own part file, and both finish with a movie.
+    #[test]
+    fn two_overlapping_renders_of_one_link_write_separate_part_files() {
+        let dir = scratch("overlap");
+        let result = dir.join(format!("{LINK}.mov"));
+        let mut session = Session::default();
+        let comp = add_comp(&mut session);
+        bind(&mut session, LINK, comp, &result.to_string_lossy());
+        let slow = prepare_render(&session, LINK, Some(1)).unwrap();
+        let quick = prepare_render(&session, LINK, Some(2)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let first = std::cell::Cell::new(true);
+            slow.encode(&|| {
+                if first.replace(false) {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(30));
+                }
+                true
+            })
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(crate::test_support::result_parts(&dir).len(), 1, "the slow encode holds one part file");
+        quick.encode(&|| true).unwrap();
+        assert!(effectcraft_media::probe(&result).is_ok(), "the quick render left a movie");
+        assert_eq!(crate::test_support::result_parts(&dir).len(), 1, "the quick render did not touch the slow part file");
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(effectcraft_media::probe(&result).is_ok());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
     }
 
     #[test]
@@ -422,9 +500,8 @@ mod tests {
 
         let first = render_result(&mut session, LINK).unwrap();
         let bytes = std::fs::read(&result).unwrap();
-        let part = part_path(&result);
         println!("RESULT_BYTES:{}", bytes.len());
-        assert!(!part.exists(), "part file remains at {}", part.display());
+        assert!(crate::test_support::result_parts(&dir).is_empty(), "a part file remains");
         assert_eq!(first.epoch, 1);
         assert_eq!(first.path, result_path);
         assert_eq!(first.link_id, LINK);
@@ -444,7 +521,7 @@ mod tests {
         let session = handle.join().unwrap();
         let bytes = std::fs::metadata(&result).unwrap().len();
         println!("RESULT_BYTES_SECOND:{bytes}");
-        assert!(!part.exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert_eq!(second.epoch, 2);
         assert_eq!(second.path, result_path);
         assert_eq!(session.project.craft_links[LINK].epoch, 2);
@@ -463,7 +540,7 @@ mod tests {
         assert_eq!(reply["error"]["code"], "comp_missing");
         assert!(reply["error"]["data"].as_object().unwrap().is_empty());
         assert!(!result.exists());
-        assert!(!part_path(&result).exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert!(session.project.craft_links.is_empty());
     }
 
@@ -476,7 +553,7 @@ mod tests {
         let err = render_result(&mut session, LINK).unwrap_err();
         assert_eq!(err.code, "comp_missing");
         assert!(!result.exists());
-        assert!(!part_path(&result).exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert_eq!(session.project.craft_links[LINK].epoch, 0);
     }
 
@@ -511,7 +588,7 @@ mod tests {
         assert_eq!(err.code, "footage_missing");
         assert!(err.message.contains("/nonexistent/clip.mov"), "{}", err.message);
         assert!(!result.exists());
-        assert!(!part_path(&result).exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert_eq!(session.project.craft_links[LINK].epoch, 0);
     }
 
@@ -557,7 +634,7 @@ mod tests {
         let err = plan.encode(&|| false).unwrap_err();
         assert_eq!(err.code, "cancelled");
         assert!(!result.exists());
-        assert!(!part_path(&result).exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert_eq!(session.project.craft_links[LINK].epoch, 0, "nothing is stored for a render that did not finish");
         // A finished plan stores its epoch once, and the epoch never goes down.
         let plan = prepare_render(&session, LINK, Some(7)).unwrap();

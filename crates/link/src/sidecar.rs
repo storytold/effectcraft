@@ -181,6 +181,7 @@ mod tests {
         assert!(!dir.join(format!("{LINK}.ecproj.part")).exists(), "the part file stays after the rename");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_sidecar_is_refused_and_its_target_is_untouched() {
         let dir = scratch("symlink");
@@ -193,6 +194,7 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_part_file_is_replaced_not_followed() {
         let dir = scratch("part-link");

@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(drive_close(&live, &mut session, t0), Closing::Ready);
 
         assert!(result.exists(), "the close left FilmCraft without a result movie");
-        assert!(!dir.join(format!("{LINK}.mov.part")).exists());
+        assert!(crate::test_support::result_parts(&dir).is_empty());
         assert!(names(&events).contains(&"link.result".to_string()), "{:?}", names(&events));
         assert_eq!(session.project.craft_links[LINK].epoch, 1);
         live.flush_sidecars(&session);
@@ -693,7 +693,7 @@ mod tests {
         live.abort_close(&session);
 
         assert_eq!(live.close_state(), Closing::Ready, "an aborted close must not keep the app in close mode");
-        assert!(!dir.join(format!("{LINK}.mov.part")).exists(), "a half-written part file was left");
+        assert!(crate::test_support::result_parts(&dir).is_empty(), "a half-written part file was left");
         let sidecar = std::fs::read_to_string(dir.join(format!("{LINK}.ecproj"))).unwrap();
         assert!(effectcraft_project::Project::from_json(&sidecar).is_ok(), "the sidecar was not written on abort");
     }

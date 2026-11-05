@@ -169,3 +169,16 @@ impl ActivationBackend for FakeBackend {
         true
     }
 }
+
+/// The result movie part files left in `dir` (`<link_id>.mov.<n>.part`).
+pub fn result_parts(dir: &std::path::Path) -> Vec<String> {
+    let mut parts: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.contains(".mov.") && name.ends_with(".part"))
+        .collect();
+    parts.sort();
+    parts
+}
