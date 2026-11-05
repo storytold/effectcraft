@@ -2130,3 +2130,52 @@ fn expressions_reading_their_own_layer_re_render_on_a_trim_or_a_layer_above() {
         }
     }
 }
+
+/// An expression inside a precomp reading a layer of the comp nesting it (a hidden Controls
+/// layer, `comp("Main").layer("Controls")`) re-renders where the precomp shows it when that
+/// layer changes. Every frame kept renders as before.
+#[test]
+fn an_edit_read_by_a_precomp_expression_reaches_the_precomp() {
+    use effectcraft_engine::project::LayerId;
+    use effectcraft_engine::render::NoFootage;
+    use serde_json::json;
+    let mut s = effectcraft_host::session();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let new_comp = |s: &mut effectcraft_engine::Session, name: &str| {
+        ItemId(id(s.execute("comp.new", json!({"name": name, "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap(), "comp"))
+    };
+    let inner = new_comp(&mut s, "Inner");
+    let dot = id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000", "width": 6, "height": 6})).unwrap(), "layer");
+    s.execute(
+        "prop.setExpression",
+        json!({"comp": inner.0, "layer": dot, "path": "transform/opacity", "expression": "comp(\"Main\").layer(\"Controls\").transform.rotation"}),
+    )
+    .unwrap();
+    let main = new_comp(&mut s, "Main");
+    s.execute("layer.addItem", json!({"comp": main.0, "item": inner.0})).unwrap();
+    let controls = json!({"comp": main.0, "name": "Controls", "color": "#0000ff", "width": 2, "height": 2});
+    let controls = LayerId(id(s.execute("layer.newSolid", controls).unwrap(), "layer"));
+    // (hidden, and short: the precomp reads it at every frame all the same)
+    let fr = s.project.comp(main).unwrap().frame_rate;
+    let c = Arc::make_mut(&mut s.project).comp_mut(main).unwrap().layer_mut(controls).unwrap();
+    (c.switches.video, c.start_time, c.in_point, c.out_point) = (false, fr.tick_of(0), fr.tick_of(0), fr.tick_of(10));
+    let p0 = s.project.clone();
+    s.execute("prop.set", json!({"comp": main.0, "layer": controls.0, "path": "transform/rotation", "value": 60.0})).unwrap();
+    let p1 = s.project.clone();
+    let host = s.expr.clone().unwrap();
+    let render = |p: &Project, i: i64| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&*host);
+        r.comp_frame(main, fr.tick_of(i))
+    };
+    assert_ne!(render(&p0, 60), render(&p1, 60), "the dot's opacity follows Controls");
+    let f = Frames::default();
+    let k = |content: u64, frame: i64| FrameKey { content, comp: main.0, ..key(0, frame, 0) };
+    let id0 = f.content_of(&p0, 1, main);
+    (0..120).for_each(|i| insert(&f, k(id0, i)));
+    let kept = f.cached_frames(&k(f.content_of(&p1, 2, main), 0));
+    assert!(!kept.contains(&60), "the precomp's frames must go: {kept:?}");
+    for i in kept {
+        assert_eq!(render(&p0, i), render(&p1, i), "kept frame {i} draws other pixels now");
+    }
+}

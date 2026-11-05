@@ -41,6 +41,9 @@ impl Project {
         // Expressions may read what changed elsewhere, even from comps that didn't change.
         let reads_elsewhere = heard.expressions && outside;
         let quiet = self.silent_layers(comp, &new_c, heard);
+        // An edit of this comp is outside the comps it nests: their expressions may read it
+        // (`comp("Main").layer("Controls")`, at their own time).
+        let nested_outside = outside || !Arc::ptr_eq(&new_c, &old_c);
         // Precomps (drawing the same comp before and after) whose comp changed: where they show it.
         let mut touched = Vec::new();
         let mut nested = Vec::new();
@@ -51,7 +54,7 @@ impl Project {
             }
             // (an unchanged `Arc` says nothing of the comps nested in it: walk it anyway)
             let (Some(n), Some(_)) = (self.comp_arc(item), old.comp_arc(item)) else { continue };
-            let inner = self.dirty_spans_at(old, item, heard, outside, depth + 1, seen);
+            let inner = self.dirty_spans_at(old, item, heard, nested_outside, depth + 1, seen);
             if inner.as_ref().is_some_and(Vec::is_empty) {
                 continue;
             }
