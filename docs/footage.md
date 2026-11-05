@@ -125,7 +125,7 @@ file's manifest. Pick them with the eyedropper next to its Selection, then click
 Composition viewer (Shift adds, Alt or Ctrl removes). Its Layer popup lists the Cryptomatte
 layers the footage has (a file with only `CryptoMaterial` shows just that), and the standard
 `CryptoObject`, `CryptoMaterial` and `CryptoAsset` when the layer has no Cryptomatte footage. The
-stored Layer value is unchanged for those three, so older projects load as they were. With
+stored Layer value is unchanged for those three, so older projects load as they were while each kind appears once. With
 several layers of one kind (`A.CryptoObject`, `B.CryptoObject`) the first keeps the standard
 value; the others, like any other layers, are stored as 3 and up in the file's name order (so a value of 3 reads another layer in
 another file). The popup lists them in Effect Controls and the timeline; scripts and

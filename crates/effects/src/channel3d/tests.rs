@@ -448,10 +448,7 @@ fn crypto_layer_popup_lists_the_layers_of_the_footage() {
     assert_eq!(crypto_layer_menu(None, 9).1.as_deref(), Some("CryptoObject"), "a custom value with no footage");
     // Two layers for one slot: the first keeps it, the next gets a custom value.
     assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string()), (3, "B.CryptoObject".to_string())]);
-    assert_eq!(
-        choices(&["A.CryptoObject", "B.CryptoObject", "C.CryptoObject", "Mine"]).iter().map(|c| c.0).collect::<Vec<_>>(),
-        [0, 3, 4, 5]
-    );
+    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject", "C.CryptoObject", "Mine"]).iter().map(|c| c.0).collect::<Vec<_>>(), [0, 3, 4, 5]);
 }
 
 /// A project saved with Layer = CryptoObject / CryptoMaterial / CryptoAsset renders the same layer
