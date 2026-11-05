@@ -152,16 +152,23 @@ pub(crate) fn bind(ui: &mut UiState, script_ui: &ScriptUi) {
     ui.maximized = ui.maximized.map(|panel| remap_panel(panel, &mut map));
 }
 
-/// `ui.dock` shows no panel whose script window isn't open, and shows each one whose window is
-/// open and that it holds a place for. Focus and the maximized panel follow.
+/// `ui.dock` shows no panel whose script window isn't open, and gives a tab to each one whose
+/// window is open and that it holds a place for, behind the tab its group shows. Focus and the
+/// maximized panel follow.
 pub(crate) fn fit(ui: &mut UiState, script_ui: &ScriptUi) {
     let live = |panel: &PanelKind| !matches!(panel, PanelKind::ScriptPanel(id) if script_ui.window(*id).is_none());
     hide_unless(&mut ui.dock, live);
     let waiting: Vec<PanelKind> =
         ui.dock.hidden.iter().map(|(panel, _)| *panel).filter(|panel| matches!(panel, PanelKind::ScriptPanel(_)) && live(panel)).collect();
+    let front: Vec<PanelKind> = ui.dock.panels().into_iter().filter(|panel| ui.dock.is_visible(*panel)).collect();
     for panel in waiting {
         if let Err(error) = ui.dock.set_visible(panel, true, None, crate::dock::permissions) {
             log::warn!("An open ScriptUI panel stays hidden: {error}");
+        }
+    }
+    for panel in front {
+        if !ui.dock.is_visible(panel) {
+            let _ = ui.dock.apply(craft_ui::docking::Action::Activate { panel }, crate::dock::permissions);
         }
     }
     if !live(&ui.focused) {
