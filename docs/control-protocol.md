@@ -127,9 +127,9 @@ over and to receive the result. The methods below only exist for that hand-off.
 | `link.attach` | `{link_id, project, comp}` | Reopens a bound link and returns its format and epoch. It never creates a comp. |
 | `link.renderResult` | `{link_id}` | Encodes the bound comp to the binding's `result_path` as ProRes 4444 and returns when the file is complete. |
 | `link.close` | `{link_id}` | Unbinds the link. The comp and its edits stay. Returns `{comp, comp_name, edited}`. |
-| `app.activate` | `{token?, pid?, open?}` | Brings the window to the front when the platform allows it. The reply says whether it did. |
+| `app.activate` | `{token?, from_pid?, open?}` | Brings the window to the front when the platform allows it. The reply says whether it did. |
 
-Errors carry a `code` (`bad_params`, `not_ready`, `refused`, and others) and a message. The header
+Errors carry a `code` and a message. The codes are `bad_params`, `not_ready`, `comp_missing`, `footage_missing`, `link_unknown`, `busy`, `payload_invalid`, `payload_too_large`, `result_path_refused`, `io_error` and `internal`. The header
 button "Back to FilmCraft" renders the result, sends `link.focus` and `app.activate` to FilmCraft, and
 shows progress on the status line.
 
