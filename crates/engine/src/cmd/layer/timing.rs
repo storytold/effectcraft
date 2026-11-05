@@ -1,3 +1,5 @@
+use effectcraft_project::TrackMatte;
+
 use super::{
     EngineError, ItemKind, Label, Layer, LayerId, LayerSource, Result, Session, Tick, Value, b_p, bad, build, f_p, json, layer_mut, layers_p, merge_p,
     resolve_layer, str_p, unlocked, with,
@@ -306,4 +308,166 @@ pub(super) fn precompose(s: &mut Session, p: &Value) -> Result<Value> {
         s.open_comp(new.0);
     }
     Ok(json!({"comp": new.0.0, "layer": new.1.0}))
+}
+
+/// Why a pre-comp layer can't be expanded in place, one entry per cause. Un-precompose keeps the
+/// picture exactly, so it handles a pre-comp layer that only places the nested composition
+/// (Position/Anchor Point, timing); anything the layer itself adds to the look is listed.
+fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested: &effectcraft_project::Comp) -> Vec<String> {
+    let mut why = vec![];
+    if layer.switches.locked {
+        why.push("the layer is locked".to_string());
+    }
+    if layer.parent.is_some() {
+        why.push("the layer has a parent".to_string());
+    }
+    if layer.track_matte.is_some() {
+        why.push("the layer has a track matte".to_string());
+    }
+    if comp.layers.iter().any(|o| o.id != layer.id && (o.parent == Some(layer.id) || o.track_matte.is_some_and(|m| m.layer == layer.id))) {
+        why.push("another layer uses it as its parent or track matte".to_string());
+    }
+    if layer.is_3d() || layer.switches.collapse || layer.switches.adjustment || layer.preserve_transparency {
+        why.push("the layer is 3D, collapses transformations, is an adjustment layer or preserves transparency".to_string());
+    }
+    if !layer.switches.video || !layer.switches.audio {
+        why.push("the layer's Video or Audio switch is off".to_string());
+    }
+    if comp.layers.iter().any(|o| o.id != layer.id && refers_to(&o.props, layer.id)) {
+        why.push("a property of another layer refers to it".to_string());
+    }
+    if layer.blend_mode != effectcraft_color::BlendMode::default() {
+        why.push("the layer has a blending mode".to_string());
+    }
+    if layer.stretch != 100.0 || layer.props.prop("timeRemap").is_some() {
+        why.push("the layer is time-stretched or time-remapped".to_string());
+    }
+    if layer.effects().is_some_and(|e| !e.children.is_empty()) {
+        why.push("the layer has effects".to_string());
+    }
+    if layer.masks().is_some_and(|m| !m.children.is_empty()) {
+        why.push("the layer has masks".to_string());
+    }
+    if let Some(tr) = layer.transform() {
+        let at = |m: &str, d: [f64; 3]| tr.get(m).map(|p| p.value.as_vec3()).unwrap_or(d);
+        let animated = tr.props().any(|p| !p.keys.is_empty() || p.expr.is_some());
+        let separated = tr.get("positionX").is_some();
+        if animated || separated {
+            why.push("its transform is animated, has an expression or has separated dimensions".to_string());
+        } else {
+            let (sc, rot, ori) = (at("scale", [100.0; 3]), at("rotation", [0.0; 3]), at("orientation", [0.0; 3]));
+            let op = tr.get("opacity").map(|p| p.value.as_f64()).unwrap_or(100.0);
+            if sc[0] != 100.0 || sc[1] != 100.0 || rot[0] != 0.0 || ori != [0.0; 3] || op != 100.0 {
+                why.push("its Scale, Rotation or Opacity is not at its default".to_string());
+            }
+        }
+    }
+    if nested.layers.iter().any(|l| l.is_camera() || l.is_light()) {
+        why.push("the composition has a camera or light".to_string());
+    }
+    // Inside the nested comp these composite against the nested stack only; in the parent they
+    // would act on everything below.
+    if nested.layers.iter().any(|l| l.switches.adjustment || l.switches.collapse || l.is_3d() || l.blend_mode != effectcraft_color::BlendMode::default()) {
+        why.push("the composition has adjustment, 3D or collapsing layers or layers with a blending mode".to_string());
+    }
+    why
+}
+
+/// Whether any property (value or key) in `props` holds a reference to layer `id`.
+fn refers_to(props: &effectcraft_project::PropGroup, id: LayerId) -> bool {
+    let is = |v: &effectcraft_keyframe::Value| matches!(v, effectcraft_keyframe::Value::Layer(Some(l)) if *l == id.0);
+    props.children.iter().any(|c| match c {
+        effectcraft_project::Node::Prop(p) => is(&p.value) || p.keys.iter().any(|k| is(&k.value)),
+        effectcraft_project::Node::Group(g) => refers_to(g, id),
+    })
+}
+
+/// Replace layer references (`Value::Layer`) found in `props` by `map` (old id → new id), the
+/// way copies of a set of layers keep pointing at each other. A reference to a layer outside the
+/// set is cleared: it named a layer of the nested comp that is no longer there.
+fn remap_layer_values(props: &mut effectcraft_project::PropGroup, map: &[(LayerId, LayerId)]) {
+    let fix = |v: &mut effectcraft_keyframe::Value| {
+        if let effectcraft_keyframe::Value::Layer(Some(id)) = v {
+            *v = effectcraft_keyframe::Value::Layer(map.iter().find(|(o, _)| o.0 == *id).map(|(_, n)| n.0));
+        }
+    };
+    for c in &mut props.children {
+        match c {
+            effectcraft_project::Node::Prop(p) => {
+                fix(&mut p.value);
+                for k in &mut p.keys {
+                    fix(&mut k.value);
+                }
+            }
+            effectcraft_project::Node::Group(g) => remap_layer_values(g, map),
+        }
+    }
+}
+
+/// Layer ▸ Un-precompose: expand a selected pre-comp layer back into its composition. The nested
+/// comp's layers become copies in this comp at the pre-comp layer's place, in their order and
+/// with their keyframes, effects, masks, parenting, mattes, markers and audio; their timing is
+/// moved by the pre-comp layer's Start and trimmed to the span it showed, and an Anchor Point
+/// different from Position moves the unparented ones by the difference. The nested comp stays in
+/// the project. The nested comp's frame no longer clips what the layers draw outside it. Anything the pre-comp layer itself adds to the look (see
+/// [`unprecompose_blockers`]) is reported as an error and nothing changes.
+pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "layer.unprecompose";
+    let (cid, ids) = layers_p(s, p)?;
+    let [lid] = ids[..] else { return Err(bad(c, "select exactly one pre-comp layer")) };
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
+    let LayerSource::Comp { item } = layer.source else { return Err(bad(c, format!("“{}” is not a pre-comp layer", layer.name))) };
+    let nested = s.project.comp(item).ok_or_else(|| bad(c, "the layer's composition is missing"))?.clone();
+    let why = unprecompose_blockers(&comp, &layer, &nested);
+    if !why.is_empty() {
+        return Err(bad(c, format!("can't un-precompose “{}”: {}", layer.name, why.join("; "))));
+    }
+    let tr = layer.transform();
+    let at = |m: &str| tr.and_then(|t| t.get(m)).map(|p| p.value.as_vec3()).unwrap_or([0.0; 3]);
+    let (anchor, position) = (at("anchor"), at("position"));
+    let (dx, dy) = (position[0] - anchor[0], position[1] - anchor[1]);
+    let shown = (layer.in_point.max(layer.start_time), layer.out_point.min(layer.start_time + nested.duration));
+    let new = s.edit("Un-precompose", None, |proj, st| {
+        let mut next = proj.next_id;
+        let mut copies: Vec<Layer> = nested.layers.iter().cloned().collect();
+        let mut map = vec![];
+        for l in &mut copies {
+            let old = l.id;
+            crate::cmd::edit::reid(l, &mut next);
+            map.push((old, l.id));
+        }
+        let link = |id: LayerId| map.iter().find(|(o, _)| *o == id).map(|(_, n)| *n);
+        for l in &mut copies {
+            l.parent = l.parent.and_then(link);
+            l.track_matte = l.track_matte.and_then(|m| link(m.layer).map(|layer| TrackMatte { layer, ..m }));
+            remap_layer_values(&mut l.props, &map);
+            l.start_time += layer.start_time;
+            l.in_point = (l.in_point + layer.start_time).clamp(shown.0, shown.1.max(shown.0));
+            l.out_point = (l.out_point + layer.start_time).clamp(l.in_point, shown.1.max(l.in_point));
+            if l.parent.is_none()
+                && let Some(tr) = l.transform_mut()
+            {
+                super::offset_position(tr, dx, dy);
+            }
+        }
+        proj.next_id = next;
+        let target = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let at = target.layers.iter().position(|l| l.id == lid).unwrap_or(0);
+        target.layers.retain(|l| l.id != lid);
+        let mut made = vec![];
+        for (k, mut l) in copies.into_iter().enumerate() {
+            l.name = target.unique_layer_name(&l.name);
+            made.push(l.id);
+            target.layers.insert((at + k).min(target.layers.len()), l);
+        }
+        for m in &nested.markers {
+            let mut m = m.clone();
+            m.time += layer.start_time;
+            target.markers.push(m);
+        }
+        st.selected_layers = made.clone();
+        Ok(made)
+    })?;
+    Ok(json!({"layers": new.iter().map(|l| l.0).collect::<Vec<_>>()}))
 }

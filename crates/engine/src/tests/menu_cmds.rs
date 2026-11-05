@@ -2065,3 +2065,120 @@ fn precompose_unlinks_layers_left_behind_and_numbers_default_names() {
     names.sort();
     assert_eq!(names, ["Pre-comp 1", "Pre-comp 2"]);
 }
+
+fn id_named(s: &Session, name: &str) -> u64 {
+    s.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("no layer {name}")).id.0
+}
+
+/// A comp with solids A (keyed Position, parent of B), B and C.
+fn precomp_scene() -> Session {
+    let mut s = comp();
+    for (name, color, pos) in [("A", "#ff0000", [150.0, 100.0]), ("B", "#00ff00", [350.0, 220.0]), ("C", "#0000ff", [500.0, 100.0])] {
+        let l = solid(&mut s, color);
+        s.execute("layer.rename", json!({"layers": [l], "name": name})).unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": pos})).unwrap();
+    }
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 0, "value": [150, 100]})).unwrap();
+    s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 1, "value": [300, 200]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [b], "parent": a})).unwrap();
+    s
+}
+
+/// Where A, B and C are drawn at a few times.
+fn scene_look(s: &mut Session) -> Vec<[f64; 4]> {
+    let mut out = vec![];
+    for t in [0.0, 0.5, 1.0, 2.0] {
+        s.execute("time.set", json!({"time": t})).unwrap();
+        for n in ["A", "B", "C"] {
+            let id = id_named(s, n);
+            out.push(seen_bounds(s, id));
+        }
+    }
+    out
+}
+
+/// Un-precompose (#2918) gives the picture back: precompose A and B, expand the pre-comp layer
+/// again, and every layer is drawn where it was at every time, parenting and stacking order are
+/// kept, as one undo step.
+#[test]
+fn unprecompose_restores_what_precompose_nested() {
+    let mut s = precomp_scene();
+    let before = scene_look(&mut s);
+    let order: Vec<String> = s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let r = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap();
+    let pre = r["layer"].as_u64().unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 2);
+    let undo = s.history.undo.len();
+    let r = s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    assert_eq!(r["layers"].as_array().unwrap().len(), 2);
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    let after: Vec<String> = s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(after, order, "the layers are back in their order");
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    assert_eq!(layer(&s, b).parent, Some(effectcraft_project::LayerId(a)), "B is still A's child");
+    for (w, g) in before.iter().zip(scene_look(&mut s)) {
+        assert!(w.iter().zip(g).all(|(x, y)| (x - y).abs() < 1e-6), "a layer moved: {w:?} → {g:?}");
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 2, "undo brings the pre-comp layer back");
+}
+
+/// A pre-comp layer that was moved or started later places the nested layers the same way after it
+/// is expanded: its Position (against the Anchor Point) and its Start carry over.
+#[test]
+fn unprecompose_carries_the_precomp_layers_position_and_start() {
+    let mut s = precomp_scene();
+    let before = scene_look(&mut s);
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let pre = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/position", "value": [360, 160]})).unwrap();
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    // The pre-comp's Anchor Point sat at the comp centre (320, 180): everything moved by (+40, −20).
+    let after = scene_look(&mut s);
+    for (i, (w, g)) in before.iter().zip(after).enumerate() {
+        let n = i % 3;
+        let (dx, dy) = if n < 2 { (40.0, -20.0) } else { (0.0, 0.0) };
+        let want = [w[0] + dx, w[1] + dy, w[2] + dx, w[3] + dy];
+        assert!(want.iter().zip(g).all(|(x, y)| (x - y).abs() < 1e-6), "layer {n}: wanted {want:?}, drawn {g:?}");
+    }
+
+    // Starting later: the nested layers start later by as much, and are trimmed to the span shown.
+    let mut s = precomp_scene();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let pre = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.timing", json!({"layers": [pre], "op": "set", "start": 2.0})).unwrap();
+    let start = layer(&s, pre).start_time;
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    let a = layer(&s, id_named(&s, "A"));
+    assert_eq!(a.start_time, start, "the nested layer's time 0 sits at the pre-comp layer's Start");
+    assert!(a.in_point >= start, "and it doesn't show before it");
+}
+
+#[test]
+fn unprecompose_refuses_what_the_precomp_layer_itself_adds() {
+    let mut s = precomp_scene();
+    let (a, b, c) = (id_named(&s, "A"), id_named(&s, "B"), id_named(&s, "C"));
+    let pre = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap()["layer"].as_u64().unwrap();
+    let snapshot = |s: &Session| s.active_comp().unwrap().layers.iter().cloned().collect::<Vec<_>>();
+    let refused = |s: &mut Session, what: &str| {
+        let undo = s.history.undo.len();
+        let before = snapshot(s);
+        let e = s.execute("layer.unprecompose", json!({"layers": [pre]})).expect_err(what).to_string();
+        assert!(e.contains(what), "{what}: {e}");
+        assert_eq!(snapshot(s), before, "{what}: nothing changed");
+        assert_eq!(s.history.undo.len(), undo, "{what}: no undo step");
+    };
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/opacity", "value": 50})).unwrap();
+    refused(&mut s, "Opacity");
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/opacity", "value": 100})).unwrap();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/rotation", "value": 10})).unwrap();
+    refused(&mut s, "Rotation");
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/rotation", "value": 0})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [pre], "parent": c})).unwrap();
+    refused(&mut s, "has a parent");
+    // A layer that is not a pre-comp, and a selection of several, are refused too.
+    assert!(s.execute("layer.unprecompose", json!({"layers": [c]})).is_err());
+    assert!(s.execute("layer.unprecompose", json!({"layers": [pre, c]})).is_err());
+}
