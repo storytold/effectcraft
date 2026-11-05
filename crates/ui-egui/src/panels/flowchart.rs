@@ -414,14 +414,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ("layers", "Layers", o.layers),
         ("solids", "Solids", o.solids),
     ] {
-        let label = tr(label);
-        let w = 18.0 + label.chars().count() as f32 * 6.6;
+        let shown = tr(label);
+        let w = 18.0 + shown.chars().count() as f32 * 6.6;
         let r = Rect::from_min_size(pos2(x - w, bar.min.y + 5.0), vec2(w, 20.0));
         x -= w + 6.0;
-        let resp = widgets::text_button(ui, r, label, on, &t, egui::Id::unique(("flow-opt", key)));
+        let resp = widgets::text_button(ui, r, shown, on, &t, egui::Id::unique(("flow-opt", key)));
         if key != "direction" {
             // Effects, Layers and Solids stay pressed while they are on.
-            a11y::toggle_button(&resp, label, on);
+            a11y::toggle_button(&resp, shown, on);
         }
         if resp.clicked() {
             let v = option_params(key, on, o.vertical);
