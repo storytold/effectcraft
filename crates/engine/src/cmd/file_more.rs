@@ -537,6 +537,9 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
         if super::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
             return Err(bad("file.runScript", "scripts can't run scripts"));
         }
+        if super::scripts::ANSWERS_SCRIPTS.contains(&id.as_str()) {
+            return Err(bad("file.runScript", "scripts can't answer scripts' file dialogs"));
+        }
         let r = if from_file { s.execute_for_script(&id, params) } else { s.execute(&id, params) };
         let r = r.map_err(|e| EngineError::Other(format!("step {} ({id}): {e}", i + 1)))?;
         results.push(r);

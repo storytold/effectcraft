@@ -398,3 +398,126 @@ fn scheduled_import_reveals_its_composition_without_manual_clicks() {
     assert!(!h.state().ui.start_screen, "Home must not hide a composition opened by the scheduled import");
     h.state_mut().session.execute("scriptui.close", json!({"window":"Automatic import"})).unwrap();
 }
+
+#[test]
+fn script_file_dialogs_use_the_app_s_file_picker() {
+    let mut h = harness();
+    let dir = std::env::temp_dir().join(format!("ec-ui-file-dialog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("export.json");
+    std::fs::write(&file, r#"{"name": "Converted"}"#).unwrap();
+    // The app's file picker: what it was asked for, and the file "the user" picks.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let (a, f) = (asked.clone(), file.to_string_lossy().to_string());
+    h.state_mut().hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
+        a.borrow_mut().push(exts.join(","));
+        vec![f.clone()]
+    }));
+    let code = r#"var f = File.openDialog("Pick an export", "Exports:*.json"); f.open("r"); var d = JSON.parse(f.read()); f.close(); app.project.items.addComp(d.name, 64, 64, 1, 1, 24); "ok""#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "pick.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(2);
+    assert_eq!(*asked.borrow(), ["json"]);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    let comps: Vec<String> = h.state().session.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.name.clone()).collect();
+    assert!(comps.contains(&"Converted".to_string()), "the script read the picked file: {comps:?}");
+    // Cancelled: the script gets null.
+    h.state_mut().hooks.pick_files = Some(Box::new(|_: &[&str]| vec![]));
+    let r = h.state_mut().session.execute("script.run", json!({"code": "writeLn(File.openDialog('Pick') === null)", "name": "cancel.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(2);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    assert_eq!(h.state().ui.status, "true");
+}
+
+#[test]
+fn a_working_script_shows_its_progress_and_the_app_lets_it_carry_on() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Importing");
+      var bar = w.add("progressbar", undefined, 0, 3);
+      var label = w.add("statictext", undefined, "Starting");
+      w.show();
+      for (var i = 1; i <= 3; i++) {
+        var t = Date.now();
+        while (Date.now() - t < 60) {}
+        app.project.items.addComp("Step " + i, 64, 64, 1, 1, 24);
+        bar.value = i;
+        label.text = "Step " + i + " of 3";
+        w.update();
+      }
+      w.close();
+      writeLn("finished");
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "work.jsx"})).unwrap();
+    assert_eq!(r["busy"], true, "{r}");
+    // A frame draws the progress, then lets the script work to its next update.
+    h.run_steps(1);
+    let id = h.state().session.script_ui.windows[0].id;
+    assert!(h.state().auto.find(&format!("scriptui.{id}")).is_some(), "the progress window is drawn");
+    for _ in 0..10 {
+        if h.state().session.script_ui.busy.is_none() {
+            break;
+        }
+        h.run_steps(1);
+    }
+    assert!(h.state().session.script_ui.busy.is_none(), "the app let the script finish");
+    let comps = h.state().session.project.items.values().filter(|i| i.as_comp().is_some()).count();
+    assert_eq!(comps, 4, "Main and three steps");
+    assert_eq!(h.state().ui.status, "finished");
+}
+
+/// A host that shows file dialogs without blocking the frame (#511, #1275): a script's dialog
+/// goes through it too, shown once while it is up, and the script gets the answer on a later
+/// frame. A dialog's answer reaches only the request it was shown for.
+#[test]
+fn script_file_dialogs_use_the_non_blocking_dialog() {
+    use effectcraft_ui_egui::{DialogDone, FileDialog};
+    use std::sync::{Arc, Mutex};
+    let mut h = harness();
+    let dir = std::env::temp_dir().join(format!("ec-ui-async-file-dialog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("export.json");
+    std::fs::write(&file, r#"{"name": "Async"}"#).unwrap();
+    let file = file.to_string_lossy().to_string();
+    h.state_mut().hooks.pick_files = Some(Box::new(|_: &[&str]| panic!("the blocking dialog is not used")));
+    let pending: Arc<Mutex<Vec<(FileDialog, DialogDone)>>> = Arc::default();
+    let queue = pending.clone();
+    h.state_mut().hooks.file_dialog_async = Some(Box::new(move |dialog, done| queue.lock().unwrap().push((dialog, done))));
+    let code = r#"var f = File.openDialog("Pick an export", "Exports:*.json"); f.open("r"); var d = JSON.parse(f.read()); f.close(); app.project.items.addComp(d.name, 64, 64, 1, 1, 24); "ok""#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "pick.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(3);
+    let (dialog, done) = {
+        let mut q = pending.lock().unwrap();
+        assert_eq!(q.len(), 1, "shown once while it is up");
+        q.pop().unwrap()
+    };
+    assert_eq!(dialog, FileDialog::Open { exts: vec!["json".into()], many: false });
+    assert!(h.state().session.script_ui.file_dialog.is_some(), "the script waits for the answer");
+    let f = file.clone();
+    std::thread::spawn(move || done(vec![f])).join().unwrap();
+    h.run_steps(2);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    let comps: Vec<String> = h.state().session.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.name.clone()).collect();
+    assert!(comps.contains(&"Async".to_string()), "the script read the picked file: {comps:?}");
+    // An agent answers the first dialog while it is up, and the script asks again: the first
+    // dialog's late answer doesn't reach the second request.
+    let code = "var a = File.openDialog('First'); var b = File.openDialog('Second'); writeLn((a ? a.name : 'null') + ' ' + (b ? b.name : 'null'))";
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "twice.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(2);
+    let (_, late) = pending.lock().unwrap().pop().expect("the first dialog was shown");
+    h.state_mut().session.execute("scriptui.fileDialog", json!({"paths": null})).unwrap();
+    let prompt = |h: &Harness<'_, EffectcraftApp>| h.state().session.script_ui.file_dialog.as_ref().map(|d| d.prompt.clone());
+    assert_eq!(prompt(&h).as_deref(), Some("Second"));
+    late(vec![file.clone()]);
+    h.run_steps(2);
+    assert_eq!(prompt(&h).as_deref(), Some("Second"), "the first dialog's answer went nowhere");
+    let (_, done) = pending.lock().unwrap().pop().expect("the second dialog was shown");
+    done(vec![file]);
+    h.run_steps(2);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    assert_eq!(h.state().ui.status, "null export.json");
+    let _ = std::fs::remove_dir_all(&dir);
+}

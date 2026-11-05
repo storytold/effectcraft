@@ -10,7 +10,7 @@ use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session};
 
 /// Commands that can't run inside a batch (they nest batches), besides the commands that run
-/// scripts ([`super::scripts::RUNS_SCRIPTS`]).
+/// scripts ([`super::scripts::RUNS_SCRIPTS`]) or answer them ([`super::scripts::ANSWERS_SCRIPTS`]).
 const NOT_IN_BATCH: &[&str] = &["engine.batch"];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
@@ -79,7 +79,7 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                 .or_else(|| step.get("id"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| bad("engine.batch", "each step needs `command` (a command id)"))?;
-            if NOT_IN_BATCH.contains(&id) || super::scripts::RUNS_SCRIPTS.contains(&id) {
+            if NOT_IN_BATCH.contains(&id) || super::scripts::RUNS_SCRIPTS.contains(&id) || super::scripts::ANSWERS_SCRIPTS.contains(&id) {
                 return Err(bad("engine.batch", format!("`{id}` can't run inside a batch")));
             }
             let params = substitute(step.get("params").unwrap_or(&json!({})), results)?;

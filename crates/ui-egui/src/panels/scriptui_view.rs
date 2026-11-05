@@ -168,13 +168,13 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         }
         WidgetKind::Checkbox => {
             let mut v = w.checked;
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::Checkbox::new(&mut v, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::Checkbox::new(&mut v, &w.text));
             if tip(r).clicked() {
                 acts.push(Act::Click(win, w.id));
             }
         }
         WidgetKind::RadioButton => {
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::RadioButton::new(w.checked, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::RadioButton::new(w.checked, &w.text));
             if tip(r).clicked() && !w.checked {
                 acts.push(Act::Click(win, w.id));
             }
@@ -486,10 +486,10 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
-/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
-fn snug(r: Rect, text: &str) -> Rect {
-    let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
-    Rect::from_min_size(r.min, vec2(w, r.height()))
+/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds, however wide
+/// their label draws (`ui.put` would centre them there).
+fn put_left(ui: &mut egui::Ui, r: Rect, enabled: bool, widget: impl egui::Widget) -> egui::Response {
+    ui.scope_builder(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| ui.add_enabled(enabled, widget)).inner
 }
 
 /// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
@@ -511,42 +511,143 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
                 ("scriptui.mouse", v)
             }
         };
-        match crate::menus::invoke(app, ctx, cmd, p) {
-            Ok(r) => {
-                if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
-                    let msg = e["message"].as_str().unwrap_or("script error").to_string();
-                    app.toast = Some((msg, app.now()));
-                } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
-                    app.ui.status = o.lines().last().unwrap_or_default().to_string();
-                }
-            }
-            Err(e) => app.ui.status = e,
-        }
+        run(app, ctx, cmd, p);
     }
 }
 
-/// The floating script windows (dialogs, palettes, windows), drawn over the app.
-pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
-    if windows.is_empty() {
+/// Run a `scriptui.*` command: a script error becomes a toast, the last line it printed the
+/// status.
+fn run(app: &mut EffectcraftApp, ctx: &egui::Context, cmd: &str, p: Value) {
+    let r = crate::menus::invoke(app, ctx, cmd, p);
+    report(app, r);
+}
+
+/// A `scriptui.*` command's reply: a script error becomes a toast, the last line it printed the
+/// status.
+fn report(app: &mut EffectcraftApp, r: Result<Value, String>) {
+    match r {
+        Ok(r) => {
+            if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
+                let msg = e["message"].as_str().unwrap_or("script error").to_string();
+                app.toast = Some((msg, app.now()));
+            } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
+                app.ui.status = o.lines().last().unwrap_or_default().to_string();
+            }
+        }
+        Err(e) => app.ui.status = e,
+    }
+}
+
+/// The command that answers a script's file dialog.
+pub(crate) const FILE_DIALOG_COMMAND: &str = "scriptui.fileDialog";
+
+/// Seconds a script's file dialog the app takes for gone ([`crate::FileDialogsUp`]) has left to
+/// answer before the script is told it was cancelled: when the app gets the keyboard back as the
+/// dialog closes, its answer can arrive a little later.
+const LOST_AFTER: f64 = 1.0;
+
+/// A script's file dialog up without blocking the frame ([`crate::Hooks::file_dialog_async`]).
+pub(crate) struct ScriptDialogUp {
+    /// The [`effectcraft_engine::scriptui::FileDialogRequest::id`] it shows.
+    id: u64,
+    /// Since when the app takes it for gone without an answer (a macOS sheet whose window went
+    /// away ends without one).
+    lost_since: Option<f64>,
+}
+
+/// A script waiting in `File.openDialog`, `File.saveDialog` or `Folder.selectDialog`: show the
+/// system dialog and hand the script what was picked (nothing when cancelled, or when this host
+/// has no dialog). A host that shows dialogs without blocking the frame
+/// ([`crate::Hooks::file_dialog_async`]) answers in [`file_dialog_answered`].
+fn answer_file_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let Some(req) = app.session.script_ui.file_dialog.clone() else { return };
+    if let Some(up) = app.script_file_dialog.as_mut().filter(|up| up.id == req.id) {
+        if app.file_dialogs.any() {
+            up.lost_since = None;
+            return;
+        }
+        // Gone without an answer: the script must not wait forever.
+        let now = ctx.input(|i| i.time);
+        if now - *up.lost_since.get_or_insert(now) < LOST_AFTER {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        app.script_file_dialog = None;
+        run(app, ctx, FILE_DIALOG_COMMAND, json!({"paths": null}));
         return;
     }
+    let save_name = || match (req.name.is_empty(), req.extensions.first()) {
+        (false, _) => req.name.clone(),
+        (true, Some(e)) => format!("Untitled.{e}"),
+        (true, None) => "Untitled".into(),
+    };
+    if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
+        let dialog = match req.kind.as_str() {
+            "folder" => crate::FileDialog::Folder,
+            "save" => crate::FileDialog::save(&save_name()),
+            _ => crate::FileDialog::Open { exts: req.extensions.clone(), many: req.multi },
+        };
+        let tx = app.dialog_answers.0.clone();
+        app.script_file_dialog = Some(ScriptDialogUp { id: req.id, lost_since: None });
+        app.file_dialogs.opened();
+        spawn(
+            dialog,
+            Box::new(move |paths| {
+                let _ = tx.send(crate::DialogAnswer { command: FILE_DIALOG_COMMAND.into(), key: "paths", params: json!({"id": req.id}), paths });
+            }),
+        );
+        return;
+    }
+    let exts: Vec<&str> = req.extensions.iter().map(String::as_str).collect();
+    let paths: Vec<String> = match req.kind.as_str() {
+        "folder" => app.hooks.pick_folder.as_ref().and_then(|f| f()).into_iter().collect(),
+        "save" => app.hooks.save_dialog(&save_name()).flatten().into_iter().collect(),
+        _ => app.hooks.pick_files.as_ref().map(|f| f(&exts)).unwrap_or_default(),
+    };
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    run(app, ctx, FILE_DIALOG_COMMAND, json!({"paths": paths}));
+}
+
+/// A script's file dialog shown without blocking answered (`id`: the request it showed): hand
+/// the script what was picked (nothing: cancelled).
+pub(crate) fn file_dialog_answered(app: &mut EffectcraftApp, id: Option<u64>, paths: Vec<String>) {
+    if app.script_file_dialog.as_ref().is_some_and(|up| Some(up.id) == id) {
+        app.script_file_dialog = None;
+    }
+    // Only to the request it showed: an agent may have answered that one meanwhile (or it was
+    // taken for cancelled), and the script may be waiting in another dialog since.
+    if app.session.script_ui.file_dialog.as_ref().map(|d| d.id) != id {
+        return;
+    }
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    let r = app.session.execute(FILE_DIALOG_COMMAND, json!({"paths": paths})).map_err(|e| e.to_string());
+    report(app, r);
+}
+
+/// The floating script windows (dialogs, palettes, windows), drawn over the app. A script in the
+/// middle of its work (`Window.update()`) carries on once they are drawn.
+pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    answer_file_dialog(app, ctx);
+    let busy = app.session.script_ui.busy;
+    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
     let t = app.tokens;
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
-    if blocked {
-        // A modal dialog blocks the app behind it, as in After Effects.
+    if blocked || busy.is_some() {
+        // A modal dialog, or a script at work, blocks the app behind it.
         let r = egui::Area::new(egui::Id::unique("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
-        let _ = r;
+        if busy.is_some() {
+            r.response.on_hover_cursor(egui::CursorIcon::Progress);
+        }
     }
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
+        let order = if w.modal || busy == Some(w.host) { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
@@ -569,6 +670,16 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
     }
     perform(app, ctx, acts);
+    // The script's progress is on screen: let it work until its next update, and draw that.
+    if app.session.script_ui.busy.is_some() {
+        // Not while a file dialog its button opened is up: the script waits in it.
+        if app.session.script_ui.file_dialog.is_none() {
+            run(app, ctx, "scriptui.resume", json!({}));
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 /// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).

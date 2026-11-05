@@ -297,3 +297,33 @@ fn sample_scripts_and_installing() {
     let _ = std::fs::remove_dir_all(&dir);
     let _: Value = json!(null);
 }
+
+#[test]
+fn file_import_converted_project_runs_the_installed_converter() {
+    let mut s = session();
+    // Not installed: say how to install it.
+    let e = s.execute("file.importConvertedProject", json!({})).unwrap_err().to_string();
+    assert!(e.contains("Import Converted Project.jsx"), "{e}");
+    // Installed (in File ▸ Scripts): File ▸ Import runs it.
+    let dir = std::env::temp_dir().join(format!("ec-converter-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Import Converted Project.jsx");
+    let code = r#"app.beginUndoGroup("Import Converted Project");
+        app.project.items.addComp("Converted", 64, 64, 1, 1, 24);
+        app.project.items.addComp("Converted 2", 64, 64, 1, 1, 24);
+        app.endUndoGroup(); "imported""#;
+    std::fs::write(&file, code).unwrap();
+    s.execute("file.installScript", json!({"path": file.to_string_lossy()})).unwrap();
+    let before = comp_names(&s);
+    let r = s.execute("file.importConvertedProject", json!({})).unwrap();
+    assert_eq!(r["result"], "imported", "{r}");
+    assert!(comp_names(&s).contains(&"Converted".to_string()) && comp_names(&s).contains(&"Converted 2".to_string()));
+    // The converter's undo group makes the whole import one step: Edit ▸ Undo removes all of it.
+    assert_eq!(s.history.undo.last().map(|(label, _)| label.as_str()), Some("Import Converted Project"));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(comp_names(&s), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert!(comp_names(&s).contains(&"Converted 2".to_string()));
+    let spec = effectcraft_engine::find_command("file.importConvertedProject").unwrap();
+    assert_eq!(spec.menu, ["File", "Import"]);
+}

@@ -31,8 +31,20 @@ pub const STARTUP_DIR: &str = "Scripts/Startup";
 pub const SHUTDOWN_DIR: &str = "Scripts/Shutdown";
 /// Commands that run script files or script code (a ScriptUI panel runs its script when it
 /// opens). Scripts and batches can't run them, and confined automation sessions refuse them.
-pub const RUNS_SCRIPTS: &[&str] =
-    &["script.run", "file.runScript", "file.runStartupScripts", "file.runShutdownScripts", "window.scriptPanel", "window.restoreScriptPanels"];
+pub const RUNS_SCRIPTS: &[&str] = &[
+    "script.run",
+    "file.runScript",
+    "file.runStartupScripts",
+    "file.runShutdownScripts",
+    "window.scriptPanel",
+    "window.restoreScriptPanels",
+    // File ▸ Import ▸ Converted Project… runs the installed converter's script.
+    "file.importConvertedProject",
+];
+/// Commands that answer a script waiting in a file dialog or in `Window.update()`: the app's or
+/// an agent's answer. Scripts and batches can't run them, as they can't run [`RUNS_SCRIPTS`]:
+/// what a file dialog's answer names, the script may read.
+pub const ANSWERS_SCRIPTS: &[&str] = &["scriptui.fileDialog", "scriptui.resume"];
 /// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
 /// `$.evalFile` allow.
 const MAX_SCRIPT_BYTES: usize = 16 << 20;
@@ -598,6 +610,24 @@ pub fn specs() -> Vec<CommandSpec> {
             "{window?, result? (a dialog's show() returns it; default 2 = Cancel)}",
             always,
             scriptui::close
+        ),
+        cmd!(
+            "scriptui.fileDialog",
+            "Answer Script File Dialog",
+            [],
+            None,
+            "{paths: [path] | null (cancelled)} → answers the script waiting in File.openDialog / File.saveDialog / Folder.selectDialog (the reply that left it waiting has `fileDialog: {kind: open|save|folder, prompt, extensions, multi, name}`); the script may then read what was picked, and write a file picked in a save dialog",
+            always,
+            scriptui::file_dialog
+        ),
+        cmd!(
+            "scriptui.resume",
+            "Resume Script",
+            [],
+            None,
+            "{} → lets the script that showed its progress with Window.update() carry on (the reply that left it waiting has `busy: true`); it runs to its next update (at most every 50 ms) or its end",
+            always,
+            scriptui::resume
         ),
     ]
 }

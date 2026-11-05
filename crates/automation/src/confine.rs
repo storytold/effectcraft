@@ -55,6 +55,10 @@ const REFUSED: &[&str] = &[
     "scriptui.set",
     "scriptui.mouse",
     "scriptui.close",
+    // A script waiting in a file dialog may read what it is answered with (write it, from a save
+    // dialog), and a script at work in `Window.update()` carries on.
+    "scriptui.fileDialog",
+    "scriptui.resume",
     "file.executeFile",
     "file.revealInFinder",
     "layer.openSource",
