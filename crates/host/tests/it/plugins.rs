@@ -69,14 +69,18 @@ fn rust_plugins_apply_by_id() {
 /// Build the example plug-in (skipped when the wasm32 target isn't installed).
 fn build_example() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/posterize-bands");
-    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| root.join("../../../target")).join("plugin-example");
-    let target = if target.is_absolute() { target } else { root.join("../../..").join(target) };
-    let st = std::process::Command::new(env!("CARGO"))
-        .current_dir(&root)
-        .args(["build", "--release", "--target", "wasm32-unknown-unknown", "--target-dir"])
-        .arg(&target)
-        .status()
-        .ok()?;
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assigned = std::env::var_os("CARGO_TARGET_DIR");
+    let target = assigned.as_ref().map(std::path::PathBuf::from).unwrap_or_else(|| workspace.join("target"));
+    let target = if target.is_absolute() { target } else { workspace.join(target) };
+    // The plug-in is part of this test's build. Inherit the assigned target and
+    // compiler guards rather than creating a second target at its root.
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command.current_dir(&workspace).args(["build", "--release", "--target", "wasm32-unknown-unknown", "--manifest-path"]).arg(root.join("Cargo.toml"));
+    if assigned.is_none() {
+        command.env("CARGO_TARGET_DIR", &target);
+    }
+    let st = command.status().ok()?;
     if !st.success() {
         eprintln!("skipping: the example plug-in didn't build (rustup target add wasm32-unknown-unknown)");
         return None;
@@ -214,7 +218,7 @@ fn example_wasm_plugin_loads_and_renders() {
 }
 
 /// A parameterless plug-in module (WebAssembly text): `render` is `ec_render`'s body.
-fn wat_plugin(id: &str, api: i32, render: &str) -> String {
+pub(super) fn wat_plugin(id: &str, api: i32, render: &str) -> String {
     let manifest = format!(r#"{{"api":1,"id":"{id}","name":"Host {id}","category":"Test Plug-ins","version":"1","params":[]}}"#);
     let len = manifest.len();
     let escaped = manifest.replace('"', "\\\"");

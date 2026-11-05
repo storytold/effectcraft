@@ -1402,6 +1402,89 @@ fn layer_source_is_the_layers_source_item() {
     assert_close!(f.num("thisComp.layer('Pre').source.numLayers", 0.0), 1.0);
 }
 
+/// The fixture plus a 20×12 solid "Wide", a 48×36 still "Still" (item "still.png") and a precomp
+/// layer "Pre" of the 64×32 "Other" comp.
+fn implicit_source_fx() -> (Fx, LayerId, LayerId, LayerId) {
+    let mut f = fx();
+    let main = f.p.comp(f.cid).unwrap().clone();
+    let wide = solid(&mut f.p, &main, "Wide", [1.0, 1.0, 0.0], 20, 12);
+    let item = f.p.add_item(
+        "still.png",
+        Label::SeaFoam,
+        None,
+        ItemKind::Footage(effectcraft_project::Footage {
+            path: "still.png".into(),
+            kind: effectcraft_project::FootageKind::Still,
+            width: 48,
+            height: 36,
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let still = build::layer(&mut f.p, &main, "Still", LayerSource::Footage { item }, (48, 36), None);
+    let other = f.p.items.values().find(|i| i.name == "Other").unwrap().id;
+    let pre = build::layer(&mut f.p, &main, "Pre", LayerSource::Comp { item: other }, (64, 32), None);
+    let ids = (wide.id, still.id, pre.id);
+    let c = f.p.comp_mut(f.cid).unwrap();
+    c.layers.push(wide);
+    c.layers.push(still);
+    c.layers.push(pre);
+    (f, ids.0, ids.1, ids.2)
+}
+
+fn num_on(f: &Fx, layer: LayerId, text: &str) -> f64 {
+    match f.ev(layer, ROT, text, 0.0) {
+        Ok(v) => v.as_f64(),
+        Err(e) => panic!("{text}: {e}"),
+    }
+}
+
+#[test]
+fn implicit_source_matches_this_layer_source() {
+    let (f, wide, still, pre) = implicit_source_fx();
+    let same = "['name', 'width', 'height', 'duration', 'frameDuration', 'pixelAspect']\
+                .every(function (k) { return source[k] === thisLayer.source[k]; }) ? 1 : 0";
+    for (layer, name, w, h) in [(wide, "Wide", 20.0, 12.0), (still, "still.png", 48.0, 36.0), (pre, "Other", 64.0, 32.0)] {
+        assert_close!(num_on(&f, layer, "source.width"), w);
+        assert_close!(num_on(&f, layer, "source.height"), h);
+        assert_close!(num_on(&f, layer, &format!("source.name == '{name}' ? 1 : 0")), 1.0);
+        assert_close!(num_on(&f, layer, same), 1.0);
+    }
+    assert_close!(num_on(&f, pre, "source.numLayers"), 1.0);
+}
+
+#[test]
+fn implicit_source_is_null_without_a_source_item() {
+    let f = fx();
+    for layer in [f.title, f.shape] {
+        assert_close!(num_on(&f, layer, "source === null && thisLayer.source === null ? 1 : 0"), 1.0);
+        let bare = f.ev(layer, ROT, "source.width", 0.0).unwrap_err();
+        let qualified = f.ev(layer, ROT, "thisLayer.source.width", 0.0).unwrap_err();
+        assert!(qualified.contains("TypeError"), "{qualified}");
+        assert_eq!(bare, qualified);
+    }
+}
+
+#[test]
+fn implicit_source_can_be_shadowed_locally() {
+    let (f, wide, ..) = implicit_source_fx();
+    assert_close!(num_on(&f, wide, "var source = 7;\nsource * 2"), 14.0);
+    assert_close!(num_on(&f, wide, "source.width"), 20.0);
+    assert_close!(num_on(&f, wide, "var source = thisComp.layer('B').source;\nsource.width"), 40.0);
+    assert_close!(num_on(&f, wide, "source.height"), 12.0);
+}
+
+#[test]
+fn implicit_source_follows_the_current_layer() {
+    let (f, wide, still, pre) = implicit_source_fx();
+    let e = "source === null ? -1 : source.width * 1000 + source.height";
+    for _ in 0..2 {
+        for (layer, want) in [(wide, 20012.0), (still, 48036.0), (pre, 64032.0), (f.title, -1.0), (f.b, 40040.0)] {
+            assert_close!(num_on(&f, layer, e), want);
+        }
+    }
+}
+
 #[test]
 fn layer_control_property_stands_for_its_layer() {
     let mut f = fx();

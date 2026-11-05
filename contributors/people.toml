@@ -104,6 +104,10 @@ sync_github_name = false
 [people.ki2pixel]
 display_name = "ki2pixel"
 
+[people.iseemhlyfta]
+display_name = "iseemhlyfta"
+sync_github_name = false
+
 [people.becauseno7]
 real_name = "Shuvra Basak"
 display_name = "Shuvra Basak"
@@ -114,3 +118,16 @@ real_name = "Ashok Ram"
 
 [people.dylanmtaylor]
 sync_github_name = true
+
+[people.adikshan11]
+real_name = "Adithya Shankaran"
+sync_github_name = true
+
+[people.marshiyar]
+real_name = "Arshiya Rahgozar"
+display_name = "Arshiya"
+sync_github_name = false
+
+[people.JonRC]
+real_name = "Jonathan Cardoso"
+display_name = "Jonathan Cardoso"
