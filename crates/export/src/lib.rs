@@ -316,25 +316,25 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
         OutputFormat::ExrSequence => {
             // Linear light, premultiplied (the EXR convention); RGB keeps alpha = 1 over the background.
             // Colour is floored at 0 but not capped at 1: a 32 bpc frame's over-range values survive (#339).
-            let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
+            // decoded with the output space's curve, in the output space's primaries.
+            let dec = effectcraft_render::color::Pipe::of(&cx.project.settings).output_linear();
+            let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
             let mut data = Vec::with_capacity((w * h * 4) as usize);
             for y in 0..h {
                 for x in 0..w {
                     let p = if x < img.width && y < img.height { img.data[img.idx(x, y)] } else { [0.0; 4] };
                     let (c, a) = match channels {
-                        Channels::Alpha => {
-                            let a = p[3].clamp(0.0, 1.0);
-                            ([lin(a); 3], 1.0)
-                        }
+                        // Alpha is coverage, not encoded colour: written as it is.
+                        Channels::Alpha => ([p[3].clamp(0.0, 1.0); 3], 1.0),
                         Channels::Rgba => {
                             let a = p[3].clamp(0.0, 1.0);
-                            let s = |c: f32| if a > 0.0 { lin((c / a).max(0.0)) * a } else { 0.0 };
-                            ([s(p[0]), s(p[1]), s(p[2])], a)
+                            let c = if a > 0.0 { lin3([p[0] / a, p[1] / a, p[2] / a]).map(|v| v * a) } else { [0.0; 3] };
+                            (c, a)
                         }
                         Channels::Rgb => {
                             let k = 1.0 - p[3].clamp(0.0, 1.0);
-                            let c = |i: usize| lin((p[i] + comp.background[i] * k).max(0.0));
-                            ([c(0), c(1), c(2)], 1.0)
+                            (lin3([0, 1, 2].map(|i| p[i] + comp.background[i] * k)), 1.0)
                         }
                     };
                     data.extend_from_slice(&[c[0], c[1], c[2], a]);

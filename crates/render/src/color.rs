@@ -117,6 +117,20 @@ impl Pipe {
         Conversion::new(ws, self.linear, self.out, false)
     }
 
+    /// The pipe without the HDR step (Clip), as [`crate::RenderOpts::skip_hdr_step`] renders
+    /// with: [`Pipe::output`] converts to the output space as it is.
+    pub fn without_hdr_step(self) -> Pipe {
+        Pipe { hdr: HdrMode::Clip, ..self }
+    }
+
+    /// The top-level frame of a [`Pipe::without_hdr_step`] render (output-encoded, straight colour)
+    /// → linear light in the output space's primaries: the output space's curve, or the Working
+    /// Gamma's when unmanaged (sRGB at 2.2, a pure 2.4 power curve at 2.4). The identity for a
+    /// linear output (ACES).
+    pub fn output_linear(&self) -> Conversion {
+        Conversion::linearize(if self.space.is_some() { self.out } else { self.curve() })
+    }
+
     /// Output with HDR compand / tone mapping (standard-dynamic-range outputs only): working
     /// space → linear output primaries, the HDR curve, then the output's encoding.
     pub fn output_hdr(&self) -> Option<(Option<Conversion>, HdrMode, Conversion)> {
