@@ -118,16 +118,21 @@ pub(crate) fn plan_light(layer: &Layer, kind: LightKind, what: &str, col: &mut C
     }
     let defaults = [("radius", 500.0), ("falloffDistance", 500.0), ("shadowDarkness", 100.0), ("shadowDiffusion", 0.0)];
     for (id, d) in defaults {
-        if scalar(layer, &format!("lightOptions/{id}"), what, col).is_some_and(|v| (v - d).abs() > 1e-9) || has_keys_or_expr(layer, &format!("lightOptions/{id}")) {
+        if scalar(layer, &format!("lightOptions/{id}"), what, col).is_some_and(|v| (v - d).abs() > 1e-9)
+            || has_keys_or_expr(layer, &format!("lightOptions/{id}"))
+        {
             col.lose(LossCategory::Lights, format!("{what}: the light's {id} is not written (not sampled)"));
         }
     }
     // Options that are not written at all: a value other than the default, or keys or an expression
     // (which change the render even when the static value is the default).
-    if matches!(layer.props.prop("lightOptions/falloff").map(|p| &p.value), Some(Value::Enum(e)) if *e != 0) || has_keys_or_expr(layer, "lightOptions/falloff") {
+    if matches!(layer.props.prop("lightOptions/falloff").map(|p| &p.value), Some(Value::Enum(e)) if *e != 0) || has_keys_or_expr(layer, "lightOptions/falloff")
+    {
         col.lose(LossCategory::Lights, format!("{what}: the light's falloff type is not written (not sampled)"));
     }
-    if matches!(layer.props.prop("lightOptions/castsShadows").map(|p| &p.value), Some(Value::Bool(true))) || has_keys_or_expr(layer, "lightOptions/castsShadows") {
+    if matches!(layer.props.prop("lightOptions/castsShadows").map(|p| &p.value), Some(Value::Bool(true)))
+        || has_keys_or_expr(layer, "lightOptions/castsShadows")
+    {
         col.lose(LossCategory::Lights, format!("{what}: Casts Shadows is not written (not sampled)"));
     }
     let color = match layer.props.prop("lightOptions/color").map(|p| &p.value) {

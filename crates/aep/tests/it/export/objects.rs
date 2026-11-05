@@ -844,7 +844,16 @@ fn a_camera_transform_group_ends_with_its_group_end() {
 #[test]
 fn animated_camera_and_light_options_that_are_not_written_are_reported() {
     use effectcraft_project::{Expression, LightKind};
-    let camera_ids = ["irisShape", "irisRotation", "irisRoundness", "irisAspectRatio", "irisDiffractionFringe", "highlightGain", "highlightThreshold", "highlightSaturation"];
+    let camera_ids = [
+        "irisShape",
+        "irisRotation",
+        "irisRoundness",
+        "irisAspectRatio",
+        "irisDiffractionFringe",
+        "highlightGain",
+        "highlightThreshold",
+        "highlightSaturation",
+    ];
     let light_ids = ["radius", "falloffDistance", "shadowDarkness", "shadowDiffusion", "falloff", "castsShadows"];
     let make = |source: LayerSource, path: Option<String>, keyed: bool| {
         let mut p = Project::default();

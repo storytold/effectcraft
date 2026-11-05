@@ -99,7 +99,10 @@ fn plan_record(spec: &StyleParam, full: String, prop: &Property, cp: &CompPlan, 
     if expr.is_some() {
         col.exported.expressions = col.exported.expressions.saturating_add(1);
         if popup_expression_differs(spec.conv) {
-            col.lose(LossCategory::LayerStyles, format!("{here}: an expression on a popup whose items are in another order in After Effects means something else there (written unchanged)"));
+            col.lose(
+                LossCategory::LayerStyles,
+                format!("{here}: an expression on a popup whose items are in another order in After Effects means something else there (written unchanged)"),
+            );
         }
     }
     if !prop.keys.is_empty() {

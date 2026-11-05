@@ -582,7 +582,9 @@ fn a_text_animator_colour_alpha_is_reported_for_the_values_that_are_written() {
                         prop.keys = vec![key(0.0, Value::Color(k0)), key(1.0, Value::Color(k1))];
                     }
                 }
-                with_layer(&mut p, c, 0, |l| l.props.sub_mut("text").unwrap().sub_mut("animators").unwrap().children = vec![effectcraft_project::Node::Group(a)]);
+                with_layer(&mut p, c, 0, |l| {
+                    l.props.sub_mut("text").unwrap().sub_mut("animators").unwrap().children = vec![effectcraft_project::Node::Group(a)]
+                });
             }
             p.next_id = next;
             p

@@ -499,7 +499,12 @@ fn plug_in_effects_read_other_frames() {
 fn an_item_inside_a_non_folder_moves_to_the_top_level_when_a_project_is_opened() {
     let mut p = Project::default();
     let folder = p.add_item("Folder", Default::default(), None, ItemKind::Folder);
-    let comp = p.add_item("Comp", Default::default(), None, ItemKind::Comp(std::sync::Arc::new(Comp::new(64, 36, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0)))));
+    let comp = p.add_item(
+        "Comp",
+        Default::default(),
+        None,
+        ItemKind::Comp(std::sync::Arc::new(Comp::new(64, 36, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0)))),
+    );
     let inside_folder = p.add_item("Fine", Default::default(), Some(folder), ItemKind::Folder);
     let inside_comp = p.add_item("Inside comp", Default::default(), None, ItemKind::Folder);
     let orphan = p.add_item("Orphan", Default::default(), None, ItemKind::Folder);
