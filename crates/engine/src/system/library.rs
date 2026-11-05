@@ -16,19 +16,19 @@
 //!   at the next start, and the list says so (`restartNeeded`).
 //! * Downloads use the system's `curl`, as trained models do ([`crate::models`]), so no
 //!   networking code is linked into EffectCraft. Only `https://` URLs on GitHub's hosts are
-//!   fetched; a local catalog (`file://`, for plug-in authors testing their entry) may also name
+//!   fetched, and a download whose redirects end anywhere else is refused; a local catalog (`file://`, for plug-in authors testing their entry) may also name
 //!   local files.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_segment::sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, always, b_p, bad, str_p};
-use crate::{PluginLoader, Result, Session, cmd, query};
+use crate::{PluginLoader, PluginPreviewer, Result, Session, cmd, query};
 
 /// The community catalog.
 pub const CATALOG_URL: &str = "https://raw.githubusercontent.com/storytold/effectcraft-plugins/main/index.json";
@@ -171,15 +171,13 @@ pub struct Library {
 impl Library {
     /// A copy of the current status.
     pub fn status(&self) -> Status {
-        self.status.lock().map(|s| s.clone()).unwrap_or_default()
+        self.status.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
-/// Change the shared status (a poisoned lock is skipped, not a panic).
+/// Change the shared status (a poisoned lock is still used, not a panic).
 fn set(status: &Arc<Mutex<Status>>, f: impl FnOnce(&mut Status)) {
-    if let Ok(mut s) = status.lock() {
-        f(&mut s);
-    }
+    f(&mut status.lock().unwrap_or_else(PoisonError::into_inner));
 }
 
 impl Session {
@@ -225,9 +223,14 @@ fn newer(a: &str, b: &str) -> bool {
     }
 }
 
-/// A package id that is also a safe folder name: letters, digits, `.`, `-`, `_`; no leading dot.
+/// A package id that is also a safe folder name: letters, digits, `.`, `-`, `_`; no leading or
+/// trailing dot (Windows drops a trailing one, so `a.` would share `a`'s folder).
 pub fn valid_id(id: &str) -> bool {
-    (1..=100).contains(&id.len()) && !id.starts_with('.') && !id.contains("..") && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    (1..=100).contains(&id.len())
+        && !id.starts_with('.')
+        && !id.ends_with('.')
+        && !id.contains("..")
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
 /// 64 hex digits.
@@ -270,7 +273,8 @@ pub fn parse_catalog(bytes: &[u8]) -> std::result::Result<(Catalog, Vec<String>)
             warnings.push(format!("left out a package with a bad id or no name (`{}`)", p.id));
             continue;
         }
-        if !seen.insert(p.id.clone()) {
+        // Windows and macOS folders ignore case: `Org.X` and `org.x` would share one.
+        if !seen.insert(p.id.to_ascii_lowercase()) {
             warnings.push(format!("left out a second package `{}`", p.id));
             continue;
         }
@@ -385,6 +389,10 @@ fn fetch(src: &Source, max: u64, tmp_dir: &Path) -> std::result::Result<Vec<u8>,
                     "=https",
                     "--proto-redir",
                     "=https",
+                    "--max-redirs",
+                    "5",
+                    "-w",
+                    "%{url_effective}",
                     "--retry",
                     "2",
                     "--connect-timeout",
@@ -402,7 +410,12 @@ fn fetch(src: &Source, max: u64, tmp_dir: &Path) -> std::result::Result<Vec<u8>,
             let bytes = if too_big {
                 Err(format!("the download is larger than {} MB", max >> 20))
             } else if out.status.success() {
-                std::fs::read(&tmp).map_err(|e| format!("cannot read the download: {e}"))
+                // Redirects are followed, so check where the download ended up.
+                let end = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                match source(&end, None) {
+                    Ok(Source::Https(_)) => std::fs::read(&tmp).map_err(|e| format!("cannot read the download: {e}")),
+                    _ => Err(format!("`{url}` redirected to `{end}`, which isn't on GitHub")),
+                }
             } else {
                 Err(format!("download failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
             };
@@ -493,6 +506,7 @@ fn install_job(
     pkg: &Package,
     rel: &Release,
     loader: PluginLoader,
+    previewer: Option<PluginPreviewer>,
     status: &Arc<Mutex<Status>>,
 ) -> std::result::Result<String, String> {
     let bytes = download(dir, catalog_url, pkg, rel)?;
@@ -500,8 +514,15 @@ fn install_job(
     let path = module_path(dir, &file).ok_or_else(|| format!("bad package id `{}`", pkg.id))?;
     let previous = status.lock().ok().and_then(|s| s.loaded.get(&pkg.id).cloned());
     let restart = match previous {
-        // Its effects are registered already: the new version loads at the next start.
-        Some(v) => v != rel.version,
+        // Its effects are registered already: the new version loads at the next start. It is
+        // still checked now (without registering it), so the version it replaces isn't deleted
+        // for one that won't load.
+        Some(v) => {
+            if let Some(check) = previewer {
+                check(&bytes, 1, 1, &[[0.0; 4]], &[]).map_err(|e| format!("{} {} didn't load: {e}", pkg.name, rel.version))?;
+            }
+            v != rel.version
+        }
         // Loaded before anything is written, so a module that fails leaves the disk as it was.
         None => {
             loader(&bytes, &path.to_string_lossy()).map_err(|e| format!("{} {} didn't load: {e}", pkg.name, rel.version))?;
@@ -545,7 +566,8 @@ fn spawn(status: &Arc<Mutex<Status>>, what: String, wait: bool, job: impl FnOnce
     });
     let st = status.clone();
     let run = move || {
-        let r = job(&st);
+        // A panic in a job (a hostile module, say) must not leave the library busy for good.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&st))).unwrap_or_else(|_| Err("the job stopped unexpectedly".into()));
         set(&st, |s| {
             s.busy = None;
             match r {
@@ -734,12 +756,13 @@ fn install(s: &mut Session, p: &Value) -> Result<Value> {
     desktop_only(c)?;
     idle(s, c)?;
     let loader = s.plugin_loader.ok_or_else(|| bad(c, "WebAssembly effect plug-ins are not available in this build"))?;
+    let previewer = s.plugin_previewer;
     let (url, pkg, rel) = pick(s, c, p)?;
     let dir = s.library_dir().ok_or_else(|| bad(c, "no settings folder to install into"))?;
     let wait = b_p(p, "wait").unwrap_or(false);
     let what = format!("Installing {} {}…", pkg.name, rel.version);
     let (pid, version) = (pkg.id.clone(), rel.version.clone());
-    spawn(&s.library.status, what, wait, move |st| install_job(&dir, &url, &pkg, &rel, loader, st));
+    spawn(&s.library.status, what, wait, move |st| install_job(&dir, &url, &pkg, &rel, loader, previewer, st));
     if wait {
         waited(s, c)?;
         let st = s.library.status();
@@ -898,13 +921,31 @@ fn update(s: &mut Session, p: &Value) -> Result<Value> {
     desktop_only(c)?;
     idle(s, c)?;
     let loader = s.plugin_loader.ok_or_else(|| bad(c, "WebAssembly effect plug-ins are not available in this build"))?;
-    let jobs = due.iter().map(|id| pick(s, c, &json!({"id": id}))).collect::<Result<Vec<_>>>()?;
+    let previewer = s.plugin_previewer;
+    // A package that can't be updated doesn't hold back the others.
+    let (mut jobs, mut failed) = (vec![], vec![]);
+    for id in &due {
+        match pick(s, c, &json!({"id": id})) {
+            Ok(job) => jobs.push(job),
+            Err(e) => failed.push(e.to_string()),
+        }
+    }
     let dir = s.library_dir().ok_or_else(|| bad(c, "no settings folder to install into"))?;
     let wait = b_p(p, "wait").unwrap_or(false);
     // One job for all of them: the worker runs one job at a time.
-    spawn(&s.library.status, format!("Updating {} plug-in(s)…", jobs.len()), wait, move |st| {
-        let done = jobs.iter().map(|(url, pkg, rel)| install_job(&dir, url, pkg, rel, loader, st)).collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(done.join("; "))
+    spawn(&s.library.status, format!("Updating {} plug-in(s)…", due.len()), wait, move |st| {
+        let mut done = vec![];
+        for (url, pkg, rel) in &jobs {
+            match install_job(&dir, url, pkg, rel, loader, previewer, st) {
+                Ok(msg) => done.push(msg),
+                Err(e) => failed.push(e),
+            }
+        }
+        match (done.is_empty(), failed.is_empty()) {
+            (_, true) => Ok(done.join("; ")),
+            (true, false) => Err(failed.join("; ")),
+            (false, false) => Err(format!("{}; not updated: {}", done.join("; "), failed.join("; "))),
+        }
     });
     if wait {
         waited(s, c)?;
@@ -1053,9 +1094,19 @@ mod tests {
         for ok in ["org.example.glow", "a", "glow-pack_2"] {
             assert!(valid_id(ok), "{ok}");
         }
-        for no in ["", ".hidden", "a/../b", "a\\b", "..", "a..b", "c:", "x y", &"a".repeat(101)] {
+        for no in ["", ".hidden", "a.", "a/../b", "a\\b", "..", "a..b", "c:", "x y", &"a".repeat(101)] {
             assert!(!valid_id(no), "{no}");
         }
+    }
+
+    #[test]
+    fn ids_that_differ_only_in_case_are_one_package() {
+        let pkg = |id: &str| json!({"id": id, "name": "Glow", "versions": []});
+        let bytes = serde_json::to_vec(&json!({"schema": 1, "packages": [pkg("Org.X.Glow"), pkg("org.x.glow")]})).unwrap();
+        let (cat, warnings) = parse_catalog(&bytes).unwrap();
+        assert_eq!(cat.packages.len(), 1);
+        assert_eq!(cat.packages[0].id, "Org.X.Glow");
+        assert!(warnings.iter().any(|w| w.contains("second package `org.x.glow`")), "{warnings:?}");
     }
 
     #[test]

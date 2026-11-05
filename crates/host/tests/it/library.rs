@@ -281,6 +281,36 @@ fn a_reinstall_that_fails_to_load_keeps_the_installed_copy() {
 }
 
 #[test]
+fn an_update_that_would_not_load_keeps_the_loaded_version() {
+    let dir = tmp("badupdate");
+    let fx = "org.test.library.badupdate.fx";
+    let v1 = serve(&dir, "u1.wasm", fx);
+    // The right checksum for a file that isn't a plug-in.
+    let junk = b"not a WebAssembly module".to_vec();
+    let path = dir.join("served").join("u2.wasm");
+    std::fs::write(&path, &junk).unwrap();
+    let v2 = (file_url(&path), sha256::hex(&junk));
+    let catalog = write_catalog(&dir, json!([{"id": "org.test.badupdate", "name": "Bad Update", "versions": [release("1.0.0", &v1, fx)]}]));
+    let mut s = session(&dir);
+    s.execute("library.refresh", json!({"catalog": catalog, "wait": true})).unwrap();
+    s.execute("library.install", json!({"id": "org.test.badupdate", "wait": true})).unwrap();
+    let catalog = write_catalog(
+        &dir,
+        json!([{"id": "org.test.badupdate", "name": "Bad Update", "versions": [release("1.0.0", &v1, fx), release("2.0.0", &v2, fx)]}]),
+    );
+    s.execute("library.refresh", json!({"catalog": catalog, "wait": true})).unwrap();
+    // Version 1 is loaded in this session, so version 2 would only load at the next start.
+    let e = s.execute("library.update", json!({"id": "org.test.badupdate", "wait": true})).unwrap_err().to_string();
+    assert!(e.contains("didn't load"), "{e}");
+    let lib = dir.join("Plug-ins").join("Library");
+    assert!(lib.join("org.test.badupdate").join("1.0.0").join("org.test.badupdate.wasm").is_file());
+    assert!(!lib.join("org.test.badupdate").join("2.0.0").exists());
+    let installed: Value = serde_json::from_slice(&std::fs::read(lib.join("installed.json")).unwrap()).unwrap();
+    assert_eq!(installed["packages"]["org.test.badupdate"]["version"], "1.0.0");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn update_all_updates_every_package_and_min_app_is_enforced() {
     let dir = tmp("updateall");
     let (fa, fb) = ("org.test.library.updateall.a", "org.test.library.updateall.b");
