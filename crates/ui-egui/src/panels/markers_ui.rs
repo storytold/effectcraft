@@ -435,7 +435,7 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     // The bin senses drags only, so a drag starts as soon as it is pressed: sensing clicks too
     // would hold that back until the pointer moved, and a drag out released within that frame
     // would add nothing. The double-click is read from the pointer instead.
-    if bin_double_clicked(ui, resp.id, bin, resp.contains_pointer())
+    if bin_double_clicked(ui, resp.id, bin, resp.contains_pointer() || resp.dragged() || resp.drag_stopped())
         && let Err(e) = app.session.execute("comp.addMarker", json!({}))
     {
         app.ui.status = e.to_string();
@@ -464,36 +464,61 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     }
 }
 
-/// Whether the marker bin `bin` (widget `id`, under the pointer when `here`) was double-clicked
-/// this frame: egui's double-click, with its first click on the bin too. egui takes any click
-/// within a few points of the last for the first one, so a click on the ruler right beside the
-/// bin and then one on the bin would count. The bin remembers when it was last clicked; two
-/// clicks on it within one frame need no memory.
-fn bin_double_clicked(ui: &egui::Ui, id: egui::Id, bin: Rect, here: bool) -> bool {
+/// What the marker bin keeps of the primary button between frames: the press being held (when,
+/// where, and whether it has moved too far since to be a click), and the last click (when,
+/// where, and whether it was on the bin).
+#[derive(Clone, Copy, Default)]
+struct BinClicks {
+    press: Option<(f64, Pos2, bool)>,
+    last: Option<(f64, Pos2, bool)>,
+}
+
+/// Whether the marker bin `bin` (widget `id`; `over` when it, not something above it, has the
+/// pointer) was double-clicked this frame: two clicks in a row, both on the bin. egui's own
+/// double-click takes any click within a few points of the last for the first one, so a click on
+/// the ruler right beside the bin and then one on the bin would count. The bin pairs the clicks
+/// itself, in the order they came, by egui's rules: a click is released within `max_click_dist`
+/// of where it was pressed and within `max_click_duration`, and the second of a double-click comes
+/// within `max_double_click_delay` and `max_click_dist` of the first. A third click starts over.
+fn bin_double_clicked(ui: &egui::Ui, id: egui::Id, bin: Rect, over: bool) -> bool {
     use egui::{Event, PointerButton};
-    if !here {
-        return false;
-    }
-    let (time, clicked, double, releases) = ui.input(|i| {
-        let releases = i
-            .events
-            .iter()
-            .filter(|e| matches!(e, Event::PointerButton { button: PointerButton::Primary, pressed: false, pos, .. } if bin.contains(*pos)))
-            .count();
-        (i.time, i.pointer.button_clicked(PointerButton::Primary), i.pointer.button_double_clicked(PointerButton::Primary), releases)
+    let (dist, duration, delay) = ui.ctx().options(|o| {
+        let i = &o.input_options;
+        (i.max_click_dist, i.max_click_duration, i.max_double_click_delay)
     });
-    if !clicked {
-        return false;
-    }
-    let delay = ui.ctx().options(|o| o.input_options.max_double_click_delay);
-    let id = id.with("last click");
-    let last = ui.data_mut(|d| {
-        let last = d.get_temp::<f64>(id);
-        d.insert_temp(id, time);
-        last
+    let id = id.with("clicks");
+    let mut s = ui.data(|d| d.get_temp::<BinClicks>(id)).unwrap_or_default();
+    let double = ui.input(|i| {
+        let mut double = false;
+        for e in &i.events {
+            match *e {
+                Event::PointerMoved(p) => {
+                    if let Some((_, at, moved)) = &mut s.press {
+                        *moved |= at.distance(p) > dist;
+                    }
+                }
+                Event::PointerButton { button: PointerButton::Primary, pressed: true, pos, .. } => s.press = Some((i.time, pos, false)),
+                Event::PointerButton { button: PointerButton::Primary, pressed: false, pos, .. } => {
+                    let Some((pressed_at, at, moved)) = s.press.take() else { continue };
+                    if moved || at.distance(pos) > dist || i.time - pressed_at >= duration {
+                        continue;
+                    }
+                    let on = bin.contains(pos);
+                    let pair = s.last.is_some_and(|(t, p, was_on)| was_on && on && i.time - t < delay && p.distance(pos) < dist);
+                    if pair {
+                        double = true;
+                        s.last = None;
+                    } else {
+                        s.last = Some((i.time, pos, on));
+                    }
+                }
+                _ => {}
+            }
+        }
+        double
     });
-    let last = last.unwrap_or(f64::NEG_INFINITY);
-    double && (releases >= 2 || time - last < delay)
+    ui.data_mut(|d| d.insert_temp(id, s));
+    double && over
 }
 
 /// Layer markers on a layer's row `r`; on a precomp layer, its comp's markers too (read-only,

@@ -443,6 +443,16 @@ fn double_clicking_the_marker_bin_adds_a_comp_marker_at_the_current_time() {
     h.step();
     h.run_steps(3);
     assert_eq!(markers(&h), vec![21.5, 22.0], "one click beside the bin and one on it");
+    // On the bin, beside it, on it again: the two in a row are never both on the bin.
+    h.run_steps(3);
+    for pos in [on, beside, on] {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        }
+    }
+    h.step();
+    h.run_steps(3);
+    assert_eq!(markers(&h), vec![21.5, 22.0], "on, beside, on");
     // Dragged out 3 s into the visible span (from 10 s at 200 px/s): a marker at 13 s too.
     drag(&mut h, bin.center(), pos2(ruler.min.x + 6.0 + 600.0, ruler.center().y));
     assert_eq!(markers(&h), vec![13.0, 21.5, 22.0]);
