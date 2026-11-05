@@ -468,6 +468,7 @@ fn a_hidden_panel_of_an_open_script_returns_without_the_focus() {
     let (store, _, _) = saved_layout_store();
     store.remove(&script_file("Beta.jsx")).unwrap();
     let mut h = harness(EffectcraftApp::new(restored(&store)));
+    h.state_mut().apply_dock(Action::Activate { panel: PanelKind::Timeline }).unwrap();
     h.state_mut().ui.focused = PanelKind::Project;
     eframe::App::on_exit(h.state_mut());
     drop(h);
@@ -477,6 +478,7 @@ fn a_hidden_panel_of_an_open_script_returns_without_the_focus() {
     let beta = panel_of(&h.state().session, "Beta.jsx");
     assert!(h.state().ui.dock.group_of(beta).contains(&PanelKind::Timeline), "Beta is with {:?}", h.state().ui.dock.group_of(beta));
     assert_eq!(h.state().ui.focused, PanelKind::Project);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Timeline) && !h.state().ui.dock.is_visible(beta), "the saved front tab stays in front");
 }
 
 #[test]
@@ -501,22 +503,32 @@ fn showing_a_panel_whose_script_is_closed_opens_no_tab() {
 
 #[test]
 fn a_panel_closed_in_a_workspace_shows_there_while_its_script_is_open() {
-    let store = store_with(&["Alpha.jsx"]);
-    let mut h = harness(EffectcraftApp::new(restored(&store)));
-    let closed = panel_of(&h.state().session, "Alpha.jsx");
-    tab_beside(&mut h, closed, PanelKind::Project);
-    h.state_mut().close_panel(closed);
-    h.run_steps(2);
-    effectcraft_ui_egui::menus::invoke(h.state_mut(), &egui::Context::default(), "window.saveWorkspaceAs", json!({"name": "W"})).unwrap();
-    assert!(h.state().ui.saved_workspaces["W"].hidden.iter().any(|(p, _)| *p == closed));
-    h.state_mut().set_workspace("Default");
-    h.run_steps(2);
-    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Alpha.jsx"})).unwrap();
-    h.run_steps(3);
-    let alpha = panel_of(&h.state().session, "Alpha.jsx");
-    h.state_mut().set_workspace("W");
-    assert!(h.state().ui.dock.group_of(alpha).contains(&PanelKind::Project), "Alpha is with {:?}", h.state().ui.dock.group_of(alpha));
-    assert_eq!(h.state().session.script_ui.windows.len(), 1, "the same window, not a second run");
+    for locked in [false, true] {
+        let store = store_with(&["Alpha.jsx"]);
+        let mut h = harness(EffectcraftApp::new(restored(&store)));
+        let closed = panel_of(&h.state().session, "Alpha.jsx");
+        tab_beside(&mut h, closed, PanelKind::Project);
+        h.state_mut().close_panel(closed);
+        h.run_steps(2);
+        h.state_mut().apply_dock(Action::Activate { panel: PanelKind::Project }).unwrap();
+        effectcraft_ui_egui::menus::invoke(h.state_mut(), &egui::Context::default(), "window.saveWorkspaceAs", json!({"name": "W"})).unwrap();
+        let saved = h.state_mut().ui.saved_workspaces.get_mut("W").unwrap();
+        assert!(saved.hidden.iter().any(|(p, _)| *p == closed));
+        saved.locked = locked;
+        h.state_mut().set_workspace("Default");
+        h.run_steps(2);
+        h.state_mut().session.execute("window.scriptPanel", json!({"name": "Alpha.jsx"})).unwrap();
+        h.run_steps(3);
+        let alpha = panel_of(&h.state().session, "Alpha.jsx");
+        h.state_mut().set_workspace("W");
+        let dock = &h.state().ui.dock;
+        assert!(dock.group_of(alpha).contains(&PanelKind::Project), "locked {locked}: Alpha is with {:?}", dock.group_of(alpha));
+        assert!(dock.is_visible(PanelKind::Project) && !dock.is_visible(alpha), "locked {locked}: the saved front tab stays in front");
+        assert_eq!(h.state().session.script_ui.windows.len(), 1, "locked {locked}: the same window, not a second run");
+        h.run_steps(2);
+        h.state_mut().show_panel(alpha);
+        assert!(h.state().ui.dock.is_visible(alpha), "locked {locked}: asking for it brings it forward");
+    }
 }
 
 #[test]
