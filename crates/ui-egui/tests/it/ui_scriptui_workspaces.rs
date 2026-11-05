@@ -533,3 +533,22 @@ fn a_queued_open_event_for_a_closed_window_opens_no_tab() {
     assert_eq!(script_tabs(h.state()), []);
     assert_eq!(h.state().ui.focused, focused);
 }
+
+#[test]
+fn a_missing_script_alone_in_its_frame_returns_to_that_frame() {
+    let store = store_with(&[]);
+    let root = |panel| dock::hsplit(SplitSize::Ratio(0.3), dock::tabs(&[panel], 0), dock::tabs(&[PanelKind::Composition], 0));
+    store.write(WORKSPACES_FILE, &file(&dock::docked(root(PanelKind::ScriptPanel(900_001))), &[(900_001, "Alpha.jsx")])).unwrap();
+    let mut h = harness(EffectcraftApp::new(session_with_windows(&store, &[])));
+    assert_eq!(h.state().ui.dock.panels(), [PanelKind::Composition]);
+    h.state_mut().session.script_ui.windows.push(ScriptWindow {
+        id: 7,
+        kind: WindowKind::Panel,
+        script: "Alpha.jsx".into(),
+        visible: true,
+        ..Default::default()
+    });
+    h.state_mut().session.events.push(effectcraft_engine::Event::Frontend { command: "window.scriptPanel".into(), params: json!({"window": 7}) });
+    h.run_steps(3);
+    assert_eq!(h.state().ui.dock.layout.root, Some(root(PanelKind::ScriptPanel(7))));
+}
