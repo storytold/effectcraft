@@ -252,7 +252,7 @@ pub(crate) async fn run_plan(
     let input = FillInput { frames, holes, references };
     let cpu = effectcraft_raster::inpaint::CpuFill;
     let backend: &dyn effectcraft_raster::inpaint::FillBackend = fill.unwrap_or(&cpu);
-    let out = effectcraft_raster::inpaint::fill_sequence_with(&input, &opts, backend, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3))
+    let out = effectcraft_raster::inpaint::fill_sequence_with(input, &opts, backend, &mut |d, t| progress(n + (d as u64 * n / t.max(1) as u64), n * 3))
         .ok_or(crate::render_queue::CANCELLED)?;
     message("Writing the fill layer");
     let dir = &plan.dir;

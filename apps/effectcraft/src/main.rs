@@ -148,6 +148,24 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
     }
 }
 
+/// External effect helpers are native programs, so they start at launch only when the user opts
+/// in with `EFFECTCRAFT_HELPERS=1`: an environment variable, outside the settings folder, so
+/// writing there alone can't run code at launch. Otherwise Effect ▸ Scan for Effect Helpers
+/// starts them.
+fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
+    if session.helpers.is_none() || std::env::var_os("EFFECTCRAFT_HELPERS").is_none_or(|v| v != "1") {
+        return;
+    }
+    match session.execute("effect.helpers.scan", json!({})) {
+        Ok(r) => {
+            for e in r["errors"].as_array().into_iter().flatten() {
+                log::warn!("effect helpers: {}", e.as_str().unwrap_or("error"));
+            }
+        }
+        Err(e) => log::warn!("effect helpers: {e}"),
+    }
+}
+
 /// Run a normal desktop launch: install logging and the panic hook, parse arguments (`--version` exits before the
 /// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
 /// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
@@ -253,10 +271,16 @@ fn main() -> eframe::Result {
             // config directory. Agent-driven runs (`--control`) skip crash recovery.
             if let Some(dir) = effectcraft_host::config_dir() {
                 // WebAssembly effect plug-ins in <config>/Plug-ins load before the menus are built.
-                let plugins = dir.join("Plug-ins");
+                let plugins = dir.join(effectcraft_engine::commands::PLUGINS_DIR);
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
+                    // Packages installed from the Plug-in Library (<config>/Plug-ins/Library).
+                    // Each package that fails to load is logged by the library itself.
+                    if let Err(e) = session.execute("library.loadInstalled", json!({})) {
+                        log::warn!("plug-in library: {e}");
+                    }
                 }
+                start_helpers_if_opted_in(&mut session);
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
@@ -498,6 +522,7 @@ impl eframe::App for Desktop {
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
+        effectcraft_host::stop_helpers();
         // Scripts in Scripts/Shutdown run with the project closed.
         let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
     }
