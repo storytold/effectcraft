@@ -172,6 +172,7 @@ fn defs() -> Vec<(u16, Def)> {
         (39, Def::Data { name: "RGB Curve" }),
         (104, Def::Check { default: true }),
         (42, Def::Data { name: "Hue vs Sat" }),
+        (106, Def::Data { name: "Hue vs Hue" }),
         (47, Def::Data { name: "Wheels" }),
         (68, Def::Check { default: true }),
         (73, Def::Data { name: "HSL Sliders" }),
@@ -195,6 +196,7 @@ fn default_data() -> Vec<(u16, Rec)> {
         (32, Rec::Data(vec![0; 32])),
         (39, Rec::Data(rgb_curves())),
         (42, Rec::Data(curve(3, &[]))),
+        (106, Rec::Data(curve(3, &[]))),
         (47, Rec::Data(wheels(4))),
         (73, Rec::Data(hex(HSL_FRESH))),
         (85, Rec::Data(wheels(8))),
@@ -372,20 +374,112 @@ fn a_look_is_reported_by_name() {
 }
 
 #[test]
-fn hue_saturation_curves_with_neutral_points_arrive_moved_ones_are_reported() {
+fn hue_vs_sat_arrives_with_its_y_scaled_other_moved_curves_are_reported() {
     // 1200 `-11-sec-hue-saturation-curves`: the selector put three neutral points on the curve.
     let neutral = curve(3, &[(0.742_483, 0.0), (0.798_038, 0.0), (0.853_594, 0.0)]);
     let (g, r) = run(&[(42, Rec::Data(neutral))]);
     assert_eq!(losses(&r), Vec::<String>::new());
     assert_eq!(val(&g, "curves/hueSaturationCurves/hueVsSat"), Value::Str(String::new()));
-    let (_, r) = run(&[(42, Rec::Data(curve(3, &[(0.5, 0.25)])))]);
+    // 1200 `-61-preset-curves-huesat`: red raised to 0.97 (After Effects nearly doubles its
+    // saturation), the neighbours pinned near 0. EffectCraft's y: 0.5 + y / 2.
+    let preset = curve(3, &[(0.015_463_917_525_773_196, 0.97), (0.262_886_597_938_144_34, -0.03), (0.764_604_810_996_563_5, -0.02)]);
+    let (g, r) = run(&[(42, Rec::Data(preset))]);
+    assert_eq!(losses(&r), Vec::<String>::new());
+    let Value::Str(text) = val(&g, "curves/hueSaturationCurves/hueVsSat") else { panic!("a point list") };
+    let pts: Vec<(f64, f64)> = text
+        .split(' ')
+        .map(|p| {
+            let (x, y) = p.split_once(',').unwrap();
+            (x.parse().unwrap(), y.parse().unwrap())
+        })
+        .collect();
+    let want = [(0.015_464, 0.985), (0.262_887, 0.485), (0.764_605, 0.49)];
+    assert_eq!(pts.len(), 3, "{text}");
+    for ((x, y), (wx, wy)) in pts.iter().zip(want) {
+        assert!((x - wx).abs() < 1e-5 && (y - wy).abs() < 1e-9, "{text}");
+    }
+    // Hue vs Hue moved: no sample tells its scale, reported and left neutral.
+    let (g, r) = run(&[(106, Rec::Data(curve(3, &[(0.5, 0.25)])))]);
     let l = losses(&r);
-    assert!(l.len() == 1 && l[0].contains("Hue vs Sat (ADBE Lumetri-0042) is not imported"), "{l:?}");
-    // A point count past the data: not a default, reported, no panic.
+    assert!(l.len() == 1 && l[0].contains("Hue vs Hue (ADBE Lumetri-0106) is not imported"), "{l:?}");
+    assert_eq!(val(&g, "curves/hueSaturationCurves/hueVsHue"), Value::Str(String::new()));
+    // A point count past the data: not a default, reported as damaged, no panic.
     let mut bad = curve(3, &[]);
     bad[4..8].copy_from_slice(&1000u32.to_le_bytes());
-    let (_, r) = run(&[(42, Rec::Data(bad))]);
-    assert_eq!(losses(&r).len(), 1);
+    let (g, r) = run(&[(42, Rec::Data(bad))]);
+    let l = losses(&r);
+    assert!(l.len() == 1 && l[0].contains("Hue vs Sat (ADBE Lumetri-0042) is unreadable"), "{l:?}");
+    assert_eq!(val(&g, "curves/hueSaturationCurves/hueVsSat"), Value::Str(String::new()));
+}
+
+#[test]
+fn the_master_rgb_curve_arrives_moved_channel_curves_are_reported() {
+    // 1200 `-60-preset-curves-rgb`: the first of the four curves, its midpoint raised.
+    let master = curve(0, &[(0.0, 0.0), (0.491_408_934_707_903_76, 0.786_885_245_901_639_3), (1.0, 1.0)]);
+    let identity = curve(0, &[(0.0, 0.0), (1.0, 1.0)]);
+    let mut d = master.clone();
+    (0..3).for_each(|_| d.extend(&identity));
+    let (g, r) = run(&[(39, Rec::Data(d))]);
+    assert_eq!(losses(&r), Vec::<String>::new());
+    assert_eq!(val(&g, "curves/rgbCurves/master"), Value::Str("0,0 0.49140893470790376,0.7868852459016393 1,1".into()));
+    assert_eq!(val(&g, "curves/rgbCurves/red"), Value::Str("0,0 1,1".into()));
+    // A moved channel curve: which channel it is is not known, reported.
+    let mut d = identity.clone();
+    d.extend(&master);
+    (0..2).for_each(|_| d.extend(&identity));
+    let (g, r) = run(&[(39, Rec::Data(d))]);
+    let l = losses(&r);
+    assert!(l.len() == 1 && l[0].contains("1 channel curve(s) of RGB Curve (ADBE Lumetri-0039) are not imported"), "{l:?}");
+    assert_eq!(val(&g, "curves/rgbCurves/master"), Value::Str("0,0 1,1".into()));
+    // Damaged: the wrong length.
+    let (_, r) = run(&[(39, Rec::Data(master))]);
+    assert!(losses(&r).iter().any(|x| x.contains("RGB Curve (ADBE Lumetri-0039) is unreadable")), "{:?}", losses(&r));
+}
+
+#[test]
+fn colour_wheels_arrive_as_colours_their_brightness_is_reported() {
+    // 1200 `-62-preset-wheels`: Shadows towards blue with the slider down, Midtones towards red,
+    // Highlights towards yellow-green with the slider up; the fourth wheel at its default.
+    let w: Vec<u8> = [
+        229.119_895_976_548_18,
+        0.369_892_467_494_294_2,
+        0.547_209_348_004_638,
+        0.104_745_366_878_020_72,
+        0.5,
+        0.394_961_840_132_529_44,
+        93.374_076_744_668_57,
+        0.726_881_718_523_399_9,
+        0.318_976_840_675_999_35,
+        0.0,
+        0.5,
+        0.0,
+    ]
+    .into_iter()
+    .flat_map(f64::to_le_bytes)
+    .collect();
+    let (g, r) = run(&[(47, Rec::Data(w.clone()))]);
+    let colour = |id: &str| match val(&g, id) {
+        Value::Color(c) => c,
+        other => panic!("{id}: {other:?}"),
+    };
+    // The hue's direction: blue strongest in Shadows, red in Midtones, green in Highlights.
+    let s = colour("colorWheels/shadowsWheel");
+    assert!(s[2] > 0.77 && s[0] < 0.23 && (s[0] + s[2] - 1.0).abs() < 1e-9, "{s:?}");
+    let m = colour("colorWheels/midtonesWheel");
+    assert!((m[0] - 0.697_480_920_066_264_7).abs() < 1e-9 && m[1] > m[2], "{m:?}");
+    let h = colour("colorWheels/highlightsWheel");
+    assert!(h[1] > h[0] && h[0] > h[2], "{h:?}");
+    let l = losses(&r);
+    assert!(l.len() == 1 && l[0].contains("Shadows brightness 0.370") && l[0].contains("Highlights brightness 0.727"), "{l:?}");
+    assert!(!l[0].contains("Midtones") && !l[0].contains("fourth"), "{l:?}");
+    // The fourth wheel set: reported; damaged data: reported, the wheels stay grey.
+    let mut w4 = w;
+    w4[88..96].copy_from_slice(&0.3f64.to_le_bytes());
+    let (_, r) = run(&[(47, Rec::Data(w4))]);
+    assert!(losses(&r).iter().any(|x| x.contains("the fourth wheel")), "{:?}", losses(&r));
+    let (g, r) = run(&[(47, Rec::Data(vec![1; 95]))]);
+    assert!(losses(&r).iter().any(|x| x.contains("Wheels (ADBE Lumetri-0047) is unreadable")), "{:?}", losses(&r));
+    assert_eq!(val(&g, "colorWheels/shadowsWheel"), Value::Color([0.5, 0.5, 0.5, 1.0]));
 }
 
 #[test]
@@ -420,15 +514,28 @@ fn the_picked_hsl_key_becomes_hue_saturation_and_lightness_ranges() {
 fn undecoded_data_and_controls_without_counterpart_are_reported_when_set() {
     let mut split = vec![0u8; 32];
     split[0] = 1;
-    let mut w = wheels(4);
-    w[8] = 1;
-    let (_, r) = run(&[(32, Rec::Data(split)), (47, Rec::Data(w)), (97, Rec::Num(1.0, 3)), (95, Rec::Data(utf16("my.cube")))]);
+    let (_, r) = run(&[(32, Rec::Data(split)), (97, Rec::Num(1.0, 3)), (95, Rec::Data(utf16("my.cube")))]);
     let l = losses(&r);
-    assert_eq!(l.len(), 4, "{l:?}");
+    assert_eq!(l.len(), 3, "{l:?}");
     assert!(l.iter().any(|d| d.contains("Split Toning (ADBE Lumetri-0032) is not imported")), "{l:?}");
-    assert!(l.iter().any(|d| d.contains("Wheels (ADBE Lumetri-0047) is not imported")), "{l:?}");
     assert!(l.iter().any(|d| d.contains("Legacy Tone And Saturation (ADBE Lumetri-0097) is on")), "{l:?}");
     assert!(l.iter().any(|d| d.contains("the Input LUT 'my.cube' is not imported")), "{l:?}");
+}
+
+#[test]
+fn legacy_tone_on_is_reported_whatever_the_pard_default_says() {
+    // After the project is opened and saved again, the `pard` default of Legacy Tone And
+    // Saturation reads on (versions/1200-lumetri-26 / -25x / -24x; off in 1200 as the script
+    // saved it): a record that says on is still reported, a missing record is not.
+    let mut d = defs();
+    if let Some((_, Def::Check { default })) = d.iter_mut().find(|(s, _)| *s == 97) {
+        *default = true;
+    }
+    let (_, r) = run_with(&d, &[(97, Rec::Num(1.0, 3))]);
+    let l = losses(&r);
+    assert!(l.len() == 1 && l[0].contains("Legacy Tone And Saturation (ADBE Lumetri-0097) is on"), "{l:?}");
+    let (_, r) = run_with(&d, &[]);
+    assert_eq!(losses(&r), Vec::<String>::new());
 }
 
 #[test]

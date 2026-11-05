@@ -16,11 +16,18 @@
 //!   After Effects; EffectCraft's Lumetri has none. A section that is off does nothing in After
 //!   Effects (1200 `lumetri-03-sec-basic-correction`, `-17-sec-vignette` render as `-00-defaults`),
 //!   so its values are not imported (the effect looks the same) and are listed in the report.
-//! - **Arbitrary data** (`ParamKind::ArbitraryData`, every instance stores it): the hue /
-//!   saturation curves (a curve type, a point count, points as `f64` x, y with y an offset from
-//!   neutral) are imported when neutral and reported otherwise (no sample moves a point); the
-//!   HSL Secondary key ([`HslKey`]) is imported; the RGB curves, the colour wheels, Split Toning
-//!   and the correction wheels are reported when they are not the default (not sampled).
+//! - **Arbitrary data** (`ParamKind::ArbitraryData`, every instance stores it). Curves are a
+//!   curve type, a point count and points as `f64` x, y ([`curve_points`]).
+//!   - The RGB curve (`-0039`) holds four curves; the first is the master (white) curve (1200
+//!     `lumetri-60-preset-curves-rgb`), imported. The other three are reported when moved: no
+//!     sample tells which is which channel.
+//!   - Hue vs Sat (`-0042`): y is an offset from neutral, 1 doubling the saturation (`-61`), so
+//!     EffectCraft's y is `0.5 + y / 2`. The other four hue / saturation curves have no sample
+//!     of their scale and are reported when moved.
+//!   - Color Wheels (`-0047`): Shadows, Midtones, Highlights and a fourth wheel, each hue,
+//!     brightness slider, distance ([`import_wheels`], `-62`).
+//!   - The HSL Secondary key ([`HslKey`]) is imported; Split Toning and the correction wheels are
+//!     reported when they are not the default (not sampled).
 //! - **LUTs and looks.** The Input LUT and the Look are files After Effects names (the Look's name
 //!   is UTF-16 text in `-0096`, the popups only index a list of the installed ones); they are not
 //!   in the project, so a set one is reported by name and EffectCraft's popup stays None.
@@ -82,8 +89,9 @@ impl Section {
 enum Data {
     /// The four RGB curves (4 x 520 bytes).
     RgbCurves,
-    /// One hue / saturation curve (520 bytes); the EffectCraft parameter it belongs to.
-    HueSatCurve,
+    /// One hue / saturation curve (520 bytes); the EffectCraft parameter when the scale of its y
+    /// is known (Hue vs Sat).
+    HueSatCurve(Option<&'static str>),
     /// Color Wheels (4 x 3 `f64`, each wheel 0, 0.5, 0 by default).
     Wheels,
     /// HSL Secondary's correction wheels (8 x 3 `f64`, the same default).
@@ -105,6 +113,11 @@ enum Role {
     Switch,
     /// No counterpart: reported when not at the default.
     Missing,
+    /// A checkbox without counterpart whose `pard` default is not reliable: reported when a
+    /// record says on. Legacy Tone And Saturation (`-0097`) is off in a fresh instance, but its
+    /// `pard` default reads off in 1200 as saved by the script and on after the project was
+    /// opened and saved again (`versions/1200-lumetri-26`, `-25x`, `-24x`).
+    MissingWhenOn,
     /// An eyedropper colour: reported when set.
     Eyedropper,
     /// The Input LUT (`lut` true) or the Look: a popup, a name or an asset.
@@ -187,19 +200,19 @@ const ROWS: &[Row] = &[
     row(39, S::RgbCurves, Some(K::ArbitraryData), Role::Data(Data::RgbCurves)),
     row(104, S::HueSat(0), Some(K::Checkbox), Role::Switch),
     row(113, S::HueSat(0), Some(K::Color), Role::Eyedropper),
-    row(42, S::HueSat(0), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve)),
+    row(42, S::HueSat(0), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve(Some("curves/hueSaturationCurves/hueVsSat")))),
     row(105, S::HueSat(1), Some(K::Checkbox), Role::Switch),
     row(114, S::HueSat(1), Some(K::Color), Role::Eyedropper),
-    row(106, S::HueSat(1), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve)),
+    row(106, S::HueSat(1), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve(None))),
     row(107, S::HueSat(2), Some(K::Checkbox), Role::Switch),
     row(115, S::HueSat(2), Some(K::Color), Role::Eyedropper),
-    row(108, S::HueSat(2), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve)),
+    row(108, S::HueSat(2), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve(None))),
     row(109, S::HueSat(3), Some(K::Checkbox), Role::Switch),
     row(116, S::HueSat(3), Some(K::Color), Role::Eyedropper),
-    row(110, S::HueSat(3), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve)),
+    row(110, S::HueSat(3), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve(None))),
     row(111, S::HueSat(4), Some(K::Checkbox), Role::Switch),
     row(117, S::HueSat(4), Some(K::Color), Role::Eyedropper),
-    row(112, S::HueSat(4), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve)),
+    row(112, S::HueSat(4), Some(K::ArbitraryData), Role::Data(Data::HueSatCurve(None))),
     // Color Wheels: 46 the switch, 102 Face Detection (on by default), 66 HDR White, 47 the wheels.
     row(46, S::ColorWheels, Some(K::Checkbox), Role::Switch),
     row(102, S::ColorWheels, Some(K::Checkbox), Role::Missing),
@@ -235,7 +248,7 @@ const ROWS: &[Row] = &[
     row(60, S::SpeedGradeCustom, Some(K::ArbitraryData), Role::Data(Data::Other)),
     // Outside the sections: Legacy Tone And Saturation, the embedded LUTs, Auto Tone, Auto Color,
     // the LUT and Look assets.
-    row(97, S::Always, Some(K::Checkbox), Role::Missing),
+    row(97, S::Always, Some(K::Checkbox), Role::MissingWhenOn),
     row(98, S::Always, Some(K::ArbitraryData), Role::Data(Data::Other)),
     row(99, S::Always, Some(K::ArbitraryData), Role::Data(Data::Other)),
     row(100, S::Always, Some(K::ArbitraryData), Role::Data(Data::Other)),
@@ -355,7 +368,11 @@ fn utf16_text(d: &[u8]) -> Option<String> {
 
 /// A Lumetri curve (520 bytes): `i32` curve type at 0 (3 for the hue curves, which wrap; 2 for
 /// Luma vs Sat and Sat vs Sat; 0 for an RGB curve), the `u32` point count at 4, then the points
-/// as little-endian `f64` pairs x, y from byte 8 (at most 32). `None` when the count does not fit.
+/// as little-endian `f64` pairs x, y from byte 8 (at most 32), sorted by x. Bytes after the
+/// counted points are stale (a fresh hue curve has count 0 and old points behind it). An RGB
+/// curve's x and y are 0..1 (2 points 0,0 and 1,1 by default); a hue / saturation curve's x is
+/// the hue (0 red, 1/3 green) or the luma / saturation, 0..1, and y its offset from neutral.
+/// `None` when the count does not fit.
 fn curve_points(d: &[u8]) -> Option<Vec<(f64, f64)>> {
     let n = usize::try_from(le_u32(d, 4)?).ok()?;
     if n > d.len().saturating_sub(8) / 16 {
@@ -418,7 +435,7 @@ fn data_default(data: Data, d: Option<&[u8]>) -> bool {
         Data::RgbCurves => {
             d.len() == 4 * 520 && d.as_chunks::<520>().0.iter().all(|c| curve_points(c).is_some_and(|pts| pts.iter().all(|(x, y)| (x - y).abs() < 1e-9)))
         }
-        Data::HueSatCurve => curve_points(d).is_some_and(|pts| pts.iter().all(|(_, y)| *y == 0.0)),
+        Data::HueSatCurve(_) => curve_points(d).is_some_and(|pts| pts.iter().all(|(_, y)| *y == 0.0)),
         Data::Wheels => wheels_default(d, 4),
         Data::CorrectionWheels => wheels_default(d, 8),
         Data::SplitToning | Data::Other => is_empty_data(Some(d)),
@@ -552,6 +569,11 @@ pub(crate) fn import_lumetri(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '
                     col.lose(LossCategory::Effects, format!("{here}: parameter {label} is off and has no counterpart"));
                 }
             }
+            Role::MissingWhenOn => {
+                if p.is_animated() || matches!(p.recorded_value(), Some(ParamValue::Bool(true))) {
+                    col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart, not imported"));
+                }
+            }
             Role::Missing => {
                 if is_set(p) {
                     col.lose(
@@ -575,8 +597,20 @@ pub(crate) fn import_lumetri(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '
                 }
                 if !data_default(d, data()) {
                     let why = match d {
-                        Data::HueSatCurve => "the curve's points are moved; no sample tells their scale",
-                        Data::RgbCurves | Data::Wheels | Data::CorrectionWheels | Data::SplitToning => "the data is not decoded (not sampled)",
+                        Data::RgbCurves => {
+                            import_rgb_curves(data(), (&here, &label), &mut *group, &mut *col);
+                            continue;
+                        }
+                        Data::HueSatCurve(Some(target)) => {
+                            import_hue_sat_curve(data(), target, (&here, &label), &mut *group, &mut *col);
+                            continue;
+                        }
+                        Data::Wheels => {
+                            import_wheels(data(), (&here, &label), &mut *group, &mut *col);
+                            continue;
+                        }
+                        Data::HueSatCurve(None) => "the curve's points are moved; no sample tells their scale",
+                        Data::CorrectionWheels | Data::SplitToning => "the data is not decoded (not sampled)",
                         Data::HslKey | Data::Other => "no counterpart",
                     };
                     col.lose(LossCategory::Effects, format!("{here}: parameter {label} is not imported ({why})"));
@@ -638,5 +672,127 @@ fn import_hsl_key(d: Option<&[u8]>, here: &str, group: &mut effectcraft_project:
         set(&format!("{id}Low"), Value::Scalar(((c - r) * 100.0).clamp(0.0, 100.0)));
         set(&format!("{id}High"), Value::Scalar(((c + r) * 100.0).clamp(0.0, 100.0)));
         set(&format!("{id}Softness"), Value::Scalar((t * 100.0).clamp(0.0, 100.0)));
+    }
+}
+
+/// A parameter of `group` set to `v` (ids the spec does not have are skipped).
+fn set_prop(group: &mut effectcraft_project::PropGroup, id: &str, v: Value) {
+    if let Some(prop) = group.prop_mut(id) {
+        prop.value = v;
+    }
+}
+
+/// Curve points as EffectCraft's `x,y x,y ...` text, x and y clamped to 0..1; `None` when a value
+/// is not finite.
+fn points_text(pts: impl IntoIterator<Item = (f64, f64)>) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (x, y) in pts {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        out.push(format!("{},{}", x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+    }
+    Some(out.join(" "))
+}
+
+/// The RGB curve (`-0039`, four curves of 520 bytes). The first is the master curve (1200
+/// `lumetri-60-preset-curves-rgb`: its midpoint raised to 0.787 lifts R, G and B alike) and
+/// becomes `curves/rgbCurves/master`. The other three are the channel curves, but no sample moves
+/// one, so which is red, green or blue is not known: a moved one is reported.
+fn import_rgb_curves(d: Option<&[u8]>, (here, label): (&str, &str), group: &mut effectcraft_project::PropGroup, col: &mut crate::import::report::Collector) {
+    let Some(d) = d else { return };
+    let curves: Option<Vec<Vec<(f64, f64)>>> = if d.len() == 4 * 520 { d.as_chunks::<520>().0.iter().map(|c| curve_points(c)).collect() } else { None };
+    let Some(curves) = curves else {
+        col.lose(LossCategory::DamagedData, format!("{here}: the data of {label} is unreadable, the curves are not imported"));
+        return;
+    };
+    let identity = |pts: &[(f64, f64)]| pts.iter().all(|(x, y)| (x - y).abs() < 1e-9);
+    if let Some(master) = curves.first().filter(|c| !identity(c)) {
+        match points_text(master.iter().copied()) {
+            Some(text) => set_prop(group, "curves/rgbCurves/master", Value::Str(text)),
+            None => col.lose(LossCategory::DamagedData, format!("{here}: the master curve of {label} has unreadable points, not imported")),
+        }
+    }
+    let moved = curves.iter().skip(1).filter(|c| !identity(c)).count();
+    if moved > 0 {
+        col.lose(
+            LossCategory::Effects,
+            format!("{here}: {moved} channel curve(s) of {label} are not imported (no sample tells which curve is red, green or blue)"),
+        );
+    }
+}
+
+/// Hue vs Sat (`-0042`): After Effects' y is an offset from neutral where 1 doubles the
+/// saturation (1200 `lumetri-61-preset-curves-huesat`: a point at hue 0.0155, y 0.97 scales pure
+/// red's saturation by about 1.96 in linear light; pins at -0.03 and -0.02 scale green, blue and
+/// cyan by 0.97). EffectCraft's y = 1 doubles it and 0.5 is neutral, so y becomes `0.5 + y / 2`.
+/// x is the hue in both (0 red, 1/3 green).
+fn import_hue_sat_curve(
+    d: Option<&[u8]>,
+    target: &str,
+    (here, label): (&str, &str),
+    group: &mut effectcraft_project::PropGroup,
+    col: &mut crate::import::report::Collector,
+) {
+    let Some(d) = d else { return };
+    match curve_points(d).and_then(|pts| points_text(pts.into_iter().map(|(x, y)| (x, 0.5 + y / 2.0)))) {
+        Some(text) => set_prop(group, target, Value::Str(text)),
+        None => col.lose(LossCategory::DamagedData, format!("{here}: the data of {label} is unreadable, the curve is not imported")),
+    }
+}
+
+/// The colour EffectCraft's wheel takes for After Effects' hue (degrees, 0 red, 120 green) and
+/// distance from the centre (0..1): the HSL colour of that hue with saturation = distance and
+/// lightness 0.5 (grey 0.5 at distance 0). EffectCraft's wheel adds that colour's offset from its
+/// grey, so the direction is After Effects' and the strength grows with the distance.
+fn wheel_colour(hue: f64, distance: f64) -> [f64; 4] {
+    let c = distance.clamp(0.0, 1.0);
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match h {
+        h if h < 1.0 => (c, x, 0.0),
+        h if h < 2.0 => (x, c, 0.0),
+        h if h < 3.0 => (0.0, c, x),
+        h if h < 4.0 => (0.0, x, c),
+        h if h < 5.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = 0.5 - c / 2.0;
+    [r + m, g + m, b + m, 1.0]
+}
+
+/// Color Wheels (`-0047`, 96 bytes): four wheels of three little-endian `f64`, the hue in degrees,
+/// the brightness slider (0..1, 0.5 neutral) and the distance from the centre (0..1); `0, 0.5, 0`
+/// each by default. The first three are Shadows, Midtones and Highlights (1200
+/// `lumetri-62-preset-wheels`: Shadows 229 degrees (blue), slider 0.37, distance 0.55; Midtones
+/// 0.1 degrees (red), 0.5, 0.39; Highlights 93 degrees (yellow-green), 0.73, 0.32); the fourth is
+/// not known. Hue and distance become EffectCraft's wheel colour ([`wheel_colour`]); the brightness
+/// sliders and a set fourth wheel have no counterpart and are reported.
+fn import_wheels(d: Option<&[u8]>, (here, label): (&str, &str), group: &mut effectcraft_project::PropGroup, col: &mut crate::import::report::Collector) {
+    let Some(d) = d else { return };
+    let wheels: Option<Vec<[f64; 3]>> = if d.len() == 4 * 24 {
+        (0..4).map(|w| Some([le_f64(d, w * 24)?, le_f64(d, w * 24 + 8)?, le_f64(d, w * 24 + 16)?]).filter(|v| v.iter().all(|x| x.is_finite()))).collect()
+    } else {
+        None
+    };
+    let Some(wheels) = wheels else {
+        col.lose(LossCategory::DamagedData, format!("{here}: the data of {label} is unreadable, the colour wheels are not imported"));
+        return;
+    };
+    let mut lost: Vec<String> = Vec::new();
+    for (w, (id, name)) in wheels.iter().zip([("shadowsWheel", "Shadows"), ("midtonesWheel", "Midtones"), ("highlightsWheel", "Highlights")]) {
+        let [hue, brightness, distance] = *w;
+        if distance != 0.0 {
+            set_prop(group, &format!("colorWheels/{id}"), Value::Color(wheel_colour(hue, distance)));
+        }
+        if (brightness - 0.5).abs() > 1e-9 {
+            lost.push(format!("{name} brightness {brightness:.3} (0.5 is neutral)"));
+        }
+    }
+    if wheels.get(3).is_some_and(|w| *w != [0.0, 0.5, 0.0]) {
+        lost.push("the fourth wheel (its role is not known)".to_string());
+    }
+    if !lost.is_empty() {
+        col.lose(LossCategory::Effects, format!("{here}: {label}: {} not imported (no counterpart)", lost.join(", ")));
     }
 }
