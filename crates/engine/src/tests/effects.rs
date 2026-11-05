@@ -941,3 +941,25 @@ fn copied_effect_property_pastes_onto_the_same_effect() {
     assert_eq!(r["expressions"], 1, "{r}");
     assert_eq!(layer(&s, b).props.prop("effects/#1/blurriness").unwrap().expr.as_ref().unwrap().text, "time * 10");
 }
+
+/// Effect helpers run native code: a script starts them only with Allow Scripts to Write Files
+/// and Access Network on (as for File.execute()); the user always can.
+#[test]
+fn scripts_start_effect_helpers_only_with_file_access() {
+    let mut s = Session {
+        helpers: Some(crate::HelperHooks {
+            scan: |_| json!({"paths": [], "helpers": [], "loaded": [], "errors": []}),
+            load: |_| Ok(json!({"loaded": [], "errors": []})),
+            list: || json!({"helpers": [], "blocked": []}),
+        }),
+        ..Default::default()
+    };
+    for (id, params) in [("effect.helpers.scan", json!({})), ("effect.helpers.load", json!({"path": "/plug-ins/x.ofx"}))] {
+        let e = s.execute_for_script(id, params.clone()).unwrap_err().to_string();
+        assert!(e.contains("Allow Scripts to Write Files"), "{id}: {e}");
+        assert!(s.execute(id, params).is_ok(), "{id}: the user starts helpers");
+    }
+    assert!(s.execute_for_script("effect.helpers.list", json!({})).is_ok(), "listing starts nothing");
+    s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
+    assert!(s.execute_for_script("effect.helpers.scan", json!({})).is_ok());
+}

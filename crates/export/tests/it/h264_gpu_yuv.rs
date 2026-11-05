@@ -24,11 +24,21 @@ struct Fake {
     /// Frames asking for planes right now, and the most at once after the stop.
     asking: AtomicUsize,
     most_after_stop: AtomicUsize,
+    /// `Accelerator::frame_end` calls: one per rendered comp frame, planes or not.
+    frame_ends: AtomicUsize,
 }
 
 impl Fake {
     fn new(yuv: bool, deferred: bool, stop_after: usize) -> Self {
-        Fake { yuv, yuv_frames: AtomicUsize::new(0), deferred, stop_after, asking: AtomicUsize::new(0), most_after_stop: AtomicUsize::new(0) }
+        Fake {
+            yuv,
+            yuv_frames: AtomicUsize::new(0),
+            deferred,
+            stop_after,
+            asking: AtomicUsize::new(0),
+            most_after_stop: AtomicUsize::new(0),
+            frame_ends: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -53,6 +63,9 @@ impl Accelerator for Fake {
             return None;
         }
         Some(effectcraft_raster::yuv::yuv420_over(&r.comp_frame_cpu(comp, t), bg))
+    }
+    fn frame_end(&self) {
+        self.frame_ends.fetch_add(1, Ordering::SeqCst);
     }
     fn available(&self) -> bool {
         self.yuv_frames.load(Ordering::SeqCst) < self.stop_after
@@ -122,6 +135,8 @@ fn accelerator_planes_encode_like_the_cpu_conversion() {
     let b = run(&p, cid, Some(&rgba), &s, &d.join("rgba.mp4"));
     let c = run(&p, cid, None, &s, &d.join("cpu.mp4"));
     assert_eq!(yuv.yuv_frames.load(Ordering::SeqCst), 20, "every frame came from the accelerator");
+    assert_eq!(yuv.frame_ends.load(Ordering::SeqCst), 20, "every planes frame ends once");
+    assert_eq!(rgba.frame_ends.load(Ordering::SeqCst), 20, "every RGBA frame ends once");
     assert!(a == b && b == c, "the three files differ");
     let f = effectcraft_media::probe(&yuv_mp4).expect("probe yuv.mp4");
     assert_eq!((f.width, f.height), (64, 48));
@@ -144,6 +159,7 @@ fn frames_the_accelerator_cannot_take_fall_back_to_rgba() {
     let a = run(&p, cid, Some(&yuv), &odd, &d.join("yuv.mp4"));
     let c = run(&p, cid, None, &odd, &d.join("cpu.mp4"));
     assert_eq!(yuv.yuv_frames.load(Ordering::SeqCst), 0);
+    assert_eq!(yuv.frame_ends.load(Ordering::SeqCst), 6, "every fallback frame ends once");
     assert!(a == c);
 }
 
