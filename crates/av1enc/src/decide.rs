@@ -1175,4 +1175,99 @@ mod tests {
             }
         }
     }
+
+    fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// A snapshot keeps only the BlockDecoded cells of the block area. Coding inside the block
+    /// marks sub-blocks of every smaller size; restoring must give back the whole 3x35x35 array
+    /// as it was, for every block size of a 64x64 superblock and every aligned position.
+    #[test]
+    fn snapshot_restore_brings_back_every_blockdecoded_flag() {
+        let g = FrameGeom::new(256, 256);
+        let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+        let src = [Plane::new(256, 256), Plane::new(128, 128), Plane::new(128, 128)];
+        let mut dec = Decider::new(&g, 8, 100, true, &src, None);
+        for random_start in [false, true] {
+            for n4 in [1usize, 2, 4, 8, 16] {
+                for sb in [0usize, 16] {
+                    for r in (sb..sb + 16).step_by(n4) {
+                        for c in (sb..sb + 16).step_by(n4) {
+                            for plane in dec.decoded.iter_mut() {
+                                for row in plane.iter_mut() {
+                                    for v in row.iter_mut() {
+                                        *v = random_start && next() & 1 == 1;
+                                    }
+                                }
+                            }
+                            let before = dec.decoded.clone();
+                            let snap = dec.snapshot(r, c, n4);
+                            // every sub-block of every size inside the block, as coding marks them
+                            let mut m = n4;
+                            loop {
+                                for rr in (r..r + n4).step_by(m) {
+                                    for cc in (c..c + n4).step_by(m) {
+                                        for p in 0..3 {
+                                            dec.mark_decoded(p, rr, cc, m);
+                                        }
+                                    }
+                                }
+                                if m == 1 {
+                                    break;
+                                }
+                                m /= 2;
+                            }
+                            dec.restore(&snap, r, c, n4);
+                            assert!(dec.decoded == before, "n4 {n4} at ({r}, {c}), random start {random_start}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bounded SADs return the full SAD whenever the cost can still win (`sad + lb < bound`)
+    /// and otherwise a partial sum that already loses, so the callers' strict `<` decides the same.
+    #[test]
+    fn bounded_sad_stops_only_once_the_cost_cannot_win() {
+        let g = FrameGeom::new(100, 80);
+        let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+        let mut mk = |w: usize, h: usize| {
+            let mut p = Plane::new(w, h);
+            p.data.iter_mut().for_each(|v| *v = (next() % 256) as u16);
+            p
+        };
+        let src = [mk(128, 128), mk(64, 64), mk(64, 64)];
+        let refp = mk(128, 128);
+        let mut next = xorshift(0x1234_5678_9abc_def1);
+        let dec = Decider::new(&g, 8, 100, false, &src, None);
+        for n in [4usize, 8, 16, 32] {
+            for (x, y, rx, ry) in [(0usize, 0usize, 0i32, 0i32), (32, 40, 29, 43), (96, 72, 90, 70), (8, 8, -5, -3)] {
+                let full_ref = dec.sad_ref(&refp, [rx, ry], [x, y], n, [0.0, f64::INFINITY]);
+                let pred: Vec<u16> = (0..n * n).map(|_| (next() % 256) as u16).collect();
+                let full_pred = dec.sad_bounded(0, [x, y], n, &pred, [0.0, f64::INFINITY]);
+                for _ in 0..50 {
+                    let lb = (next() % 64) as f64 * 0.75;
+                    let b_ref = (next() % (2 * full_ref + 2)) as f64;
+                    let b_pred = (next() % (2 * full_pred + 2)) as f64;
+                    let got_ref = dec.sad_ref(&refp, [rx, ry], [x, y], n, [lb, b_ref]);
+                    let got_pred = dec.sad_bounded(0, [x, y], n, &pred, [lb, b_pred]);
+                    for (got, full, bound) in [(got_ref, full_ref, b_ref), (got_pred, full_pred, b_pred)] {
+                        if full as f64 + lb < bound {
+                            assert_eq!(got, full, "n {n} at ({x}, {y}) bound {bound}");
+                        } else {
+                            assert!(got as f64 + lb >= bound && got <= full, "n {n} at ({x}, {y}) bound {bound}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
