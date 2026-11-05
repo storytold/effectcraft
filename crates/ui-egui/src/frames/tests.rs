@@ -17,6 +17,14 @@ fn converting_a_frame_with_nan_alpha_keeps_the_viewer_alive() {
     assert_eq!(to_color_image(&image).pixels, [egui::Color32::TRANSPARENT]);
 }
 
+/// Frames without the HDR step (`RenderOpts::skip_hdr_step`) never share a RAM or disk
+/// cache key with the HDR-mapped frames of the same options.
+#[test]
+fn frames_without_the_hdr_step_have_keys_of_their_own() {
+    let opts = RenderOpts::default();
+    assert_ne!(opts_hash(&opts), opts_hash(&RenderOpts { skip_hdr_step: true, ..opts }));
+}
+
 struct ProbeDisk {
     keys: Mutex<HashSet<u128>>,
     probes: std::sync::atomic::AtomicUsize,

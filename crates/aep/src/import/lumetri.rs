@@ -41,7 +41,7 @@ use crate::effect_map::{Conv, ParamMap};
 use crate::{Effect as AepEffect, EffectParam, ParamKind, ParamValue};
 use effectcraft_keyframe::Value;
 
-use crate::import::effects::{LayerCtx, ParamOut, ValueRecord, carries_nothing, import_mapped, param_label};
+use crate::import::effects::{LayerCtx, ParamOut, carries_nothing, import_mapped, param_label};
 use crate::import::report::LossCategory;
 use ParamKind as K;
 
@@ -559,7 +559,7 @@ pub(crate) fn import_lumetri(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '
         match row.role {
             Role::To(target, conv) => {
                 let m = ParamMap { index: p.index, kind: p.kind, target, conv };
-                import_mapped(p, &m, cx, (&here, &label), ParamOut { group: &mut *group, refs: &mut *refs, col: &mut *col }, ValueRecord::Any);
+                import_mapped(p, &m, cx, (&here, &label), ParamOut { group: &mut *group, refs: &mut *refs, col: &mut *col });
             }
             Role::Switch => {
                 if p.is_animated() || p.stored().is_some_and(|s| s.expression().is_some()) {

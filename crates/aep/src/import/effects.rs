@@ -142,6 +142,8 @@ pub(crate) fn param_label(p: &EffectParam<'_, '_>) -> String {
     if p.name.trim().is_empty() { p.match_name.clone() } else { format!("{} ({})", p.name.trim(), p.match_name) }
 }
 
+/// Imports one parameter of `fx` into its EffectCraft property: its keyframes, the value in its
+/// record or the `pard` default, with a loss for what cannot be read or mapped.
 fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>, cx: &LayerCtx<'_>, shown: &str, out: ParamOut<'_>) {
     let ParamOut { group, refs, col } = out;
     if carries_nothing(p) {
@@ -161,27 +163,14 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         }
         return;
     };
-    import_mapped(p, m, cx, (&here, &label), ParamOut { group, refs, col }, ValueRecord::Written);
-}
-
-/// Which value records count.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValueRecord {
-    /// Only written records (`tdsb` 1, [`EffectParam::stored_value`]).
-    Written,
-    /// Every record, also one in the default state (Lumetri Color, [`EffectParam::recorded_value`]).
-    Any,
+    import_mapped(p, m, cx, (&here, &label), ParamOut { group, refs, col });
 }
 
 /// Imports parameter `p` into the property `m` names, converted by `m.conv`. `names` is
 /// `(here, label)`, the effect and the parameter for the report.
-pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>, records: ValueRecord) {
+pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
     let (here, label) = names;
     let ParamOut { group, refs, col } = out;
-    let read = |p: &EffectParam<'_, '_>| match records {
-        ValueRecord::Written => p.stored_value(),
-        ValueRecord::Any => p.recorded_value(),
-    };
     if p.kind != m.kind {
         col.lose(LossCategory::Effects, format!("{here}: parameter {label} has type {:?}, expected {:?}; not imported", p.kind, m.kind));
         return;
@@ -299,7 +288,9 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         }
         return;
     }
-    let value = match (p.stored(), read(p)) {
+    // A record in the default state (`tdsb` 3) still holds the value After Effects uses (1200,
+    // 1400: every such record reads back as recorded).
+    let value = match (p.stored(), p.recorded_value()) {
         (Some(_), Some(v)) => Some(v),
         (Some(_), None) => {
             col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, default used"));
