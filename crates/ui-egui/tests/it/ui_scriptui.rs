@@ -398,3 +398,196 @@ fn scheduled_import_reveals_its_composition_without_manual_clicks() {
     assert!(!h.state().ui.start_screen, "Home must not hide a composition opened by the scheduled import");
     h.state_mut().session.execute("scriptui.close", json!({"window":"Automatic import"})).unwrap();
 }
+
+/// Programmatic focus and typing without mouse interaction.
+#[test]
+fn scriptui_programmatic_focus_and_typing_test() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Focus Test");
+      var f = w.add("edittext", undefined, "", { name: "inputField" });
+      f.characters = 15;
+      f.onChanging = function() {};
+      f.active = true;
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "focustest.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    h.step();
+
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Focus Test").cloned().expect("window open");
+    let target_wid = win.focus_widget.expect("focus_widget set");
+    let field_id = egui::Id::unique(("sui", win.id, target_wid));
+
+    // Focus must be on the input field immediately without mouse interaction
+    assert!(h.ctx.memory(|m| m.has_focus(field_id)), "inputField must have focus without mouse interaction");
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(field_id));
+
+    // Cursor is at 0
+    let state = egui::text_edit::TextEditState::load(&h.ctx, field_id).expect("TextEditState exists");
+    assert_eq!(state.cursor.char_range(), Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+
+    // Type characters
+    for ch in ['h', 'e', 'l', 'l', 'o'] {
+        h.event(Event::Key {
+            key: match ch {
+                'h' => egui::Key::H,
+                'e' => egui::Key::E,
+                'l' => egui::Key::L,
+                'o' => egui::Key::O,
+                _ => egui::Key::A,
+            },
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.event(Event::Text(ch.to_string()));
+        h.step();
+    }
+    h.run_steps(2);
+
+    let updated_win = h.state().session.script_ui.window(win.id).cloned().expect("window exists");
+    let input_field = updated_win.root.lookup(&json!("inputField")).expect("inputField exists");
+    assert_eq!(input_field.text, "hello", "typed characters must appear inside inputField");
+    h.state_mut().session.execute("scriptui.close", json!({"window": win.id})).unwrap();
+}
+
+/// ScriptUI deactivation (`active = false`) surrenders native focus.
+#[test]
+fn scriptui_deactivation_releases_native_focus() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Deact Test");
+      var f = w.add("edittext", undefined, "Initial", { name: "field" });
+      var b = w.add("button", undefined, "Blur", { name: "blurBtn" });
+      b.onClick = function() {
+        f.active = false;
+      };
+      f.active = true;
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "deacttest.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    h.step();
+
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Deact Test").cloned().expect("window open");
+    let field_id = egui::Id::unique(("sui", win.id, win.focus_widget.unwrap()));
+    assert!(h.ctx.memory(|m| m.has_focus(field_id)), "field must initially have focus");
+
+    // Click the Blur button to set f.active = false from within the window context
+    let r2 = h.state_mut().session.execute("scriptui.click", json!({"window": win.id, "widget": "blurBtn"})).unwrap();
+    assert_eq!(r2["ok"], true, "{r2}");
+    h.step();
+    h.step();
+
+    assert!(!h.ctx.memory(|m| m.has_focus(field_id)), "native focus must be surrendered upon deactivation");
+    h.state_mut().session.execute("scriptui.close", json!({"window": win.id})).unwrap();
+}
+
+/// Modal dialogs remain raised above palettes regardless of window creation order.
+#[test]
+fn scriptui_modal_stays_above_palette_regardless_of_order() {
+    let mut h = harness();
+    // 1. Create modal first
+    let modal_code = r#"
+      var d = new Window("dialog", "Modal Above");
+      d.add("statictext", undefined, "Modal content");
+      d.show();
+    "#;
+    h.state_mut().session.execute("script.run", json!({"code": modal_code, "name": "modal.jsx"})).unwrap();
+    h.step();
+
+    // 2. Create palette second
+    let pal_code = r#"
+      var p = new Window("palette", "Palette Below");
+      p.add("statictext", undefined, "Palette content");
+      p.show();
+    "#;
+    h.state_mut().session.execute("script.run", json!({"code": pal_code, "name": "pal.jsx"})).unwrap();
+    h.step();
+    h.step();
+
+    let (modal_id, pal_id) = {
+        let wins = &h.state().session.script_ui.windows;
+        let modal_win = wins.iter().find(|w| w.modal).expect("modal window");
+        let pal_win = wins.iter().find(|w| !w.modal).expect("palette window");
+        assert!(modal_win.modal);
+        assert!(!pal_win.modal);
+        (modal_win.id, pal_win.id)
+    };
+
+    h.state_mut().session.execute("scriptui.close", json!({"window": modal_id})).unwrap();
+    h.state_mut().session.execute("scriptui.close", json!({"window": pal_id})).unwrap();
+}
+
+/// Key events route to the focused ScriptUI widget while edittext typing remains unconsumed.
+#[test]
+fn scriptui_keyboard_event_routing_and_navigation() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Key Routing");
+      var f = w.add("edittext", undefined, "test", { name: "field" });
+      var log = w.add("statictext", undefined, "", { name: "log" });
+      log.preferredSize = [200, 20];
+      var seen = [];
+      f.addEventListener("keydown", function(e) {
+        seen.push(e.keyName);
+        log.text = seen.join(",");
+      });
+      f.active = true;
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "keyroute.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    h.step();
+
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Key Routing").cloned().unwrap();
+    let fid = egui::Id::unique(("sui", win.id, win.focus_widget.unwrap()));
+    assert!(h.ctx.memory(|m| m.has_focus(fid)));
+
+    // Send ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Enter
+    for k in [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::Enter] {
+        h.event(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+
+    let win_updated = h.state().session.script_ui.window(win.id).cloned().unwrap();
+    let log_val = win_updated.root.lookup(&json!("log")).unwrap().text.clone();
+    assert_eq!(log_val, "Down,Up,Left,Right,Enter", "keyboard events must reach script listeners: {log_val}");
+    h.state_mut().session.execute("scriptui.close", json!({"window": win.id})).unwrap();
+}
+
+/// Accessibility metadata (placeholder on textedit, item text and selection on listbox) is preserved.
+#[test]
+fn scriptui_accessibility_metadata_preserved() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "A11y Test");
+      var ed = w.add("edittext", undefined, "", { name: "searchBox" });
+      ed.properties = { placeholder: "Search effects..." };
+      var list = w.add("listbox", undefined, ["Gaussian Blur", "Sharpen", "Glow"]);
+      list.selection = 1;
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "a11y.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "A11y Test").cloned().unwrap();
+    let search_box = win.root.lookup(&json!("searchBox")).unwrap();
+    assert_eq!(search_box.placeholder, "Search effects...");
+
+    // Query egui-kittest widgets to assert accessible label and selection
+    use egui_kittest::kittest::Queryable;
+    let blur_node = h.query_by_label("Gaussian Blur");
+    assert!(blur_node.is_some(), "Gaussian Blur item label must be present in UI tree");
+    let sharpen_node = h.query_by_label("Sharpen");
+    assert!(sharpen_node.is_some(), "Sharpen item label must be present in UI tree");
+
+    h.state_mut().session.execute("scriptui.close", json!({"window": win.id})).unwrap();
+}
