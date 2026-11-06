@@ -175,6 +175,83 @@ fn psd_imported_as_composition_with_new_comp_is_the_new_comp() {
     assert_eq!(roots, 1, "no wrapper comp");
 }
 
+struct Movie;
+impl crate::Importer for Movie {
+    fn probe(&self, path: &str) -> Result<effectcraft_project::Footage, String> {
+        Ok(effectcraft_project::Footage {
+            path: path.into(),
+            kind: effectcraft_project::FootageKind::Video,
+            width: 640,
+            height: 360,
+            has_video: true,
+            frame_rate: effectcraft_time::FrameRate::FPS_25,
+            duration: effectcraft_time::Tick::from_seconds_f64(3.0),
+            ..Default::default()
+        })
+    }
+}
+
+/// Verify complete mixed-import Undo/Redo for both PSD import modes and bounded histories,
+/// preserving intervening edits when the footage is probed in the background.
+fn mixed_import_undo(background: bool) {
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let path = tmp(&format!("mixed-{background}-{import_as}.psd"));
+        std::fs::write(&path, sample_psd()).unwrap();
+        for levels in [1, 32] {
+            let mut s = Session { importer: Some(std::sync::Arc::new(Movie)), ..Default::default() };
+            s.prefs.general.undo_levels = levels;
+            s.execute("file.importPlaceholder", json!({"name": "Before import"})).unwrap();
+            let mut before = serde_json::to_value(&s.project).unwrap();
+            s.execute_checked("file.import", json!({"paths": [path, "clip.mov"], "importAs": import_as, "newComp": true, "background": background})).unwrap();
+            if background {
+                assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "prepared additions wait for the probe");
+                s.execute("file.importPlaceholder", json!({"name": "During probe"})).unwrap();
+                before = serde_json::to_value(&s.project).unwrap();
+            }
+            s.wait_jobs();
+            if background {
+                assert_eq!(s.job_log.last().unwrap().message, "Imported 2 items");
+            }
+            let c = s.active_comp().unwrap();
+            assert_eq!(c.layers.len(), 1, "the layered document keeps its own comp");
+            assert_eq!(c.layers[0].name, "clip.mov");
+            assert_eq!(s.project.comps().count(), 3, "PSD root, PSD group and movie comp");
+            let after = serde_json::to_value(&s.project).unwrap();
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "one undo removes every imported item");
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(serde_json::to_value(&s.project).unwrap(), after, "one redo restores the complete import");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn mixed_psd_and_footage_import_undo_together() {
+    mixed_import_undo(false);
+}
+
+#[test]
+fn mixed_background_import_undo_preserves_intervening_edit() {
+    mixed_import_undo(true);
+}
+
+#[test]
+fn cancelling_a_mixed_background_import_leaves_no_prepared_items() {
+    let path = tmp("mixed-cancel.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session { importer: Some(std::sync::Arc::new(Movie)), ..Default::default() };
+    s.execute("file.importPlaceholder", json!({"name": "Before import"})).unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let undo = s.history.undo.len();
+    let job = s.execute_checked("file.import", json!({"paths": [path, "clip.mov"], "importAs": "composition", "newComp": true, "background": true})).unwrap();
+    assert_eq!(s.execute("jobs.cancel", json!({"job": job["job"]})).unwrap()["cancelled"], true);
+    s.wait_jobs();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    assert_eq!(s.history.undo.len(), undo);
+    std::fs::remove_file(path).unwrap();
+}
+
 /// A Photoshop file imported as a composition and dropped on the Timeline (`addToComp`) adds
 /// its composition once, not its folder too.
 #[test]

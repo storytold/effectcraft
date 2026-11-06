@@ -154,9 +154,9 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             }
             ctl.progress(total as u64, total as u64);
             let apply: crate::jobs::Apply = Box::new(move |s: &mut Session| {
-                let made = pending.comps.len() + probed.iter().filter(|r| r.is_ok()).count();
-                let mut r = add_footage(s, pending, probed)?;
-                finish_import(s, &mut r, target, &p);
+                let made = probed.iter().filter(|r| r.is_ok()).count();
+                let mut r = apply_import(s, pending, probed, target, &p)?;
+                let made = made + r["comps"].as_array().map_or(0, Vec::len);
                 let mut toast = format!("Imported {made} item{}", if made == 1 { "" } else { "s" });
                 let errors: Vec<&str> = r["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                 match errors.as_slice() {
@@ -171,9 +171,18 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         });
     }
     let probed = pending.sources.iter().map(|src| pending.prober.probe(src)).collect();
-    let mut r = add_footage(s, pending, probed)?;
-    finish_import(s, &mut r, target, p);
-    Ok(r)
+    apply_import(s, pending, probed, target, p)
+}
+
+/// Importing footage and making its composition is one undo step. For background
+/// probes, take the snapshot when applying the result, preserving intervening edits.
+fn apply_import(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>, target: Option<ItemId>, p: &Value) -> Result<Value> {
+    let apply = |s: &mut Session| {
+        let mut r = add_footage(s, pending, probed)?;
+        finish_import(s, &mut r, target, p);
+        Ok(r)
+    };
+    if b_p(p, "newComp").unwrap_or(false) { super::app_more::grouped(s, "Import", apply) } else { apply(s) }
 }
 
 /// After an import (its result `r`): with `newComp`, the new items become one new composition;
@@ -266,8 +275,8 @@ pub(crate) fn import(s: &mut Session, p: &Value) -> Result<Value> {
     add_footage(s, pending, probed)
 }
 
-/// An import whose layered files are already compositions: the files and image sequences left
-/// to probe as footage, how, and what the import made so far.
+/// Files left to probe and prepared additions. With `newComp`, the prepared additions wait
+/// until the result is applied, so they join the footage in the same undo group.
 struct PendingImport {
     sources: Vec<Source>,
     prober: Prober,
@@ -276,6 +285,13 @@ struct PendingImport {
     errors: Vec<String>,
     /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
     projects: Vec<Value>,
+    prepared: Vec<PreparedImport>,
+}
+
+enum PreparedImport {
+    Project(String),
+    Photoshop { path: String, bytes: Vec<u8>, retain: bool },
+    Vector { path: String, bytes: Vec<u8>, page: u32, retain: bool },
 }
 
 /// Everything probing a file needs, apart from the session (it can run on a background thread).
@@ -401,18 +417,9 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
             _ => return Err(bad("file.import", "page: a page number from 1")),
         },
     };
-    let mut comps = vec![];
-    let mut items = vec![];
-    let mut errors = vec![];
     // EffectCraft projects import as projects, as After Effects imports an .aep.
     let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
-    let mut projects = vec![];
-    for path in project_paths {
-        match s.execute("file.importProject", json!({"path": path})) {
-            Ok(r) => projects.push(r),
-            Err(e) => errors.push(format!("{path}: {e}")),
-        }
-    }
+    let mut prepared: Vec<PreparedImport> = project_paths.into_iter().map(PreparedImport::Project).collect();
     if let Some(retain) = retain {
         let mut rest = vec![];
         for path in paths {
@@ -420,13 +427,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
                 Ok(b) if effectcraft_psd::is_psd(&b) => b,
                 Ok(b) if effectcraft_pdf::sniff(&b).is_some() && !path.to_ascii_lowercase().ends_with(".svg") => {
                     // PDF / Illustrator / EPS: one layer per file layer.
-                    match import_vector_comp(s, &path, &b, page, retain) {
-                        Ok((comp, made)) => {
-                            comps.push(comp);
-                            items.extend(made);
-                        }
-                        Err(e) => errors.push(e.to_string()),
-                    }
+                    prepared.push(PreparedImport::Vector { path, bytes: b, page, retain });
                     continue;
                 }
                 _ => {
@@ -434,23 +435,9 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
                     continue;
                 }
             };
-            match import_psd_comp(s, &path, bytes, retain) {
-                Ok((comp, made, warnings)) => {
-                    comps.push(comp);
-                    items.extend(made);
-                    errors.extend(warnings);
-                }
-                Err(e) => errors.push(format!("{path}: {e}")),
-            }
+            prepared.push(PreparedImport::Photoshop { path, bytes, retain });
         }
         paths = rest;
-        // Composition imports already made their sources, so they bypass add_footage's
-        // probed-footage refresh. Refresh them before any background probe job starts (#1070).
-        for id in &items {
-            if let Some(ItemKind::Footage(f)) = s.project.item(ItemId(*id)).map(|it| &it.kind) {
-                s.forget_decoded(f);
-            }
-        }
     }
     // Numbered stills as image sequences (the Import dialog's "<format> Sequence" and Force
     // Alphabetical Order), at `frameRate` or Settings ▸ Import ▸ Sequence Footage.
@@ -470,12 +457,56 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
         page,
         psd_layer: p.get("layer").cloned(),
     };
-    Ok(PendingImport { sources, prober, comps, items, errors, projects })
+    let mut pending = PendingImport { sources, prober, comps: vec![], items: vec![], errors: vec![], projects: vec![], prepared };
+    if !b_p(p, "newComp").unwrap_or(false) {
+        apply_prepared(s, &mut pending);
+    }
+    Ok(pending)
+}
+
+/// Commit layered/project imports. Ordinary imports do this during preparation; `newComp`
+/// imports defer it until the probe completes, inside the result's undo group.
+fn apply_prepared(s: &mut Session, pending: &mut PendingImport) {
+    if pending.prepared.is_empty() {
+        return;
+    }
+    for import in std::mem::take(&mut pending.prepared) {
+        match import {
+            PreparedImport::Project(path) => match s.execute("file.importProject", json!({"path": path})) {
+                Ok(r) => pending.projects.push(r),
+                Err(e) => pending.errors.push(format!("{path}: {e}")),
+            },
+            PreparedImport::Photoshop { path, bytes, retain } => match crate::guard::guarded("Photoshop import", || import_psd_comp(s, &path, bytes, retain)) {
+                Ok((comp, made, warnings)) => {
+                    pending.comps.push(comp);
+                    pending.items.extend(made);
+                    pending.errors.extend(warnings);
+                }
+                Err(e) => pending.errors.push(format!("{path}: {e}")),
+            },
+            PreparedImport::Vector { path, bytes, page, retain } => {
+                match crate::guard::guarded("vector import", || import_vector_comp(s, &path, &bytes, page, retain)) {
+                    Ok((comp, made)) => {
+                        pending.comps.push(comp);
+                        pending.items.extend(made);
+                    }
+                    Err(e) => pending.errors.push(e.to_string()),
+                }
+            }
+        }
+    }
+    // These sources bypass the probed-footage refresh in add_footage (#1070).
+    for id in &pending.items {
+        if let Some(ItemKind::Footage(f)) = s.project.item(ItemId(*id)).map(|it| &it.kind) {
+            s.forget_decoded(f);
+        }
+    }
 }
 
 /// The last part of an import: add the probed files to the project (one undo step) and select
 /// everything the import made, so the Project panel shows it.
-fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>) -> Result<Value> {
+fn add_footage(s: &mut Session, mut pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>) -> Result<Value> {
+    apply_prepared(s, &mut pending);
     let PendingImport { comps, mut items, mut errors, projects, .. } = pending;
     let mut found = vec![];
     let mut warnings = vec![];
