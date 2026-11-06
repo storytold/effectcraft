@@ -226,6 +226,12 @@ from?, newName?}`, `shortcuts.export {preset?, path?}`, `shortcuts.import {path?
   Untitled projects go to the custom folder, or to `EffectCraft Auto-Save` in the config directory.
 - Every project and auto-save write is atomic: a temporary file is written and flushed, then
   renamed over the target, so a crash mid-write leaves the previous file intact.
+- On Linux and macOS a save keeps the file's mode. The temporary file is readable by its owner
+  only until it has the saved file's mode, so a private project is never written into a more open
+  file.
+- A project save through a symbolic link replaces the file the link points to, with the temporary
+  file next to that file, and the link stays. A link to a file that doesn't exist is an error, and
+  nothing is written. Settings, auto-saves and caches don't follow links.
 - While the app runs, `session.lock` in the config directory records the open project and its
   latest auto-save. A clean quit removes it. If it is still there at the next launch, the app
   offers to open the latest auto-save (Settings ▸ Startup & Repair can turn this off).

@@ -94,7 +94,12 @@ pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
 
 fn save_to(s: &mut Session, path: &str) -> Result<Value> {
     let json = file_text(s, path)?;
-    s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    // A save through a symlink replaces the file it points to, so the link stays (#2873). Only
+    // project saves follow links: settings, auto-saves and caches are files EffectCraft makes.
+    let cannot = |e: &dyn std::fmt::Display| EngineError::Other(format!("cannot write {path}: {e}"));
+    let target = crate::config::follow_links(std::path::Path::new(path)).map_err(|e| cannot(&e))?;
+    let target = target.to_str().ok_or_else(|| cannot(&"the symbolic link points to a path that isn't valid Unicode"))?;
+    s.services.write_file(target, json.as_bytes()).map_err(|e| cannot(&e))?;
     s.path = Some(path.to_string());
     s.mark_saved();
     s.note_project_path(path);
