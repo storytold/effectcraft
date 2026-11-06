@@ -174,6 +174,10 @@ fn new_mask(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_vertices = vec![VertexRef { layer: lid, mask: uid, index: n - 1 }];
         Ok(uid)
     })?;
+    s.events.push(crate::Event::Frontend {
+        command: "timeline.revealMask".into(),
+        params: json!({"comp": cid.0, "layer": lid.0, "mask": uid, "projectEpoch": s.script_ui.project_epoch}),
+    });
     Ok(json!({"mask": uid}))
 }
 

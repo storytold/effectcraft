@@ -30,6 +30,25 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "3D Channel", params, render, gpu: false, float: true }
 }
 
+/// The effects that read their layer's auxiliary channels ([`crate::EffectHost::aux`]): every
+/// 3D Channel effect but 3D Layer Instance.
+const READS_AUX: [&str; 8] = [
+    "ec.3d.channelextract",
+    "ec.3d.cryptomatte",
+    "ec.3d.depthmatte",
+    "ec.3d.depthoffield",
+    "ec.3d.extractor",
+    "ec.3d.fog3d",
+    "ec.3d.idmatte",
+    "ec.3d.identifier",
+];
+
+/// Does effect `id` read its layer's auxiliary channels ([`crate::EffectHost::aux`])? The media
+/// layer then decodes the footage's picture together with its channels (#474).
+pub fn reads_aux(id: &str) -> bool {
+    READS_AUX.contains(&id)
+}
+
 fn aux(ctx: &EffectCtx) -> Option<Arc<AuxChannels>> {
     ctx.env.host?.aux()
 }
@@ -491,6 +510,18 @@ pub fn crypto_aux_image_with(a: &AuxChannels, layer: &str, sel: &[u32], what: Cr
     img
 }
 
+/// The hidden switch that keeps Matte Only as projects saved before #3127 render it: the matte in
+/// RGB and alpha. Fresh instances have it off (the matte in RGB over alpha 1, as After Effects'
+/// Cryptomatte plug-in shows Matte Only); `migrate::legacy_default` turns it on for older saves.
+pub const MATTE_ONLY_IN_ALPHA: &str = "matteOnlyInAlpha";
+
+/// A Matte Only pixel for matte `m`: grey `m` over alpha 1, or with `in_alpha` (older
+/// projects) `m` in every channel. The GPU shader (`fx_depth.wgsl`, op 7) does the same.
+#[inline]
+pub fn matte_only_px(m: f32, in_alpha: bool) -> Px {
+    if in_alpha { [m; 4] } else { [m, m, m, 1.0] }
+}
+
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
     let layers = a.crypto_layers();
@@ -504,11 +535,12 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let idx = index_map(&b, &a);
     let display = ctx.params.e("display");
     let matte_only = ctx.params.b("matteOnly");
+    let in_alpha = ctx.params.b(MATTE_ONLY_IN_ALPHA);
     let planes = a.crypto_rank_planes(&layer);
     b.img.data.par_iter_mut().zip(idx.par_iter()).for_each_init(IdColorMemo::default, |memo, (px, &k)| {
         let m = k.map_or(0.0, |k| crypto_matte(&planes, &sel, k));
         if matte_only {
-            *px = [m, m, m, m];
+            *px = matte_only_px(m, in_alpha);
             return;
         }
         *px = match display {
@@ -624,6 +656,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 text("selection", "Selection", ""),
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
+                p(MATTE_ONLY_IN_ALPHA, "Matte Only In Alpha", Value::Bool(false), ParamUi::Hidden),
             ],
             cryptomatte,
         ),

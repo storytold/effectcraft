@@ -41,7 +41,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `gpu` | The GPU compositor and GPU effects on wgpu compute shaders (Metal, Vulkan, Direct3D 12, WebGPU), checked against the CPU renderer |
 | L3 | `sam2` | SAM 2.1 image segmentation and video object tracking for Roto Brush, with candle CPU inference and optional wgpu acceleration; native only, empty on wasm32, with user-installed weights |
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
-| L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of the importer's table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)) |
+| L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of a shared table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)); `export` builds every chunk in code (prototypes in the layout After Effects writes, cloned and edited only at verified fields) for the same scope, with a report of everything not exported, verified by opening the output in After Effects ([aep-export.md](aep-export.md)) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
 | L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
 | L3 | `helper-host` | External effect helpers: finds helper programs, runs each as a child process and registers its effects (plug-in API 2) over a versioned pipe + shared-file protocol; a crashing helper is an error on the effect, never a crash ([external-helpers.md](external-helpers.md), [ADR 0001](adr/0001-external-effect-helpers.md)). Native only |
@@ -409,7 +409,12 @@ inputs in 32 bpc. With a working space (sRGB, Rec. 709, Rec. 2020, Display P3; m
 from the published primaries), footage is converted from its colour profile (stream metadata or
 Interpret Footage, else sRGB) and the top-level comp is converted to the sRGB display. Linearize
 Working Space runs everything in linear light; Blend Colors Using 1.0 Gamma linearises only for
-blending. Layer cache keys include these settings.
+blending. Layer cache keys include these settings. Project Settings ▸ HDR (compand / tone
+mapping) is the last top-level step, for standard-dynamic-range displays and outputs; OpenEXR
+renders (sequences and ProEXR) skip it (`RenderOpts::skip_hdr_step`) and decode the frame with the
+output space's own curve (`Pipe::output_linear`), so they hold linear light in the output space's
+primaries; unmanaged projects decode with the Working Gamma's curve (sRGB at 2.2, a pure 2.4 power
+curve at 2.4). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by
