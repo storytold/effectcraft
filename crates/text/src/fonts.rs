@@ -5,7 +5,8 @@
 //! [`resolve`] maps a family + style name (as stored in projects) to a face and the synthetic
 //! bold/italic needed when the family lacks that style; a full name (`Yu Gothic Bold`) or
 //! PostScript name (`YuGothic-Bold`, how After Effects scripts name fonts) is accepted too.
-//! Unknown families fall back to Inter. [`fallback_for`] finds a face for a character the chosen
+//! Unknown families fall back to Inter. An installed face takes the place of a bundled one with
+//! the same family and style. [`fallback_for`] finds a face for a character the chosen
 //! face lacks: bundled faces first, then the system's usual family for the character's script
 //! (CJK), then any installed face that covers it.
 
@@ -50,7 +51,9 @@ pub struct FaceInfo {
     pub italic: bool,
     pub index: u32,
     pub data: FaceData,
-    /// "bundled", "system", …
+    /// "bundled" (compiled in), "system" (found by a [`DirectorySource`] in a font folder: the
+    /// system's, the user's own such as `~/.local/share/fonts` or `~/Library/Fonts`, and those in
+    /// `EFFECTCRAFT_FONT_DIRS`) or "user" (registered from memory with [`add_font_data`]).
     pub origin: &'static str,
     /// The family name in the font's own (non-English) language, when it has one.
     pub native_family: Option<String>,
@@ -331,20 +334,35 @@ fn db() -> &'static RwLock<Db> {
     })
 }
 
+fn is_bundled(f: &Face) -> bool {
+    f.info.origin == "bundled"
+}
+
+/// `faces` split into the installed ones and the bundled ones, each in database order, for the
+/// lookups to search in that order. An installed face takes the place of a bundled face with the
+/// same family and style: a user who installs Inter (a variable Inter, say) expects their copy to
+/// be used, as the operating system uses a font in the user's font folder over its own copy, and
+/// the bundled faces still fill the styles the installed family lacks.
+fn installed_then_bundled<'a>(faces: impl IntoIterator<Item = &'a Arc<Face>>) -> [Vec<&'a Arc<Face>>; 2] {
+    let (installed, bundled) = faces.into_iter().partition(|f| !is_bundled(f));
+    [installed, bundled]
+}
+
 fn push(db: &mut Db, info: FaceInfo) -> FaceId {
     let id = db.faces.len();
     db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), shaper: OnceLock::new() }));
     id
 }
 
-/// Add faces from a source (skipping family+style pairs already present). Returns how many were
-/// added.
+/// Add faces from a source (skipping family+style pairs an installed face already has). Returns
+/// how many were added. A bundled face does not hide an installed one with the same family and
+/// style: the installed face takes its place in [`resolve`].
 pub fn add_source(src: &dyn FontSource) -> usize {
     let faces = src.faces();
     let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut n = 0;
     for f in faces {
-        let dup = d.faces.iter().any(|g| g.info.family.eq_ignore_ascii_case(&f.family) && g.info.style.eq_ignore_ascii_case(&f.style));
+        let dup = d.faces.iter().any(|g| !is_bundled(g) && g.info.family.eq_ignore_ascii_case(&f.family) && g.info.style.eq_ignore_ascii_case(&f.style));
         if !dup {
             push(&mut d, f);
             n += 1;
@@ -579,10 +597,16 @@ fn style_wants(style: &str) -> (u16, bool) {
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
 /// lacks picks the nearest weight and synthesises bold (≥ 600 requested, ≤ 500 found) or italic.
 pub fn resolve(family: &str, style: &str) -> Resolved {
-    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
+    // A bundled face is the answer only once the installed fonts are known: an installed copy of
+    // its family takes its place, and the same text must not change face when a scan finishes.
+    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family))
+        && (system_scanned() || !is_bundled(&face(r.face)))
+    {
         return r;
     }
-    if !system_scanned() && !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY) {
+    // Before the scan, a missing family may be installed, and the Inter that stands in for it may
+    // be the installed copy.
+    if !system_scanned() {
         scan_system();
         if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
             return r;
@@ -621,23 +645,27 @@ fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
     let faces = all_faces();
-    let fam: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
-    if fam.is_empty() {
+    let fam = installed_then_bundled(faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)));
+    if fam.iter().all(Vec::is_empty) {
         return None;
     }
     let instance_named = |f: &Face, name: &str| f.info.instances.iter().position(|i| i.style.eq_ignore_ascii_case(name)).and_then(|i| u16::try_from(i).ok());
-    // A face's own style (a variable face's is its default instance) needs no axis values.
-    if let Some(f) = fam.iter().find(|f| f.info.style.eq_ignore_ascii_case(style)) {
-        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: None });
+    // The installed faces are searched before the bundled ones, so an installed variable face's
+    // named instance wins over a bundled face's own style.
+    for part in &fam {
+        // A face's own style (a variable face's is its default instance) needs no axis values.
+        if let Some(f) = part.iter().find(|f| f.info.style.eq_ignore_ascii_case(style)) {
+            return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: None });
+        }
+        // A named instance of a variable face (`Figtree` `Black`): that face at the instance's
+        // axis values, not the nearest static weight made bold synthetically.
+        if let Some((f, i)) = part.iter().find_map(|f| Some((f, instance_named(f, style)?))) {
+            return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: Some(i) });
+        }
     }
-    // A named instance of a variable face (`Figtree` `Black`): that face at the instance's axis
-    // values, not the nearest static weight made bold synthetically.
-    if let Some((f, i)) = fam.iter().find_map(|f| Some((f, instance_named(f, style)?))) {
-        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: Some(i) });
-    }
-    // The nearest weight among the faces and the named instances.
+    // The nearest weight among the faces and the named instances (an installed one on a tie).
     let (w, it) = style_wants(style);
-    let candidates = fam.iter().flat_map(|f| {
+    let candidates = fam.iter().flatten().flat_map(|f| {
         std::iter::once((f, None, f.info.weight, f.info.italic)).chain(
             f.info
                 .instances
@@ -668,23 +696,27 @@ fn resolve_by_name(name: &str) -> Option<Resolved> {
         missing: false,
         instance: instance.and_then(|i| u16::try_from(i).ok()),
     };
-    if let Some(f) = faces
-        .iter()
-        .find(|f| f.info.postscript.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)))
-        .or_else(|| faces.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))
-    {
-        // A variable face's own name is its default instance's (`Figtree-Light`).
-        return Some(found(f, None));
-    }
-    // A named instance of a variable face, by its PostScript name (`Figtree-Black`, what After
-    // Effects scripts use) or its full name (`Figtree Black`).
-    faces.iter().find_map(|f| {
-        let i = f
-            .info
-            .instances
+    // The installed faces first, as in `resolve_in`: an installed face or named instance that
+    // shares its name with a bundled face (`Inter-Regular`) takes its place.
+    installed_then_bundled(&faces).iter().find_map(|part| {
+        if let Some(f) = part
             .iter()
-            .position(|i| i.postscript.eq_ignore_ascii_case(name) || format!("{} {}", f.info.family, i.style).eq_ignore_ascii_case(name))?;
-        Some(found(f, Some(i)))
+            .find(|f| f.info.postscript.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)))
+            .or_else(|| part.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))
+        {
+            // A variable face's own name is its default instance's (`Figtree-Light`).
+            return Some(found(f, None));
+        }
+        // A named instance of a variable face, by its PostScript name (`Figtree-Black`, what
+        // After Effects scripts use) or its full name (`Figtree Black`).
+        part.iter().find_map(|f| {
+            let i = f
+                .info
+                .instances
+                .iter()
+                .position(|i| i.postscript.eq_ignore_ascii_case(name) || format!("{} {}", f.info.family, i.style).eq_ignore_ascii_case(name))?;
+            Some(found(f, Some(i)))
+        })
     })
 }
 

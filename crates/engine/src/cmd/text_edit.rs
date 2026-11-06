@@ -889,7 +889,12 @@ pub fn fonts(_s: &mut Session, p: &Value) -> Result<Value> {
     let variable = fonts::variable_families();
     let mut origin: std::collections::BTreeMap<String, &'static str> = Default::default();
     for f in fonts::all_faces() {
-        origin.entry(f.info.family.clone()).or_insert(f.info.origin);
+        // Installed faces take the place of bundled ones with the same style, so a family that
+        // has any reports where they come from.
+        let o = origin.entry(f.info.family.clone()).or_insert(f.info.origin);
+        if *o == "bundled" {
+            *o = f.info.origin;
+        }
     }
     let list: Vec<Value> = effectcraft_text::families()
         .into_iter()
@@ -942,7 +947,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "List Fonts",
             [],
             None,
-            "{query?, variable?, rescan?} → {count, families: [{family, styles, origin: bundled|system|user, variable, nativeName?}], added} (variable: only variable fonts; rescan picks up fonts installed since launch)",
+            "{query?, variable?, rescan?} → {count, families: [{family, styles, origin: bundled|system|user, variable, nativeName?}], added} (origin: bundled = built in, system = found in a font folder, per-user folders included, user = registered from memory; an installed face replaces a bundled one of the same style; variable: only variable fonts; rescan picks up fonts installed since launch)",
             always_ok,
             fonts
         ),

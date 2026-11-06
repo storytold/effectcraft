@@ -197,8 +197,8 @@ mod tests {
 
     #[test]
     fn static_fonts_have_no_axes_and_variable_outlines_move() {
-        let inter = crate::resolve("Inter", "Regular").face;
-        assert!(font_axes(inter).is_empty());
+        // The bundled Inter Regular (face 0; an installed Inter would take its place in resolve).
+        assert!(font_axes(0).is_empty());
         // A variable system font, when one is installed (macOS ships several): its outline
         // changes along an axis. Skipped on machines without one.
         let Some((face, axes)) = find_variable_face() else {
