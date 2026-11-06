@@ -116,12 +116,26 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
+/// Frames a segmentation span may reach on each side of its base frame (72 minutes at 60 fps):
+/// every frame of the span gets a content key, and the propagation jobs visit each one.
+pub const MAX_SPAN_FRAMES: i64 = 1 << 18;
+
 impl RotoData {
+    /// Read saved data. The span is kept around the base frame and within [`MAX_SPAN_FRAMES`]
+    /// of it on each side, whatever the file says.
     pub fn from_json(s: &str) -> RotoData {
         if s.trim().is_empty() {
             return RotoData::default();
         }
-        serde_json::from_str(s).unwrap_or_default()
+        let mut d: RotoData = serde_json::from_str(s).unwrap_or_default();
+        d.bound_span();
+        d
+    }
+    /// Keep the span around the base frame and within [`MAX_SPAN_FRAMES`] of it on each side.
+    pub fn bound_span(&mut self) {
+        let Some(base) = self.base else { return };
+        let [a, b] = self.span;
+        self.span = [a.min(base).max(base.saturating_sub(MAX_SPAN_FRAMES)), b.max(base).min(base.saturating_add(MAX_SPAN_FRAMES))];
     }
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
@@ -169,6 +183,7 @@ impl RotoData {
             }
             None => {}
         }
+        self.bound_span();
         self.strokes.push(s);
     }
     /// Largest Refine Edge stroke radius (layer pixels).
@@ -181,10 +196,15 @@ impl RotoData {
     pub fn chain_keys(&self, seed: u64) -> BTreeMap<i64, u64> {
         let mut out = BTreeMap::new();
         let Some(base) = self.base else { return out };
+        // Strokes by frame, once: not a pass over every stroke for each frame of the span.
+        let mut by_frame: BTreeMap<i64, Vec<&Stroke>> = BTreeMap::new();
+        for s in &self.strokes {
+            by_frame.entry(s.frame).or_default().push(s);
+        }
         let key = |prev: u64, f: i64| {
             let mut h = prev ^ 0x9e37_79b9_7f4a_7c15;
             fnv(&mut h, &f.to_le_bytes());
-            for s in self.strokes.iter().filter(|s| s.frame == f) {
+            for s in by_frame.get(&f).into_iter().flatten() {
                 fnv(&mut h, serde_json::to_string(s).unwrap_or_default().as_bytes());
             }
             h
