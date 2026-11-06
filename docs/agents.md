@@ -319,6 +319,13 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  OpenEXR sequences (`format: exr`) are scan-line files, linear and premultiplied, and take
+  `exrCompression: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab` (default `zip`, 16-line
+  blocks; `zips` is ZIP one scan line per block, the "Zip (1 scanline)" many compositing
+  pipelines default to) and `exrBitDepth: half|float` (default `float`); `renderQueue.formats`
+  lists them.
+  PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
+  stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both
@@ -476,7 +483,9 @@ undistort?, wait?}`) apply
 Effect ▸ Perspective ▸ 3D Camera Tracker (or reuse the layer's) and analyse it in the background:
 "Analyzing in background (step 1 of 2)" tracks features, "Solving camera" solves.
 `camera.analyze {layer?, effect?, wait?}` re-runs it, `camera.cancel` stops it without writing
-anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved`, `methodUsed`,
+anything. `camera.solveStatus` reports `progress`/`banner`, `analyzed`, `solved` (every frame
+solved), `partial` with `solvedFrames` of `frames` (the camera is interpolated on the other frames,
+and `camera.exportBlender` refuses such a solve), `methodUsed`,
 `averageError` (pixels), `focalLength`, `horizontalAngleOfView`, the current frame's `camera`
 (position, orientation, zoom), `groundPlane` and the solved `lensDistortion` (`k1`, `k2`, normalised by
 half the frame diagonal) when Solve Lens Distortion (`effects/#1/advanced/lensDistortion`, also on
@@ -647,7 +656,8 @@ that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript 
 `file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes
 the project first). Scripts' `app.settings`:
 `script.settings.get {"section": …, "key": …}` and `script.settings.save {…, "value": …}`.
-Extension points and the bundled extensions: [plugins.md](plugins.md).
+Extension points and the bundled extensions: [plugins.md](plugins.md); publishing an effect plug-in
+in the Plug-in Library: [publishing-plugins.md](publishing-plugins.md).
 
 ### Timeline: layer order, properties and shortcuts
 
@@ -749,7 +759,16 @@ effectcraft-cli exec layer.newNull --bridge 9877                 # same commands
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
+effectcraft-cli render main.ecproj --comp Main --out 'main_[#####].exr' --exr-compression piz --exr-depth half   # half-float PIZ OpenEXR frames
 ```
+
+Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
+parallel scripts don't lose edits. Each holds an OS lock on `.<name>.lock` next to the project from
+before it reads the file until it exits; the next one says so on stderr, waits, and then edits what
+the first one saved. A crash releases the lock, and the empty file left behind is harmless. Only these
+CLI runs take the lock: the desktop app, `mcp`, and a `file.save` step in a run without `--save`
+don't. OS locks can also be unreliable over network shares and synced folders. If the lock can't be
+taken, the run warns on stderr and saves anyway.
 
 A long `run` doesn't fit on a command line (Windows caps it at 32 767 characters, Linux one
 argument at 128 KiB). `run --args-file F` reads the same `<id> <json>` arguments one per line;
@@ -781,6 +800,10 @@ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network.
 cannot express (most effects, cameras and lights, layer styles, audio, video footage…), so an
 agent can check what a player will not show. A `.lottie` path writes a dotLottie archive.
 `file.importLottie` returns `{comp, items, warnings}` and opens the new composition.
+
+`file.importAep {path, allowLosses?, dryRun?, applySettings?}` imports an After Effects project (`.aep` or `.aepx`) into a folder named after the file and returns `{folder, comps, items, report}`. The report counts what arrived and lists, per category, what did not (effects outside the importer's table, undecoded text or style settings, simplified keyframes…); without `allowLosses` an import that would lose anything is refused and changes nothing, and `dryRun` returns just the report ([aep-import.md](aep-import.md)).
+
+`file.exportAep {path, allowLosses?, dryRun?}` writes the project as an After Effects project and returns `{path, bytes, report}`. The report counts what was written and lists, per category, what was not; without `allowLosses` an export that would lose anything is refused and writes nothing, and `dryRun` returns just the report ([aep-export.md](aep-export.md)).
 
 Premiere Pro interop goes through timeline interchange (MCP: the `execute_command` tool; control channel: `engine.execute`
 with the same ids):

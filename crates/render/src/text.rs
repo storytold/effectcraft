@@ -343,7 +343,10 @@ pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &Tex
             }
             angles.apply(c, k);
             if let Some(o) = op {
-                c.opacity *= 1.0 + (o / 100.0 - 1.0) * k;
+                // Blend toward this animator's value, so a later animator can show characters an
+                // earlier one hid (Lottie files rely on it: Opacity 0 % on every character, then
+                // animators at 100 % that sweep in). With one animator this is the same as before.
+                c.opacity += (o - c.opacity) * k;
             }
             if let Some(f) = fill {
                 c.fill = Some(f);

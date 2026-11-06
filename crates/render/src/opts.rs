@@ -32,6 +32,12 @@ pub struct RenderOpts {
     /// compositing is skipped (its mask paths stay, a text path may use them) and lines past its
     /// paragraph box show, so the glyphs match the caret and selection.
     pub edited_text: Option<u64>,
+
+    /// No HDR step: the top-level comp leaves the working space for the output space without
+    /// Project Settings ▸ HDR (compand / tone mapping), so over-range values stay. The consumer
+    /// decodes the frame with [`crate::color::Pipe::output_linear`] (float outputs: OpenEXR)
+    /// or applies the step itself. Part of the viewer's frame keys (`opts_hash`).
+    pub skip_hdr_step: bool,
 }
 
 impl RenderOpts {
@@ -53,6 +59,7 @@ impl Default for RenderOpts {
             backend: Backend::Cpu,
             nested_switches: true,
             draft_shadows: true,
+            skip_hdr_step: false,
             proxy: effectcraft_project::render_queue::ProxyUse::CurrentSettings,
             edited_text: None,
         }

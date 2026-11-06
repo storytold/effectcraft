@@ -152,6 +152,9 @@ pub enum Dialog {
     UnsavedChanges,
     /// Delete Project items that compositions use? (`panels::delete_items`).
     DeleteItems,
+    /// Import an After Effects project although some of it cannot be imported exactly?
+    /// (`panels::aep_losses`).
+    AepLosses,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
@@ -312,6 +315,8 @@ pub struct EffectcraftApp {
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
     pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
     /// demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
@@ -332,7 +337,7 @@ pub struct EffectcraftApp {
     /// files, started with the first project that has items ([`Self::tick_footage_reload`]).
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
-    footage_watch_key: Option<(u64, String)>,
+    footage_watch_key: Option<(u64, String, bool)>,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,

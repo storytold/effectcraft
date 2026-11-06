@@ -549,6 +549,22 @@ fn keyframed_selector_animates() {
 }
 
 #[test]
+fn a_later_animator_opacity_shows_characters_an_earlier_one_hid() {
+    let (mut p, cid, comp) = setup(400, 200);
+    let mut l = text_layer(&mut p, &comp, doc("ABCD", 40.0));
+    animator(&mut p, &mut l, &["opacity"], &["range"]);
+    set(&mut l, "text/animators/#1/properties/opacity", Value::Scalar(0.0));
+    animator(&mut p, &mut l, &["opacity"], &["range"]);
+    set(&mut l, "text/animators/#2/properties/opacity", Value::Scalar(60.0));
+    set(&mut l, "text/animators/#2/selectors/#1/end", Value::Scalar(50.0));
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let glyphs = glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]);
+    let opacity: Vec<f64> = glyphs.iter().map(|g| (g.1.opacity * 1000.0).round() / 1000.0).collect();
+    // The second animator selects "AB" only: they come back at 60 %, "CD" stay hidden.
+    assert_eq!(opacity, [60.0, 60.0, 0.0, 0.0]);
+}
+
+#[test]
 fn caret_follows_animators_and_path_text() {
     let (mut p, cid, comp) = setup(400, 400);
     let mut l = text_layer(&mut p, &comp, doc("ABCD", 30.0));

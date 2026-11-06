@@ -76,6 +76,16 @@ pub trait Accelerator: Send + Sync {
     fn particles(&self) -> Option<&dyn effectcraft_effects::psim::ParticleSim> {
         None
     }
+    /// A hardware backend for Content-Aware Fill's stages (the GPU compositor's kernels), with
+    /// the CPU fill's semantics. `None` = the fill runs on the CPU.
+    ///
+    /// The fill's input frames are read back to the CPU before it runs (analyses render on the
+    /// CPU by design, see `effectcraft_engine::background::offload::job_accel`), so a backend
+    /// here is about the fill's own work — PatchMatch and the flow's block matching today, one
+    /// stage at a time as each pays (`effectcraft_gpu::inpaint`) — not about compositing.
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        None
+    }
     /// Timing history [`Backend::Auto`] uses to send each comp's top-level frames to the
     /// faster compositor. `None` = Auto always tries the accelerator first.
     fn auto_pick(&self) -> Option<&AutoPick> {
@@ -96,6 +106,19 @@ pub trait Accelerator: Send + Sync {
     /// results, `pass_begin` clears the miss. Synchronous accelerators never miss.
     fn frame_begin(&self) {}
     fn pass_begin(&self) {}
+    /// A rendered comp frame is done (the GPU pool ages sizes no frame asks for, and evicts
+    /// only those once full). The multi-frame render paths call it once per comp frame:
+    /// [`crate::passes::comp_frame`] (exports; a field-rendered output frame is two), the
+    /// export's 4:2:0 frames ([`Accelerator::comp_frame_yuv420`]), remote frames and the
+    /// preview workers. One-off renders (`Session::render`, single-frame export,
+    /// thumbnails) don't, so they don't advance the pool's clock. Without it the pool never
+    /// finds a stale size and keeps its first sizes, dropping newcomers.
+    fn frame_end(&self) {}
+    /// A render of many frames (an export) is done: drop what is kept only to speed up the
+    /// next frame (pooled working textures). Exports call it, even when they fail, panic or
+    /// are dropped; other multi-frame paths (preview, remote frames) don't, so there the pool
+    /// keeps up to its budget until the next export ends.
+    fn render_end(&self) {}
     fn pass_missed(&self) -> bool {
         false
     }
@@ -172,6 +195,13 @@ impl<'a> Renderer<'a> {
     /// The project's colour pipeline.
     pub fn pipe(&self) -> color::Pipe {
         self.pipe
+    }
+
+    /// The colour pipeline of the top-level output steps: the project's, with no HDR step under
+    /// [`crate::RenderOpts::skip_hdr_step`] (the consumer decodes with
+    /// [`color::Pipe::output_linear`] or applies the step itself).
+    pub fn output_pipe(&self) -> color::Pipe {
+        if self.opts.skip_hdr_step { self.pipe.without_hdr_step() } else { self.pipe }
     }
 
     /// Nesting depth (0 = the top-level comp).

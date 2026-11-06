@@ -581,6 +581,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
@@ -591,6 +592,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
+    After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
@@ -1014,6 +1016,11 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Install Effect Plug-in... | effect.plugins.install
+  Install Effect Plug-in Bundle (Folder)... | effect.plugins.install {"bundle": true}
+  Load Plug-ins Through Helper... | effect.helpers.load
+  Scan for Effect Helpers | effect.helpers.scan
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation
