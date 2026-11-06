@@ -502,6 +502,30 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.show_panel(PanelKind::EffectsPresets);
             Value::Null
         }
+        "timeline.revealMask" => {
+            let id = |key: &str| p.get(key).and_then(Value::as_u64).ok_or_else(|| format!("timeline.revealMask: need `{key}` as an unsigned integer"));
+            let (comp, layer, mask, epoch) = (id("comp")?, id("layer")?, id("mask")?, id("projectEpoch")?);
+            if epoch != app.session.script_ui.project_epoch || app.session.active_comp_id().map(|c| c.0) != Some(comp) {
+                return Ok(json!({"revealed": false}));
+            }
+            let masks = app.session.active_comp().and_then(|c| c.layer(effectcraft_engine::project::LayerId(layer))).and_then(|l| l.masks());
+            let Some(masks) = masks.filter(|m| m.groups().any(|g| g.uid == mask && matches!(g.kind, effectcraft_engine::project::GroupKind::Mask { .. })))
+            else {
+                return Ok(json!({"revealed": false}));
+            };
+            let masks_uid = masks.uid;
+            let tl = &mut app.ui.timeline;
+            tl.open_layers.insert(layer);
+            tl.open_groups.extend([masks_uid, mask]);
+            // Add to a shortcut's existing reveal without changing the last pressed shortcut.
+            if let Some(kinds) = tl.layer_reveal.get_mut(&layer).filter(|k| !k.is_empty()) {
+                tl.reveal_props.insert(mask);
+                if !kinds.iter().any(|k| k == "props") {
+                    kinds.push("props".into());
+                }
+            }
+            json!({"revealed": true})
+        }
         "timeline.revealProps" => {
             let props = p.get("props").and_then(Value::as_array).cloned().unwrap_or_default();
             let uids = |k: &str| -> Vec<u64> { props.iter().filter_map(|x| x.get(k).and_then(Value::as_u64)).collect() };

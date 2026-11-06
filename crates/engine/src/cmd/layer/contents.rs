@@ -31,6 +31,10 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         proj.next_id = next;
         Ok(uid)
     })?;
+    s.events.push(crate::Event::Frontend {
+        command: "timeline.revealMask".into(),
+        params: json!({"comp": cid.0, "layer": lid.0, "mask": uid, "projectEpoch": s.script_ui.project_epoch}),
+    });
     Ok(json!({"mask": uid}))
 }
 

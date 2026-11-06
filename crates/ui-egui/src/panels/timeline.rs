@@ -1106,6 +1106,9 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
         let mut groups = vec![];
         groups_in(&l.props, reveal_props, &mut groups);
         for g in groups {
+            if shown_groups.contains(&g.uid) {
+                continue;
+            }
             let open = tl.open_groups.contains(&g.uid);
             rows.push(Row {
                 layer: l.id,
@@ -1176,6 +1179,19 @@ fn revealed_rows(
             }
         }
     }
+    // Whole groups already emitted above own their properties, including under mixed reveals.
+    fn props(rows: &mut Vec<Row>, t: &Tree<'_>, g: &PropGroup) {
+        if t.skip.contains(&g.uid) {
+            return;
+        }
+        for child in &g.children {
+            match child {
+                Node::Prop(p) if (t.wanted)(p) => rows.push(Row { layer: t.l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
+                Node::Group(g) => props(rows, t, g),
+                _ => {}
+            }
+        }
+    }
     let wanted = |p: &Property| shown.contains(&p.uid) && prop_visible(p, l);
     let tree = Tree { l, wanted: &wanted, skip, open, full };
     for c in &l.props.children {
@@ -1185,11 +1201,7 @@ fn revealed_rows(
                     group(rows, &tree, e, 1);
                 }
             }
-            Node::Group(g) => {
-                let mut found = vec![];
-                collect_props(g, &mut found, &wanted);
-                rows.extend(found.into_iter().map(|uid| Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid } }));
-            }
+            Node::Group(g) => props(rows, &tree, g),
             Node::Prop(p) if wanted(p) => rows.push(Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
             Node::Prop(_) => {}
         }
