@@ -40,6 +40,15 @@ struct Tex {
     rect: [f64; 4],
 }
 
+/// Pan movement for a held middle button. The pan follows the pointer wherever it goes once the
+/// press began over the canvas `area` (as the Timeline's middle-drag pan does); `None` when the
+/// press began elsewhere, in the press frame (movement from before the press is not part of the
+/// drag), or when the delta is zero / not finite.
+fn middle_pan_delta(area: Rect, press_origin: Option<Pos2>, pressed: bool, delta: egui::Vec2) -> Option<egui::Vec2> {
+    let d = if pressed { egui::Vec2::ZERO } else { delta };
+    (press_origin.is_some_and(|p| area.contains(p)) && d != egui::Vec2::ZERO && d.x.is_finite() && d.y.is_finite()).then_some(d)
+}
+
 /// The `egui::Id` of the cached render of the layer shown in this panel ([`Tex`]), with the key
 /// the image was made from.
 fn tex_id() -> egui::Id {
@@ -332,11 +341,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.layer_pan = [pan.x + scroll.pan.x, pan.y + scroll.pan.y];
         }
     }
-    // A middle-drag pans with any tool; painting and Roto Brush strokes don't run meanwhile.
-    if hovered && ui.input(|i| i.pointer.middle_down()) {
-        // Movement from before the press (in its frame) is not part of the drag.
-        let d = ui.input(|i| if i.pointer.button_pressed(egui::PointerButton::Middle) { egui::Vec2::ZERO } else { i.pointer.delta() });
-        if d != egui::Vec2::ZERO && d.x.is_finite() && d.y.is_finite() {
+    // A middle-drag pans with any tool for as long as the button is held, even once the pointer has
+    // left the canvas; painting and Roto Brush strokes don't run meanwhile (they would otherwise
+    // start a stroke from the middle-press point, #2896).
+    if ui.input(|i| i.pointer.middle_down()) {
+        let (press, pressed, delta) = ui.input(|i| (i.pointer.press_origin(), i.pointer.button_pressed(egui::PointerButton::Middle), i.pointer.delta()));
+        if let Some(d) = middle_pan_delta(area, press, pressed, delta) {
             app.ui.layer_zoom.get_or_insert(zoom as f32);
             app.ui.layer_pan = [pan.x + d.x, pan.y + d.y];
         }
@@ -430,5 +440,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     {
         let stroke = StrokeCtx { layer: layer.id.0, kind, zoom, did, diameter: o.diameter, color: o.color, to_layer: &to_layer, to_screen: &to_screen };
         paint_stroke(app, ui, &painter, &resp, &stroke);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn middle_pan_follows_a_press_on_the_canvas_and_ignores_the_press_frame() {
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let inside = Some(pos2(50.0, 50.0));
+        let d = vec2(3.0, -2.0);
+        // The pan keeps going whatever the pointer's current position is (it may be off the canvas).
+        assert_eq!(middle_pan_delta(area, inside, false, d), Some(d));
+        // A middle press that began in another panel doesn't pan this one.
+        assert_eq!(middle_pan_delta(area, Some(pos2(150.0, 50.0)), false, d), None);
+        assert_eq!(middle_pan_delta(area, None, false, d), None);
+        assert_eq!(middle_pan_delta(area, inside, true, d), None);
+        assert_eq!(middle_pan_delta(area, inside, false, vec2(f32::NAN, 1.0)), None);
+        assert_eq!(middle_pan_delta(area, inside, false, egui::Vec2::ZERO), None);
     }
 }
