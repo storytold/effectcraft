@@ -140,13 +140,16 @@ fn light_dir(angle_deg: f64, elevation_deg: f64) -> [f64; 3] {
     v.map(|x| x / l)
 }
 
-fn bevel_alpha(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
+fn bevel_alpha(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let pr = ctx.params;
     let t = pr.f("edgeThickness") * b.scale;
     let inten = pr.f("lightIntensity") as f32;
     if t <= 0.0 || inten == 0.0 {
         return Some(b);
     }
+    // As the CPU's: transparent room for the alpha blur, up to the layer's edge (#1205).
+    let sides = effectcraft_effects::cover_pad_sides(ctx, [b.img.width, b.img.height], b.offset, b.scale, effectcraft_effects::alpha_blur_reach(t * 0.5));
+    b.pad_sides(e, sides)?;
     let light = pr.color("lightColor");
     let l = light_dir(pr.f("lightAngle"), 45.0);
     // The alpha plane's Gaussian (util::gauss_plane: box passes, edges repeated); kernels read x.

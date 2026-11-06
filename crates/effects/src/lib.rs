@@ -445,9 +445,44 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
 }
 
 /// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
-/// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
-/// skips the renderer's cover of the whole layer rectangle (#1205).
-pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+/// Pixels through [`Buf::cover`], displacement through [`cover_pad`], the alpha blur of Bevel
+/// Alpha and Roughen Edges through [`cover_pad_sides`]): a stack of only these skips the
+/// renderer's cover of the whole layer rectangle (#1205). A text layer's cover is the whole
+/// comp or more, so one effect outside this list made every word of a lyric video render its
+/// effects comp-sized (#1913).
+pub const SKIPS_COVER: &[&str] =
+    &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.bevelalpha", "ec.stylize.roughenedges"];
+
+/// How far [`util::gauss_plane`] at `sigma` carries a pixel (its three repeated-edge box passes),
+/// plus one for a gradient read beside it: transparent pixels this deep around the content make
+/// the blur near the content what it is inside the full-layer cover.
+pub fn alpha_blur_reach(sigma: f64) -> u32 {
+    if !(sigma > 0.05 && sigma.is_finite()) {
+        return 1;
+    }
+    (util::box_radii(sigma, 3).iter().sum::<usize>().saturating_add(1)).min(4096) as u32
+}
+
+/// Transparent pixels to add on each side (left, top, right, bottom; [`Buf::pad_sides`]) of a
+/// buffer `size` pixels big, with `offset` and `scale`, for an effect that reads up to `want`
+/// pixels around its content: `want`, cut at the layer rectangle so the buffer never reaches past
+/// what [`Buf::cover`] gives (where the cover repeats the layer's edge, so must this), and on
+/// the left and top in whole [`GRID_ALIGN`] steps or exactly to the layer's edge, so the grid
+/// phase [`Buf::align`] gave stays. Nothing on an adjustment layer.
+pub fn cover_pad_sides(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64, want: u32) -> [u32; 4] {
+    if ctx.adjustment {
+        return [0; 4];
+    }
+    let (x0, y0, w, h) = util::layer_rect_at(ctx, offset, scale);
+    let room = |v: f64| if v.is_finite() { v.ceil().clamp(0.0, 4096.0) as u32 } else { 0 };
+    let (l, t, r, b) = (room(-x0), room(-y0), room(x0 + w - f64::from(size[0])), room(y0 + h - f64::from(size[1])));
+    let lead = |room: u32| if want >= room { room } else { want.div_ceil(GRID_ALIGN).saturating_mul(GRID_ALIGN).min(room) };
+    [lead(l), lead(t), want.min(r), want.min(b)]
+}
+
+/// Effects that leave their input unchanged at some values (VR Chromatic Aberrations with no
+/// aberration), and so need no cover there either: see [`EffectSpec::skips_cover_at`].
+const IDLE_SKIPS_COVER: &[&str] = &["ec.vr.chromaticaberrations"];
 
 /// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
 /// of the resampling pyramid used for downscaled layers.
@@ -661,6 +696,22 @@ impl EffectSpec {
     /// renderer's full-layer cover and keep the pyramid grid phase (#1205).
     pub fn skips_cover(&self) -> bool {
         SKIPS_COVER.contains(&self.id)
+    }
+
+    /// True when the cover decision for this effect needs its parameter values
+    /// ([`EffectSpec::skips_cover_at`]): it is not in [`SKIPS_COVER`] but is a no-op at some values.
+    pub fn skips_cover_when_idle(&self) -> bool {
+        IDLE_SKIPS_COVER.contains(&self.id)
+    }
+
+    /// [`EffectSpec::skips_cover`], or the effect leaves its input unchanged at `params`
+    /// (on the CPU and the GPU), so it needs no cover at these values.
+    pub fn skips_cover_at(&self, params: &Params) -> bool {
+        self.skips_cover()
+            || match self.id {
+                "ec.vr.chromaticaberrations" => ["aberrationRed", "aberrationGreen", "aberrationBlue"].iter().all(|k| params.f(k) == 0.0),
+                _ => false,
+            }
     }
 }
 
@@ -1735,5 +1786,85 @@ mod tests {
             assert!(find(id).expect(id).skips_cover(), "{id}");
         }
         assert!(!find("ec.distort.twirl").unwrap().skips_cover());
+    }
+
+    /// Bevel Alpha and Roughen Edges on a buffer that only surrounds the content (as the
+    /// renderer leaves it when every effect skips the cover) give exactly the pixels they give
+    /// on the full-layer cover: their own padding reaches as far as their alpha blur, and stops
+    /// at the layer's edge where the cover repeats it (#1913).
+    #[test]
+    fn alpha_blur_effects_match_the_cover_on_a_tight_buffer() {
+        let ls = [96.0, 64.0];
+        // A soft-edged blob with a hard core, `w` × `h`.
+        let blob = |w: u32, h: u32| {
+            let mut img = Image::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let (u, v) = ((x as f32 + 0.5) / w as f32 - 0.5, (y as f32 + 0.5) / h as f32 - 0.5);
+                    let a = (1.0 - (u * u + v * v).sqrt() * 1.6).clamp(0.0, 1.0).max(if x % 5 == 0 { 0.3 } else { 0.0 });
+                    img.data[(y * w + x) as usize] = [0.8 * a, 0.5 * a, 0.2 * a, a];
+                }
+            }
+            img
+        };
+        let run = |id: &str, set: &[(&str, Value)], b: Buf| {
+            let s = find(id).unwrap();
+            let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            for (k, v) in set {
+                params.values.insert(k.to_string(), v.clone());
+            }
+            let ctx = EffectCtx { params: &params, time: 0.25, layer_size: ls, seed: 7, adjustment: false, env: Default::default() };
+            apply(s, &ctx, b)
+        };
+        let cases: &[(&str, &[(&str, Value)])] = &[
+            ("ec.perspective.bevelalpha", &[("edgeThickness", Value::Scalar(4.0))]),
+            ("ec.perspective.bevelalpha", &[("edgeThickness", Value::Scalar(11.0)), ("lightAngle", Value::Scalar(30.0))]),
+            ("ec.stylize.roughenedges", &[]),
+            ("ec.stylize.roughenedges", &[("edgeType", Value::Enum(1)), ("border", Value::Scalar(14.0))]),
+            ("ec.stylize.roughenedges", &[("edgeType", Value::Enum(4)), ("border", Value::Scalar(3.0)), ("offset", Value::Vec2([5.0, -3.0]))]),
+        ];
+        // Content inside the layer, against its left/top edge, and against its right/bottom edge.
+        for &(cx, cy, w, h) in &[(30u32, 20u32, 24u32, 14u32), (0, 0, 20, 16), (70, 44, 26, 20)] {
+            for (id, set) in cases {
+                let tight = Buf { img: blob(w, h), offset: [-(cx as f64), -(cy as f64)], scale: 1.0 };
+                let mut aligned = tight.clone();
+                aligned.align(ls);
+                let mut covered = tight;
+                covered.cover(ls);
+                let (a, c) = (run(id, set, aligned), run(id, set, covered));
+                // Every pixel of the cover's result, found in the tight result by layer position.
+                for y in 0..c.img.height {
+                    for x in 0..c.img.width {
+                        let want = c.img.get(x.into(), y.into());
+                        let (tx, ty) = (x as f64 - c.offset[0] + a.offset[0], y as f64 - c.offset[1] + a.offset[1]);
+                        let inside = tx >= 0.0 && ty >= 0.0 && tx < a.img.width as f64 && ty < a.img.height as f64;
+                        let got = if inside { a.img.get(tx as i64, ty as i64) } else { [0.0; 4] };
+                        assert_eq!(got, want, "{id} {set:?}: content at ({cx}, {cy}), layer pixel ({x}, {y})");
+                    }
+                }
+                // Never past the layer rectangle the cover spans.
+                assert!(a.offset[0] <= c.offset[0] && a.offset[1] <= c.offset[1], "{id}: grew past the layer's left/top");
+                assert!(a.img.width as f64 - a.offset[0] <= c.img.width as f64 - c.offset[0], "{id}: grew past the layer's right");
+                assert!(a.img.height as f64 - a.offset[1] <= c.img.height as f64 - c.offset[1], "{id}: grew past the layer's bottom");
+            }
+        }
+    }
+
+    /// VR Chromatic Aberrations with no aberration changes nothing, so it needs no cover; any
+    /// aberration samples the whole layer frame and does.
+    #[test]
+    fn idle_vr_chromatic_aberrations_skips_the_cover() {
+        let s = find("ec.vr.chromaticaberrations").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        assert!(s.skips_cover_when_idle() && !s.skips_cover());
+        assert!(!s.skips_cover_at(&params), "the defaults aberrate red and blue");
+        for k in ["aberrationRed", "aberrationGreen", "aberrationBlue"] {
+            params.values.insert(k.into(), Value::Scalar(0.0));
+        }
+        assert!(s.skips_cover_at(&params));
+        let img = Image::filled(12, 8, [0.2, 0.4, 0.6, 1.0]);
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [12.0, 8.0], seed: 0, adjustment: false, env: Default::default() };
+        assert_eq!(apply(s, &ctx, Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }).img, img);
+        assert!(!find("ec.stylize.glow").unwrap().skips_cover_when_idle());
     }
 }

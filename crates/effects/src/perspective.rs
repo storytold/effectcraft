@@ -54,6 +54,11 @@ fn bevel_alpha(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if t <= 0.0 || inten == 0.0 {
         return b;
     }
+    if !ctx.adjustment {
+        // Transparent room for the alpha blur's support, up to the layer's edge: the bevel at the
+        // content's edge sees what the full-layer cover gave it (#1205).
+        b.pad_sides(crate::cover_pad_sides(ctx, [b.img.width, b.img.height], b.offset, b.scale, crate::alpha_blur_reach(t * 0.5)));
+    }
     let light = ctx.params.color("lightColor");
     let l = light_dir(ctx.params.f("lightAngle"), 45.0);
     let a = Plane::alpha(&b.img);

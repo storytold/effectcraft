@@ -144,6 +144,11 @@ fn roughen_edges(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let kind = ctx.params.e("edgeType");
     let ec = ctx.params.color("edgeColor");
     let border = ctx.params.f("border") * b.scale;
+    if border > 0.05 && !ctx.adjustment {
+        // Transparent room for the border's alpha blur, up to the layer's edge (#1205). Before
+        // anything reads the buffer's offset: the padding moves it.
+        b.pad_sides(crate::cover_pad_sides(ctx, [b.img.width, b.img.height], b.offset, b.scale, crate::alpha_blur_reach(border * 0.5)));
+    }
     let sharp = ctx.params.f("edgeSharpness").max(0.01) as f32;
     let infl = ctx.params.f("fractalInfluence") as f32;
     let scale = (ctx.params.f("scale") * b.scale * 0.1).max(0.5) as f32;
