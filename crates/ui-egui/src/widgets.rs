@@ -764,8 +764,8 @@ pub fn label_popup(
         let mut chosen = None;
         for l in labels {
             let r = label_entry(ui, l, &name(l), l == current, t);
-            let r = browse_hover(ui, r);
-            if r.clicked() || browse_pick(ui, &r) {
+            let r = browse_hover(ui, r, id);
+            if r.clicked() || browse_pick(ui, &r, id) {
                 chosen = Some(l);
             }
         }
@@ -812,13 +812,13 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
                 ui.separator();
             } else {
                 let r = ui.selectable_label(current == Some(i), o);
-                let r = browse_hover(ui, r);
+                let r = browse_hover(ui, r, id);
                 // The keyboard starts on the current entry (the first one, with none current).
                 if current == Some(i) || (current.is_none() && first) {
                     focus_when_opened(ui, id, &r);
                 }
                 first = false;
-                if r.clicked() || browse_pick(ui, &r) {
+                if r.clicked() || browse_pick(ui, &r, id) {
                     chosen = Some(i);
                 }
             }
@@ -876,7 +876,7 @@ pub fn popup_list<R>(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, anchor: Rect, r
     // control that toggles the list: the press that opens the list is outside the list itself and
     // must not close it in the same pass (#2686).
     let anchor = ui.data(|d| d.get_temp::<Rect>(id.with("anchor"))).unwrap_or(anchor);
-    let held = browsing(ui.ctx());
+    let held = browsing_for(ui.ctx(), id);
     let screen = ui.ctx().content_rect();
     let max_h = (screen.height() - 24.0).max(120.0);
     let sp = ui.spacing();
@@ -905,8 +905,11 @@ pub fn popup_list<R>(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, anchor: Rect, r
     let outside = pressed_outside(ui.ctx(), &area.response) && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| anchor.contains(p));
     if chosen.is_some() || outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.data_mut(|d| d.insert_temp(id.with("open"), false));
-        // A closed list cannot browse: the flag must not outlive the press that opened it.
-        stop_browsing(ui.ctx());
+        // A closed list cannot browse — its own press at most: another control pressed while
+        // this list was up is still browsing its own list.
+        if browsing_for(ui.ctx(), id) {
+            stop_browsing(ui.ctx());
+        }
     }
     chosen
 }
@@ -1054,14 +1057,19 @@ pub fn open_popup(ui: &Ui, id: egui::Id) {
     ui.data_mut(|d| d.insert_temp(id.with("open"), true));
 }
 
-/// The temp-data id of the "a control was pressed and its list is being browsed" flag.
-fn browse_id() -> egui::Id {
-    egui::Id::unique("popup-browse")
+/// A press that is browsing a drop-down's list: the control whose list it belongs to (two
+/// drop-downs can be up at once — the font fields of both text panels — and one press must not
+/// highlight or choose a row of the other's list) and the trigger's rect (a release back over
+/// the trigger is not a pick).
+#[derive(Clone, Copy)]
+struct Browse {
+    owner: egui::Id,
+    trigger: Rect,
 }
 
-/// The temp-data id of the trigger whose press opened the browsed list (its rect).
-fn browse_trigger_id() -> egui::Id {
-    egui::Id::unique("popup-browse-trigger")
+/// The temp-data id of the browse in progress: its presence means one is.
+fn browse_id() -> egui::Id {
+    egui::Id::unique("popup-browse")
 }
 
 /// `resp` opens (or closes) the [`popup_menu`] `id` on the press, not on the release, as After
@@ -1073,7 +1081,8 @@ fn browse_trigger_id() -> egui::Id {
 ///
 /// The trigger's rect is remembered for the list, so the press that opens it is not mistaken for
 /// a press outside it ([`popup_list`]) and closes it in the same pass, and for [`browse_pick`],
-/// which must not choose when the button comes up back over the trigger.
+/// which must not choose when the button comes up back over the trigger. The browse belongs to
+/// `id`'s list, so a press on another control cannot choose a row of this one's ([`browsing_for`]).
 pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     let open = popup_is_open(ui, id);
     let pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && resp.hovered();
@@ -1082,8 +1091,11 @@ pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
     if pressed {
         ui.data_mut(|d| {
-            d.insert_temp(browse_id(), !open);
-            d.insert_temp(browse_trigger_id(), resp.rect);
+            if open {
+                d.remove::<Browse>(browse_id());
+            } else {
+                d.insert_temp(browse_id(), Browse { owner: id, trigger: resp.rect });
+            }
             d.insert_temp(id.with("open"), !open);
         });
     } else if resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary) {
@@ -1094,47 +1106,62 @@ pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
 /// Whether a control was pressed and its list is still being browsed: the press that opened it
 /// has not come up yet (or is coming up in this pass, so the entry under the pointer can be
 /// chosen). Nothing browses otherwise, so a release that belongs to some other gesture — a
-/// viewer drag, a timeline drag — never picks an entry.
+/// viewer drag, a timeline drag — never picks an entry. [`browsing_for`] narrows this to one
+/// list's press when several can be open at once.
 pub fn browsing(ctx: &egui::Context) -> bool {
-    if !ctx.data(|d| d.get_temp::<bool>(browse_id())).unwrap_or(false) {
-        return false;
-    }
+    active_browse(ctx).is_some()
+}
+
+/// Whether the browse in progress belongs to the list `id`: with two drop-downs' lists up, the
+/// press on one must not highlight ([`browse_hover`]) or choose ([`browse_pick`]) a row of the
+/// other's.
+pub fn browsing_for(ctx: &egui::Context, id: egui::Id) -> bool {
+    active_browse(ctx).is_some_and(|browse| browse.owner == id)
+}
+
+/// The browse in progress while its press is still down (or is coming up in this pass, so the
+/// entry under the pointer can be chosen). The state of a press that ended clears itself, so a
+/// later gesture never picks an entry from it.
+fn active_browse(ctx: &egui::Context) -> Option<Browse> {
+    let browse = ctx.data(|d| d.get_temp::<Browse>(browse_id()))?;
     let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.button_released(egui::PointerButton::Primary)));
     if down || released {
-        return true;
+        return Some(browse);
     }
     // The press is over and its release pass has gone: nothing may browse any more.
     stop_browsing(ctx);
-    false
+    None
 }
 
 /// Ends an [`open_on_press`] browse: the list closed, or the press ended.
 fn stop_browsing(ctx: &egui::Context) {
-    ctx.data_mut(|d| {
-        d.insert_temp(browse_id(), false);
-        d.remove::<Rect>(browse_trigger_id());
-    });
+    ctx.data_mut(|d| d.remove::<Browse>(browse_id()));
 }
 
-/// The row `r` highlighted while its list is browsed with the button held: egui reports nothing
-/// as hovered while a button is down — which would leave browsing with no hover feedback at all
-/// — so the row under the pointer takes the highlight by hand.
-pub fn browse_hover(ui: &Ui, r: Response) -> Response {
-    if browsing(ui.ctx()) && r.contains_pointer() { r.highlight() } else { r }
+/// The row `r` highlighted while its list `id` is browsed with the button held: egui reports
+/// nothing as hovered while a button is down — which would leave browsing with no hover feedback
+/// at all — so the row under the pointer takes the highlight by hand.
+pub fn browse_hover(ui: &Ui, r: Response, id: egui::Id) -> Response {
+    if browsing_for(ui.ctx(), id) && r.contains_pointer() { r.highlight() } else { r }
 }
 
-/// Whether a [`open_on_press`] press that is still down comes up over row `r`, which then chooses
-/// it as a click would. egui reports no click for that release (it is far from the press), and
-/// nothing but the pressed widget is hovered while a button is down, so the row tests the pointer
-/// itself. Rows that are disabled are skipped, as in native menus, and so is a release back over
-/// the trigger: a long list is moved up to fit the window and can cover the control that opened
-/// it, and the click that opened it must not choose the entry that happens to lie under it then.
-pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
-    if !(browsing(ui.ctx()) && r.enabled() && r.contains_pointer()) {
+/// Whether a [`open_on_press`] press that is still down comes up over row `r` of the list `id`,
+/// which then chooses it as a click would. egui reports no click for that release (it is far from
+/// the press), and nothing but the pressed widget is hovered while a button is down, so the row
+/// tests the pointer itself. Rows that are disabled are skipped, as in native menus, and so is a
+/// release back over the trigger: a long list is moved up to fit the window and can cover the
+/// control that opened it, and the click that opened it must not choose the entry that happens to
+/// lie under it then. Only `id`'s own press picks: a second control pressed while this list is up
+/// browses its own list.
+pub fn browse_pick(ui: &Ui, r: &Response, id: egui::Id) -> bool {
+    let Some(browse) = active_browse(ui.ctx()).filter(|browse| browse.owner == id) else {
+        return false;
+    };
+    if !(r.enabled() && r.contains_pointer()) {
         return false;
     }
-    let trigger = ui.data(|d| d.get_temp::<Rect>(browse_trigger_id()));
-    ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) && !i.pointer.interact_pos().is_some_and(|p| trigger.is_some_and(|t| t.contains(p))))
+    let trigger = browse.trigger;
+    ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) && !i.pointer.interact_pos().is_some_and(|p| trigger.contains(p)))
 }
 
 /// Linked values after component `d` of `c` became `v`: the others scale by the same ratio
@@ -1479,9 +1506,9 @@ mod tests {
                         let mut chosen = None;
                         for (i, name) in SIZES.iter().enumerate() {
                             let r = ui.selectable_label(s.current == Some(i), *name);
-                            let r = browse_hover(ui, r);
+                            let r = browse_hover(ui, r, pop);
                             s.rows.push(r.rect);
-                            if r.clicked() || browse_pick(ui, &r) {
+                            if r.clicked() || browse_pick(ui, &r, pop) {
                                 chosen = Some(i);
                             }
                         }
@@ -1514,9 +1541,9 @@ mod tests {
                         let mut chosen = None;
                         for i in 0..20 {
                             let r = ui.selectable_label(s.current == Some(i), format!("Entry {i}"));
-                            let r = browse_hover(ui, r);
+                            let r = browse_hover(ui, r, pop);
                             s.rows.push(r.rect);
-                            if r.clicked() || browse_pick(ui, &r) {
+                            if r.clicked() || browse_pick(ui, &r, pop) {
                                 chosen = Some(i);
                             }
                         }

@@ -876,7 +876,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             let row_width = ui.available_width();
             let label_width = if preview { (row_width - 100.0).max(40.0) } else { row_width };
             let row = ui.add_sized([row_width, 24.0], egui::Button::selectable(index == selected, ""));
-            let resp = widgets::browse_hover(ui, row);
+            let resp = widgets::browse_hover(ui, row, id);
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), index == selected, &r.display));
             let label_rect = Rect::from_min_size(resp.rect.min + vec2(5.0, 0.0), vec2(label_width - 5.0, resp.rect.height()));
             let name = drawn_font_name(ui.ctx(), r);
@@ -914,7 +914,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
                     }
                 }
             }
-            if resp.clicked() || widgets::browse_pick(ui, &resp) {
+            if resp.clicked() || widgets::browse_pick(ui, &resp, id) {
                 chosen = Some(r.family.clone());
             }
             resp.on_hover_text(name);

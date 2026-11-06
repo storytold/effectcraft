@@ -161,6 +161,60 @@ fn the_font_list_picks_the_font_the_press_comes_up_over() {
     assert!(h.state().auto.find("character.font.search").is_none(), "and closes the list");
 }
 
+/// Two font fields can be open at once (the Character and Properties panels): the press on the
+/// second field browses its own list, and the release over a row of the first field's list —
+/// which stays up, a click started while it is open only closes it once it comes up — must not
+/// choose a font for it (#2686).
+#[test]
+fn the_other_font_fields_press_picks_nothing_from_the_open_list() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Caption", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    // Both text panels in different tab groups, so both font fields are up at once.
+    h.state_mut().set_workspace("Essential Graphics");
+    h.state_mut().show_panel(PanelKind::Character);
+    h.state_mut().show_panel(PanelKind::Properties);
+    h.run_steps(3);
+    // The first field's list, filtered to fonts that are not the layer's.
+    click(&mut h, "character.font");
+    type_text(&mut h, "noto serif");
+    // A click on the list's header but on no row takes the search field's focus the way any
+    // click outside it does (the list stays up: its menu only closes for a focus loss the
+    // pointer is not inside the popup for). The list must then survive a press elsewhere.
+    let v = h.state().auto.find("character.font.variable").expect("the filter row").clone();
+    let rs = h.state().auto.find("character.font.rescan").expect("the rescan row").clone();
+    let gap = egui::pos2(v.rect[0] + v.rect[2] * 0.5, (v.rect[1] + v.rect[3] + rs.rect[1]) * 0.5);
+    assert!(gap.y > v.rect[1] + v.rect[3] && gap.y < rs.rect[1], "the header rows have a gap to click");
+    h.input_mut().events.push(Event::PointerMoved(gap));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: gap, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+    }
+    h.run_steps(1);
+    assert!(h.state().auto.find("character.font.search").is_some(), "the click on no row keeps the list up");
+    // Press the second field: its own list opens, and that press is the one being browsed.
+    let b = h.state().auto.find("properties.text.font").expect("the second font field").clone();
+    let at = egui::pos2(b.rect[0] + b.rect[2] * 0.5, b.rect[1] + b.rect[3] * 0.5);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(h.state().auto.find("properties.text.font.search").is_some(), "the press opens the second field's list");
+    assert!(effectcraft_ui_egui::widgets::browsing(&h.ctx), "and browses it");
+    // Come up over a row of the first list while that press is held.
+    let r = h.state().auto.query("character.font.option.").first().expect("the searched font").rect;
+    let row = egui::pos2(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    h.input_mut().events.push(Event::PointerMoved(row));
+    h.step();
+    h.run_steps(1);
+    assert!(h.state().auto.find("character.font.search").is_some(), "the first field's list is still up under the press on the second");
+    h.input_mut().events.push(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "the release over the first list's row picks nothing for it");
+}
+
 /// A font file of just `name`: the family and Regular in English, and the family again in
 /// Simplified Chinese (language 0x804).
 fn font_with_native_name(family: &str, native: &str) -> Vec<u8> {
