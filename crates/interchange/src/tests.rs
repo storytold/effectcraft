@@ -408,6 +408,81 @@ fn edl_media_left_on_timecode_is_named() {
     assert_eq!(notes, ["EDL source timecodes stay media time for b.mov, c.mov: the file is missing or has no start timecode"], "{:?}", r.warnings);
 }
 
+/// An EDL line without `SOURCE FILE` only names its clip; the file beside the list is still found
+/// (the reader flags such media offline, but the guess is probed all the same).
+#[test]
+fn edl_clip_without_a_source_file_links_the_file_beside_the_list() {
+    let edl = "TITLE: CUT
+FCM: NON-DROP FRAME
+
+001  A002C003 V     C        10:00:31:00 10:00:33:00 02:00:00:00 02:00:02:00
+* FROM CLIP NAME: A002C003.mov
+
+002  A001C001 V     C        10:00:24:00 10:00:26:00 02:00:02:00 02:00:04:00
+* FROM CLIP NAME: A001C001.mov
+";
+    let mut probe_beside = |path: &str| (path == "/work/A002C003.mov").then(|| probe(path)).flatten();
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "hand.edl".into(), edl_frame_rate: Some(25.0), base_dir: Some("/work".into()) };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_beside).unwrap();
+    assert_eq!(r.missing, ["/work/A001C001.mov"], "only the file that is not there is missing");
+    let linked = p.items.values().find_map(|it| match &it.kind {
+        ItemKind::Footage(f) if f.path == "/work/A002C003.mov" => Some(f.missing),
+        _ => None,
+    });
+    assert_eq!(linked, Some(false));
+}
+
+/// A clip name that leaves the list's folder (`../x.mov`, an absolute path) is a guess too far:
+/// the file there is neither probed nor linked, and its timecode does not rebase the clip. A
+/// `SOURCE FILE` path outside the folder is the list's own choice and still links.
+#[test]
+fn edl_guessed_paths_outside_the_list_folder_are_not_probed() {
+    let edl = "TITLE: CUT
+FCM: NON-DROP FRAME
+
+001  A001 V     C        10:00:31:00 10:00:33:00 02:00:00:00 02:00:02:00
+* FROM CLIP NAME: ../up.mov
+
+002  A002 V     C        10:00:24:00 10:00:26:00 02:00:02:00 02:00:04:00
+* FROM CLIP NAME: /elsewhere/abs.mov
+
+003  A003 V     C        10:00:24:00 10:00:26:00 02:00:04:00 02:00:06:00
+* FROM CLIP NAME: inside.mov
+
+004  A004 V     C        10:00:24:00 10:00:26:00 02:00:06:00 02:00:08:00
+* FROM CLIP NAME: named.mov
+* SOURCE FILE: /elsewhere/named.mov
+";
+    let mut asked = Vec::new();
+    let mut probe_all = |path: &str| {
+        asked.push(path.to_string());
+        probe(path)
+    };
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "hand.edl".into(), edl_frame_rate: Some(25.0), base_dir: Some("/work".into()) };
+    let r = import(&mut p, edl.as_bytes(), None, &opts, &mut probe_all).unwrap();
+    asked.sort();
+    assert_eq!(asked, ["/elsewhere/named.mov", "/work/inside.mov"], "only the file inside the folder and the named one");
+    let mut missing = r.missing.clone();
+    missing.sort();
+    assert_eq!(missing.len(), 2, "{missing:?}");
+    assert!(missing.iter().all(|m| m.ends_with("up.mov") || m.ends_with("abs.mov")), "{missing:?}");
+}
+
+/// Only an EDL's guessed paths are probed: an OTIO missing reference also gets a path built from
+/// the clip name, and a same-named file beside the document is not the intended clip.
+#[test]
+fn otio_missing_reference_stays_a_placeholder_even_with_a_file_of_that_name() {
+    let otio = r#"{"OTIO_SCHEMA":"Timeline.1","name":"t","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","name":"tracks","children":[{"OTIO_SCHEMA":"Track.1","name":"V1","kind":"Video","children":[{"OTIO_SCHEMA":"Clip.2","name":"a.mov","source_range":{"OTIO_SCHEMA":"TimeRange.1","start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":25.0,"value":0.0},"duration":{"OTIO_SCHEMA":"RationalTime.1","rate":25.0,"value":50.0}},"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"MissingReference.1","name":"","available_range":null}},"active_media_reference_key":"DEFAULT_MEDIA"}]}]}}"#;
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "t.otio".into(), edl_frame_rate: None, base_dir: Some("/work".into()) };
+    let mut probe_any = |path: &str| probe(path);
+    let r = import(&mut p, otio.as_bytes(), None, &opts, &mut probe_any).unwrap();
+    assert_eq!(r.format, Some(TimelineFormat::Otio));
+    assert!(!r.missing.is_empty(), "the missing reference stays a placeholder: {:?}", r.warnings);
+}
+
 /// A drop-frame list counts its hour in timecode: a clip cut at 01:00:00;00 (3599.996 s at 29.97
 /// fps) from a missing file is still named.
 #[test]

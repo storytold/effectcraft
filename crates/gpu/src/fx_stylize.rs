@@ -871,6 +871,17 @@ fn texturize(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 fn corner_pin(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let (w, h) = (ctx.layer_size[0].max(1.0), ctx.layer_size[1].max(1.0));
+    // Grow to hold the whole quad, like the CPU `corner_pin`.
+    if !ctx.adjustment {
+        let pts = ["ul", "ur", "lr", "ll"].map(|k| {
+            let p = b.to_px(ctx.params.v2(k));
+            [p.0, p.1]
+        });
+        let (lo, hi) = effectcraft_effects::quad_bounds(&pts);
+        if let Some(sides) = effectcraft_effects::grow_sides(lo, hi, b.img.width, b.img.height) {
+            b.pad_sides(e, sides)?;
+        }
+    }
     let q = ["ul", "ur", "lr", "ll"].map(|k| {
         let p = b.to_px(ctx.params.v2(k));
         vec2(p.0, p.1)

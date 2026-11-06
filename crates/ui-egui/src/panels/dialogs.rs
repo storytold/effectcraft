@@ -37,6 +37,12 @@ pub struct DialogState {
     pub palette_sel: usize,
     /// Settings dialog page id (`general`, `appearance`…).
     pub settings_page: String,
+    /// Settings ▸ Plug-in Library: the search field.
+    pub library_query: String,
+    /// Settings ▸ Plug-in Library: the package whose preview is open.
+    pub library_preview: Option<String>,
+    /// The preview's Before/After split (0 = all After, 1 = all Before).
+    pub library_split: f32,
     /// Settings when the dialog opened (Cancel restores them).
     pub prefs_snapshot: Option<effectcraft_engine::prefs::Prefs>,
     /// Keyboard Shortcuts editor.
@@ -335,7 +341,8 @@ fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
     let mut cmd: Option<&str> = None;
     let tab_id = egui::Id::unique("about_tab");
-    modal(ctx, "About EffectCraft", vec2(680.0, 520.0), t, |ui| {
+    // Wide enough for every Contributors column at its natural width (modals shrink to the window).
+    modal(ctx, "About EffectCraft", vec2(820.0, 520.0), t, |ui| {
         let mut tab = ui.data_mut(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
         ui.horizontal(|ui| {
             for (i, (label, id)) in ABOUT_TABS.iter().enumerate() {
@@ -496,6 +503,8 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
             };
             if !existing && r.is_ok() {
                 app.dialog_state.last_new_comp = Some(app.dialog_state.comp.clone());
+                // The new composition opens: it leaves the Home screen, as `run_engine` does.
+                app.ui.start_screen = false;
             }
             if let Err(e) = r {
                 app.ui.status = e.to_string();

@@ -221,10 +221,7 @@ impl EffectcraftApp {
         self.playback.start_frame = cur;
         // `prefetch_playback` requests every uncached frame of offsets 0..window from here.
         let window = (ahead * 3).min(fit - 1);
-        let need = self.frames.get(&FrameKey { frame: cur, ..series }).map(|img| {
-            let [w, h] = img.size();
-            startup_frames(ahead, window, self.frames.budget(), w.saturating_mul(h).saturating_mul(4))
-        });
+        let need = self.frames.get(&FrameKey { frame: cur, ..series }).map(|img| startup_frames(ahead, window, self.frames.budget(), img.bytes()));
         if need.is_some() && self.playback.first_cached.is_none() {
             self.playback.first_cached = Some(now);
         }
@@ -399,6 +396,12 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 - quiet));
             return;
         }
+        // Frames an edit kept in RAM are on disk under the comp's previous content only.
+        // Again soon while frames wait to be written (a refused write is retried then).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.frames.persist_missing(&self.render_source(), series, &self.frame_opts(ItemId(series.comp), series.scale as f64 / 1000.0)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
         // An empty work area has nothing to cache.
         let n = wb - wa + 1;
         if n < 1 {
@@ -442,10 +445,11 @@ impl EffectcraftApp {
         ((self.frames.budget() as f64 * 0.9 / self.frame_bytes(comp, scale)) as i64).max(1)
     }
 
-    /// Bytes of one comp-sized viewer frame at `scale` (Extended Viewer frames are larger).
+    /// Bytes of one comp-sized viewer frame at `scale` (Extended Viewer frames are larger; 32 bpc
+    /// frames are half floats, twice the bytes of 8-bit ones).
     fn frame_bytes(&self, comp: &effectcraft_engine::project::Comp, scale: f64) -> f64 {
         let side = |n: u32| (n as f64 * scale).ceil().max(1.0);
-        side(comp.width) * side(comp.height) * 4.0
+        side(comp.width) * side(comp.height) * frames::frame_pixel_bytes(&self.session.project.settings) as f64
     }
 
     fn frames_parallelism(&self) -> usize {

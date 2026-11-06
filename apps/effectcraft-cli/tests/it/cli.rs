@@ -1171,3 +1171,55 @@ fn render_without_progress_writes_no_progress_lines() {
     let stderr = render_demo_stderr("no-progress.gif", &[]);
     assert!(!stderr.lines().any(|l| l.starts_with("progress")), "{stderr}");
 }
+
+/// `render --exr-compression C --exr-depth half` writes OpenEXR frames with that compression and
+/// half-float channels (#2911); an unknown value is an error naming the parameter.
+#[test]
+fn render_exr_compression_and_depth() {
+    let root = tmp("render-exr-options");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("x.ecproj");
+    let p = project.to_str().unwrap();
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36,"duration":1}"#,
+        "layer.newSolid",
+        r#"{"width":64,"height":36}"#,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    let out = root.join("f_[#####].exr");
+    let reply = ok_json(&[
+        "render",
+        "--project",
+        p,
+        "--start",
+        "0",
+        "--end",
+        "0.01",
+        "--exr-compression",
+        "piz",
+        "--exr-depth",
+        "half",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(reply["rendered"].as_array().unwrap().len(), 1, "{reply}");
+    let bytes = std::fs::read(root.join("f_00000.exr")).unwrap();
+    // The `compression` attribute: name, type name, a 1-byte size, then PIZ (4).
+    let attr = b"compression\0compression\0\x01\0\0\0";
+    let at = bytes.windows(attr.len()).position(|w| w == attr).expect("compression attribute");
+    assert_eq!(bytes[at + attr.len()], 4, "PIZ");
+    // Each channel in `chlist`: its name, then the pixel type (1 = half).
+    for name in [&b"R\0"[..], b"G\0", b"B\0", b"A\0"] {
+        let half = [name, &[1, 0, 0, 0]].concat();
+        assert!(bytes.windows(half.len()).any(|w| w == half.as_slice()), "{:?} is half float", std::str::from_utf8(name));
+    }
+    let (code, reply) = run_json(&["render", "--project", p, "--exr-depth", "8", "--out", out.to_str().unwrap()]);
+    assert_eq!(code, 1, "{reply}");
+    assert!(reply["error"].as_str().unwrap().contains("exrBitDepth: half|float"), "{reply}");
+    let _ = std::fs::remove_dir_all(&root);
+}

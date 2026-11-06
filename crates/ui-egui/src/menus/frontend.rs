@@ -30,15 +30,40 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
     }
 }
 
+/// What a command is checked against for leaving the Home screen: the active composition and
+/// the project (its epoch, which a replaced project steps even when its composition has the same
+/// id).
+type HomeMark = (Option<effectcraft_project::ItemId>, u64);
+
+/// The [`HomeMark`] of the session now.
+fn home_mark(app: &EffectcraftApp) -> HomeMark {
+    (app.session.active_comp_id(), app.session.script_ui.project_epoch)
+}
+
+/// A command that opened a composition (an imported After Effects project, a new or opened
+/// project) leaves the Home screen, as the Home screen's own buttons do: it otherwise stayed
+/// over the opened project.
+fn leave_home_if_opened(app: &mut EffectcraftApp, before: HomeMark, ok: bool) {
+    if ok && app.session.active_comp_id().is_some() && home_mark(app) != before {
+        app.ui.start_screen = false;
+    }
+}
+
+/// Runs engine command `id` from a menu, key or the control channel: the status line shows a
+/// failure, Copy commands fill the clipboard, the frontend events it queued run, and a command
+/// that opened a composition leaves the Home screen.
 pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     // Events already queued belong to earlier invocations (`engine.execute` defers them).
     let queued = app.session.events.len();
+    let before = home_mark(app);
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
     }
+    // Frontend events below may show the Home screen again (Help ▸ In-App Tutorials).
+    leave_home_if_opened(app, before, r.is_ok());
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
         match ev {
@@ -188,6 +213,14 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             Value::Null
         }
         "app.find" => {
+            if let Some(status) = p.get("status").and_then(Value::as_str) {
+                app.ui.project_status = match status {
+                    "all" => crate::state::ProjectStatus::All,
+                    "available" => crate::state::ProjectStatus::Available,
+                    "missing" => crate::state::ProjectStatus::Missing,
+                    _ => return Err("status must be all, available or missing".into()),
+                };
+            }
             if let Some(q) = p.get("query").and_then(Value::as_str) {
                 app.ui.project_search = q.to_string();
             }
@@ -502,6 +535,30 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.show_panel(PanelKind::EffectsPresets);
             Value::Null
         }
+        "timeline.revealMask" => {
+            let id = |key: &str| p.get(key).and_then(Value::as_u64).ok_or_else(|| format!("timeline.revealMask: need `{key}` as an unsigned integer"));
+            let (comp, layer, mask, epoch) = (id("comp")?, id("layer")?, id("mask")?, id("projectEpoch")?);
+            if epoch != app.session.script_ui.project_epoch || app.session.active_comp_id().map(|c| c.0) != Some(comp) {
+                return Ok(json!({"revealed": false}));
+            }
+            let masks = app.session.active_comp().and_then(|c| c.layer(effectcraft_engine::project::LayerId(layer))).and_then(|l| l.masks());
+            let Some(masks) = masks.filter(|m| m.groups().any(|g| g.uid == mask && matches!(g.kind, effectcraft_engine::project::GroupKind::Mask { .. })))
+            else {
+                return Ok(json!({"revealed": false}));
+            };
+            let masks_uid = masks.uid;
+            let tl = &mut app.ui.timeline;
+            tl.open_layers.insert(layer);
+            tl.open_groups.extend([masks_uid, mask]);
+            // Add to a shortcut's existing reveal without changing the last pressed shortcut.
+            if let Some(kinds) = tl.layer_reveal.get_mut(&layer).filter(|k| !k.is_empty()) {
+                tl.reveal_props.insert(mask);
+                if !kinds.iter().any(|k| k == "props") {
+                    kinds.push("props".into());
+                }
+            }
+            json!({"revealed": true})
+        }
         "timeline.revealProps" => {
             let props = p.get("props").and_then(Value::as_array).cloned().unwrap_or_default();
             let uids = |k: &str| -> Vec<u64> { props.iter().filter_map(|x| x.get(k).and_then(Value::as_u64)).collect() };
@@ -575,6 +632,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "view.importGuides" => ("path", Ask::Open(&["json"])),
         "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py".into())),
         "file.exportLottie" => ("path", Ask::Save("Animation.json".into())),
+        "file.exportAep" => ("path", Ask::Save("Project.aep".into())),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importAep" => ("path", Ask::Open(&["aep", "aepx"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
@@ -583,6 +641,9 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
+        "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
+        "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
+        "effect.helpers.load" => ("path", Ask::Folder),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
@@ -679,9 +740,32 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
-    if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        app.ui.status = e;
+    match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
+        Ok(result) => show_result_errors(app, &result),
+        Err(e) => app.ui.status = e,
     }
+}
+
+/// A successful command can still report per-item problems in an `errors` array (Effect ▸
+/// Install Effect Plug-in Bundle does): show a short, readable report in the status line,
+/// without turning the success into an error. The full structured array stays in the result
+/// for scripts; the status line is single-line and short-lived, so it lists the first few
+/// problems and counts the rest instead of printing raw JSON.
+pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
+    let Some(errors) = result.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) else { return };
+    let parts: Vec<String> = errors
+        .iter()
+        .map(|e| match (e.get("file").and_then(Value::as_str), e.get("error").and_then(Value::as_str)) {
+            (Some(file), Some(error)) => format!("{file}: {error}"),
+            (_, Some(error)) => error.to_string(),
+            _ => e.to_string(),
+        })
+        .collect();
+    let mut msg = parts.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    if parts.len() > 3 {
+        msg.push_str(&format!("; +{} more", parts.len() - 3));
+    }
+    app.ui.status = msg;
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.
@@ -711,10 +795,12 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     }
     // Save (untitled) becomes Save As.
     let id = if id == "file.save" { "file.saveAs" } else { id };
+    let before = home_mark(app);
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
     }
+    leave_home_if_opened(app, before, r.is_ok());
     r
 }
 
