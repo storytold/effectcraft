@@ -33,6 +33,7 @@ pub mod style_map;
 mod textdoc;
 mod typed;
 mod values;
+mod version;
 mod write;
 
 pub use aepx::{is_aepx, parse_any, read_aepx, read_aepx_with_limits};
@@ -54,4 +55,5 @@ pub use textdoc::{
 };
 pub use typed::{Comp, Item, ItemKind, KeyLayout, KeyList, Keyframe, Layer, ListHeader, Project, PropEntry, PropGroup, PropNode, Property, TimeBase};
 pub use values::{Orientation, OrientationKey, TimeRemap, TimeRemapKey, Tracked, Transform, ValueSource};
+pub use version::AeVersion;
 pub use write::{write, write_to};

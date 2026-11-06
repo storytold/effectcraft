@@ -272,6 +272,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
             if let Some(map) = &popup_map {
                 remap_popup_keys(prop, map, &here, &label, col);
             }
+            report_beyond_limit(m.limit, prop.keys.iter().map(|k| &k.value), &here, &label, col);
         }
         return;
     }
@@ -306,8 +307,21 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         _ => convert(value, kind),
     };
     match converted {
-        Some(v) => prop.value = v,
+        Some(v) => {
+            report_beyond_limit(m.limit, std::iter::once(&v), &here, &label, col);
+            prop.value = v;
+        }
         None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
+    }
+}
+
+/// Reports a value After Effects accepts but EffectCraft's effect limits (`ParamMap::limit`): it is
+/// imported as it is, and the effect renders it as the nearest end of its range.
+fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item = &'v Value>, here: &str, label: &str, col: &mut Collector) {
+    let Some((lo, hi)) = limit else { return };
+    let beyond: Vec<f64> = values.filter_map(|v| if let Value::Scalar(x) = v { Some(*x) } else { None }).filter(|x| *x < lo || *x > hi).collect();
+    if let Some(x) = beyond.first() {
+        col.lose(LossCategory::Effects, format!("{here}: parameter {label} is {x}, EffectCraft's effect uses {lo} to {hi} (rendered as the nearest of them)"));
     }
 }
 
@@ -648,7 +662,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
             return;
         }
         // EffectCraft's mesh reads the first two numbers of a vertex; moved handles follow as
-        // eight more (kept in the project, not drawn).
+        // eight more (kept for the export, not drawn).
         let mut token = format!("{},{}", px(dx * w), px(dy * h));
         if own.iter().any(|x| x.abs() > 0.01) {
             handles_moved = true;
@@ -661,7 +675,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
     if handles_moved {
         col.lose(
             LossCategory::Effects,
-            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept in the project)"),
+            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)"),
         );
     }
     if let Some(p) = group.prop_mut("rows") {
