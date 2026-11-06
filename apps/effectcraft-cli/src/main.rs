@@ -38,6 +38,7 @@
 //! GPU:      --gpu renders on the GPU compositor (Mercury GPU Acceleration) when an adapter exists;
 //!           the default is the CPU (Mercury Software Only)
 //! Bridge:   --bridge PORT drives a running `effectcraft --control PORT` instead of a headless session
+//! Memory:   --memory-prefs applies only Memory & CPU settings from EFFECTCRAFT_CONFIG_DIR/prefs.json
 //! Output:   --json for one compact JSON document on stdout (errors: {"error": …}, exit 1)
 //! ```
 //!
@@ -46,7 +47,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 mod project_lock;
 mod template;
@@ -143,6 +144,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            confine the agent's file access: reads under a read or write root,
                                            writes under a write root (each repeatable); scripts are refused
 options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge PORT   --json   --gpu
+         --memory-prefs   opt in to Memory & CPU preferences (EFFECTCRAFT_CONFIG_DIR/prefs.json)
 <comp>: id or name, '-' = active comp; <layer>: id, '#n' or name; <value>: JSON or bare string";
 
 /// Options that take a value.
@@ -210,6 +212,7 @@ const FLAGS: &[&str] = &[
     "--demo",
     "--empty",
     "--gpu",
+    "--memory-prefs",
     "--list",
     "--schemas",
     "--enabled",
@@ -469,6 +472,7 @@ fn backend(args: &Args, default_demo: bool) -> Result<Backend, Failure> {
 /// renderer setting, Mercury GPU Acceleration by default).
 fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
     let mut s = effectcraft_host::session();
+    apply_memory_prefs(&mut s, args)?;
     if args.flag("--autosave") {
         let dir = effectcraft_host::config_dir().ok_or_else(|| Failure::Error("--autosave: no config directory; set EFFECTCRAFT_CONFIG_DIR".into()))?;
         // Read only auto-save settings. Opting in must not change headless rendering or load
@@ -487,6 +491,38 @@ fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
         s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
     }
     Ok(s)
+}
+
+/// Explicit opt-in: desktop model, disk, recovery and scripting settings stay out of headless runs.
+fn apply_memory_prefs(s: &mut effectcraft_engine::Session, args: &Args) -> Result<(), Failure> {
+    if !args.flag("--memory-prefs") {
+        return Ok(());
+    }
+    let dir = effectcraft_host::config_dir().ok_or_else(|| Failure::Error("--memory-prefs: no config directory; set EFFECTCRAFT_CONFIG_DIR".into()))?;
+    let path = dir.join(effectcraft_engine::prefs::PREFS_FILE);
+    const MAX_PREFS_BYTES: u64 = 1 << 20;
+    let file = std::fs::File::open(&path).map_err(|e| Failure::Error(format!("--memory-prefs {}: {e}", path.display())))?;
+    let mut text = String::new();
+    file.take(MAX_PREFS_BYTES + 1).read_to_string(&mut text).map_err(|e| Failure::Error(format!("--memory-prefs {}: {e}", path.display())))?;
+    if text.len() as u64 > MAX_PREFS_BYTES {
+        return Err(Failure::Error("--memory-prefs: prefs.json exceeds 1 MiB".into()));
+    }
+    let value: Value = serde_json::from_str(&text).map_err(|e| Failure::Error(format!("--memory-prefs: invalid JSON: {e}")))?;
+    let memory = value.get("memory").ok_or_else(|| Failure::Error("--memory-prefs: prefs.json has no memory section".into()))?;
+    s.prefs.memory = serde_json::from_value(memory.clone()).map_err(|e| Failure::Error(format!("--memory-prefs: invalid memory section: {e}")))?;
+    s.prefs.normalize();
+    s.sys_memory = effectcraft_engine::sysinfo::memory();
+    s.apply_cache_budgets();
+    let b = s.prefs.cache_budgets(s.sys_memory);
+    note!(
+        "effective cache budgets (bytes): layer={}, footage={}, preview={} (headless has no viewer cache); capped={}, reduced={}",
+        b.layer,
+        b.media,
+        b.preview,
+        b.capped,
+        b.reduced
+    );
+    Ok(())
 }
 
 /// `--save` / `--save-as` after a mutating command.
@@ -562,6 +598,9 @@ fn emit(v: &Value, json_out: bool) {
 }
 
 fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
+    if args.flag("--memory-prefs") && args.opt("--bridge").is_some() {
+        return usage_err("--memory-prefs is for headless sessions; the bridged app owns its memory settings");
+    }
     if args.flag("--autosave") && cmd != "mcp" {
         return usage_err("--autosave is only supported by mcp");
     }
@@ -573,6 +612,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             let mut b = backend(args, true)?;
             let p = tool(&mut b, "get_project", json!({}))?;
             let comp = tool(&mut b, "get_comp", json!({})).ok();
+            let system = b.exec("help.systemReport", json!({"quiet": true}))?;
             let info = json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "mode": if b.is_bridge() { "bridge" } else { "headless" },
@@ -580,6 +620,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 "effects": effectcraft_engine::effects::registry().len(),
                 "project": p,
                 "activeComp": comp,
+                "system": system,
             });
             if json_out {
                 emit(&info, true);
@@ -998,6 +1039,9 @@ fn list_commands_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
 /// `bench`: time one frame N times without the layer cache (per-layer and per-effect breakdown),
 /// and optionally `--play N` consecutive frames with and without the cache.
 fn bench_cmd(args: &Args) -> Result<(), Failure> {
+    if args.flag("--memory-prefs") && (args.flag("--ops") || args.flag("--roto")) {
+        return usage_err("--memory-prefs applies to frame benchmarks and rendering, not synthetic --ops/--roto benchmarks");
+    }
     if args.flag("--ops") {
         return bench_ops(args);
     }
@@ -1005,6 +1049,7 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
         return bench_roto(args);
     }
     let mut s = effectcraft_host::session();
+    apply_memory_prefs(&mut s, args)?;
     match &args.project {
         Some(p) => s.execute("file.open", json!({"path": p})),
         None => s.execute("file.openDemoProject", json!({})),
@@ -1265,7 +1310,7 @@ fn bench(s: &Session, cid: ItemId, t: Tick, opts: RenderOpts, n: usize) {
 fn bench_play(s: &Session, cid: ItemId, t: Tick, opts: RenderOpts, n: usize) {
     let Some(comp) = s.project.comp(cid) else { return };
     let f0 = comp.frame_rate.frame_at(t);
-    let cache = LayerCache::default();
+    let cache = LayerCache::new(s.layer_cache.budget());
     for (label, c) in [("no cache", None), ("layer cache", Some(&cache))] {
         let runs: Vec<(f64, f64)> = (0..n as i64)
             .map(|i| {
@@ -1499,11 +1544,11 @@ fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
             let gpu_cold = time_ms(n, || {
                 std::hint::black_box(mk(Backend::Gpu, None));
             });
-            let cache = LayerCache::default();
+            let cache = LayerCache::new(s.layer_cache.budget());
             let cpu_warm = time_ms(n, || {
                 std::hint::black_box(mk(Backend::Cpu, Some(&cache)));
             });
-            let gcache = LayerCache::default();
+            let gcache = LayerCache::new(s.layer_cache.budget());
             // Traffic in steady state: after the frame that fills the layer cache.
             std::hint::black_box(mk(Backend::Gpu, Some(&gcache)));
             let t0 = gpu.context().transfer_stats();
