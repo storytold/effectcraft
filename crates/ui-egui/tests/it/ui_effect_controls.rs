@@ -319,6 +319,37 @@ fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     assert!(others.iter().all(|u| closed.contains(u)), "other effects stay as they were");
 }
 
+/// Shift-clicking effect headers selects the range from the last effect picked, which stays the
+/// end the next range starts from; Cmd/Ctrl adds or takes out one effect and moves that end.
+#[test]
+fn shift_click_on_effect_headers_selects_a_range_and_command_toggles() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let fx: Vec<u64> = layer(&h.state().session, x.small).effects().unwrap().groups().map(|g| g.uid).collect();
+    // All twirled closed, so every header is on screen.
+    h.state_mut().ui.fx_closed.extend(fx.iter().copied());
+    h.run_steps(3);
+    let pick = |h: &mut Harness<'_, EffectcraftApp>, i: usize, modifiers: egui::Modifiers| {
+        let at = rect_of(h, &format!("effectControls.effect.{}", fx[i])).center();
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        click(h, at);
+        h.event(egui::Event::ModifiersChanged(Default::default()));
+        h.step();
+        let picked = h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect::<std::collections::BTreeSet<_>>();
+        fx.iter().enumerate().filter(|(_, u)| picked.contains(u)).map(|(i, _)| i).collect::<Vec<_>>()
+    };
+    let (shift, command) = (egui::Modifiers::SHIFT, egui::Modifiers::COMMAND);
+    assert_eq!(pick(&mut h, 3, shift), [3], "with nothing picked, the range is the effect itself");
+    assert_eq!(pick(&mut h, 1, Default::default()), [1]);
+    assert_eq!(pick(&mut h, 3, shift), [1, 2, 3], "Shift takes in the effects between");
+    assert_eq!(pick(&mut h, 0, shift), [0, 1], "the next range starts from the same effect");
+    assert_eq!(pick(&mut h, 4, shift), [1, 2, 3, 4]);
+    assert_eq!(pick(&mut h, 2, command), [1, 3, 4], "Cmd/Ctrl takes one out");
+    assert_eq!(pick(&mut h, 5, command), [1, 3, 4, 5], "and adds one");
+    assert_eq!(pick(&mut h, 3, shift), [3, 4, 5], "which is where the next range starts");
+    assert_eq!(pick(&mut h, 0, Default::default()), [0], "a plain click picks one");
+}
+
 fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
     let e = h.state().auto.previous.iter().chain(h.state().auto.elements.iter()).find(|e| e.id == id).unwrap_or_else(|| panic!("no {id}")).clone();
     egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))

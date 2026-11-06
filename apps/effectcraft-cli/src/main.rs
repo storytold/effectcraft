@@ -17,6 +17,7 @@
 //!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
+//!     [--exr-compression none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab] [--exr-depth half|float]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
 //!     [--progress]  report progress on stderr when it is not a terminal, up to four lines a second:
 //!     `progress <frames done> <frames total> <seconds elapsed> <seconds left, or - when unknown>`
@@ -47,6 +48,7 @@
 
 use std::io::Write;
 
+mod project_lock;
 mod template;
 
 use effectcraft_automation::tools::{self, Reply};
@@ -113,9 +115,13 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
          [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
          [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
-         [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
+         [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
+         [--exr-compression C] [--exr-depth half|float] | --queue
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff;
-                                           --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
+                                           --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus;
+                                           --exr-compression none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab
+                                           (default zip; pxr24 on float, b44/b44a on half and dwaa/dwab are lossy),
+                                           --exr-depth (default float): OpenEXR)
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal
                                            (progress <frames done> <total> <seconds elapsed> <seconds left|->)
@@ -189,6 +195,8 @@ const VALUED: &[&str] = &[
     "--webm-codec",
     "--audio-bitrate",
     "--opus-app",
+    "--exr-compression",
+    "--exr-depth",
     // mcp
     "--automation-read-root",
     "--automation-write-root",
@@ -508,6 +516,7 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
         (None, Some(f)) => (std::fs::read_to_string(f).map_err(|e| Failure::Error(format!("cannot read {f}: {e}")))?, f.clone()),
         (None, None) => return usage_err("script needs a .jsx/.js file or --eval CODE"),
     };
+    let _lock = project_lock::for_save(args)?;
     let mut b = backend(args, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
     let saved = maybe_save(&mut b, args)?;
@@ -611,6 +620,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 (Some(p), _) | (None, Some(p)) => serde_json::from_str(p).map_err(|e| Failure::Usage(format!("params are not valid JSON: {e}")))?,
                 (None, None) => json!({}),
             };
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let r = b.exec(&id, params)?;
             if let Some(e) = failed_render(&id, &r) {
@@ -654,6 +664,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             if steps.is_empty() {
                 return Err(Failure::Usage(format!("--commands {}: no commands", sources.join(", "))));
             }
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let mut results = vec![];
             // The step's index closes the message: a generated list repeats ids, and callers match
@@ -690,7 +701,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                     if let Some(e) = p.get("expression").and_then(Value::as_str) {
                         extra += &format!("  expr: {e}");
                     }
-                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), p["value"]);
+                    say!("  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), value_text(p));
                 }
             }
         }
@@ -708,6 +719,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             }
             let (comp, layer, path) = (args.pos[0].clone(), args.pos[1].clone(), args.pos[2].clone());
             let value = args.pos.get(3).map(|v| value_arg(v));
+            let _lock = project_lock::for_save(args)?;
             let mut b = backend(args, true)?;
             let a =
                 json!({"comp": reference(&comp), "layer": reference(&layer), "path": path, "value": value, "time": args.num("--time")?, "expression": expr});
@@ -876,6 +888,8 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             ("--rate-control", "rateControl"),
             ("--webm-codec", "webmCodec"),
             ("--opus-app", "opusApplication"),
+            ("--exr-compression", "exrCompression"),
+            ("--exr-depth", "exrBitDepth"),
         ] {
             if let Some(v) = args.opt(flag) {
                 p[key] = json!(v);
@@ -1537,6 +1551,16 @@ fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// A flat property's value for the text listing: an enum's number with the label `options` gives it
+/// (#2928), since the numbers are 0-based where After Effects scripting counts from 1.
+fn value_text(p: &Value) -> String {
+    let label = p["options"].as_array().and_then(|o| o.iter().find(|o| o["value"] == p["value"])).and_then(|o| o["label"].as_str());
+    match label {
+        Some(l) => format!("{} ({l})", p["value"]),
+        None => p["value"].to_string(),
+    }
 }
 
 #[cfg(test)]

@@ -98,6 +98,7 @@ impl Session {
             self.saved_revision = self.revision;
         }
         self.refresh_disk_salt(false);
+        self.refresh_aux_footage();
         self.events.push(Event::ProjectChanged { revision: self.revision });
     }
 
@@ -252,6 +253,8 @@ impl Session {
         self.project = Arc::new(p);
         // Its files may have changed since they were last stamped.
         self.disk_salt = None;
+        // The set of footage effects read the channels of is sent again, even when it is empty.
+        self.aux_footage = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;

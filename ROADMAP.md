@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-30 · **Change:** minor (features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-05 · **Change:** minor (ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -97,7 +97,7 @@ UI strings translated out of ≈ 4,200 (detail: [localization-parity.md](docs/lo
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 38%), Ukrainian (partial, 29%), Czech (partial, 29%), Polish (partial, 34%), Georgian (partial, 39%; native-speaker reviewed) and Russian (menus only, 15%). No other language has had
+Also shipped: Traditional Chinese (partial, 38%), Ukrainian (partial, 29%), Czech (partial, 29%), Polish (partial, 34%), Georgian (partial, 39%; native-speaker reviewed), Russian (menus only, 15%) and Swedish (menus, panels and effect names; not yet measured). No other language has had
 native-speaker review.
 
 ## Upcoming
@@ -117,6 +117,10 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-11-05: ProRes 4444 and XQ exports write the required run after the final alpha
+  difference. The FilmCraft encoder pin fixes alpha movies rejected by native macOS
+  decoding; an export regression checks the stored bytes for both profiles, alpha modes,
+  and motion-blur settings (#293). Resolve itself still needs confirmation.
 - 2026-10-30: Text strokes take a Line Join (Miter, Round or Bevel) in the Character panel,
   Miter for new text as in After Effects (#2077). In the Timeline, effects, masks and shape items
   drag to a new place in their stack (#2210) and Shift-click adds them to the selection, so one
@@ -155,7 +159,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
   design — alongside its 618/618 menus.
 - 2026-10-10: Full parity re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5
   release notes, repository counts): breadth ≈ 91%, ready ≈ 45%, stage alpha. Progress docs
-  follow the shared standard: `docs/parity.md` became `docs/target-app-parity.md`; new
+  restructured: `docs/parity.md` became `docs/target-app-parity.md`; new
   `docs/roadmap.md`, `localization-parity.md`, `file-format-parity.md`, `hardware-parity.md`,
   `ui-parity.md`, `effects-parity.md` and `scripting-parity.md`.
 - 2026-10-10: Spanish (#460) and Brazilian Portuguese (#217) menu translations.
@@ -184,6 +188,6 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
-| 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
+| 2026-10-10 | major | Progress docs restructured: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |
