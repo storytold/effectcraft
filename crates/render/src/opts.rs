@@ -28,6 +28,11 @@ pub struct RenderOpts {
     pub nested_switches: bool,
     /// Realtime Shadows in Draft (Settings ▸ 3D): draft renders (`draft`) still cast shadows.
     pub draft_shadows: bool,
+    /// Viewer only: the id of the text layer being edited, drawn whole while typing: its mask
+    /// compositing is skipped (its mask paths stay, a text path may use them) and lines past its
+    /// paragraph box show, so the glyphs match the caret and selection.
+    pub edited_text: Option<u64>,
+
     /// No HDR step: the top-level comp leaves the working space for the output space without
     /// Project Settings ▸ HDR (compand / tone mapping), so over-range values stay. The consumer
     /// decodes the frame with [`crate::color::Pipe::output_linear`] (float outputs: OpenEXR)
@@ -56,6 +61,7 @@ impl Default for RenderOpts {
             draft_shadows: true,
             skip_hdr_step: false,
             proxy: effectcraft_project::render_queue::ProxyUse::CurrentSettings,
+            edited_text: None,
         }
     }
 }

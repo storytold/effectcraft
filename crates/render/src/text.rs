@@ -15,7 +15,7 @@ use effectcraft_project::{Layer, PropGroup};
 use effectcraft_raster::{Image, Mask};
 use effectcraft_text::path_text::{self, PathMeasure};
 use effectcraft_text::selectors::{self, BasedOn, Mode, Range, Shape, Wiggly};
-use effectcraft_text::{CharGlyph, TextLayout, char_glyph_style, layout_doc};
+use effectcraft_text::{CharGlyph, TextLayout, char_glyph_style, layout_doc_with};
 
 use crate::eval::EvalCtx;
 
@@ -609,7 +609,8 @@ fn text_path(ctx: &EvalCtx, layer: &Layer, text: &PropGroup) -> Option<(PathMeas
 /// (layer space, what [`TextLayout::caret`] returns) to where animators and Path Options put
 /// the characters: the caret follows the character before it (or the first one).
 pub fn caret_maps(ctx: &EvalCtx, layer: &Layer, chars: usize) -> Vec<Mat3> {
-    let Some(geom) = text_geom(ctx, layer) else { return vec![Mat3::IDENTITY; chars + 1] };
+    // Every line, also those past the box: the caret goes there while typing.
+    let Some(geom) = text_geom_with(ctx, layer, true) else { return vec![Mat3::IDENTITY; chars + 1] };
     let mut by_char: Vec<Option<Mat3>> = vec![None; chars + 1];
     for g in &geom.glyphs {
         if let Some(slot) = by_char.get_mut(g.char_index) {
@@ -640,9 +641,14 @@ fn align_index(j: Justify) -> u8 {
 
 /// Lay out and animate a text layer.
 pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
+    text_geom_with(ctx, layer, false)
+}
+
+/// [`text_geom`]; `whole` keeps the lines past a paragraph box (the text being edited).
+pub fn text_geom_with(ctx: &EvalCtx, layer: &Layer, whole: bool) -> Option<TextGeom> {
     let doc = source_text(ctx, layer)?;
     let text = layer.props.sub("text")?;
-    let lay = layout_doc(&doc);
+    let lay = layout_doc_with(&doc, !whole);
     let xfs = char_transforms(ctx, layer, text, &lay);
     let three = per_char_3d(ctx, layer);
     let more = text.sub("moreOptions");
@@ -664,7 +670,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         }
         // Same character count: the style runs still line up.
         let d2 = TextDoc { text: chars.into_iter().collect(), ..doc.clone() };
-        let l2 = layout_doc(&d2);
+        let l2 = layout_doc_with(&d2, !whole);
         let by_char: std::collections::HashMap<usize, CharXf> = lay.glyphs.iter().zip(&xfs).map(|(g, x)| (g.char_index, *x)).collect();
         let x2: Vec<CharXf> = l2.glyphs.iter().map(|g| by_char.get(&g.char_index).copied().unwrap_or_default()).collect();
         subs = vec![None; l2.glyphs.len()];
@@ -856,6 +862,13 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
 /// and hit testing).
 pub fn glyph_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<(BezPath, CharXf)> {
     text_geom(ctx, layer).map(|t| t.glyphs.iter().map(|g| (g.path(), g.xf)).collect()).unwrap_or_default()
+}
+
+/// Layer-space `[x0, y0, x1, y1]` of a paragraph (box) text layer's box, `None` for point text.
+pub fn text_box(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 4]> {
+    let doc = source_text(ctx, layer)?;
+    let b = doc.box_size?;
+    Some([doc.box_pos[0], doc.box_pos[1], doc.box_pos[0] + b[0], doc.box_pos[1] + b[1]])
 }
 
 fn path_join(j: effectcraft_keyframe::LineJoin) -> effectcraft_path::Join {
@@ -1053,9 +1066,9 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
 }
 
 /// Render a text layer into a layer-space buffer at scale `s`.
-pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
+pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64, whole: bool) -> Buf {
     let empty = || Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: s };
-    let Some(geom) = text_geom(ctx, layer) else { return empty() };
+    let Some(geom) = text_geom_with(ctx, layer, whole) else { return empty() };
     let mut bounds: Option<kurbo::Rect> = None;
     for g in &geom.glyphs {
         if let Some(b) = effectcraft_path::bounds(&[g.path()]) {
@@ -1078,8 +1091,8 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
 
 /// Per-character 3D: each character as its own plane — (buffer in character space, character
 /// space → layer space matrix).
-pub fn per_char_planes(ctx: &EvalCtx, layer: &Layer, s: f64) -> Vec<(Buf, Mat4)> {
-    let Some(geom) = text_geom(ctx, layer) else { return vec![] };
+pub fn per_char_planes(ctx: &EvalCtx, layer: &Layer, s: f64, whole: bool) -> Vec<(Buf, Mat4)> {
+    let Some(geom) = text_geom_with(ctx, layer, whole) else { return vec![] };
     let mut out = Vec::with_capacity(geom.glyphs.len());
     for (gi, g) in geom.glyphs.iter().enumerate() {
         if g.xf.opacity <= 0.0 {

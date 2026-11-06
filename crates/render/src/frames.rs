@@ -147,6 +147,10 @@ pub fn render_frame(project: &Project, comp: ItemId, t: Tick, scale: f64) -> Ima
 pub fn content_bounds(ctx: &EvalCtx, layer: &effectcraft_project::Layer) -> Option<[f64; 4]> {
     match &layer.source {
         LayerSource::Text => {
+            // Paragraph text is bounded by its box, so the outline is that box, not the glyphs.
+            if let Some(b) = text::text_box(ctx, layer) {
+                return Some(b);
+            }
             let glyphs = text::glyph_paths(ctx, layer);
             let paths: Vec<_> = glyphs.into_iter().map(|g| g.0).collect();
             effectcraft_path::bounds(&paths).map(|r| [r.x0, r.y0, r.x1, r.y1])

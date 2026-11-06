@@ -159,9 +159,11 @@ impl<'a> Renderer<'a> {
     }
 
     /// The render options one level down (precomps, collapsed precomps, comps read by effects):
-    /// guide layers render only in their own comp, never when it is nested.
+    /// guide layers render only in their own comp, never when it is nested. Only the viewed
+    /// comp's own layer draws unmasked: what other layers read of it stays masked, so their
+    /// cached results don't depend on the edit (`RenderOpts::edited_text`).
     fn nested_opts(&self) -> RenderOpts {
-        RenderOpts { guides: false, ..self.opts }
+        RenderOpts { guides: false, edited_text: None, ..self.opts }
     }
 
     /// A renderer for nested work (precomps, layers read by effects): one level deeper.
@@ -776,7 +778,7 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
+            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer), self.edited(layer)))),
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }
@@ -893,7 +895,7 @@ impl<'a> Renderer<'a> {
         };
         // A solid is filled with a quantised colour: only masks can take it off the grid.
         let solid = matches!(layer.source, LayerSource::Solid { .. });
-        if masks::apply(ctx, layer, &mut buf, self.mask_blur(ctx, layer)) || !solid {
+        if self.apply_masks(ctx, layer, &mut buf) || !solid {
             self.pipe.quantize(&mut buf.img);
         }
         Some(buf)
@@ -987,7 +989,10 @@ impl<'a> Renderer<'a> {
     }
 
     pub(crate) fn content_buf_timed(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<(Arc<Buf>, Option<u64>)> {
-        let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        let key = self.mask_aware_key(
+            layer,
+            self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer))),
+        );
         let key = self.content_key(ctx, layer, key);
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
@@ -1012,7 +1017,10 @@ impl<'a> Renderer<'a> {
     /// what effect `effects` sees. Served from / stored in the layer cache under its own key,
     /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
-        let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
+        let key = self.mask_aware_key(
+            layer,
+            self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects)),
+        );
         let key = self.content_key(ctx, layer, key);
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)

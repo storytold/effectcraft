@@ -254,6 +254,7 @@ impl<'a> Cx<'a> {
             // OpenEXR keeps over-range values: no HDR compand / tone mapping on its frames.
             skip_hdr_step: self.job.output.format == effectcraft_project::render_queue::OutputFormat::ExrSequence,
             proxy: s.proxy_use,
+            edited_text: None,
         };
         let mut r = Renderer::new(&self.project, self.job.footage, opts);
         r.expr = self.job.expr;
