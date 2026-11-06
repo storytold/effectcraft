@@ -40,6 +40,7 @@ impl EffectcraftApp {
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_held: false,
+            silent_project: None,
             starting: false,
             starting_since: now,
             first_cached: None,
