@@ -19,7 +19,7 @@ fn render_queue_panel_snapshot() {
     s.execute("renderQueue.add", json!({"format": "png", "output": "/renders/frames/[compName]_[#####].png", "timeSpan": "workArea"})).unwrap();
     s.execute("renderQueue.add", json!({"format": "gif", "resolution": "quarter"})).unwrap();
     {
-        let p = std::sync::Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         p.render_queue[0].status = RenderStatus::Done;
         p.render_queue[0].started = Some(1_790_000_000);
         p.render_queue[0].render_time = Some(12.4);

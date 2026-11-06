@@ -47,7 +47,7 @@ fn disk_cache_settings_persistence_and_invalidation() {
     let saved = s.project.clone();
     drop(s);
     let mut s2 = session(&dir);
-    s2.project = saved;
+    s2.set_project(saved);
     s2.bump();
     s2.open_comp(cid);
     let dc2 = s2.disk_cache.clone().unwrap();
@@ -128,7 +128,7 @@ fn footage_changes_change_the_salt() {
     assert_eq!(effectcraft_render::disk_cache::comp_content_key(&s.project, cid), k2);
     // A proxy, and its Use Proxy switch, change the pixels.
     let set_proxy = |s: &mut Session, enabled: bool| {
-        let it = std::sync::Arc::make_mut(&mut s.project).items.get_mut(&cid).unwrap();
+        let it = s.project_mut().items.get_mut(&cid).unwrap();
         it.proxy = Some(Box::new(effectcraft_project::Proxy { footage: effectcraft_project::Footage::default(), enabled }));
         effectcraft_render::disk_cache::comp_content_key(&s.project, cid)
     };
@@ -282,7 +282,7 @@ fn opening_a_project_drops_the_footage_salt_being_taken() {
     .unwrap();
     // The file changes after the edit started the salt, before the same footage is opened again.
     std::fs::write(&path, b"a longer content").unwrap();
-    let same = (*s.project).clone();
+    let same = (**s.project).clone();
     s.replace_project(same, None);
     let t0 = std::time::Instant::now();
     while s.poll_disk_salt() {

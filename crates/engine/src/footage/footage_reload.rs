@@ -298,19 +298,23 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
             Ok(())
         })?;
     } else {
-        let p = Arc::make_mut(&mut s.project);
-        let mut changed = false;
-        for (i, f) in updates {
-            if let Some(it) = p.item_mut(i)
-                && !matches!(&it.kind, ItemKind::Footage(cur) if *cur == f)
-            {
-                it.kind = ItemKind::Footage(f);
-                changed = true;
+        // Take the project for writing only for updates that differ: a write without a `bump`
+        // is published as an untracked change.
+        let updates: Vec<_> =
+            updates.into_iter().filter(|(i, f)| s.project.item(*i).is_some_and(|it| !matches!(&it.kind, ItemKind::Footage(cur) if cur == f))).collect();
+        let changed = !updates.is_empty();
+        if changed {
+            let p = s.project_mut();
+            for (i, f) in updates {
+                if let Some(it) = p.item_mut(i) {
+                    it.kind = ItemKind::Footage(f);
+                }
             }
         }
         if changed {
             let dirty = s.is_dirty();
-            s.bump();
+            let hooks = s.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("footage_reload"), || s.bump());
             if !dirty {
                 // Only the disk changed: the project isn't modified.
                 s.mark_saved();
@@ -652,7 +656,7 @@ mod watcher_tests {
         disk.set("/live.png", (1, 1));
         let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
         s.prefs.import.auto_reload_footage = "off".into();
-        let id = Arc::make_mut(&mut s.project).add_item(
+        let id = s.project_mut().add_item(
             "Live",
             Default::default(),
             None,
@@ -686,18 +690,13 @@ mod watcher_tests {
         disk.set("/plate.png", (1, 1));
         let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
         s.prefs.import.auto_reload_footage = "off".into();
-        let id = Arc::make_mut(&mut s.project).add_item(
-            "Plate",
-            Default::default(),
-            None,
-            ItemKind::Footage(Footage { path: "/plate.png".into(), ..Default::default() }),
-        );
+        let id = s.project_mut().add_item("Plate", Default::default(), None, ItemKind::Footage(Footage { path: "/plate.png".into(), ..Default::default() }));
         let (mut w, wakes) = start(&disk, LONG, LONG).unwrap();
         w.update(&s);
         wait_for(&w, &wakes, 1);
         let sources = w.paths.sources.clone();
         let looks = disk.looks.load(Ordering::SeqCst);
-        Arc::make_mut(&mut s.project).item_mut(id).unwrap().name = "Renamed".into();
+        s.project_mut().item_mut(id).unwrap().name = "Renamed".into();
         w.update(&s);
         assert!(Arc::ptr_eq(&sources, &w.paths.sources), "sequence snapshots are reused");
         assert!(Arc::ptr_eq(w.pending.lock().unwrap().paths.project.as_ref().unwrap(), &s.project));
@@ -711,12 +710,7 @@ mod watcher_tests {
         let disk = Arc::new(Disk::default());
         let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
         s.prefs.import.auto_reload_footage = "off".into();
-        let id = Arc::make_mut(&mut s.project).add_item(
-            "Plate",
-            Default::default(),
-            None,
-            ItemKind::Footage(Footage { path: "/gone.png".into(), ..Default::default() }),
-        );
+        let id = s.project_mut().add_item("Plate", Default::default(), None, ItemKind::Footage(Footage { path: "/gone.png".into(), ..Default::default() }));
         let (mut w, _) = start(&disk, LONG, LONG).unwrap();
         w.update(&s);
         let mut scan = None;
@@ -724,7 +718,7 @@ mod watcher_tests {
             scan = w.take();
             scan.is_some()
         });
-        Arc::make_mut(&mut s.project).item_mut(id).unwrap().name = "Keep this edit".into();
+        s.project_mut().item_mut(id).unwrap().name = "Keep this edit".into();
         assert_eq!(scan.unwrap().apply(&mut s).unwrap()["stale"], true);
         w.update(&s);
         w.recheck();
@@ -750,7 +744,7 @@ mod watcher_tests {
         disk.set("/data.csv", (1, 1));
         let mut s = Session { services: disk.clone(), importer: Some(Arc::new(DataProbe(disk.clone()))), ..Default::default() };
         s.prefs.import.auto_reload_footage = "off".into();
-        let id = Arc::make_mut(&mut s.project).add_item(
+        let id = s.project_mut().add_item(
             "Data",
             Default::default(),
             None,
@@ -782,7 +776,7 @@ mod watcher_tests {
         let (mut w, wakes) = start(&disk, LONG, LONG).unwrap();
         w.update(&s);
         disk.set("/first.csv", (1, 1));
-        let id = Arc::make_mut(&mut s.project).add_item(
+        let id = s.project_mut().add_item(
             "Data",
             Default::default(),
             None,
@@ -791,12 +785,12 @@ mod watcher_tests {
         w.update(&s);
         assert_eq!(wait_for(&w, &wakes, 1), vec![("/first.csv".into(), Some((1, 1)))]);
         disk.set("/second.csv", (2, 2));
-        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+        if let ItemKind::Footage(f) = &mut s.project_mut().item_mut(id).unwrap().kind {
             f.path = "/second.csv".into();
         }
         w.update(&s);
         assert_eq!(wait_for(&w, &wakes, 2), vec![("/second.csv".into(), Some((2, 2)))]);
-        Arc::make_mut(&mut s.project).items.remove(&id);
+        s.project_mut().items.remove(&id);
         w.update(&s);
         assert!(w.paths.reload.is_empty());
         assert!(w.pending.lock().unwrap().paths.reload.is_empty());
@@ -849,5 +843,37 @@ mod watcher_tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "the worker is still running");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    fn footage(width: u32) -> Footage {
+        Footage { path: "/ec/a.png".into(), width, height: 48, has_video: true, ..Default::default() }
+    }
+
+    /// Reloads that equal what is stored write nothing, so the change bus has nothing to
+    /// publish; one that differs is published with the reload's cause.
+    #[test]
+    fn a_reload_that_changes_nothing_publishes_no_change() {
+        let mut s = Session::default();
+        let id = s.project_mut().add_item("a", crate::color::Label::None, None, ItemKind::Footage(footage(64)));
+        s.mark_saved();
+        // Publish the setup's own write first, so only the call under test is seen.
+        s.hooks.flush(&mut s.project, s.revision);
+        let bus = s.hooks.change_bus::<Arc<effectcraft_project::Project>>();
+        let sub = bus.subscribe();
+        apply_reloads(&mut s, vec![(id, footage(64))], false).unwrap();
+        s.hooks.flush(&mut s.project, s.revision);
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert!(seen.is_empty(), "{seen:?}");
+        assert!(!s.is_dirty());
+        apply_reloads(&mut s, vec![(id, footage(96))], false).unwrap();
+        s.hooks.flush(&mut s.project, s.revision);
+        let seen: Vec<_> = bus.drain(sub).into_iter().map(|c| c.cause).collect();
+        assert_eq!(seen, [craft_command::Cause::Job("footage_reload")]);
+        assert!(!s.is_dirty(), "only the disk changed");
     }
 }

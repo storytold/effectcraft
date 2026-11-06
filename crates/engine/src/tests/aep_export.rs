@@ -147,7 +147,7 @@ fn with_sequence(dir: &str, sep: &str, document: &str) -> (Session, std::sync::A
         ..Default::default()
     };
     f.sync_sequence_duration();
-    std::sync::Arc::make_mut(&mut s.project).add_item("a_[0001-0003].png", Default::default(), None, ItemKind::Footage(f));
+    s.project_mut().add_item("a_[0001-0003].png", Default::default(), None, ItemKind::Footage(f));
     s.stored_paths.add(&s.project, Some(document));
     (s, stamps)
 }

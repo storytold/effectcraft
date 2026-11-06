@@ -33,6 +33,7 @@ pub mod gpu_failure;
 pub mod header;
 pub mod i18n;
 pub mod icons;
+mod link_ui;
 pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;
@@ -367,6 +368,8 @@ pub struct EffectcraftApp {
     /// Pointer position in comp pixels (Info panel).
     pub(crate) pointer_comp: Option<[f32; 2]>,
     pub(crate) dialog_state: panels::dialogs::DialogState,
+    /// Craft Link: where a window close stands (see `link_ui::close_step`).
+    pub(crate) link_close: link_ui::CloseState,
     pub integrated_titlebar: bool,
     /// Audio preview while playing (audio clock drives playback).
     pub audio: Option<audio::AudioPlayback>,

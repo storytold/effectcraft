@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-29 · **Change:** minor (SAM 2 crate added to the layer table) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-29 · **Change:** minor (`link` on L5; not in the wasm check) · **Target:** Adobe After Effects 2026
 
 EffectCraft is a stack of small Rust crates. The engine knows nothing about the user interface;
 the egui frontend, the command-line tool and the MCP server all sit on top of the same `Session`
@@ -11,7 +11,8 @@ and drive it through the same command registry.
 Dependencies only point downward (or along the few same-layer edges listed below). `cargo xtask
 layers` enforces this, and fails the build if a crate below L5 depends on egui, eframe, winit, rfd,
 cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
-`wasm32-unknown-unknown` (`cargo xtask wasm`); see [web.md](web.md).
+`wasm32-unknown-unknown` (`cargo xtask wasm`); see [web.md](web.md). L5 is `ui-egui`,
+`automation`, `link`, and `plugins`. `link` and `plugins` are not in that wasm check.
 
 | Layer | Crate (`effectcraft-…`) | Responsibility |
 |---|---|---|
@@ -50,11 +51,13 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
+| L5 | `link` | EffectCraft side of Craft Link. It depends on `craft-ipc` and `craft-command` from craft-libs. It is not in the wasm check because `craft-ipc` uses local sockets and std threads. Live link: `frames` serves bulk frames with `Renderer::comp_frame` on an `Arc<Project>` snapshot, `track` counts epochs, `live` ties both and the background result render to the UI thread (`live::tick` once per frame) |
+| L5 | `plugins` | EffectCraft side of the suite plug-in host (craft-abi 1): `Services` over a `Session`, the install flow, the manager view. It depends on `craft-plugin-host`, `craft-plugin-ui` and `craft-plugin-abi` from craft-libs. Not in the wasm check: the host lifecycle is native only |
 | L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)) |
 
 Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,
-`script → engine`.
+`script → engine`, `ui-egui → link`.
 
 The frontend uses `craft-ui::docking` for atomic layout transactions and pointer drop targets,
 and `craft-ui::layout` for bounded split geometry and resize interactions. A small adapter
@@ -783,5 +786,7 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+| 2026-10-11 | minor | `link` added on L5. It depends on `craft-ipc` and `craft-command` and is outside the wasm check |
+| 2026-10-24 | minor | `link` serves live frames (`frames`), tracks comp changes (`track`, `live`) and renders the result file in the background; it also depends on `effectcraft-render` |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

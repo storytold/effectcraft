@@ -51,7 +51,7 @@ pub(crate) fn rollback(app: &mut EffectcraftApp, checkpoint: Checkpoint, applied
     history.redo.clear();
     history.merge_key = None;
     let edited = active_editor_snapshot(&app.session);
-    app.session.project = Arc::new(merged);
+    app.session.set_project(Arc::new(merged));
     app.session.history = history;
     app.session.sanitize_after_replacement(edited.as_ref());
     app.session.bump();

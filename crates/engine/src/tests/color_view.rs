@@ -173,7 +173,7 @@ fn color_engine_aces_working_spaces_and_hdr() {
     assert!(hlg[0] > 0.85, "HLG: {hlg:?}");
     assert!(s.execute("file.projectSettings", json!({"hdr": "glow"})).is_err());
     // Serde keeps the new settings; older files load with the defaults.
-    let back: Project = serde_json::from_str(&serde_json::to_string(&*s.project).unwrap()).unwrap();
+    let back: Project = serde_json::from_str(&serde_json::to_string(&**s.project).unwrap()).unwrap();
     assert_eq!(back.settings, s.project.settings);
     let mut v = serde_json::to_value(&s.project.settings).unwrap();
     for k in ["color_engine", "hdr", "output_space"] {

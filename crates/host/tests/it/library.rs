@@ -209,7 +209,7 @@ fn missing_effects_name_the_packages_that_provide_them() {
     s.execute("effect.apply", json!({"layer": layer, "effect": "ec.blur.gaussian"})).unwrap();
     s.execute("effect.apply", json!({"layer": layer, "effect": "ec.blur.gaussian"})).unwrap();
     let cid = s.active_comp_id().unwrap();
-    let proj = std::sync::Arc::make_mut(&mut s.project);
+    let proj = s.project_mut();
     let l = proj.comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap();
     let first = l.props.sub_mut("effects").unwrap().children.iter_mut().find_map(|n| match n {
         Node::Group(g) => Some(g),

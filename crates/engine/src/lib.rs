@@ -9,6 +9,7 @@
 //! (compositions are `Arc`s, so untouched comps are shared).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+#![allow(clippy::disallowed_methods)]
 
 mod analysis;
 mod background;
@@ -24,6 +25,7 @@ pub mod render_queue;
 pub mod scriptui;
 mod settings;
 mod system;
+pub mod ui_ids;
 pub mod viewer;
 
 use std::sync::Arc;
@@ -100,7 +102,7 @@ pub use services::{FsServices, Importer, Services};
 pub use session::{DiskSaltJob, upgrade_effects};
 
 pub struct Session {
-    pub project: Arc<Project>,
+    pub project: craft_command::Tracked<Arc<Project>>,
     pub history: History,
     pub revision: u64,
     /// Process-unique monotonic revision of the on-canvas editor's committed text and session.
@@ -119,6 +121,8 @@ pub struct Session {
     pub path: Option<String>,
     pub state: EditorState,
     pub services: Arc<dyn Services>,
+    /// Time source for the gate budgets (2 ms per call, 6 ms per 16 ms window). Tests inject a fixed one.
+    pub clock: Arc<dyn craft_command::Clock + Send + Sync>,
     pub footage: Arc<dyn FootageSource>,
     pub expr: Option<Arc<dyn ExprHost>>,
     /// GPU compositor (Mercury GPU Acceleration), when the frontend has one: used by renders
@@ -269,6 +273,15 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
+    /// Nesting depth of [`Session::execute`].
+    pub exec_depth: u32,
+    /// Monotonic id for [`craft_command::Call::seq`].
+    pub call_seq: u64,
+    /// Set by a merged edit, consumed by [`Session::bump`].
+    pub pending_merged: bool,
+    /// `Arc` so the plug-in host (`effectcraft-plugins`) registers into the same table.
+    pub registry: Arc<craft_command::Registry<Session, EngineError>>,
+    pub hooks: craft_command::Hooks<Session>,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -296,6 +309,27 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
 
+struct SystemClock;
+
+/// Result class for a UI-only command. The egui crate does not name `craft_command`.
+pub enum UiOutcome {
+    Ok,
+    Err,
+    Panicked,
+}
+
+/// An open UI-only gate. [`Session::close_ui`] finishes it.
+pub struct UiGate {
+    info: craft_command::CallInfo,
+    pub params: Value,
+}
+
+impl craft_command::Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    }
+}
+
 /// What a host that runs external effect helpers provides (`docs/external-helpers.md`).
 #[derive(Clone, Copy)]
 pub struct HelperHooks {
@@ -321,8 +355,8 @@ impl Default for Session {
     fn default() -> Self {
         let project = Arc::new(Project::default());
         Session {
-            saved_project: project.clone(),
-            project,
+            saved_project: Arc::clone(&project),
+            project: craft_command::Tracked::new(project),
             history: History::default(),
             revision: 0,
             // A fresh session gets its own process-monotonic stamp even before its first edit.
@@ -331,6 +365,7 @@ impl Default for Session {
             path: None,
             state: EditorState { snapping: true, view_layout: 1, ..Default::default() },
             services: Arc::new(FsServices),
+            clock: Arc::new(SystemClock),
             footage: Arc::new(NoFootage),
             expr: None,
             accel: None,
@@ -396,6 +431,11 @@ impl Default for Session {
             disk_salt_job: None,
             aux_footage: None,
             script_calls: ScriptCalls::default(),
+            exec_depth: 0,
+            call_seq: 0,
+            pending_merged: false,
+            registry: Arc::new(craft_command::Registry::new(commands::registry_specs())),
+            hooks: craft_command::Hooks::new(),
         }
     }
 }

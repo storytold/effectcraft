@@ -166,7 +166,7 @@ fn ui_scope(id: &str) -> &'static str {
 
 /// Every bindable command: menu entries, registry commands outside the menus, then the
 /// frontend's own commands.
-pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
+pub fn bindables(ui: &[UiCommand], registry: &craft_command::Registry<crate::Session, crate::EngineError>) -> Vec<Bindable> {
     let mut out: Vec<Bindable> = vec![];
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut push = |b: Bindable, out: &mut Vec<Bindable>| {
@@ -217,23 +217,17 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
         },
         &mut out,
     );
-    for c in crate::command_specs() {
-        if !c.journal || entries.iter().any(|(_, e)| e.command == c.id) {
-            continue;
+    let mut journaled = Vec::new();
+    registry.for_each(|view| {
+        if !view.journal || entries.iter().any(|(_, e)| e.command == view.id) {
+            return;
         }
-        let defaults = c.shortcut.into_iter().chain(c.alt_shortcuts.iter().copied()).filter_map(normalize).collect();
-        push(
-            Bindable {
-                key: c.id.to_string(),
-                command: c.id.to_string(),
-                params: Value::Null,
-                label: c.label.to_string(),
-                path: vec!["Commands".into()],
-                scope: scope_of(c.id).into(),
-                defaults,
-            },
-            &mut out,
-        );
+        journaled.push((view.id.to_string(), view.label.to_string(), view.shortcut.map(str::to_string), view.alt_shortcuts.to_vec()));
+    });
+    for (id, label, shortcut, alt) in journaled {
+        let defaults = shortcut.as_deref().into_iter().chain(alt.iter().copied()).filter_map(normalize).collect();
+        let scope = scope_of(&id).into();
+        push(Bindable { key: id.clone(), command: id, params: Value::Null, label, path: vec!["Commands".into()], scope, defaults }, &mut out);
     }
     for c in ui {
         let scope = c.scope.as_deref().unwrap_or_else(|| ui_scope(&c.id));
@@ -559,14 +553,19 @@ pub struct ShortcutTable {
 }
 
 impl ShortcutTable {
-    pub fn build(maps: &Keymaps, ui: &[UiCommand]) -> ShortcutTable {
-        Self::build_with_scripts(maps, ui, &[])
+    pub fn build(maps: &Keymaps, ui: &[UiCommand], registry: &craft_command::Registry<crate::Session, crate::EngineError>) -> ShortcutTable {
+        Self::build_with_scripts(maps, ui, registry, &[])
     }
 
     /// [`ShortcutTable::build`] with the File ▸ Scripts entries of the scripts `scripts`, listed
     /// after the other File ▸ Scripts entries.
-    pub fn build_with_scripts(maps: &Keymaps, ui: &[UiCommand], scripts: &[String]) -> ShortcutTable {
-        let mut bindables = bindables(ui);
+    pub fn build_with_scripts(
+        maps: &Keymaps,
+        ui: &[UiCommand],
+        registry: &craft_command::Registry<crate::Session, crate::EngineError>,
+        scripts: &[String],
+    ) -> ShortcutTable {
+        let mut bindables = bindables(ui, registry);
         let at = bindables.iter().rposition(|b| b.path.starts_with(&["File".to_string(), "Scripts".to_string()])).map_or(bindables.len(), |i| i + 1);
         let new: Vec<Bindable> = script_bindables(scripts).into_iter().filter(|s| !bindables.iter().any(|b| b.key == s.key)).collect();
         bindables.splice(at..at, new);

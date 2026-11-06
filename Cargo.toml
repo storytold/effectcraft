@@ -38,6 +38,7 @@ effectcraft-export = { path = "crates/export" }
 effectcraft-expr = { path = "crates/expr" }
 effectcraft-lottie = { path = "crates/lottie" }
 effectcraft-interchange = { path = "crates/interchange" }
+effectcraft-link = { path = "crates/link" }
 effectcraft-pdf = { path = "crates/pdf" }
 effectcraft-psd = { path = "crates/psd" }
 effectcraft-aep = { path = "crates/aep" }
@@ -52,6 +53,7 @@ effectcraft-script = { path = "crates/script" }
 effectcraft-hevcenc = { path = "crates/hevcenc" }
 effectcraft-av1enc = { path = "crates/av1enc" }
 effectcraft-plugin = { path = "crates/plugin" }
+effectcraft-plugins = { path = "crates/plugins" }
 effectcraft-helper-host = { path = "crates/helper-host" }
 
 # foundation
@@ -143,6 +145,16 @@ sys-locale = "0.3"
 # filmcraft-isobmff = { path = "../filmcraft/crates/isobmff" }
 # filmcraft-matroska = { path = "../filmcraft/crates/matroska" }
 # filmcraft-mpegts = { path = "../filmcraft/crates/mpegts" }
+
+# Craft Link and the plug-in host. These crates are in craft-libs pull requests that are still open
+# (craft-command, craft-ipc, craft-plugin-abi, craft-plugin-host, craft-plugin-ui). They share one rev.
+# Move it to the merged commit.
+craft-command = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
+craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
+# The plug-in host lifecycle is native only.
+craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0", default-features = false }
+craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
+craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

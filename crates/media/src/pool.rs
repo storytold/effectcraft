@@ -869,6 +869,9 @@ impl Inner {
         if let Some(img) = crate::layered::decode(path, &bytes, footage, op)? {
             return Ok(img);
         }
+        if let Some(img) = crate::foreign::decode(path, &bytes, op)? {
+            return Ok(img);
+        }
         // (an OpenEXR compression the decoder lacks came out transparent or as a missing
         // channel error)
         if path.to_ascii_lowercase().ends_with(".exr")

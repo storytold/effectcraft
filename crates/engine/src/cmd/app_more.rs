@@ -49,7 +49,7 @@ pub(crate) fn grouped<T>(s: &mut Session, label: &str, f: impl FnOnce(&mut Sessi
             // text.edit / text change / comp switch must invalidate the pre-`f` editor token
             // instead of reviving it.
             let edited = super::text_edit::active_editor_snapshot(s);
-            s.project = before;
+            s.set_project(before);
             s.state = before_state;
             s.history = saved_history;
             s.history.merge_key = None;

@@ -52,6 +52,11 @@ impl EffectcraftApp {
 }
 
 impl EffectcraftApp {
+    /// True while a window close waits for the result render of a link (tests).
+    pub fn link_close_rendering(&self) -> bool {
+        self.link_close.rendering
+    }
+
     /// Take the pending synthetic input (from `ui.click`, `ui.key`, …). Hosts that don't call
     /// [`eframe::App::raw_input_hook`] (the headless test harness) feed these in themselves.
     pub fn take_synthetic_input(&mut self) -> Vec<egui::Event> {

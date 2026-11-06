@@ -783,7 +783,7 @@ impl Session {
     /// Save the tracker's frames in the instance, unless its strokes changed while it tracked. No undo
     /// step: the frames are a cache of the strokes and the span (a stale copy is ignored).
     fn save_tracks(&mut self, cid: ItemId, lid: LayerId, uid: Uid, strokes: &str, json: String) {
-        let p = Arc::make_mut(&mut self.project);
+        let p = self.project_mut();
         if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid))
             && guard_of(g) == strokes
         {
@@ -805,12 +805,14 @@ impl Session {
         let name = if job.object_matte { "Object Matte" } else { "Roto Brush" };
         if let Some(e) = &st.error {
             self.events.push(Event::Toast { message: format!("{name}: {e}"), error: true });
-            self.bump();
+            let hooks = self.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("roto"), || self.bump());
             return true;
         }
         if st.cancelled {
             self.events.push(Event::Toast { message: format!("{name}: stopped"), error: false });
-            self.bump();
+            let hooks = self.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("roto"), || self.bump());
             return true;
         }
         match job.task {
@@ -822,7 +824,8 @@ impl Session {
                     self.save_tracks(job.comp, job.layer, job.effect, &job.strokes, json);
                 }
                 // Rendered frames depend on the cache: redraw.
-                self.bump();
+                let hooks = self.hooks.clone();
+                hooks.with_cause(craft_command::Cause::Job("roto"), || self.bump());
             }
             RotoTask::Freeze => {
                 let Some(fc) = lock(&job.shared.frozen).take() else { return true };

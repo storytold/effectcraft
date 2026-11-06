@@ -51,6 +51,25 @@ pub use settings::{
     TimeDisplayStyle, is_newer_version, saved_by, saved_view,
 };
 
+fn epoch_is_zero(epoch: &u64) -> bool {
+    *epoch == 0
+}
+
+/// One Craft Link, stored in the sidecar project so a later open can find the comp.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CraftLinkBinding {
+    pub link_id: String,
+    /// Composition this link opens.
+    pub comp: ItemId,
+    /// The `link.open` source object (`app`, `doc_id`, `item`).
+    pub source: serde_json::Value,
+    /// Absolute path of the result movie.
+    pub result_path: String,
+    /// Epoch of the last result movie written for this link. Missing in a saved project means 0.
+    #[serde(default, skip_serializing_if = "epoch_is_zero")]
+    pub epoch: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub schema: u32,
@@ -66,6 +85,9 @@ pub struct Project {
     /// Render Queue preferences (Notify, storage overflow folders).
     #[serde(default, skip_serializing_if = "render_queue::RenderQueuePrefs::is_default")]
     pub render_prefs: render_queue::RenderQueuePrefs,
+    /// Craft Link bindings in this document (`link_id` → binding). Empty projects omit the field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub craft_links: BTreeMap<String, CraftLinkBinding>,
 }
 
 #[cfg(test)]

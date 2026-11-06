@@ -184,6 +184,29 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    // Engine ids are gated inside `Session::execute`, including commands that emit `Event::Frontend`.
+    // This gate is only for ids execute does not resolve.
+    if app.session.registry.resolve(id).is_none() {
+        let gate = app.session.open_ui(id, &params)?;
+        let params = gate.params.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| invoke_body(app, ctx, id, params)));
+        match result {
+            Ok(value) => {
+                let outcome = if value.is_ok() { effectcraft_engine::UiOutcome::Ok } else { effectcraft_engine::UiOutcome::Err };
+                app.session.close_ui(gate, outcome);
+                value
+            }
+            Err(payload) => {
+                app.session.close_ui(gate, effectcraft_engine::UiOutcome::Panicked);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    } else {
+        invoke_body(app, ctx, id, params)
+    }
+}
+
+fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }

@@ -62,6 +62,12 @@ pub struct Hooks {
     /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
     /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.
     pub device_lost: Option<Box<dyn Fn(Option<Result<String, String>>)>>,
+    /// Runs once per frame after the UI, with the session (the plug-in host draws its windows
+    /// here). A hidden window never reaches it.
+    pub per_frame: Option<Box<dyn FnMut(&egui::Context, &mut Session)>>,
+    /// Runs on every logic tick, hidden window included, with the session (the plug-in host
+    /// serves the calls other threads queued here). It does no input handling and no drawing.
+    pub per_tick: Option<Box<dyn FnMut(&egui::Context, &mut Session)>>,
     /// Runs on the worker thread right before the GPU compositor is built (desktop). Tests hold
     /// it to look at the interface while the compositor is still being prepared, or make it
     /// panic to check that a failing build never reaches the UI thread.

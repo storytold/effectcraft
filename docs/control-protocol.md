@@ -121,6 +121,25 @@ press. `ui.key` accepts the same notation to test them. Ordinary shortcuts remai
 `time.workAreaStart` and `time.workAreaEnd` navigate to the first and last included work-area
 frames and can be assigned through `shortcuts.set`.
 
+## Craft Link
+
+The app also listens on a Craft Link socket (`effectcraft-<pid>` in the per-user runtime directory) on
+every launch, with or without `--control`. It carries the same methods as the TCP port. A peer must be
+the same user and must send the token from the instance record. FilmCraft uses it to hand a selection
+over and to receive the result. The methods below only exist for that hand-off.
+
+| Method | Params | Result |
+|---|---|---|
+| `link.open` | `{link_id, payload, place, result_path, source}` | Imports the OpenTimelineIO `payload`, opens the comp and writes the sidecar project `<link_id>.ecproj` next to `result_path`. `result_path` must be an absolute `<link_id>.mov` in the folder that holds that sidecar. |
+| `link.attach` | `{link_id, project, comp}` | Reopens a bound link and returns its format and epoch. It never creates a comp. |
+| `link.renderResult` | `{link_id}` | Encodes the bound comp to the binding's `result_path` as ProRes 4444 and returns when the file is complete. |
+| `link.close` | `{link_id}` | Unbinds the link. The comp and its edits stay. Returns `{comp, comp_name, edited}`. |
+| `app.activate` | `{token?, from_pid?, open?}` | Brings the window to the front when the platform allows it. The reply says whether it did. |
+
+Errors carry a `code` and a message. The codes are `bad_params`, `not_ready`, `comp_missing`, `footage_missing`, `link_unknown`, `busy`, `payload_invalid`, `payload_too_large`, `result_path_refused`, `superseded`, `io_error` and `internal`. The header
+button "Back to FilmCraft" renders the result, sends `link.focus` and `app.activate` to FilmCraft, and
+shows progress on the status line.
+
 ## Locating things
 
 | Method | Params | Result |

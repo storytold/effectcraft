@@ -286,7 +286,7 @@ mod tests {
 
     fn add(s: &mut Session, path: &str) -> ItemId {
         let f = Footage { path: path.into(), width: 8, height: 8, has_video: true, missing: true, ..Default::default() };
-        std::sync::Arc::make_mut(&mut s.project).add_item(file_name(path), crate::color::Label::None, None, ItemKind::Footage(f))
+        s.project_mut().add_item(file_name(path), crate::color::Label::None, None, ItemKind::Footage(f))
     }
 
     fn path_of(s: &Session, id: ItemId) -> String {

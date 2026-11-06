@@ -181,6 +181,10 @@ impl EffectcraftApp {
         }
         // Plug-in Library: a finished job's toast (also polled with Roto, for other frontends).
         self.session.poll_library();
+        // The host's per-tick work, such as the calls plug-in threads queued for the session.
+        if let Some(per_tick) = self.hooks.per_tick.as_mut() {
+            per_tick(ctx, &mut self.session);
+        }
         // Warp Stabilizer: finish analyses and start queued (re-)analyses in the background.
         if self.session.warp_job.is_some() || !self.session.warp_pending.is_empty() {
             self.session.poll_warp(true);
@@ -212,7 +216,9 @@ impl EffectcraftApp {
         // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
         // An answered file dialog can change the project, so the answers above run first. The host
         // calls `panels::unsaved::quit_on_close` last in its `logic`.
-        panels::unsaved::on_close_requested(self, ctx);
+        if !link_ui::close_step(self, ctx) {
+            panels::unsaved::on_close_requested(self, ctx);
+        }
         let title = panels::unsaved::window_title(self);
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -231,6 +237,11 @@ impl EffectcraftApp {
             self.advance_playback(ctx, scale, now, active, cid);
         }
         self.drain_control(ctx, now);
+        // Craft Link: epochs, frame snapshot, result render. Returns when it wants the next frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(wait) = effectcraft_link::live::tick(&mut self.session) {
+            ctx.request_repaint_after(wait);
+        }
         // Screenshot completion, deadlines and issuance are app-side work: the callback only
         // stores pixels and wakes this viewport.
         self.tick_screenshots(ctx);
@@ -336,6 +347,9 @@ impl EffectcraftApp {
         panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
         panels::crypto_pick::upkeep(self, &ctx);
+        if let Some(per_frame) = self.hooks.per_frame.as_mut() {
+            per_frame(&ctx, &mut self.session);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.

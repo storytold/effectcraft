@@ -437,7 +437,7 @@ mod parent_chain_tests {
     }
     fn malformed_parent(s: &mut Session, child: u64, parent: u64) {
         let cid = s.active_comp_id().unwrap();
-        Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(child)).unwrap().parent = Some(LayerId(parent));
+        s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(child)).unwrap().parent = Some(LayerId(parent));
     }
     fn assert_atomic_error(s: &mut Session, child: u64, parent: u64, compensate: bool, message: &str) {
         let before = s.project.clone();
