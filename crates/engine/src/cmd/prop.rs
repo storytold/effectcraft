@@ -1380,12 +1380,21 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     convert_one_expr(s, cid, lid, uid)
 }
 
+/// Most keyframes Convert Expression to Keyframes makes (2.4 hours at 30 fps).
+const MAX_CONVERTED_KEYS: u64 = 1 << 18;
+
 fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
     let pr = layer.props.find(uid).ok_or_else(|| bad("prop.convertExpressionToKeyframes", "no property"))?.clone();
-    let mut keys = vec![];
     let fd = comp.frame_duration();
+    // One evaluation and one key per frame of the layer: its In and Out points are saved data,
+    // so the count is checked before any is made.
+    let frames = (layer.out_point.0.saturating_sub(layer.in_point.0)).max(0) as u64 / fd.0.max(1) as u64;
+    if frames > MAX_CONVERTED_KEYS {
+        return Err(bad("prop.convertExpressionToKeyframes", format!("the layer spans {frames} frames; at most {MAX_CONVERTED_KEYS} are converted")));
+    }
+    let mut keys = vec![];
     let mut t = layer.in_point;
     while t < layer.out_point {
         let ctx = effectcraft_render::EvalCtx {
