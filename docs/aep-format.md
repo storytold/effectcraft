@@ -375,7 +375,7 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since a file of ours with three different eases for the three Scale dimensions read back the same three in After Effects). `Keyframe::plain_ease_slots`
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
 returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
@@ -754,7 +754,7 @@ switch group per style, `<style>/enabled` (`dropShadow`, `innerShadow`, `outerGl
 | gradients | `<style>/gradient` is a `GCst` list, not decoded | - | ? |
 
 At 32 bpc After Effects renders the modes 6, 7, 11, 12, 16-22 and 25 of a style as Normal (978);
-at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (the importer's table).
+at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (table shared by importer and exporter).
 
 ### 3.13 What the tests cover
 
@@ -805,12 +805,12 @@ another value).
 - Bytes 0 (**?**), 16 (600: **H**, the 1/600 s legacy time base), 24, 32, 40 (cache-like: they hold values the session used earlier, do not use them: **E**), 48 (**E**), 176 and 184 (360 in all files: **?**, probably the maximum shutter angle), 196 and 200 (128 and 16: **?**).
 - Not sampled: a 3840 x 2160 composition, other pixel aspect fractions (1.2121, 1.4587), the preserve-frame-rate and preserve-resolution switches, draft 3D, `Hide shy layers`, frame blending, the 8-versus-16-bit project depth with a coloured background, the display start at 30 fps and with drop frame (whether the denominator at 168 is always the timescale).
 - `PRin/prda` (12 bytes for Classic 3D, 52 for Advanced 3D: renderer parameters, **E**).
-- Item `idta` byte 20 and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
+- Item `idta` byte 23 (0x20 composition and sequences or clips, 0x30 stills and solids, 4 audio, 0 folder; needed: zeroed, renders differ) and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
 
 **Properties and keyframes**
 
-- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
-- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, above); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
+- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**; needed, without it keys are dropped), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**; 16..55 are needed by roving keys: zeroed, After Effects reads a roving key back at time 0), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
+- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, aep-export.md R13); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
 - The 8 stale bytes of the marker record and the bytes after the common fields of the mask path record (uninitialised memory).
 - Expressions in effect parameters, multi-line and non-ASCII expressions, the ExtendScript engine.
 - Time Remapping with extra keys, with a stretch, on a nested layer; whether keys are rescaled by a stretch.

@@ -244,7 +244,8 @@ pub struct Session {
     pub next_task_id: u64,
     /// The running Learn tutorial (Home ▸ Learn), see [`learn`].
     pub learn: Option<learn::Progress>,
-    /// Check footage in the background after File ▸ Open ([`footage_check`]): frontends with an
+    /// Track footage availability automatically, after File ▸ Open ([`footage_check`]) and in
+    /// the desktop disk watcher. Frontends with an
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,

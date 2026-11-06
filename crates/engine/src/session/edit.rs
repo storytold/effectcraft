@@ -122,7 +122,7 @@ impl Session {
             return None;
         };
         self.poll_disk_salt();
-        let footage = footage_fingerprint(&self.project);
+        let footage = Self::footage_fingerprint(&self.project);
         if !force {
             if let Some((seen, salt)) = self.disk_salt
                 && seen == footage
@@ -185,6 +185,24 @@ impl Session {
             }
             None => true,
         }
+    }
+
+    /// In-memory identity of the footage settings represented by a disk salt. Workers use the
+    /// same fingerprint when preparing availability changes without disk access on the UI.
+    pub(crate) fn footage_fingerprint(project: &effectcraft_project::Project) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (id, item) in &project.items {
+            if let effectcraft_project::ItemKind::Footage(f) = &item.kind {
+                id.hash(&mut h);
+                format!("{f:?}").hash(&mut h);
+            }
+            if let Some(proxy) = &item.proxy {
+                id.hash(&mut h);
+                format!("{proxy:?}").hash(&mut h);
+            }
+        }
+        h.finish()
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -371,22 +389,8 @@ pub fn upgrade_effects(p: &mut Project) {
 
 /// A footage salt being taken on a worker thread ([`Session::refresh_disk_salt`]).
 pub struct DiskSaltJob {
-    /// The footage it is taken for ([`footage_fingerprint`]).
+    /// The footage it is taken for ([`Session::footage_fingerprint`]).
     footage: u64,
     slot: Arc<std::sync::Mutex<Option<u64>>>,
     thread: std::thread::JoinHandle<()>,
-}
-
-/// What the footage salt depends on besides the files themselves: every footage item's id and
-/// settings. Cheap (no file is read), so every edit can compare it.
-fn footage_fingerprint(p: &Project) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for (id, it) in &p.items {
-        if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-            id.hash(&mut h);
-            format!("{f:?}").hash(&mut h);
-        }
-    }
-    h.finish()
 }
