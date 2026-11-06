@@ -599,6 +599,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "view.importGuides" => ("path", Ask::Open(&["json"])),
         "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py".into())),
         "file.exportLottie" => ("path", Ask::Save("Animation.json".into())),
+        "file.exportAep" => ("path", Ask::Save("Project.aep".into())),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importAep" => ("path", Ask::Open(&["aep", "aepx"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),

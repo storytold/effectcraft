@@ -393,6 +393,17 @@ impl Project {
         for item in p.items.values_mut() {
             limits::repair_item(item, &mut notes);
         }
+        // An item inside a composition, a solid or footage (or inside an item that is not there) is
+        // in no folder: it would not be listed under any parent. It moves to the top level.
+        let folders: std::collections::BTreeSet<ItemId> = p.items.values().filter(|i| i.is_folder()).map(|i| i.id).collect();
+        for item in p.items.values_mut() {
+            if let Some(parent) = item.parent
+                && !folders.contains(&parent)
+            {
+                notes.push(format!("{}: its parent is not a folder, moved to the top level", item.name));
+                item.parent = None;
+            }
+        }
         Ok((p, notes))
     }
 }

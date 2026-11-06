@@ -1,4 +1,5 @@
 mod add_item_options;
+mod aep_export;
 mod aep_import;
 mod anim_presets;
 mod anim_tools;
