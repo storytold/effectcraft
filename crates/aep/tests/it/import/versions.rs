@@ -136,13 +136,13 @@ const FAMILIES: &[&str] =
     &["1200-lumetri", "3d", "effects", "footage-precomp", "keyframes", "layers-comps", "markers", "masks", "settings-a", "shapes", "styles", "text"];
 
 /// The import of a file: the project as JSON, the report and the parsed versions.
-fn import_file(name: &str) -> Option<(serde_json::Value, ImportReport)> {
+fn import_file(name: &str) -> Option<(serde_json::Value, ImportReport, effectcraft_project::ProjectSettings)> {
     let bytes = crate::common::try_file(name)?;
     let mut project = Project::default();
     let none = |_: &str| false;
     let opts = ImportOptions { allow_losses: true, ..ImportOptions::new(&none) };
     let r = import(&mut project, &bytes, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
-    Some((serde_json::to_value(&project).unwrap(), r.report))
+    Some((serde_json::to_value(&project).unwrap(), r.report, r.settings))
 }
 
 /// Per corpus family, the 25.x and 24.x copies import to the same project and report as the 2026 save.
@@ -150,13 +150,14 @@ fn import_file(name: &str) -> Option<(serde_json::Value, ImportReport)> {
 #[ignore = "needs the version fixtures of the corpus (<family>-26/-25x/-24x.aep)"]
 fn copies_saved_as_25x_and_24x_import_like_the_2026_file() {
     for family in FAMILIES {
-        let Some((project_26, report_26)) = import_file(&format!("{family}-26.aep")) else { continue };
+        let Some((project_26, report_26, settings_26)) = import_file(&format!("{family}-26.aep")) else { continue };
         assert_eq!(report_26.ae_version, AeVersionInfo { file_version: "26.2.1x2".into(), saved_by: "26.2.1x2".into(), tested: true }, "{family}");
         for (suffix, version) in [("25x", "25.6.0x97"), ("24x", "24.6.0x65")] {
             let name = format!("{family}-{suffix}.aep");
-            let Some((project, report)) = import_file(&name) else { continue };
+            let Some((project, report, settings)) = import_file(&name) else { continue };
             assert_eq!(report.ae_version, AeVersionInfo { file_version: version.into(), saved_by: "26.2.1x2".into(), tested: true }, "{name}");
             assert_eq!(project, project_26, "{name}: the imported project differs from the 2026 file's");
+            assert_eq!(settings, settings_26, "{name}: the imported settings differ from the 2026 file's");
             let same_but_version = ImportReport { ae_version: report_26.ae_version.clone(), ..report };
             assert_eq!(same_but_version, report_26, "{name}: the report differs from the 2026 file's");
         }
