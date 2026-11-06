@@ -152,6 +152,21 @@ fn pin_count(s: &Session, id: u64) -> usize {
 }
 
 #[test]
+fn keys_of_two_puppet_pins_paste_together() {
+    let (mut s, id) = setup();
+    let a = s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap()["pin"].as_u64().unwrap();
+    let b = s.execute("puppet.addPin", json!({"layer": id, "position": [90, 30]})).unwrap()["pin"].as_u64().unwrap();
+    let pos = |s: &Session, pin: u64| layer(s, id).props.find_group(pin).unwrap().get("position").unwrap().clone();
+    let keys: Vec<_> = [a, b].iter().map(|&pin| json!({"layer": id, "prop": pos(&s, pin).uid, "time": 0})).collect();
+    s.execute("keys.select", json!({"keys": keys})).unwrap();
+    s.execute("keys.copy", json!({})).unwrap();
+    s.set_time(Tick::from_seconds_f64(1.0));
+    s.execute("keys.paste", json!({})).unwrap();
+    assert_eq!(pos(&s, a).keys.len(), 2);
+    assert_eq!(pos(&s, b).keys.len(), 2);
+}
+
+#[test]
 fn puppet_pins_deform_and_undo() {
     let (mut s, id) = setup();
     let a = s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
