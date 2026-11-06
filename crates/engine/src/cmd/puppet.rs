@@ -34,19 +34,58 @@ fn pt(v: Option<&Value>) -> Option<[f64; 2]> {
 /// The Puppet effect's input pixels and evaluated parameters at comp time `t`. The input comes
 /// from the layer cache, shared: moving pins doesn't change it (#212).
 pub fn puppet_eval(s: &Session, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick) -> Option<(std::sync::Arc<Buf>, Params)> {
-    let comp = s.project.comp(cid)?;
-    let layer = comp.layer(lid)?;
-    let fx = layer.effects()?;
-    let index = fx.groups().position(|g| g.uid == fx_uid)?;
-    let g = fx.groups().nth(index)?;
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
-    let mut r = Renderer::new(&s.project, &*s.footage, RenderOpts::default());
-    r.expr = s.expr.as_deref();
-    r.cache = Some(&s.layer_cache);
-    let buf = r.layer_input(&ctx, layer, index)?;
-    let params = effectcraft_effects::flatten_params(g, &mut |p| ctx.value(layer, p));
-    Some((buf, params))
+    PuppetSource { project: &s.project, footage: &*s.footage, expr: s.expr.as_deref(), cache: &s.layer_cache }.eval(cid, lid, fx_uid, t)
+}
+
+/// What a Puppet evaluation reads: a project and the footage, expressions and layer cache it
+/// renders with. Built from shared snapshots (`Arc`s), it evaluates off the UI thread too: the
+/// Puppet tools' overlay renders the layer's input at full size, a whole nested composition for
+/// a precomp layer (#2516).
+#[derive(Clone, Copy)]
+pub struct PuppetSource<'a> {
+    pub project: &'a effectcraft_project::Project,
+    pub footage: &'a dyn effectcraft_render::FootageSource,
+    pub expr: Option<&'a dyn effectcraft_render::ExprHost>,
+    pub cache: &'a effectcraft_render::LayerCache,
+}
+
+impl PuppetSource<'_> {
+    /// [`puppet_eval`] of the Puppet effect `fx_uid` of layer `lid` of comp `cid` at comp time `t`.
+    pub fn eval(self, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick) -> Option<(std::sync::Arc<Buf>, Params)> {
+        self.with_input(cid, lid, fx_uid, t, |r, ctx, layer, index| {
+            let buf = r.layer_input(ctx, layer, index)?;
+            let g = layer.effects()?.groups().nth(index)?;
+            let params = effectcraft_effects::flatten_params(g, &mut |p| ctx.value(layer, p));
+            Some((buf, params))
+        })
+    }
+
+    /// Whether [`Self::eval`]'s input pixels come from the layer cache once rendered
+    /// ([`Renderer::layer_input_cacheable`]), so evaluating again after an edit elsewhere is cheap;
+    /// `false` when they are rendered again every time (a precomp layer's nested composition).
+    pub fn input_cacheable(self, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick) -> bool {
+        self.with_input(cid, lid, fx_uid, t, |r, ctx, layer, index| Some(r.layer_input_cacheable(ctx, layer, index))).unwrap_or(false)
+    }
+
+    /// `f` with a renderer of this source, the evaluation context at comp time `t`, layer `lid`
+    /// of comp `cid`, and the index of its effect `fx_uid` among its effects.
+    fn with_input<T>(
+        self,
+        cid: ItemId,
+        lid: LayerId,
+        fx_uid: Uid,
+        t: Tick,
+        f: impl FnOnce(&Renderer<'_>, &EvalCtx<'_>, &Layer, usize) -> Option<T>,
+    ) -> Option<T> {
+        let comp = self.project.comp(cid)?;
+        let layer = comp.layer(lid)?;
+        let index = layer.effects()?.groups().position(|g| g.uid == fx_uid)?;
+        let ctx = EvalCtx { project: self.project, comp_id: cid, comp, time: t, expr: self.expr, footage: None, property_overrides: &[], media_overrides: &[] };
+        let mut r = Renderer::new(self.project, self.footage, RenderOpts::default());
+        r.expr = self.expr;
+        r.cache = Some(self.cache);
+        f(&r, &ctx, layer, index)
+    }
 }
 
 fn find_puppet(s: &Session, cid: ItemId, lid: LayerId) -> Option<Uid> {
