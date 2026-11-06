@@ -240,7 +240,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Some(pl) => pl,
             None => effectcraft_engine::preview::plan(&o, &c, app.session.time()),
         };
-        let cached_set = app.frames.cached_frames(&app.shown_series(cid));
+        let cached_set = app.frames.cached_frames(&app.preview_series(cid, &o));
         let total = pl.frames().count();
         let cached = pl.frames().filter(|f| cached_set.binary_search(f).is_ok()).count();
         let bar = Rect::from_min_size(pos2(rect.min.x + 12.0, yy), vec2(rect.width() - 24.0, 6.0));
