@@ -122,17 +122,23 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if on_mesh(mesh, def, at) || want_mesh.is_some() {
                 let rest = puppet::unmap(mesh, def, at);
-                // A moving pin holds its nearest mesh vertex at `position + (vertex - rest)`
-                // (puppet::solve). Choose the position that keeps that vertex where it is now, so
-                // adding a pin to a bent mesh moves nothing (After Effects, #318); on an unbent
-                // mesh that is the click itself.
-                let now = (0..mesh.verts.len().min(def.len()))
-                    .filter(|_| kind.moves())
-                    .min_by(|a, b| dist2(mesh.verts[*a], rest).total_cmp(&dist2(mesh.verts[*b], rest)))
-                    .and_then(|v| {
-                        let (r, d) = (mesh.verts.get(v)?, def.get(v)?);
-                        Some([d[0] - (r[0] - rest[0]), d[1] - (r[1] - rest[1])])
+                // Choose the position that keeps everything where it is, so adding a pin to a bent
+                // mesh moves nothing (After Effects, #318). A moving pin holds a point at `position`,
+                // which is where that point is now (on the mesh, the click itself; just off it, the
+                // rest point can still be on the mesh). Otherwise it holds its nearest vertex at
+                // `position + (vertex - rest)` (puppet::solve).
+                let now = kind
+                    .moves()
+                    .then(|| match puppet::held_point(mesh, rest) {
+                        Some((tri, bary)) => tri.iter().zip(bary).try_fold([0.0, 0.0], |a, (v, l)| def.get(*v).map(|d| [a[0] + l * d[0], a[1] + l * d[1]])),
+                        None => (0..mesh.verts.len().min(def.len()))
+                            .min_by(|a, b| dist2(mesh.verts[*a], rest).total_cmp(&dist2(mesh.verts[*b], rest)))
+                            .and_then(|v| {
+                                let (r, d) = (mesh.verts.get(v)?, def.get(v)?);
+                                Some([d[0] - (r[0] - rest[0]), d[1] - (r[1] - rest[1])])
+                            }),
                     })
+                    .flatten()
                     // Round-off only (an unbent mesh): exactly the click.
                     .filter(|n| dist2(*n, at) > 1e-12)
                     .unwrap_or(at);
