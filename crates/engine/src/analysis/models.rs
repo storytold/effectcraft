@@ -619,7 +619,9 @@ fn install(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
     let cmd = format!("{}.model.install", kind(task).prefix);
     let path = str_p(p, "path").ok_or_else(|| bad(&cmd, "missing `path` (the downloaded weights file)"))?;
     let dir = s.models_dir().ok_or_else(|| bad(&cmd, "no settings folder to install into"))?;
-    let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+    // Through the services' reader, which refuses what isn't a regular file (a device would be
+    // read to no end).
+    let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
     // Which model it is: the one asked for, or the one whose checksum it has.
     let m = match str_p(p, "id") {
         Some(_) => model_p(p, &cmd, task)?,

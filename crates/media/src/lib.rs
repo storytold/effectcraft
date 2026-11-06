@@ -86,6 +86,11 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 /// `/dev/zero` or a FIFO as footage, and reading those never ends (#2134).
 pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    // Checked before opening too: opening a FIFO with no writer blocks, so the check after the
+    // open would never run. shortcut: a FIFO swapped in between still blocks; O_NONBLOCK would close it.
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
+    }
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
@@ -133,5 +138,21 @@ mod read_tests {
         std::fs::write(&f, b"abc").unwrap();
         assert_eq!(super::read_regular_file(&f).unwrap(), b"abc");
         let _ = std::fs::remove_file(f);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod read_regular_file_tests {
+    #[test]
+    fn a_fifo_is_refused_before_it_is_opened() {
+        let dir = std::env::temp_dir().join(format!("ec-media-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("clip.png");
+        let _ = std::fs::remove_file(&fifo);
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        // With no writer, opening it would block forever.
+        assert!(super::read_regular_file(&fifo).is_err());
+        assert!(super::stream::FileReader::open(&fifo).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
