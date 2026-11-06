@@ -107,7 +107,7 @@ fn a_precomp_with_an_undecodable_proxy_has_a_notice_collapsed_or_not() {
 fn missing_footage_marks_project_timeline_and_viewer_and_clears_after_recovery() {
     let (mut h, clip) = harness(|_| false, None);
     let set_missing = |h: &mut Harness<'static, EffectcraftApp>, missing| {
-        let item = Arc::make_mut(&mut h.state_mut().session.project).item_mut(clip).unwrap();
+        let item = h.state_mut().session.project_mut().item_mut(clip).unwrap();
         let ItemKind::Footage(f) = &mut item.kind else { panic!("footage fixture") };
         f.missing = missing;
     };
@@ -127,7 +127,7 @@ fn missing_footage_marks_project_timeline_and_viewer_and_clears_after_recovery()
 fn missing_original_with_working_proxy_warns_inventory_without_a_viewer_failure() {
     let proxy = Footage { path: "proxy.png".into(), has_video: true, width: 32, height: 18, ..Default::default() };
     let (mut h, clip) = harness(|_| false, Some(proxy));
-    if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut h.state_mut().session.project).item_mut(clip).unwrap().kind {
+    if let ItemKind::Footage(f) = &mut h.state_mut().session.project_mut().item_mut(clip).unwrap().kind {
         f.missing = true;
     }
     h.run_steps(2);

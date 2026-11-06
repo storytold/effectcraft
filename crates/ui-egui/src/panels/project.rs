@@ -1534,7 +1534,7 @@ mod tests {
     #[test]
     fn name_fit_measures_the_longest_listed_name_with_its_indent() {
         let mut s = effectcraft_engine::Session::default();
-        let p = std::sync::Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let folder = p.add_item("F", Label::Aqua, None, ItemKind::Folder);
         let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
         let app = EffectcraftApp::new(s);
@@ -1703,7 +1703,7 @@ mod availability_filter_tests {
     #[test]
     fn status_and_search_keep_only_matching_items_and_their_folder_ancestors() {
         let mut s = effectcraft_engine::Session::default();
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let folder = p.add_item("Shots", Label::None, None, ItemKind::Folder);
         let missing =
             p.add_item("Lost plate", Label::None, Some(folder), ItemKind::Footage(Footage { path: "/gone.png".into(), missing: true, ..Default::default() }));
@@ -1721,7 +1721,7 @@ mod availability_filter_tests {
     #[test]
     fn unused_missing_proxy_is_in_the_missing_filter() {
         let mut s = effectcraft_engine::Session::default();
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let id = p.add_item("Plate", Label::None, None, ItemKind::Footage(Footage { path: "/original.png".into(), ..Default::default() }));
         p.item_mut(id).unwrap().proxy =
             Some(Box::new(Proxy { footage: Footage { path: "/proxy.png".into(), missing: true, ..Default::default() }, enabled: false }));

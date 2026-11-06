@@ -282,7 +282,7 @@ fn opening_a_project_drops_the_footage_salt_being_taken() {
     .unwrap();
     // The file changes after the edit started the salt, before the same footage is opened again.
     std::fs::write(&path, b"a longer content").unwrap();
-    let same = (*s.project).clone();
+    let same = (**s.project).clone();
     s.replace_project(same, None);
     let t0 = std::time::Instant::now();
     while s.poll_disk_salt() {
