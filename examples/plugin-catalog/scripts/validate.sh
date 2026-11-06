@@ -42,7 +42,25 @@ dups=$(jq -r '.packages[].id' "$catalog" | sort | uniq -d)
 [ -z "$dups" ] || fail "duplicate package ids: $dups"
 echo "ok"
 
-echo "== 3. downloads"
+echo "== 3. release URLs"
+# When a package has a `repo`, every release must be an asset of that repository, as Install and
+# Preview require (the loader step installs from file:// copies, which skip this check).
+bad=$(jq -r '
+  # Only the scheme, host, owner and name compare without case; the `.git` suffix is lower case.
+  def repo_of:
+    (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+?)(\\.git)?/?$")
+     // capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+)/tree/[^?#]+$")
+     | select(.h | ascii_downcase == "https://github.com") | "\(.o)/\(.n)" | ascii_downcase) // "?";
+  .packages[] | . as $pkg | ((.repo // "") | gsub("^\\s+|\\s+$"; "")) as $repo
+  | select($repo != "") | ($repo | repo_of) as $want
+  | .versions[] | select(.url | startswith("file://") | not)
+  | ((.url | ascii_downcase | capture("^https://github\\.com/(?<o>[^/]+)/(?<n>[^/]+)/releases/download/") | "\(.o)/\(.n)") // "?") as $got
+  | select($want == "?" or $got != $want)
+  | "\($pkg.id) \(.version): \(.url) is not a release asset of \($repo)"' "$catalog")
+[ -z "$bad" ] || fail "release URLs outside the package's repo:"$'\n'"$bad"
+echo "ok"
+
+echo "== 4. downloads"
 # The checked files are what the loader step installs: a copy of the catalog names them by file://.
 local_catalog=$(jq '.' "$catalog")
 while IFS=$'\t' read -r p r id version url sha size; do
@@ -58,7 +76,7 @@ done < <(jq -r '.packages | to_entries[] | .key as $p | .value as $pkg | $pkg.ve
   | [$p, .key, $pkg.id, .value.version, .value.url, .value.sha256, (.value.size // "")] | @tsv' "$catalog")
 echo "ok"
 
-echo "== 4. load with EffectCraft"
+echo "== 5. load with EffectCraft"
 if [ -z "${EFFECTCRAFT_CLI:-}" ]; then
   echo "skipped (set EFFECTCRAFT_CLI to an effectcraft-cli build)"
   exit 0

@@ -375,8 +375,10 @@ package can't read files, open the network or crash the app.
   catalog gives one) against the catalog and loads it. Downloads use the system's `curl`,
   `https://` only and starting on GitHub's hosts (redirects stay on `https://`; the SHA-256 check
   is what guarantees the file). A package's `url` must be a release asset
-  (`https://github.com/<owner>/<repo>/releases/download/…`), in the package's `repo` when that is
-  a GitHub repository URL. A catalog other than the community one is read only when
+  (`https://github.com/<owner>/<repo>/releases/download/…`). When the package names a `repo`, the
+  asset must be in that repository. A `repo` that isn't `https://github.com/<owner>/<repo>` (with
+  an optional trailing `/` or `.git`) or a folder in one (`https://github.com/<owner>/<repo>/tree/<ref>/…`)
+  makes Install and Preview refuse every release of the package. A catalog other than the community one is read only when
   `library.refresh {catalog}` names it: an `index.json` on GitHub's hosts over `https://`, or a
   local `file://` path.
 * **Where it goes.** `<Plug-ins>/Library/<id>/<version>/<id>.wasm` (the `Plug-ins` folder next to
