@@ -14,7 +14,7 @@
     "version": {"type": "string", "maxLength": 32, "pattern": "^[0-9]+(\\.[0-9]+)*$"},
     "release_url": {
       "type": "string",
-      "pattern": "^(?!.*/(\\.|%2[eE]){1,2}(/|$))https://[Gg][Ii][Tt][Hh][Uu][Bb]\\.[Cc][Oo][Mm]/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/releases/download/[^/?#\\\\\\s]+(/[^/?#\\\\\\s]+)+$"
+      "pattern": "^(?!.*/(\\.|%2[eE]){1,2}(/|$))https://[Gg][Ii][Tt][Hh][Uu][Bb]\\.[Cc][Oo][Mm]/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/releases/download/[^/?#\\\\\\s\\u0085]+(/[^/?#\\\\\\s\\u0085]+)+$"
     },
     "package": {
       "type": "object",
@@ -26,7 +26,7 @@
         "author": {"type": "string"},
         "description": {"type": "string"},
         "license": {"type": "string"},
-        "repo": {"type": "string", "pattern": "^(?!.*/(\\.|%2[eE]){1,2}(/|$))[Hh][Tt][Tt][Pp][Ss]://[Gg][Ii][Tt][Hh][Uu][Bb]\\.[Cc][Oo][Mm]/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(/tree(/[^/?#\\\\\\s]+)+)?/?$"},
+        "repo": {"type": "string", "pattern": "^(?!.*/(\\.|%2[eE]){1,2}(/|$))[Hh][Tt][Tt][Pp][Ss]://[Gg][Ii][Tt][Hh][Uu][Bb]\\.[Cc][Oo][Mm]/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(/tree(/[^/?#\\\\\\s\\u0085]+)+)?/?$"},
         "tags": {"type": "array", "items": {"type": "string"}},
         "preview": {
           "type": "object",

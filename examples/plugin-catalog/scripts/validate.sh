@@ -49,25 +49,28 @@ echo "== 3. release URLs"
 bad=$(jq -r '
   # A path segment EffectCraft refuses: empty, `.` or `..` (also percent-encoded).
   def bad_segment: . == "" or (ascii_downcase | gsub("%2e"; ".") | . == "." or . == "..");
+  # A `?`, `#`, `\` or white space character (Unicode, and U+FEFF), which EffectCraft refuses in a URL.
+  def bad_char: test("[?#\\\\\t\n\u000b\f\r \u0085   -     　﻿]");
   # "owner/name" in lower case of a release asset,
   # https://github.com/<owner>/<name>/releases/download/<tag>/<file> (a tag may contain `/`), with
-  # no query, fragment, backslash, or empty, `.` or `..` segment; "?" for anything else.
+  # no query, fragment, backslash, white space, or empty, `.` or `..` segment; "?" for anything else.
   def asset_of:
     if startswith("https://") and (.[8:19] | ascii_downcase) == "github.com/" then
       .[19:] as $rest
       | ($rest | split("/")) as $p
-      | if ($rest | test("[?#\\\\]")) or ($p | length) < 6 or ($p | any(bad_segment))
+      | if ($rest | bad_char) or ($p | length) < 6 or ($p | any(bad_segment))
           or ($p[0] | test("^[A-Za-z0-9._-]+$") | not) or ($p[1] | test("^[A-Za-z0-9._-]+$") | not)
           or $p[2] != "releases" or $p[3] != "download"
         then "?" else "\($p[0])/\($p[1])" | ascii_downcase end
     else "?" end;
   # Only the scheme, host, owner and name compare without case; the `.git` suffix is lower case.
   def repo_of:
+    if bad_char then "?" else
     (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+?)(\\.git)?/?$")
      // (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+)/tree/(?<f>[^?#\\\\]+?)/?$")
          | select(.f | split("/") | any(bad_segment) | not))
      | select((.h | ascii_downcase) == "https://github.com" and (.o | bad_segment | not) and (.n | bad_segment | not))
-     | "\(.o)/\(.n)" | ascii_downcase) // "?";
+     | "\(.o)/\(.n)" | ascii_downcase) // "?" end;
   .packages[] | . as $pkg | ((.repo // "") | gsub("^\\s+|\\s+$"; "")) as $repo
   | (if $repo == "" then "" else $repo | repo_of end) as $want
   | .versions[] | select(.url | startswith("file://") | not)

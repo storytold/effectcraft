@@ -272,12 +272,18 @@ fn dot_segment(p: &str) -> bool {
     p == "." || p == ".."
 }
 
+/// A character a release or repository URL may not contain: `?`, `#`, `\`, Unicode white space,
+/// or U+FEFF (the catalog schema's `\s` matches it too).
+fn bad_url_char(c: char) -> bool {
+    matches!(c, '?' | '#' | '\\' | '\u{feff}') || c.is_whitespace()
+}
+
 /// `(owner, name)` in lower case of a `https://github.com/<owner>/<name>` repository URL (an
 /// optional trailing `/` or `.git`) or of a folder in one, `https://github.com/<owner>/<name>/tree/<ref>/<path>`;
 /// `None` for anything else.
 fn github_repo(repo: &str) -> Option<(String, String)> {
     let rest = strip_prefix_ignore_case(repo.trim(), "https://github.com/")?;
-    if rest.contains(['?', '#', '\\']) {
+    if rest.contains(bad_url_char) {
         return None;
     }
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -296,7 +302,7 @@ fn github_repo(repo: &str) -> Option<(String, String)> {
 fn release_url_problem(repo: &str, url: &str) -> Option<String> {
     let not_asset = || Some(format!("`{url}` isn't a release asset (https://github.com/<owner>/<repo>/releases/download/<tag>/<file>)"));
     let Some(rest) = strip_prefix_ignore_case(url, "https://github.com/") else { return not_asset() };
-    if rest.contains(['?', '#', '\\']) {
+    if rest.contains(bad_url_char) {
         return not_asset();
     }
     let parts: Vec<&str> = rest.split('/').collect();
@@ -1230,6 +1236,12 @@ mod tests {
             "https://github.com/me/glow/releases/download/./v1/x.wasm",
             "https://github.com/me/glow/releases/download/v1\\x.wasm",
             "https://github.com/m e/glow/releases/download/v1/x.wasm",
+            "https://github.com/me/glow/releases/download/v 1/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\t.wasm",
+            "https://github.com/me/glow/releases/download/v1/x.wasm\n",
+            "https://github.com/me/glow/releases/download/v1\u{a0}/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/\u{85}x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\u{feff}.wasm",
             "https://github.com/../glow/releases/download/v1/x.wasm",
             "https://github.com.evil.com/me/glow/releases/download/v1/x.wasm",
         ] {
@@ -1281,6 +1293,9 @@ mod tests {
             "https://github.com/me/glow?tab=readme",
             "https://github.com/me/glow#readme",
             "https://github.com/me/gl ow",
+            "https://github.com/me/glow/tree/main/my plug-in",
+            "https://github.com/me/glow/tree/ma\tin",
+            "https://github.com/me/glow/tree/main/x\u{feff}",
             "https://github.com/me/..",
         ] {
             let why = release_url_problem(repo, asset);
