@@ -41,7 +41,7 @@ const BASELINE: &[(&str, usize, usize)] = &[
     ("EffectControls:default", 28, 14),
     ("Composition:default", 4, 2),
     ("Layer:default", 2, 1),
-    ("Timeline:default", 89, 42),
+    ("Timeline:default", 72, 25),
     ("Audio:default", 4, 2),
     ("Properties:default", 31, 15),
     ("Character:default", 46, 22),
