@@ -348,7 +348,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             // white the values are in (the output space's), for Nuke, AE and Blender.
             let om = cx.output;
             let chroma = Some(pipe.output_linear_space().exr_chromaticities());
-            exr_out::write_rgba(file, &data, (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma).map_err(|e| ExportError::Encode(e.to_string()))
+            exr_out::write_rgba(file, &data, (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma)
+                .map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
             let px = cx.pixels(img, comp, if channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb }, w, h);
