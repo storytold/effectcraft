@@ -238,8 +238,9 @@ fn cache_frames_when_idle_fills_the_work_area() {
     let mut h = harness();
     let cid = h.state().session.active_comp_id().unwrap();
     let cached = |h: &Harness<'_, EffectcraftApp>| h.state().frames.cached_frames(&h.state().shown_series(cid)).len();
-    // Off: only a few frames ahead of the current time are prefetched (the work area is the
-    // whole 240 frames).
+    // Off (it is on by default): only a few frames ahead of the current time are prefetched (the
+    // work area is the whole 240 frames).
+    invoke(&mut h, "playback.cacheWhenIdle", json!({"value": false}));
     for _ in 0..120 {
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));

@@ -93,7 +93,7 @@ page!(Previews {
     /// Largest downsampling while playing back: `1/2`, `1/4`, `1/8`.
     adaptive_resolution_limit: String = "1/8".into(),
     show_internal_wireframes: bool = false,
-    cache_frames_when_idle: bool = false,
+    cache_frames_when_idle: bool = true,
     fast_previews: bool = false,
     /// `faster` or `moreAccurate`.
     zoom_quality: String = "moreAccurate".into(),
