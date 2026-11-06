@@ -353,6 +353,9 @@ fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested
     if layer.masks().is_some_and(|m| !m.children.is_empty()) {
         why.push("the layer has masks".to_string());
     }
+    if layer.styles_change_pixels() {
+        why.push("the layer has layer styles".to_string());
+    }
     if let Some(tr) = layer.transform() {
         let at = |m: &str, d: [f64; 3]| tr.get(m).map(|p| p.value.as_vec3()).unwrap_or(d);
         let animated = tr.props().any(|p| !p.keys.is_empty() || p.expr.is_some());
@@ -372,8 +375,14 @@ fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested
     }
     // Inside the nested comp these composite against the nested stack only; in the parent they
     // would act on everything below.
-    if nested.layers.iter().any(|l| l.switches.adjustment || l.switches.collapse || l.is_3d() || l.blend_mode != effectcraft_color::BlendMode::default()) {
-        why.push("the composition has adjustment, 3D or collapsing layers or layers with a blending mode".to_string());
+    if nested.layers.iter().any(|l| {
+        l.switches.adjustment || l.switches.collapse || l.is_3d() || l.preserve_transparency || l.blend_mode != effectcraft_color::BlendMode::default()
+    }) {
+        why.push("the composition has adjustment, 3D or collapsing layers or layers with a blending mode or Preserve Transparency".to_string());
+    }
+    // A solo hides only the nested comp's other layers; a soloed copy would hide the parent's.
+    if nested.layers.iter().any(|l| l.switches.solo) {
+        why.push("the composition has a soloed layer".to_string());
     }
     why
 }

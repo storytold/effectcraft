@@ -78,6 +78,7 @@ pub use settings::config;
 pub use settings::prefs;
 pub use settings::shortcuts;
 pub use system::guard;
+pub use system::library;
 pub use system::logging;
 pub use system::perf;
 pub use system::storage;
@@ -96,7 +97,7 @@ pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
 pub use services::{FsServices, Importer, Services};
-pub use session::upgrade_effects;
+pub use session::{DiskSaltJob, upgrade_effects};
 
 pub struct Session {
     pub project: Arc<Project>,
@@ -199,6 +200,16 @@ pub struct Session {
     /// Loads WebAssembly effect plug-ins (set by the host that links `effectcraft-plugin` with
     /// its runtime): `effect.plugins.load`.
     pub plugin_loader: Option<PluginLoader>,
+    /// External effect helpers (native hosts link `effectcraft-helper-host`):
+    /// `effect.helpers.list`, `effect.helpers.scan`, `effect.helpers.load`.
+    pub helpers: Option<HelperHooks>,
+    /// Renders a module without registering it (`library.preview`; set with `plugin_loader`).
+    pub plugin_previewer: Option<PluginPreviewer>,
+    /// Where effect plug-ins live (hosts set it; else `Plug-ins` next to the settings): the
+    /// Plug-in Library installs into its `Library` folder ([`library`]).
+    pub plugins_dir: Option<std::path::PathBuf>,
+    /// The Plug-in Library's catalog, worker status and the packages this session loaded.
+    pub library: library::Library,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -233,7 +244,8 @@ pub struct Session {
     pub next_task_id: u64,
     /// The running Learn tutorial (Home ▸ Learn), see [`learn`].
     pub learn: Option<learn::Progress>,
-    /// Check footage in the background after File ▸ Open ([`footage_check`]): frontends with an
+    /// Track footage availability automatically, after File ▸ Open ([`footage_check`]) and in
+    /// the desktop disk watcher. Frontends with an
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
@@ -244,6 +256,15 @@ pub struct Session {
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
     /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
     pub disk_salt: Option<(u64, u64)>,
+    /// Take the disk cache's footage salt on a worker thread ([`Session::refresh_disk_salt`]):
+    /// frontends with an event loop (the desktop app) turn this on and call
+    /// [`Session::poll_disk_salt`] each frame; headless sessions take it at once.
+    pub disk_salt_background: bool,
+    /// The footage salt being taken in the background.
+    pub disk_salt_job: Option<DiskSaltJob>,
+    /// The footage files effects read the channels of, as last given to the footage source
+    /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
+    pub aux_footage: Option<Vec<String>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -274,6 +295,23 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// Loads one WebAssembly effect plug-in (`bytes`, `source` path) into the effect registry and
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
+
+/// What a host that runs external effect helpers provides (`docs/external-helpers.md`).
+#[derive(Clone, Copy)]
+pub struct HelperHooks {
+    /// Start the helpers installed in the host's search paths and register their effects
+    /// (`retry` forgets the block list first) → `{paths, helpers, loaded, errors}`.
+    pub scan: fn(bool) -> Value,
+    /// Load a file or folder through the helpers that accept it → `{loaded, errors}`.
+    pub load: fn(&str) -> std::result::Result<Value, String>,
+    /// The helpers and their state → `{helpers, blocked}`.
+    pub list: fn() -> Value,
+}
+
+/// Renders one WebAssembly effect module without registering it (the Plug-in Library preview):
+/// `(bytes, width, height, premultiplied RGBA pixels, times in seconds)` → (manifest JSON, one frame
+/// per time).
+pub type PluginPreviewer = fn(&[u8], u32, u32, &[[f32; 4]], &[f64]) -> std::result::Result<(Value, Vec<Vec<[f32; 4]>>), String>;
 
 impl Default for Session {
     /// A new unsaved session: a default project that is both current and saved, no path, no
@@ -330,6 +368,10 @@ impl Default for Session {
             snapshot: None,
             script: None,
             plugin_loader: None,
+            helpers: None,
+            plugin_previewer: None,
+            plugins_dir: None,
+            library: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,
@@ -350,6 +392,9 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             disk_salt: None,
+            disk_salt_background: false,
+            disk_salt_job: None,
+            aux_footage: None,
             script_calls: ScriptCalls::default(),
         }
     }

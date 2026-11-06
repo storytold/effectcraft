@@ -19,7 +19,7 @@ pub mod content_fill;
 mod create;
 mod edit;
 mod effect;
-pub use effect::{CryptoCoverage, CryptoProbeJob};
+pub use effect::{CryptoCoverage, CryptoProbeJob, PLUGINS_DIR};
 pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
 pub mod essential;
 pub mod expr_tools;
@@ -176,6 +176,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         let mut v = Vec::new();
         v.extend(file::specs());
         v.extend(crate::models::specs());
+        v.extend(crate::library::specs());
         v.extend(edit::specs());
         v.extend(comp::specs());
         v.extend(layer::specs());
