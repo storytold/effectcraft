@@ -43,11 +43,24 @@ dups=$(jq -r '.packages[].id' "$catalog" | sort | uniq -d)
 echo "ok"
 
 echo "== 3. release URLs"
-# When a package has a `repo`, every release must be an asset of that repository, as Install and
-# Preview require (the loader step installs from file:// copies, which skip this check).
+# Every release that isn't a local file:// path must be a release asset, and when its package has
+# a `repo`, an asset of that repository, as Install and Preview require (the loader step installs
+# from file:// copies, which skip this check).
 bad=$(jq -r '
   # A path segment EffectCraft refuses: empty, `.` or `..` (also percent-encoded).
   def bad_segment: . == "" or (ascii_downcase | gsub("%2e"; ".") | . == "." or . == "..");
+  # "owner/name" in lower case of a release asset,
+  # https://github.com/<owner>/<name>/releases/download/<tag>/<file> (a tag may contain `/`), with
+  # no query, fragment, backslash, or empty, `.` or `..` segment; "?" for anything else.
+  def asset_of:
+    if startswith("https://") and (.[8:19] | ascii_downcase) == "github.com/" then
+      .[19:] as $rest
+      | ($rest | split("/")) as $p
+      | if ($rest | test("[?#\\\\]")) or ($p | length) < 6 or ($p | any(bad_segment))
+          or ($p[0] | test("^[A-Za-z0-9._-]+$") | not) or ($p[1] | test("^[A-Za-z0-9._-]+$") | not)
+          or $p[2] != "releases" or $p[3] != "download"
+        then "?" else "\($p[0])/\($p[1])" | ascii_downcase end
+    else "?" end;
   # Only the scheme, host, owner and name compare without case; the `.git` suffix is lower case.
   def repo_of:
     (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+?)(\\.git)?/?$")
@@ -56,12 +69,13 @@ bad=$(jq -r '
      | select((.h | ascii_downcase) == "https://github.com" and (.o | bad_segment | not) and (.n | bad_segment | not))
      | "\(.o)/\(.n)" | ascii_downcase) // "?";
   .packages[] | . as $pkg | ((.repo // "") | gsub("^\\s+|\\s+$"; "")) as $repo
-  | select($repo != "") | ($repo | repo_of) as $want
+  | (if $repo == "" then "" else $repo | repo_of end) as $want
   | .versions[] | select(.url | startswith("file://") | not)
-  | ((.url | ascii_downcase | capture("^https://github\\.com/(?<o>[^/]+)/(?<n>[^/]+)/releases/download/") | "\(.o)/\(.n)") // "?") as $got
-  | select($want == "?" or $got != $want)
-  | "\($pkg.id) \(.version): \(.url) is not a release asset of \($repo)"' "$catalog")
-[ -z "$bad" ] || fail "release URLs outside the package's repo:"$'\n'"$bad"
+  | (.url | asset_of) as $got
+  | if $got == "?" then "\($pkg.id) \(.version): \(.url) is not a release asset (https://github.com/<owner>/<repo>/releases/download/<tag>/<file>)"
+    elif $want != "" and ($want == "?" or $got != $want) then "\($pkg.id) \(.version): \(.url) is not a release asset of \($repo)"
+    else empty end' "$catalog")
+[ -z "$bad" ] || fail "release URLs that Install and Preview refuse:"$'\n'"$bad"
 echo "ok"
 
 echo "== 4. downloads"
