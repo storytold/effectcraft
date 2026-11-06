@@ -335,6 +335,8 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     moved
 }
 
+/// Match names and dependency status, retain folder ancestors, and expand them while filtering.
+/// Iterative traversal bounds cyclic document trees and builds each folder's child list once.
 pub(crate) fn visible_rows(app: &EffectcraftApp) -> Vec<(ItemId, usize)> {
     let project = &app.session.project;
     let q = app.ui.project_search.to_lowercase();

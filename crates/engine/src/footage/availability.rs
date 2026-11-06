@@ -15,6 +15,8 @@ pub(crate) struct Source {
 }
 
 impl Source {
+    /// Find the same source settings in a newer project, ignoring only the disk-derived
+    /// missing flag so an overlapping check cannot invalidate moved-source recovery.
     pub fn current<'a>(&self, project: &'a mut Project) -> Option<&'a mut Footage> {
         let item = project.item_mut(self.id)?;
         let f = if self.proxy {
@@ -32,6 +34,8 @@ impl Source {
     }
 }
 
+/// External originals and proxies that need availability checks. Embedded data and empty
+/// paths remain usable without an external file and are excluded from this inventory.
 fn entries(s: &Session) -> impl Iterator<Item = (ItemId, bool, &Footage)> {
     s.project.items.values().flat_map(|item| {
         let original = match &item.kind {
@@ -47,6 +51,7 @@ fn entries(s: &Session) -> impl Iterator<Item = (ItemId, bool, &Footage)> {
     })
 }
 
+/// Check whether a snapshot can be reused without allocating new sequence path strings.
 pub(crate) fn sources_match(s: &Session, sources: &[Source]) -> bool {
     let mut before = sources.iter();
     for (id, proxy, footage) in entries(s) {
@@ -60,6 +65,8 @@ pub(crate) fn sources_match(s: &Session, sources: &[Source]) -> bool {
     before.next().is_none()
 }
 
+/// Resolve accepted paths once for the worker. Refused document paths retain an empty probe
+/// list, which reports missing without contacting the filesystem or a foreign share.
 pub(crate) fn sources(s: &Session) -> Vec<Source> {
     let mut out = Vec::new();
     for (id, proxy, f) in entries(s) {
@@ -120,11 +127,14 @@ pub(crate) struct Scanner {
 }
 
 impl Scanner {
+    /// Discard partial evidence after watched sources change, retaining their last known flags.
     pub fn reset(&mut self, sources: &[Source]) {
         self.progress = sources.iter().map(|s| Progress { next: 0, absent: 0, missing: s.footage.missing }).collect();
         self.source = 0;
     }
 
+    /// Spend at most PROBE_BUDGET file/folder probes and return one status per source.
+    /// Partial sequence scans retain the last proven status and resume on a later poll.
     pub fn poll(&mut self, sources: &[Source], services: &dyn Services) -> Vec<bool> {
         if self.progress.len() != sources.len() {
             self.reset(sources);
@@ -216,6 +226,8 @@ pub(crate) struct Update {
     salt: Option<(u64, u64)>,
 }
 
+/// Prepare a replacement only when availability changed. Project cloning and optional disk
+/// salt computation belong on the worker; apply later rejects an outdated project snapshot.
 pub(crate) fn prepare(project: &Arc<Project>, sources: &[Source], missing: &[bool], cache_enabled: bool) -> Option<Update> {
     let mut after = project.clone();
     let mut paths = BTreeSet::new();

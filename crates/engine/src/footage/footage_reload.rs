@@ -56,6 +56,7 @@ fn reload_paths(s: &Session) -> BTreeSet<String> {
     paths
 }
 
+/// Automatic reload obeys Off; explicit Reload Changed still uses eligible non-sequence files.
 fn automatic_paths(s: &Session) -> BTreeSet<String> {
     if s.prefs.import.auto_reload_footage == "off" { BTreeSet::new() } else { reload_paths(s) }
 }
@@ -81,6 +82,8 @@ pub struct Watched {
 }
 
 impl PartialEq for Watched {
+    /// Compare watched inputs, excluding unrelated project edits whose latest Arc is refreshed
+    /// separately without waking the worker or restarting partial sequence scans.
     fn eq(&self, other: &Self) -> bool {
         self.cache_enabled == other.cache_enabled
             && self.stored_paths == other.stored_paths
@@ -90,6 +93,8 @@ impl PartialEq for Watched {
     }
 }
 
+/// Capture the automatic reload policy and opted-in availability sources for a worker.
+/// Watcher::update reuses this source inventory when only unrelated project state changed.
 pub fn watched(s: &Session) -> Watched {
     Watched {
         reload: automatic_paths(s),
@@ -102,9 +107,12 @@ pub fn watched(s: &Session) -> Watched {
 }
 
 impl Watched {
+    /// A worker may sleep indefinitely only when neither content nor availability is watched.
     fn is_empty(&self) -> bool {
         self.reload.is_empty() && self.sources.is_empty()
     }
+    /// Complete the synchronous pass used by explicit commands. Automatic availability uses
+    /// Scanner::poll instead, so long sequences cannot consume an unbounded polling pass.
     fn scan(&self, services: &dyn Services) -> Observation {
         Observation { stamps: self.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: availability::scan(&self.sources, services) }
     }
@@ -131,11 +139,16 @@ pub struct Scan {
 }
 
 impl Scan {
+    /// Prepare availability and cache state before the session applies the observation.
+    /// Automatic callers construct this result on the worker; explicit commands run inline.
     fn new(watched: Watched, observation: Observation, policy: ReloadPolicy) -> Self {
         let update = watched.project.as_ref().and_then(|p| availability::prepare(p, &watched.sources, &observation.missing, watched.cache_enabled));
         Self { watched, observation, update, policy }
     }
 
+    /// Apply a current observation, returning `stale: true` when its project needs rechecking.
+    /// Availability-only scans preserve manual reload stamps; eligible content changes still
+    /// follow the existing reload/probe path and return its contextual errors.
     pub fn apply(self, s: &mut Session) -> crate::Result<Value> {
         if let Some(update) = self.update
             && !update.apply(s)
@@ -313,6 +326,8 @@ fn forget(s: &mut Session, paths: &BTreeSet<String>) {
     s.refresh_disk_salt(true);
 }
 
+/// Invalidate decoded and rendered buffers without probing the disk for a new salt.
+/// Availability updates already carry their worker-computed salt; content reload refreshes it.
 pub(crate) fn forget_media(s: &mut Session, paths: &BTreeSet<String>) {
     for p in paths {
         s.footage.forget(p);

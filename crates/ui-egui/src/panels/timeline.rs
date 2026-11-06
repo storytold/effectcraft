@@ -2935,6 +2935,8 @@ fn layer_twirl_and_icon(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw,
 }
 
 /// The layer name: the rename field or the (selected) name cell.
+/// Reserve space for source warnings so selection backgrounds and inline renaming cannot
+/// obscure the marker or its recovery tooltip.
 fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, name_x: f32) {
     let t = g.tl.t;
     let ctx = g.tl.ctx.clone();

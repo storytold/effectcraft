@@ -605,6 +605,7 @@ pub enum ProjectStatus {
 
 impl ProjectStatus {
     pub const ALL: [Self; 3] = [Self::All, Self::Available, Self::Missing];
+    /// English catalog key; localization belongs at the widget rendering boundary.
     pub fn label(self) -> &'static str {
         match self {
             Self::All => "All",
@@ -612,6 +613,8 @@ impl ProjectStatus {
             Self::Missing => "Missing",
         }
     }
+    /// Filter the dependency inventory, including unused missing proxies. Generated items
+    /// count as available even though they have no external source file.
     pub fn matches(self, item: &effectcraft_engine::project::Item) -> bool {
         match self {
             Self::All => true,
