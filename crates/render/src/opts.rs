@@ -88,10 +88,19 @@ pub(crate) struct Collapse3d<'a> {
 }
 
 /// Time spent on one layer of one frame (milliseconds).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct LayerTiming {
     pub depth: usize,
+    pub comp: u64,
+    pub layer_id: u64,
     pub layer: String,
+    /// Stable effect instances, in execution order; repeated evaluations remain separate.
+    pub effect_instances: Vec<EffectTiming>,
+    /// Only source processing was measured (3D composition is shared between layers).
+    pub processing_only: bool,
+    /// Effect invocation details reached the diagnostic storage limit.
+    pub truncated: bool,
     /// Source + masks + effects (cache lookup only, on a hit).
     pub process_ms: f64,
     /// Per effect: (effect id, ms). Empty on a cache hit.
@@ -100,4 +109,15 @@ pub struct LayerTiming {
     pub composite_ms: f64,
     /// The processed buffer came from the layer cache.
     pub cached: bool,
+}
+
+/// One CPU effect invocation, addressed by its original stack position and property uid.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectTiming {
+    pub index: usize,
+    pub uid: u64,
+    pub effect: String,
+    pub name: String,
+    pub ms: f64,
 }

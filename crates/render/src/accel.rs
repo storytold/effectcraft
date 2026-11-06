@@ -1,7 +1,6 @@
 use super::frames::content_bounds;
 use super::fx_host::MAX_FX_DEPTH;
 use super::layers::StyledLayer;
-use super::opts::LayerTiming;
 use super::{
     Arc, AutoPick, Buf, EffectCtx, EvalCtx, Image, ItemId, ItemKind, Layer, LayerSource, Mat3, MatteKind, Renderer, Tick, cache, color, masks, three_d, vec2,
 };
@@ -377,14 +376,13 @@ impl<'a> Renderer<'a> {
 
     /// The layer's finished buffers (styles included) in the blending space.
     pub fn styled_layer(&self, ctx: &EvalCtx, layer: &Layer) -> Option<StyledLayer> {
-        let mut timing = self.profile.map(|_| LayerTiming { depth: self.depth, layer: layer.name.clone(), ..Default::default() });
+        let mut timing = self.layer_timing(ctx, layer);
         let t0 = web_time::Instant::now();
         let st = self.styled(ctx, layer, timing.as_mut()).map(|st| self.styled_to_blend(st));
-        if let (Some(prof), Some(mut timing)) = (self.profile, timing) {
+        if let Some(mut timing) = timing {
             timing.process_ms = t0.elapsed().as_secs_f64() * 1e3;
-            if let Ok(mut v) = prof.lock() {
-                v.push(timing);
-            }
+            timing.processing_only = true;
+            self.record_timing(timing);
         }
         st
     }

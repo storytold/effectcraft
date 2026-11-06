@@ -69,6 +69,12 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
     let now = app.now();
     let v = &mut app.ui.viewer;
     Ok(match id {
+        "comp.profileOptions" => {
+            let scale =
+                p.get("scale").and_then(Value::as_f64).filter(|s| s.is_finite() && (0.0625..=1.0).contains(s)).ok_or("scale must be between 0.0625 and 1")?;
+            app.ui.profiler.scale = scale;
+            json!({"scale": scale})
+        }
         "mediaBrowser.copySourcePath" => {
             let path = p.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or("A source path is required")?;
             ctx.copy_text(path.to_string());

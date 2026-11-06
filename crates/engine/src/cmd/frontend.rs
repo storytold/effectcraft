@@ -80,13 +80,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "{} — another Composition viewer of the active comp; the one in use is locked",
             has_comp
         ),
+        fe!("comp.profileOptions", "Composition Profiler Options", [], None, "{scale: 0.0625..1}", always),
         // Panels and workspaces.
         fe!(
             "window.panel",
             "Show Panel",
             [],
             None,
-            "{panel: project|effectControls|composition|layer|timeline|info|audio|preview|effectsPresets|properties|character|paragraph|align|tracker|wiggler|smoother|motionSketch|paint|brushes|renderQueue|flowchart|history|markers|tools|lumetriScopes|footage|mediaBrowser|metadata|progress|contentAwareFill|createNullsFromPaths|vrCompEditor}",
+            "{panel: project|effectControls|composition|layer|timeline|info|compositionProfiler|audio|preview|effectsPresets|properties|character|paragraph|align|tracker|wiggler|smoother|motionSketch|paint|brushes|renderQueue|flowchart|history|markers|tools|lumetriScopes|footage|mediaBrowser|metadata|progress|contentAwareFill|createNullsFromPaths|vrCompEditor}",
             always
         ),
         fe!(

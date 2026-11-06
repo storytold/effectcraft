@@ -40,6 +40,7 @@ pub mod path_vr_panels;
 pub mod precomp;
 pub(crate) mod preview_merge;
 pub mod primitive_dialog;
+pub mod profiler;
 pub mod project;
 pub mod properties;
 pub mod puppet_tool;
@@ -270,6 +271,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
         PanelKind::EffectControls => effect_controls::show(app, ui, rect),
         PanelKind::EffectsPresets => effects_presets::show(app, ui, rect),
         PanelKind::Info => info::show(app, ui, rect),
+        PanelKind::CompositionProfiler => profiler::show(app, ui, rect),
         PanelKind::Preview => misc::preview(app, ui, rect),
         PanelKind::Character => text_panels::character(app, ui, rect),
         PanelKind::Paragraph => text_panels::paragraph(app, ui, rect),

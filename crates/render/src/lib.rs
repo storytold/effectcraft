@@ -58,7 +58,9 @@ pub(crate) use fx_host::comp_scene;
 pub use fx_host::essential_overrides;
 pub use layers::{Placement, StyledLayer};
 pub(crate) use opts::Collapse3d;
-pub use opts::{LayerTiming, RenderOpts};
+pub use opts::{EffectTiming, LayerTiming, RenderOpts};
+/// Maximum execution records retained by an optional frame profiling sink.
+pub const MAX_PROFILE_RECORDS: usize = 2_048;
 use opts::{MAX_THROUGH, Through};
 pub use pipeline::{Collapsed, MediaOverride, PropertyOverride};
 

@@ -1251,6 +1251,7 @@ Window
   Effects & Presets | window.panel {"panel":"effectsPresets"} | Cmd+5
   Essential Graphics | window.panel {"panel":"essentialGraphics"}
   Info | window.panel {"panel":"info"} | Cmd+2
+  Composition Profiler | window.panel {"panel":"compositionProfiler"}
   Learn | help.inAppTutorials
   Lumetri Scopes | window.panel {"panel":"lumetriScopes"}
   Mask Interpolation | window.panel {"panel":"maskInterpolation"}

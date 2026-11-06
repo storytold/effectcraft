@@ -124,6 +124,7 @@ impl EffectcraftApp {
     /// channel, screenshots and the close guard. Everything here is idempotent for a pass that
     /// `Context::request_discard` replays.
     pub fn tick(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        crate::panels::profiler::tick(self);
         self.now = self.clock.now();
         // The compositor exists before the first paint and while hidden (device-loss handling
         // must run there too).
