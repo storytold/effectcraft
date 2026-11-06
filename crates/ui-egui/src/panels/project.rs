@@ -530,6 +530,12 @@ fn name_fit(app: &EffectcraftApp, p: &egui::Painter, rows: &[(ItemId, usize)]) -
         .fold(0.0, f32::max)
 }
 
+/// [`name_fit`] of the listed rows: only an automatic width (or an invalid saved one) measures the
+/// names.
+fn auto_name_fit(app: &EffectcraftApp, p: &egui::Painter) -> f32 {
+    if app.ui.project_name_w.is_some_and(f32::is_finite) { 0.0 } else { name_fit(app, p, &visible_rows(app)) }
+}
+
 /// The part of the panel the optional columns keep next to a widest Name column (points): room
 /// for some of their content and a horizontal scroll bar track that can be dragged.
 const MIN_OPTIONAL_VIEW: f32 = 40.0;
@@ -1252,8 +1258,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gutter_id = egui::Id::unique("project-gutter");
     let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
     let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
-    // Only an automatic width (or an invalid saved one) measures the names.
-    let fit = if app.ui.project_name_w.is_some_and(f32::is_finite) { 0.0 } else { name_fit(app, &p, &visible_rows(app)) };
+    let fit = auto_name_fit(app, &p);
     let cl = layout_columns(app, content, fit);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
