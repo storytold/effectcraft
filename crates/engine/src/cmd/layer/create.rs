@@ -119,7 +119,7 @@ pub(super) fn new_adjustment(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Parameters of `layer.setText` / `layer.newText` that aren't text attributes.
-const NOT_ATTRS: &[&str] = &["layer", "layers", "comp", "merge", "text", "range", "position", "edit"];
+const NOT_ATTRS: &[&str] = &["layer", "layers", "selected", "comp", "merge", "text", "range", "position", "edit"];
 
 /// Apply `layer.setText` keys to `d`: `text` replaces characters `r` (or everything), then each
 /// character / paragraph / document attribute applies to `r` (or everything).

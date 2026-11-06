@@ -1,7 +1,7 @@
 use super::create::{apply_text_params, text_range_p};
 use super::{
-    EngineError, GroupKind, Ids, ItemId, KV, LayerId, MaskMode, Node, Project, PropGroup, Result, Session, TextDoc, Value, b_p, bad, build, json, layer_mut,
-    layer_p, merge_p, str_p,
+    EngineError, GroupKind, Ids, ItemId, KV, LayerId, LayerSource, MaskMode, Node, Project, PropGroup, Result, Session, TextDoc, Value, b_p, bad, build, json,
+    layer_mut, layer_p, merge_p, str_p,
 };
 
 /// Add a tool-shaped mask in one document edit, then request its Timeline controls separately.
@@ -159,7 +159,29 @@ fn shape_item_target(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: O
     })
 }
 
-/// `layer.setText`: sets a text layer's Source Text and/or character attributes at the CTI.
+/// The layers `layer.setText` changes: `layer` (or the first selected layer). With `selected` (the
+/// Character, Paragraph and Properties panels pass it) and that layer selected, every selected,
+/// unlocked text layer instead, as in After Effects (#2862), and none when no layer qualifies. A
+/// `range` belongs to one layer's text, so it never reaches the others.
+fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
+    let (cid, lid) = layer_p(s, p, "layer.setText")?;
+    if b_p(p, "selected") != Some(true) || p.get("range").is_some() || !s.state.selected_layers.contains(&lid) {
+        return Ok((cid, vec![lid]));
+    }
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let ids = s
+        .state
+        .selected_layers
+        .iter()
+        .filter_map(|o| comp.layer(*o))
+        .filter(|l| matches!(l.source, LayerSource::Text) && !l.switches.locked)
+        .map(|l| l.id)
+        .collect();
+    Ok((cid, ids))
+}
+
+/// `layer.setText`: sets the Source Text and/or character attributes at the CTI of the layers
+/// [`set_text_layers`] picks, in one undo step.
 ///
 /// A `font` name is also added to the recent fonts and the preferences saved. With an empty
 /// `range` and no `text`, while that layer is being edited and its document is non-empty,
@@ -168,8 +190,12 @@ fn shape_item_target(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: O
 /// the session is bumped whenever this branch runs. Document changes use [`Session::edit`],
 /// merged by `merge_p`. With `text` given, a layer whose name is empty or starts with `Text`
 /// takes the new first line (up to 40 characters) when that line is non-empty. Replies `null`.
+/// With no layer to change it does nothing: the panels stay quiet over a locked selection.
 pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid) = layer_p(s, p, "layer.setText")?;
+    let (cid, lids) = set_text_layers(s, p)?;
+    if lids.is_empty() {
+        return Ok(Value::Null);
+    }
     // The Character panel's recent fonts (Settings ▸ Type ▸ Number of Recent Fonts to Display).
     if let Some(f) = str_p(p, "font") {
         s.prefs.push_recent_font(f);
@@ -179,7 +205,7 @@ pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     let range = text_range_p(p);
     // Character attributes with only a caret (no selected text) set the insertion style.
     if let Some(r) = range.clone().filter(|r| r.is_empty() && str_p(p, "text").is_none())
-        && s.state.text_edit.as_ref().is_some_and(|e| e.layer == lid)
+        && let Some(lid) = s.state.text_edit.as_ref().map(|e| e.layer).filter(|l| lids.contains(l))
         && let Some(doc) = crate::cmd::text_edit::layer_doc(s, lid)
         && doc.char_len() > 0
         && let Some(obj) = p.as_object()
@@ -199,22 +225,24 @@ pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     // starts a new IME epoch only when the CTI document actually changed, so an identical text
     // write stays a no-op and keeps the editor's owner.
     s.edit("Edit Text", merge_p(p), |proj, _| {
-        let l = layer_mut(proj, cid, lid)?;
-        let lt = l.layer_time(t);
-        let pr = l.props.prop_mut("text/sourceText").ok_or_else(|| bad("layer.setText", "not a text layer"))?;
-        let mut doc = match pr.value_at(lt) {
-            KV::Text(d) => *d,
-            KV::Str(t) => TextDoc::plain(&t),
-            _ => TextDoc::default(),
-        };
-        apply_text_params("layer.setText", p, &mut doc, range.clone())?;
-        pr.set_value_at(lt, KV::Text(Box::new(doc.clone())));
-        if let Some(first) = doc.text.lines().next()
-            && str_p(p, "text").is_some()
-            && !first.is_empty()
-            && (l.name.starts_with("Text") || l.name.is_empty())
-        {
-            l.name = first.chars().take(40).collect();
+        for lid in lids {
+            let l = layer_mut(proj, cid, lid)?;
+            let lt = l.layer_time(t);
+            let pr = l.props.prop_mut("text/sourceText").ok_or_else(|| bad("layer.setText", "not a text layer"))?;
+            let mut doc = match pr.value_at(lt) {
+                KV::Text(d) => *d,
+                KV::Str(t) => TextDoc::plain(&t),
+                _ => TextDoc::default(),
+            };
+            apply_text_params("layer.setText", p, &mut doc, range.clone())?;
+            pr.set_value_at(lt, KV::Text(Box::new(doc.clone())));
+            if let Some(first) = doc.text.lines().next()
+                && str_p(p, "text").is_some()
+                && !first.is_empty()
+                && (l.name.starts_with("Text") || l.name.is_empty())
+            {
+                l.name = first.chars().take(40).collect();
+            }
         }
         Ok(())
     })?;
