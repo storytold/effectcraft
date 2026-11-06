@@ -1,6 +1,6 @@
 //! Image sequences (#297): File ▸ Import with the "<format> Sequence" option, picked ranges,
 //! folders, Force Alphabetical Order, the import frame rate, Replace Footage, missing frames
-//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Timecode.
+//! (they hold the previous frame) and Interpret Footage ▸ Start Timecode.
 
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
 use effectcraft_time::{FrameRate, Tick};
