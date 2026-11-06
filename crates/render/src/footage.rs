@@ -204,7 +204,7 @@ impl FootageSource for CancellableFootage<'_> {
 
 /// Footage that can be rasterised at any scale (SVG).
 pub fn is_vector_footage(f: &Footage) -> bool {
-    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS")
+    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS" | "VectorCraft")
 }
 
 /// No footage available (renders footage layers as transparent).

@@ -62,6 +62,9 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
     }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
+    }
     // Frontend events below may show the Home screen again (Help ▸ In-App Tutorials).
     leave_home_if_opened(app, before, r.is_ok());
     let events = app.session.drain_events();
@@ -671,6 +674,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3", "flac", "ogg", "opus", "svg", "pdf", "ai",
         "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
+    // VectorCraft documents, read through the PDF they carry.
+    let media = [MEDIA, &["vectorcraft"]].concat();
     let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
     // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
@@ -680,7 +685,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
-            Ask::Import => crate::FileDialog::Open { exts: footage(MEDIA).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
+            Ask::Import => crate::FileDialog::Open { exts: footage(&media).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
             Ask::OpenProject => crate::FileDialog::OpenProject,
             Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
             Ask::OpenFootage(more) => crate::FileDialog::Open { exts: footage(more).iter().map(|e| e.to_string()).collect(), many: false },
@@ -704,7 +709,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         }
         Ask::Import => {
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `paths`)".into())) };
-            picked_value(key, f(&footage(MEDIA)))
+            picked_value(key, f(&footage(&media)))
         }
         Ask::OpenProject => {
             let Some(f) = app.hooks.pick_open_project.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
@@ -799,6 +804,9 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
+    }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
     }
     leave_home_if_opened(app, before, r.is_ok());
     r

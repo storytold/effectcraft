@@ -32,6 +32,7 @@ tempfile = { workspace = true }
 effectcraft-psd = { workspace = true }
 effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }
+craft-vectorcraft-format = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-interchange = { workspace = true }
