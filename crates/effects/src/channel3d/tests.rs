@@ -348,6 +348,60 @@ fn cryptomatte_selects_by_name_and_wildcard() {
     assert_eq!(selection_hashes(&hex, None), vec![crypto_hash("left")]);
 }
 
+/// Layer Name picks a Cryptomatte layer named in full (`Crypto_Material`, which the Layer popup's
+/// CryptoMaterial does not match); empty or missing it falls back to the Layer popup.
+#[test]
+fn cryptomatte_layer_name_picks_the_named_layer() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    // A second layer with the IDs swapped: left is on the right half there.
+    let swap = |name: &str| a.channels.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap();
+    let (r, g) = (swap("CryptoObject00.R"), swap("CryptoObject00.G"));
+    let w = 20;
+    let r2: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    a.channels.push(("Crypto_Material00.R".into(), r2));
+    a.channels.push(("Crypto_Material00.G".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |vals: &[(&str, Value)]| {
+        let mut v = vec![("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true))];
+        v.extend(vals.iter().cloned());
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Material".into()))]), (0.0, 1.0), "the named layer");
+    assert_eq!(matte(&[]), (1.0, 0.0), "the Layer popup's CryptoObject");
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Name".into()))]), (1.0, 0.0), "a missing name falls back to the popup");
+}
+
+/// Layers whose names differ only in case are different layers: `layerName` "crypto_a" mattes
+/// from crypto_a's own IDs, not from the earlier `Crypto_A`.
+#[test]
+fn cryptomatte_layer_name_is_case_sensitive() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    let (r, g) = (
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.R").unwrap().1.clone(),
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.G").unwrap().1.clone(),
+    );
+    let w = 20;
+    let flipped: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    // `Crypto_A` first, with left/right as in the base scene; `crypto_a` has them swapped.
+    a.channels.push(("Crypto_A00.R".into(), r));
+    a.channels.push(("Crypto_A00.G".into(), g.clone()));
+    a.channels.push(("crypto_a00.r".into(), flipped));
+    a.channels.push(("crypto_a00.g".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |name: &str| {
+        let v = [("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true)), ("layerName", Value::Str(name.into()))];
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte("Crypto_A"), (1.0, 0.0));
+    assert_eq!(matte("crypto_a"), (0.0, 1.0));
+}
+
 /// #473: a name with a comma in it (Blender allows `Green, Glossy`) is selected when it is
 /// quoted or its comma escaped, instead of being cut into two names that match nothing.
 #[test]

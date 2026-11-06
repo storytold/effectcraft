@@ -456,6 +456,12 @@ pub fn crypto_layer_menu(aux: Option<&AuxChannels>, index: usize) -> (Vec<(usize
     (slots.into_iter().map(|(i, n)| (i, n.to_string())).collect(), shown)
 }
 
+/// The Cryptomatte layer the effect reads: the one called `name` when the footage has it (Layer
+/// Name, the layer an imported After Effects project names), else [`crypto_layer_name`]'s.
+pub fn crypto_layer_named(aux: &AuxChannels, name: &str, index: usize) -> Option<String> {
+    aux.resolve_crypto_layer_named(name, &crypto_layer_name(aux, index)?)
+}
+
 /// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
 /// the first layer (what a file without that layer has always shown). `None` without any.
 pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
@@ -578,7 +584,7 @@ pub fn matte_only_px(m: f32, in_alpha: bool) -> Px {
 
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
-    let Some(layer) = crypto_layer_name(&a, ctx.params.e("layer") as usize) else { return b };
+    let Some(layer) = crypto_layer_named(&a, ctx.params.s("layerName"), ctx.params.e("layer") as usize) else { return b };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);
@@ -706,6 +712,10 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
                 p(MATTE_ONLY_IN_ALPHA, "Matte Only In Alpha", Value::Bool(false), ParamUi::Hidden),
+                // A layer named in full (`CryptoMaterial`); empty uses Layer. Last, so the
+                // earlier parameters keep their indexes and saved instances, which get it
+                // appended, have the same order as new ones.
+                text("layerName", "Layer Name", ""),
             ],
             cryptomatte,
         ),

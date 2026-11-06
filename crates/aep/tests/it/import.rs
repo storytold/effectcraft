@@ -8,6 +8,7 @@ mod blend_modes;
 mod cameras;
 mod cases;
 mod combined;
+mod cryptomatte;
 mod ease_round2;
 mod effects;
 mod effects_batch5;

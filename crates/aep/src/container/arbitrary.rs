@@ -307,3 +307,173 @@ impl MeshData {
         Some(out)
     }
 }
+
+/// The Cryptomatte plug-in's Settings data (`Cryptomatte-0001`, the plug-in's own layout,
+/// little-endian; read from 88 instances of one project and from our own sample 1400, fresh
+/// instances and two presets that pick a layer and an object, docs/aep-format.md 3.7): the magic
+/// `cry1`; bytes 4..32 are not read (they differ between instances holding the same settings);
+/// the Cryptomatte layer's name at 32, NUL-padded to 64 bytes (`CryptoObject`); at 96 a `u32` 1
+/// and a `u32` (neither read); at 104 the `u32` length of the selection text including its NUL,
+/// the `u32` MurmurHash3 (x86, 32-bit, seed 0) of that text with its NUL (not read) and a zero
+/// byte; the selection text from byte 113 (`<11a97486>, <deadbeef>`, the matte list as ID hashes,
+/// the hashes of the picked names). Bytes after it are left-overs of a longer earlier text. A
+/// fresh effect stores no layer and an empty text (length 1, its NUL); the `u32`s at 100 and 108
+/// are then both `0x514e28b7`, the hash of one NUL byte: the one at 100 looks like the hash of a
+/// first text that is empty in every sample, the zero byte at 112 like that text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CryptomatteData {
+    /// The Cryptomatte layer's name (`CryptoMaterial`: the EXR layer's name, which is also its
+    /// channel prefix in every sample); empty when none is chosen.
+    pub layer: String,
+    /// The selection (matte list) as the plug-in stores it.
+    pub selection: String,
+}
+
+impl CryptomatteData {
+    /// Decodes the data; `None` when it is not this layout (no `cry1`, too short, a length past
+    /// the end, no zero byte at 112, a text without its NUL, text that is not UTF-8).
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.get(..4)? != b"cry1" {
+            return None;
+        }
+        let text = |b: &[u8]| -> Option<String> {
+            let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+            String::from_utf8(b.get(..end)?.to_vec()).ok()
+        };
+        let layer = text(data.get(32..96)?)?;
+        let len = usize::try_from(u32::from_le_bytes(data.get(104..108)?.try_into().ok()?)).ok()?;
+        if *data.get(112)? != 0 {
+            return None;
+        }
+        let selection = if len == 0 {
+            String::new()
+        } else {
+            // The length counts the text's NUL as its last byte: a text without it, or with an early
+            // NUL before more bytes (which `text` would silently cut short), is not this layout.
+            let b = data.get(113..113usize.checked_add(len)?)?;
+            let (last, text_bytes) = b.split_last()?;
+            if *last != 0 || text_bytes.contains(&0) {
+                return None;
+            }
+            text(b)?
+        };
+        Some(Self { layer, selection })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CryptomatteData;
+
+    /// Settings data in the layout [`CryptomatteData::parse`] reads, with `noise` in the bytes it
+    /// does not read.
+    fn crypto(layer: &str, selection: &str, noise: u8) -> Vec<u8> {
+        let mut d = b"cry1".to_vec();
+        d.resize(32, noise);
+        d.extend(layer.as_bytes());
+        d.resize(96, 0);
+        d.extend(1u32.to_le_bytes());
+        d.extend([noise; 4]);
+        let len = if selection.is_empty() { 0 } else { selection.len() + 1 };
+        d.extend(u32::try_from(len).unwrap_or(0).to_le_bytes());
+        d.extend([noise; 4]);
+        d.push(0);
+        d.extend(selection.as_bytes());
+        d.push(0);
+        // Left-overs of an earlier, longer text.
+        d.extend(b" <de");
+        d
+    }
+
+    #[test]
+    fn cryptomatte_settings_are_read() {
+        for noise in [0, 0x5a] {
+            let d = CryptomatteData::parse(&crypto("Layer_A", "<0000002a>, <deadbeef>", noise));
+            assert_eq!(d, Some(CryptomatteData { layer: "Layer_A".into(), selection: "<0000002a>, <deadbeef>".into() }), "noise {noise}");
+        }
+    }
+
+    #[test]
+    fn a_selection_whose_nul_is_not_its_last_byte_is_refused() {
+        // An early NUL followed by more declared bytes would shorten the selection silently.
+        let mut d = crypto("Layer_A", "<0000002a>, <deadbeef>", 0);
+        d[113 + 4] = 0;
+        assert_eq!(CryptomatteData::parse(&d), None);
+        // No NUL at the end of the declared length.
+        let mut d = crypto("Layer_A", "<0000002a>", 0);
+        d[113 + 10] = b'x';
+        assert_eq!(CryptomatteData::parse(&d), None);
+    }
+
+    #[test]
+    fn the_default_cryptomatte_settings_are_empty() {
+        let mut d = b"cry1".to_vec();
+        d.resize(116, 0);
+        assert_eq!(CryptomatteData::parse(&d), Some(CryptomatteData::default()));
+        // What After Effects 2026 wrote for a fresh effect (plug-in 2.6.6, sample 1400
+        // `crypto-00-defaults`, the `pard` default and the instance's record alike): an empty text
+        // of length 1 and its hash, twice.
+        let mut fresh = b"cry1".to_vec();
+        fresh.resize(96, 0);
+        for _ in 0..2 {
+            fresh.extend(1u32.to_le_bytes());
+            fresh.extend(0x514e_28b7u32.to_le_bytes());
+        }
+        fresh.extend([0; 4]);
+        assert_eq!(fresh.len(), 116);
+        assert_eq!(CryptomatteData::parse(&fresh), Some(CryptomatteData::default()));
+    }
+
+    /// The Settings data After Effects 2026 wrote for the two presets of sample 1400 (plug-in
+    /// 2.6.6, `crypto-06-preset-object-box` and `crypto-07-preset-material-paint`: a layer chosen
+    /// and one object or material picked in the plug-in's UI), byte for byte: 127 bytes, the `u32`
+    /// at 108 the MurmurHash3 of the text with its NUL, three zero bytes after the text.
+    #[test]
+    fn the_presets_of_our_sample_are_read() {
+        for (layer, selection, hash) in [("CryptoObject", "<11a97486>", 0x2788_0767u32), ("CryptoMaterial", "<a5deeb9e>", 0xf737_4a5b)] {
+            let mut d = b"cry1".to_vec();
+            d.resize(32, 0);
+            d.extend(layer.as_bytes());
+            d.resize(96, 0);
+            for v in [1, 0x514e_28b7, 11, hash] {
+                d.extend(u32::to_le_bytes(v));
+            }
+            d.push(0);
+            d.extend(selection.as_bytes());
+            d.extend([0; 4]);
+            assert_eq!(d.len(), 127);
+            assert_eq!(CryptomatteData::parse(&d), Some(CryptomatteData { layer: layer.into(), selection: selection.into() }), "{layer}");
+        }
+    }
+
+    #[test]
+    fn damaged_cryptomatte_settings_are_not_read() {
+        let good = crypto("L", "<00000001>", 0);
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'x';
+        let mut past_end = good.clone();
+        past_end[104..108].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut no_zero = good.clone();
+        no_zero[112] = b'<';
+        let mut not_utf8 = good.clone();
+        not_utf8[32] = 0xff;
+        // The length covers the text without its NUL (`<00000001>` is 10 bytes, its NUL the 11th).
+        let mut no_nul = good.clone();
+        no_nul[104..108].copy_from_slice(&10u32.to_le_bytes());
+        // No zero byte at 112 with an empty text.
+        let mut empty_no_zero = crypto("L", "", 0);
+        empty_no_zero[112] = b'<';
+        for (what, d) in [
+            ("magic", bad_magic),
+            ("length", past_end),
+            ("zero byte", no_zero),
+            ("utf-8", not_utf8),
+            ("no NUL", no_nul),
+            ("empty text, zero byte", empty_no_zero),
+            ("short", good[..100].to_vec()),
+            ("empty", Vec::new()),
+        ] {
+            assert_eq!(CryptomatteData::parse(&d), None, "{what}");
+        }
+    }
+}

@@ -110,6 +110,8 @@ pub const HUE_SAT_CHANNEL: &[&str] = &["Master", "Reds", "Yellows", "Greens", "C
 pub const LEVELS_CHANNEL: &[&str] = &["RGB", "Red", "Green", "Blue", "Alpha"];
 /// 511.
 pub const LEVELS_CLIP: &[&str] = &["On", "Off", "Off for 32 bpc Color"];
+/// The Cryptomatte plug-in's Output (`Cryptomatte-0002`).
+pub const CRYPTOMATTE_OUTPUT: &[&str] = &["Colors", "Matted Colors", "Matted RGBA", "Matte Only"];
 
 /// One mapped parameter.
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +141,10 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
+    /// The Cryptomatte plug-in: the layer and selection in its Settings data
+    /// (`CryptomatteData`), Output split over EffectCraft's Display and Matte Only; every
+    /// parameter is handled by the importer's Cryptomatte step, none by the table.
+    Cryptomatte,
 }
 
 /// One mapped effect.
@@ -526,6 +532,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // The Cryptomatte plug-in (docs/aep-format.md 3.7): 1 Settings data, 2 Output, 3 Selection
+    // Mode, imported by the Cryptomatte step (`Extra::Cryptomatte`).
+    EffectMap { match_name: "Cryptomatte", effect: "ec.3d.cryptomatte", params: &[], extra: Extra::Cryptomatte },
     // Expression controls (070-077, 217-221, 310).
     // Directional Blur (711): Direction in degrees, Blur Length in pixels (valid max 1 000).
     fx(
