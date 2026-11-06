@@ -1374,6 +1374,77 @@ fn edge_pan_speed(area: Rect, pos: Pos2) -> egui::Vec2 {
     vec2(axis(pos.x, area.min.x, area.max.x), axis(pos.y, area.min.y, area.max.y))
 }
 
+/// What an arrow key asks of the Rounded Rectangle's corner radius while it is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum RoundnessKey {
+    /// Up and Down, in comp pixels.
+    Step(f64),
+    /// Left: square corners.
+    Min,
+    /// Right: as round as the box allows.
+    Max,
+}
+
+/// The arrow key the drag is carrying into this frame's `Gesture::Create`. The key has to be
+/// taken before the shortcut table sees it, which is earlier in the frame than the pointer's
+/// box is worked out, so the request waits here rather than resolving against the box the
+/// previous frame drew.
+fn roundness_id() -> egui::Id {
+    egui::Id::unique("viewer-shape-roundness")
+}
+
+/// How far one Up or Down press moves the Rounded Rectangle's corner radius (comp pixels).
+const ROUNDNESS_STEP: f64 = 1.0;
+
+/// The Rounded Rectangle's corner radius while the tool is drawing: Up and Down change it, Left
+/// and Right set it to the minimum (square corners) and the maximum (fully rounded), as in After
+/// Effects. Called before the shortcut table, which otherwise takes the arrow keys for Nudge
+/// Layer; outside such a drag it consumes nothing. [`apply_roundness_key`] carries out the
+/// request once this frame's box is known.
+pub(crate) fn shape_drag_keys(ctx: &egui::Context) {
+    let drawing = matches!(ctx.data(|d| d.get_temp::<Gesture>(egui::Id::unique("viewer-gesture"))), Some(Gesture::Create { tool: Tool::RoundedRect, .. }));
+    if !drawing {
+        return;
+    }
+    let arrow = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+    // All four every frame: a chord of two arrows must not leave one of them to the shortcuts.
+    let (up, down, max, min) = (arrow(egui::Key::ArrowUp), arrow(egui::Key::ArrowDown), arrow(egui::Key::ArrowRight), arrow(egui::Key::ArrowLeft));
+    let step = ROUNDNESS_STEP * (f64::from(u8::from(up)) - f64::from(u8::from(down)));
+    let key = if min {
+        RoundnessKey::Min
+    } else if max {
+        RoundnessKey::Max
+    } else if step != 0.0 {
+        RoundnessKey::Step(step)
+    } else {
+        return;
+    };
+    ctx.data_mut(|d| d.insert_temp(roundness_id(), key));
+    // The pointer may be standing still: ask for the frame that redraws the ghost.
+    ctx.request_repaint();
+}
+
+/// Carry out the arrow key this frame took, against the box the drag has reached: Right rounds
+/// the box the pointer is on now, and a step starts from the radius the ghost is drawing. The
+/// radius goes through `shape.toolOptions`, so the tool keeps it for the next shape.
+fn apply_roundness_key(app: &mut EffectcraftApp, ui: &egui::Ui, d: &mut ShapeDrag) {
+    let key = ui.data_mut(|dd| {
+        let key = dd.get_temp::<RoundnessKey>(roundness_id());
+        dd.remove::<RoundnessKey>(roundness_id());
+        key
+    });
+    let Some(key) = key else { return };
+    let want = match key {
+        RoundnessKey::Step(by) => (d.roundness + by).max(0.0),
+        RoundnessKey::Min => 0.0,
+        RoundnessKey::Max => effectcraft_engine::commands::shape_tool::max_roundness(d.size),
+    };
+    if let Err(e) = app.session.execute("shape.toolOptions", json!({"roundness": want})) {
+        app.ui.status = e.to_string();
+    }
+    d.roundness = effectcraft_engine::commands::shape_tool::clamp_roundness(want, d.size);
+}
+
 fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let t = v.t;
     let zoom = v.zoom;
@@ -1470,7 +1541,10 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                 }
             }
             Gesture::Create { tool, start } => {
-                if let Some(d) = shape_drag(app, tool, start, cpt, mods) {
+                if let Some(mut d) = shape_drag(app, tool, start, cpt, mods) {
+                    // The box is known now, so an arrow key taken earlier this frame lands
+                    // inside it rather than inside the one the previous frame drew.
+                    apply_roundness_key(app, ui, &mut d);
                     draw_shape_ghost(&painter, &map, app, &d, &t);
                 }
             }
@@ -1948,7 +2022,7 @@ use geometry::{
 use geometry::{box_corners, project_clipped};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
-use shapes::{create_shape, draw_shape_ghost, shape_drag};
+use shapes::{ShapeDrag, create_shape, draw_shape_ghost, shape_drag};
 pub(crate) use shapes::{layer_at, layer_at_including_locked, layers_at, pick, selectable_layers};
 #[cfg(test)]
 use tools::constrain_45;

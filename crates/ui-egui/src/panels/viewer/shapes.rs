@@ -84,12 +84,27 @@ pub(super) struct ShapeDrag {
     kind: &'static str,
     /// Comp-space centre and size, what the drag will make.
     centre: [f64; 2],
-    size: [f64; 2],
+    pub(super) size: [f64; 2],
+    /// The Rounded Rectangle's corner radius for this box (comp pixels): the Tools bar's, as far
+    /// as the box allows. The arrow keys change it while the drag runs.
+    pub(super) roundness: f64,
     target: ShapeTarget,
     /// The selected layer's name and the index its next mask would take, for the ghost's caption
     /// and colour.
     layer_name: String,
     mask_index: usize,
+}
+
+impl ShapeDrag {
+    /// The ghost's caption: where the shape lands, and for the Rounded Rectangle the corner
+    /// radius the arrow keys are changing, which is otherwise invisible until the shape is drawn.
+    fn caption(&self) -> String {
+        let lands = self.target.label(&self.layer_name);
+        match self.kind {
+            "rounded" => format!("{lands} · {:.0} px radius", self.roundness),
+            _ => lands,
+        }
+    }
 }
 
 /// The kind `tool` draws, as `shape.newShape` / `layer.addMask` name it.
@@ -104,7 +119,7 @@ fn shape_kind(tool: Tool) -> &'static str {
 }
 
 /// What a shape tool drag from `start` to `end` makes, or `None` while it is too small to make
-/// anything. Alt (Option) draws from the press point and Shift squares the box; the live ghost and
+/// anything. Ctrl/Cmd draws from the press point and Shift squares the box; the live ghost and
 /// [`create_shape`] both go through this, so the drag always shows what it will commit.
 pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<ShapeDrag> {
     let comp = app.session.active_comp()?;
@@ -140,6 +155,9 @@ pub(super) fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end:
         kind: shape_kind(tool),
         centre: if mods.command { start } else { [start[0].min(end[0]) + w / 2.0, start[1].min(end[1]) + h / 2.0] },
         size: [w, h],
+        // A box smaller than twice the radius draws the fully rounded shape, as After Effects
+        // does, instead of letting the corners cross.
+        roundness: effectcraft_engine::commands::shape_tool::clamp_roundness(app.session.state.shape_tool.roundness, [w, h]),
         target,
         layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
         mask_index,
@@ -156,7 +174,7 @@ fn paint_rgb(c: [f32; 3], opacity: f64, alpha: f32) -> Color32 {
 /// outlined in its Stroke (or the mask colour, for a mask), captioned with where it goes.
 pub(super) fn draw_shape_ghost(painter: &egui::Painter, map: &ViewerMap, app: &EffectcraftApp, d: &ShapeDrag, t: &Tokens) {
     // The engine's own geometry for the kind, so the ghost is the shape and not a stand-in for it.
-    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size) else { return };
+    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size, d.roundness) else { return };
     let mut pts = ov::flatten(&sp, &Mat3::IDENTITY, map);
     if pts.first() == pts.last() {
         pts.pop();
@@ -182,9 +200,9 @@ pub(super) fn draw_shape_ghost(painter: &egui::Painter, map: &ViewerMap, app: &E
     // A screen-width outline reads at every zoom, where a comp-pixel hairline does not.
     painter.add(egui::Shape::Path(egui::epaint::PathShape { points: pts, closed: true, fill, stroke: Stroke::new(1.5, line).into() }));
     // Caption it with where the shape lands: a mask, a group in the selected shape layer or a
-    // new layer.
+    // new layer, and the Rounded Rectangle's corner radius.
     let font = Tokens::ui(11.0);
-    let galley = painter.layout_no_wrap(d.target.label(&d.layer_name), font, line);
+    let galley = painter.layout_no_wrap(d.caption(), font, line);
     let caption = Rect::from_min_size(pos2(bounds.left(), bounds.top() - 5.0 - galley.size().y), galley.size());
     painter.rect_filled(caption.expand(3.0), 2.0, Color32::from_black_alpha(150));
     painter.galley(caption.min, galley, line);
@@ -224,7 +242,10 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));
             let p1 = inv.apply(gv2(cx + w / 2.0, cy + h / 2.0));
             let rect = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            if let Err(e) = app.session.execute("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})) {
+            // The radius is measured in the ghost's space, so it shrinks with the box on the way
+            // into the layer's.
+            let r = d.roundness * effectcraft_engine::commands::shape_tool::size_ratio([w, h], [rect[2], rect[3]]);
+            if let Err(e) = app.session.execute("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect, "roundness": r})) {
                 app.ui.status = e.to_string();
             }
         }
@@ -232,7 +253,7 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
     }
     // Into the selected shape layer's Contents as a new group (as in After Effects), else a new
     // shape layer; painted with the Tools bar's Fill and Stroke.
-    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy]})) {
+    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy], "roundness": d.roundness})) {
         app.ui.status = e.to_string();
     }
 }

@@ -77,7 +77,8 @@ impl Default for ToolPaint {
 }
 
 /// The shape tools' and the Pen's options: Tool Creates Mask (with a shape layer selected they
-/// draw masks on it instead of shapes) and the Fill, Stroke and Stroke Width new shapes get.
+/// draw masks on it instead of shapes), the Fill, Stroke and Stroke Width new shapes get, and
+/// the Rounded Rectangle's corner radius.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ShapeTool {
@@ -86,18 +87,44 @@ pub struct ShapeTool {
     pub stroke: ToolPaint,
     /// 0 draws no stroke.
     pub stroke_width: f64,
+    /// The Rounded Rectangle tool's corner radius in pixels, which the drag's arrow keys change
+    /// and the tool then remembers. A drawn shape clamps it to half its shorter side.
+    pub roundness: f64,
 }
 
 impl Default for ShapeTool {
     fn default() -> Self {
-        ShapeTool { creates_mask: false, fill: ToolPaint { color: [0.25, 0.55, 1.0], ..ToolPaint::default() }, stroke: ToolPaint::default(), stroke_width: 0.0 }
+        ShapeTool {
+            creates_mask: false,
+            fill: ToolPaint { color: [0.25, 0.55, 1.0], ..ToolPaint::default() },
+            stroke: ToolPaint::default(),
+            stroke_width: 0.0,
+            roundness: DEFAULT_ROUNDNESS,
+        }
     }
+}
+
+/// The Rounded Rectangle tool's corner radius before anything changes it, as in After Effects
+/// (it does not grow with the drawn size).
+pub const DEFAULT_ROUNDNESS: f64 = 20.0;
+
+/// The largest corner radius a rectangle of `size` can take: half its shorter side, where the
+/// corner arcs meet. 0 for a size that is not a pair of finite numbers.
+pub fn max_roundness(size: [f64; 2]) -> f64 {
+    let (w, h) = (size[0].abs(), size[1].abs());
+    if w.is_finite() && h.is_finite() { w.min(h) / 2.0 } else { 0.0 }
+}
+
+/// `roundness` as a rectangle of `size` can draw it: never negative, never past
+/// [`max_roundness`], and 0 for anything that is not a finite number.
+pub fn clamp_roundness(roundness: f64, size: [f64; 2]) -> f64 {
+    if roundness.is_finite() { roundness.clamp(0.0, max_roundness(size)) } else { 0.0 }
 }
 
 /// `p`'s paint keys over `base`: `fill` / `stroke` (a colour, which makes a None paint Solid
 /// Color; `null` or `false` for None), `fillType` / `strokeType` (none|solid|linear|radial),
-/// `fillBlend` / `strokeBlend` (a blend mode), `fillOpacity` / `strokeOpacity` (%) and
-/// `strokeWidth` (0 draws no stroke).
+/// `fillBlend` / `strokeBlend` (a blend mode), `fillOpacity` / `strokeOpacity` (%),
+/// `strokeWidth` (0 draws no stroke) and `roundness` (the Rounded Rectangle's corner radius).
 pub(crate) fn paint_p(p: &Value, base: &ShapeTool, cmd: &str) -> Result<ShapeTool> {
     let mut o = base.clone();
     for (key, paint) in [("fill", &mut o.fill), ("stroke", &mut o.stroke)] {
@@ -123,6 +150,9 @@ pub(crate) fn paint_p(p: &Value, base: &ShapeTool, cmd: &str) -> Result<ShapeToo
     }
     if let Some(v) = p.get("strokeWidth") {
         o.stroke_width = v.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad(cmd, "`strokeWidth`: pixels"))?.max(0.0);
+    }
+    if let Some(v) = p.get("roundness") {
+        o.roundness = v.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad(cmd, "`roundness`: pixels"))?.max(0.0);
     }
     Ok(o)
 }
@@ -180,12 +210,6 @@ fn rgba(c: [f32; 3]) -> [f64; 4] {
     [c[0] as f64, c[1] as f64, c[2] as f64, 1.0]
 }
 
-/// The Rounded Rectangle tool's corner roundness: a fixed default, as in After Effects
-/// (it does not grow with the drawn size).
-fn roundness() -> f64 {
-    20.0
-}
-
 /// The Polygon and Star tools' Polystar for `size`: (star, points, outer radius, inner radius).
 fn polystar_of(kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
     match kind {
@@ -200,7 +224,7 @@ fn polystar_of(kind: &str, size: [f64; 2]) -> Option<(bool, f64, f64, f64)> {
 pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &ShapeTool) -> Option<PropGroup> {
     let (path, gname) = match kind {
         "rect" | "rectangle" => (build::shape_rect(ids, size, [0.0, 0.0], 0.0), "Rectangle 1"),
-        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], roundness()), "Rectangle 1"),
+        "rounded" | "roundedRect" => (build::shape_rect(ids, size, [0.0, 0.0], clamp_roundness(paint.roundness, size)), "Rectangle 1"),
         "ellipse" => (build::shape_ellipse(ids, size, [0.0, 0.0]), "Ellipse 1"),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
@@ -212,14 +236,16 @@ pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &Sha
     Some(build::shape_group(ids, gname, items))
 }
 
-/// The path a shape tool draws: `kind` of `size` centred at `centre` (layer space). The geometry
-/// of every one of the five kinds, so a caller that only wants to draw it (the viewer's
-/// drag ghost) cannot drift from what `shape.newShape` / `layer.addMask` commit.
-pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2]) -> Option<ShapePath> {
+/// The path a shape tool draws: `kind` of `size` centred at `centre` (layer space), with
+/// `roundness` as the Rounded Rectangle's corner radius (clamped to what the box allows, and
+/// ignored by the other kinds). The geometry of every one of the five kinds, so a caller that
+/// only wants to draw it (the viewer's drag ghost) cannot drift from what `shape.newShape` /
+/// `layer.addMask` commit.
+pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2], roundness: f64) -> Option<ShapePath> {
     let bez = match kind {
         "rect" | "rectangle" => return Some(ShapePath::rect(centre, size[0], size[1])),
         "ellipse" => return Some(ShapePath::ellipse(centre, size[0], size[1])),
-        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness()),
+        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, clamp_roundness(roundness, size)),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
             effectcraft_path::polystar(effectcraft_path::Polystar {
@@ -293,6 +319,14 @@ pub(crate) fn add_to_contents(
     Ok(uid)
 }
 
+/// How much `to` shrinks `from`, the smaller of the two axes: what a length that is not tied to
+/// one axis (a corner radius) is multiplied by. 1 when either size has an axis at or near zero,
+/// where no ratio is meaningful.
+pub fn size_ratio(from: [f64; 2], to: [f64; 2]) -> f64 {
+    let axis = |a: f64, b: f64| if a.is_finite() && b.is_finite() && a.abs() > f64::EPSILON { (b / a).abs() } else { 1.0 };
+    axis(from[0], to[0]).min(axis(from[1], to[1]))
+}
+
 /// A finite `[w, h]` / `[x, y]` parameter.
 fn pair_p(p: &Value, k: &str) -> Option<[f64; 2]> {
     let a = p.get(k)?.as_array()?;
@@ -322,7 +356,7 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
     let target = draw_target(s, &comp, p, c)?;
     // In the target layer's space: the centre maps through the layer's transform, the size by
     // its scale.
-    let (centre, size) = match target.and_then(|l| comp.layer(l)) {
+    let (centre, local) = match target.and_then(|l| comp.layer(l)) {
         Some(l) if str_p(p, "space") != Some("layer") => {
             let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, s.time_of(cid));
             let inv = ctx.layer_to_comp(l).0.inverse().ok_or_else(|| bad(c, "the layer is scaled to nothing"))?;
@@ -332,6 +366,10 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => (pos, size),
         None => ([0.0, 0.0], size),
     };
+    // The corner radius is in the same space as the box, so it shrinks and grows with it: a
+    // Rounded Rectangle drawn on a scaled layer keeps the corners the drag showed.
+    let paint = ShapeTool { roundness: paint.roundness * size_ratio(size, local), ..paint };
+    let size = local;
     let label = match kind {
         "rounded" => "Rounded Rectangle Tool",
         "ellipse" => "Ellipse Tool",
@@ -375,7 +413,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Tool",
             [],
             None,
-            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), space?: comp|layer, name? (a new layer's), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions)} → {layer, group}",
+            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), space?: comp|layer, name? (a new layer's), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth?, roundness? px (rounded: the corner radius, half the shorter side at most) (default the Tools bar's, shape.toolOptions)} → {layer, group}",
             has_comp,
             new_shape
         ),
@@ -384,9 +422,60 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Tool Options",
             [],
             None,
-            "{createsMask?: bool (Tool Creates Mask with a shape layer selected), fill?: [r,g,b]|#hex|false, fillType?: none|solid|linear|radial, fillBlend?: blend mode, fillOpacity? %, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? px, reset?} → the options",
+            "{createsMask?: bool (Tool Creates Mask with a shape layer selected), fill?: [r,g,b]|#hex|false, fillType?: none|solid|linear|radial, fillBlend?: blend mode, fillOpacity? %, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? px, roundness? px (the Rounded Rectangle's corner radius), reset?} → the options",
             always,
             tool_options
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Rounded Rectangle's corner radius is a tool option, so the viewer's arrow keys, the
+    /// CLI and MCP all set the same thing and the tool remembers it.
+    #[test]
+    fn the_corner_radius_is_a_tool_option() {
+        let mut s = Session::default();
+        assert_eq!(s.state.shape_tool.roundness, DEFAULT_ROUNDNESS);
+        let o = s.execute("shape.toolOptions", json!({"roundness": 48})).unwrap();
+        assert_eq!(o["roundness"].as_f64(), Some(48.0));
+        assert_eq!(s.state.shape_tool.roundness, 48.0);
+        // A square corner is a radius of 0, and nothing goes below it.
+        assert_eq!(s.execute("shape.toolOptions", json!({"roundness": -5})).unwrap()["roundness"].as_f64(), Some(0.0));
+        // Not a number: an error the caller can act on, with the option left as it was.
+        assert!(s.execute("shape.toolOptions", json!({"roundness": "round"})).is_err());
+        assert_eq!(s.state.shape_tool.roundness, 0.0);
+        assert_eq!(s.execute("shape.toolOptions", json!({"reset": true})).unwrap()["roundness"].as_f64(), Some(DEFAULT_ROUNDNESS));
+    }
+
+    /// A radius past half the shorter side draws the fully rounded shape rather than a broken
+    /// one, and a hostile number draws square corners instead of failing.
+    #[test]
+    fn a_drawn_corner_radius_stays_within_the_box() {
+        assert_eq!(max_roundness([200.0, 100.0]), 50.0);
+        assert_eq!(clamp_roundness(500.0, [200.0, 100.0]), 50.0);
+        assert_eq!(clamp_roundness(-1.0, [200.0, 100.0]), 0.0);
+        assert_eq!(clamp_roundness(f64::NAN, [200.0, 100.0]), 0.0);
+        assert_eq!(clamp_roundness(20.0, [f64::NAN, 100.0]), 0.0);
+        let square = mask_path("rounded", [0.0, 0.0], [200.0, 100.0], 0.0).unwrap();
+        let round = mask_path("rounded", [0.0, 0.0], [200.0, 100.0], 1.0e9).unwrap();
+        assert!(square.vertices.len() < round.vertices.len(), "rounded corners add vertices: {square:?} {round:?}");
+        assert!(round.vertices.iter().all(|v| v[0].abs() <= 100.0 + 1e-9 && v[1].abs() <= 50.0 + 1e-9), "{round:?}");
+        // The other kinds ignore it rather than drawing something else.
+        assert_eq!(mask_path("ellipse", [0.0, 0.0], [200.0, 100.0], 0.0), mask_path("ellipse", [0.0, 0.0], [200.0, 100.0], 40.0));
+    }
+
+    /// A radius is not tied to one axis, so it follows the box by the smaller of the two
+    /// ratios: a shape drawn on a half-scale layer keeps the corners the drag showed.
+    #[test]
+    fn the_corner_radius_follows_the_box_through_a_layer_transform() {
+        assert_eq!(size_ratio([200.0, 100.0], [100.0, 50.0]), 0.5);
+        assert_eq!(size_ratio([200.0, 100.0], [100.0, 100.0]), 0.5);
+        assert_eq!(size_ratio([200.0, 100.0], [200.0, 100.0]), 1.0);
+        // Nothing to measure against: the radius is left alone instead of exploding.
+        assert_eq!(size_ratio([0.0, 100.0], [50.0, 100.0]), 1.0);
+        assert_eq!(size_ratio([200.0, 100.0], [f64::NAN, 50.0]), 0.5);
+    }
 }
