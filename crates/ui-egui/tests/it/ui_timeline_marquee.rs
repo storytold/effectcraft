@@ -74,3 +74,51 @@ fn a_box_selects_a_key_it_grazes_from_any_side_and_not_one_it_stops_short_of() {
         assert!(h.state().session.state.selected_layers.is_empty(), "a box that catches nothing deselects (layers included)");
     }
 }
+
+/// #3056: one box spans the layer outline and the time graph. Dragged from the empty outline
+/// into the graph, or from the graph back over the outline, it selects the layers whose rows it
+/// crosses and the keys inside it, through the real drag, release and selection commands.
+#[test]
+fn a_box_dragged_across_the_outline_and_the_graph_selects_rows_and_keys() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Box", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
+    let mut ids = vec![];
+    for name in ["A", "B"] {
+        let id = s.execute("layer.newSolid", json!({"name": name, "color": "#e04020", "width": 80, "height": 80})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": 1.0, "value": 50})).unwrap();
+        ids.push(id);
+    }
+    s.execute("layer.select", json!({"layers": ids})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.opacity", json!({})).unwrap();
+    h.run_steps(4);
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(2);
+    // B was added last, so its rows are on top; below A's rows the outline is empty.
+    let (top, bottom) = (key_center(&h, ids[1], 1.0), key_center(&h, ids[0], 1.0));
+    let outline = h.state().auto.find("timeline.layerMarquee").expect("the outline's empty area").rect;
+    let below = pos2(outline[0] + 60.0, bottom.y + 40.0);
+    assert!(below.x < top.x && below.y < outline[1] + outline[3], "the start is in the outline, below the rows");
+    let selected = |h: &Harness<'_, EffectcraftApp>| {
+        let st = &h.state().session.state;
+        let mut layers: Vec<u64> = st.selected_layers.iter().map(|l| l.0).collect();
+        let mut keyed: Vec<u64> = st.selected_keys.iter().map(|k| k.layer.0).collect();
+        layers.sort_unstable();
+        keyed.sort_unstable();
+        (layers, keyed)
+    };
+    let mut both = ids.clone();
+    both.sort_unstable();
+    // From the outline up and right into the graph, over both keys.
+    let keys = marquee(&mut h, below, top + vec2(15.0, -3.0));
+    assert_eq!(keys, [1.0, 1.0]);
+    assert_eq!(selected(&h), (both.clone(), both.clone()), "outline → graph");
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(2);
+    // And back: from beside the top key in the graph down and left over the outline.
+    let keys = marquee(&mut h, top + vec2(30.0, 0.0), below);
+    assert_eq!(keys, [1.0, 1.0]);
+    assert_eq!(selected(&h), (both.clone(), both), "graph → outline");
+}

@@ -895,6 +895,141 @@ impl ProResProfile {
     }
 }
 
+/// OpenEXR sequence compression. Every method writes scan lines, in blocks of the method's own
+/// height (1 line for None, RLE and ZIPS; 16 for ZIP and PXR24; 32 for PIZ, B44, B44A and DWAA;
+/// 256 for DWAB).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExrCompression {
+    None,
+    Rle,
+    /// ZIP, one scan line per block.
+    Zips,
+    /// ZIP, 16 scan lines per block.
+    #[default]
+    Zip,
+    Piz,
+    /// Lossy for 32-bit float (rounded to 24 bits), lossless for half float.
+    Pxr24,
+    /// Lossy for half float; 32-bit float channels are stored uncompressed.
+    B44,
+    /// B44 that also packs flat areas smaller; lossy for half float, 32-bit float is stored uncompressed.
+    B44a,
+    /// Lossy DCT, 32 scan lines per block.
+    Dwaa,
+    /// Lossy DCT, 256 scan lines per block.
+    Dwab,
+}
+
+impl ExrCompression {
+    pub const ALL: [ExrCompression; 10] = [
+        ExrCompression::None,
+        ExrCompression::Rle,
+        ExrCompression::Zips,
+        ExrCompression::Zip,
+        ExrCompression::Piz,
+        ExrCompression::Pxr24,
+        ExrCompression::B44,
+        ExrCompression::B44a,
+        ExrCompression::Dwaa,
+        ExrCompression::Dwab,
+    ];
+    /// The parameter value (`exrCompression`).
+    pub fn name(self) -> &'static str {
+        match self {
+            ExrCompression::None => "none",
+            ExrCompression::Rle => "rle",
+            ExrCompression::Zips => "zips",
+            ExrCompression::Zip => "zip",
+            ExrCompression::Piz => "piz",
+            ExrCompression::Pxr24 => "pxr24",
+            ExrCompression::B44 => "b44",
+            ExrCompression::B44a => "b44a",
+            ExrCompression::Dwaa => "dwaa",
+            ExrCompression::Dwab => "dwab",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ExrCompression::None => "None",
+            ExrCompression::Rle => "RLE",
+            ExrCompression::Zips => "ZIPS (1 scan line)",
+            ExrCompression::Zip => "ZIP (16 scan lines)",
+            ExrCompression::Piz => "PIZ",
+            ExrCompression::Pxr24 => "PXR24",
+            ExrCompression::B44 => "B44",
+            ExrCompression::B44a => "B44A",
+            ExrCompression::Dwaa => "DWAA",
+            ExrCompression::Dwab => "DWAB",
+        }
+    }
+    /// Whether the written samples can differ from the rendered ones at `depth` (half float is
+    /// already rounded from the 32-bit render; that rounding is not counted here).
+    pub fn is_lossy(self, depth: ExrBitDepth) -> bool {
+        match self {
+            ExrCompression::None | ExrCompression::Rle | ExrCompression::Zips | ExrCompression::Zip | ExrCompression::Piz => false,
+            ExrCompression::Pxr24 => depth == ExrBitDepth::Float,
+            ExrCompression::B44 | ExrCompression::B44a => depth == ExrBitDepth::Half,
+            ExrCompression::Dwaa | ExrCompression::Dwab => true,
+        }
+    }
+    /// Whether the method leaves the samples uncompressed at `depth` (B44 and B44A pack only half
+    /// floats).
+    pub fn stores_uncompressed(self, depth: ExrBitDepth) -> bool {
+        self == ExrCompression::None || (matches!(self, ExrCompression::B44 | ExrCompression::B44a) && depth == ExrBitDepth::Float)
+    }
+    /// Parse a compression name: `none`/`uncompressed`, `rle`, `zips`/`zip1` (Nuke's "Zip (1
+    /// scanline)"), `zip`/`zip16`,
+    /// `piz`, `pxr24`, `b44`, `b44a`, `dwaa`, `dwab` (any case).
+    pub fn from_name(s: &str) -> Option<ExrCompression> {
+        let n = s.to_ascii_lowercase().replace([' ', '-', '_', '(', ')'], "");
+        match n.as_str() {
+            "uncompressed" | "off" => Some(ExrCompression::None),
+            "zip1" | "zips1scanline" | "zip1scanline" | "zip1scanlines" => Some(ExrCompression::Zips),
+            "zip16" | "zip16scanlines" => Some(ExrCompression::Zip),
+            _ => ExrCompression::ALL.into_iter().find(|c| c.name() == n),
+        }
+    }
+}
+
+/// OpenEXR sequence sample type: 16-bit half float (the usual VFX interchange) or 32-bit float.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExrBitDepth {
+    Half,
+    #[default]
+    Float,
+}
+
+impl ExrBitDepth {
+    pub const ALL: [ExrBitDepth; 2] = [ExrBitDepth::Half, ExrBitDepth::Float];
+    /// The parameter value (`exrBitDepth`).
+    pub fn name(self) -> &'static str {
+        match self {
+            ExrBitDepth::Half => "half",
+            ExrBitDepth::Float => "float",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ExrBitDepth::Half => "16-bit Half Float",
+            ExrBitDepth::Float => "32-bit Float",
+        }
+    }
+    pub fn bits(self) -> u32 {
+        match self {
+            ExrBitDepth::Half => 16,
+            ExrBitDepth::Float => 32,
+        }
+    }
+    /// Parse `half`/`16`/`f16` or `float`/`32`/`f32` (any case).
+    pub fn from_name(s: &str) -> Option<ExrBitDepth> {
+        match s.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
+            "half" | "16" | "f16" | "16bit" | "halffloat" | "16bithalffloat" => Some(ExrBitDepth::Half),
+            "float" | "32" | "f32" | "32bit" | "full" | "fullfloat" | "32bitfloat" => Some(ExrBitDepth::Float),
+            _ => None,
+        }
+    }
+}
+
 /// HEVC / AV1 profile: 8-bit (HEVC Main, AV1 Main 8-bit) or 10-bit (HEVC Main 10, AV1 Main 10-bit).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodecProfile {
@@ -1065,6 +1200,10 @@ pub struct OutputModule {
     /// Movies: frames between key frames (0 = automatic, two seconds).
     pub keyframe_interval: u32,
     pub prores_profile: ProResProfile,
+    /// OpenEXR sequence: compression (scan lines).
+    pub exr_compression: ExrCompression,
+    /// OpenEXR sequence: half or 32-bit float samples.
+    pub exr_bit_depth: ExrBitDepth,
     pub crop: Crop,
     pub resize: Resize,
     pub audio: AudioOutput,
@@ -1099,6 +1238,8 @@ impl Default for OutputModule {
             webm_bitrate: false,
             keyframe_interval: 0,
             prores_profile: ProResProfile::Hq,
+            exr_compression: ExrCompression::Zip,
+            exr_bit_depth: ExrBitDepth::Float,
             crop: Crop::default(),
             resize: Resize::default(),
             audio: AudioOutput::Auto,
@@ -1155,6 +1296,10 @@ impl OutputModule {
         match self.format {
             OutputFormat::H264 => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::ProRes => v.push(("Codec", self.prores_profile.label().into())),
+            OutputFormat::ExrSequence => {
+                v.push(("Compression", self.exr_compression_label()));
+                v.push(("Bit Depth", self.exr_bit_depth.label().into()));
+            }
             OutputFormat::WebM if self.webm_bitrate => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::WebM | OutputFormat::JpegSequence => v.push(("Quality", self.quality.to_string())),
             _ => {}
@@ -1215,6 +1360,18 @@ impl OutputModule {
         }
         self.output = format!("{stem}.{}", format.extension());
     }
+    /// The OpenEXR compression's label, marked when it is lossy at the module's bit depth or, for
+    /// B44 / B44A at 32-bit float, stores the samples uncompressed.
+    pub fn exr_compression_label(&self) -> String {
+        let (c, d) = (self.exr_compression, self.exr_bit_depth);
+        if c.is_lossy(d) {
+            format!("{} (lossy)", c.label())
+        } else if c != ExrCompression::None && c.stores_uncompressed(d) {
+            format!("{} (uncompressed at float)", c.label())
+        } else {
+            c.label().into()
+        }
+    }
     /// Whether this module can write alpha (the format can, and WebM uses VP9).
     pub fn supports_alpha(&self) -> bool {
         self.format.supports_alpha() && !(self.format == OutputFormat::WebM && self.webm_codec == WebmVideoCodec::Av1)
@@ -1246,6 +1403,7 @@ impl OutputModule {
                 if self.channels == Channels::Rgba && !self.prores_profile.is_4444() { "Apple ProRes 4444" } else { self.prores_profile.label() }
             ),
             OutputFormat::Hevc | OutputFormat::Av1 => format!("{} · {}", self.format.label(), self.codec_summary()),
+            OutputFormat::ExrSequence => format!("{} · {} · {} · {ch}", self.format.label(), self.exr_compression_label(), self.exr_bit_depth.label()),
             OutputFormat::WebM if self.webm_codec == WebmVideoCodec::Av1 => {
                 format!("WebM (AV1 + Opus {} kbps) · {}", self.opus_bitrate_kbps, self.codec_summary())
             }
@@ -1894,5 +2052,46 @@ mod tests {
         // Older projects (no codec fields) load with the defaults.
         let old: OutputModule = serde_json::from_str(r#"{"format":"H264","bitrate_kbps":5000}"#).unwrap();
         assert_eq!((old.codec, old.webm_codec, old.opus_bitrate_kbps), (VideoCodecOptions::default(), WebmVideoCodec::Vp9, 192));
+    }
+
+    /// OpenEXR compression and bit depth (#2911): names parse, lossy methods are marked for the
+    /// depth they lose data at, and modules saved before the settings existed load as ZIP, 32-bit
+    /// float (what those projects rendered).
+    #[test]
+    fn exr_compression_and_bit_depth() {
+        for c in ExrCompression::ALL {
+            assert_eq!(ExrCompression::from_name(c.name()), Some(c));
+            assert_eq!(ExrCompression::from_name(&c.name().to_ascii_uppercase()), Some(c));
+        }
+        assert_eq!(ExrCompression::from_name("uncompressed"), Some(ExrCompression::None));
+        assert_eq!(ExrCompression::from_name("zip16"), Some(ExrCompression::Zip));
+        assert_eq!(ExrCompression::from_name("ZIP1"), Some(ExrCompression::Zips));
+        assert_eq!(ExrCompression::from_name("Zip (1 scanline)"), Some(ExrCompression::Zips));
+        assert_eq!(ExrCompression::from_name("Zip (16 scanlines)"), Some(ExrCompression::Zip));
+        assert_eq!(ExrCompression::from_name("htj2k"), None);
+        assert_eq!(ExrBitDepth::from_name("16"), Some(ExrBitDepth::Half));
+        assert_eq!(ExrBitDepth::from_name("Half"), Some(ExrBitDepth::Half));
+        assert_eq!(ExrBitDepth::from_name("f32"), Some(ExrBitDepth::Float));
+        assert_eq!(ExrBitDepth::from_name("8"), None);
+        let lossy = |d| ExrCompression::ALL.into_iter().filter(|c| c.is_lossy(d)).map(ExrCompression::name).collect::<Vec<_>>();
+        assert_eq!(lossy(ExrBitDepth::Float), ["pxr24", "dwaa", "dwab"]);
+        assert_eq!(lossy(ExrBitDepth::Half), ["b44", "b44a", "dwaa", "dwab"]);
+
+        let mut m = OutputModule::for_format(OutputFormat::ExrSequence);
+        assert_eq!((m.exr_compression, m.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
+        assert_eq!(m.summary(), "OpenEXR Sequence · ZIP (16 scan lines) · 32-bit Float · RGB");
+        m.exr_compression = ExrCompression::Dwaa;
+        m.exr_bit_depth = ExrBitDepth::Half;
+        assert!(m.describe().contains(&("Compression", "DWAA (lossy)".to_string())), "{:?}", m.describe());
+        assert!(m.describe().contains(&("Bit Depth", "16-bit Half Float".to_string())));
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap(), m);
+        m.exr_compression = ExrCompression::B44a;
+        m.exr_bit_depth = ExrBitDepth::Float;
+        assert_eq!(m.exr_compression_label(), "B44A (uncompressed at float)");
+        m.exr_bit_depth = ExrBitDepth::Half;
+        assert_eq!(m.exr_compression_label(), "B44A (lossy)");
+        let old: OutputModule = serde_json::from_str(r#"{"format":"ExrSequence","channels":"Rgba"}"#).unwrap();
+        assert_eq!((old.exr_compression, old.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
     }
 }

@@ -710,7 +710,8 @@ mod tests {
         options.exposure = 1.0;
         let exposed = press_sampling_viewer(&mut harness).unwrap();
         let mut expected = [[32, 64, 96, 255]];
-        effectcraft_engine::viewer::display_transform(&mut expected, effectcraft_engine::viewer::Channel::Rgb, false, 1.0);
+        let encoding = effectcraft_engine::viewer::FrameEncoding::of(&harness.state().session.project.settings, false);
+        effectcraft_engine::viewer::DisplayPass::new(effectcraft_engine::viewer::Channel::Rgb, false, 1.0, encoding, None).apply_rgba8(&mut expected);
         for (actual, expected) in exposed.iter().zip(expected[0]) {
             assert!((*actual - expected as f32 / 255.0).abs() < 0.01, "{exposed:?}");
         }
@@ -734,6 +735,94 @@ mod tests {
         options.fast_previews = effectcraft_engine::commands::viewer_cmds::FastPreviews::Wireframe;
         harness.event(egui::Event::Key { key: egui::Key::F5, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
         assert_eq!(press_sampling_viewer(&mut harness), None, "wireframe must not sample an old pixel frame");
+    }
+
+    /// A 32 bpc project whose solid is about 4.0 in linear light (white +2 stops), in half-float viewer
+    /// frames; `hdr`: Project Settings ▸ HDR (with an sRGB working space).
+    fn hdr_viewer(hdr: &str) -> egui_kittest::Harness<'static, crate::EffectcraftApp> {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", serde_json::json!({"width": 320, "height": 180, "duration": 2})).unwrap();
+        s.execute("file.projectSettings", serde_json::json!({"bitDepth": 32, "workingSpace": "srgb", "hdr": hdr})).unwrap();
+        let lid = s.execute("layer.newSolid", serde_json::json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("effect.apply", serde_json::json!({"layers": [lid], "effect": "Exposure"})).unwrap();
+        s.execute("prop.set", serde_json::json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(s));
+        for _ in 0..400 {
+            harness.step();
+            if harness.state().frames.inflight() == 0 && harness.state().viewer_f16.is_some() {
+                harness.run_steps(3);
+                return harness;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the half-float viewer frame did not arrive");
+    }
+
+    /// The linear light of the frame's first pixel (sRGB-encoded).
+    fn linear_of(harness: &egui_kittest::Harness<'_, crate::EffectcraftApp>) -> f32 {
+        let p = harness.state().viewer_f16.as_ref().unwrap().pixel(0).unwrap();
+        effectcraft_engine::color::srgb_to_linear(p[0] / p[3])
+    }
+
+    fn exposed(harness: &mut egui_kittest::Harness<'_, crate::EffectcraftApp>, stops: f32) -> f32 {
+        harness.state_mut().session.state.viewer.exposure = stops;
+        harness.run_steps(2);
+        press_sampling_viewer(harness).unwrap()[0]
+    }
+
+    /// #2797: in 32 bpc the viewer's exposure reaches values above 1.0. White +2 stops (about 4.0)
+    /// is white at 0 EV and still white at -2 EV (the 8-bit viewer showed 0.25 there), and at -3 EV
+    /// it is an eighth of its linear light.
+    #[test]
+    fn viewer_exposure_reaches_over_range_values_in_32_bpc() {
+        let mut harness = hdr_viewer("clip");
+        let l = linear_of(&harness);
+        assert!(l > 3.9, "the frame keeps the over-range value: {l}");
+        let srgb = |l: f32| effectcraft_engine::color::linear_to_srgb(l);
+        assert!((exposed(&mut harness, 0.0) - 1.0).abs() < 0.01);
+        assert!((exposed(&mut harness, -2.0) - 1.0).abs() < 0.01, "-2 EV");
+        let v = exposed(&mut harness, -3.0);
+        assert!((v - srgb(l / 8.0)).abs() < 0.01 && v < 0.8, "-3 EV: {v}");
+        // The 8-bit image other panels read: as rendered (clipped), without the exposure.
+        let img = harness.state_mut().viewer_pixels().unwrap();
+        assert_eq!(img.pixels[0].to_array(), [255, 255, 255, 255]);
+        // A 32 bpc snapshot keeps the range too.
+        harness.state_mut().session.execute("view.takeSnapshot", serde_json::json!({})).unwrap();
+        harness.state_mut().session.state.viewer.show_snapshot = true;
+        let v = exposed(&mut harness, -3.0);
+        assert!((v - srgb(l / 8.0)).abs() < 0.01, "snapshot at -3 EV: {v}");
+    }
+
+    /// Compand runs after the exposure: at -3 EV the 4.0 white is about 0.5, under the knee, so it
+    /// shows as that (companding first left 0.99, darkened to 0.12). At 0 EV it is companded as
+    /// before.
+    #[test]
+    fn compand_follows_the_viewer_exposure() {
+        let mut harness = hdr_viewer("compand");
+        assert_eq!(harness.state().viewer_f16.as_ref().unwrap().encoding.hdr, effectcraft_engine::project::HdrMode::Compand);
+        let srgb = |l: f32| effectcraft_engine::color::linear_to_srgb(l);
+        let l = linear_of(&harness);
+        let at0 = exposed(&mut harness, 0.0);
+        let want = srgb(effectcraft_engine::render::color::compand(l));
+        assert!((at0 - want).abs() < 0.01, "0 EV: {at0} vs {want}");
+        let v = exposed(&mut harness, -3.0);
+        assert!((v - srgb(l / 8.0)).abs() < 0.01 && v < 0.8, "-3 EV: {v}");
+        // Other panels' 8-bit image is the companded frame, as the render was.
+        let img = harness.state_mut().viewer_pixels().unwrap();
+        assert!((img.pixels[0].r() as f32 / 255.0 - want).abs() < 0.01);
+        // A passive viewer gets the half-float frame through the same pass (no channel or exposure
+        // of its own; on the CPU without a device): the companded frame.
+        let ctx = harness.ctx.clone();
+        let (key, f) = (harness.state().viewer_shown.unwrap().1, harness.state().viewer_f16.clone().unwrap());
+        crate::panels::viewers::set_texture(harness.state_mut(), &ctx, 7, key, crate::frames::FrameImage::CpuF16(f), None, 0);
+        let Some((_, crate::panels::viewers::PassiveTexture::Cpu(tex))) = harness.state().passive_tex.get(&7) else { panic!("no passive texture") };
+        assert_eq!(tex.size(), [320, 180]);
+        let f = harness.state().viewer_f16.clone().unwrap();
+        let crate::frames::FrameImage::Cpu(shown) = crate::panels::viewers::cpu_passive_image(harness.state(), crate::frames::FrameImage::CpuF16(f), None)
+        else {
+            panic!("an 8-bit image")
+        };
+        assert!((shown.pixels[0].r() as f32 / 255.0 - want).abs() < 0.01, "the passive viewer shows the companded frame: {:?}", shown.pixels[0]);
     }
 
     #[test]
