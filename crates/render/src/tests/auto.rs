@@ -229,6 +229,12 @@ fn healthy_gpu_decline_renders_cpu_once_outside_scope() {
     let src = ScopedFootage { in_scope: false.into(), reads: 0.into() };
     let mut r = Renderer::new(&p, &src, RenderOpts { backend: Backend::Auto, ..Default::default() });
     r.accel = Some(&a);
+    // Auto warms up CPU first: the first frame renders on the CPU without a GPU scope.
+    r.comp_frame_scoped(cid, Tick::ZERO, |_| -> Result<Option<crate::Image>, ()> { panic!("Auto's CPU warm-up frame must not enter GPU error scopes") })
+        .unwrap();
+    assert_eq!(src.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(a.calls(), 0);
+    // The next one is the GPU's warm-up frame, which the accelerator declines.
     let frame = r
         .comp_frame_scoped(cid, Tick::ZERO, |a| {
             src.in_scope.store(true, Ordering::SeqCst);
@@ -238,11 +244,67 @@ fn healthy_gpu_decline_renders_cpu_once_outside_scope() {
         })
         .unwrap();
     assert!(frame.get(100, 50)[3] > 0.99);
-    assert_eq!(src.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(src.reads.load(Ordering::SeqCst), 2);
     assert_eq!(a.calls(), 1);
-    assert_eq!(a.pick.stats(AutoKey::new(cid, 1.0, false)).unwrap().cpu_frames, 1);
+    assert_eq!(a.pick.stats(AutoKey::new(cid, 1.0, false)).unwrap().cpu_frames, 2);
     // Auto's next frame stays on CPU, without entering a GPU scope at all.
     r.comp_frame_scoped(cid, Tick::ZERO, |_| -> Result<Option<crate::Image>, ()> { panic!("Auto CPU choice must not enter GPU error scopes") }).unwrap();
-    assert_eq!(src.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(src.reads.load(Ordering::SeqCst), 3);
     assert_eq!(a.effect_calls.load(Ordering::SeqCst), 0, "CPU effects must not use the GPU outside its scope");
+}
+
+/// A preview starts with every lane asking at once, before any frame is measured: the first
+/// frames (the ones on screen) render on the CPU; once one is measured, one lane takes a GPU
+/// warm-up frame, and the next waits for its time. (Every lane took a GPU warm-up frame on an
+/// integrated GPU 2–4× slower than the CPU, and each first playback stalled at its start.)
+#[test]
+fn auto_pick_warms_the_gpu_up_one_frame_at_a_time() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(3), 1.0, false);
+    let first: Vec<bool> = (0..12).map(|_| pick.choose(key)).collect();
+    assert!(!first.iter().any(|g| *g), "{first:?}");
+    pick.record(key, false, 10.0);
+    let next: Vec<bool> = (0..12).map(|_| pick.choose(key)).collect();
+    assert_eq!(next.iter().filter(|g| **g).count(), 1, "{next:?}");
+    // The CPU frames finish first: still no second GPU frame while the first runs.
+    for _ in 0..22 {
+        pick.record(key, false, 10.0);
+    }
+    assert!(!(0..12).any(|_| pick.choose(key)), "a second GPU warm-up frame while one runs");
+    // Measured: the next warm-up frame may go to the GPU.
+    pick.record(key, true, 40.0);
+    assert!(pick.choose(key));
+    // A re-probe of the slow side runs one frame at a time too.
+    let pick = AutoPick::default();
+    let mut gpu_asked = 0;
+    for _ in 0..(4 * AutoPick::REPROBE) {
+        // (sequential warm-up, then GPU frames held: as lanes that never report back)
+        if pick.choose(key) {
+            gpu_asked += 1;
+            if pick.stats(key).is_none_or(|s| s.gpu_frames < AutoPick::WARMUP) {
+                pick.record(key, true, 40.0);
+            }
+        } else {
+            pick.record(key, false, 10.0);
+        }
+    }
+    assert!(gpu_asked <= AutoPick::WARMUP as usize + 1, "asked the GPU {gpu_asked} times");
+}
+
+/// Frames render side by side: twelve CPU frames of 210 ms each at once cost ~18 ms a frame,
+/// so a lone GPU frame of 175 ms is the slower side (it measured faster and took the comp).
+#[test]
+fn auto_pick_counts_frames_running_side_by_side() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(4), 0.5, false);
+    // Twelve lanes: each starts its next frame as soon as one is done.
+    let mut lanes: std::collections::VecDeque<bool> = (0..12).map(|_| pick.choose(key)).collect();
+    for _ in 0..240 {
+        let Some(gpu) = lanes.pop_front() else { break };
+        pick.record(key, gpu, if gpu { 175.0 } else { 210.0 });
+        lanes.push_back(pick.choose(key));
+    }
+    let s = pick.stats(key).unwrap();
+    assert!(s.cpu_ms.unwrap() < 30.0 && s.gpu_ms.unwrap() > 100.0, "{s:?}");
+    assert!(lanes.iter().filter(|g| **g).count() <= 1, "{lanes:?}");
 }
