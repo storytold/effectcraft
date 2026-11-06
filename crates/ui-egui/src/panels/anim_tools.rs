@@ -23,9 +23,8 @@ fn label(p: &egui::Painter, x: f32, y: f32, s: &str, t: &Tokens) {
 fn choice(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str, options: &[&str], cur: usize) -> Option<usize> {
     let t = app.tokens;
     let id = egui::Id::unique(("animtool-dd", auto));
-    if widgets::dropdown(ui, r, options.get(cur).copied().unwrap_or(""), &t, id).clicked() {
-        widgets::open_popup(ui, id);
-    }
+    let resp = widgets::dropdown(ui, r, options.get(cur).copied().unwrap_or(""), &t, id);
+    widgets::open_on_press(ui, &resp, id);
     app.auto.add(auto, r, options.get(cur).copied().unwrap_or(""));
     let opts: Vec<String> = options.iter().map(|s| s.to_string()).collect();
     widgets::popup_menu(ui, id, r.left_bottom(), &opts, Some(cur)).filter(|i| *i != cur)

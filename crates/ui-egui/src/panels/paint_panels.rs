@@ -69,8 +69,9 @@ fn popup_row(
     p.text(pos2(x, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), if enabled { t.text_dim } else { t.text_faint });
     let r = Rect::from_min_size(pos2(x + 70.0, y), vec2((w - 70.0).max(60.0), 20.0));
     let pop = egui::Id::unique(("paint-pop", key));
-    if widgets::dropdown(ui, r, options.get(cur).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("paint-dd", key))).clicked() && enabled {
-        widgets::open_popup(ui, pop);
+    let dresp = widgets::dropdown(ui, r, options.get(cur).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("paint-dd", key)));
+    if enabled {
+        widgets::open_on_press(ui, &dresp, pop);
     }
     app.auto.add(key, r, label);
     widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(cur))
@@ -97,12 +98,9 @@ fn colour_swatches(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let bg = Rect::from_min_size(pos2(x0 + 14.0, y + 10.0), vec2(26.0, 20.0));
     widgets::swatch(ui, bg, [background[0] as f32, background[1] as f32, background[2] as f32, 1.0], egui::Id::unique("paint-bg"), &t);
     let bresp = ui.interact(Rect::from_min_max(pos2(fg.max.x, bg.min.y), bg.max), egui::Id::unique("paint-bg-hit"), Sense::click());
-    if bresp.clicked() {
-        widgets::open_popup(ui, egui::Id::unique("paint-bg-pop"));
-    }
-    if widgets::swatch(ui, fg, [color[0] as f32, color[1] as f32, color[2] as f32, 1.0], egui::Id::unique("paint-fg"), &t).clicked() {
-        widgets::open_popup(ui, egui::Id::unique("paint-fg-pop"));
-    }
+    widgets::open_on_press(ui, &bresp, egui::Id::unique("paint-bg-pop"));
+    let fresp = widgets::swatch(ui, fg, [color[0] as f32, color[1] as f32, color[2] as f32, 1.0], egui::Id::unique("paint-fg"), &t);
+    widgets::open_on_press(ui, &fresp, egui::Id::unique("paint-fg-pop"));
     app.auto.add("paint.color", fg, "Foreground color");
     app.auto.add("paint.background", bg, "Background color");
     let mut fc = rgb(color);
