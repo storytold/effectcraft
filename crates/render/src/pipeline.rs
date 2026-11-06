@@ -964,6 +964,10 @@ impl<'a> Renderer<'a> {
                         return Some(buf);
                     }
                 }
+                // 8 bpc plain footage: made from the footage's 8-bit levels, no float frame.
+                if quantized && let Some(buf) = self.footage_buf8(ctx, layer, item, self.proxy_for(item).unwrap_or(f), f, ctx.source_time(layer)) {
+                    return Some(buf);
+                }
                 let (img, pf) = self.footage_picture_of(ctx, layer, item, f)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height, quantized && Self::prequantized_footage(layer)))
             }
@@ -1027,6 +1031,35 @@ impl<'a> Renderer<'a> {
                 Buf { img, offset: [0.0; 2], scale }
             }
         }
+    }
+
+    /// [`Renderer::footage_buf`]'s quantised buffer made from the footage's 8-bit levels
+    /// ([`FootageSource::frame8`]), the same pixels to the bit, when nothing before the quantise
+    /// changes them: an 8 bpc render at Full size of plain footage (no masks, colour profile,
+    /// Separate Fields, Frame Blending, Cineon, Invert Alpha or linear light interpretation).
+    /// `None` otherwise, and when the source has no 8-bit frame.
+    #[allow(clippy::too_many_arguments)]
+    fn footage_buf8(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, pf: &Footage, f: &Footage, t: Tick) -> Option<Buf> {
+        let plain = self.pipe.levels == Some(255.0)
+            && Self::prequantized_footage(layer)
+            && self.reduced_size(f.width, f.height).is_none()
+            && self.pipe.media_in(pf).is_none()
+            && pf.fields == effectcraft_project::FieldOrder::Off
+            && !(pf.invert_alpha || pf.linear_light_applies() || pf.cineon_applies())
+            && frame_blend_mode(ctx, layer) == FrameBlend::Off;
+        if !plain {
+            return None;
+        }
+        let fr = self.footage.frame8(item, pf, t, self.pipe.float_curve(pf))?;
+        let n = (fr.width as usize).checked_mul(fr.height as usize)?;
+        let px = fr.rgba.as_chunks::<4>().0;
+        if px.len() != n {
+            return None;
+        }
+        use rayon::prelude::*;
+        let data = px.par_iter().map(|&p| effectcraft_raster::expand_u8(p)).collect();
+        let k = if fr.width > 0 { f.width.max(1) as f64 / fr.width as f64 } else { 1.0 };
+        Some(Buf { img: Image { width: fr.width, height: fr.height, data }, offset: [0.0; 2], scale: 1.0 / k })
     }
 
     /// The layer's source is footage that [`Renderer::source`] hands over already quantised

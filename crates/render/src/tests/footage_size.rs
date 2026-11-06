@@ -106,3 +106,54 @@ fn still_layers_are_cached_across_times_and_movies_are_not() {
         assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches + 3, "{kind:?}");
     }
 }
+
+/// [`Clip`] that also keeps its frames as 8-bit levels, counting the times it's asked for them.
+struct Clip8 {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl FootageSource for Clip8 {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        let mut img = (*Clip { sizes: None }.frame(item, f, t)?).clone();
+        // (partly transparent, premultiplied, as decoded with alpha)
+        img.data.iter_mut().enumerate().for_each(|(i, p)| {
+            let a = (i % 7) as f32 / 6.0;
+            *p = [p[0] * a, p[1] * a, p[2] * a, a];
+        });
+        Some(Arc::new(img))
+    }
+    fn frame8(&self, item: ItemId, f: &Footage, t: Tick, _: crate::FloatCurve) -> Option<Arc<crate::disk_cache::Frame8>> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let img = self.frame(item, f, t)?;
+        let rgba = img.data.iter().flat_map(|p| effectcraft_raster::quantize_px_u8(*p)).collect();
+        Some(Arc::new(crate::disk_cache::Frame8 { width: img.width, height: img.height, rgba }))
+    }
+}
+
+/// An 8 bpc render at Full takes plain footage as 8-bit levels and renders the same pixels to
+/// the bit; other depths, reduced renders and interpreted pixels never ask for them.
+#[test]
+fn footage_kept_as_8_bit_levels_renders_the_same_pixels() {
+    struct Float(Clip8);
+    impl FootageSource for Float {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            self.0.frame(item, f, t)
+        }
+    }
+    for (depth, invert, scale, used) in [
+        (BitDepth::Bpc8, false, 1.0, true),
+        (BitDepth::Bpc8, false, 0.75, true),
+        (BitDepth::Bpc8, false, 0.5, false),
+        (BitDepth::Bpc8, true, 1.0, false),
+        (BitDepth::Bpc16, false, 1.0, false),
+        (BitDepth::Bpc32, false, 1.0, false),
+    ] {
+        let (p, cid) = project(depth, invert);
+        let opts = RenderOpts { scale, ..Default::default() };
+        let q8 = Clip8 { asked: Default::default() };
+        let frame = Renderer::new(&p, &q8, opts).comp_frame(cid, Tick::ZERO);
+        let plain = Renderer::new(&p, &Float(Clip8 { asked: Default::default() }), opts).comp_frame(cid, Tick::ZERO);
+        assert!(frame.data.iter().zip(&plain.data).all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits)), "{depth:?} {invert} {scale}");
+        assert_eq!(q8.asked.into_inner() > 0, used, "{depth:?} {invert} {scale}");
+    }
+}
