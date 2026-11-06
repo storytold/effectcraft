@@ -255,18 +255,29 @@ async fn run_work(w: WarpWork, shared: &WarpShared) {
     s.finished = true;
 }
 
-/// Frames to analyse: every comp frame from the layer's In to its Out point (inside the comp).
-pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer) -> Vec<Tick> {
+/// Most frames one analysis schedules (4.8 hours at 60 fps): the schedule is made from saved
+/// timing, before any frame is analysed.
+pub(crate) const MAX_ANALYSIS_FRAMES: usize = 1 << 20;
+
+/// Frames to analyse: every comp frame from the layer's In to its Out point (inside the comp),
+/// at most `limit` of them.
+pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, limit: usize) -> Vec<Tick> {
     let fd = comp.frame_duration();
     let lo = comp.frame_rate.snap_nearest(layer.in_point.max(Tick::ZERO));
     let hi = layer.out_point.min(comp.duration);
     let mut t = lo;
     let mut v = vec![];
-    while t < hi {
+    while t < hi && v.len() < limit.min(MAX_ANALYSIS_FRAMES) {
         v.push(t);
         t += fd;
     }
     v
+}
+
+/// Whether `times` (from [`analysis_times`]) stopped at the cap with layer frames left over, so
+/// the analysis would cover only the start of the layer.
+pub(crate) fn analysis_truncated(comp: &effectcraft_project::Comp, layer: &Layer, times: &[Tick]) -> bool {
+    times.len() >= MAX_ANALYSIS_FRAMES && times.last().is_some_and(|&t| t + comp.frame_duration() < layer.out_point.min(comp.duration))
 }
 
 impl Session {
@@ -319,9 +330,12 @@ impl Session {
         if l.switches.adjustment {
             return Err("Warp Stabilizer needs footage, not an adjustment layer".into());
         }
-        let times = analysis_times(c, l);
+        let times = analysis_times(c, l, MAX_ANALYSIS_FRAMES);
         if times.len() < 2 {
             return Err("the layer must be at least two frames long".into());
+        }
+        if analysis_truncated(c, l, &times) {
+            return Err(format!("the layer is longer than {MAX_ANALYSIS_FRAMES} frames: trim it before analysing"));
         }
         let size = effectcraft_render::effect_bounds(&self.project, c, l).0;
         let detailed = g.prop("advanced/detailedAnalysis").is_some_and(|p| p.value.as_bool());
@@ -427,5 +441,29 @@ impl Session {
             }
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use effectcraft_project::{Comp, LayerSource, Project, build};
+    use effectcraft_time::{FrameRate, Tick};
+
+    use super::{MAX_ANALYSIS_FRAMES, analysis_times, analysis_truncated};
+
+    #[test]
+    fn a_long_layer_schedules_at_most_the_limit() {
+        let mut p = Project::default();
+        // A million seconds at 1000 fps: 10⁹ frames.
+        let c = Comp::new(4, 4, FrameRate::new(1000, 1), Tick::from_seconds_f64(1e6));
+        let l = build::layer(&mut p, &c, "N", LayerSource::Null, (4, 4), None);
+        assert_eq!(analysis_times(&c, &l, usize::MAX).len(), MAX_ANALYSIS_FRAMES);
+        assert_eq!(analysis_times(&c, &l, 10).len(), 10);
+        assert!(analysis_truncated(&c, &l, &analysis_times(&c, &l, usize::MAX)));
+        // A short layer, or a short schedule from a limit, is not a capped analysis.
+        let short = Comp::new(4, 4, FrameRate::new(1000, 1), Tick::from_seconds_f64(1.0));
+        let sl = build::layer(&mut p, &short, "S", LayerSource::Null, (4, 4), None);
+        assert!(!analysis_truncated(&short, &sl, &analysis_times(&short, &sl, usize::MAX)));
+        assert!(!analysis_truncated(&c, &l, &analysis_times(&c, &l, 10)));
     }
 }
