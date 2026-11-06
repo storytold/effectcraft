@@ -444,3 +444,70 @@ fn the_worker_reports_the_files_of_each_frame_for_its_disk_entry() {
         assert!(read_frame_entry(&entry, Some(&two)).is_none(), "the file was replaced: a miss");
     }
 }
+
+/// No salt work at all (#3184, replacing the background salt of #3106): syncing a project with a
+/// large image sequence nobody shows, patching it and rendering with the layer store never asks
+/// the file hook about the sequence (the salt asked about every file at every sync). Only the
+/// file the rendered buffer reads is asked about: to store its entry and, in another worker, to
+/// check it before the buffer from the store is used.
+#[test]
+fn the_worker_asks_only_about_the_files_its_buffers_read() {
+    use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+    use effectcraft_time::FrameRate;
+    use std::sync::Mutex;
+    let mut p = Project::default();
+    let f = Footage { path: "/clip.png".into(), width: 4, height: 4, has_video: true, ..Default::default() };
+    let fid = p.add_item("clip.png", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+    let seq = Footage {
+        kind: FootageKind::Sequence,
+        path: "/seq/f_00000.png".into(),
+        sequence: (0..5000).map(|i| format!("/seq/f_{i:05}.png")).collect(),
+        width: 4,
+        height: 4,
+        has_video: true,
+        ..Default::default()
+    };
+    p.add_item("seq", effectcraft_color::Label::None, None, ItemKind::Footage(seq));
+    let mut comp = Comp::new(4, 4, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (4, 4), None)].into();
+    let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let worker = || {
+        let mut w = FrameServer::new(Arc::new(OneVirtualFile { records: true }), None);
+        let seen = asked.clone();
+        w.set_virtual_id(Some(Arc::new(move |path: &str| {
+            seen.lock().unwrap().push(path.to_string());
+            (path == "/clip.png").then_some((10, 1))
+        })));
+        let store = Arc::new(PrefetchStore::new(1 << 20).with_min_ms(0));
+        w.set_layer_store(Some(store.clone()));
+        (w, store)
+    };
+    let render = |w: &mut FrameServer, revision: u64, prefetch: Vec<String>| {
+        let out = w.handle(round(&FrameMsg::Render { id: 1, revision, comp: cid, time: Tick::ZERO, opts: Box::default(), disk: None, layers: true, prefetch }));
+        let FrameReply::Frame { layer_hits, .. } = &out[0].0 else { panic!("{:?}", out[0].0) };
+        layer_hits.len()
+    };
+    // Worker A: synced, patched, rendered; its buffer is queued with its file.
+    let (mut a, store_a) = worker();
+    let mut m = Mirror::default();
+    assert!(a.handle(round(&m.sync(1, &p).unwrap())).is_empty());
+    let mut edited = p.clone();
+    edited.item_mut(cid).unwrap().name = "Renamed".into();
+    assert!(a.handle(round(&m.sync(2, &edited).unwrap())).is_empty());
+    assert!(asked.lock().unwrap().is_empty(), "syncing looks at no file");
+    assert_eq!(render(&mut a, 2, vec![]), 0);
+    let writes = store_a.take_writes();
+    assert!(!writes.is_empty(), "the clip's buffer is stored");
+    // Worker B: fetched before its frame, checked, used.
+    let (mut b, store_b) = worker();
+    let mut m = Mirror::default();
+    assert!(b.handle(round(&m.sync(2, &edited).unwrap())).is_empty());
+    for (k, e) in &writes {
+        assert!(store_b.provide(*k, e));
+    }
+    assert!(render(&mut b, 2, writes.iter().map(|(k, _)| format!("{k:032x}")).collect()) > 0, "served from the store");
+    let asked = asked.lock().unwrap();
+    assert!(!asked.is_empty(), "the hook names the buffer's file");
+    assert!(asked.iter().all(|p| p == "/clip.png"), "only the file the buffer read: {:?}", &asked[..asked.len().min(5)]);
+}

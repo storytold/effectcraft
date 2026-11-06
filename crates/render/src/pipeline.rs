@@ -903,6 +903,9 @@ impl<'a> Renderer<'a> {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
+                    // Every file of a sequence: the key must tell two projects apart whose items
+                    // share an id and a first frame (on disk, no project-wide salt does, #3184).
+                    f.sequence.hash(&mut h);
                     (f.alpha as u8).hash(&mut h);
                     if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
                         f.premul_color.map(f32::to_bits).hash(&mut h);
