@@ -2,6 +2,35 @@ use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, selected_layer};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
+use crate::dock::{PanelKind, WorkspaceExt as _};
+
+/// Plain Left/Right disclose selected effect headers before global layer nudges run.
+pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
+    let panel = PanelKind::EffectControls;
+    if app.ui.focused != panel
+        || app.ui.start_screen
+        || !app.ui.dock.is_visible(panel)
+        || (app.ui.dock.is_docked(panel) && app.ui.maximized.is_some_and(|m| m != panel && app.ui.dock.is_docked(m)))
+        || !matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight)
+    {
+        return false;
+    }
+    let Some(comp) = app.session.active_comp() else { return false };
+    let Some(layer) = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) else { return false };
+    let Some(effects) = layer.effects() else { return false };
+    let mut handled = false;
+    for g in effects.groups() {
+        if matches!(&g.kind, GroupKind::Effect { .. }) && app.session.state.selected_props.contains(&(layer.id, g.uid)) {
+            if key == egui::Key::ArrowLeft {
+                app.ui.fx_closed.insert(g.uid);
+            } else {
+                app.ui.fx_closed.remove(&g.uid);
+            }
+            handled = true;
+        }
+    }
+    handled
+}
 
 // ---------------------------------------------------------------------------------------------
 
