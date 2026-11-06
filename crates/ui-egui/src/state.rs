@@ -684,6 +684,10 @@ pub struct UiState {
     /// Horizontal scroll of the Project panel's optional columns (Name and Label stay put).
     #[serde(default)]
     pub project_hscroll: f32,
+    /// Width of the Project panel's Name column set by dragging its edge in the header (points);
+    /// `None` fits the longest name shown (double-clicking the edge goes back to that).
+    #[serde(default)]
+    pub project_name_w: Option<f32>,
     /// Vertical scroll of the Project panel's item list (points); only visible rows are drawn.
     #[serde(default)]
     pub project_scroll: f32,
@@ -785,6 +789,7 @@ impl Default for UiState {
             project_sort: default_project_sort(),
             project_sort_desc: false,
             project_hscroll: 0.0,
+            project_name_w: None,
             project_scroll: 0.0,
             project_columns: default_project_columns(),
             fx_closed: BTreeSet::new(),
