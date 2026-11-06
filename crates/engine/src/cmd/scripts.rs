@@ -127,6 +127,7 @@ pub const BUNDLED: &[(&str, bool, &str, &str)] = &[
     ("Sort Layers by In Point.jsx", false, "sample", include_str!("../../scripts/Sort Layers by In Point.jsx")),
     ("Layer Tools.jsx", true, "sample", include_str!("../../scripts/ScriptUI Panels/Layer Tools.jsx")),
     ("Ease Presets.jsx", true, "extension", include_str!("../../../../extensions/scriptui-panels/Ease Presets.jsx")),
+    ("FX Console.jsx", true, "extension", include_str!("../../../../extensions/scriptui-panels/FX Console.jsx")),
 ];
 
 /// A script File ▸ Scripts (or the Window menu, for panels) offers.
@@ -582,6 +583,15 @@ pub fn specs() -> Vec<CommandSpec> {
             scriptui::mouse
         ),
         cmd!(
+            "scriptui.key",
+            "Keyboard Event on Script Window Control",
+            [],
+            None,
+            "{window?, widget?, type: keydown | keyup, key?, keyName?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners receive a KeyboardEvent",
+            always,
+            scriptui::key
+        ),
+        cmd!(
             "scriptui.resize",
             "Resize Script Window",
             [],
@@ -820,7 +830,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(labels, ["Ease Presets.jsx", "Layer Tools.jsx", "Motion Kit", "Top.jsx"]);
+        assert_eq!(labels, ["Ease Presets.jsx", "FX Console.jsx", "Layer Tools.jsx", "Motion Kit", "Top.jsx"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
