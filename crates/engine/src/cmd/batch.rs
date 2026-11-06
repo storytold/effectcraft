@@ -13,6 +13,60 @@ use crate::{EngineError, Result, Session};
 /// scripts ([`super::scripts::RUNS_SCRIPTS`]).
 const NOT_IN_BATCH: &[&str] = &["engine.batch"];
 
+/// Commands an atomic batch (the default) refuses before running any step: they write files,
+/// render or open other applications, which rolling the project back can't undo. They can still
+/// run in a batch with `atomic: false`, whose failures keep what earlier steps did.
+/// `file.autoSave` isn't here: it only writes a recovery copy into the auto-save folder, which
+/// the next auto-save replaces.
+pub const NOT_IN_ATOMIC: &[&str] = &[
+    // Files written.
+    "file.save",
+    "file.saveAs",
+    "file.saveCopy",
+    "file.saveCopyAsXml",
+    "file.incrementAndSave",
+    "file.collectFiles",
+    "file.exportLottie",
+    "file.exportTimeline",
+    "file.createProxy",
+    "comp.saveFrameAs",
+    "comp.saveFrameAsPsd",
+    "comp.saveFrameAsExr",
+    "anim.savePreset",
+    "view.exportGuides",
+    "render.saveCurrentPreview",
+    "render.preRender",
+    "renderQueue.render",
+    "essential.exportTemplate",
+    "essential.importTemplate",
+    "shortcuts.export",
+    "templates.saveAs",
+    "templates.delete",
+    "file.installScript",
+    "file.installScriptUIPanel",
+    "file.uninstallScript",
+    // Other applications.
+    "file.executeFile",
+    "file.revealInFinder",
+    "layer.openSource",
+    "help.revealLogFile",
+    "camera.exportBlender",
+    // A ScriptUI panel's script runs when the panel opens, when an event reaches one of its
+    // controls, and when one of its tasks comes due. Rolling the project back does not undo that.
+    "window.scriptPanel",
+    "window.restoreScriptPanels",
+    "script.runTasks",
+    "scriptui.click",
+    "scriptui.set",
+    "scriptui.mouse",
+    "scriptui.close",
+];
+
+/// A step's command id.
+fn step_id(step: &Value) -> Option<&str> {
+    step.get("command").or_else(|| step.get("id")).and_then(Value::as_str)
+}
+
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
     let rest = s.strip_prefix('$')?;
@@ -67,6 +121,15 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let steps = p.get("steps").and_then(Value::as_array).ok_or_else(|| bad("engine.batch", "missing `steps`: [{command, params?}, …]"))?.clone();
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
+    if atomic && let Some((i, id)) = steps.iter().enumerate().find_map(|(i, st)| step_id(st).filter(|id| NOT_IN_ATOMIC.contains(id)).map(|id| (i, id))) {
+        return Err(bad(
+            "engine.batch",
+            format!(
+                "step {} (`{id}`) writes files or acts outside the project, which a rollback can't undo: run it on its own, or use `atomic: false`; nothing ran",
+                i + 1
+            ),
+        ));
+    }
     let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
     // Rolled-back steps may have queued events (an `OpenComp`, a Toast) for the state that is
     // about to be dropped: the UI must not act on them.
@@ -74,11 +137,7 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
         let run = |s: &mut Session, results: &[Value]| -> Result<Value> {
-            let id = step
-                .get("command")
-                .or_else(|| step.get("id"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| bad("engine.batch", "each step needs `command` (a command id)"))?;
+            let id = step_id(step).ok_or_else(|| bad("engine.batch", "each step needs `command` (a command id)"))?;
             if NOT_IN_BATCH.contains(&id) || super::scripts::RUNS_SCRIPTS.contains(&id) {
                 return Err(bad("engine.batch", format!("`{id}` can't run inside a batch")));
             }
@@ -88,7 +147,7 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
         match run(s, &results) {
             Ok(r) => results.push(r),
             Err(e) => {
-                let id = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str).unwrap_or("?");
+                let id = step_id(step).unwrap_or("?");
                 let note = if atomic {
                     // The snapshot is the intermediate state the failing step left: comparing it
                     // with the restored editor detects a restart or cross-comp switch inside the
@@ -136,7 +195,7 @@ pub fn specs() -> Vec<CommandSpec> {
         menu: &[],
         shortcut: None,
         alt_shortcuts: &[],
-        params: "{steps: [{command, params?}], label? (undo step name, default Batch), atomic?: bool (default true: a failing step rolls the whole batch back)} → {steps, results: [each step's result]}; a string param \"$N\" or \"$N.key.0\" is step N's result (1-based), e.g. {\"layer\": \"$1.layer\"}",
+        params: "{steps: [{command, params?}], label? (undo step name, default Batch), atomic?: bool (default true: a failing step rolls the whole batch back; commands that write files or open other applications are refused, so use false for those)} → {steps, results: [each step's result]}; a string param \"$N\" or \"$N.key.0\" is step N's result (1-based), e.g. {\"layer\": \"$1.layer\"}",
         enabled: always,
         run: batch,
         // The steps journal themselves.
@@ -220,5 +279,38 @@ mod tests {
         // Bad references are reported.
         let e = s.execute_checked("engine.batch", json!({"steps": [{"command": "layer.rename", "params": {"layer": "$3.layer", "name": "x"}}]})).unwrap_err();
         assert!(e.to_string().contains("refers to step 3"), "{e}");
+    }
+
+    fn tmp(name: &str) -> String {
+        let d = std::env::temp_dir().join(format!("ec-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join(name).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn an_atomic_batch_refuses_steps_it_cannot_roll_back_before_running_any() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "C", "width": 32, "height": 32})).unwrap();
+        let path = tmp("refused.ecproj");
+        let _ = std::fs::remove_file(&path);
+        let layers = |s: &Session| s.active_comp().unwrap().layers.len();
+        let steps = json!([{"command": "layer.newSolid", "params": {"name": "First"}}, {"command": "file.saveAs", "params": {"path": path}}]);
+        let e = s.execute_checked("engine.batch", json!({"steps": steps})).unwrap_err().to_string();
+        assert!(e.contains("step 2 (`file.saveAs`)") && e.contains("nothing ran"), "{e}");
+        assert_eq!(layers(&s), 0, "step 1 didn't run");
+        assert!(!std::path::Path::new(&path).exists());
+        let e = s
+            .execute_checked("engine.batch", json!({"steps": [{"command": "essential.importTemplate", "params": {"path": "absent.ectemplate"}}]}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("nothing ran"), "template extraction cannot be rolled back: {e}");
+        // Without atomicity it runs, as before.
+        s.execute_checked("engine.batch", json!({"steps": steps, "atomic": false})).unwrap();
+        assert_eq!(layers(&s), 1);
+        assert!(std::path::Path::new(&path).exists());
+        // Every listed command exists.
+        for id in super::NOT_IN_ATOMIC {
+            assert!(crate::commands::find(id).is_some(), "{id} is not a command");
+        }
     }
 }
