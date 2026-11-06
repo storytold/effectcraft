@@ -567,3 +567,22 @@ fn unknown_face_id_returns_bundled_default() {
     assert!(fallback.font().is_some());
     assert!(Arc::ptr_eq(&fallback, &face(0)));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_reached_through_many_links_is_listed_once() {
+    // Six links back to the folder itself: 6^8 listings within the depth bound before.
+    let d = std::env::temp_dir().join(format!("effectcraft-font-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("a.ttf"), b"x").unwrap();
+    for i in 0..6 {
+        std::os::unix::fs::symlink(&d, d.join(format!("l{i}"))).unwrap();
+    }
+    let (mut out, mut seen) = (Vec::new(), std::collections::HashSet::new());
+    let start = std::time::Instant::now();
+    walk(&d, 0, &mut out, &mut seen);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(out.len(), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}

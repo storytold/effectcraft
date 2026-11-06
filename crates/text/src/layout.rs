@@ -624,6 +624,13 @@ fn is_hanging_open(c: char) -> bool {
 /// The style run index covering global byte `b` (the run before it at a boundary, for empty
 /// paragraphs at the end).
 fn run_at(runs: &[(Range<usize>, TextStyle)], b: usize) -> usize {
+    // Runs from a document are ordered and contiguous: the last one starting at or before `b`
+    // holds it, found by bisection (a scan from the first run per character was quadratic).
+    // Anything else (a gap, unordered runs) takes the scan as before.
+    let i = runs.partition_point(|(r, _)| r.start <= b).saturating_sub(1);
+    if runs.get(i).is_some_and(|(r, _)| r.contains(&b)) {
+        return i;
+    }
     runs.iter().position(|(r, _)| b >= r.start && b < r.end).unwrap_or_else(|| runs.iter().rposition(|(r, _)| r.start <= b).unwrap_or(0))
 }
 
