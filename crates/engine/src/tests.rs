@@ -30,6 +30,7 @@ mod lottie;
 mod m137;
 mod m145;
 mod markers;
+mod mask_reveal;
 mod mask_warp;
 mod menu_cmds;
 mod model3d;
