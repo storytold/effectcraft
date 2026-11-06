@@ -36,6 +36,14 @@ fn plugins_list(s: &mut Session, _: &Value) -> Result<Value> {
 /// folder) through the host's loader ([`Session::plugin_loader`]).
 fn plugins_load(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "effect.plugins.load";
+    // A plug-in is code, and a file that fails to load comes back in the error: a script may
+    // load one only with the access it would need to read and write files anywhere.
+    if s.running_for_script() && !s.prefs.scripting.allow_scripts_write_files {
+        return Err(bad(
+            c,
+            "scripts can't load effect plug-ins unless Settings ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network is on",
+        ));
+    }
     let loader = s.plugin_loader.ok_or_else(|| EngineError::Other("WebAssembly effect plug-ins are not available in this build".into()))?;
     let files: Vec<String> = match (str_p(p, "path"), str_p(p, "folder")) {
         (Some(path), _) => vec![path.to_string()],
