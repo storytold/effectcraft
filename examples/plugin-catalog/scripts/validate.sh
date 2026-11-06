@@ -46,11 +46,15 @@ echo "== 3. release URLs"
 # When a package has a `repo`, every release must be an asset of that repository, as Install and
 # Preview require (the loader step installs from file:// copies, which skip this check).
 bad=$(jq -r '
+  # A path segment EffectCraft refuses: empty, `.` or `..` (also percent-encoded).
+  def bad_segment: . == "" or (ascii_downcase | gsub("%2e"; ".") | . == "." or . == "..");
   # Only the scheme, host, owner and name compare without case; the `.git` suffix is lower case.
   def repo_of:
     (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+?)(\\.git)?/?$")
-     // capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+)/tree/[^?#]+$")
-     | select(.h | ascii_downcase == "https://github.com") | "\(.o)/\(.n)" | ascii_downcase) // "?";
+     // (capture("^(?<h>[^/]+//[^/]+)/(?<o>[A-Za-z0-9._-]+)/(?<n>[A-Za-z0-9._-]+)/tree/(?<f>[^?#\\\\]+?)/?$")
+         | select(.f | split("/") | any(bad_segment) | not))
+     | select((.h | ascii_downcase) == "https://github.com" and (.o | bad_segment | not) and (.n | bad_segment | not))
+     | "\(.o)/\(.n)" | ascii_downcase) // "?";
   .packages[] | . as $pkg | ((.repo // "") | gsub("^\\s+|\\s+$"; "")) as $repo
   | select($repo != "") | ($repo | repo_of) as $want
   | .versions[] | select(.url | startswith("file://") | not)
