@@ -568,24 +568,11 @@ impl EffectcraftApp {
         self.tick_footage_reload(ctx);
     }
 
-    /// Settings ▸ Import ▸ Reload Footage Changed on Disk: a worker thread stamps the footage
-    /// files (every two seconds while the window is in front, and as soon as it comes back to
-    /// the front after saving in another app) and wakes this frame only when a stamp changed;
-    /// the changed files are reloaded here. Nothing here asks for a repaint: an idle app with
-    /// unchanged footage stays asleep.
+    /// One background worker tracks source availability and optional content reloads. It wakes
+    /// the UI only for changes; availability remains enabled when automatic reload is off.
     fn tick_footage_reload(&mut self, ctx: &egui::Context) {
         use effectcraft_engine::footage_reload;
-        if let Some(stamps) = self.footage_watcher.as_ref().and_then(footage_reload::Watcher::take)
-            && let Err(e) = footage_reload::apply_stamps(&mut self.session, stamps)
-        {
-            self.ui.status = e.to_string();
-        }
-        let off = self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty();
-        if off {
-            if let Some(w) = &mut self.footage_watcher {
-                w.set_watched(Default::default());
-            }
-            self.footage_watch_key = None;
+        if self.session.project.items.is_empty() && self.footage_watcher.is_none() {
             return;
         }
         if self.footage_watcher.is_none() {
@@ -595,10 +582,22 @@ impl EffectcraftApp {
         let Some(watcher) = &mut self.footage_watcher else { return };
         watcher.set_focused(self.focused);
         // Which files are watched follows the project and the preference, not the frame.
-        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone());
+        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some());
         if self.footage_watch_key.as_ref() != Some(&key) {
             self.footage_watch_key = Some(key);
-            watcher.set_watched(footage_reload::watched(&self.session));
+            watcher.update(&self.session);
+        }
+        let before = self.session.revision;
+        if let Some(scan) = watcher.take() {
+            match scan.apply(&mut self.session) {
+                Ok(result) if result.get("stale").and_then(serde_json::Value::as_bool) == Some(true) => watcher.recheck(),
+                Err(e) => self.ui.status = e.to_string(),
+                _ => {}
+            }
+        }
+        if self.session.revision != before {
+            self.footage_watch_key = Some((self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some()));
+            watcher.update(&self.session);
         }
     }
 }

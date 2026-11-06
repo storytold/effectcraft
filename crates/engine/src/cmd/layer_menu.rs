@@ -718,6 +718,9 @@ fn opens_as_bundle(dir: &std::path::Path) -> bool {
 /// plain folder after following links, is refused.
 pub(crate) fn reveal_url(s: &Session, stored: &str) -> std::result::Result<String, String> {
     let path = s.stored_path(stored).map_err(|why| crate::doc_path::refusal(stored, why))?;
+    if !s.services.exists(&path.to_string_lossy()) {
+        return Err(format!("Missing footage: {stored}. Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage."));
+    }
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("{stored} is not in a folder"))?;
     let real = std::fs::canonicalize(dir).map_err(|e| format!("cannot show the folder of {stored}: {e}"))?;
     if !real.is_dir() || opens_as_bundle(dir) || opens_as_bundle(&real) {
@@ -966,6 +969,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         for f in ["Clips", "Tool.app", "Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
             std::fs::create_dir_all(d.join(f)).unwrap();
+            std::fs::write(d.join(f).join("a.mov"), b"fixture").unwrap();
         }
         let s = crate::Session::default();
         let reveal = |folder: &str| super::reveal_url(&s, &d.join(folder).join("a.mov").to_string_lossy());

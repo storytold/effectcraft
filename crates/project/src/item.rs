@@ -55,6 +55,13 @@ pub struct Item {
 }
 
 impl Item {
+    /// Whether an external original or proxy is known to be offline, even if the other can
+    /// still provide a preview. Generated items and embedded data have no external dependency.
+    pub fn has_missing_footage(&self) -> bool {
+        let missing = |f: &crate::Footage| f.missing && !f.path.is_empty() && f.kind != FootageKind::Data;
+        matches!(&self.kind, ItemKind::Footage(f) if missing(f)) || self.proxy.as_ref().is_some_and(|p| missing(&p.footage))
+    }
+
     pub fn type_name(&self) -> &'static str {
         match &self.kind {
             ItemKind::Folder => "Folder",
@@ -438,5 +445,34 @@ impl Heard {
         self.audio_exprs |= o.audio_exprs;
         self.layers.extend(o.layers.iter().copied());
         self
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_status_tracks_original_and_proxy_independently() {
+        let footage = crate::Footage { path: "/original.png".into(), ..Default::default() };
+        let mut item = Item {
+            id: ItemId(1),
+            name: "Plate".into(),
+            label: Label::None,
+            comment: String::new(),
+            parent: None,
+            kind: ItemKind::Footage(footage.clone()),
+            proxy: None,
+        };
+        assert!(!item.has_missing_footage());
+        item.proxy = Some(Box::new(Proxy { footage: crate::Footage { path: "/proxy.png".into(), missing: true, ..footage.clone() }, enabled: false }));
+        assert!(item.has_missing_footage(), "unused missing proxies still need repair");
+        item.proxy.as_mut().unwrap().footage.missing = false;
+        assert!(!item.has_missing_footage());
+        if let ItemKind::Footage(f) = &mut item.kind {
+            f.missing = true;
+        }
+        item.proxy.as_mut().unwrap().enabled = true;
+        assert!(item.has_missing_footage(), "a working proxy does not make the original available");
     }
 }

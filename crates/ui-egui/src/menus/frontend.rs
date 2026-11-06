@@ -188,6 +188,14 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             Value::Null
         }
         "app.find" => {
+            if let Some(status) = p.get("status").and_then(Value::as_str) {
+                app.ui.project_status = match status {
+                    "all" => crate::state::ProjectStatus::All,
+                    "available" => crate::state::ProjectStatus::Available,
+                    "missing" => crate::state::ProjectStatus::Missing,
+                    _ => return Err("status must be all, available or missing".into()),
+                };
+            }
             if let Some(q) = p.get("query").and_then(Value::as_str) {
                 app.ui.project_search = q.to_string();
             }
