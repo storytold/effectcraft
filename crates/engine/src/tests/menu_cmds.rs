@@ -1805,6 +1805,104 @@ fn pasted_merge_paths_keeps_the_targets_paint() {
     assert_eq!(opaque_centroid(&s).2, before);
 }
 
+/// A new shape layer's Contents names after adding `items` and then Add ▸ Merge Paths.
+fn with_added_merge(s: &mut Session, items: &[&str]) -> (u64, Vec<String>) {
+    let l = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    for kind in items {
+        s.execute("layer.addShapeItem", json!({"layer": l, "kind": kind})).unwrap();
+    }
+    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge", "paint": true})).unwrap();
+    (l, contents_names(s, l))
+}
+
+/// Add ▸ Merge Paths takes in every path and group above it, whatever stands around them, and
+/// paints the result: Mode Add, the paint below it kept, or the Tools bar's added in one undo step
+/// (#2175).
+#[test]
+fn add_merge_paths_goes_below_the_paths_and_paints_the_result() {
+    let mut s = comp();
+    // No paint: the Tools bar's Fill follows it (Stroke Width is 0 by default, so no Stroke).
+    let (l, names) = with_added_merge(&mut s, &["rect", "ellipse"]);
+    assert_eq!(names, ["Rectangle Path 1", "Ellipse Path 1", "Merge Paths 1", "Fill 1"]);
+    let contents = layer(&s, l).props.sub("contents").unwrap().clone();
+    let merge = contents.groups().find(|g| g.match_id == "merge").unwrap();
+    assert_eq!(merge.get("mode").unwrap().value, KV::Enum(1), "Mode Add");
+    let fill = contents.groups().find(|g| g.match_id == "fill").unwrap();
+    let [r, g, b] = s.state.shape_tool.fill.color;
+    assert_eq!(fill.get("color").unwrap().value.as_color(), [r, g, b, 1.0]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(contents_names(&s, l), ["Rectangle Path 1", "Ellipse Path 1"], "one undo step");
+    // Groups count as paths, and a paint below them is kept, with nothing added.
+    let (_, names) = with_added_merge(&mut s, &["rect", "group", "fill"]);
+    assert_eq!(names, ["Rectangle Path 1", "Group 1", "Merge Paths 1", "Fill 1"]);
+    // A paint between the paths stays above the merge and goes with them; a new one is added.
+    let (_, names) = with_added_merge(&mut s, &["rect", "fill", "ellipse"]);
+    assert_eq!(names, ["Rectangle Path 1", "Fill 1", "Ellipse Path 1", "Merge Paths 1", "Fill 1"]);
+    // Both of the Tools bar's paints, Stroke first as on a drawn shape.
+    s.execute("shape.toolOptions", json!({"strokeWidth": 3, "stroke": "#00ff00"})).unwrap();
+    let (_, names) = with_added_merge(&mut s, &["rect"]);
+    assert_eq!(names, ["Rectangle Path 1", "Merge Paths 1", "Stroke 1", "Fill 1"]);
+    // Scripts build the list themselves, and keep Merge.
+    let a = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "rect"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "fill"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge"})).unwrap();
+    assert_eq!(contents_names(&s, a), ["Rectangle Path 1", "Fill 1", "Merge Paths 1"]);
+    let contents = layer(&s, a).props.sub("contents").unwrap().clone();
+    assert_eq!(contents.groups().find(|g| g.match_id == "merge").unwrap().get("mode").unwrap().value, KV::Enum(0), "Mode Merge");
+}
+
+/// The gradient Add ▸ Merge Paths brings runs across what the merge takes in, in the space of the
+/// group it goes into, painted or not (#2175).
+#[test]
+fn add_merge_paths_gradient_runs_across_its_inputs() {
+    let mut s = comp();
+    s.execute("shape.toolOptions", json!({"fillType": "linear"})).unwrap();
+    let ends = |s: &Session, l: u64, group: Option<u64>| {
+        let l = layer(s, l);
+        let contents = l.props.sub("contents").unwrap();
+        let contents = group.map_or(contents, |g| contents.find_group(g).unwrap().sub("contents").unwrap());
+        let fill = contents.groups().filter(|g| g.match_id == "gfill").last().unwrap();
+        (fill.get("start").unwrap().value.components(), fill.get("end").unwrap().value.components())
+    };
+    // Into a moved, scaled group: its own space, not the layer's.
+    let l = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    let group = s.execute("layer.addShapeItem", json!({"layer": l, "kind": "group"})).unwrap();
+    let (uid, path) = (group["uid"].as_u64().unwrap(), group["path"].as_str().unwrap().to_string());
+    s.execute("prop.set", json!({"layer": l, "path": format!("{path}/transform/position"), "value": [500, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": l, "path": format!("{path}/transform/scale"), "value": [50, 50]})).unwrap();
+    for kind in ["rect", "fill", "rect"] {
+        s.execute("layer.addShapeItem", json!({"layer": l, "kind": kind, "group": uid})).unwrap();
+    }
+    s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge", "paint": true, "group": uid})).unwrap();
+    assert_eq!(ends(&s, l, Some(uid)), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+    // Paths with no paint yet.
+    let (l, _) = with_added_merge(&mut s, &["rect"]);
+    assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+    // A Repeater below the merge repeats the gradient with each copy: it spans one.
+    let (l, _) = with_added_merge(&mut s, &["rect", "repeater"]);
+    assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+    // A Stroke among the paths goes with them: its width doesn't widen the gradient.
+    let (l, _) = with_added_merge(&mut s, &["rect", "stroke", "rect"]);
+    assert_eq!(ends(&s, l, None), (vec![-100.0, 0.0], vec![100.0, 0.0]));
+}
+
+/// Pasted with nothing selected, Merge Paths goes below the groups too, not above them where it
+/// would take in nothing (#2175).
+#[test]
+fn pasted_merge_paths_goes_below_the_targets_groups() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "none", "name": "A"})).unwrap()["layer"].as_u64().unwrap();
+    let merge = s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge"})).unwrap()["uid"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "none", "name": "B"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": b, "kind": "group"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": merge})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(contents_names(&s, b), ["Group 1", "Merge Paths 1"]);
+}
+
 /// Edit ▸ Duplicate with shape items selected duplicates them in their layer, above the
 /// original and named "Rectangle 2", not the layer (#227).
 #[test]

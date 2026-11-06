@@ -3,6 +3,8 @@ use super::{
     EngineError, GroupKind, Ids, ItemId, KV, LayerId, MaskMode, Node, Project, PropGroup, Result, Session, TextDoc, Value, b_p, bad, build, json, layer_mut,
     layer_p, merge_p, str_p,
 };
+use crate::cmd::shape_tool::ShapeTool;
+use effectcraft_time::Tick;
 
 /// Add a tool-shaped mask in one document edit, then request its Timeline controls separately.
 pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
@@ -97,7 +99,10 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
         ),
         v => v.and_then(Value::as_u64),
     };
-    let uid = s.edit("Add Shape Item", None, |proj, _| {
+    // The Add menu's Merge Paths. Scripts and importers build the list themselves and keep Merge.
+    let paint = kind == "merge" && b_p(p, "paint") == Some(true);
+    let time = s.time_of(cid);
+    let uid = s.edit("Add Shape Item", None, |proj, st| {
         let mut next = proj.next_id;
         let mut ids = Ids(&mut next);
         // Front / Bevel / Side / Back ▸ property: into the group's surface item (one per group).
@@ -120,7 +125,7 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
             proj.next_id = next;
             return Ok(uid);
         }
-        let g = match kind.as_str() {
+        let mut g = match kind.as_str() {
             "group" => build::shape_group(&mut ids, "Group 1", vec![]),
             "rect" | "rectangle" => build::shape_rect(&mut ids, [200.0, 200.0], [0.0, 0.0], 0.0),
             "ellipse" => build::shape_ellipse(&mut ids, [200.0, 200.0], [0.0, 0.0]),
@@ -136,6 +141,18 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
             k => build::shape_simple_op(&mut ids, k).ok_or_else(|| bad("layer.addShapeItem", format!("unknown kind `{k}`")))?,
         };
         let uid = g.uid;
+        if paint {
+            // Mode Add, as a new Merge Paths has in After Effects.
+            if let Some(mode) = g.get_mut("mode") {
+                mode.value = KV::Enum(1);
+            }
+            let paints = merge_paints(proj, cid, lid, group_uid, time, &mut ids, &st.shape_tool)?;
+            proj.next_id = next;
+            let target = shape_item_target(proj, cid, lid, group_uid)?;
+            let at = crate::cmd::prop_groups::after_last_path(target);
+            target.children.splice(at..at, std::iter::once(g).chain(paints).map(Node::from));
+            return Ok(uid);
+        }
         proj.next_id = next;
         shape_item_target(proj, cid, lid, group_uid)?.children.push(g.into());
         Ok(uid)
@@ -143,6 +160,29 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
     // The new item's property path, ready for prop.set / add_keyframe (`contents/trim#2/end`).
     let path = s.project.comp(cid).and_then(|c| c.layer(lid)).and_then(|l| l.props.match_path_of(uid));
     Ok(json!({"uid": uid, "path": path}))
+}
+
+/// The paint a new Merge Paths in the shape item target needs: the renderer paints the merged path
+/// with the paint items below it alone, so with none below where it goes, the Tools bar's Stroke
+/// and Fill (gradients run across what the merge takes in).
+fn merge_paints(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: Option<u64>, time: Tick, ids: &mut Ids, tool: &ShapeTool) -> Result<Vec<PropGroup>> {
+    let mut target = shape_item_target(proj, cid, lid, group_uid)?.clone();
+    let at = crate::cmd::prop_groups::after_last_path(&target);
+    if target.children.get(at..).is_some_and(|below| below.iter().any(crate::cmd::prop_groups::is_paint)) {
+        return Ok(vec![]);
+    }
+    // (bounds cover painted paths only: a stand-in merge drops the paints among them, a stand-in Fill
+    // below it counts those with no paint yet, and what's below the merge, a Repeater say, doesn't
+    // reach what it takes in)
+    target.children.truncate(at);
+    let merge = build::shape_simple_op(ids, "merge").ok_or_else(|| bad("layer.addShapeItem", "unknown kind `merge`"))?;
+    target.children.push(merge.into());
+    target.children.push(build::shape_fill(ids, [1.0; 4]).into());
+    let comp = proj.comp(cid).ok_or(EngineError::NoComp)?;
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let ctx = effectcraft_render::EvalCtx::new(proj, cid, comp, time);
+    let bounds = effectcraft_render::shapes::content_bounds(&ctx, layer, &target).map_or([-50.0, -50.0, 100.0, 100.0], |r| [r.x0, r.y0, r.width(), r.height()]);
+    Ok(crate::cmd::shape_tool::paint_items(ids, tool, bounds))
 }
 
 /// The contents a new shape item goes into: the shape group `group_uid` (its Contents), else the
