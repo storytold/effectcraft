@@ -4,6 +4,7 @@ use super::{
     layer_p, merge_p, str_p,
 };
 
+/// Add a tool-shaped mask in one document edit, then request its Timeline controls separately.
 pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.addMask")?;
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).ok_or(EngineError::NoComp)?.clone();
@@ -16,8 +17,17 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         None => (if w > 0.0 { w / 2.0 } else { 0.0 }, h / 2.0, w * 0.6, h * 0.6),
     };
     // The shape tools' masks: rectangle, ellipse, rounded rectangle, polygon or star.
-    let path = crate::cmd::shape_tool::mask_path(shape, [cx, cy], [rw, rh])
+    let radius = match p.get("roundness").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            Some(v.as_f64().filter(|r| r.is_finite() && *r >= 0.0).ok_or_else(|| bad("layer.addMask", "`roundness` is a corner radius in pixels, 0 or more"))?)
+        }
+    };
+    let path = crate::cmd::shape_tool::mask_path_rounded(shape, [cx, cy], [rw, rh], radius)
         .ok_or_else(|| bad("layer.addMask", format!("unknown shape `{shape}`; one of rect, ellipse, rounded, polygon, star")))?;
+    if radius.is_some() && !matches!(shape, "rounded" | "roundedRect") {
+        return Err(bad("layer.addMask", "`roundness` only applies to shapes `rounded` and `roundedRect`"));
+    }
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
     let uid = s.edit("New Mask", None, |proj, _| {
@@ -31,6 +41,10 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         proj.next_id = next;
         Ok(uid)
     })?;
+    s.events.push(crate::Event::Frontend {
+        command: "timeline.revealMask".into(),
+        params: json!({"comp": cid.0, "layer": lid.0, "mask": uid, "projectEpoch": s.script_ui.project_epoch}),
+    });
     Ok(json!({"mask": uid}))
 }
 

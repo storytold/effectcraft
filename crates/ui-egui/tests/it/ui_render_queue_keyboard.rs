@@ -204,11 +204,13 @@ fn a_pick_with_the_mouse_leaves_no_keyboard_focus() {
     click(&mut h, "renderQueue.item.1.twirl");
     click(&mut h, "renderQueue.item.1.renderSettings");
     assert!(h.ctx.memory(|m| m.focused()).is_none(), "opening a drop-down with the mouse takes no keyboard focus");
-    let template = h.state().session.project.render_templates.render_settings_list()[0].name.clone();
+    let current = h.state().session.project.render_queue[0].settings.name.clone();
+    let template =
+        h.state().session.project.render_templates.render_settings_list().into_iter().map(|t| t.name).find(|n| *n != current).expect("a second template");
     h.get_by_label_contains(&template).click();
     h.run_steps(4);
     assert!(h.ctx.memory(|m| m.focused()).is_none(), "choosing an entry with the mouse leaves no keyboard focus");
-    // The Effects & Presets options menu the same.
+    assert_eq!(h.state().session.project.render_queue[0].settings.name, template, "the pick applied the template");
 }
 
 /// Enter after a click in the panel belongs to the panel (it opens or applies the row), not to

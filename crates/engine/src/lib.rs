@@ -97,7 +97,7 @@ pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
 pub use services::{FsServices, Importer, Services};
-pub use session::upgrade_effects;
+pub use session::{DiskSaltJob, upgrade_effects};
 
 pub struct Session {
     pub project: Arc<Project>,
@@ -244,7 +244,8 @@ pub struct Session {
     pub next_task_id: u64,
     /// The running Learn tutorial (Home ▸ Learn), see [`learn`].
     pub learn: Option<learn::Progress>,
-    /// Check footage in the background after File ▸ Open ([`footage_check`]): frontends with an
+    /// Track footage availability automatically, after File ▸ Open ([`footage_check`]) and in
+    /// the desktop disk watcher. Frontends with an
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
@@ -255,6 +256,15 @@ pub struct Session {
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
     /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
     pub disk_salt: Option<(u64, u64)>,
+    /// Take the disk cache's footage salt on a worker thread ([`Session::refresh_disk_salt`]):
+    /// frontends with an event loop (the desktop app) turn this on and call
+    /// [`Session::poll_disk_salt`] each frame; headless sessions take it at once.
+    pub disk_salt_background: bool,
+    /// The footage salt being taken in the background.
+    pub disk_salt_job: Option<DiskSaltJob>,
+    /// The footage files effects read the channels of, as last given to the footage source
+    /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
+    pub aux_footage: Option<Vec<String>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -382,6 +392,9 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             disk_salt: None,
+            disk_salt_background: false,
+            disk_salt_job: None,
+            aux_footage: None,
             script_calls: ScriptCalls::default(),
         }
     }

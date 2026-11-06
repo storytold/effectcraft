@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** `.aep` / `.aepx` import (`crates/aep`: `container`, `import`) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-11-05 · **Change:** ProRes alpha final-run conformance; previously `.aep` / `.aepx` import and `.aep` export (`crates/aep`: `container`, `import`, `export`) · **Target:** Adobe After Effects 2026
 
 Every format After Effects reads or writes, with EffectCraft's support. After Effects' list comes
 from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plug-ins/Format`,
@@ -12,7 +12,7 @@ from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plu
 
 **Overall ≈ 50%** (estimated, weighted by use): modern delivery and interchange formats are
 strong, but After Effects' own formats, which decide whether existing work moves over, are the
-weakest: `.aep` / `.aepx` import is partial, export is not built, templates and presets are 0%.
+weakest: `.aep` / `.aepx` import and export are partial, templates and presets are 0%.
 
 Fidelity key: **exact** (bit-exact or within a stated tolerance of a reference), **good** (round
 trips and renders, checked by tests, not against After Effects), **partial** (named limitations),
@@ -22,7 +22,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 | Format | After Effects | EffectCraft read | Write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
-| Project `.aep` | R/W (native) | partial | none | Main file format; the clean-room method is in [aep-format.md](aep-format.md), the maintainers' decision on it is open (#190). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a typed view of the decoded fields, from our own generated files only ([aep-format.md](aep-format.md)). File ▸ Import ▸ After Effects Project… (`file.importAep`, `effectcraft_aep::import`): folders, project settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text with animators, shapes, cameras, lights, track mattes, markers, time remapping, layer styles, the built-in effects of a table (Curves, Levels, Glow, Fractal Noise, Gradient Ramp, … and the expression controls), footage and image sequences; everything else is reported ([aep-import.md](aep-import.md)). Export to `.aep` is not built yet. Effects outside the table (plug-ins, Lumetri, …) are not converted | `crates/aep` tests (`tests/it`: `container`, `import`) |
+| Project `.aep` | R/W (native) | partial | partial | Main file format; the clean-room method is in [aep-format.md](aep-format.md), the maintainers' decision on it is open (#190). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a typed view of the decoded fields, from our own generated files only ([aep-format.md](aep-format.md)). File ▸ Import ▸ After Effects Project… (`file.importAep`, `effectcraft_aep::import`): folders, project settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text with animators, shapes, cameras, lights, track mattes, markers, time remapping, layer styles, the built-in effects of a table shared with the exporter (Curves, Levels, Glow, Fractal Noise, Gradient Ramp, … and the expression controls), footage and image sequences; everything else is reported ([aep-import.md](aep-import.md)). File ▸ Export ▸ After Effects Project… (`file.exportAep`, `effectcraft_aep::export`) writes the same scope with every chunk built in code; exports were opened and read back in After Effects 2026 ([aep-export.md](aep-export.md)); everything else is reported. Effects outside the table (plug-ins, Lumetri, …) are not converted | `crates/aep` tests (`tests/container`, `tests/import`, `tests/export`) |
 | XML project `.aepx` | R/W | partial | none | Read into the same chunk tree as `.aep` by `crates/aep` (`read_aepx`; mapping in [aep-format.md](aep-format.md) section 1), so `file.importAep` imports it with the same coverage as `.aep`; not written | `crates/aep` `aepx` tests (container and import) |
 | Templates `.aet` / `.aetx` | R/W | none | none | Own `.ectemplate` (Home ▸ Templates, Save as Template) | `templates.rs` tests |
 | Motion Graphics template `.mogrt` | W (and R in Premiere) | none | none | Own `.ectemplate` Essential Graphics templates; FilmCraft rejects our `.fcgt` export (#611) | `essential.rs` tests |
@@ -41,7 +41,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | PNG | R/W | yes | yes (sequence) | good |
 | JPEG | R/W | yes | yes (sequence) | good |
 | TIFF | R/W | yes | yes (sequence) | good |
-| OpenEXR (multi-layer, Cryptomatte) | R/W | yes | yes (32-bit sequence) | good; HTJ2K compression fails (#482); EXRs without an unnamed RGB layer decode twice (#474) |
+| OpenEXR (multi-layer, Cryptomatte) | R/W | yes | yes (scan-line sequence, half or 32-bit float, every compression but HTJ2K) | good; written files carry a `chromaticities` attribute for the output space's primaries and white; HTJ2K compression fails (#482); a multi-layer frame decodes once for its picture and EXtractoR / Cryptomatte from the first frame on, except Media Replacement items, which are learned at their first frame, and files whose picture the `image` crate still decodes (#474); footage alone keeps only its picture's channels, though a single-part file still decompresses every channel's pixels; decoded channels are held as f32 |
 | Photoshop PSD / PSB | R (footage, composition) / W (layers, sequence) | yes (layers, groups, masks, styles, smart objects) | Save Frame As ▸ Photoshop Layers; no Photoshop sequence output | good, from Adobe's published spec |
 | Illustrator `.ai`, PDF, EPS | R | yes (vector, Continuously Rasterize, Create Shapes; Composition and Composition - Retain Layer Sizes, #1536) | — | partial: no JPX / JBIG2 images, no Illustrator procset EPS |
 | SVG | R | yes | — | good; SVG markup on the clipboard pastes as a shape layer (26.3, #738); Illustrator's own clipboard data (PDF/AI) doesn't |
@@ -62,7 +62,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | MP4 / MOV with H.264 | R/W | yes | yes (own encoder, + AAC) | decoder bit-exact on conformance streams (FilmCraft) |
 | HEVC (H.265) | R/W | yes | yes (MP4 `hvc1`, Main / Main 10) | encoder bit-exact with ffmpeg's decode; no B-frames / SAO, larger files |
 | AV1 | R | yes | yes (MP4 `av01`, WebM) | beyond After Effects' export; no B-frames / CDEF |
-| Apple ProRes (422 family, 4444) | R/W | yes | yes | good; 4444 colour tag wrong (#340); no ProRes RAW |
+| Apple ProRes (422 family, 4444) | R/W | yes | yes | alpha final-run syntax checked in exported MOVs (#293); 4444 colour tag wrong (#340); no ProRes RAW |
 | WebM / Matroska (VP9, AV1, Opus) | R (limited) | yes, incl. VP9 alpha | yes | beyond After Effects |
 | MXF (OP1a / OP-Atom) | R/W | yes (FilmCraft's demuxer: AVC, MPEG-2 incl. XDCAM / D-10, VC-3 / DNxHD, ProRes; PCM audio) | none | partial: import (#767), checked against ffmpeg; no MXF output |
 | AVI | R | yes (FilmCraft's demuxer: AVI 1.0 / OpenDML; Motion JPEG, H.264, HEVC, uncompressed; PCM, MP3, MP2, AC-3 audio) | none | partial: import (#1701), checked against ffmpeg; H.264 needs its parameter sets in the chunks (global headers and copies with an `avcC` record don't decode until storytold/filmcraft#2303), and a damaged video index loses the video (storytold/filmcraft#2302); DV, MPEG-4 Part 2 (DivX / Xvid) and other legacy codecs import but show why they have no picture; no AVI output |
@@ -100,6 +100,10 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 H.264 MP4, HEVC MP4, AV1 MP4, ProRes MOV, uncompressed 8-bit RGB / RGB + Alpha MOV (`raw `, + PCM;
 #372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, WAV, AIFF.
+OpenEXR sequences are scan-line RGBA files in half or 32-bit float (default) with None, RLE, ZIPS,
+ZIP (default), PIZ, PXR24, B44, B44A, DWAA or DWAB compression; PXR24 on float, B44 / B44A on half
+and DWAA / DWAB are lossy (#2911). No tiled or multi-part output, no HTJ2K (the `exr` crate can't
+write it).
 Missing against After Effects + Media Encoder: 16-bpc uncompressed, AVI and lossless-compressed
 single-file video (Animation / PNG codecs), DPX / Photoshop sequences, MXF, DNxHR, hardware
 encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over an existing file
@@ -138,7 +142,7 @@ check and a write still require exporter-side revalidation.
 
 ## Estimate
 
-**≈ 130–230 h**: `.aep` / `.aepx` 80–160 h (import of the common scope is in `crates/aep`; export is not built; the rest is in [aep-import.md](aep-import.md)), wiring TGA / DPX /
+**≈ 130–230 h**: `.aep` / `.aepx` 80–160 h (import and export of the common scope are in `crates/aep`; the rest is in [aep-import.md](aep-import.md)), wiring TGA / DPX /
 HDR / MXF / AVI / DNx import and DPX output 10–20 h, FBX animation and skinning, USD and Substance 20–40 h,
 relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel with the rest).
 
@@ -146,6 +150,7 @@ relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel wit
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | ProRes encoder pin and export regression for final alpha runs; native macOS decode validated, Resolve still unverified (#293) |
 | 2026-10-30 | minor | Render-queue source-protection behavior and limits consolidated here from the standalone page |
 | 2026-10-12 | minor | #324 and #514 marked closed; open `.aep` PRs #251 and #860 noted |
 | 2026-10-10 | major | First file format parity document, from the After Effects 26.5 bundle and this repository's import/export registries |

@@ -8,7 +8,7 @@ use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::Session;
-use crate::viewer::{Channel, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, SnapKind, SnapSource, SnapTarget, display_transform, snap};
+use crate::viewer::{Channel, DisplayPass, FrameEncoding, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, PassCurve, SnapKind, SnapSource, SnapTarget, snap};
 
 fn comp() -> Session {
     let mut s = Session::default();
@@ -225,15 +225,19 @@ fn snapping_options_command_sets_and_toggles() {
 
 // ---------------------------------------------------------------- channels, exposure, snapshot
 
+/// The display pass on 8-bit frames (sRGB, no HDR step): Show Channel and exposure.
+fn display_rgba8(px: [u8; 4], channel: Channel, colorized: bool, stops: f32) -> [u8; 4] {
+    let encoding = FrameEncoding { curve: PassCurve::Srgb, hdr: effectcraft_project::HdrMode::Clip };
+    let mut v = [px];
+    DisplayPass::new(channel, colorized, stops, encoding, None).apply_rgba8(&mut v);
+    v[0]
+}
+
 #[test]
 fn channel_and_exposure_pixel_transforms() {
     // Premultiplied: straight (200, 100, 50) at 50% alpha.
     let px = [100u8, 50, 25, 128];
-    let run = |c: Channel, col: bool, stops: f32| {
-        let mut v = [px];
-        display_transform(&mut v, c, col, stops);
-        v[0]
-    };
+    let run = |c: Channel, col: bool, stops: f32| display_rgba8(px, c, col, stops);
     assert_eq!(run(Channel::Rgb, false, 0.0), px);
     assert_eq!(run(Channel::Red, false, 0.0), [100, 100, 100, 255]);
     assert_eq!(run(Channel::Green, true, 0.0), [0, 50, 0, 255]);
@@ -242,13 +246,13 @@ fn channel_and_exposure_pixel_transforms() {
     let st = run(Channel::RgbStraight, false, 0.0);
     assert!((st[0] as i32 - 199).abs() <= 1 && (st[1] as i32 - 100).abs() <= 1 && st[3] == 255, "{st:?}");
     // +1 stop doubles linear light: sRGB 50% gray → about 69%; -1 stop darkens; 0 is identity.
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, 1.0);
-    assert!((174..=178).contains(&g[0][0]), "{:?}", g[0]);
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, -1.0);
-    assert!((92..=96).contains(&g[0][0]), "{:?}", g[0]);
-    assert_eq!(crate::viewer::exposure_lut(0.0)[200], 200);
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, 1.0);
+    assert!((174..=178).contains(&g[0]), "{g:?}");
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, -1.0);
+    assert!((92..=96).contains(&g[0]), "{g:?}");
+    for v in 0..=255u8 {
+        assert_eq!(display_rgba8([v, v, v, 255], Channel::Rgb, false, 0.0), [v, v, v, 255]);
+    }
     // Exposure applies to a single channel too, and keeps alpha untouched in RGB.
     assert!(run(Channel::Red, false, 1.0)[0] > 100);
     assert_eq!(run(Channel::Rgb, false, 2.0)[3], 128);
