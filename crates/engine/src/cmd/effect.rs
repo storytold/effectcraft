@@ -521,7 +521,7 @@ impl CryptoProbe {
             if !live() {
                 return Ok(None);
             }
-            let layer_name = effectcraft_effects::crypto_layer_name(&aux, params.e("layer") as usize).ok_or(NO_CRYPTO)?;
+            let layer_name = effectcraft_effects::crypto_layer_named(&aux, params.s("layerName"), params.e("layer") as usize).ok_or(NO_CRYPTO)?;
             // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
             // up, proxies have their own size, earlier effects can pad it), rendered and cached.
             if !live() {

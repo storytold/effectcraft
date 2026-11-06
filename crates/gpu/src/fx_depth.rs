@@ -268,7 +268,7 @@ fn identifier(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<
 
 fn cryptomatte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<GBuf> {
     let pr = ctx.params;
-    let Some(layer) = effectcraft_effects::crypto_layer_name(a, pr.e("layer") as usize) else { return Some(b) };
+    let Some(layer) = effectcraft_effects::crypto_layer_named(a, pr.s("layerName"), pr.e("layer") as usize) else { return Some(b) };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = effectcraft_effects::selection_hashes(pr.s("selection"), manifest);
     // Per aux pixel: coverage-weighted ID colours (RGB) and the selection's coverage (A), on all
