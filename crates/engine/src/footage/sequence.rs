@@ -242,6 +242,13 @@ impl crate::Session {
         let importer = self.importer.as_ref().ok_or("media import is not available in this build")?;
         probe_path(importer.as_ref(), self.services.as_ref(), path, self.sequence_rate())
     }
+
+    /// Probe `path` as one file, never as part of a numbered run: a still a document names on
+    /// its own (Apple Motion clips) stays that image even when numbered siblings sit next to it.
+    pub(crate) fn probe_file(&self, path: &str) -> Result<Footage, String> {
+        let importer = self.importer.as_ref().ok_or("media import is not available in this build")?;
+        importer.probe(path)
+    }
 }
 
 /// Settings ▸ Import ▸ Report Missing Frames: "3 missing frames (3–4, 6)". `None` when the

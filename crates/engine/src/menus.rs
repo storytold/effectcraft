@@ -583,6 +583,7 @@ File
     Solid... | file.importSolid
     After Effects Project... | file.importAep
     Lottie... | file.importLottie
+    Apple Motion... | file.importMotion
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
   Import Recent Footage

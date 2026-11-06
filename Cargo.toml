@@ -37,6 +37,7 @@ effectcraft-media = { path = "crates/media" }
 effectcraft-export = { path = "crates/export" }
 effectcraft-expr = { path = "crates/expr" }
 effectcraft-lottie = { path = "crates/lottie" }
+effectcraft-motion = { path = "crates/motion" }
 effectcraft-interchange = { path = "crates/interchange" }
 effectcraft-pdf = { path = "crates/pdf" }
 effectcraft-psd = { path = "crates/psd" }
@@ -66,6 +67,8 @@ rayon = "1"
 web-time = "1"
 gif = "0.14"
 proptest = "1"
+# XML parsing (SVG, Apple Motion); never fetches external entities.
+roxmltree = "0.21"
 
 # scripting (expressions)
 boa_engine = { version = "0.22", default-features = false }
