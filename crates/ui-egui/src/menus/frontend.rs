@@ -145,6 +145,8 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
         "prop.editGradient" => crate::panels::gradient_editor::open(app, &p)?,
         "window.scriptPanel" => {
             let id = p.get("window").and_then(Value::as_u64).ok_or("no ScriptUI panel window")? as u32;
+            // First, so a panel opened again takes its saved place instead of the usual one.
+            crate::workspace_state::script_panels::bind(&mut app.ui, &app.session.script_ui);
             app.show_panel(PanelKind::ScriptPanel(id));
             json!({"window": id})
         }

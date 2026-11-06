@@ -439,7 +439,7 @@ fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name").ok_or_else(|| bad(c, "missing `name` (a script in the ScriptUI Panels folder)"))?.to_string();
     let file = name.rsplit_once('/').map_or(name.as_str(), |(_, f)| f);
     let title = file.trim_end_matches(".jsx").trim_end_matches(".js").to_string();
-    if let Some(w) = s.script_ui.windows.iter().find(|w| w.kind == scriptui::WindowKind::Panel && w.script == name) {
+    if let Some(w) = s.script_ui.windows.iter().rev().find(|w| w.kind == scriptui::WindowKind::Panel && w.script == name) {
         let id = w.id;
         s.events.push(Event::Frontend { command: c.into(), params: json!({"window": id}) });
         return Ok(json!({"window": id, "open": true}));
