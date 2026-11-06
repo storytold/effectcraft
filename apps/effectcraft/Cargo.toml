@@ -45,7 +45,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 # NSApplication hide / hide others / show all, and the pasteboard for Edit ▸ Paste in text fields.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSResponder", "NSPasteboard"] }
 # Finder double-click, Open With, Dock drops and `open -a EffectCraft x.ecproj` arrive as a
 # kAEOpenDocuments Apple event, which winit 0.30 doesn't handle. This audited crate (also used by
 # PhotoCraft and PdfCraft) registers the handler (Objective-C interop needs unsafe, which our

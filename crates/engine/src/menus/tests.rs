@@ -81,16 +81,19 @@ fn dialog_labels_use_ascii_ellipsis() {
 
 #[test]
 fn shortcuts_are_unambiguous() {
-    // shortcut → (command, params) from command defaults and menu entries.
-    let mut seen: BTreeMap<String, (String, String)> = BTreeMap::new();
+    // (scope, shortcut) → (command, params) from command defaults and menu entries: a chord is
+    // bound once per scope.
+    let mut seen: BTreeMap<(&str, String), (String, String)> = BTreeMap::new();
     let mut add = |sc: &str, id: &str, params: String| {
         if sc == "Num*" {
             return;
         }
-        if let Some(prev) = seen.get(sc) {
-            assert_eq!(prev, &(id.to_string(), params.clone()), "shortcut {sc} is bound twice");
+        let key = if params == "null" { id.to_string() } else { format!("{id} {params}") };
+        let scope = crate::shortcuts::scope_of(&key);
+        if let Some(prev) = seen.get(&(scope, sc.to_string())) {
+            assert_eq!(prev, &(id.to_string(), params.clone()), "shortcut {sc} is bound twice in {scope}");
         } else {
-            seen.insert(sc.to_string(), (id.to_string(), params));
+            seen.insert((scope, sc.to_string()), (id.to_string(), params));
         }
     };
     for (_, e) in platform_entries(true) {

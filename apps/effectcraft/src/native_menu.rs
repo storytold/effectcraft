@@ -25,7 +25,8 @@ pub struct NativeBar {
     spec: NativeMenu,
     structure: u64,
     state: Option<(u64, bool)>,
-    events: Receiver<MenuEvent>,
+    /// Menu activations, each with whether its key equivalent chose the item.
+    events: Receiver<(MenuEvent, bool)>,
     /// The in-window-bar setting last applied (None: not yet).
     in_window: Option<bool>,
 }
@@ -35,7 +36,8 @@ impl NativeBar {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-            let _ = tx.send(e);
+            // Here, while AppKit is still handling the activation: it is the current event.
+            let _ = tx.send((e, current_event_is_key_down()));
             ctx.request_repaint();
         }));
         NativeBar { menu: None, items: HashMap::new(), spec: NativeMenu::default(), structure: 0, state: None, events: rx, in_window: None }
@@ -57,8 +59,8 @@ impl NativeBar {
                 self.structure = 0;
             }
         }
-        while let Ok(e) = self.events.try_recv() {
-            if let Err(err) = native_menu::activate(app, ctx, &self.spec, &e.id.0) {
+        while let Ok((e, key_equivalent)) = self.events.try_recv() {
+            if let Err(err) = native_menu::activate(app, ctx, &self.spec, &e.id.0, key_equivalent) {
                 log::warn!("menu: {err}");
             }
             // Check items toggle themselves when clicked: resync with the app.
@@ -158,6 +160,14 @@ impl NativeBar {
             }
         }
     }
+}
+
+/// Whether NSApplication is handling a key press now (main thread only).
+fn current_event_is_key_down() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventType};
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| e.r#type() == NSEventType::KeyDown)
 }
 
 /// `app.hide` / `app.hideOthers` / `app.showAll` through NSApplication (main thread only).

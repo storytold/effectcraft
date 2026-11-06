@@ -1264,3 +1264,33 @@ fn gpu_summary_names_the_adapter_or_says_why_there_is_none() {
     assert!(on.starts_with("Compositing: GPU, NVIDIA GeForce RTX 4070 (Vulkan)."), "{on}");
     assert!(!on.contains("compositing is off"), "{on}");
 }
+
+#[test]
+fn default_keys_shared_between_a_panel_and_the_application() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    let keys = |k: &str| t.keys.get(k).cloned().unwrap_or_default();
+    let has = |k: &str, chord: &str| keys(k).iter().any(|c| c == chord);
+    assert_eq!(keys("file.newCompFromSelection"), ["Alt+\\"]);
+    // The stacking order: the bracket keys (shown in the menus) and the arrows.
+    assert_eq!(keys(r#"layer.arrange {"to":"forward"}"#), ["Cmd+]", "Cmd+Alt+ArrowUp"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"backward"}"#), ["Cmd+[", "Cmd+Alt+ArrowDown"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"front"}"#), ["Cmd+Shift+]", "Cmd+Alt+Shift+ArrowUp"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"back"}"#), ["Cmd+Shift+[", "Cmd+Alt+Shift+ArrowDown"]);
+    // The Video switch of the selected layers; Hide Other Video has no key of its own.
+    assert!(has(r#"layer.setSwitch {"switch":"video"}"#, "Cmd+Alt+Shift+V"));
+    assert!(keys("layer.hideOtherVideo").is_empty());
+    assert!(has("project.deleteWithoutConfirmation", "Cmd+Backspace") && has("project.deleteWithoutConfirmation", "Shift+Delete"));
+    // One chord, two scopes.
+    for (panel, app, chord) in [
+        ("file.rememberInterpretation", "edit.copyWithPropertyLinks", "Cmd+Alt+C"),
+        ("renderQueue.duplicate", "edit.splitLayer", "Cmd+Shift+D"),
+        (r#"view.newViewer {"inViewer":true}"#, "project.newFolder", "Cmd+Alt+Shift+N"),
+    ] {
+        assert!(has(panel, chord) && has(app, chord), "{chord}");
+        assert_ne!(t.find(panel).unwrap().scope, t.find(app).unwrap().scope, "{chord}");
+    }
+    // Only the shared chord is the viewer's: New Viewer's own keys stay application-wide.
+    assert_eq!(t.find("view.newViewer").unwrap().scope, crate::shortcuts::APP_SCOPE);
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}

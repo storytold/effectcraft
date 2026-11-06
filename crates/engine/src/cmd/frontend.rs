@@ -9,6 +9,9 @@ use super::{CommandSpec, always, bad, frontend, has_comp, has_layers};
 use crate::{Result, Session, cmd};
 
 macro_rules! fe {
+    ($id:literal, $label:literal, [$($m:literal),*], [$($sc:literal),+], $params:literal, $en:expr) => {
+        cmd!($id, $label, [$($m),*], [$($sc),+], $params, $en, |s, p| frontend(s, $id, p))
+    };
     ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr) => {
         cmd!($id, $label, [$($m),*], $sc, $params, $en, |s, p| frontend(s, $id, p))
     };
@@ -113,7 +116,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "project.deleteWithoutConfirmation",
             "Delete Project Items Without Confirmation",
             [],
-            Some("Shift+Delete"),
+            ["Shift+Delete", "Cmd+Backspace"],
             "{} — the Project panel's selection, with the layers that use it; one undo step",
             always
         ),

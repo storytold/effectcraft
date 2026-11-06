@@ -29,6 +29,7 @@ pub use frontend::frontend;
 use frontend::zoom_step;
 pub(crate) use frontend::{dialog_answered, run_engine};
 pub use invoke::{invoke, panel_command_id, reveal};
+pub(crate) use shortcuts::key_equivalent_binding;
 #[cfg(test)]
 use shortcuts::modifiers_at_start;
 pub use shortcuts::{Binding, bindings, chord_matches, forwardable_during_text_edit, handle_shortcuts, handle_tab_shortcut, parse_shortcut, shortcut_text};
