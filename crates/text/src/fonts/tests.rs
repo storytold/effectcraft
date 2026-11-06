@@ -9,6 +9,36 @@ fn run_in_child(variable: &str, test: &str) {
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 }
 
+/// `coverage` reads a face's character map from its file without keeping the bytes, and
+/// `usual_faces` names the faces to read it from.
+#[test]
+fn coverage_reads_the_file_without_keeping_it() {
+    let path = std::env::temp_dir().join(format!("effectcraft-coverage-{}.ttf", std::process::id()));
+    std::fs::write(&path, INTER_REGULAR).expect("write temp font");
+    let info = FaceInfo {
+        family: "Inter Coverage".into(),
+        style: "Regular".into(),
+        weight: 400,
+        italic: false,
+        index: 0,
+        data: FaceData::File(path.clone()),
+        origin: "system",
+        native_family: None,
+        full_name: "Inter Coverage Regular".into(),
+        postscript: None,
+        variable: false,
+        instances: Vec::new(),
+    };
+    let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() };
+    let ranges = f.coverage();
+    let _ = std::fs::remove_file(&path);
+    let has = |c: char| ranges.iter().any(|&(a, b)| (a..=b).contains(&u32::from(c)));
+    assert!(has('A') && has('\u{416}') && !has('\u{5d0}'), "{ranges:?}");
+    assert!(ranges.windows(2).all(|w| w[0].1.saturating_add(1) < w[1].0), "sorted and merged: {ranges:?}");
+    assert!(f.bytes.get().is_none(), "reading the coverage must not keep the file");
+    assert!(usual_faces('A', 0, "").is_empty(), "Latin has no usual fallback families");
+}
+
 /// Concurrent language requests must neither choose another context's font nor reuse its
 /// cached family order. Synthetic fonts in a child process keep this independent of the host
 /// font installation and of other tests that exercise the process-global database/locale.
