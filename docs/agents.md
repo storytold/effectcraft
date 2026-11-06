@@ -274,7 +274,10 @@ build real projects through these interfaces; they are worked examples of everyt
   layer (parent, matte or a layer property), or an expression of another layer names it (by name in
   quotes or as `layer(<index>)`; listed per property, the expression is left as written and will
   no longer find it); or the nested comp holds a camera, light, adjustment,
-  3D, collapsing or soloed layer, or a layer with a blending mode or Preserve Transparency. Without
+  3D, collapsing or soloed layer, or a layer with a blending mode or Preserve Transparency, preserves
+  a frame rate other than the comp's, has a motion-blur shutter other than the comp's (with motion
+  blur layers), or has an unparented layer with a Position expression while the pre-comp layer's
+  Position differs from its Anchor Point (the move is added to stored values only). Without
   `force` such a call is an error listing every reason and nothing changes; `dryRun: true` returns
   `{dryRun, warnings}` without changing anything. With `force: true` it unpacks anyway and returns
   `{layers, warnings}`: what the pre-comp layer itself carried (effects, masks, styles, transform

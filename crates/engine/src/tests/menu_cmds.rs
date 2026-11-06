@@ -2389,6 +2389,91 @@ fn unprecompose_warns_about_expressions_that_refer_to_it() {
     scene_look(&mut s);
 }
 
+/// A nested comp that preserves its own frame rate (10 fps in a 30 fps comp) samples its layers on
+/// its own frames; expanded, they would change on every frame of the parent: a warning. Without
+/// Preserve Frame Rate the nested layers are sampled at the parent's times already: no warning.
+#[test]
+fn unprecompose_warns_when_the_nested_comp_preserves_another_frame_rate() {
+    let (mut s, _, inner, pre) = unprecompose_scene();
+    s.execute("comp.settings", json!({"comp": inner, "frameRate": 10})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "a different rate alone samples at the parent's times");
+    s.execute("comp.settings", json!({"comp": inner, "preserveFrameRate": true})).unwrap();
+    warned_then_forced(&mut s, pre, "preserves a frame rate");
+
+    // A motion-blurred nested layer under another shutter would be blurred with the parent's.
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.settings", json!({"comp": inner, "shutterAngle": 90})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "no layer uses motion blur");
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let a = id_named(&s, "A");
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "motionBlur", "value": true})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    warned_then_forced(&mut s, pre, "motion blur shutter");
+}
+
+/// The pre-comp layer's move (Position against Anchor Point) is added to the stored Position of
+/// unparented nested layers; one whose Position has an expression may ignore it: a warning, only
+/// when there is a move.
+#[test]
+fn unprecompose_warns_about_position_expressions_it_cannot_move() {
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let a = id_named(&s, "A");
+    s.execute("prop.setExpression", json!({"layer": a, "path": "transform/position", "expression": "[100, 100]"})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "no move, nothing to lose");
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/position", "value": [360, 160]})).unwrap();
+    warned_then_forced(&mut s, pre, "layer “A” has a Position expression");
+}
+
+/// Expanded copies keep pointing at each other: a track matte and a layer-valued effect property
+/// on a nested layer follow the copy of the layer they named, and the nested comp's markers are
+/// moved by the pre-comp layer's Start and merged in time order with the comp's own.
+#[test]
+fn unprecompose_remaps_mattes_layer_values_and_merges_markers_in_order() {
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    s.execute("layer.setParent", json!({"layers": [b], "parent": null})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layer": b, "matte": a})).unwrap();
+    s.execute("effect.apply", json!({"layers": [b], "effect": "Set Matte"})).unwrap();
+    {
+        let proj = std::sync::Arc::make_mut(&mut s.project);
+        let l = proj.comp_mut(effectcraft_project::ItemId(inner)).unwrap().layer_mut(effectcraft_project::LayerId(b)).unwrap();
+        l.props.walk_mut(&mut |p| {
+            if matches!(p.value, KV::Layer(_)) {
+                p.value = KV::Layer(Some(a));
+            }
+        });
+    }
+    for t in [2.5, 0.5] {
+        s.execute("comp.addMarker", json!({"time": t, "comment": format!("in {t}")})).unwrap();
+    }
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    s.execute("comp.addMarker", json!({"time": 2.0, "comment": "out"})).unwrap();
+    s.execute("layer.timing", json!({"layers": [pre], "op": "set", "start": 1.0})).unwrap();
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    let (a, b) = (layer(&s, id_named(&s, "A")), layer(&s, id_named(&s, "B")));
+    assert_eq!(b.track_matte.map(|m| m.layer), Some(a.id), "B's matte is the copy of A");
+    let mut refs = vec![];
+    b.props.walk("", &mut |_, p| {
+        if let KV::Layer(v) = p.value {
+            refs.push(v);
+        }
+    });
+    assert_eq!(refs, vec![Some(a.id.0)], "Set Matte names the copy of A");
+    let markers: Vec<(f64, String)> = s.active_comp().unwrap().markers.iter().map(|m| (m.time.seconds(), m.comment.clone())).collect();
+    let want = [(1.5, "in 0.5"), (2.0, "out"), (3.5, "in 2.5")];
+    assert_eq!(markers.len(), 3, "{markers:?}");
+    for ((t, c), (wt, wc)) in markers.iter().zip(want) {
+        assert!((t - wt).abs() < 1e-9 && c == wc, "{markers:?}");
+    }
+    scene_look(&mut s);
+}
+
 /// Every reason at once, forced: unpacked without a crash, one undo step, undone exactly.
 #[test]
 fn unprecompose_forced_with_everything_at_once() {

@@ -384,7 +384,49 @@ fn unprecompose_warnings(comp: &effectcraft_project::Comp, layer: &Layer, nested
     if nested.layers.iter().any(|l| l.switches.solo) {
         why.push("the composition has a soloed layer".to_string());
     }
+    why.extend(sampling_warnings(comp, nested));
+    why.extend(position_expression_warnings(layer, nested));
     why
+}
+
+/// What the nested comp's own frame sampling does that the expanded layers lose: a preserved
+/// frame rate other than the parent's (its layers then change only on its own frames), and
+/// motion blur with a shutter other than the parent's.
+fn sampling_warnings(comp: &effectcraft_project::Comp, nested: &effectcraft_project::Comp) -> Vec<String> {
+    let mut why = vec![];
+    if nested.preserve_frame_rate && nested.frame_rate != comp.frame_rate {
+        why.push("the composition preserves a frame rate other than this one's (its layers would be sampled at this comp's frames)".to_string());
+    }
+    let shutter = nested.shutter_angle != comp.shutter_angle || nested.shutter_phase != comp.shutter_phase;
+    if shutter && nested.layers.iter().any(|l| l.switches.motion_blur) {
+        why.push("the composition's motion blur shutter differs from this one's".to_string());
+    }
+    why
+}
+
+/// The move from the pre-comp layer's Position against its Anchor Point, which expansion adds to
+/// the Position of the nested comp's unparented layers.
+fn placement_offset(layer: &Layer) -> (f64, f64) {
+    let tr = layer.transform();
+    let at = |m: &str| tr.and_then(|t| t.get(m)).map(|p| p.value.as_vec3()).unwrap_or([0.0; 3]);
+    let (anchor, position) = (at("anchor"), at("position"));
+    (position[0] - anchor[0], position[1] - anchor[1])
+}
+
+/// Unparented nested layers whose Position (or a separated axis) has an expression: the move from
+/// [`placement_offset`] is added to the stored value and keys, which an expression can ignore.
+fn position_expression_warnings(layer: &Layer, nested: &effectcraft_project::Comp) -> Vec<String> {
+    let (dx, dy) = placement_offset(layer);
+    if dx == 0.0 && dy == 0.0 {
+        return vec![];
+    }
+    nested
+        .layers
+        .iter()
+        .filter(|l| l.parent.is_none())
+        .filter(|l| l.transform().is_some_and(|tr| ["position", "positionX", "positionY"].iter().any(|m| tr.get(m).is_some_and(|p| p.expr.is_some()))))
+        .map(|l| format!("layer “{}” has a Position expression, so the move to the pre-comp layer's Position may not apply to it", l.name))
+        .collect()
 }
 
 /// One warning per property of another layer in `comp` whose expression names `layer`: by its
@@ -525,10 +567,7 @@ pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
             ),
         ));
     }
-    let tr = layer.transform();
-    let at = |m: &str| tr.and_then(|t| t.get(m)).map(|p| p.value.as_vec3()).unwrap_or([0.0; 3]);
-    let (anchor, position) = (at("anchor"), at("position"));
-    let (dx, dy) = (position[0] - anchor[0], position[1] - anchor[1]);
+    let (dx, dy) = placement_offset(&layer);
     let shown = (layer.in_point.max(layer.start_time), layer.out_point.min(layer.start_time + nested.duration));
     let new = s.edit("Un-precompose", None, |proj, st| {
         let mut next = proj.next_id;
@@ -569,6 +608,8 @@ pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
             m.time += layer.start_time;
             target.markers.push(m);
         }
+        // Comp markers are kept in time order (`thisComp.marker.key(n)`, next/previous marker).
+        target.markers.sort_by_key(|m| m.time);
         st.selected_layers = made.clone();
         Ok(made)
     })?;
