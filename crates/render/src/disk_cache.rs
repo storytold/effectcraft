@@ -6,7 +6,9 @@
 //!   files' size and modification time included) plus frame, scale and view; layer buffers by
 //!   the layer cache's content key salted with the project's footage fingerprint. A changed
 //!   project therefore never reads stale pixels: its keys simply change.
-//! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA, layer
+//! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
+//!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
+//!   header's format byte tells them apart, 8-bit entries keep format 0), layer
 //!   buffers as `f32` RGBA with the bytes shuffled into planes (exact, so cached and fresh
 //!   renders are bit-identical), Roto Brush / Object Matte segmentations as
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
@@ -75,6 +77,19 @@ pub struct Frame8 {
     pub height: u32,
     pub rgba: Vec<u8>,
 }
+
+/// A cached 32 bpc viewer frame: premultiplied RGBA half floats (IEEE binary16 bits), four
+/// per pixel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameF16 {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u16>,
+}
+
+/// The entry header's format byte of frame entries.
+const FORMAT_RGBA8: u8 = 0;
+const FORMAT_F16: u8 = 1;
 
 /// Counters for tests, the Info panel and `cache.diskStats`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,7 +241,8 @@ impl LayerPrefetch {
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
-    Write(Kind, u128, Vec<u8>),
+    /// Kind, key, header format byte, payload.
+    Write(Kind, u128, u8, Vec<u8>),
 }
 
 struct Queue {
@@ -245,7 +261,7 @@ impl Queue {
     #[cfg(not(target_arch = "wasm32"))]
     fn pop(&mut self) -> Option<Job> {
         if let Some(j) = self.frames.pop_front() {
-            let Job::Write(_, _, p) = &j;
+            let Job::Write(_, _, _, p) = &j;
             self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
             return Some(j);
         }
@@ -520,16 +536,21 @@ impl DiskCache {
     }
 
     fn read(&self, kind: Kind, key: u128) -> Option<Vec<u8>> {
+        self.read_entry(kind, key).map(|(_, p)| p)
+    }
+
+    /// An entry's payload and its header's format byte.
+    fn read_entry(&self, kind: Kind, key: u128) -> Option<(u8, Vec<u8>)> {
         if !self.contains(kind, key) {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         let path = self.path(kind, key);
         let data = std::fs::read(&path).ok();
-        let ok = data.as_deref().and_then(|d| verify(d, kind));
+        let ok = data.as_deref().and_then(|d| verify(d, kind).map(|p| (d[5], p)));
         match ok {
-            Some(payload) => {
-                let payload = payload.to_vec();
+            Some((format, payload)) => {
+                let payload = (format, payload.to_vec());
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut g) = self.index.lock() {
                     g.touch(kind, key);
@@ -552,6 +573,12 @@ impl DiskCache {
         }
     }
 
+    /// A valid file whose payload does not decode: delete it, as a damaged one.
+    fn discard(&self, kind: Kind, key: u128) {
+        let _ = std::fs::remove_file(self.path(kind, key));
+        self.forget(kind, key);
+    }
+
     fn forget(&self, kind: Kind, key: u128) {
         if let Ok(mut g) = self.index.lock() {
             g.remove(kind, key);
@@ -560,9 +587,14 @@ impl DiskCache {
 
     /// Queue a write; `false` when it was dropped (a full queue).
     fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
+        self.enqueue_format(kind, key, FORMAT_RGBA8, payload)
+    }
+
+    /// [`DiskCache::enqueue`] with the entry's header format byte.
+    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Vec<u8>) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.write_now(kind, key, &payload);
+            self.write_format(kind, key, format, &payload);
             true
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -580,9 +612,9 @@ impl DiskCache {
             if kind == Kind::Frame {
                 q.pending_frames.insert(key);
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
-                q.frames.push_back(Job::Write(kind, key, payload));
+                q.frames.push_back(Job::Write(kind, key, format, payload));
             } else {
-                q.jobs.push_back(Job::Write(kind, key, payload));
+                q.jobs.push_back(Job::Write(kind, key, format, payload));
             }
             cv.notify_all();
             true
@@ -591,6 +623,10 @@ impl DiskCache {
 
     /// Write an entry now (atomic rename), then evict down to the limit.
     fn write_now(&self, kind: Kind, key: u128, payload: &[u8]) {
+        self.write_format(kind, key, FORMAT_RGBA8, payload);
+    }
+
+    fn write_format(&self, kind: Kind, key: u128, format: u8, payload: &[u8]) {
         if self.contains(kind, key) {
             return;
         }
@@ -600,7 +636,7 @@ impl DiskCache {
             self.write_failed(&e);
             return;
         }
-        let data = seal(kind, payload);
+        let data = seal_format(kind, format, payload);
         // An entry that cannot fit would be evicted straight away.
         if data.len() as u64 > self.limit_bytes() {
             return;
@@ -646,9 +682,41 @@ impl DiskCache {
 
     // ------------------------------------------------------------ typed entries
 
+    /// An 8-bit frame (`None` for a half-float entry of that key, which [`DiskCache::get_frame_f16`]
+    /// reads).
     pub fn get_frame(&self, key: u128) -> Option<Frame8> {
-        let p = self.read(Kind::Frame, key)?;
+        let (format, p) = self.read_entry(Kind::Frame, key)?;
+        if format != FORMAT_RGBA8 {
+            return None;
+        }
         decode_frame(&p)
+    }
+
+    /// A half-float frame (32 bpc viewer frames). A damaged one is deleted.
+    pub fn get_frame_f16(&self, key: u128) -> Option<FrameF16> {
+        let (format, p) = self.read_entry(Kind::Frame, key)?;
+        if format != FORMAT_F16 {
+            return None;
+        }
+        let f = decode_frame_f16(&p);
+        if f.is_none() {
+            self.discard(Kind::Frame, key);
+        }
+        f
+    }
+
+    /// Queue a half-float frame for writing (`width * height * 4` binary16 values). `true` when
+    /// it is on disk or queued; `false` when refused (wrong size, a full queue).
+    pub fn put_frame_f16(&self, key: u128, width: u32, height: u32, rgba: &[u16]) -> bool {
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+            return false;
+        }
+        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16, encode_frame_f16(width, height, rgba))
+    }
+
+    /// Write a half-float frame synchronously (tests).
+    pub fn put_frame_f16_now(&self, key: u128, width: u32, height: u32, rgba: &[u16]) {
+        self.write_format(Kind::Frame, key, FORMAT_F16, &encode_frame_f16(width, height, rgba));
     }
 
     /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes). `true`
@@ -762,8 +830,8 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
-        let Job::Write(kind, key, payload) = job;
-        cache.write_now(kind, key, &payload);
+        let Job::Write(kind, key, format, payload) = job;
+        cache.write_format(kind, key, format, &payload);
         drop(cache);
         if let Ok(mut g) = m.lock() {
             g.busy = false;
@@ -775,12 +843,17 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     }
 }
 
-/// An entry file's bytes: header (magic, kind), payload, checksum.
+/// An entry file's bytes: header (magic, kind, format 0), payload, checksum.
 pub fn seal(kind: Kind, payload: &[u8]) -> Vec<u8> {
+    seal_format(kind, FORMAT_RGBA8, payload)
+}
+
+/// [`seal`] with the header's format byte (frames: 0 = 8-bit, 1 = half float).
+fn seal_format(kind: Kind, format: u8, payload: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(payload.len() + 16);
     data.extend_from_slice(MAGIC);
     data.push(kind.tag());
-    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&[format, 0, 0]);
     data.extend_from_slice(payload);
     let sum = checksum(&data);
     data.extend_from_slice(&sum.to_le_bytes());
@@ -877,6 +950,46 @@ fn decode_frame(p: &[u8]) -> Option<Frame8> {
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
     let rgba = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
     (rgba.len() == w as usize * h as usize * 4).then_some(Frame8 { width: w, height: h, rgba })
+}
+
+/// Half floats with their low and high bytes in planes (per channel), then LZ4: the high bytes
+/// (sign, exponent) repeat a lot, mixed with the low ones LZ4 finds little.
+fn encode_frame_f16(w: u32, h: u32, rgba: &[u16]) -> Vec<u8> {
+    use rayon::prelude::*;
+    let n = rgba.len() / 4;
+    let mut planes = vec![0u8; n * 8];
+    // Plane (byte k, channel c) at (k · 4 + c) · n.
+    planes.par_chunks_mut(n.max(1)).enumerate().for_each(|(plane, out)| {
+        let (k, c) = (plane / 4, plane % 4);
+        for (o, px) in out.iter_mut().zip(rgba.as_chunks::<4>().0) {
+            *o = px[c].to_le_bytes()[k];
+        }
+    });
+    let mut out = Vec::with_capacity(planes.len() / 3 + 16);
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&lz4_flex::compress_prepend_size(&planes));
+    out
+}
+
+fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
+    if p.len() < 8 {
+        return None;
+    }
+    let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
+    let n = (w as usize).checked_mul(h as usize)?;
+    let planes = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
+    if planes.len() != n.checked_mul(8)? {
+        return None;
+    }
+    let mut rgba = vec![0u16; n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (c, v) in px.iter_mut().enumerate() {
+            *v = u16::from_le_bytes([planes[c * n + i], planes[(4 + c) * n + i]]);
+        }
+    }
+    Some(FrameF16 { width: w, height: h, rgba })
 }
 
 fn encode_layer(b: &Buf) -> Vec<u8> {
@@ -1173,6 +1286,42 @@ mod tests {
         assert_eq!(parse_entry_name(&entry_name(key)), Some(key));
         assert_eq!(parse_entry_name("abc.ecc"), None);
         assert_eq!(parse_entry_name(&format!("{key:032x}.tmp.1")), None);
+    }
+
+    /// Half-float frames (32 bpc viewer frames) round-trip bit for bit, over-range values,
+    /// negatives and odd sizes included; they and 8-bit frames never read as each other; a
+    /// damaged half-float entry is a miss and is deleted; they count toward the size limit.
+    #[test]
+    fn half_float_frames_round_trip() {
+        let dir = tmpdir("f16");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (w, h) = (7u32, 5u32);
+        // 4.0, 16.0, -0.25, 65504 and a spread of bit patterns.
+        let rgba: Vec<u16> = (0..w * h * 4).map(|i| [0x4400, 0x4c00, 0xb400, 0x7bff][i as usize % 4] ^ ((i * 37) as u16 & 0x03ff)).collect();
+        dc.put_frame_f16_now(1, w, h, &rgba);
+        assert_eq!(dc.get_frame_f16(1), Some(FrameF16 { width: w, height: h, rgba: rgba.clone() }));
+        assert!(dc.get_frame(1).is_none(), "not an 8-bit frame");
+        dc.put_frame_now(2, 2, 2, &[9; 16]);
+        assert!(dc.get_frame_f16(2).is_none() && dc.contains(Kind::Frame, 2), "an 8-bit entry stays valid");
+        assert_eq!(dc.get_frame(2).unwrap().rgba, vec![9; 16]);
+        assert!(dc.stats().bytes > 0);
+        // Reopened, still there (format byte persisted).
+        drop(dc);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        assert_eq!(dc.get_frame_f16(1).unwrap().rgba, rgba);
+        // A sealed entry with a payload of the wrong size: deleted on read.
+        let p = dc.path(Kind::Frame, 3);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, seal_format(Kind::Frame, FORMAT_F16, &encode_frame_f16(w, h + 1, &rgba[..])[..])).unwrap();
+        dc.rescan();
+        assert!(dc.contains(Kind::Frame, 3));
+        assert!(dc.get_frame_f16(3).is_none());
+        assert!(!dc.contains(Kind::Frame, 3) && !p.exists());
+        // Wrong lengths are not written.
+        dc.put_frame_f16(4, w, h, &rgba[1..]);
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 4));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Segmentations round-trip by (chain key, scale), survive a reopen (rescan), are bounded by

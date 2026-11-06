@@ -24,6 +24,7 @@ pub mod bench;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
+pub mod display_gpu;
 pub mod dock;
 pub mod dock_ui;
 mod expression_diagnostics;
@@ -314,12 +315,28 @@ pub struct EffectcraftApp {
     /// The last GPU frame shown: its egui texture id (registered with egui-wgpu), key and texture.
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
-    pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
+    /// (`None` texture: a half-float frame, drawn by the display pass.)
+    pub(crate) viewer_shown: Option<(Option<egui::TextureId>, FrameKey)>,
     /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
     pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
-    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
-    /// demand ([`EffectcraftApp::viewer_pixels`]).
+    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames and
+    /// half-float frames fill it on demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
+    /// The half-float frame on screen (32 bpc projects; its key is `viewer_shown`'s).
+    pub(crate) viewer_f16: Option<Arc<frames::F16Frame>>,
+    /// The window's egui-wgpu device (with or without a GPU compositor on it): the display pass
+    /// runs there.
+    pub(crate) window_wgpu: Option<eframe::egui_wgpu::RenderState>,
+    /// The display pass on that device (made with the first frame that needs it), and whether
+    /// making it failed (the pass then runs on the CPU).
+    pub(crate) display_gpu: Option<Arc<display_gpu::DisplayGpu>>,
+    pub(crate) display_gpu_failed: bool,
+    /// The Composition viewer's and the snapshot's displayed textures (display pass).
+    pub(crate) viewer_bake: display_gpu::Bake,
+    pub(crate) snapshot_bake: display_gpu::Bake,
+    /// The snapshot in half floats for the display pass (the image it was made from, not kept
+    /// alive by this).
+    pub(crate) snapshot_f16: Option<(std::sync::Weak<effectcraft_engine::render::Image>, Arc<frames::F16Frame>)>,
     /// wasm32: an asynchronous readback of a GPU viewer frame (key asked for, result).
     viewer_readback: (Option<FrameKey>, Arc<std::sync::Mutex<Option<(FrameKey, Arc<egui::ColorImage>)>>>),
     /// egui-wgpu's device, once the first frame arrives (desktop and WebGPU).
