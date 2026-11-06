@@ -18,7 +18,9 @@
 //! the state of the disk: it is not an undo step and doesn't modify the project.
 
 use std::collections::BTreeSet;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+
+use super::availability::{self, Source};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -37,7 +39,7 @@ pub type Stamps = Vec<(String, Option<Stamp>)>;
 /// sequences count only with Automatically Reload Footage set to All Footage (After Effects'
 /// default, Non-Sequence Footage, leaves them alone: thousands of frames on a share add up).
 /// Items with a stored path that is not followed ([`crate::doc_path`]) are not watched.
-pub fn watched(s: &Session) -> BTreeSet<String> {
+fn reload_paths(s: &Session) -> BTreeSet<String> {
     let sequences = s.prefs.import.auto_reload_footage == "all";
     let mut paths = BTreeSet::new();
     for it in s.project.items.values() {
@@ -52,6 +54,119 @@ pub fn watched(s: &Session) -> BTreeSet<String> {
         }
     }
     paths
+}
+
+/// Automatic reload obeys Off; explicit Reload Changed still uses eligible non-sequence files.
+fn automatic_paths(s: &Session) -> BTreeSet<String> {
+    if s.prefs.import.auto_reload_footage == "off" { BTreeSet::new() } else { reload_paths(s) }
+}
+
+/// Embedded data is excluded from availability warnings, but its external file can still be
+/// reloaded. Compare these paths without cloning sequences during unrelated project edits.
+fn data_paths(project: &effectcraft_project::Project) -> impl Iterator<Item = (ItemId, &str, &[String])> {
+    project.items.values().filter_map(|item| match &item.kind {
+        ItemKind::Footage(f) if f.kind == FootageKind::Data => Some((item.id, f.path.as_str(), f.sequence.as_slice())),
+        _ => None,
+    })
+}
+
+/// Files and source identities watched by the single background disk worker.
+#[derive(Clone, Default)]
+pub struct Watched {
+    reload: BTreeSet<String>,
+    sources: Arc<Vec<Source>>,
+    project: Option<Arc<effectcraft_project::Project>>,
+    cache_enabled: bool,
+    reload_mode: String,
+    stored_paths: crate::doc_path::StoredPaths,
+}
+
+impl PartialEq for Watched {
+    /// Compare watched inputs, excluding unrelated project edits whose latest Arc is refreshed
+    /// separately without waking the worker or restarting partial sequence scans.
+    fn eq(&self, other: &Self) -> bool {
+        self.cache_enabled == other.cache_enabled
+            && self.stored_paths == other.stored_paths
+            && self.reload_mode == other.reload_mode
+            && self.reload == other.reload
+            && (Arc::ptr_eq(&self.sources, &other.sources) || self.sources == other.sources)
+    }
+}
+
+/// Capture the automatic reload policy and opted-in availability sources for a worker.
+/// Watcher::update reuses this source inventory when only unrelated project state changed.
+pub fn watched(s: &Session) -> Watched {
+    Watched {
+        reload: automatic_paths(s),
+        sources: Arc::new(if s.check_footage_on_open { availability::sources(s) } else { Vec::new() }),
+        project: Some(s.project.clone()),
+        cache_enabled: s.disk_cache.is_some(),
+        reload_mode: s.prefs.import.auto_reload_footage.clone(),
+        stored_paths: s.stored_paths.clone(),
+    }
+}
+
+impl Watched {
+    /// A worker may sleep indefinitely only when neither content nor availability is watched.
+    fn is_empty(&self) -> bool {
+        self.reload.is_empty() && self.sources.is_empty()
+    }
+    /// Complete the synchronous pass used by explicit commands. Automatic availability uses
+    /// Scanner::poll instead, so long sequences cannot consume an unbounded polling pass.
+    fn scan(&self, services: &dyn Services) -> Observation {
+        Observation { stamps: self.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: availability::scan(&self.sources, services) }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct Observation {
+    stamps: Stamps,
+    missing: Vec<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReloadPolicy {
+    Automatic,
+    Manual,
+}
+
+/// A complete disk observation paired with the sources that were actually checked.
+pub struct Scan {
+    watched: Watched,
+    observation: Observation,
+    update: Option<availability::Update>,
+    policy: ReloadPolicy,
+}
+
+impl Scan {
+    /// Prepare availability and cache state before the session applies the observation.
+    /// Automatic callers construct this result on the worker; explicit commands run inline.
+    fn new(watched: Watched, observation: Observation, policy: ReloadPolicy) -> Self {
+        let update = watched.project.as_ref().and_then(|p| availability::prepare(p, &watched.sources, &observation.missing, watched.cache_enabled));
+        Self { watched, observation, update, policy }
+    }
+
+    /// Apply a current observation, returning `stale: true` when its project needs rechecking.
+    /// Availability-only scans preserve manual reload stamps; eligible content changes still
+    /// follow the existing reload/probe path and return its contextual errors.
+    pub fn apply(self, s: &mut Session) -> crate::Result<Value> {
+        if let Some(update) = self.update
+            && !update.apply(s)
+        {
+            return Ok(json!({"files": 0, "reloaded": 0, "stale": true}));
+        }
+        // Availability-only scans must preserve the baseline used by the manual command.
+        // A scan captured before automatic reload was disabled must not reload stale paths.
+        if self.policy == ReloadPolicy::Automatic && (self.watched.reload_mode == "off" || s.prefs.import.auto_reload_footage == "off") {
+            return Ok(json!({"files": 0, "reloaded": 0}));
+        }
+        let current = match self.policy {
+            ReloadPolicy::Automatic => automatic_paths(s),
+            ReloadPolicy::Manual => reload_paths(s),
+        };
+        let stamps = self.observation.stamps.into_iter().filter(|(p, _)| current.contains(p)).collect();
+        apply_stamps(s, stamps)
+    }
 }
 
 /// Size and position in the stack of Photoshop layer `l` in the file at `path` now: the layer
@@ -207,12 +322,17 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
 
 /// Make the media layer and the layer cache let go of `paths`, so renders read them again.
 fn forget(s: &mut Session, paths: &BTreeSet<String>) {
+    forget_media(s, paths);
+    s.refresh_disk_salt(true);
+}
+
+/// Invalidate decoded and rendered buffers without probing the disk for a new salt.
+/// Availability updates already carry their worker-computed salt; content reload refreshes it.
+pub(crate) fn forget_media(s: &mut Session, paths: &BTreeSet<String>) {
     for p in paths {
         s.footage.forget(p);
     }
     s.layer_cache.clear();
-    // Reloaded files may keep their footage settings but not their size and time.
-    s.refresh_disk_salt(true);
     s.events.push(crate::Event::PurgeCaches);
 }
 
@@ -267,8 +387,16 @@ pub fn apply_stamps(s: &mut Session, now: Vec<(String, Option<Stamp>)>) -> crate
 /// `footage.reloadChanged`: stamp the watched files now and reload the ones that changed.
 pub(crate) fn command(s: &mut Session, _: &Value) -> crate::Result<Value> {
     let services = s.services.clone();
-    let now = watched(s).into_iter().map(|p| (p.clone(), services.stamp(&p))).collect();
-    apply_stamps(s, now)
+    let watched = Watched {
+        reload: reload_paths(s),
+        sources: Arc::new(availability::sources(s)),
+        project: Some(s.project.clone()),
+        cache_enabled: s.disk_cache.is_some(),
+        reload_mode: s.prefs.import.auto_reload_footage.clone(),
+        stored_paths: s.stored_paths.clone(),
+    };
+    let observation = watched.scan(services.as_ref());
+    Scan::new(watched, observation, ReloadPolicy::Manual).apply(s)
 }
 
 /// How often the watched files are stamped while the window is in front.
@@ -277,9 +405,11 @@ pub const FOCUSED_INTERVAL: Duration = Duration::from_secs(2);
 /// as soon as the window comes back, so this only covers a second screen.
 pub const UNFOCUSED_INTERVAL: Duration = Duration::from_secs(10);
 
-enum Watch {
-    Paths(BTreeSet<String>),
-    Focused(bool),
+#[derive(Default)]
+struct Watch {
+    paths: Watched,
+    focused: bool,
+    recheck: bool,
 }
 
 /// The desktop app's footage watcher: a worker thread that stamps the watched files and hands
@@ -288,9 +418,10 @@ enum Watch {
 /// what to watch and whether the window is in front; nothing watched means the thread sleeps.
 /// Dropping the watcher ends the thread.
 pub struct Watcher {
-    tx: Sender<Watch>,
-    result: Arc<Mutex<Option<Stamps>>>,
-    paths: BTreeSet<String>,
+    tx: SyncSender<()>,
+    pending: Arc<Mutex<Watch>>,
+    result: Arc<Mutex<Option<Scan>>>,
+    paths: Watched,
     focused: Option<bool>,
 }
 
@@ -307,77 +438,114 @@ impl Watcher {
         if cfg!(target_arch = "wasm32") {
             return None;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let result: Arc<Mutex<Option<Stamps>>> = Arc::default();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let pending = Arc::new(Mutex::new(Watch { focused: true, ..Default::default() }));
+        let input = pending.clone();
+        let result: Arc<Mutex<Option<Scan>>> = Arc::default();
         let out = Arc::clone(&result);
-        std::thread::Builder::new().name("footage-watch".into()).spawn(move || watch(&rx, &*services, &out, &wake, focused, unfocused)).ok()?;
-        Some(Watcher { tx, result, paths: BTreeSet::new(), focused: None })
+        std::thread::Builder::new().name("footage-watch".into()).spawn(move || watch(&rx, &input, &*services, &out, &wake, focused, unfocused)).ok()?;
+        Some(Watcher { tx, pending, result, paths: Watched::default(), focused: None })
+    }
+
+    /// Refresh the project snapshot after an edit without rebuilding sequence paths or waking
+    /// the worker when the sources, path provenance and reload policy are unchanged.
+    pub fn update(&mut self, s: &Session) {
+        let same_sources = availability::sources_match(s, &self.paths.sources);
+        let same_data = self.paths.project.as_ref().is_some_and(|before| data_paths(before).eq(data_paths(&s.project)));
+        if same_sources
+            && same_data
+            && self.paths.stored_paths == s.stored_paths
+            && self.paths.reload_mode == s.prefs.import.auto_reload_footage
+            && self.paths.cache_enabled == s.disk_cache.is_some()
+        {
+            let project = Some(s.project.clone());
+            self.paths.project = project.clone();
+            self.pending.lock().unwrap_or_else(PoisonError::into_inner).paths.project = project;
+        } else {
+            self.set_watched(watched(s));
+        }
     }
 
     /// The files to watch ([`watched`]); a changed set is stamped at once.
-    pub fn set_watched(&mut self, paths: BTreeSet<String>) {
-        if paths != self.paths {
-            self.paths = paths.clone();
-            let _ = self.tx.send(Watch::Paths(paths));
+    pub fn set_watched(&mut self, paths: Watched) {
+        let changed = paths != self.paths;
+        self.paths = paths.clone();
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).paths = paths;
+        if changed {
+            let _ = self.tx.try_send(());
         }
+    }
+
+    /// An observation raced with an edit: refresh from the latest snapshot, through the same
+    /// bounded queue. Unrelated edits update the snapshot without waking or rescanning.
+    pub fn recheck(&self) {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).recheck = true;
+        let _ = self.tx.try_send(());
     }
 
     /// Whether the window is in front; coming back to the front stamps the files at once.
     pub fn set_focused(&mut self, focused: bool) {
         if self.focused != Some(focused) {
             self.focused = Some(focused);
-            let _ = self.tx.send(Watch::Focused(focused));
+            self.pending.lock().unwrap_or_else(PoisonError::into_inner).focused = focused;
+            let _ = self.tx.try_send(());
         }
     }
 
     /// Stamps the worker found changed (or the first ones for a new set of files), once; for
     /// [`apply_stamps`]. `None` while nothing changed.
-    pub fn take(&self) -> Option<Stamps> {
-        self.result.lock().unwrap_or_else(PoisonError::into_inner).take()
+    pub fn take(&self) -> Option<Scan> {
+        self.result.lock().unwrap_or_else(PoisonError::into_inner).take().filter(|s| s.watched == self.paths)
     }
 }
 
 /// The watcher's worker: wait for a message or the interval, stamp, report only changes.
 fn watch(
-    rx: &Receiver<Watch>,
+    rx: &Receiver<()>,
+    pending: &Mutex<Watch>,
     services: &dyn Services,
-    out: &Mutex<Option<Stamps>>,
+    out: &Mutex<Option<Scan>>,
     wake: &(dyn Fn() + Send + Sync),
     focused_every: Duration,
     unfocused_every: Duration,
 ) {
-    let mut paths = BTreeSet::new();
+    let mut paths = Watched::default();
     let mut focused = true;
-    let mut last: Option<Stamps> = None;
+    let mut last: Option<Observation> = None;
+    let mut scanner = availability::Scanner::default();
     loop {
         let msg = if paths.is_empty() {
             rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
         } else {
             rx.recv_timeout(if focused { focused_every } else { unfocused_every })
         };
-        match msg {
-            Ok(Watch::Paths(p)) => {
-                paths = p;
-                // A new set is reported whole, so the session forgets files no longer watched.
-                last = None;
-            }
-            Ok(Watch::Focused(f)) => {
-                let regained = f && !focused;
-                focused = f;
-                if !regained {
-                    continue;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+        if matches!(msg, Err(RecvTimeoutError::Disconnected)) {
+            return;
+        }
+        let mut next = pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = next.paths != paths;
+        let regained = next.focused && !focused;
+        focused = next.focused;
+        let recheck = std::mem::take(&mut next.recheck);
+        paths = next.paths.clone();
+        if changed {
+            scanner.reset(&paths.sources);
+        }
+        if changed || recheck {
+            last = None;
+        }
+        drop(next);
+        if msg.is_ok() && !changed && !regained && !recheck {
+            continue;
         }
         if paths.is_empty() {
             continue;
         }
-        let stamps: Stamps = paths.iter().map(|p| (p.clone(), services.stamp(p))).collect();
+        let stamps =
+            Observation { stamps: paths.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: scanner.poll(&paths.sources, services) };
         if last.as_ref() != Some(&stamps) {
             last = Some(stamps.clone());
-            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(stamps);
+            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(Scan::new(paths.clone(), stamps, ReloadPolicy::Automatic));
             wake();
         }
     }
@@ -408,6 +576,12 @@ mod watcher_tests {
         fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
             Err(std::io::Error::other("read-only"))
         }
+        fn exists(&self, path: &str) -> bool {
+            self.stamp(path).is_some()
+        }
+        fn is_dir(&self, _: &str) -> bool {
+            true
+        }
         fn stamp(&self, path: &str) -> Option<Stamp> {
             self.looks.fetch_add(1, Ordering::SeqCst);
             self.stamps.lock().unwrap_or_else(PoisonError::into_inner).get(path).copied()
@@ -423,7 +597,7 @@ mod watcher_tests {
             if wakes.load(Ordering::SeqCst) >= n
                 && let Some(s) = w.take()
             {
-                return s;
+                return s.observation.stamps;
             }
             assert!(t0.elapsed() < Duration::from_secs(10), "no report {n} within 10 s");
             std::thread::sleep(Duration::from_millis(5));
@@ -461,7 +635,7 @@ mod watcher_tests {
         disk.set("/a.psd", (10, 1));
         let (mut w, wakes) = start(&disk, TICK, LONG).unwrap();
         w.set_focused(true);
-        w.set_watched(["/a.psd".to_string()].into());
+        w.set_watched(Watched { reload: ["/a.psd".to_string()].into(), ..Default::default() });
         assert_eq!(wait_for(&w, &wakes, 1), vec![("/a.psd".to_string(), Some((10, 1)))]);
         let looked = disk.looks.load(Ordering::SeqCst);
         wait_until("it keeps stamping while the window is in front", || disk.looks.load(Ordering::SeqCst) > looked + 3);
@@ -472,6 +646,162 @@ mod watcher_tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn watcher_detects_disconnect_and_return_even_when_automatic_reload_is_off() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/live.png", (1, 1));
+        let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
+        s.prefs.import.auto_reload_footage = "off".into();
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Live",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/live.png".into(), width: 64, height: 32, ..Default::default() }),
+        );
+        s.mark_saved();
+        let (mut w, _) = start(&disk, TICK, TICK).unwrap();
+        w.set_watched(watched(&s));
+        disk.stamps.lock().unwrap().clear();
+        wait_until("offline warning", || {
+            if let Some(scan) = w.take() {
+                scan.apply(&mut s).unwrap();
+            }
+            s.project.item(id).unwrap().has_missing_footage()
+        });
+        disk.set("/live.png", (1, 1));
+        w.set_watched(watched(&s));
+        wait_until("reconnected file", || {
+            if let Some(scan) = w.take() {
+                scan.apply(&mut s).unwrap();
+            }
+            !s.project.item(id).unwrap().has_missing_footage()
+        });
+        assert!(!s.is_dirty());
+        assert!(s.history.undo.is_empty());
+    }
+
+    #[test]
+    fn unrelated_edits_reuse_source_snapshots_without_waking_the_worker() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/plate.png", (1, 1));
+        let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
+        s.prefs.import.auto_reload_footage = "off".into();
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Plate",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/plate.png".into(), ..Default::default() }),
+        );
+        let (mut w, wakes) = start(&disk, LONG, LONG).unwrap();
+        w.update(&s);
+        wait_for(&w, &wakes, 1);
+        let sources = w.paths.sources.clone();
+        let looks = disk.looks.load(Ordering::SeqCst);
+        Arc::make_mut(&mut s.project).item_mut(id).unwrap().name = "Renamed".into();
+        w.update(&s);
+        assert!(Arc::ptr_eq(&sources, &w.paths.sources), "sequence snapshots are reused");
+        assert!(Arc::ptr_eq(w.pending.lock().unwrap().paths.project.as_ref().unwrap(), &s.project));
+        std::thread::sleep(TICK * 3);
+        assert_eq!(disk.looks.load(Ordering::SeqCst), looks);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stale_availability_update_is_rechecked_against_the_latest_project() {
+        let disk = Arc::new(Disk::default());
+        let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
+        s.prefs.import.auto_reload_footage = "off".into();
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Plate",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/gone.png".into(), ..Default::default() }),
+        );
+        let (mut w, _) = start(&disk, LONG, LONG).unwrap();
+        w.update(&s);
+        let mut scan = None;
+        wait_until("first observation", || {
+            scan = w.take();
+            scan.is_some()
+        });
+        Arc::make_mut(&mut s.project).item_mut(id).unwrap().name = "Keep this edit".into();
+        assert_eq!(scan.unwrap().apply(&mut s).unwrap()["stale"], true);
+        w.update(&s);
+        w.recheck();
+        wait_until("fresh availability", || {
+            if let Some(scan) = w.take() {
+                scan.apply(&mut s).unwrap();
+            }
+            s.project.item(id).unwrap().has_missing_footage()
+        });
+        assert_eq!(s.project.item(id).unwrap().name, "Keep this edit");
+    }
+
+    #[test]
+    fn manual_reload_with_automatic_reload_off_keeps_its_baseline_and_reloads_changed_data() {
+        struct DataProbe(Arc<Disk>);
+        impl crate::Importer for DataProbe {
+            fn probe(&self, path: &str) -> std::result::Result<Footage, String> {
+                let data = if self.0.stamp(path) == Some((2, 2)) { "updated" } else { "original" };
+                Ok(Footage { path: path.into(), kind: FootageKind::Data, data: Some(data.into()), ..Default::default() })
+            }
+        }
+        let disk = Arc::new(Disk::default());
+        disk.set("/data.csv", (1, 1));
+        let mut s = Session { services: disk.clone(), importer: Some(Arc::new(DataProbe(disk.clone()))), ..Default::default() };
+        s.prefs.import.auto_reload_footage = "off".into();
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Data",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/data.csv".into(), kind: FootageKind::Data, data: Some("original".into()), ..Default::default() }),
+        );
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap(), json!({"files": 0, "reloaded": 0}));
+        let baseline = s.footage_stamps.clone();
+        assert_eq!(baseline.get("/data.csv"), Some(&(1, 1)));
+        let off = watched(&s);
+        Scan::new(off.clone(), off.scan(disk.as_ref()), ReloadPolicy::Automatic).apply(&mut s).unwrap();
+        assert_eq!(s.footage_stamps, baseline, "availability-only scans retain the manual baseline");
+        s.prefs.import.auto_reload_footage = "nonSequence".into();
+        disk.set("/data.csv", (2, 2));
+        let old = watched(&s);
+        let pending = Scan::new(old.clone(), old.scan(disk.as_ref()), ReloadPolicy::Automatic);
+        s.prefs.import.auto_reload_footage = "off".into();
+        assert_eq!(pending.apply(&mut s).unwrap(), json!({"files": 0, "reloaded": 0}));
+        assert_eq!(s.footage_stamps, baseline, "a stale automatic result cannot reload or erase the baseline");
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap(), json!({"files": 1, "reloaded": 1}));
+        assert!(matches!(&s.project.item(id).unwrap().kind, ItemKind::Footage(f) if f.data.as_deref() == Some("updated")));
+        assert!(s.history.undo.is_empty());
+    }
+
+    #[test]
+    fn watcher_updates_external_data_paths_after_import_relink_and_removal() {
+        let disk = Arc::new(Disk::default());
+        let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
+        s.prefs.import.auto_reload_footage = "all".into();
+        let (mut w, wakes) = start(&disk, LONG, LONG).unwrap();
+        w.update(&s);
+        disk.set("/first.csv", (1, 1));
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Data",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/first.csv".into(), kind: FootageKind::Data, ..Default::default() }),
+        );
+        w.update(&s);
+        assert_eq!(wait_for(&w, &wakes, 1), vec![("/first.csv".into(), Some((1, 1)))]);
+        disk.set("/second.csv", (2, 2));
+        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+            f.path = "/second.csv".into();
+        }
+        w.update(&s);
+        assert_eq!(wait_for(&w, &wakes, 2), vec![("/second.csv".into(), Some((2, 2)))]);
+        Arc::make_mut(&mut s.project).items.remove(&id);
+        w.update(&s);
+        assert!(w.paths.reload.is_empty());
+        assert!(w.pending.lock().unwrap().paths.reload.is_empty());
+    }
+
     /// Behind another app the files are stamped only at the slow interval; the window coming
     /// back to the front stamps them at once.
     #[test]
@@ -480,7 +810,7 @@ mod watcher_tests {
         disk.set("/b.psd", (1, 1));
         let (mut w, wakes) = start(&disk, TICK, LONG).unwrap();
         w.set_focused(false);
-        w.set_watched(["/b.psd".to_string()].into());
+        w.set_watched(Watched { reload: ["/b.psd".to_string()].into(), ..Default::default() });
         wait_for(&w, &wakes, 1);
         let looked = disk.looks.load(Ordering::SeqCst);
         disk.set("/b.psd", (2, 2));
@@ -502,11 +832,11 @@ mod watcher_tests {
         w.set_focused(true);
         std::thread::sleep(TICK * 10);
         assert_eq!(disk.looks.load(Ordering::SeqCst), 0);
-        w.set_watched(["/c.psd".to_string(), "/d.psd".to_string()].into());
+        w.set_watched(Watched { reload: ["/c.psd".to_string(), "/d.psd".to_string()].into(), ..Default::default() });
         assert_eq!(wait_for(&w, &wakes, 1), vec![("/c.psd".to_string(), Some((1, 1))), ("/d.psd".to_string(), Some((2, 2)))]);
-        w.set_watched(["/d.psd".to_string()].into());
+        w.set_watched(Watched { reload: ["/d.psd".to_string()].into(), ..Default::default() });
         assert_eq!(wait_for(&w, &wakes, 2), vec![("/d.psd".to_string(), Some((2, 2)))], "the set is reported whole, so the session forgets /c.psd");
-        w.set_watched(BTreeSet::new());
+        w.set_watched(Watched::default());
         // The worker may already be past its wait with the old set: that one round of stamps
         // (one file) can still come, and nothing after it.
         let looked = disk.looks.load(Ordering::SeqCst);

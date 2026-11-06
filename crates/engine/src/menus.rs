@@ -862,6 +862,16 @@ Layer
     Flip Vertical | layer.transform {"op":"flipV"}
     Center In View | layer.transform {"op":"center"} | Cmd+Home
     Center Anchor Point in Layer Content | layer.centerAnchor
+    Quick Set Anchor
+      Top Left | layer.quickSetAnchor {"point":"topLeft"}
+      Top | layer.quickSetAnchor {"point":"top"}
+      Top Right | layer.quickSetAnchor {"point":"topRight"}
+      Left | layer.quickSetAnchor {"point":"left"}
+      Center | layer.quickSetAnchor {"point":"center"}
+      Right | layer.quickSetAnchor {"point":"right"}
+      Bottom Left | layer.quickSetAnchor {"point":"bottomLeft"}
+      Bottom | layer.quickSetAnchor {"point":"bottom"}
+      Bottom Right | layer.quickSetAnchor {"point":"bottomRight"}
     Fit to Comp | layer.transform {"op":"fit"} | Cmd+Alt+F
     Fit to Comp Width | layer.transform {"op":"fitWidth"} | Cmd+Alt+Shift+H
     Fit to Comp Height | layer.transform {"op":"fitHeight"} | Cmd+Alt+Shift+G

@@ -116,7 +116,7 @@ fn source(s: &Session, gpu: Option<Gpu>) -> RenderSource {
 fn cpu_pixels(f: &FrameImage) -> Vec<egui::Color32> {
     match f {
         FrameImage::Cpu(c) => c.pixels.clone(),
-        FrameImage::Gpu(_) => panic!("expected a CPU frame"),
+        FrameImage::Gpu(_) | FrameImage::CpuF16(_) => panic!("expected an 8-bit CPU frame"),
     }
 }
 

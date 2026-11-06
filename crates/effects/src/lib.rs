@@ -88,8 +88,8 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
-    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge, venetian_cover,
-    venetian_origin,
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma, radial_wipe_sigma,
+    radial_wipe_wedge, venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
@@ -116,7 +116,8 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
-    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, id_color, matte_only_px, reads_aux, selection_hashes,
+    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
+    crypto_layer_name, crypto_layer_named, id_color, matte_only_px, reads_aux, selection_hashes,
 };
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};

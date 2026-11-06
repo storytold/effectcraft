@@ -558,7 +558,7 @@ pub(crate) fn import_lumetri(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '
         }
         match row.role {
             Role::To(target, conv) => {
-                let m = ParamMap { index: p.index, kind: p.kind, target, conv };
+                let m = ParamMap { index: p.index, kind: p.kind, target, conv, limit: None };
                 import_mapped(p, &m, cx, (&here, &label), ParamOut { group: &mut *group, refs: &mut *refs, col: &mut *col });
             }
             Role::Switch => {

@@ -13,6 +13,7 @@
 use std::io::{Seek, Write};
 
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
+use exr::meta::attribute::Chromaticities;
 use exr::prelude::{Blocks, Compression, Encoding, Image, Layer, LayerAttributes, LineOrder, SpecificChannels, Vec2, WritableImage, f16};
 
 /// The largest finite half float.
@@ -48,7 +49,20 @@ fn encoding(c: ExrCompression) -> Encoding {
 /// Write `w`×`h` RGBA pixels (`data`: four samples per pixel as they are to be written,
 /// premultiplied, rows top to bottom) as one OpenEXR frame, its blocks compressed in parallel as before. A pixel `data`
 /// doesn't cover is written as transparent black.
-pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, usize), (c, depth): (ExrCompression, ExrBitDepth)) -> exr::error::UnitResult {
+///
+/// `chroma` is the primaries and white the samples are in (red, green, blue, white as CIE xy), written as the
+/// file's `chromaticities` attribute for Nuke, After Effects and Blender; `None` writes no attribute.
+pub fn write_rgba<W: Write + Seek>(
+    file: &mut W,
+    data: &[f32],
+    (w, h): (usize, usize),
+    (c, depth): (ExrCompression, ExrBitDepth),
+    chroma: Option<[[f32; 2]; 4]>,
+) -> exr::error::UnitResult {
+    let chroma = chroma.map(|[red, green, blue, white]| {
+        let v = |[x, y]: [f32; 2]| Vec2(x, y);
+        Chromaticities { red: v(red), green: v(green), blue: v(blue), white: v(white) }
+    });
     let row = w.saturating_mul(4);
     let px = move |p: Vec2<usize>| -> [f32; 4] {
         let o = p.y().saturating_mul(row).saturating_add(p.x().saturating_mul(4));
@@ -59,7 +73,7 @@ pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, u
     };
     match depth {
         ExrBitDepth::Float => {
-            let image = Image::from_layer(Layer::new(
+            let mut image = Image::from_layer(Layer::new(
                 (w, h),
                 LayerAttributes::default(),
                 encoding(c),
@@ -68,10 +82,11 @@ pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, u
                     (r, g, b, a)
                 }),
             ));
+            image.attributes.chromaticities = chroma;
             image.write().to_buffered(file)
         }
         ExrBitDepth::Half => {
-            let image = Image::from_layer(Layer::new(
+            let mut image = Image::from_layer(Layer::new(
                 (w, h),
                 LayerAttributes::default(),
                 encoding(c),
@@ -80,6 +95,7 @@ pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, u
                     (r, g, b, a)
                 }),
             ));
+            image.attributes.chromaticities = chroma;
             image.write().to_buffered(file)
         }
     }
@@ -118,7 +134,7 @@ mod tests {
 
     fn write(data: &[f32], size: (usize, usize), c: ExrCompression, depth: ExrBitDepth) -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
-        write_rgba(&mut buf, data, size, (c, depth)).unwrap();
+        write_rgba(&mut buf, data, size, (c, depth), None).unwrap();
         buf.into_inner()
     }
 
@@ -233,5 +249,20 @@ mod tests {
         let (got, _) = read_back(&write(&[1.0, 0.5, 0.25, 1.0], (3, 2), ExrCompression::Zip, ExrBitDepth::Half));
         assert_eq!(&got[..4], &[1.0, 0.5, 0.25, 1.0]);
         assert!(got[4..].iter().all(|v| *v == 0.0));
+    }
+
+    /// The chromaticities attribute is written when given and absent otherwise.
+    #[test]
+    fn chromaticities_are_written_only_when_given() {
+        let rec709 = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], [0.3127, 0.3290]];
+        for depth in [ExrBitDepth::Float, ExrBitDepth::Half] {
+            let mut with = Cursor::new(Vec::new());
+            write_rgba(&mut with, &[0.5; 4], (1, 1), (ExrCompression::Zip, depth), Some(rec709)).unwrap();
+            let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(with.into_inner()), false).unwrap();
+            let got = meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]));
+            assert_eq!(got, Some(rec709));
+            let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(write(&[0.5; 4], (1, 1), ExrCompression::Zip, depth)), false).unwrap();
+            assert!(meta.headers[0].shared_attributes.chromaticities.is_none());
+        }
     }
 }
