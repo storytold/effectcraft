@@ -109,19 +109,11 @@ impl Session {
     /// attached), not at every edit: with a few large sequences that cost each keystroke in a
     /// text field over half a second (#1926).
     pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
         if self.disk_cache.is_none() {
             self.disk_salt = None;
             return None;
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for (id, it) in &self.project.items {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                id.hash(&mut h);
-                format!("{f:?}").hash(&mut h);
-            }
-        }
-        let footage = h.finish();
+        let footage = Self::footage_fingerprint(&self.project);
         if let Some((seen, salt)) = self.disk_salt
             && seen == footage
             && !force
@@ -132,6 +124,24 @@ impl Session {
         self.disk_salt = Some((footage, salt));
         self.layer_cache.set_disk_salt(salt);
         Some(salt)
+    }
+
+    /// In-memory identity of the footage settings represented by a disk salt. Workers use the
+    /// same fingerprint when preparing availability changes without disk access on the UI.
+    pub(crate) fn footage_fingerprint(project: &effectcraft_project::Project) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (id, item) in &project.items {
+            if let effectcraft_project::ItemKind::Footage(f) = &item.kind {
+                id.hash(&mut h);
+                format!("{f:?}").hash(&mut h);
+            }
+            if let Some(proxy) = &item.proxy {
+                id.hash(&mut h);
+                format!("{proxy:?}").hash(&mut h);
+            }
+        }
+        h.finish()
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
