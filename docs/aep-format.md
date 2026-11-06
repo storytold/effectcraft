@@ -1,6 +1,6 @@
 # After Effects project format (`.aep`)
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
 
 What `crates/aep` ([`effectcraft-aep`](../crates/aep/README.md)) reads and writes, and the evidence
 for each statement. Everything here was observed on project files we generated ourselves; no
@@ -123,6 +123,31 @@ counterpart (a name that is not 1 to 4 characters) are skipped with their conten
   the typed view of both forms, and runs truncated, bit-flipped, deeply nested and oversized
   inputs; `crates/aep/tests/it/import/aepx.rs` imports both forms of each pair and expects the same
   project and report. An ignored test runs the comparison over the whole local corpus.
+
+### Versions (`head`, `svap`) and files saved for 25.x and 24.x
+
+Evidence: 12 families of the corpus (`layers-comps`, `footage-precomp`, `masks`, `shapes`, `text`,
+`effects`, `3d`, `keyframes`, `markers`, `styles`, `settings-a`, `1200-lumetri`), each saved three
+ways by After Effects 2026 (26.2.1x2) in one session: a normal save (`-26`), File ▸ Save a Copy As
+25.x (`-25x`) and Save a Copy As 24.x (`-24x`), 36 files. All of them are copies made by 2026; no
+file written by After Effects 24 or 25 itself was examined, so nothing below says what those versions
+write on their own.
+
+| Fact | Evidence |
+|---|---|
+| `svap` (4 bytes, the first top-level chunk) is the version of the After Effects that **wrote** the file: `0f 11 0e 02` in all 36 (a down-saved copy keeps the 2026 word) and in all 1 192 other `.aep` files of the local corpus folders. After Effects opens a file without `svap` (`t-nosvap`). | All 36; corpus scan. |
+| `head` bytes 4 to 7 are the version the file is **written for**: `0f 11 0e 02` (= `svap`) in the 2026 saves, `0f 0b 06 61` in the 25.x copies, `0f 03 06 41` in the 24.x copies, the same word in every family. After Effects refuses a file whose word is zero ("created with an older version [0.0x0]", `u-zhead`). | All 36; `u-zhead`. |
+| The word is packed (bit 31 first): bits 25-24 and 21-19 the major, 18-15 the minor, 14-11 the bug-fix, 10-8 a stage (6 in all), 7-0 the build; bits 31-26 (`000011`) and 23-22 (`00`) are the same in all samples and not decoded. `0f110e02` = **26.2.1x2**, which is what the saving After Effects reports for itself (`app.version` recorded by the corpus scripts) - this one sample fixes minor, bug-fix and build. The copies read as **25.6.0x97** and **24.6.0x65** (major **V** from three consecutive majors; minor, bug-fix and build of the copies **E**: one other word decides their positions). `effectcraft_aep::AeVersion`, `AepFile::file_version`, `AepFile::saved_by_version`. | Tests `decodes_the_sampled_words`, `the_container_of_a_copy_states_its_version_in_head_and_the_writer_in_svap`. |
+| `head` bytes 0 to 1 (a `u16`) step with the major: 97 (`0x61`) in the 2026 saves, 96 in 25.x, 95 in 24.x; bytes 2 to 3 are 5, 9 and 6 (**?**). Bytes 8 to 15 differ between families, not between versions; bytes 16 to 19 are the save counter (one higher in each copy). Nothing is derived from bytes 0 to 3 (`AepFile::head_revision` exposes the `u16`). | All 36. |
+| The XMP packet after the container is no guide: its `CreatorTool` is "Adobe After Effects 2026" in the copies too. | All 36. |
+| **26 against 25.x** (per family, chunk tree aligned by item and layer id): besides `head`, `nhed` / `nnhd` differ in 6 bytes (`nhed` 20-23 and 26-27: `827fa930` / `0015` in the 2026 save, `00000000` / `011b` in both copies; session state, see section 4). Every **solid's** `Pin /CLRS` changes: the 2026 save has `dcui` (1 byte, 1), `apid` all `0xff` and an empty `Utf8`; the copies drop `dcui`, set `apid` to a GUID (`601e9973...`, the same in all) and embed a 935-byte JSON with an ICC profile (`baseColorProfile/colorProfileData`). A **footage** item that the 2026 save stores with an assigned profile (`mcsp` = 1 and a profile JSON) loses `mcsp` and that JSON in the copies, and its `epid` becomes all `0xff`. The rest is save noise: the footage alias `ascendcount_base` (the copies were saved in another folder), `sspc` byte 112 of a footage item (a modification time), the `oEXR` `opti` of an EXR item (the copies hold the display device name `\.\DISPLAY1` as UTF-16 at byte 126 and, in the 24.x copy, a few non-zero bytes from byte 2 102 that look like uninitialised memory; the 2026 save has zeros), the plug-ins' sequence data `sdat` of Lumetri Color (16 instances and the project's `EfdG`), the mask counter `mkif` byte 8. No chunk is added or reordered, and no `pard`, `cdat`, `ldta`, `cdta`, `tdb4`, keyframe, text or shape chunk differs. | All 12 families. |
+| **25.x against 24.x**: only `head` (bytes 1, 3, 5 and 7), and the session noise in `opti` and `sdat` above. | All 12 families. |
+| Lumetri Color in the copies has the parameter definitions (`pard`, valid ranges included) of the 2026 plug-in, byte for byte. | `1200-lumetri`. |
+
+The importer reads none of the chunks that change (it reads the solid colour from `opti`, not
+`CLRS`), so the copies import to the same project and report as the 2026 save
+([aep-import.md](aep-import.md), "What is reported"; test
+`copies_saved_as_25x_and_24x_import_like_the_2026_file`).
 
 ## 2. Typed view (`Project`, `Item`, `Comp`, `Layer`, `PropGroup`, `Property`, `KeyList`)
 
@@ -328,7 +353,7 @@ Property record (`LIST tdbs`: `tdsb`, `tdsn`, `tdb4`, then `cdat` or a `LIST lis
 | keyed spatial-template flag | `tdb4` | 79 | u8 | 1 on a static colour or point effect value, 0 once it is keyed (359 / 364, 369 / 382); 0 on keyed and static sliders (362 / 363, 391 / 397); meaning **?** | 359, 362-364, 369, 382, 391, 397 | V (values) |
 | expression flags | `tdb4` | 76, 77, 120 | u8 | all three are 1 when an expression exists. 76 and 77 are also 1 on a camera's or light's computed (auto) Position, which has no expression | 060, 213, 251 | V |
 | **expression disabled** | `tdb4` | 119 | u8 | 1 = the expression is disabled; the text and bytes 76, 77, 120 stay. On the built-in view layers the byte flips by itself after the first save, so it counts only together with an expression | 060 (0), 213 (1) | V |
-| state | `tdsb` | 0 | u32 | 1 = written (non-default value, keys or expression), 3 = default state | 040, 071, 073 (1); 3 on the unwritten properties of 000 | V (1), E (3) |
+| state | `tdsb` | 0 | u32 | 1 = written (non-default value, keys or expression), 3 = default state. **A layer, camera, light, shape or text property in the default state holds After Effects' default** or a value with no effect on that layer (survey of 839 corpus and sample files: Material Options, cone 90 / 50 and falloff 500 / 500 of point lights, Position `[0, 0, -1333.33]` of ambient and environment lights, Opacity 1 and Scale `[1, 1, 1]` of cameras and lights, a polygon's Inner Radius 50, Miter Limit 4, the inert Time Remap 0), so the importer skips it. **An effect parameter's record in the default state holds the effective value** (3.7, stored value) | 040, 071, 073 (1); 3 on the unwritten properties of 000; 1200, 1400 (effects) | V (1), E (3), V (effects) |
 | static value | `cdat` | 0 | `components` x f64 | the first `components` doubles are the value | 040, 041, 043, 071 | V |
 | user name | `tdsn/Utf8` | | text | `-_0_/-` means "no custom name" | 091 (`Mask 1`), 238 (`Group 1`) | V |
 
@@ -375,7 +400,7 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since a file of ours with three different eases for the three Scale dimensions read back the same three in After Effects). `Keyframe::plain_ease_slots`
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
 returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
@@ -437,9 +462,9 @@ The expression engine is project-wide (`LIST ExEn/Utf8`, `javascript-1.0`). API:
 | **float slider valid minimum, slider range** | `pard` | 104; 112 / 116 | f32; f32 x 2 | the smallest valid value (Exposure -100, Offset -2, Gamma Correction 0.1 as f32) and the range the slider covers (Exposure -4..4, Offset -0.5..0.5, Gamma 0.1..10); the slider range is repeated as `tdum` / `tduM` (f64) in each value record (391-394). @120 holds the default again as f32 (Gamma 1.0, Blurriness 25), u16 @124 the display decimals (**H**: Exposure 2, Offset 4) | 389, 391-394 | V |
 | **definitions of a second instance** | top-level `LIST EfdG` | | | one `EfDf` per effect TYPE (`tdmn` = match name, then a copy of ONE instance's `sspc`, including that instance's value records); the `EfDC` count before them is a little-endian u32. When two layers carry the same effect type, only one instance keeps a full `parT`; **the other has an empty `LIST parT` (4 bytes)** but its own `tdgp` (input layer `-0000` with its own `tdpi`, the button record, and its value records). Its definitions come from the `EfdG` copy by match name, its values from its own records, never from the copy (383: the copy holds S100's Start [0.1, 0.2]; L's Ramp reads the 368 defaults). Which instance keeps the full `parT` is **?** (in 383 S100 is both first in the file and newest). The `EfDf` order follows the stack order (365 / 366); `Pefl/pjef` does not | 365, 366, 383 | V |
 | popup items | `parT/pdnm/Utf8` | | text | items separated by `\|` | 077 (`Item 1\|Item 2\|Item 3`), 214 | V |
-| stored value | `sspc/tdgp/<match>-NNNN` | | `tdbs` | present only for a parameter that differs from its default; `tdsb` 1, `cdat` as in 3.4. **Absent record = the `pard` default** | see below | V |
+| stored value | `sspc/tdgp/<match>-NNNN` | | `tdbs` | present only for a parameter that differs from its default; `tdsb` 1, `cdat` as in 3.4. **Absent record = the `pard` default.** Some parameters are recorded in the default state (`tdsb` 3) and the record still holds the value After Effects uses: every one of the 25 such records in the corpus and the samples differs from its `pard` default and reads back as recorded (Lumetri Color's hidden controls High Dynamic Range, HDR Specular, the second Look, Legacy Tone And Saturation, Face Detection, Auto Color, Auto Intensity and SemanticAutoTone Progress, 1200; Cryptomatte's Selection Mode on, 1400). No effect record in the default state holds a value that does not count. The reader takes the value in either state (`EffectParam::recorded_value`, `EffectParam::value`); `EffectParam::stored_value` keeps to written records, and a record in any other state (no sample has one) is not read: the importer reports it as damaged data. That other effects record values so is H (no sample shows one) | see below; 1200, 1400 | V (1200, 1400), H (other effects) |
 
-Stored values by type (all `tdsb` 1):
+Stored values by type (`tdsb` 1, or 3 as above):
 
 | Type | Stored | Evidence | Conf. |
 |---|---|---|---|
@@ -519,6 +544,20 @@ popup_selected_item, borrowed_definition}`, `Effect::has_own_definitions`,
 (356, 357, 361, 363, 364, 366, 368, 369, 371, 374, 377, 378, 380, 382, 383),
 `tests/effects_exposure.rs` (389-391, 393-397).
 
+**Importer block 2026-11-05, #3110 (`1100-quickwins.aep`, After Effects 26.2.1; V for every
+row: defaults from the defaults composition, the valid ranges from the minimum and maximum
+compositions, the items from one composition per popup item).** Each set value is stored as set
+(Decay 20 is `20.0`, Blend With Original 100 % is `1.0`); a value set to the default leaves no record
+(HDR Amount 100):
+
+| Effect (match name) | Parameters (`parT` index: type, valid range, default) |
+|---|---|
+| `ADBE HDR ToneMap` (HDR Highlight Compression) | 1 Amount: float, 0..100 (slider 0..100), default 100 |
+| `ADBE Echo` | 1 Echo Time (seconds): float, -30 000..30 000 (slider -5..5), default -1/30 (float32); 2 Number Of Echoes: integer, max 30 000, default 1; 3 Starting Intensity: float, 0..1, default 1; 4 Decay: float, **valid 0..100, slider 0..1**, default 1; 5 Echo Operator: popup (Add, Maximum, Minimum, Screen, Composite In Back, Composite In Front, Blend), default 1 |
+| `ADBE Linear Wipe` | 1 Transition Completion: fixed, max 100, default 0; 2 Wipe Angle: angle, default 90; 3 Feather: fixed, max 32 000, default 0 |
+| `ADBE Offset` | 1 Shift Center To: point, default the layer centre; 2 Blend With Original: fixed, **max 1 (a 0..1 fraction)**, default 0 |
+| `ADBE Deflicker` (Color Stabilizer) | 1 Stabilize: popup (Brightness, Levels, Curves), **default 2 (Levels)**; 2 Black Point, 3 Mid Point, 4 White Point: points, defaults 0.2 / 0.5 / 0.8 of the width at half the height; 5 Sample Size: fixed, max 50, default 3. The reference frame the Set Frame button picks is not among the parameters |
+
 **Curves and Mesh Warp** (961-965, 985; applied from presets, the data is not scriptable): their
 arbitrary-data parameter (type 11) always has a record (`tdbs` with a 4-byte `cdat`) and a `LIST
 aRbs` / `aRbp`, also at the default. Curves (`ADBE CurvesCustom-0001`, 1644 bytes): `u16` 1, 1;
@@ -533,6 +572,43 @@ Columns / Quality are integer sliders with records only off their default (7, 7,
 suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -0001; Mesh Warp
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
+
+**Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
+sample; read from 88 instances in one production project, not made by us, and from our own After
+Effects 2026 sample 1400 (corpus `aep/cryptomatte.aep`: a fresh instance, Selection Mode on, each
+Output item, and two presets of our own that choose a layer and pick one object or material in the
+plug-in's UI; scripting read-backs and renders per composition); H for what neither varies):
+`parT` 0 the input layer; 1 Settings: **arbitrary data** (type 11, `Cryptomatte-0001`, a record and
+`aRbs` / `aRbp` in every instance); 2 Output: popup (Colors, Matted Colors, Matted RGBA, Matte
+Only), **`pard` default 1 = Colors** (bytes 56..64 `00000001 0004 0001`, in the instance's own and
+the project's shared definition; scripting reads 1 from a fresh effect: 1400 `crypto-00-defaults`),
+a written record (`tdsb` 1) holding the item number when set (1400: 2, 3, 4; production: 3 in 81,
+4 in 7); 3 Selection Mode: checkbox (`pdnm` `fnord!`), no record when off, and when on **a
+default-state record (`tdsb` 3) holding 1.0** that After Effects reads back as on and renders
+(1400 `crypto-01-set-all`, `crypto-02-chk-toggled`; the general reader takes only `tdsb` 1
+values, so the importer reads this one itself); the built-in entry. As in every project, only the
+first instance has its own `parT`; the others borrow the project's (1400). The Settings data is
+the plug-in's own layout, **little-endian**: `cry1`; bytes 4..32 differ between instances with
+the same settings (zeros in one, pointer-like values in others: not read); the layer name at 32,
+NUL-padded to 64 bytes (`CryptoObject`, `CryptoMaterial` in 1400: the EXR layer's name, which is
+also its channel prefix there, so the sample cannot tell which of the two the plug-in stores); at
+96 a `u32` 1 and a `u32` that is the same in every instance; at 104 the `u32` length of the
+selection text including its NUL; at 108 **the MurmurHash3 (x86, 32-bit, seed 0) of the selection
+text with its NUL** (V on the three texts of 1400: `<11a97486>` `0x27880767`, `<a5deeb9e>`
+`0xf7374a5b`, the empty text `0x514e28b7`; not read); a zero byte at 112; the selection text from
+113, the matte list as comma-and-space separated ID hashes `<11a97486>, <deadbeef>` (303 tokens in
+production, all in that form). Each token is the 8-digit hash of a picked name as the EXR's
+manifest lists it, i.e. the MurmurHash3 of the name (1400: `box_red` `11a97486` picked on
+CryptoObject, `mat_paint` `a5deeb9e` on CryptoMaterial). After the text 2 to 3 bytes, zeros or
+left-overs of a longer earlier text (1400's presets: 127 bytes, three zeros after the text). **A fresh effect** (the `parT`
+default and the record alike, 116 bytes, 1400) is `cry1`, zeros to 96, then `u32`s 1,
+`0x514e28b7`, 1, `0x514e28b7` and four zero bytes: no layer and an empty text (length 1, its NUL).
+`0x514e28b7` is the hash of a single NUL byte, so the `u32` at 100 looks like the hash of a first
+text that is empty in every sample, its length the `u32` 1 at 96 and its NUL the zero byte at 112
+(H: one value). Layer and selection decode the same in the production project and in 1400's two
+presets, and After Effects draws exactly the picked objects as selected (`crypto-06`: the box,
+`crypto-07`: box and disc, the two objects of `mat_paint`). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
+a non-zero byte at 112).
 
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
@@ -754,7 +830,7 @@ switch group per style, `<style>/enabled` (`dropShadow`, `innerShadow`, `outerGl
 | gradients | `<style>/gradient` is a `GCst` list, not decoded | - | ? |
 
 At 32 bpc After Effects renders the modes 6, 7, 11, 12, 16-22 and 25 of a style as Normal (978);
-at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (the importer's table).
+at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (table shared by importer and exporter).
 
 ### 3.13 What the tests cover
 
@@ -805,12 +881,12 @@ another value).
 - Bytes 0 (**?**), 16 (600: **H**, the 1/600 s legacy time base), 24, 32, 40 (cache-like: they hold values the session used earlier, do not use them: **E**), 48 (**E**), 176 and 184 (360 in all files: **?**, probably the maximum shutter angle), 196 and 200 (128 and 16: **?**).
 - Not sampled: a 3840 x 2160 composition, other pixel aspect fractions (1.2121, 1.4587), the preserve-frame-rate and preserve-resolution switches, draft 3D, `Hide shy layers`, frame blending, the 8-versus-16-bit project depth with a coloured background, the display start at 30 fps and with drop frame (whether the denominator at 168 is always the timescale).
 - `PRin/prda` (12 bytes for Classic 3D, 52 for Advanced 3D: renderer parameters, **E**).
-- Item `idta` byte 20 and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
+- Item `idta` byte 23 (0x20 composition and sequences or clips, 0x30 stills and solids, 4 audio, 0 folder; needed: zeroed, renders differ) and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 4 to 7 are the version the file is written for and `svap` the version that wrote it (section 1, "Versions"); `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
 
 **Properties and keyframes**
 
-- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
-- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, above); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
+- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**; needed, without it keys are dropped), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**; 16..55 are needed by roving keys: zeroed, After Effects reads a roving key back at time 0), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
+- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, aep-export.md R13); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
 - The 8 stale bytes of the marker record and the bytes after the common fields of the mask path record (uninitialised memory).
 - Expressions in effect parameters, multi-line and non-ASCII expressions, the ExtendScript engine.
 - Time Remapping with extra keys, with a stretch, on a nested layer; whether keys are rescaled by a stretch.
@@ -823,7 +899,7 @@ another value).
 **Masks, shapes**
 
 - Masks: locked, colour, feather falloff, rotobezier, keyed expansion, a path whose last vertex has only handles, the counter after a mask is deleted, a mask on a scaled layer (whether the box stays layer-relative), an animated path with three or more keys.
-- Shape layers: open shape paths (in shape groups), stroke dashes, taper and wave with values, merge paths, repeater, offset paths and the other path operators, item blend modes and composite order, shape direction, gradient colour stops other than the default (**?**: they appear only as an `ADBE Vector Grad Colors` entry), highlight length and angle other than 0, gradient scale and rotation; why a radial gradient writes its highlight records with `tdsb` 1 and a polygon its inner radius with `tdsb` 3 (**?**).
+- Shape layers: open shape paths (in shape groups), stroke dashes, taper and wave with values, merge paths, repeater, offset paths and the other path operators, item blend modes and composite order, shape direction, gradient colour stops other than the default (**?**: they appear only as an `ADBE Vector Grad Colors` entry), highlight length and angle other than 0, gradient scale and rotation; why a radial gradient writes its highlight records with `tdsb` 1 and a polygon its inner radius with `tdsb` 3 (**?**; the polygon's records hold the defaults 50 and 0, as every non-effect record in the default state does: 3.4, state).
 
 **Text**
 

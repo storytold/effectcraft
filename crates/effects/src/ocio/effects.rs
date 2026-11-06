@@ -398,15 +398,38 @@ fn curve3(xs: [f64; 3], ys: [f64; 3], v: f64) -> f64 {
     a.1 + (c.1 - a.1) * (v - a.0) / (c.0 - a.0).max(1e-9)
 }
 
+/// The Black, Mid and White Point parameters.
+const STABILIZER_POINTS: [&str; 3] = ["blackPoint", "midPoint", "whitePoint"];
+
+/// Color Stabilizer's samples: the current frame's means at the points' current positions and
+/// the reference frame's means at the positions the points had at the reference time (After
+/// Effects samples the reference where the points were when it was set: with keyframed points a
+/// static picture is corrected, #3125). The points fall back to their current positions when
+/// the host can't evaluate them at the reference time. `None` without a host or reference frame.
+fn stabilizer_samples(ctx: &EffectCtx, b: &Buf) -> Option<([[f64; 3]; 3], [[f64; 3]; 3])> {
+    let host = ctx.env.host?;
+    let t_ref = ctx.params.f("referenceFrame");
+    let reference = host.self_at(t_ref, ctx.env.effect_index)?;
+    let r = ctx.params.f("sampleSize").max(0.5);
+    let pts = STABILIZER_POINTS.map(|id| ctx.params.v2(id));
+    let ref_params = host.params_at(t_ref);
+    let ref_pts = match &ref_params {
+        Some(p) => STABILIZER_POINTS.map(|id| p.v2(id)),
+        None => pts,
+    };
+    let cur = pts.map(|pt| sample_mean(b, pt, r));
+    let mut refv = [[0.0; 3]; 3];
+    for (o, pt) in refv.iter_mut().zip(ref_pts) {
+        *o = sample_mean(&reference, pt, r);
+    }
+    Some((cur, refv))
+}
+
 /// Color Stabilizer's correction of buffer `b` as one piecewise-linear map per channel (points
 /// with increasing x; the end segments extend), the same maps `color_stabilizer` applies.
 /// `None` without a host or reference frame (the layer passes through). (The GPU effect.)
 pub fn color_stabilizer_maps(ctx: &EffectCtx, b: &Buf) -> Option<[Vec<(f64, f64)>; 3]> {
-    let reference = ctx.env.host?.self_at(ctx.params.f("referenceFrame"), ctx.env.effect_index)?;
-    let r = ctx.params.f("sampleSize").max(0.5);
-    let pts = [ctx.params.v2("blackPoint"), ctx.params.v2("midPoint"), ctx.params.v2("whitePoint")];
-    let cur = pts.map(|pt| sample_mean(b, pt, r));
-    let refv = pts.map(|pt| sample_mean(&reference, pt, r));
+    let (cur, refv) = stabilizer_samples(ctx, b)?;
     let mode = ctx.params.e("stabilize");
     Some([0, 1, 2].map(|k| {
         let offset = |c0: f64, r0: f64| vec![(0.0, r0 - c0), (1.0, 1.0 + r0 - c0)];
@@ -439,12 +462,7 @@ pub fn color_stabilizer_maps(ctx: &EffectCtx, b: &Buf) -> Option<[Vec<(f64, f64)
 }
 
 pub(super) fn color_stabilizer(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let Some(host) = ctx.env.host else { return b };
-    let Some(reference) = host.self_at(ctx.params.f("referenceFrame"), ctx.env.effect_index) else { return b };
-    let r = ctx.params.f("sampleSize").max(0.5);
-    let pts = [ctx.params.v2("blackPoint"), ctx.params.v2("midPoint"), ctx.params.v2("whitePoint")];
-    let cur = pts.map(|pt| sample_mean(&b, pt, r));
-    let refv = pts.map(|pt| sample_mean(&reference, pt, r));
+    let Some((cur, refv)) = stabilizer_samples(ctx, &b) else { return b };
     let mode = ctx.params.e("stabilize");
     map_px(&mut b, |c| {
         [0, 1, 2].map(|k| {

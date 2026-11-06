@@ -256,6 +256,9 @@ impl<'f, 'a> Effect<'f, 'a> {
                 && let Some(last) = out.last_mut()
                 && let Some(u) = c.children().iter().find(|u| u.is(b"Utf8"))
                 && let Some(b) = u.bytes()
+                // An empty `pdnm` names nothing (EffectCraft's exports write one: the effect
+                // supplies its items).
+                && !b.is_empty()
             {
                 last.items = Some(text(b).split('|').map(str::to_string).collect());
             }
@@ -376,10 +379,24 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     /// keyframes; a layer control reads the `tdpi` chunk; a button has no value.
     pub fn stored_value(&self) -> Option<ParamValue> {
         let p = self.stored?;
+        if self.kind != ParamKind::Layer && p.flags() != Some(1) {
+            return None;
+        }
+        self.recorded_value()
+    }
+
+    /// The value in the value record when the record is written (`tdsb` 1) or in the default
+    /// state (`tdsb` 3): what [`EffectParam::stored_value`] reads, also from a default-state
+    /// record. Lumetri Color writes the values of its hidden parameters so (High Dynamic Range,
+    /// HDR Specular, Look: 1200 `lumetri-01-set-all`, `-02-sec-top`, `-06-sec-light`; After
+    /// Effects reads back the recorded values). `None` with keyframes, without a record or for a
+    /// record in any other state (no sample has one; the importer reports it as damaged).
+    pub fn recorded_value(&self) -> Option<ParamValue> {
+        let p = self.stored?;
         if self.kind == ParamKind::Layer {
             return be_u32(p.chunk().child(b"tdpi")?.bytes()?, 0).map(ParamValue::Layer);
         }
-        if p.flags() != Some(1) || p.is_animated() {
+        if !matches!(p.flags(), Some(1 | 3)) || p.is_animated() {
             return None;
         }
         let v = p.static_value()?;
@@ -443,8 +460,9 @@ impl<'f, 'a> EffectParam<'f, 'a> {
 
     /// True when the parameter is at its default: it has no value record (a record exists exactly
     /// when the value differs from the `pard` default; setting a value back to the default removes
-    /// the record again), or the record equals the default. `None` when that cannot be decided
-    /// (unknown parameter type).
+    /// the record again), or the record equals the default. A record in the default state (`tdsb`
+    /// 3) counts with its value ([`EffectParam::recorded_value`]). `None` when that cannot be
+    /// decided (unknown parameter type, keyframes).
     pub fn is_default(&self) -> Option<bool> {
         match (self.stored, self.kind) {
             // A Layer Control always has its record, and a popup selection overwrites the default
@@ -453,7 +471,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
             (None, _) => Some(true),
             (Some(_), ParamKind::Popup) => Some(false),
             (Some(_), _) => {
-                let stored = self.stored_value()?;
+                let stored = self.recorded_value()?;
                 // A checkbox's default is in `pard` too (on for Repeat Edge Pixels, 412).
                 Some(self.pard_default().is_some_and(|d| d == stored))
             }
@@ -541,10 +559,11 @@ impl<'f, 'a> EffectParam<'f, 'a> {
         self.items.as_ref()?.get(index).map(String::as_str)
     }
 
-    /// The effective value: the stored value when there is one, else the `pard` default (absent =
+    /// The effective value: the value in the record when there is one, also in a record in the
+    /// default state (`tdsb` 3, [`EffectParam::recorded_value`]), else the `pard` default (absent =
     /// default); a checkbox without a record is off.
     pub fn value(&self) -> Option<ParamValue> {
-        self.stored_value().or_else(|| self.pard_default()).or(match self.kind {
+        self.recorded_value().or_else(|| self.pard_default()).or(match self.kind {
             ParamKind::Checkbox if self.stored.is_none() => Some(ParamValue::Bool(false)),
             _ => None,
         })

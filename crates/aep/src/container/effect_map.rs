@@ -1,7 +1,8 @@
-//! The effect table of the importer (`crate::import`): an After Effects effect (its match name) and its parameters (by
+//! The effect table shared by the importer (`crate::import`) and the exporter
+//! (`crate::export`): an After Effects effect (its match name) and its parameters (by
 //! their index in `parT`) map to an EffectCraft effect, a parameter id and a unit conversion.
 //! Plain data; the evidence for each row is in `docs/aep-format.md` 3.7 and the case numbers in
-//! the comments.
+//! the comments. The importer reads a file through it, the exporter writes the inverse.
 
 use crate::container::effects::ParamKind;
 use ParamKind as K;
@@ -109,6 +110,8 @@ pub const HUE_SAT_CHANNEL: &[&str] = &["Master", "Reds", "Yellows", "Greens", "C
 pub const LEVELS_CHANNEL: &[&str] = &["RGB", "Red", "Green", "Blue", "Alpha"];
 /// 511.
 pub const LEVELS_CLIP: &[&str] = &["On", "Off", "Off for 32 bpc Color"];
+/// The Cryptomatte plug-in's Output (`Cryptomatte-0002`).
+pub const CRYPTOMATTE_OUTPUT: &[&str] = &["Colors", "Matted Colors", "Matted RGBA", "Matte Only"];
 
 /// One mapped parameter.
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +123,10 @@ pub struct ParamMap {
     /// The EffectCraft parameter id.
     pub target: &'static str,
     pub conv: Conv,
+    /// The range EffectCraft's effect works in when it is narrower than the range After Effects
+    /// accepts (the effect limits the value there): a stored value or key outside it is imported
+    /// as it is and reported. `None`: no narrower range.
+    pub limit: Option<(f64, f64)>,
 }
 
 /// Values of an effect that are not ordinary parameters.
@@ -134,6 +141,10 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
+    /// The Cryptomatte plug-in: the layer and selection in its Settings data
+    /// (`CryptomatteData`), Output split over EffectCraft's Display and Matte Only; every
+    /// parameter is handled by the importer's Cryptomatte step, none by the table.
+    Cryptomatte,
 }
 
 /// One mapped effect.
@@ -147,7 +158,12 @@ pub struct EffectMap {
 }
 
 const fn pm(index: usize, kind: ParamKind, target: &'static str, conv: Conv) -> ParamMap {
-    ParamMap { index, kind, target, conv }
+    ParamMap { index, kind, target, conv, limit: None }
+}
+
+/// [`pm`] for a parameter EffectCraft's effect limits to `lo..=hi` (see [`ParamMap::limit`]).
+const fn pm_limited(index: usize, kind: ParamKind, target: &'static str, conv: Conv, lo: f64, hi: f64) -> ParamMap {
+    ParamMap { index, kind, target, conv, limit: Some((lo, hi)) }
 }
 
 const fn fx(match_name: &'static str, effect: &'static str, params: &'static [ParamMap]) -> EffectMap {
@@ -339,6 +355,13 @@ pub const MATTE_USE: &[&str] = &["Red Channel", "Green Channel", "Blue Channel",
 /// 903.
 pub const SHUTTER_CONTROL: &[&str] = &["Manual", "Automatic"];
 
+// After Effects' popup items of the #3110 effects as the 2026-11-05 importer block stores them
+// (`pdnm`; the `echo-*` and `colstab-*` compositions).
+/// Echo's Echo Operator (`echo-05` ... `echo-10`).
+pub const ECHO_OPERATOR: &[&str] = &["Add", "Maximum", "Minimum", "Screen", "Composite In Back", "Composite In Front", "Blend"];
+/// Color Stabilizer's Stabilize (`colstab-02`, `colstab-03`; the fresh default is Levels).
+pub const STABILIZE: &[&str] = &["Brightness", "Levels", "Curves"];
+
 /// The effects the importer converts.
 pub const EFFECTS: &[EffectMap] = &[
     // Tint (356-364): Map Black To, Map White To, Amount to Tint; 4 = Swap Colors (a button).
@@ -509,6 +532,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // The Cryptomatte plug-in (docs/aep-format.md 3.7): 1 Settings data, 2 Output, 3 Selection
+    // Mode, imported by the Cryptomatte step (`Extra::Cryptomatte`).
+    EffectMap { match_name: "Cryptomatte", effect: "ec.3d.cryptomatte", params: &[], extra: Extra::Cryptomatte },
     // Expression controls (070-077, 217-221, 310).
     // Directional Blur (711): Direction in degrees, Blur Length in pixels (valid max 1 000).
     fx(
@@ -1006,6 +1032,50 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(4, K::FloatSlider, "vectorDetail", Conv::Plain { valid_max: 100.0 }),
         ],
     ),
+    // HDR Highlight Compression (importer block 2026-11-05, `hdr-*`): Amount a float slider in
+    // percent (valid 0..100, default 100).
+    fx("ADBE HDR ToneMap", "ec.utility.hdrcompression", &[pm(1, K::FloatSlider, "amount", Conv::Plain { valid_max: 100.0 })]),
+    // Echo (`echo-*`): Echo Time in seconds (valid -30 000..30 000), Number Of Echoes an integer
+    // (valid 0..30 000), Starting Intensity 0..1, Decay (valid 0..100, slider 0..1), Echo
+    // Operator. EffectCraft's Echo uses at most 255 echoes and a Decay up to 1.
+    fx(
+        "ADBE Echo",
+        "ec.time.echo",
+        &[
+            pm(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }),
+            pm_limited(2, K::IntSlider, "numberOfEchoes", Conv::Plain { valid_max: 30000.0 }, 0.0, 255.0),
+            pm(3, K::FloatSlider, "startingIntensity", Conv::Plain { valid_max: 1.0 }),
+            pm_limited(4, K::FloatSlider, "decay", Conv::Plain { valid_max: 100.0 }, 0.0, 1.0),
+            pm(5, K::Popup, "echoOperator", Conv::Popup { default: 1, items: ECHO_OPERATOR }),
+        ],
+    ),
+    // Linear Wipe (`linwipe-*`): Transition Completion and Feather fixed sliders (valid 100 and
+    // 32 000), Wipe Angle in degrees.
+    fx(
+        "ADBE Linear Wipe",
+        "ec.transition.linearwipe",
+        &[
+            pm(1, K::FixedSlider, "completion", Conv::Plain { valid_max: 100.0 }),
+            pm(2, K::Angle, "angle", Conv::Angle),
+            pm(3, K::FixedSlider, "feather", Conv::Plain { valid_max: 32000.0 }),
+        ],
+    ),
+    // Offset (`offset-*`): Blend With Original is a 0..1 fraction, a percentage here.
+    fx("ADBE Offset", "ec.distort.offset", &[pm(1, K::Point, "shift", Conv::Point), pm(2, K::FixedSlider, "blend", Conv::Percent { valid_max: 1.0 })]),
+    // Color Stabilizer (`colstab-*`): Stabilize (fresh default Levels), the three sample points,
+    // Sample Size a fixed slider (valid 50, default 3). The reference frame (Set Frame) is not a
+    // parameter in the file and is not imported.
+    fx(
+        "ADBE Deflicker",
+        "ec.color.colorstabilizer",
+        &[
+            pm(1, K::Popup, "stabilize", Conv::Popup { default: 2, items: STABILIZE }),
+            pm(2, K::Point, "blackPoint", Conv::Point),
+            pm(3, K::Point, "midPoint", Conv::Point),
+            pm(4, K::Point, "whitePoint", Conv::Point),
+            pm(5, K::FixedSlider, "sampleSize", Conv::Plain { valid_max: 50.0 }),
+        ],
+    ),
     // Layer Control (076, 220, 320, 321): the default is the owning layer, None is unset.
     fx("ADBE Layer Control", "ec.control.layer", &[pm(1, K::Layer, "layer", Conv::LayerRef { own: true })]),
     fx("ADBE Slider Control", "ec.control.slider", &[pm(1, K::FloatSlider, "slider", Conv::Plain { valid_max: 1_000_000.0 })]),
@@ -1027,6 +1097,16 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 pub fn popup_key(item: &str) -> String {
     let s = item.trim().to_ascii_lowercase();
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+}
+
+/// The table row of an After Effects match name.
+pub fn by_match_name(match_name: &str) -> Option<&'static EffectMap> {
+    EFFECTS.iter().find(|m| m.match_name == match_name)
+}
+
+/// The table row of an EffectCraft effect id.
+pub fn by_effect(effect: &str) -> Option<&'static EffectMap> {
+    EFFECTS.iter().find(|m| m.effect == effect)
 }
 
 /// The EffectCraft parameters Hue/Saturation's master values (`Extra::HueSaturation`) go to,
