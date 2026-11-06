@@ -170,8 +170,10 @@ fn main() {
     println!("footage cache     {} hits, {} misses, {} frames ({} MB) kept", p.hits, p.misses, p.frames, p.bytes >> 20);
     if let Some(dc) = &s.disk_cache {
         // (writes finish on the disk cache's own thread)
+        let t = Instant::now();
         dc.flush();
+        let flushed = t.elapsed().as_secs_f64();
         let d = dc.stats();
-        println!("disk cache        {} written, {} dropped, {} entries ({} MB)", d.writes, d.dropped, d.entries, d.bytes >> 20);
+        println!("disk cache        {} written, {} dropped, {} entries ({} MB), flushed in {flushed:.2} s", d.writes, d.dropped, d.entries, d.bytes >> 20);
     }
 }

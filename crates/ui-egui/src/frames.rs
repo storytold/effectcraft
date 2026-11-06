@@ -571,10 +571,8 @@ fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles,
         return false;
     }
     match img {
-        FrameImage::Cpu(img) => {
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba, files, virtual_id, since)
-        }
+        // (one copy; the disk cache's writer thread compresses it)
+        FrameImage::Cpu(img) => dc.put_frame_owned(dk, img.size[0] as u32, img.size[1] as u32, img.as_raw().to_vec(), files, virtual_id, since),
         FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits(), files, virtual_id, since),
         FrameImage::Gpu(_) => false,
     }
