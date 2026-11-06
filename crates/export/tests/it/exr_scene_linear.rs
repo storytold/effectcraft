@@ -202,6 +202,12 @@ fn bits_hash(v: &[f32]) -> u64 {
     fnv(&v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect::<Vec<u8>>())
 }
 
+/// [`bits_hash`] of the samples rounded to 15 mantissa bits. 32 bpc samples go through `powf`, and
+/// the last bits of its result differ between platforms' math libraries (macOS on Apple silicon).
+fn near_hash(v: &[f32]) -> u64 {
+    bits_hash(&v.iter().map(|x| f32::from_bits(x.to_bits().wrapping_add(0x80) & !0xff)).collect::<Vec<f32>>())
+}
+
 /// Clip-mode EXR samples with an sRGB output, for each colour setup × bit depth × channels.
 fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
     let mut out = vec![];
@@ -210,7 +216,7 @@ fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
             let (p, cid) = build(depth, HdrMode::Clip, ws, linearize, None);
             for &ch in channels {
                 let d = out_dir(&format!("clip-{ws:?}-{linearize}-{depth:?}-{ch:?}"));
-                out.push(bits_hash(&exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"))));
+                out.push(near_hash(&exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"))));
                 let _ = std::fs::remove_dir_all(&d);
             }
         }
@@ -261,8 +267,8 @@ const EXR_CLIP_GOLDEN: [u64; 36] = [
 #[test]
 fn exr_clip_with_srgb_output_is_unchanged() {
     // The bands are opaque everywhere, so the Alpha-only files (alpha 1.0) are unchanged too.
-    assert_eq!(exr_clip_hashes(project, &[Channels::Rgba, Channels::Rgb, Channels::Alpha]), EXR_CLIP_GOLDEN);
-    assert_eq!(exr_clip_hashes(half_project, &[Channels::Rgba, Channels::Rgb]), HALF_EXR_CLIP_GOLDEN);
+    let (a, b) = (exr_clip_hashes(project, &[Channels::Rgba, Channels::Rgb, Channels::Alpha]), exr_clip_hashes(half_project, &[Channels::Rgba, Channels::Rgb]));
+    panic!("GOLDENS {a:x?} HALF {b:x?} {} {}", EXR_CLIP_GOLDEN.len(), HALF_EXR_CLIP_GOLDEN.len());
 }
 
 /// [`exr_clip_hashes`] of [`half_project`] before (RGBA premultiplied, RGB over the background).
