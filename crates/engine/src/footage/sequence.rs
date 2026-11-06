@@ -11,6 +11,8 @@
 //! The browser has no folders: its file table lists the files picked or dropped so far, so
 //! picking every frame of a sequence imports it there too.
 
+use std::collections::HashMap;
+
 use effectcraft_project::sequence::{frame_number, missing_frame_ranges, sequence_name, split_frame_number};
 use effectcraft_project::{Footage, FootageKind};
 use effectcraft_time::FrameRate;
@@ -126,10 +128,22 @@ fn sort_run(files: &mut Vec<String>, alphabetical: bool) {
     files.dedup();
 }
 
-/// The files of the run `path` belongs to, from its folder.
-fn run_files(services: &dyn Services, path: &str, alphabetical: bool) -> Vec<String> {
+type RunKey = (String, String, String);
+
+/// The files of the run `path` belongs to, from its folder. `folders` keeps each folder's files
+/// by run, listed once for all the files picked from it.
+fn run_files(services: &dyn Services, path: &str, alphabetical: bool, folders: &mut HashMap<String, HashMap<RunKey, Vec<String>>>) -> Vec<String> {
     let Some(key) = run_key(path, alphabetical) else { return vec![] };
-    let mut files: Vec<String> = services.list_dir(&key.0).into_iter().filter(|p| run_key(p, alphabetical).as_ref() == Some(&key)).collect();
+    let runs = folders.entry(key.0.clone()).or_insert_with(|| {
+        let mut runs: HashMap<RunKey, Vec<String>> = HashMap::new();
+        for p in services.list_dir(&key.0) {
+            if let Some(k) = run_key(&p, alphabetical) {
+                runs.entry(k).or_default().push(p);
+            }
+        }
+        runs
+    });
+    let mut files = runs.get(&key).cloned().unwrap_or_default();
     sort_run(&mut files, alphabetical);
     files
 }
@@ -150,15 +164,17 @@ pub fn group(services: &dyn Services, paths: &[String], opts: SequenceOptions) -
             files.push((p.clone(), opts.sequence));
         }
     }
-    // Runs in the order their first file was picked.
-    let mut runs: Vec<((String, String, String), Vec<String>)> = vec![];
+    // Runs in the order their first file was picked (found by key, not by a scan of the runs).
+    let mut runs: Vec<(RunKey, Vec<String>)> = vec![];
+    let mut run_of: HashMap<RunKey, usize> = HashMap::new();
     let mut out: Vec<Option<Source>> = vec![];
     let mut slot: Vec<usize> = vec![];
     for (f, joins) in files {
         match run_key(&f, opts.alphabetical).filter(|_| joins) {
-            Some(key) => match runs.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, run)) => run.push(f),
+            Some(key) => match run_of.get(&key) {
+                Some(&i) => runs[i].1.push(f),
                 None => {
+                    run_of.insert(key.clone(), runs.len());
                     runs.push((key, vec![f]));
                     slot.push(out.len());
                     out.push(None);
@@ -167,13 +183,14 @@ pub fn group(services: &dyn Services, paths: &[String], opts: SequenceOptions) -
             None => out.push(Some(Source::File(f))),
         }
     }
+    let mut folders = HashMap::new();
     for ((_, mut picked), at) in runs.into_iter().zip(slot) {
         sort_run(&mut picked, opts.alphabetical);
         // One picked file: its whole run from the folder.
         if let [one] = picked.as_slice()
             && opts.sequence
         {
-            let all = run_files(services, one, opts.alphabetical);
+            let all = run_files(services, one, opts.alphabetical, &mut folders);
             if all.len() >= 2 {
                 picked = all;
             }
@@ -313,6 +330,34 @@ mod tests {
         assert_eq!(a, [Source::Sequence { files: strs(&["/s/a_0001.png", "/s/a_0002.png", "/s/a_0010.png", "/s/b_1.png", "/s/c.png"]), alphabetical: true }]);
         assert_eq!(a[0].name(), "a_0001.png");
         assert_eq!(sequences(&t, &strs(&["/s/a_0001.png", "/s/c.png"]), false).len(), 1);
+    }
+
+    /// Thousands of files picked one by one from one folder: the folder is listed once, not
+    /// once per file, and each finds its run by key.
+    #[test]
+    fn picked_files_of_one_folder_list_it_once() {
+        struct Counting(Table, std::sync::atomic::AtomicUsize);
+        impl Services for Counting {
+            fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+                self.0.read_file(path)
+            }
+            fn write_file(&self, p: &str, b: &[u8]) -> std::io::Result<()> {
+                self.0.write_file(p, b)
+            }
+            fn list_dir(&self, dir: &str) -> Vec<String> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0.list_dir(dir)
+            }
+            fn is_dir(&self, path: &str) -> bool {
+                self.0.is_dir(path)
+            }
+        }
+        let names: Vec<&'static str> = (0..2000).map(|i| &*Box::leak(format!("/s/x{i}_1.png").into_boxed_str())).collect();
+        let t = Counting(Table(names.clone()), Default::default());
+        let picked: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        let g = group(&t, &picked, SequenceOptions::default());
+        assert_eq!(g.len(), 2000);
+        assert_eq!(t.1.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     /// #431: `file.import` brings picked or dropped numbered stills in as stills; only a folder or
