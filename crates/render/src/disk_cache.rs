@@ -1004,6 +1004,11 @@ pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Opt
             hash_debug(&mut h, f);
             footage_stamp(&mut h, f, virtual_id);
         }
+        if let Some(proxy) = it.proxy.as_ref().filter(|p| p.enabled) {
+            h.write_u64(id.0);
+            hash_debug(&mut h, proxy);
+            footage_stamp(&mut h, &proxy.footage, virtual_id);
+        }
     }
     let v = h.finish();
     (v as u64) ^ ((v >> 64) as u64)

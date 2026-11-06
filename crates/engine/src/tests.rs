@@ -1,7 +1,9 @@
 mod add_item_options;
+mod aep_export;
 mod aep_import;
 mod anim_presets;
 mod anim_tools;
+mod aux_footage;
 mod blender;
 mod camera_track;
 mod codec_options;
@@ -29,6 +31,7 @@ mod lottie;
 mod m137;
 mod m145;
 mod markers;
+mod mask_reveal;
 mod mask_warp;
 mod menu_cmds;
 mod model3d;

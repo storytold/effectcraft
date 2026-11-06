@@ -328,7 +328,7 @@ Property record (`LIST tdbs`: `tdsb`, `tdsn`, `tdb4`, then `cdat` or a `LIST lis
 | keyed spatial-template flag | `tdb4` | 79 | u8 | 1 on a static colour or point effect value, 0 once it is keyed (359 / 364, 369 / 382); 0 on keyed and static sliders (362 / 363, 391 / 397); meaning **?** | 359, 362-364, 369, 382, 391, 397 | V (values) |
 | expression flags | `tdb4` | 76, 77, 120 | u8 | all three are 1 when an expression exists. 76 and 77 are also 1 on a camera's or light's computed (auto) Position, which has no expression | 060, 213, 251 | V |
 | **expression disabled** | `tdb4` | 119 | u8 | 1 = the expression is disabled; the text and bytes 76, 77, 120 stay. On the built-in view layers the byte flips by itself after the first save, so it counts only together with an expression | 060 (0), 213 (1) | V |
-| state | `tdsb` | 0 | u32 | 1 = written (non-default value, keys or expression), 3 = default state | 040, 071, 073 (1); 3 on the unwritten properties of 000 | V (1), E (3) |
+| state | `tdsb` | 0 | u32 | 1 = written (non-default value, keys or expression), 3 = default state. **A layer, camera, light, shape or text property in the default state holds After Effects' default** or a value with no effect on that layer (survey of 839 corpus and sample files: Material Options, cone 90 / 50 and falloff 500 / 500 of point lights, Position `[0, 0, -1333.33]` of ambient and environment lights, Opacity 1 and Scale `[1, 1, 1]` of cameras and lights, a polygon's Inner Radius 50, Miter Limit 4, the inert Time Remap 0), so the importer skips it. **An effect parameter's record in the default state holds the effective value** (3.7, stored value) | 040, 071, 073 (1); 3 on the unwritten properties of 000; 1200, 1400 (effects) | V (1), E (3), V (effects) |
 | static value | `cdat` | 0 | `components` x f64 | the first `components` doubles are the value | 040, 041, 043, 071 | V |
 | user name | `tdsn/Utf8` | | text | `-_0_/-` means "no custom name" | 091 (`Mask 1`), 238 (`Group 1`) | V |
 
@@ -375,7 +375,7 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since a file of ours with three different eases for the three Scale dimensions read back the same three in After Effects). `Keyframe::plain_ease_slots`
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
 returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
@@ -437,9 +437,9 @@ The expression engine is project-wide (`LIST ExEn/Utf8`, `javascript-1.0`). API:
 | **float slider valid minimum, slider range** | `pard` | 104; 112 / 116 | f32; f32 x 2 | the smallest valid value (Exposure -100, Offset -2, Gamma Correction 0.1 as f32) and the range the slider covers (Exposure -4..4, Offset -0.5..0.5, Gamma 0.1..10); the slider range is repeated as `tdum` / `tduM` (f64) in each value record (391-394). @120 holds the default again as f32 (Gamma 1.0, Blurriness 25), u16 @124 the display decimals (**H**: Exposure 2, Offset 4) | 389, 391-394 | V |
 | **definitions of a second instance** | top-level `LIST EfdG` | | | one `EfDf` per effect TYPE (`tdmn` = match name, then a copy of ONE instance's `sspc`, including that instance's value records); the `EfDC` count before them is a little-endian u32. When two layers carry the same effect type, only one instance keeps a full `parT`; **the other has an empty `LIST parT` (4 bytes)** but its own `tdgp` (input layer `-0000` with its own `tdpi`, the button record, and its value records). Its definitions come from the `EfdG` copy by match name, its values from its own records, never from the copy (383: the copy holds S100's Start [0.1, 0.2]; L's Ramp reads the 368 defaults). Which instance keeps the full `parT` is **?** (in 383 S100 is both first in the file and newest). The `EfDf` order follows the stack order (365 / 366); `Pefl/pjef` does not | 365, 366, 383 | V |
 | popup items | `parT/pdnm/Utf8` | | text | items separated by `\|` | 077 (`Item 1\|Item 2\|Item 3`), 214 | V |
-| stored value | `sspc/tdgp/<match>-NNNN` | | `tdbs` | present only for a parameter that differs from its default; `tdsb` 1, `cdat` as in 3.4. **Absent record = the `pard` default** | see below | V |
+| stored value | `sspc/tdgp/<match>-NNNN` | | `tdbs` | present only for a parameter that differs from its default; `tdsb` 1, `cdat` as in 3.4. **Absent record = the `pard` default.** Some parameters are recorded in the default state (`tdsb` 3) and the record still holds the value After Effects uses: every one of the 25 such records in the corpus and the samples differs from its `pard` default and reads back as recorded (Lumetri Color's hidden controls High Dynamic Range, HDR Specular, the second Look, Legacy Tone And Saturation, Face Detection, Auto Color, Auto Intensity and SemanticAutoTone Progress, 1200; Cryptomatte's Selection Mode on, 1400). No effect record in the default state holds a value that does not count. The reader takes the value in either state (`EffectParam::recorded_value`, `EffectParam::value`); `EffectParam::stored_value` keeps to written records, and a record in any other state (no sample has one) is not read: the importer reports it as damaged data. That other effects record values so is H (no sample shows one) | see below; 1200, 1400 | V (1200, 1400), H (other effects) |
 
-Stored values by type (all `tdsb` 1):
+Stored values by type (`tdsb` 1, or 3 as above):
 
 | Type | Stored | Evidence | Conf. |
 |---|---|---|---|
@@ -754,7 +754,7 @@ switch group per style, `<style>/enabled` (`dropShadow`, `innerShadow`, `outerGl
 | gradients | `<style>/gradient` is a `GCst` list, not decoded | - | ? |
 
 At 32 bpc After Effects renders the modes 6, 7, 11, 12, 16-22 and 25 of a style as Normal (978);
-at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (the importer's table).
+at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (table shared by importer and exporter).
 
 ### 3.13 What the tests cover
 
@@ -805,12 +805,12 @@ another value).
 - Bytes 0 (**?**), 16 (600: **H**, the 1/600 s legacy time base), 24, 32, 40 (cache-like: they hold values the session used earlier, do not use them: **E**), 48 (**E**), 176 and 184 (360 in all files: **?**, probably the maximum shutter angle), 196 and 200 (128 and 16: **?**).
 - Not sampled: a 3840 x 2160 composition, other pixel aspect fractions (1.2121, 1.4587), the preserve-frame-rate and preserve-resolution switches, draft 3D, `Hide shy layers`, frame blending, the 8-versus-16-bit project depth with a coloured background, the display start at 30 fps and with drop frame (whether the denominator at 168 is always the timescale).
 - `PRin/prda` (12 bytes for Classic 3D, 52 for Advanced 3D: renderer parameters, **E**).
-- Item `idta` byte 20 and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
+- Item `idta` byte 23 (0x20 composition and sequences or clips, 0x30 stills and solids, 4 audio, 0 folder; needed: zeroed, renders differ) and `idpc` (**V** in the corpus: 1 when the composition contains a nested composition), `head`, `nhed`, `nnhd`, `Ewst`, the `f*` records, `Gide`, `PTRE`, `LRdr` and `LSIf` bodies. `head` bytes 16 to 19 are the save counter (a big-endian `u32`; only its low byte changed between most saves, `314` shows the carry) and are the only bytes of the container that change in a Save As without an edit; item `idta` bytes 80 to 83 are the modification time (seconds since 1904-01-01); `nhed` / `nnhd` hold the id of the After Effects session (six sessions seen); `mkif` byte 8 is a running mask counter; `pgui` chunks are random GUIDs. All of that is edit-history or session state (**V** in the corpus) and is not decoded, except the mask counter.
 
 **Properties and keyframes**
 
-- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
-- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, above); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
+- `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**; needed, without it keys are dropped), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**; 16..55 are needed by roving keys: zeroed, After Effects reads a roving key back at time 0), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
+- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, aep-export.md R13); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
 - The 8 stale bytes of the marker record and the bytes after the common fields of the mask path record (uninitialised memory).
 - Expressions in effect parameters, multi-line and non-ASCII expressions, the ExtendScript engine.
 - Time Remapping with extra keys, with a stretch, on a nested layer; whether keys are rescaled by a stretch.
@@ -823,7 +823,7 @@ another value).
 **Masks, shapes**
 
 - Masks: locked, colour, feather falloff, rotobezier, keyed expansion, a path whose last vertex has only handles, the counter after a mask is deleted, a mask on a scaled layer (whether the box stays layer-relative), an animated path with three or more keys.
-- Shape layers: open shape paths (in shape groups), stroke dashes, taper and wave with values, merge paths, repeater, offset paths and the other path operators, item blend modes and composite order, shape direction, gradient colour stops other than the default (**?**: they appear only as an `ADBE Vector Grad Colors` entry), highlight length and angle other than 0, gradient scale and rotation; why a radial gradient writes its highlight records with `tdsb` 1 and a polygon its inner radius with `tdsb` 3 (**?**).
+- Shape layers: open shape paths (in shape groups), stroke dashes, taper and wave with values, merge paths, repeater, offset paths and the other path operators, item blend modes and composite order, shape direction, gradient colour stops other than the default (**?**: they appear only as an `ADBE Vector Grad Colors` entry), highlight length and angle other than 0, gradient scale and rotation; why a radial gradient writes its highlight records with `tdsb` 1 and a polygon its inner radius with `tdsb` 3 (**?**; the polygon's records hold the defaults 50 and 0, as every non-effect record in the default state does: 3.4, state).
 
 **Text**
 
