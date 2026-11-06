@@ -6,7 +6,7 @@ use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, La
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, has_comp, has_layers, layers_or, layers_p, match_path_of, selected_leaf_props, str_p};
+use super::{CommandSpec, has_comp, has_layers, layers_or, layers_p, match_path_of, merge_p, selected_leaf_props, str_p};
 use crate::{EngineError, KeyRef, LinkClip, Result, Session, cmd};
 
 fn can_undo(s: &Session) -> std::result::Result<(), String> {
@@ -145,7 +145,8 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         Some(layer) => layers_or(s, p, &[layer])?,
         None => layers_p(s, p)?,
     };
-    let new = s.edit("Duplicate", None, |proj, st| {
+    // `merge` folds the copy and the drag that follows it (Alt-drag in the viewer) into one undo step.
+    let new = s.edit("Duplicate", merge_p(p), |proj, st| {
         let mut next = proj.next_id;
         let comp = proj.comp_mut(cid).ok_or(crate::EngineError::NoComp)?;
         let mut created = vec![];
@@ -1007,7 +1008,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Duplicate",
             ["Edit"],
             Some("Cmd+D"),
-            "{layers?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
+            "{layers?, merge?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
             layers_or_text_edit,
             duplicate
         ),

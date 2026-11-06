@@ -184,10 +184,29 @@ fn composites_and_colour() {
     effect_case("ec.utility.hdrcompander", &[("mode", e(1)), ("gain", n(3.0)), ("gamma", n(1.5))]);
     effect_case("ec.utility.hdrcompression", &[]);
     effect_case("ec.utility.hdrcompression", &[("amount", n(40.0))]);
+    effect_case("ec.utility.hdrcompression", &[("amount", n(90.0))]);
+    // A NaN Amount keeps the layer (the CPU returns it unchanged).
+    effect_case("ec.utility.hdrcompression", &[("amount", n(f64::NAN))]);
     effect_case("ec.utility.growbounds", &[("pixels", n(9.0))]);
     effect_case("ec.utility.ccoverbrights", &[]);
     for ch in 1..=5 {
         effect_case("ec.utility.ccoverbrights", &[("channel", e(ch)), ("highlightColor", c(0.2, 0.9, 0.4))]);
+    }
+}
+
+/// HDR Highlight Compression on over-range input (HDR Compander expanding first), where the
+/// compressed channel clips at 1 before the Amount blend.
+#[test]
+fn hdr_compression_over_range() {
+    for amount in [100.0, 60.0] {
+        let mut s = Scene::new(BitDepth::Bpc32);
+        let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+        s.push(bg);
+        let mut l = s.footage(70, 44);
+        s.effect(&mut l, "ec.utility.hdrcompander", &[("mode", e(1)), ("gain", n(4.0)), ("gamma", n(1.0))]);
+        s.effect(&mut l, "ec.utility.hdrcompression", &[("amount", n(amount))]);
+        s.push(l);
+        check(&format!("hdr compression over range {amount}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
     }
 }
 
