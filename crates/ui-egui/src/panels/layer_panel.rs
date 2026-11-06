@@ -221,9 +221,8 @@ fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, ba
     p.text(pos2(vx, bar.center().y), Align2::LEFT_CENTER, tr("View:"), Tokens::ui(12.0), t.text_dim);
     let vr = Rect::from_min_size(pos2(vx + 36.0, bar.center().y - 10.0), vec2(150.0, 20.0));
     let pop = egui::Id::unique("layer-view-pop");
-    if widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::unique("layer-view")).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let vresp = widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::unique("layer-view"));
+    widgets::open_on_press(ui, &vresp, pop);
     app.auto.add("layerPanel.view", vr, "View");
     if let Some(i) = widgets::popup_menu(ui, pop, vr.left_bottom(), names, Some(view)) {
         app.ui.layer_view = Some(i);
