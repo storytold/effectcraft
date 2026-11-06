@@ -89,12 +89,8 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
         let mut out = None;
         if r.lost_focus() || tab.is_some() {
-            let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape))
-                && let Ok(v) = txt.parse::<f64>()
-                && v.is_finite()
-            {
-                out = Some(v.clamp(range.0, range.1));
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                out = typed_value(&buf, suffix, value, decimals, range);
             }
             ui.data_mut(|d| d.remove::<String>(editing_id));
             if let Some(back) = tab {
@@ -141,6 +137,18 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
     (rect, out, resp.drag_stopped())
+}
+
+/// The value a hot-text field commits from its typed `buf`: none when it does not parse or is
+/// the text already displayed for `value` (opening and closing the field must not write, or
+/// the range would clamp a legacy out-of-range value and change its animation), else the
+/// number clamped to `range`.
+fn typed_value(buf: &str, suffix: &str, value: f64, decimals: usize, range: (f64, f64)) -> Option<f64> {
+    let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
+    if txt == format!("{value:.decimals$}") {
+        return None;
+    }
+    txt.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(range.0, range.1))
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -1108,6 +1116,20 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening a field on a negative legacy value (a Taper length saved before it was bounded)
+    /// and closing it unedited writes nothing; a changed text still commits, clamped.
+    #[test]
+    fn unchanged_hot_text_is_not_committed() {
+        let range = (0.0, 1e9);
+        for shown in ["-50.0", " -50.0 ", "-50.0px", "-50,0"] {
+            assert_eq!(typed_value(shown, "px", -50.0, 1, range), None, "{shown:?}");
+        }
+        assert_eq!(typed_value("-50.0%", "%", -50.0, 1, range), None);
+        assert_eq!(typed_value("-20", "", -50.0, 1, range), Some(0.0), "an edit clamps");
+        assert_eq!(typed_value("40", "", -50.0, 1, range), Some(40.0));
+        assert_eq!(typed_value("x", "", -50.0, 1, range), None);
+    }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
     fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {
