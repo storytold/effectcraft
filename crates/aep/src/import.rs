@@ -41,7 +41,7 @@ mod time;
 use effectcraft_project::{ItemId, Project, ProjectSettings};
 
 pub use effects::supported_effects;
-pub use report::{ImportReport, Imported, LIMITATIONS, Loss, LossCategory, MAX_DETAILS};
+pub use report::{AeVersionInfo, ImportReport, Imported, LIMITATIONS, Loss, LossCategory, MAX_DETAILS, TESTED_MAJORS, UNKNOWN};
 
 /// Why an `.aep` was not imported.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -118,6 +118,10 @@ pub fn import(project: &mut Project, bytes: &[u8], options: &ImportOptions<'_>) 
     // Work on a copy so a refusal leaves the project untouched (compositions are shared, cheap).
     let mut work = project.clone();
     let (folder, comps, items, mut report) = build::run(&mut work, &view, options);
+    report.ae_version = report::AeVersionInfo::of(&file);
+    if let Some(line) = report.ae_version.limitation() {
+        report.limitations.push(line);
+    }
     let mut col = report::Collector::default();
     let settings = settings::map(&file, &work.settings, &mut col);
     for loss in col.finish().losses.into_iter().filter(|_| options.settings) {

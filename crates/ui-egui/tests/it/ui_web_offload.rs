@@ -136,7 +136,7 @@ fn viewer_frames_render_remotely_from_project_diffs() {
     assert_eq!(frames.remote_busy(), 0);
     let img = match frames.get(&key(&s, 10)).expect("viewer frame cached") {
         FrameImage::Cpu(c) => c,
-        FrameImage::Gpu(_) => unreachable!(),
+        FrameImage::Gpu(_) | FrameImage::CpuF16(_) => unreachable!(),
     };
     let local = effectcraft_ui_egui::frames::to_color_image(&s.render(comp, c.frame_rate.tick_of(10), opts));
     assert_eq!(img.size, local.size);
