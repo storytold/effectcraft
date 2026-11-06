@@ -121,6 +121,10 @@ pub struct ParamMap {
     /// The EffectCraft parameter id.
     pub target: &'static str,
     pub conv: Conv,
+    /// The range EffectCraft's effect works in when it is narrower than the range After Effects
+    /// accepts (the effect limits the value there): a stored value or key outside it is imported
+    /// as it is and reported. `None`: no narrower range.
+    pub limit: Option<(f64, f64)>,
 }
 
 /// Values of an effect that are not ordinary parameters.
@@ -148,7 +152,12 @@ pub struct EffectMap {
 }
 
 const fn pm(index: usize, kind: ParamKind, target: &'static str, conv: Conv) -> ParamMap {
-    ParamMap { index, kind, target, conv }
+    ParamMap { index, kind, target, conv, limit: None }
+}
+
+/// [`pm`] for a parameter EffectCraft's effect limits to `lo..=hi` (see [`ParamMap::limit`]).
+const fn pm_limited(index: usize, kind: ParamKind, target: &'static str, conv: Conv, lo: f64, hi: f64) -> ParamMap {
+    ParamMap { index, kind, target, conv, limit: Some((lo, hi)) }
 }
 
 const fn fx(match_name: &'static str, effect: &'static str, params: &'static [ParamMap]) -> EffectMap {
@@ -339,6 +348,13 @@ pub const DISPLACE_BEHAVIOR: &[&str] = &["Center Map", "Stretch Map to Fit", "Ti
 pub const MATTE_USE: &[&str] = &["Red Channel", "Green Channel", "Blue Channel", "Alpha Channel", "Luminance", "Hue", "Lightness", "Saturation", "Full", "Off"];
 /// 903.
 pub const SHUTTER_CONTROL: &[&str] = &["Manual", "Automatic"];
+
+// After Effects' popup items of the #3110 effects as the 2026-11-05 importer block stores them
+// (`pdnm`; the `echo-*` and `colstab-*` compositions).
+/// Echo's Echo Operator (`echo-05` ... `echo-10`).
+pub const ECHO_OPERATOR: &[&str] = &["Add", "Maximum", "Minimum", "Screen", "Composite In Back", "Composite In Front", "Blend"];
+/// Color Stabilizer's Stabilize (`colstab-02`, `colstab-03`; the fresh default is Levels).
+pub const STABILIZE: &[&str] = &["Brightness", "Levels", "Curves"];
 
 /// The effects the importer converts.
 pub const EFFECTS: &[EffectMap] = &[
@@ -1005,6 +1021,50 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(2, K::FloatSlider, "shutterAngle", Conv::Plain { valid_max: 5000.0 }),
             pm(3, K::IntSlider, "shutterSamples", Conv::Plain { valid_max: 256.0 }),
             pm(4, K::FloatSlider, "vectorDetail", Conv::Plain { valid_max: 100.0 }),
+        ],
+    ),
+    // HDR Highlight Compression (importer block 2026-11-05, `hdr-*`): Amount a float slider in
+    // percent (valid 0..100, default 100).
+    fx("ADBE HDR ToneMap", "ec.utility.hdrcompression", &[pm(1, K::FloatSlider, "amount", Conv::Plain { valid_max: 100.0 })]),
+    // Echo (`echo-*`): Echo Time in seconds (valid -30 000..30 000), Number Of Echoes an integer
+    // (valid 0..30 000), Starting Intensity 0..1, Decay (valid 0..100, slider 0..1), Echo
+    // Operator. EffectCraft's Echo uses at most 255 echoes and a Decay up to 1.
+    fx(
+        "ADBE Echo",
+        "ec.time.echo",
+        &[
+            pm(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }),
+            pm_limited(2, K::IntSlider, "numberOfEchoes", Conv::Plain { valid_max: 30000.0 }, 0.0, 255.0),
+            pm(3, K::FloatSlider, "startingIntensity", Conv::Plain { valid_max: 1.0 }),
+            pm_limited(4, K::FloatSlider, "decay", Conv::Plain { valid_max: 100.0 }, 0.0, 1.0),
+            pm(5, K::Popup, "echoOperator", Conv::Popup { default: 1, items: ECHO_OPERATOR }),
+        ],
+    ),
+    // Linear Wipe (`linwipe-*`): Transition Completion and Feather fixed sliders (valid 100 and
+    // 32 000), Wipe Angle in degrees.
+    fx(
+        "ADBE Linear Wipe",
+        "ec.transition.linearwipe",
+        &[
+            pm(1, K::FixedSlider, "completion", Conv::Plain { valid_max: 100.0 }),
+            pm(2, K::Angle, "angle", Conv::Angle),
+            pm(3, K::FixedSlider, "feather", Conv::Plain { valid_max: 32000.0 }),
+        ],
+    ),
+    // Offset (`offset-*`): Blend With Original is a 0..1 fraction, a percentage here.
+    fx("ADBE Offset", "ec.distort.offset", &[pm(1, K::Point, "shift", Conv::Point), pm(2, K::FixedSlider, "blend", Conv::Percent { valid_max: 1.0 })]),
+    // Color Stabilizer (`colstab-*`): Stabilize (fresh default Levels), the three sample points,
+    // Sample Size a fixed slider (valid 50, default 3). The reference frame (Set Frame) is not a
+    // parameter in the file and is not imported.
+    fx(
+        "ADBE Deflicker",
+        "ec.color.colorstabilizer",
+        &[
+            pm(1, K::Popup, "stabilize", Conv::Popup { default: 2, items: STABILIZE }),
+            pm(2, K::Point, "blackPoint", Conv::Point),
+            pm(3, K::Point, "midPoint", Conv::Point),
+            pm(4, K::Point, "whitePoint", Conv::Point),
+            pm(5, K::FixedSlider, "sampleSize", Conv::Plain { valid_max: 50.0 }),
         ],
     ),
     // Layer Control (076, 220, 320, 321): the default is the owning layer, None is unset.

@@ -2010,6 +2010,7 @@ dependencies = [
 name = "effectcraft-ui-egui"
 version = "0.21.0"
 dependencies = [
+ "bytemuck",
  "chrono",
  "craft-quit",
  "craft-ui",
@@ -2032,6 +2033,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "exr",
+ "half",
  "image",
  "kurbo",
  "log",
@@ -2040,6 +2042,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "tempfile",
  "toml",
  "web-time",
 ]

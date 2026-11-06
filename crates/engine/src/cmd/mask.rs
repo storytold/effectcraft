@@ -229,6 +229,120 @@ fn set_closed(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!(c))
 }
 
+/// Rebuild a rectangular mask or shape path with corner radius `radius` (layer pixels; 0 gives
+/// square corners). The rectangle is the path's bounding box. Only a plain rectangle (four
+/// corner vertices, straight sides) or a rounded one (eight vertices, straight sides alternating
+/// with circular corners) is reshaped; anything else (an ellipse, a star) is refused. The new path
+/// keeps the old one's start vertex and direction, so the feather points and the other keys of an
+/// animated path still line up; a change between square and rounded corners changes the vertex
+/// count, which is refused when the path is keyed or has feather points.
+fn set_roundness(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "mask.setRoundness";
+    let radius = p.get("roundness").and_then(Value::as_f64).filter(|r| r.is_finite() && *r >= 0.0);
+    let radius = radius.ok_or_else(|| bad(c, "need `roundness`: a corner radius in pixels, 0 or more"))?;
+    let (cid, lid) = layer_p(s, p, c)?;
+    let key = p.get("mask").cloned().ok_or_else(|| bad(c, "missing `mask` (uid, index or name)"))?;
+    let t = s.time();
+    s.edit(c, merge_p(p), |proj, _| {
+        let l = layer_mut(proj, cid, lid)?;
+        let lt = l.layer_time(t);
+        let g = path_group(&mut l.props, &key).ok_or_else(|| bad(c, "no such mask or shape path"))?;
+        let roto = super::paths::is_roto(g);
+        let pr = g.get_mut("path").ok_or_else(|| bad(c, "mask has no path"))?;
+        let KV::Path(mut sp) = pr.value_at(lt) else { return Err(bad(c, "not a path")) };
+        sp.fit_tangents();
+        let (lo, hi) = rect_box(&sp).ok_or_else(|| bad(c, "the path is not a closed rectangle or rounded rectangle"))?;
+        let size = [hi[0] - lo[0], hi[1] - lo[1]];
+        let bez = effectcraft_path::rect(size, [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0], radius);
+        let mut new = effectcraft_path::from_kurbo(&bez).into_iter().next().ok_or_else(|| bad(c, "could not rebuild the path"))?;
+        if new.vertices.len() != sp.vertices.len() {
+            if !pr.keys.is_empty() {
+                return Err(bad(c, "the path is keyed: changing between square and rounded corners would change its vertex count"));
+            }
+            if !sp.feather.is_empty() {
+                return Err(bad(c, "the path has feather points: changing between square and rounded corners would change its vertex count"));
+            }
+        }
+        align_like(&mut new, &sp);
+        new.feather = std::mem::take(&mut sp.feather);
+        if roto {
+            super::paths::roto_smooth(&mut new);
+        }
+        pr.set_value_at(lt, KV::Path(new));
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
+/// The bounding box of `sp` when it is a closed plain rectangle (four corner vertices, straight
+/// sides) or rounded rectangle (eight vertices on the box's edges, straight sides along the edges
+/// alternating with circular corners whose two ends are as far apart across as down).
+fn rect_box(sp: &ShapePath) -> Option<([f64; 2], [f64; 2])> {
+    let first = *sp.vertices.first()?;
+    let (mut lo, mut hi) = (first, first);
+    for v in &sp.vertices {
+        lo = [lo[0].min(v[0]), lo[1].min(v[1])];
+        hi = [hi[0].max(v[0]), hi[1].max(v[1])];
+    }
+    let n = sp.vertices.len();
+    if !sp.closed || !(n == 4 || n == 8) || hi[0] <= lo[0] || hi[1] <= lo[1] {
+        return None;
+    }
+    let eps = 1e-9 * (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
+    let x_edge = |v: [f64; 2]| v[0] == lo[0] || v[0] == hi[0];
+    let y_edge = |v: [f64; 2]| v[1] == lo[1] || v[1] == hi[1];
+    let zero = |t: Option<&[f64; 2]>| t.is_none_or(|t| *t == [0.0, 0.0]);
+    let seg = |i: usize| (sp.vertices[i], sp.vertices[(i + 1) % n]);
+    let straight = |i: usize| {
+        let (a, b) = seg(i);
+        zero(sp.out_tangents.get(i)) && zero(sp.in_tangents.get((i + 1) % n)) && ((a[0] == b[0] && x_edge(a)) || (a[1] == b[1] && y_edge(a)))
+    };
+    let corner = |i: usize| {
+        let (a, b) = seg(i);
+        let (dx, dy) = ((b[0] - a[0]).abs(), (b[1] - a[1]).abs());
+        dx > eps && (dx - dy).abs() <= eps.max(dx * 1e-9) && ((x_edge(a) && y_edge(b)) || (y_edge(a) && x_edge(b)))
+    };
+    let ok = if n == 4 {
+        sp.vertices.iter().all(|v| x_edge(*v) && y_edge(*v)) && (0..n).all(straight)
+    } else {
+        sp.vertices.iter().all(|v| x_edge(*v) || y_edge(*v)) && (0..2).any(|k| (0..n).all(|i| if i % 2 == k { straight(i) } else { corner(i) }))
+    };
+    ok.then_some((lo, hi))
+}
+
+/// Turn the rebuilt closed path `new` so it runs the same way round as `old` and starts at the
+/// vertex nearest `old`'s first one, keeping vertex correspondence for keys and feather points.
+fn align_like(new: &mut ShapePath, old: &ShapePath) {
+    let area = |sp: &ShapePath| {
+        let n = sp.vertices.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (sp.vertices[i], sp.vertices[(i + 1) % n]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+    };
+    if (area(new) > 0.0) != (area(old) > 0.0) {
+        // Reverse: vertex order flips and each vertex's in and out tangents swap; keep vertex 0.
+        new.vertices.reverse();
+        std::mem::swap(&mut new.in_tangents, &mut new.out_tangents);
+        new.in_tangents.reverse();
+        new.out_tangents.reverse();
+        let n = new.vertices.len();
+        if n > 0 {
+            new.vertices.rotate_right(1);
+            new.in_tangents.rotate_right(1);
+            new.out_tangents.rotate_right(1);
+        }
+    }
+    let Some(o) = old.vertices.first() else { return };
+    let d = |v: &[f64; 2]| (v[0] - o[0]).powi(2) + (v[1] - o[1]).powi(2);
+    let start = new.vertices.iter().enumerate().min_by(|a, b| d(a.1).total_cmp(&d(b.1))).map_or(0, |(i, _)| i);
+    new.vertices.rotate_left(start);
+    new.in_tangents.rotate_left(start);
+    new.out_tangents.rotate_left(start);
+}
+
 /// Selected (or given) vertices grouped per (layer, mask).
 fn vertex_groups(s: &Session, p: &Value) -> Result<std::collections::BTreeMap<(u64, Uid), Vec<usize>>> {
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
@@ -649,6 +763,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mask.addVertex", "Add Mask Vertex", [], None, "{layer?, mask, point: [x,y], in?, out?, index?}", has_layers, add_vertex),
         cmd!("mask.setVertex", "Set Mask Vertex", [], None, "{layer?, mask, index, point?, in?, out?, merge?}", has_layers, set_vertex),
         cmd!("mask.setClosed", "Closed", ["Layer", "Mask and Shape Path"], None, "{layer?, mask, closed?}", has_layers, set_closed),
+        cmd!("mask.setRoundness", "Set Mask Roundness", [], None, "{layer?, mask, roundness (corner radius in px; 0 = square)}", has_layers, set_roundness),
         cmd!("mask.selectVertices", "Select Mask Vertices", [], None, "{vertices: [{layer, mask, index}], add?, toggle?}", has_comp, select_vertices),
         cmd!("mask.moveVertices", "Move Mask Vertices", [], None, "{vertices?: [{layer, mask, index}], delta: [dx,dy], merge?}", has_vertices, move_vertices),
         cmd!("mask.deleteVertices", "Delete Mask Vertices", [], None, "{vertices?}", has_vertices, delete_vertices),

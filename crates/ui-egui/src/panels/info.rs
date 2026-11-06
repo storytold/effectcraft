@@ -18,16 +18,28 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 12.0;
     let mut y = rect.min.y + 14.0 - scroll.offset;
-    if app.pointer_comp.is_some() {
+    let comp_size = app.session.active_comp().map_or([1.0, 1.0], |c| [c.width as f32, c.height as f32]);
+    let region = || super::viewer_tools::shown_region(ui.ctx(), comp_size);
+    // 32 bpc (half-float frames): the frame's float values, straight colour as rendered (before
+    // Project Settings ▸ HDR and the viewer's exposure), as After Effects shows them in 32 bpc.
+    let floats = match (app.pointer_comp, app.viewer_f16()) {
+        (Some([cx, cy]), Some(f)) => {
+            let p = super::fx_widgets::frame_pixel_index(f.size(), region(), [cx as f64, cy as f64]).and_then(|i| f.pixel(i));
+            let un = |p: [f32; 4]| {
+                let a = p[3].clamp(0.0, 1.0);
+                if a > 0.0 { [p[0] / a, p[1] / a, p[2] / a, a] } else { [0.0; 4] }
+            };
+            Some((p.map(un), (cx, cy)))
+        }
+        _ => None,
+    };
+    if app.pointer_comp.is_some() && floats.is_none() {
         // GPU frames: read the shown frame back for sampling.
         app.viewer_pixels();
     }
     let (rgba, xy) = match (app.pointer_comp, &app.viewer_image) {
-        (Some([cx, cy]), Some(img)) => {
-            let comp = app.session.active_comp().map_or([1.0, 1.0], |c| [c.width as f32, c.height as f32]);
-            let region = super::viewer_tools::shown_region(ui.ctx(), comp);
-            (super::fx_widgets::frame_pixel(img, region, [cx as f64, cy as f64]), Some((cx, cy)))
-        }
+        _ if floats.is_some() => (None, floats.map(|(_, xy)| xy)),
+        (Some([cx, cy]), Some(img)) => (super::fx_widgets::frame_pixel(img, region(), [cx as f64, cy as f64]), Some((cx, cy))),
         _ => (None, None),
     };
     let row = |p: &egui::Painter, y: f32, k: &str, v: String, col: Color32| {
@@ -43,20 +55,26 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             [f(c.r()), f(c.g()), f(c.b()), a]
         }
     };
-    let px = rgba.map(unpre).unwrap_or([0, 0, 0, 0]);
-    row(&p, y, "R :", format!("{}", px[0]), Color32::from_rgb(0xe0, 0x60, 0x60));
-    row(&p, y + 18.0, "G :", format!("{}", px[1]), Color32::from_rgb(0x60, 0xd0, 0x60));
-    row(&p, y + 36.0, "B :", format!("{}", px[2]), Color32::from_rgb(0x60, 0x90, 0xf0));
-    row(&p, y + 54.0, "A :", format!("{}", px[3]), t.text_dim);
+    let (texts, swatch): ([String; 4], Option<[u8; 4]>) = match floats {
+        Some((p, _)) => (p.unwrap_or([0.0; 4]).map(|v| format!("{v:.4}")), p.map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8))),
+        None => {
+            let px = rgba.map(unpre).unwrap_or([0, 0, 0, 0]);
+            (px.map(|v| format!("{v}")), rgba.map(|_| px))
+        }
+    };
+    let [tr_, tg, tb, ta] = texts;
+    row(&p, y, "R :", tr_, Color32::from_rgb(0xe0, 0x60, 0x60));
+    row(&p, y + 18.0, "G :", tg, Color32::from_rgb(0x60, 0xd0, 0x60));
+    row(&p, y + 36.0, "B :", tb, Color32::from_rgb(0x60, 0x90, 0xf0));
+    row(&p, y + 54.0, "A :", ta, t.text_dim);
     let cx = rect.min.x + rect.width() * 0.5;
     if let Some((x, yy)) = xy {
         p.text(pos2(cx, y), Align2::LEFT_CENTER, format!("X : {x:.0}"), Tokens::mono(12.0), t.text);
         p.text(pos2(cx, y + 18.0), Align2::LEFT_CENTER, format!("Y : {yy:.0}"), Tokens::mono(12.0), t.text);
     }
-    if let Some(c) = rgba {
+    if let Some(px) = swatch {
         let sw = egui::Rect::from_min_size(pos2(cx, y + 34.0), vec2(36.0, 30.0));
         p.rect_filled(sw, 3.0, Color32::from_rgb(px[0], px[1], px[2]));
-        let _ = c;
     }
     y += 82.0;
     p.line_segment([pos2(rect.min.x + 8.0, y), pos2(rect.max.x - 8.0, y)], egui::Stroke::new(1.0, t.separator));
