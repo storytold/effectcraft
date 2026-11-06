@@ -166,7 +166,13 @@ pub(crate) fn set_texture(
     let pass = |encoding| passive_pass(encoding, dc.as_ref());
     let gpu = app.display_gpu();
     let img = match img {
-        FrameImage::CpuF16(f) if gpu.is_some() && app.window_wgpu.is_some() => FrameImage::CpuF16(f),
+        // Frames past the display texture limit take the CPU pass (display conversion first, then
+        // the averaging down), which the GPU bake leaves out.
+        FrameImage::CpuF16(f)
+            if app.window_wgpu.is_some() && gpu.as_ref().is_some_and(|g| !crate::display_gpu::Source::F16(f.clone()).needs_cpu_pass(g.max_side())) =>
+        {
+            FrameImage::CpuF16(f)
+        }
         img => cpu_passive_image(app, img, dc.as_ref()),
     };
     let tex = match (img, app.passive_tex.remove(&id)) {
