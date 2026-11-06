@@ -335,22 +335,43 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     moved
 }
 
+/// Match names and dependency status, retain folder ancestors, and expand them while filtering.
+/// Iterative traversal bounds cyclic document trees and builds each folder's child list once.
 pub(crate) fn visible_rows(app: &EffectcraftApp) -> Vec<(ItemId, usize)> {
-    fn walk(app: &EffectcraftApp, folder: Option<ItemId>, depth: usize, q: &str, out: &mut Vec<(ItemId, usize)>) {
-        let mut kids = app.session.project.children(folder);
-        sort_items(&mut kids, &app.ui.project_sort, app.ui.project_sort_desc);
-        for it in kids {
-            if !q.is_empty() && !it.is_folder() && !it.name.to_lowercase().contains(q) {
-                continue;
-            }
-            out.push((it.id, depth));
-            if it.is_folder() && (app.ui.project_open_folders.contains(&it.id.0) || !q.is_empty()) {
-                walk(app, Some(it.id), depth + 1, q, out);
+    let project = &app.session.project;
+    let q = app.ui.project_search.to_lowercase();
+    let filtered = !q.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All;
+    let mut included = std::collections::BTreeSet::new();
+    if filtered {
+        for item in project.items.values().filter(|i| !i.is_folder() && app.ui.project_status.matches(i) && i.name.to_lowercase().contains(&q)) {
+            let mut id = Some(item.id);
+            while let Some(current) = id {
+                if !included.insert(current) {
+                    break;
+                }
+                id = project.item(current).and_then(|i| i.parent);
             }
         }
     }
-    let mut rows = vec![];
-    walk(app, None, 0, &app.ui.project_search.to_lowercase(), &mut rows);
+    let mut children: std::collections::BTreeMap<Option<ItemId>, Vec<&Item>> = std::collections::BTreeMap::new();
+    for item in project.items.values() {
+        children.entry(item.parent).or_default().push(item);
+    }
+    for kids in children.values_mut() {
+        sort_items(kids, &app.ui.project_sort, app.ui.project_sort_desc);
+    }
+    let mut pending: Vec<_> = children.get(&None).into_iter().flatten().rev().map(|i| (*i, 0usize)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    while let Some((item, depth)) = pending.pop() {
+        if !seen.insert(item.id) || (filtered && !included.contains(&item.id)) {
+            continue;
+        }
+        rows.push((item.id, depth));
+        if item.is_folder() && (filtered || app.ui.project_open_folders.contains(&item.id.0)) {
+            pending.extend(children.get(&Some(item.id)).into_iter().flatten().rev().map(|i| (*i, depth.saturating_add(1))));
+        }
+    }
     rows
 }
 
@@ -375,6 +396,7 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
         }
     }
     app.ui.project_search.clear();
+    app.ui.project_status = crate::state::ProjectStatus::All;
     app.session.state.project_selection = items;
     // Force the panel's selection scroll on its next draw, even when the item was already selected.
     ctx.data_mut(|d| d.remove_temp::<Option<u64>>(selection_seen_id()));
@@ -493,8 +515,45 @@ impl Columns {
     }
 }
 
-fn layout_columns(app: &mut EffectcraftApp, rect: Rect) -> Columns {
-    let name_w = (rect.width() * 0.40).clamp(120.0, 260.0);
+/// Narrowest Name column (points).
+const MIN_NAME_W: f32 = 120.0;
+
+/// The Name column width that shows every listed name in full: indent, twirl and icon, the
+/// name, and room for a problem marker.
+fn name_fit(app: &EffectcraftApp, p: &egui::Painter, rows: &[(ItemId, usize)]) -> f32 {
+    rows.iter()
+        .filter_map(|(id, depth)| {
+            let it = app.session.project.item(*id)?;
+            let text = p.layout_no_wrap(it.name.clone(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            Some(8.0 + 14.0 * *depth as f32 + 30.0 + text + 24.0)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// [`name_fit`] of the listed rows: only an automatic width (or an invalid saved one) measures the
+/// names.
+fn auto_name_fit(app: &EffectcraftApp, p: &egui::Painter) -> f32 {
+    if app.ui.project_name_w.is_some_and(f32::is_finite) { 0.0 } else { name_fit(app, p, &visible_rows(app)) }
+}
+
+/// The part of the panel the optional columns keep next to a widest Name column (points): room
+/// for some of their content and a horizontal scroll bar track that can be dragged.
+const MIN_OPTIONAL_VIEW: f32 = 40.0;
+
+/// The widest the Name column gets in a panel `width` points wide: the width less the Label
+/// column (40 points), and less [`MIN_OPTIONAL_VIEW`] while optional columns are shown.
+fn name_max_w(app: &EffectcraftApp, width: f32) -> f32 {
+    let optional = if app.ui.project_columns.iter().any(|k| COLUMNS.iter().any(|c| c.0 == k)) { MIN_OPTIONAL_VIEW } else { 0.0 };
+    (width - 40.0 - optional).max(MIN_NAME_W)
+}
+
+/// Column positions. The Name column is as wide as the user dragged it, else wide enough for
+/// the names listed (`fit`), as After Effects shows full names; at most [`name_max_w`] (the
+/// optional columns scroll under it).
+fn layout_columns(app: &mut EffectcraftApp, rect: Rect, fit: f32) -> Columns {
+    let max_w = name_max_w(app, rect.width());
+    let auto = (rect.width() * 0.40).clamp(MIN_NAME_W, 260.0).max(fit);
+    let name_w = app.ui.project_name_w.filter(|w| w.is_finite()).unwrap_or(auto).clamp(MIN_NAME_W, max_w);
     let label_x = rect.min.x + name_w + 14.0;
     let mut cols: Vec<(&'static str, &'static str, f32, f32)> = vec![("name", "Name", rect.min.x + 26.0, name_w - 26.0), ("label", "", label_x - 8.0, 18.0)];
     // Optional columns wider than the panel scroll horizontally under the frozen Name and Label
@@ -568,6 +627,21 @@ fn draw_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, h
     }
     let hresp = ui.interact(Rect::from_min_max(pos2(end_x, hdr.min.y), hdr.max), egui::Id::unique("proj-hdr-rest"), Sense::CLICK);
     column_menu(app, &hresp);
+    // The Name column's right edge: drag to resize it, double-click to fit the names again.
+    let edge = Rect::from_center_size(pos2(hdr.min.x + cl.name_w + 5.0, hdr.center().y), vec2(8.0, hdr.height()));
+    let eresp = ui.interact(edge, egui::Id::unique("proj-name-edge"), Sense::click_and_drag());
+    app.auto.add("project.nameColumn.edge", edge, "Drag to resize the Name column; double-click to fit the names");
+    if eresp.hovered() || eresp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        hp.line_segment([pos2(edge.center().x, hdr.min.y + 3.0), pos2(edge.center().x, hdr.max.y - 3.0)], Stroke::new(1.0, t.text_dim));
+    }
+    if eresp.double_clicked() {
+        app.ui.project_name_w = None;
+    } else if eresp.dragged() {
+        let max_w = name_max_w(app, hdr.width());
+        app.ui.project_name_w = Some((app.ui.project_name_w.unwrap_or(cl.name_w).min(max_w) + eresp.drag_delta().x).clamp(MIN_NAME_W, max_w));
+    }
+    eresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::tr("Resize the Name column")));
     app.auto.add("project.columns", hdr, "Columns (right-click to show or hide)");
 }
 
@@ -1153,6 +1227,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     details_header(app, ui, &p, &ctx, head);
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
+    let filter_w = 88.0_f32.min(sr.width() * 0.45);
+    let filter = Rect::from_min_max(pos2(sr.max.x - filter_w, sr.min.y), sr.max);
+    let sr = Rect::from_min_max(sr.min, pos2((filter.min.x - 4.0).max(sr.min.x), sr.max.y));
+    let id = egui::Id::unique("project-status");
+    let pop = id.with("popup");
+    let status = app.ui.project_status;
+    let response = widgets::dropdown_tip(ui, filter, crate::i18n::tr(status.label()), Some(crate::i18n::tr("Filter by footage status")), &t, id);
+    app.auto.add("project.status", filter, status.label());
+    if response.clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    if widgets::popup_is_open(ui, pop) {
+        let options: Vec<_> = crate::state::ProjectStatus::ALL.iter().map(|s| crate::i18n::tr(s.label()).to_string()).collect();
+        if let Some(index) = widgets::popup_menu(ui, pop, filter.left_bottom(), &options, crate::state::ProjectStatus::ALL.iter().position(|s| *s == status))
+            && let Some(chosen) = crate::state::ProjectStatus::ALL.get(index)
+        {
+            app.ui.project_status = *chosen;
+        }
+    }
     let mut q = app.ui.project_search.clone();
     widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
     app.ui.project_search = q;
@@ -1165,7 +1258,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gutter_id = egui::Id::unique("project-gutter");
     let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
     let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
-    let cl = layout_columns(app, content);
+    let fit = auto_name_fit(app, &p);
+    let cl = layout_columns(app, content, fit);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
     // Rows.
@@ -1226,7 +1320,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("project.item.{}", id.0), r, &it.name);
         // For screen readers: a tree item named by the item and its type, with its selection,
         // depth and (a folder) open state. One Tab stop per row; the panel's keys then apply.
-        let open = it.is_folder().then(|| app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty());
+        let open = it.is_folder().then(|| {
+            app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All
+        });
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
         ctx.accesskit_node_builder(resp.id, |n| {
             n.set_selected(selected);
@@ -1251,7 +1347,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         proxy_indicator(app, ui, &g, it, &mut actions);
         // Footage (or the proxy in use) that can't be decoded (no decoder for its codec /
         // profile): a warning marker at the end of the name cell, the reason on hover.
-        let problem = app.session.footage.item_problem(it);
+        let problem = app.session.footage.item_problem(it).or_else(|| effectcraft_engine::render::missing_item_problem(it));
         let name_clip =
             Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
         if let Some(why) = &problem {
@@ -1408,6 +1504,53 @@ mod tests {
         }
     }
 
+    /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")
+    /// up to the panel's width less the Label column and, while optional columns show, room for
+    /// them; a width the user dragged wins.
+    #[test]
+    fn the_name_column_fits_the_names_up_to_the_panel_width() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 400.0));
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 260.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        // The optional columns keep 40 points more: some content and a usable scroll bar track.
+        assert!(!app.ui.project_columns.is_empty());
+        let cl = layout_columns(&mut app, rect, 2000.0);
+        assert_eq!(cl.name_w, 620.0);
+        assert!(rect.max.x - cl.opt_x0 >= 50.0, "the optional columns keep {} points", rect.max.x - cl.opt_x0);
+        let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 400.0));
+        assert_eq!(layout_columns(&mut app, narrow, 400.0).name_w, MIN_NAME_W);
+        app.ui.project_name_w = Some(150.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 150.0);
+        app.ui.project_name_w = Some(f32::NAN);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        app.ui.project_name_w = Some(5000.0);
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 620.0);
+        // Without optional columns the Name column may take all but the Label column.
+        app.ui.project_columns.clear();
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 660.0);
+    }
+
+    #[test]
+    fn name_fit_measures_the_longest_listed_name_with_its_indent() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = std::sync::Arc::make_mut(&mut s.project);
+        let folder = p.add_item("F", Label::Aqua, None, ItemKind::Folder);
+        let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
+        let app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        let mut fit = (0.0, 0.0);
+        ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let text = painter.layout_no_wrap("A rather long composition name for the list".into(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            fit = (name_fit(&app, painter, &[(folder, 0), (long, 1)]), 8.0 + 14.0 + 30.0 + text + 24.0);
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(fit.0, fit.1);
+        assert!(fit.0 > 260.0);
+    }
+
     #[test]
     fn size_keys_are_sampled_once_with_stable_ties() {
         let mut project = Project::default();
@@ -1548,5 +1691,42 @@ mod tests {
         set_column(&mut cols, "path", true);
         set_column(&mut cols, "size", false);
         assert_eq!(cols, ["type", "duration", "fps", "path", "comment"]);
+    }
+}
+
+#[cfg(test)]
+mod availability_filter_tests {
+    use super::*;
+    use crate::state::ProjectStatus;
+    use effectcraft_engine::project::{Footage, Proxy};
+
+    #[test]
+    fn status_and_search_keep_only_matching_items_and_their_folder_ancestors() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let folder = p.add_item("Shots", Label::None, None, ItemKind::Folder);
+        let missing =
+            p.add_item("Lost plate", Label::None, Some(folder), ItemKind::Footage(Footage { path: "/gone.png".into(), missing: true, ..Default::default() }));
+        let present = p.add_item("Other plate", Label::None, None, ItemKind::Footage(Footage { path: "/here.png".into(), ..Default::default() }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        app.ui.project_search = "plate".into();
+        assert_eq!(visible_rows(&app), vec![(folder, 0), (missing, 1)]);
+        app.ui.project_status = ProjectStatus::Available;
+        assert_eq!(visible_rows(&app), vec![(present, 0)]);
+        app.ui.project_search = "absent name".into();
+        assert!(visible_rows(&app).is_empty());
+    }
+
+    #[test]
+    fn unused_missing_proxy_is_in_the_missing_filter() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let id = p.add_item("Plate", Label::None, None, ItemKind::Footage(Footage { path: "/original.png".into(), ..Default::default() }));
+        p.item_mut(id).unwrap().proxy =
+            Some(Box::new(Proxy { footage: Footage { path: "/proxy.png".into(), missing: true, ..Default::default() }, enabled: false }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        assert_eq!(visible_rows(&app), vec![(id, 0)]);
     }
 }

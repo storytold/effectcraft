@@ -637,3 +637,96 @@ fn menu_items_cover_the_tree() {
     assert_eq!(menus().last(), Some(&"Help"));
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
+
+/// A command run from the menu that opens a composition (File ▸ Import ▸ After Effects
+/// Project… after Import Anyway, a new composition) leaves the Home screen: it stayed over the
+/// imported project, which looked as if nothing was imported. A command that opens none keeps it.
+#[test]
+fn a_menu_command_that_opens_a_composition_leaves_the_home_screen() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "project.summary", json!({})).unwrap();
+    assert!(app.ui.start_screen);
+    assert!(run_engine(&mut app, &ctx, "file.importAep", json!({"path": "/no/such/file.aep", "allowLosses": true})).is_err());
+    assert!(app.ui.start_screen);
+    run_engine(&mut app, &ctx, "comp.new", json!({"name": "Opened", "width": 64, "height": 36, "duration": 1})).unwrap();
+    assert!(!app.ui.start_screen);
+    // Asked for again (Home button, Help ▸ In-App Tutorials) it stays while the comp is open.
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    assert!(app.ui.start_screen);
+}
+
+/// Opening a project leaves the Home screen also when its composition has the id of the one open
+/// before (the project changed, the id did not), from the menu and from a file dialog's answer.
+#[test]
+fn opening_a_project_leaves_the_home_screen_whatever_its_composition_id() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "Saved", "width": 64, "height": 36, "duration": 1})).unwrap();
+    let dir = std::env::temp_dir().join(format!("ec-home-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Home.ecproj").to_string_lossy().to_string();
+    app.session.execute("file.saveAs", json!({"path": path})).unwrap();
+    let comp = app.session.active_comp_id();
+    // File ▸ Open with the path given (the menu path, `run_engine`).
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "file.open", json!({"path": path})).unwrap();
+    assert_eq!(app.session.active_comp_id(), comp, "the same composition id");
+    assert!(!app.ui.start_screen, "File ▸ Open leaves the Home screen");
+    // The path picked in a file dialog (`run_with_picked`).
+    app.ui.start_screen = true;
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: vec![path.clone()] });
+    assert_eq!(app.session.active_comp_id(), comp);
+    assert!(!app.ui.start_screen, "a picked project leaves the Home screen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A successful command that reports per-item problems (`errors`) shows a compact, readable
+/// report in the status line: `file: error; …`, first three and a count, never raw JSON.
+#[test]
+fn bundle_result_errors_show_compactly_in_the_status_line() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let result = json!({"installed": [], "errors": [
+        {"file": "a.wasm", "error": "already installed"},
+        {"file": "b.wasm", "error": "does not load"},
+        {"file": "c.wasm", "error": "cannot read it"},
+        {"error": "cannot read the bundle folder"},
+    ]});
+    super::frontend::show_result_errors(&mut app, &result);
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+    // A clean success leaves the status line alone.
+    super::frontend::show_result_errors(&mut app, &json!({"installed": ["x.wasm"], "errors": []}));
+    assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+}
+
+/// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,
+/// a plain install asks for a `.wasm`, and with both given inline nothing asks at all.
+#[test]
+fn effect_plugin_install_dialog_router() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    // The bundle menu entry: a folder picker.
+    assert_eq!(invoke(&mut app, &ctx, "effect.plugins.install", json!({"bundle": true})).unwrap(), json!({"dialog": "effect.plugins.install"}));
+    assert_eq!(pending.lock().unwrap().pop().unwrap(), crate::FileDialog::Folder, "the bundle asks for a folder");
+    // The plain command: a `.wasm` file picker.
+    assert_eq!(invoke(&mut app, &ctx, "effect.plugins.install", json!({})).unwrap(), json!({"dialog": "effect.plugins.install"}));
+    let crate::FileDialog::Open { exts, many } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
+    assert_eq!(exts, vec!["wasm".to_string()], "{exts:?}");
+    assert!(!many);
+    // `path` given inline overrides the bundle ask: the command runs directly, opening no dialog
+    // (this session has no plug-in loader, so it errors — but nothing was asked).
+    let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"bundle": true, "path": "x.wasm"}));
+    assert!(r.is_err(), "{r:?}");
+    assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline path");
+    // A supplied `folder` is a bundle source too: asking for a file would let the install take
+    // the picked file and ignore the folder, so nothing is asked.
+    let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"folder": "some/where"}));
+    assert!(r.is_err(), "{r:?}");
+    assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline folder");
+}

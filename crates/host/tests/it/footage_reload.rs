@@ -147,7 +147,7 @@ fn a_file_still_being_written_is_tried_again() {
 }
 
 /// The desktop app's watcher ([`footage_reload::Watcher`]) notices a footage file another app
-/// saved, hands its stamps over once, and reloads it through [`footage_reload::apply_stamps`];
+/// saved, hands its stamps over once, and reloads it through [`footage_reload::Scan::apply`];
 /// while nothing changes it hands over nothing (so the interface is never woken for it).
 #[test]
 fn the_watcher_notices_a_footage_file_changed_on_disk() {
@@ -186,14 +186,14 @@ fn the_watcher_notices_a_footage_file_changed_on_disk() {
         }
     };
     // First look: remembered, nothing to reload.
-    assert_eq!(footage_reload::apply_stamps(&mut s, next(&w, 1)).unwrap(), json!({"files": 0, "reloaded": 0}));
+    assert_eq!(next(&w, 1).apply(&mut s).unwrap(), json!({"files": 0, "reloaded": 0}));
     assert_eq!(wakes.load(Ordering::SeqCst), 1);
     std::thread::sleep(fast * 15);
     assert!(w.take().is_none(), "an unchanged file is never reported");
     assert_eq!(wakes.load(Ordering::SeqCst), 1, "and never wakes the interface");
     // Saved in another app: reported once, reloaded, shown.
     save(&path, &flat(GREEN, true));
-    assert_eq!(footage_reload::apply_stamps(&mut s, next(&w, 2)).unwrap(), json!({"files": 1, "reloaded": 1}));
+    assert_eq!(next(&w, 2).apply(&mut s).unwrap(), json!({"files": 1, "reloaded": 1}));
     assert!(near(pixel(&s, cid, 32, 24), GREEN));
     assert_eq!(wakes.load(Ordering::SeqCst), 2);
     std::thread::sleep(fast * 10);

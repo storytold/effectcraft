@@ -581,6 +581,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
@@ -591,6 +592,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
+    After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
@@ -860,6 +862,16 @@ Layer
     Flip Vertical | layer.transform {"op":"flipV"}
     Center In View | layer.transform {"op":"center"} | Cmd+Home
     Center Anchor Point in Layer Content | layer.centerAnchor
+    Quick Set Anchor
+      Top Left | layer.quickSetAnchor {"point":"topLeft"}
+      Top | layer.quickSetAnchor {"point":"top"}
+      Top Right | layer.quickSetAnchor {"point":"topRight"}
+      Left | layer.quickSetAnchor {"point":"left"}
+      Center | layer.quickSetAnchor {"point":"center"}
+      Right | layer.quickSetAnchor {"point":"right"}
+      Bottom Left | layer.quickSetAnchor {"point":"bottomLeft"}
+      Bottom | layer.quickSetAnchor {"point":"bottom"}
+      Bottom Right | layer.quickSetAnchor {"point":"bottomRight"}
     Fit to Comp | layer.transform {"op":"fit"} | Cmd+Alt+F
     Fit to Comp Width | layer.transform {"op":"fitWidth"} | Cmd+Alt+Shift+H
     Fit to Comp Height | layer.transform {"op":"fitHeight"} | Cmd+Alt+Shift+G
@@ -1014,6 +1026,11 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Install Effect Plug-in... | effect.plugins.install
+  Install Effect Plug-in Bundle (Folder)... | effect.plugins.install {"bundle": true}
+  Load Plug-ins Through Helper... | effect.helpers.load
+  Scan for Effect Helpers | effect.helpers.scan
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation
