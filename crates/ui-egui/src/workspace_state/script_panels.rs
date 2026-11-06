@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use craft_ui::docking::Action;
 use effectcraft_engine::Session;
 use effectcraft_engine::scriptui::{ScriptUi, WindowKind};
 use serde_json::Value;
@@ -122,6 +123,15 @@ fn show_hidden(workspace: &mut Workspace, open: impl Fn(&PanelKind) -> bool) {
     each_group(&mut workspace.layout, &mut |panels, active| selected.extend(panels.get(*active).copied()));
     let stays_open = |panel: &PanelKind| Permissions { closable: !open(panel), ..crate::dock::permissions(panel) };
     workspace.reconcile(|_| true, stays_open, &Workspace::default());
+    // With its anchor gone, `reconcile` tries an edge frame, which a dock-only root or a tree at
+    // its depth limit can't take. A tab needs no room; like `reconcile`, it expands nothing.
+    let waiting: Vec<PanelKind> = workspace.hidden.iter().map(|(panel, _)| *panel).filter(|panel| open(panel)).collect();
+    for panel in waiting {
+        let anchor = workspace.panels().first().copied();
+        if let Err(error) = workspace.apply(Action::Open { panel, anchor }, crate::dock::permissions) {
+            log::warn!("An open ScriptUI panel stays hidden: {error}");
+        }
+    }
     each_group(&mut workspace.layout, &mut |panels, active| {
         if let Some(index) = panels.iter().position(|panel| selected.contains(panel)) {
             *active = index;
