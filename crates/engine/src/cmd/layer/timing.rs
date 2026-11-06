@@ -310,14 +310,13 @@ pub(super) fn precompose(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"comp": new.0.0, "layer": new.1.0}))
 }
 
-/// Why a pre-comp layer can't be expanded in place, one entry per cause. Un-precompose keeps the
-/// picture exactly, so it handles a pre-comp layer that only places the nested composition
-/// (Position/Anchor Point, timing); anything the layer itself adds to the look is listed.
-fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested: &effectcraft_project::Comp) -> Vec<String> {
+/// Why expanding a pre-comp layer in place would change the picture or drop something, one entry
+/// per cause. Un-precompose keeps the picture exactly for a pre-comp layer that only places the
+/// nested composition (Position/Anchor Point, timing); anything the layer itself adds to the look,
+/// and what only holds inside the nested comp, is listed. These are warnings: `force` unpacks
+/// anyway and drops it. A lock is not listed here: it always refuses.
+fn unprecompose_warnings(comp: &effectcraft_project::Comp, layer: &Layer, nested: &effectcraft_project::Comp) -> Vec<String> {
     let mut why = vec![];
-    if layer.switches.locked {
-        why.push("the layer is locked".to_string());
-    }
     if layer.parent.is_some() {
         why.push("the layer has a parent".to_string());
     }
@@ -325,7 +324,7 @@ fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested
         why.push("the layer has a track matte".to_string());
     }
     if comp.layers.iter().any(|o| o.id != layer.id && (o.parent == Some(layer.id) || o.track_matte.is_some_and(|m| m.layer == layer.id))) {
-        why.push("another layer uses it as its parent or track matte".to_string());
+        why.push("another layer uses it as its parent or track matte (that link is removed)".to_string());
     }
     if layer.is_3d() || layer.switches.collapse || layer.switches.adjustment || layer.preserve_transparency {
         why.push("the layer is 3D, collapses transformations, is an adjustment layer or preserves transparency".to_string());
@@ -339,7 +338,7 @@ fn unprecompose_blockers(comp: &effectcraft_project::Comp, layer: &Layer, nested
         why.push("the layer's Solo or Guide switch is on".to_string());
     }
     if comp.layers.iter().any(|o| o.id != layer.id && refers_to(&o.props, layer.id)) {
-        why.push("a property of another layer refers to it".to_string());
+        why.push("a property of another layer refers to it (that reference is cleared)".to_string());
     }
     if layer.blend_mode != effectcraft_color::BlendMode::default() {
         why.push("the layer has a blending mode".to_string());
@@ -396,6 +395,41 @@ fn refers_to(props: &effectcraft_project::PropGroup, id: LayerId) -> bool {
     })
 }
 
+/// Clear every reference to layer `id` (`Value::Layer`, value or key) in `props`; references to
+/// other layers stay.
+fn clear_layer_refs(props: &mut effectcraft_project::PropGroup, id: LayerId) {
+    let fix = |v: &mut effectcraft_keyframe::Value| {
+        if matches!(v, effectcraft_keyframe::Value::Layer(Some(l)) if *l == id.0) {
+            *v = effectcraft_keyframe::Value::Layer(None);
+        }
+    };
+    for c in &mut props.children {
+        match c {
+            effectcraft_project::Node::Prop(p) => {
+                fix(&mut p.value);
+                for k in &mut p.keys {
+                    fix(&mut k.value);
+                }
+            }
+            effectcraft_project::Node::Group(g) => clear_layer_refs(g, id),
+        }
+    }
+}
+
+/// The layers of `comp` other than `id` let go of it: parent, track matte and property references
+/// to it are removed, so nothing points at a layer that is gone.
+fn detach_from(comp: &mut effectcraft_project::Comp, id: LayerId) {
+    for l in comp.layers.iter_mut().filter(|l| l.id != id) {
+        if l.parent == Some(id) {
+            l.parent = None;
+        }
+        if l.track_matte.is_some_and(|m| m.layer == id) {
+            l.track_matte = None;
+        }
+        clear_layer_refs(&mut l.props, id);
+    }
+}
+
 /// Replace layer references (`Value::Layer`) found in `props` by `map` (old id → new id), the
 /// way copies of a set of layers keep pointing at each other. A reference to a layer outside the
 /// set is cleared: it named a layer of the nested comp that is no longer there.
@@ -423,8 +457,14 @@ fn remap_layer_values(props: &mut effectcraft_project::PropGroup, map: &[(LayerI
 /// with their keyframes, effects, masks, parenting, mattes, markers and audio; their timing is
 /// moved by the pre-comp layer's Start and trimmed to the span it showed, and an Anchor Point
 /// different from Position moves the unparented ones by the difference. The nested comp stays in
-/// the project. The nested comp's frame no longer clips what the layers draw outside it. Anything the pre-comp layer itself adds to the look (see
-/// [`unprecompose_blockers`]) is reported as an error and nothing changes.
+/// the project. The nested comp's frame no longer clips what the layers draw outside it.
+///
+/// A locked pre-comp layer is refused, changing nothing. Anything else that would change the
+/// picture or drop something (see [`unprecompose_warnings`]) is an error listing the reasons unless
+/// `force` is set; with `force` the layer is expanded the same way, what the pre-comp layer itself
+/// carried (effects, masks, styles, transform beyond Position, time remap, blending mode, switches,
+/// parent, matte) goes with it, and the other layers' parent, matte and property links to it are
+/// removed. The result lists the reasons as `warnings`; `dryRun` only lists them.
 pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "layer.unprecompose";
     let (cid, ids) = layers_p(s, p)?;
@@ -432,10 +472,23 @@ pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
     let LayerSource::Comp { item } = layer.source else { return Err(bad(c, format!("“{}” is not a pre-comp layer", layer.name))) };
+    if layer.switches.locked {
+        return Err(bad(c, format!("can't un-precompose “{}”: the layer is locked (unlock it first)", layer.name)));
+    }
     let nested = s.project.comp(item).ok_or_else(|| bad(c, "the layer's composition is missing"))?.clone();
-    let why = unprecompose_blockers(&comp, &layer, &nested);
-    if !why.is_empty() {
-        return Err(bad(c, format!("can't un-precompose “{}”: {}", layer.name, why.join("; "))));
+    let warnings = unprecompose_warnings(&comp, &layer, &nested);
+    if b_p(p, "dryRun").unwrap_or(false) {
+        return Ok(json!({"dryRun": true, "warnings": warnings}));
+    }
+    if !warnings.is_empty() && !b_p(p, "force").unwrap_or(false) {
+        let why = warnings.join("; ");
+        return Err(bad(
+            c,
+            format!(
+                "can't un-precompose “{}” without changing it: {why} (nothing changed: pass `force` to unpack anyway, or `dryRun` to list the reasons)",
+                layer.name
+            ),
+        ));
     }
     let tr = layer.transform();
     let at = |m: &str| tr.and_then(|t| t.get(m)).map(|p| p.value.as_vec3()).unwrap_or([0.0; 3]);
@@ -467,6 +520,7 @@ pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
         }
         proj.next_id = next;
         let target = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        detach_from(target, lid);
         let at = target.layers.iter().position(|l| l.id == lid).unwrap_or(0);
         target.layers.retain(|l| l.id != lid);
         let mut made = vec![];
@@ -483,5 +537,5 @@ pub(super) fn unprecompose(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_layers = made.clone();
         Ok(made)
     })?;
-    Ok(json!({"layers": new.iter().map(|l| l.0).collect::<Vec<_>>()}))
+    Ok(json!({"layers": new.iter().map(|l| l.0).collect::<Vec<_>>(), "warnings": warnings}))
 }

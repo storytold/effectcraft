@@ -182,7 +182,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Un-precompose",
             ["Layer"],
             None,
-            "{layer?} → {layers}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over); refuses, changing nothing, when the pre-comp layer itself is locked, has a parent, matte, effects, masks, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, Solo/Guide on, is 3D/collapsing/adjustment, is referenced by another layer, or the nested comp has cameras, lights, adjustment, 3D, collapsing or blend-mode layers",
+            "{layer?, force?, dryRun?} → {layers, warnings}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over). A locked pre-comp layer is refused, changing nothing. What would change the picture (the pre-comp layer has a parent, matte, effects, masks, layer styles, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, Solo/Guide on, is 3D/collapsing/adjustment, is used by another layer; or the nested comp has cameras, lights, adjustment, 3D, collapsing, soloed or blend-mode / Preserve Transparency layers) is an error listing the reasons, changing nothing, unless `force`: then it unpacks anyway in one undo step, drops what the pre-comp layer carried, removes other layers' parent/matte/property links to it and lists the reasons as `warnings`. `dryRun` returns {dryRun, warnings} and changes nothing",
             has_layers,
             unprecompose
         ),

@@ -261,17 +261,25 @@ build real projects through these interfaces; they are worked examples of everyt
   `layer.centerAnchor` skip them and fail when every target is locked ("… is locked"); Select
   All and `layer.selectNext` / `selectPrevious` step over them. Unlock with
   `layer.setSwitch {"layers": [...], "switch": "lock", "value": false}` or `layer.unlockAll`.
-* **Un-precompose**: `layer.unprecompose {layer?}` (Layer ▸ Un-precompose) expands the selected pre-comp
-  layer into copies of its composition's layers at its place (order, keyframes, effects, masks,
-  parenting, mattes, markers kept; timing moved by the layer's Start and trimmed to what it showed;
-  Position minus Anchor Point added to the unparented ones). One undo step; the nested comp stays
-  in the project; the nested comp's frame no longer clips what its layers draw outside it. It
-  refuses, changing nothing, when the pre-comp layer itself is locked, has a parent or matte,
-  effects, masks, a non-default Scale / Rotation / Opacity, an animated transform, time remap or
-  stretch, a blending mode, layer styles, Video or Audio off, Solo or Guide on, the 3D / collapse /
-  adjustment switch, or is used by another layer (parent, matte or a layer property); or when the
-  nested comp holds a camera, light, adjustment, 3D, collapsing or soloed layer, or a layer with a
-  blending mode or Preserve Transparency.
+* **Un-precompose**: `layer.unprecompose {layer?, force?, dryRun?}` (Layer ▸ Un-precompose) expands the
+  selected pre-comp layer into copies of its composition's layers at its place (order, keyframes,
+  effects, masks, parenting, mattes, markers kept; timing moved by the layer's Start and trimmed to
+  what it showed; Position minus Anchor Point added to the unparented ones). One undo step; the
+  nested comp stays in the project; the nested comp's frame no longer clips what its layers draw
+  outside it. Only a **locked** pre-comp layer is refused (with or without `force`), changing
+  nothing. Everything that would change the picture or drop something is a warning: the pre-comp
+  layer has a parent or matte, effects, masks, layer styles, a non-default Scale / Rotation /
+  Opacity, an animated transform, time remap or stretch, a blending mode, Video or Audio off, Solo
+  or Guide on, the 3D / collapse / adjustment switch or Preserve Transparency, or is used by another
+  layer (parent, matte or a layer property); or the nested comp holds a camera, light, adjustment,
+  3D, collapsing or soloed layer, or a layer with a blending mode or Preserve Transparency. Without
+  `force` such a call is an error listing every reason and nothing changes; `dryRun: true` returns
+  `{dryRun, warnings}` without changing anything. With `force: true` it unpacks anyway and returns
+  `{layers, warnings}`: what the pre-comp layer itself carried (effects, masks, styles, transform
+  beyond Position, time remap, blending mode, switches, its parent and matte) is dropped, and other
+  layers' parent, track matte and layer-property links to it are removed. The menu shows the
+  reasons and asks (Unpack Anyway / Cancel, `dialog.unprecompose.force` /
+  `dialog.unprecompose.cancel`); a layer without reasons unpacks without asking.
 * **Quick Set Anchor**: `layer.quickSetAnchor {point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?}`
   (Layer ▸ Transform ▸ Quick Set Anchor) moves the Anchor Point of 2D layers to that point of their
   content and shifts Position and its keys so the layers don't move, in one undo step. 3D and
