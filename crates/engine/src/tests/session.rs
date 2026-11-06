@@ -14,6 +14,7 @@ fn import_new_comp_undo(background: bool) {
     use effectcraft_time::{FrameRate, Tick};
     struct Clip;
     impl crate::Importer for Clip {
+        /// Supply fixed video settings; `.bad` paths exercise partial and complete import failures.
         fn probe(&self, path: &str) -> Result<Footage, String> {
             if path.ends_with(".bad") {
                 return Err("unreadable footage".into());

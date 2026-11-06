@@ -191,6 +191,8 @@ impl crate::Importer for Movie {
     }
 }
 
+/// Verify complete mixed-import Undo/Redo for both PSD import modes and bounded histories,
+/// preserving intervening edits when the footage is probed in the background.
 fn mixed_import_undo(background: bool) {
     for import_as in ["composition", "compositionLayerSizes"] {
         let path = tmp(&format!("mixed-{background}-{import_as}.psd"));
