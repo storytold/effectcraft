@@ -36,7 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("app.commandPalette", "Quick Apply...", ["Edit"], Some("Cmd+Shift+Space"), "{query?}", always),
         fe!("app.keyboardShortcuts", "Keyboard Shortcuts", ["Edit"], Some("Cmd+Alt+'"), "{}", always),
         fe!("app.templates", "Templates", [], None, "{kind: renderSettings|outputModule}", always),
-        fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?}", always),
+        fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?: string, status?: all|available|missing}", always),
         fe!("effects.copyPresetsFolderPath", "Copy Presets Folder Path", [], None, "{}", always),
         // Preview.
         fe!(

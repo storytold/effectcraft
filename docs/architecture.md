@@ -220,12 +220,33 @@ instead of skipping pixels (Viewer Zoom Quality More Accurate): GPU frames carry
 sampled trilinearly, CPU frames go up averaged down by the whole factor that leaves about one
 texel per screen pixel.
 
+32 bpc projects keep **half-float frames** on the desktop (`frames::F16Frame`, 8 bytes a pixel:
+the RAM preview holds half as many as of 8-bit frames). They are rendered without Project
+Settings ▸ HDR (`RenderOpts::skip_hdr_step`), so the values above 1.0 stay. The viewer's
+**display pass** (`engine::viewer::DisplayPass`; on the GPU `ui-egui/src/display_gpu.rs` +
+`display_gpu.wgsl`) then turns a frame into what the panel shows, in this order: decode with the
+output space's curve, the viewer's exposure in linear light, the HDR step the frame was rendered
+without (Compand / Tone Map), encode, clamp to 0..1, the display colour conversion (Use Display
+Color Management, Simulate Output, LUT profiles), Show Channel, premultiply, round to 8 bits.
+So exposure reaches the full float range, and tone mapping and the monitor conversion see the
+exposed light. The pass runs on egui-wgpu's device (it needs no GPU compositor) into one RGBA8
+texture with mips per viewer slot (main viewer, snapshot, each passive viewer: about 110 MB of
+video memory per slot for a 4K frame, input included); without a device the same steps run on
+the CPU (`DisplayPass::pixel`, which is also the shader's test reference). 8 and 16 bpc frames
+stay 8-bit with the HDR step applied when rendered; they go through the same pass when exposure,
+a channel view or a display conversion applies, else they are drawn as they are. Panels that
+read the viewer's pixels as 8-bit (Video Preview, keyers, thumbnails) get the half-float frame
+converted on demand with the HDR step and without the exposure; the Info panel shows the
+frame's float values. The browser keeps 8-bit frames for now (its frame workers send RGBA8).
+
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
 the layer cache and the viewer's RAM preview: layer buffers that were slow to render and every
 preview frame are written (LZ4, atomic rename, checksummed) under 128-bit content keys — the
 comp's content hash (the comp, what it uses, footage file size and time) plus frame, scale and
 view for frames; the layer key salted with the footage fingerprint for layers — so entries
-survive restarts and never go stale. LRU eviction keeps it under the size limit; Edit ▸ Purge
+survive restarts and never go stale. Frame entries are 8-bit RGBA, or for 32 bpc viewer frames
+half floats with their bytes shuffled into planes before LZ4 (the entry header's format byte
+tells them apart; the render options in the key keep the two kinds apart). LRU eviction keeps it under the size limit; Edit ▸ Purge
 empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue. In the
 browser the frames live in the Origin Private File System: frame workers write them, the page
 keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
@@ -414,7 +435,9 @@ mapping) is the last top-level step, for standard-dynamic-range displays and out
 renders (sequences and ProEXR) skip it (`RenderOpts::skip_hdr_step`) and decode the frame with the
 output space's own curve (`Pipe::output_linear`), so they hold linear light in the output space's
 primaries; unmanaged projects decode with the Working Gamma's curve (sRGB at 2.2, a pure 2.4 power
-curve at 2.4). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
+curve at 2.4). Every OpenEXR file (sequences and ProEXR) names those primaries and the white point in its
+`chromaticities` attribute (`ColorSpace::exr_chromaticities`; Rec. 709 / sRGB primaries for the default
+and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces with the ACES white). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by

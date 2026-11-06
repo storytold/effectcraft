@@ -128,7 +128,13 @@ impl Pipe {
     /// Gamma's when unmanaged (sRGB at 2.2, a pure 2.4 power curve at 2.4). The identity for a
     /// linear output (ACES).
     pub fn output_linear(&self) -> Conversion {
-        Conversion::linearize(if self.space.is_some() { self.out } else { self.curve() })
+        Conversion::linearize(self.output_linear_space())
+    }
+
+    /// The space whose primaries and white the frame of [`Pipe::output_linear`] is in: the output
+    /// space, or the Working Gamma's (sRGB or Rec. 709, the same primaries) when unmanaged.
+    pub fn output_linear_space(&self) -> ColorSpace {
+        if self.space.is_some() { self.out } else { self.curve() }
     }
 
     /// Output with HDR compand / tone mapping (standard-dynamic-range outputs only): working

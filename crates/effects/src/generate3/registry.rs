@@ -83,7 +83,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 check("allMasks", "All Masks", false),
                 check("strokeSequentially", "Stroke Sequentially", true),
                 p("color", "Color", col(1.0, 1.0, 1.0), ParamUi::Color),
-                p("brushSize", "Brush Size", num(2.0), slider(0.0, 50.0, 0.0, 50.0, 1)),
+                p("brushSize", "Brush Size", num(2.0), slider(0.0, 200.0, 0.0, 50.0, 1)),
                 p("brushHardness", "Brush Hardness", num(75.0), pct()),
                 p("opacity", "Opacity", num(100.0), pct()),
                 p("start", "Start", num(0.0), pct()),
@@ -132,7 +132,7 @@ pub fn specs() -> Vec<EffectSpec> {
             vec![
                 p("brushPosition", "Brush Position", pt(0.5, 0.5), ParamUi::Point),
                 p("color", "Color", col(1.0, 1.0, 1.0), ParamUi::Color),
-                p("brushSize", "Brush Size", num(6.0), slider(0.0, 50.0, 0.0, 50.0, 1)),
+                p("brushSize", "Brush Size", num(6.0), slider(0.0, 200.0, 0.0, 50.0, 1)),
                 p("brushHardness", "Brush Hardness", num(75.0), pct()),
                 p("brushOpacity", "Brush Opacity", num(100.0), pct()),
                 p("strokeLength", "Stroke Length (secs)", num(0.0), slider(0.0, 30.0, 0.0, 30.0, 1)),

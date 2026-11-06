@@ -936,4 +936,46 @@ fn every_icon_only_header_has_a_hover_text() {
     // A hidden column has no hover targets.
     let none = crate::state::TimelineState { columns: Default::default(), show_modes: false, ..Default::default() };
     assert!(header_tip_rects(&cols(0.0, 800.0, Vis::of(&none)), ch).is_empty());
+/// One box spans the outline and the time graph (#3056): rows it crosses are selected on both
+/// sides of the boundary, and only keys in the time graph count (the part over the outline is cut).
+#[test]
+fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4, "frameRate": 30})).unwrap();
+    let mut layers = vec![];
+    for name in ["A", "B", "C"] {
+        let id = s.execute("layer.newSolid", json!({"name": name, "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": 0.0, "value": 50})).unwrap();
+        layers.push(id);
+    }
+    s.execute("layer.setSwitch", json!({"layers": [layers[2]], "switch": "lock", "value": true})).unwrap();
+    let comp = s.active_comp().unwrap();
+    let uid = |id: u64| comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let mut rows = vec![];
+    for id in &layers {
+        rows.push(Row { layer: LayerId(*id), depth: 0, kind: RowKind::Layer });
+        rows.push(Row { layer: LayerId(*id), depth: 1, kind: RowKind::Prop { uid: uid(*id) } });
+    }
+    // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
+    let hit_rows: Vec<(Rect, Row)> =
+        rows.iter().enumerate().map(|(i, r)| (Rect::from_min_size(pos2(0.0, 20.0 * i as f32), vec2(400.0, 20.0)), r.clone())).collect();
+    let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
+    let go = |br: Rect| box_targets(comp, &rows, &hit_rows, &tm, 0.0, 20.0, 200.0, false, br);
+    let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();
+    // From the outline across the boundary: layer A's row (y 0..20) and B's row, and their keys.
+    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 65.0)));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    assert_eq!(keyed(&ks), [layers[0], layers[1]]);
+    // The same box dragged the other way is the same rectangle: the same rows, the same keys.
+    let (ls, ks) = go(Rect::from_two_pos(pos2(260.0, 65.0), pos2(10.0, 5.0)));
+    assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
+    // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
+    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
+    assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
+    // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
+    let (ls, ks) = go(Rect::from_min_max(pos2(204.0, 5.0), pos2(260.0, 65.0)));
+    assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
+    // A locked layer is not selected as a row (the engine drops its keys in keys.select).
+    let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
+    assert_eq!(ls, [layers[0], layers[1]]);
 }

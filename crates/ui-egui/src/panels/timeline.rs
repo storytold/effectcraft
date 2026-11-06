@@ -1716,7 +1716,6 @@ struct Rw {
     left_clip: Rect,
     right_clip: Rect,
     empty_rect: Rect,
-    outline_rect: Rect,
     empty: egui::Response,
     outline_empty: egui::Response,
     selected: Vec<LayerId>,
@@ -1924,7 +1923,6 @@ fn begin_rows(app: &mut EffectcraftApp, ui: &mut egui::Ui, tl: Tl) -> Rw {
         left_clip,
         right_clip,
         empty_rect,
-        outline_rect,
         empty,
         outline_empty,
         selected: app.session.state.selected_layers.clone(),
@@ -1998,7 +1996,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     group_reorder_drag(ui, g);
     quick_offset_follow(g);
     key_drag_follow(app, g);
-    key_box_select(app, ui, g);
+    box_select(app, ui, g);
     current_time_indicator(app, g);
     let footer = footer_bar(app, ui, g);
     footer_zoom(app, ui, g, footer);
@@ -3018,6 +3016,8 @@ fn layer_twirl_and_icon(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw,
 }
 
 /// The layer name: the rename field or the (selected) name cell.
+/// Reserve space for source warnings so selection backgrounds and inline renaming cannot
+/// obscure the marker or its recovery tooltip.
 fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, name_x: f32) {
     let t = g.tl.t;
     let ctx = g.tl.ctx.clone();
@@ -3028,7 +3028,21 @@ fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowC
     let r = rc.r;
     let cy = rc.cy;
     let is_sel = rc.is_sel;
-    let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
+    let problem = match &layer.source {
+        LayerSource::Footage { item } | LayerSource::Comp { item } => {
+            app.session.project.item(*item).and_then(|i| app.session.footage.item_problem(i).or_else(|| effectcraft_engine::render::missing_item_problem(i)))
+        }
+        _ => None,
+    };
+    let end = cw.name_end - 4.0;
+    if let Some(why) = &problem {
+        let marker = Rect::from_center_size(pos2(end - 7.0, cy), vec2(13.0, 12.0)).intersect(lp.clip_rect());
+        lp.add(egui::Shape::convex_polygon(vec![marker.center_top(), marker.right_bottom(), marker.left_bottom()], t.warning, Stroke::NONE));
+        lp.text(marker.center() + vec2(0.0, 1.5), Align2::CENTER_CENTER, "!", Tokens::semibold(9.0), Color32::BLACK);
+        ui.interact(marker, egui::Id::unique(("tl-problem", layer.id.0)), Sense::hover()).on_hover_text(why);
+        app.auto.add(&format!("timeline.layer.{}.problem", layer.id.0), marker, why);
+    }
+    let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2((end - if problem.is_some() { 17.0 } else { 0.0 }).max(name_x), r.max.y));
     let rename_id = egui::Id::unique("tl-rename");
     let renaming: Option<(u64, String)> = ctx.data(|d| d.get_temp(rename_id));
     if let Some((rl, mut buf)) = renaming.filter(|(rl, _)| *rl == layer.id.0) {
@@ -3055,7 +3069,7 @@ fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowC
             let g = lp.layout_no_wrap(display_name(app, layer), Tokens::ui(12.0), name_col);
             let cell = Rect::from_min_max(
                 pos2(name_rect.min.x - 3.0, r.min.y + 1.0),
-                pos2((name_rect.min.x + g.size().x + 4.0).max(cw.name_end - 4.0).min(cw.name_end - 2.0), r.max.y - 1.0),
+                pos2((name_rect.min.x + g.size().x + 4.0).max(name_rect.max.x).min(name_rect.max.x + 2.0), r.max.y - 1.0),
             );
             lp.rect_filled(cell, 0.0, SELECTED_NAME_BG);
         }
@@ -4445,38 +4459,12 @@ fn background_menus(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     }
 }
 
-/// Click and marquee-select on the empty outline.
+/// Click on the empty outline (its drag is the Timeline's one box, [`box_select`]).
 fn outline_marquee(ui: &mut egui::Ui, g: &mut Rw) {
-    let t = g.tl.t;
-    let ctx = g.tl.ctx.clone();
-    let comp = g.tl.comp.clone();
     let actions = &mut g.tl.actions;
-    let outline_rect = g.outline_rect;
-    let lp = g.lp.clone();
     let outline_empty = g.outline_empty.clone();
-    let hit_rows = &mut g.hit_rows;
     if outline_empty.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
         actions.push(("layer.select".into(), json!({"layers": []})));
-    }
-    if let (Some(start), Some(end)) = (ctx.input(|i| i.pointer.press_origin()), outline_empty.interact_pointer_pos())
-        && outline_empty.dragged()
-    {
-        let box_rect = Rect::from_two_pos(start, end).intersect(outline_rect);
-        lp.rect_filled(box_rect, 0.0, t.accent.gamma_multiply(0.12));
-        lp.rect_stroke(box_rect, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
-        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("tl-layer-box"), box_rect));
-    }
-    if outline_empty.drag_stopped()
-        && let Some(box_rect) = ctx.data(|d| d.get_temp::<Rect>(egui::Id::unique("tl-layer-box")))
-    {
-        ctx.data_mut(|d| d.remove::<Rect>(egui::Id::unique("tl-layer-box")));
-        let layers: Vec<u64> = hit_rows
-            .iter()
-            .filter(|(r, row)| matches!(row.kind, RowKind::Layer) && r.intersects(box_rect))
-            .filter(|(_, row)| comp.layer(row.layer).is_some_and(|l| !l.switches.locked))
-            .map(|(_, row)| row.layer.0)
-            .collect();
-        actions.push(("layer.select".into(), json!({"layers": layers, "add": ui.input(|i| i.modifiers.shift || i.modifiers.command)})));
     }
     // Pick whips: a line follows the pointer; releasing over a row links to it (an expression's
 }
@@ -4589,23 +4577,12 @@ fn alt_scale_and_graph(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, 
     // below the last row) deselects the layers and their keys and properties, as in After
 }
 
-/// Click / marquee on empty track area.
+/// Click on empty track area (its drag is the Timeline's one box, [`box_select`]).
 fn graph_empty_area(ui: &mut egui::Ui, g: &mut Rw) {
-    let t = g.tl.t;
-    let ctx = g.tl.ctx.clone();
     let actions = &mut g.tl.actions;
-    let gp = g.gp.clone();
     let empty = g.empty.clone();
     if empty.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
         actions.push(("layer.select".into(), json!({"layers": []})));
-    }
-    if let (true, Some(origin), Some(cur)) =
-        (empty.dragged(), empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())), empty.interact_pointer_pos())
-    {
-        let br = Rect::from_two_pos(origin, cur);
-        gp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
-        gp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
-        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("tl-box"), br));
     }
 }
 
@@ -4819,28 +4796,76 @@ fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect
     keys
 }
 
-/// Releasing the key marquee selects the keys it touches.
-fn key_box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
+/// What a box over the Timeline selects: the layer rows it crosses (locked layers stay out) and
+/// the keys whose markers it touches. A box that reaches the outline (started on either side)
+/// selects the rows it crosses; one kept inside the time graph selects keys only, as before.
+/// Keys exist only in the time graph, so the box is cut at its left edge (`graph_x0`; a key
+/// scrolled out under the outline isn't touched).
+/// `graph_on`: the Graph Editor shows no key markers here.
+#[allow(clippy::too_many_arguments)]
+fn box_targets(
+    comp: &Comp,
+    rows: &[Row],
+    hit_rows: &[(Rect, Row)],
+    tm: &TMap,
+    top: f32,
+    rh: f32,
+    graph_x0: f32,
+    graph_on: bool,
+    br: Rect,
+) -> (Vec<u64>, Vec<effectcraft_engine::KeyRef>) {
+    let layers = hit_rows
+        .iter()
+        .filter(|(r, row)| br.min.x < graph_x0 && matches!(row.kind, RowKind::Layer) && r.intersects(br))
+        .filter(|(_, row)| comp.layer(row.layer).is_some_and(|l| !l.switches.locked))
+        .map(|(_, row)| row.layer.0)
+        .collect();
+    let in_graph = Rect::from_min_max(pos2(br.min.x.max(graph_x0), br.min.y), pos2(br.max.x, br.max.y));
+    let keys = if graph_on || in_graph.width() < 0.0 { vec![] } else { keys_in_box(comp, rows, tm, top, rh, in_graph) };
+    (layers, keys)
+}
+
+/// The Timeline's one selection box, from the empty outline or the empty time graph: it spans both
+/// columns as it is dragged (the pointer may cross the boundary either way) and on release selects
+/// the layer rows it crosses and the keys inside it, as in After Effects.
+fn box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
+    let t = g.tl.t;
     let tm = g.tl.tm;
     let rows_rect = g.tl.rows_rect;
     let rh = g.tl.rh;
+    let graph_x0 = g.tl.graph_x0;
+    let graph_on = g.graph_on;
     let ctx = g.tl.ctx.clone();
     let comp = g.tl.comp.clone();
-    let rows = &g.tl.rows;
-    let actions = &mut g.tl.actions;
-    let empty = g.empty.clone();
-    if empty.drag_stopped()
-        && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(egui::Id::unique("tl-box")))
+    let rows = g.tl.rows.clone();
+    let origin = [&g.outline_empty, &g.empty].into_iter().find(|r| r.dragged() || r.drag_stopped()).cloned();
+    let Some(origin) = origin else { return };
+    let box_of = |o: &egui::Response| {
+        let start = ctx.input(|i| i.pointer.press_origin());
+        start.zip(o.interact_pointer_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()))).map(|(a, b)| Rect::from_two_pos(a, b).intersect(rows_rect))
+    };
+    let id = egui::Id::unique("tl-box");
+    if origin.dragged()
+        && let Some(br) = box_of(&origin)
     {
-        ctx.data_mut(|d| d.remove::<Rect>(egui::Id::unique("tl-box")));
-        let touched = keys_in_box(&comp, rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, br);
-        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
+        let bp = g.tl.p.with_clip_rect(rows_rect);
+        bp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
+        bp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+        ctx.data_mut(|d| d.insert_temp(id, br));
+    }
+    if origin.drag_stopped()
+        && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(id))
+    {
+        ctx.data_mut(|d| d.remove::<Rect>(id));
+        let (layers, touched) = box_targets(&comp, &rows, &g.hit_rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, graph_x0, graph_on, br);
         let mods = ui.input(|i| i.modifiers);
-        if keys.is_empty() && !(mods.shift || mods.command) {
-            // A marquee that catches nothing leaves nothing selected (layers included).
-            actions.push(("layer.select".into(), json!({"layers": []})));
-        } else {
-            actions.push(("keys.select".into(), json!({"keys": keys, "add": mods.shift, "selectProperties": true})));
+        let add = mods.shift || mods.command;
+        let actions = &mut g.tl.actions;
+        // A box that catches nothing leaves nothing selected (layers included), unless it adds.
+        actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
+        if !touched.is_empty() {
+            let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
+            actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
         }
     }
 }
@@ -5958,16 +5983,30 @@ fn enum_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>, 
     let (p, layer, prop, at, uid) = (ve.p, ve.layer, ve.prop, ve.at, ve.uid);
     let t = app.tokens;
     let x = at.x;
-    if let Some(options) = layer.popup_options(prop) {
+    // Cryptomatte's Layer lists the footage's Cryptomatte layers (value k is the choice's own).
+    let crypto = crate::panels::fx_editors::is_crypto_layer_of(layer, prop).then(|| {
+        let aux = app.session.layer_channels(layer.id);
+        effectcraft_engine::effects::crypto_layer_menu(aux.as_deref(), *i as usize)
+    });
+    let options = match &crypto {
+        Some((choices, _)) => Some(std::borrow::Cow::Owned(choices.iter().map(|c| c.1.clone()).collect::<Vec<_>>())),
+        None => layer.popup_options(prop),
+    };
+    if let Some(options) = options {
         let r = Rect::from_min_size(pos2(x, at.y - 9.0), vec2(150.0, 18.0));
-        let label = options.get(*i as usize).cloned().unwrap_or_default();
+        let label = match &crypto {
+            Some((_, shown)) => shown.clone().unwrap_or_default(),
+            None => options.get(*i as usize).cloned().unwrap_or_default(),
+        };
+        let cur = if crypto.is_some() { options.iter().position(|o| *o == label) } else { Some(*i as usize) };
         let pop = egui::Id::unique(("epop", uid));
         if widgets::dropdown(ui, r, &label, &t, egui::Id::unique(("en", uid))).clicked() {
             widgets::open_popup(ui, pop);
         }
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
-        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, Some(*i as usize)) {
-            ve.set_step(actions, json!(ni));
+        if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, cur) {
+            let value = crypto.as_ref().and_then(|(choices, _)| choices.get(ni)).map_or(ni, |c| c.0);
+            ve.set_step(actions, json!(value));
         }
     } else {
         p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.for_value(prop.has_expression()).hot_text);
