@@ -69,6 +69,10 @@ fn math_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out, p, vec4<f32>(q, fxs_posterize_bin(q, P.u[0].y), 0.0, 1.0));
         return;
     }
+    if (P.u[0].x == 2u) {
+        textureStore(out, p, vec4<f32>(round_away(v), 0.0, 0.0, 1.0));
+        return;
+    }
     textureStore(out, p, vec4<f32>(sin_p(v), cos_p(v), 0.0, 1.0));
 }
 "#;
@@ -124,6 +128,30 @@ fn alpha_division_and_posterization_match_f32_rounding() {
             assert_eq!(q.to_bits(), got[0].to_bits(), "levels {levels}, pixel {i}, input {v:?}");
             assert_eq!((q * levels as f32).round(), got[1], "levels {levels}, pixel {i}, input {v:?}");
         }
+    }
+}
+
+/// `round_away` is `f32::round`, also from 2^23 up where every value is already an integer
+/// (integer IDs there must not merge: 8388608 and 8388609 both rounded to 8388609).
+#[test]
+fn round_away_matches_f32_round_for_large_values() {
+    let Some(g) = gpu() else { return };
+    let mut values = vec![];
+    for m in [1.0f32, -1.0] {
+        for v in [0.0f32, 0.5, 1.5, 2.5, 0.49999997, 4194303.5, 8388607.5, 8388608.0, 8388609.0, 8388610.0, 16777216.0, 3.0e9] {
+            values.push([m * v, 0.0, 0.0, 1.0]);
+        }
+    }
+    let img = Image { width: values.len() as u32, height: 1, data: values.clone() };
+    let input = g.ctx.upload_image(&img).unwrap();
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let out = e.scratch(img.width, 1);
+    let mut params = crate::context::Params::default();
+    params.u[0] = [2, 0, 0, 0];
+    e.pixels("math_probe", &params, &input, None, &out, None);
+    let result = e.download(&out).unwrap();
+    for (v, got) in values.iter().zip(result.data) {
+        assert_eq!(v[0].round(), got[0], "round_away({})", v[0]);
     }
 }
 
@@ -1430,6 +1458,38 @@ fn owned_devices_favour_memory_usage() {
     assert!(matches!(d.memory_hints, wgpu::MemoryHints::MemoryUsage));
     assert_eq!(d.label, Some("effectcraft gpu"));
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
+}
+
+/// `RenderOpts::skip_hdr_step` (float outputs) skips Project Settings ▸ HDR on the GPU as on the
+/// CPU: both compositors agree, and the frame is the Clip frame with its over-range values.
+#[test]
+fn skipping_the_hdr_step_on_the_gpu_matches_clip() {
+    use effectcraft_project::HdrMode;
+    let Some(g) = gpu() else {
+        // Visible skip (EFFECTCRAFT_REQUIRE_GPU=1 makes a missing adapter fail instead).
+        eprintln!("skipping_the_hdr_step_on_the_gpu_matches_clip: skipped: no GPU adapter");
+        return;
+    };
+    for mode in [HdrMode::Compand, HdrMode::ToneMap] {
+        let mut s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
+        let mut bright = s.solid([3.0, 1.5, 0.5], 30, 20);
+        bright.blend_mode = BlendMode::Add;
+        s.push(bright);
+        s.p.settings.working_space = Some(ColorSpace::Srgb);
+        s.p.settings.linearize = true;
+        s.p.settings.hdr = mode;
+        let scene = RenderOpts { skip_hdr_step: true, ..opts() };
+        check(&format!("no HDR step {mode:?}"), compare_at(&s, scene, Tick::ZERO), 0.0);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..scene });
+        r.accel = Some(g);
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let mut clip = s.p.clone();
+        clip.settings.hdr = HdrMode::Clip;
+        let want = Renderer::new(&clip, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        let d = diff(&want, &img, tolerance(BitDepth::Bpc32));
+        assert_eq!(d.over, 0, "{mode:?}: max {} at {:?}", d.max, d.worst);
+        assert!(img.data.iter().any(|p| p[3] > 0.0 && p[0] / p[3] > 1.0), "{mode:?}: over-range values survive");
+    }
 }
 
 /// A GPU context of its own with a small pool budget, so other tests (sharing [`gpu`]) neither

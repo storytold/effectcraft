@@ -577,12 +577,28 @@ pub(crate) fn patch_image(g: &GpuContext, img: &Image, hole: &[bool], init: Opti
 /// The plan of one level: its flags (`bit 0` hole, `bit 1` a target centre) and the dispatch
 /// bounds of its targets, holes and field.
 fn plan_level(e: &mut Enc, hole: &[bool], w: u32, h: u32, patch: usize) -> Option<Lv> {
+    // Texture and buffer limits are independent: a level that fits as a texture can still need a
+    // flags buffer over the device's storage binding limit, and that validation error would
+    // retire the context. Decline the GPU path instead (the fill runs on the CPU).
+    if !flags_fit(&e.g.device.limits(), w, h) {
+        return None;
+    }
     let (iw, ih) = (w as usize, h as usize);
     let r = radius(patch, w, h);
     let near = dilate(hole, iw, ih, r as usize);
     let near_bb = bbox(&near, iw, ih)?;
     let flags: Vec<f32> = (0..iw * ih).map(|i| (u32::from(hole[i]) + 2 * u32::from(near[i])) as f32).collect();
     Some(Lv { w, h, r, near: near_bb, holes: bbox(hole, iw, ih)?, field: grow(near_bb, r + 1, w, h), flags: e.data(&flags) })
+}
+
+/// Whether a level's `w × h` f32 flags buffer (at least the 16 bytes [`Enc::data`] allocates)
+/// can be created and bound as one storage buffer on a device with `limits`.
+fn flags_fit(limits: &wgpu::Limits, w: u32, h: u32) -> bool {
+    u64::from(w)
+        .checked_mul(u64::from(h))
+        .and_then(|n| n.checked_mul(4))
+        .map(|b| b.max(16))
+        .is_some_and(|b| b <= limits.max_buffer_size && b <= limits.max_storage_buffer_binding_size)
 }
 
 /// The PatchMatch run at one level: the random stream's seed and the EM round and iteration
@@ -726,4 +742,23 @@ pub(crate) fn distance_histogram(g: &GpuContext, field: &Image, near: &[bool], w
         return None;
     }
     out
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::flags_fit;
+
+    /// A level whose flags buffer is over the storage binding limit is declined before it is
+    /// created (the default 128 MiB binding holds 33,554,432 flags: 8192 × 4096).
+    #[test]
+    fn flags_buffer_is_checked_against_the_device_limits() {
+        let l = wgpu::Limits::default();
+        assert!(flags_fit(&l, 1, 1));
+        assert!(flags_fit(&l, 8192, 4096));
+        assert!(!flags_fit(&l, 8192, 4097));
+        assert!(!flags_fit(&l, 16384, 16384));
+        let small = wgpu::Limits { max_buffer_size: 1024, ..wgpu::Limits::default() };
+        assert!(flags_fit(&small, 16, 16));
+        assert!(!flags_fit(&small, 16, 17));
+    }
 }
