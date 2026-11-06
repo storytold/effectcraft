@@ -295,6 +295,13 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                 applied += 1;
             }
         }
+        // Without this, a preset that fits no layer does nothing and says nothing.
+        if applied == 0 && !skipped.is_empty() {
+            return Err(bad(
+                "anim.applyPreset",
+                "nothing in this preset fits the layer. A text animation preset saved by an earlier version only updates animators a layer already has: save it again",
+            ));
+        }
         proj.next_id = next;
         Ok(())
     })?;
