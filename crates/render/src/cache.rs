@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use effectcraft_effects::Buf;
 use effectcraft_project::{FootageKind, ItemKind, Layer, LayerSource, Node, PropGroup};
 
+use crate::disk_cache::{EntryFiles, SharedVirtualFileId, VirtualFileId, layer_disk_key};
 use crate::eval::EvalCtx;
 use crate::reads::ReadFiles;
 
@@ -31,13 +32,17 @@ mod dependencies;
 
 /// Thread-safe, memory-budgeted cache of processed layer buffers, optionally backed by the
 /// persistent [`DiskCache`](crate::disk_cache::DiskCache): a memory miss reads the disk, and
-/// buffers that were slow to render are written there (keys salted per project, see
-/// [`LayerCache::set_disk`]).
+/// buffers that were slow to render are written there with the source files they were made of
+/// (keys: [`crate::disk_cache::layer_disk_key`]; an entry is used only while its files are
+/// unchanged, #3184).
 pub struct LayerCache {
     inner: Mutex<Inner>,
-    disk: Mutex<Option<(Arc<crate::disk_cache::DiskCache>, u64)>>,
+    disk: Mutex<Option<Arc<crate::disk_cache::DiskCache>>>,
     /// Another persistent store when there is no disk cache (the browser's, [`PrefetchStore`]).
-    store: Mutex<Option<(Arc<dyn LayerStore>, u64)>>,
+    store: Mutex<Option<Arc<dyn LayerStore>>>,
+    /// Size and content hash of files served from memory (the browser file table), to store
+    /// and check the source files of persistent entries.
+    virtual_id: Mutex<Option<SharedVirtualFileId>>,
     /// While set, inserts are dropped (see [`LayerCache::set_gate`]).
     gate: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
@@ -83,6 +88,7 @@ impl LayerCache {
             inner: Mutex::new(Inner { map: HashMap::new(), bytes: 0, budget, clock: 0, hits: 0, misses: 0, missed_at: HashMap::new() }),
             disk: Mutex::new(None),
             store: Mutex::new(None),
+            virtual_id: Mutex::new(None),
             gate: Mutex::new(None),
         }
     }
@@ -101,58 +107,49 @@ impl LayerCache {
         self.gate.lock().ok().and_then(|g| g.as_ref().map(|g| g.load(std::sync::atomic::Ordering::Relaxed))).unwrap_or(false)
     }
 
-    /// Attach (or detach) the disk cache. `salt` separates projects and footage versions (see
-    /// `footage_salt`); keys on disk are `(salt, key)`.
-    pub fn set_disk(&self, disk: Option<(Arc<crate::disk_cache::DiskCache>, u64)>) {
+    /// Attach (or detach) the disk cache. It is used at once: its entries check their own
+    /// source files when read, so nothing has to be looked at first.
+    pub fn set_disk(&self, disk: Option<Arc<crate::disk_cache::DiskCache>>) {
         if let Ok(mut d) = self.disk.lock() {
             *d = disk;
         }
     }
 
-    /// Change the disk salt (after footage changed) keeping the attached disk cache.
-    pub fn set_disk_salt(&self, salt: u64) {
-        if let Ok(mut d) = self.disk.lock()
-            && let Some((_, s)) = d.as_mut()
-        {
-            *s = salt;
-        }
-    }
-
     pub fn disk(&self) -> Option<Arc<crate::disk_cache::DiskCache>> {
-        self.disk.lock().ok()?.as_ref().map(|d| d.0.clone())
+        self.disk.lock().ok()?.clone()
     }
 
     /// Attach (or detach) a [`LayerStore`] used when no disk cache is attached (the browser's
-    /// Origin Private File System through a [`PrefetchStore`]); `salt` as in
-    /// [`LayerCache::set_disk`].
-    pub fn set_store(&self, store: Option<(Arc<dyn LayerStore>, u64)>) {
+    /// Origin Private File System through a [`PrefetchStore`]).
+    pub fn set_store(&self, store: Option<Arc<dyn LayerStore>>) {
         if let Ok(mut s) = self.store.lock() {
             *s = store;
         }
     }
 
-    /// Change the store's salt (a new project or footage), keeping the store.
-    pub fn set_store_salt(&self, salt: u64) {
-        if let Ok(mut d) = self.store.lock()
-            && let Some((_, s)) = d.as_mut()
-        {
-            *s = salt;
+    /// Size and content hash of files served from memory (the browser file table): what a
+    /// persistent entry keeps for them and checks them against.
+    pub fn set_virtual_id(&self, id: Option<SharedVirtualFileId>) {
+        if let Ok(mut v) = self.virtual_id.lock() {
+            *v = id;
         }
     }
 
-    fn disk_key(&self, key: u64) -> Option<(Arc<dyn LayerStore>, u128)> {
-        let salted = |salt: u64| ((salt as u128) << 64) | key as u128;
-        if let Some((dc, salt)) = self.disk.lock().ok()?.as_ref() {
-            return Some((dc.clone() as Arc<dyn LayerStore>, salted(*salt)));
+    fn virtual_id(&self) -> Option<SharedVirtualFileId> {
+        self.virtual_id.lock().ok()?.clone()
+    }
+
+    /// The persistent store behind the memory: the disk cache, else the other store.
+    fn persistent(&self) -> Option<Arc<dyn LayerStore>> {
+        if let Some(dc) = self.disk.lock().ok()?.as_ref() {
+            return Some(dc.clone() as Arc<dyn LayerStore>);
         }
-        let s = self.store.lock().ok()?;
-        let (st, salt) = s.as_ref()?;
-        Some((st.clone(), salted(*salt)))
+        self.store.lock().ok()?.clone()
     }
 
     /// The buffer kept under `key` and the source files it was made of (see [`crate::reads`]).
-    /// A buffer from the disk cache or another store doesn't know its files: its list is
-    /// incomplete.
+    /// A buffer from the disk cache or another store comes with the files its entry lists, after
+    /// they were found unchanged.
     pub fn get(&self, key: u64) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
         let mut g = self.inner.lock().ok()?;
         g.clock += 1;
@@ -172,10 +169,9 @@ impl LayerCache {
                 g.missed_at.insert(key, web_time::Instant::now());
                 drop(g);
                 // Disk cache: a hit comes back into memory.
-                let (dc, dk) = self.disk_key(key)?;
-                let buf = dc.get_layer(dk)?;
-                let mut files = ReadFiles::default();
-                files.mark_incomplete();
+                let store = self.persistent()?;
+                let id = self.virtual_id();
+                let (buf, files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
                 let files = Arc::new(files);
                 Some((self.insert_mem(key, buf, files.clone()), files))
             }
@@ -188,7 +184,7 @@ impl LayerCache {
     /// and packs it once instead of once per worker, which ran it out of memory). Renders don't
     /// wait for each other: on the frame workers' shared thread pool a wait can end up under
     /// the very work it waits for. `files`: the source files `buf` was made of (see
-    /// [`crate::reads`]).
+    /// [`crate::reads`]); a buffer whose files can't all be named stays in memory.
     pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> Arc<Buf> {
         if self.gated() {
             return buf;
@@ -197,10 +193,12 @@ impl LayerCache {
             return kept;
         }
         let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
-        if let Some((dc, dk)) = self.disk_key(key) {
-            let slow = started.is_some_and(|t| t.elapsed().as_secs_f64() * 1e3 >= dc.min_layer_ms() as f64);
-            if slow {
-                dc.put_layer(dk, &buf);
+        if let Some(store) = self.persistent() {
+            let slow = started.is_some_and(|t| t.elapsed().as_secs_f64() * 1e3 >= store.min_layer_ms() as f64);
+            let id = self.virtual_id();
+            // (an incomplete list, or a file from memory without its identity: not stored)
+            if slow && let Some(entry) = EntryFiles::of(&files, id.as_deref()) {
+                store.put_layer(layer_disk_key(key), &buf, &entry);
             }
         }
         self.insert_mem(key, buf, files)
@@ -274,12 +272,16 @@ impl LayerCache {
     }
 }
 
-/// Persistent storage of layer buffers behind a [`LayerCache`] (keys salted per project).
+/// Persistent storage of layer buffers behind a [`LayerCache`] (keys:
+/// [`crate::disk_cache::layer_disk_key`]). Every entry keeps the source files its buffer was made
+/// of and is used only while they are unchanged (#3184).
 pub trait LayerStore: Send + Sync {
-    /// A stored buffer (synchronous: mid-render).
-    fn get_layer(&self, key: u128) -> Option<Arc<Buf>>;
-    /// Keep a buffer that was slow to render.
-    fn put_layer(&self, key: u128, buf: &Buf);
+    /// A stored buffer whose source files are unchanged, with those files (synchronous:
+    /// mid-render). An entry whose files changed, or damaged, is a miss and is dropped, so the
+    /// buffer rendered again replaces it. `virtual_id` names files served from memory.
+    fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)>;
+    /// Keep a buffer that was slow to render, with the source files it was made of.
+    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles);
     /// Buffers faster to render than this (ms) are not stored.
     fn min_layer_ms(&self) -> u64 {
         0
@@ -291,9 +293,10 @@ pub const PREFETCH_MIN_LAYER_MS: u64 = 20;
 
 /// A [`LayerStore`] over storage that can't be read in the middle of a render (the browser's
 /// Origin Private File System, read asynchronously). Lookups are served from buffers fetched
-/// before the frame ([`PrefetchStore::provide`]); the keys a render looked up and didn't find
-/// are recorded ([`PrefetchStore::take_misses`]) so the transport can fetch them before the next
-/// frame; buffers to store queue up as sealed entries ([`PrefetchStore::take_writes`]) for the
+/// before the frame ([`PrefetchStore::provide`]), once the files their entries list are found
+/// unchanged; the keys a render looked up and didn't find are recorded
+/// ([`PrefetchStore::take_misses`]) so the transport can fetch them before the next frame;
+/// buffers to store queue up as sealed entries ([`PrefetchStore::take_writes`]) for the
 /// transport to write after the frame. Fetched buffers are kept least recently used first, up
 /// to a byte budget.
 pub struct PrefetchStore {
@@ -302,9 +305,20 @@ pub struct PrefetchStore {
     min_ms: u64,
 }
 
+/// A fetched entry: the buffer, the source files it was made of, its last use.
+struct Fetched {
+    buf: Arc<Buf>,
+    files: Arc<EntryFiles>,
+    used: u64,
+}
+
+fn buf_bytes(b: &Buf) -> usize {
+    b.img.data.len().saturating_mul(std::mem::size_of::<effectcraft_raster::Px>())
+}
+
 #[derive(Default)]
 struct Prefetched {
-    ready: HashMap<u128, (Arc<Buf>, u64)>,
+    ready: HashMap<u128, Fetched>,
     bytes: usize,
     clock: u64,
     misses: Vec<u128>,
@@ -312,6 +326,20 @@ struct Prefetched {
     writes: Vec<(u128, Vec<u8>)>,
     /// Keys stored or queued (not written twice).
     known: std::collections::HashSet<u128>,
+}
+
+impl Prefetched {
+    fn note_miss(&mut self, key: u128) {
+        if !self.misses.contains(&key) && self.misses.len() < 1024 {
+            self.misses.push(key);
+        }
+    }
+
+    fn remove(&mut self, key: u128) {
+        if let Some(f) = self.ready.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(buf_bytes(&f.buf));
+        }
+    }
 }
 
 impl Default for PrefetchStore {
@@ -337,23 +365,21 @@ impl PrefetchStore {
     }
 
     /// A fetched entry (sealed bytes, [`crate::disk_cache::layer_entry`]) for `key`; `false`
-    /// when damaged.
+    /// when damaged or of another format. Its files are checked when the buffer is used.
     pub fn provide(&self, key: u128, entry: &[u8]) -> bool {
-        let Some(buf) = crate::disk_cache::read_layer_entry(entry) else { return false };
-        let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
+        let Some((buf, files)) = crate::disk_cache::read_layer_entry(entry) else { return false };
+        let buf = Arc::new(buf);
+        let bytes = buf_bytes(&buf);
         let Ok(mut s) = self.st.lock() else { return false };
         s.clock += 1;
-        let now = s.clock;
-        if let Some((old, _)) = s.ready.insert(key, (Arc::new(buf), now)) {
-            s.bytes -= old.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-        }
-        s.bytes += bytes;
+        let used = s.clock;
+        s.remove(key);
+        s.ready.insert(key, Fetched { buf, files: Arc::new(files), used });
+        s.bytes = s.bytes.saturating_add(bytes);
         s.known.insert(key);
         while s.bytes > self.budget {
-            let Some((&k, _)) = s.ready.iter().min_by_key(|(_, (_, t))| *t) else { break };
-            if let Some((b, _)) = s.ready.remove(&k) {
-                s.bytes -= b.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-            }
+            let Some(oldest) = s.ready.iter().min_by_key(|(_, f)| f.used).map(|(k, _)| *k) else { break };
+            s.remove(oldest);
         }
         true
     }
@@ -382,32 +408,44 @@ impl PrefetchStore {
 }
 
 impl LayerStore for PrefetchStore {
-    fn get_layer(&self, key: u128) -> Option<Arc<Buf>> {
+    fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
+        let found = {
+            let mut s = self.st.lock().ok()?;
+            s.clock += 1;
+            let now = s.clock;
+            match s.ready.get_mut(&key) {
+                Some(f) => {
+                    f.used = now;
+                    Some((f.buf.clone(), f.files.clone()))
+                }
+                None => {
+                    s.note_miss(key);
+                    None
+                }
+            }
+        };
+        let (buf, files) = found?;
+        // (looked at without the lock: one call of the hook, or one `metadata`, per file)
+        let unchanged = files.unchanged(virtual_id);
         let mut s = self.st.lock().ok()?;
-        s.clock += 1;
-        let now = s.clock;
-        match s.ready.get_mut(&key) {
-            Some((b, t)) => {
-                *t = now;
-                let b = b.clone();
-                if !s.hits.contains(&key) {
-                    s.hits.push(key);
-                }
-                Some(b)
-            }
-            None => {
-                if !s.misses.contains(&key) && s.misses.len() < 1024 {
-                    s.misses.push(key);
-                }
-                None
-            }
+        if !unchanged {
+            // Made of files that changed since: forgotten, so the buffer rendered again is
+            // written over its entry.
+            s.remove(key);
+            s.known.remove(&key);
+            s.note_miss(key);
+            return None;
         }
+        if !s.hits.contains(&key) {
+            s.hits.push(key);
+        }
+        Some((buf, files.to_read_files()))
     }
 
-    fn put_layer(&self, key: u128, buf: &Buf) {
+    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
-            s.writes.push((key, crate::disk_cache::layer_entry(buf)));
+            s.writes.push((key, crate::disk_cache::layer_entry(buf, files)));
         }
     }
 
@@ -799,5 +837,48 @@ mod shared_insert_tests {
         assert!(Arc::ptr_eq(&cache.insert(3, a.clone(), Default::default()), &a));
         assert!(Arc::ptr_eq(&cache.insert(3, b, Default::default()), &a), "the later render gets the first buffer");
         assert!(Arc::ptr_eq(&cache.get(3).unwrap().0, &a));
+    }
+
+    /// The browser's store (#3184): a fetched entry is used only while the files it lists are
+    /// unchanged (here from memory, through the hook), and comes with them; one made of files
+    /// that changed is dropped and counts as a miss, so the buffer rendered again is queued over
+    /// it. A buffer whose files can't all be named is not queued at all.
+    #[test]
+    fn the_prefetch_store_checks_the_files_of_its_entries() {
+        use super::{LayerStore, PrefetchStore};
+        use crate::disk_cache::{EntryFiles, layer_disk_key, layer_entry};
+        use crate::reads::{FileStamp, ReadFile, ReadFiles};
+        let buf = || Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 };
+        let files: ReadFiles = [ReadFile::new("/v.png", FileStamp::Virtual)].into_iter().collect();
+        let (one, two) = (|_: &str| Some((3, 1)), |_: &str| Some((3, 2)));
+        let entry = layer_entry(&buf(), &EntryFiles::of(&files, Some(&one)).unwrap());
+        let store = PrefetchStore::new(1 << 20).with_min_ms(0);
+        assert!(store.provide(5, &entry));
+        assert!(!store.provide(6, b"damaged"));
+        let (_, got) = store.get_layer(5, Some(&one)).unwrap();
+        assert_eq!(got, files);
+        assert_eq!(store.take_hits(), [5]);
+        // The file changed: a miss, forgotten, and the new buffer is queued over it.
+        assert!(store.get_layer(5, Some(&two)).is_none());
+        assert!(!store.has(5));
+        assert_eq!(store.take_misses(), [5]);
+        store.put_layer(5, &buf(), &EntryFiles::of(&files, Some(&two)).unwrap());
+        assert_eq!(store.take_writes().len(), 1, "written over the changed entry");
+        // Through the layer cache: a hit reports its files; incomplete lists are not queued.
+        let cache = LayerCache::default();
+        let store = Arc::new(PrefetchStore::new(1 << 20).with_min_ms(0));
+        cache.set_store(Some(store.clone()));
+        cache.set_virtual_id(Some(Arc::new(one)));
+        assert!(store.provide(layer_disk_key(9), &entry));
+        let (_, from_store) = cache.get(9).unwrap();
+        assert!(*from_store == files && from_store.is_complete());
+        let mut incomplete = files.clone();
+        incomplete.mark_incomplete();
+        assert!(cache.get(10).is_none());
+        cache.insert(10, Arc::new(buf()), Arc::new(incomplete));
+        assert!(cache.get(11).is_none());
+        cache.insert(11, Arc::new(buf()), Arc::new(files.clone()));
+        let written: Vec<u128> = store.take_writes().into_iter().map(|w| w.0).collect();
+        assert_eq!(written, [layer_disk_key(11)], "only the buffer whose files are all named");
     }
 }

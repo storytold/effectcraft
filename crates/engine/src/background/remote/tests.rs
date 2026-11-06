@@ -69,7 +69,8 @@ fn layer_buffers_go_through_the_disk_store() {
     assert!(!layer_misses.is_empty() && layer_hits.is_empty());
     let writes = store_a.take_writes();
     assert!(!writes.is_empty());
-    assert!(writes.iter().all(|(k, _)| (*k >> 64) as u64 == a.salt()), "keys are salted per project");
+    // Sealed with the files each buffer was made of (none here: the demo reads no footage).
+    assert!(writes.iter().all(|(_, e)| effectcraft_render::disk_cache::read_layer_entry(e).is_some_and(|(_, f)| f.is_empty())));
     let mut index = DiskIndex::default();
     let mut disk = std::collections::HashMap::new();
     for (k, e) in writes {

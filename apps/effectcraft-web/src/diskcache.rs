@@ -21,9 +21,11 @@
 //!   back their layer caches with a `PrefetchStore`. They report each frame's layer-cache
 //!   misses; before the next request the page names the recent misses that are on disk
 //!   ([`layer_prefetch`], `disk_cache::LayerPrefetch`), and the worker reads those entries
-//!   into memory before rendering, so the lookups find them. Slow buffers are written by the
-//!   worker after its frame and indexed here like frames (one least-recently-used order for
-//!   both kinds).
+//!   into memory before rendering, so the lookups find them; an entry is used only while the
+//!   files it lists (the file table's size and content hash) are unchanged, and a buffer whose
+//!   files can't all be named is not written (#3184). Slow buffers are written by the worker
+//!   after its frame and indexed here like frames (one least-recently-used order for both
+//!   kinds).
 
 use std::cell::RefCell;
 

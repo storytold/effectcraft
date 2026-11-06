@@ -76,11 +76,13 @@ fn disk_cache_settings_persistence_and_invalidation() {
     assert!(s2.layer_cache.disk().is_none());
 }
 
+/// The comp key comes from the project in memory: a footage file that changes on disk doesn't
+/// change it (the entries check their own files, #3184); edits that change pixels do.
 #[test]
-fn footage_changes_change_the_salt() {
-    let dir = folder("salt");
+fn comp_content_keys_come_from_memory() {
+    let dir = folder("keys");
     let mut s = session(&dir);
-    let foot = std::env::temp_dir().join(format!("effectcraft-salt-{}.png", std::process::id()));
+    let foot = std::env::temp_dir().join(format!("effectcraft-keys-{}.png", std::process::id()));
     std::fs::write(&foot, b"one").unwrap();
     s.edit("add", None, |p, _| {
         let f = effectcraft_project::Footage {
@@ -108,12 +110,10 @@ fn footage_changes_change_the_salt() {
         Ok(())
     })
     .unwrap();
-    let a = effectcraft_render::disk_cache::footage_salt(&s.project);
-    std::fs::write(&foot, b"two, longer").unwrap();
-    let b = effectcraft_render::disk_cache::footage_salt(&s.project);
-    assert_ne!(a, b);
     let cid = project(&mut s);
     let k1 = effectcraft_render::disk_cache::comp_content_key(&s.project, cid);
+    std::fs::write(&foot, b"two, longer").unwrap();
+    assert_eq!(effectcraft_render::disk_cache::comp_content_key(&s.project, cid), k1, "no file is looked at");
     s.execute("prop.set", json!({"layer": "#1", "path": "transform/opacity", "value": 50})).unwrap();
     let k2 = effectcraft_render::disk_cache::comp_content_key(&s.project, cid);
     assert_ne!(k1, k2);
@@ -137,66 +137,51 @@ fn footage_changes_change_the_salt() {
     assert_ne!(set_proxy(&mut s, false), k3);
 }
 
-/// The desktop app stamps footage files for the disk cache's salt on a worker thread: importing an
-/// After Effects project with thousands of sequence frames on a network share stamped them all
-/// inside the import's edit, freezing the UI for half a minute. Until the salt lands the disk
-/// cache sits out (keys under the old salt may name other files); a newer footage change
-/// supersedes a salt still being taken; a settings change keeps the salt.
+/// No salt and no scan (#3184, replacing the background footage salt of #3106): the disk cache
+/// is attached to the layer cache as soon as it is switched on, and stays attached through
+/// edits that add footage (a large image sequence included), settings changes and opening a
+/// project, none of which looks at a single file for it. The first render may use it at once.
 #[test]
-fn footage_salt_is_taken_off_the_ui_thread_and_the_disk_cache_waits_for_it() {
-    let dir = folder("bg-salt");
+fn the_disk_cache_is_attached_at_once_and_edits_do_no_file_work() {
+    let dir = folder("attach");
     let mut s = session(&dir);
-    s.disk_salt_background = true;
-    let at = |n: &str| std::env::temp_dir().join(format!("effectcraft-bg-salt-{}-{n}.png", std::process::id()));
-    let add = |s: &mut Session, path: &std::path::Path| {
-        let f = effectcraft_project::Footage {
-            path: path.to_string_lossy().to_string(),
-            kind: effectcraft_project::FootageKind::Still,
-            width: 1,
-            height: 1,
-            has_video: true,
-            ..Default::default()
-        };
-        s.edit("add", None, |p, _| {
-            p.add_item("f.png", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
-            Ok(())
-        })
-        .unwrap();
+    let dc = s.disk_cache.clone().unwrap();
+    let attached = |s: &Session| s.layer_cache.disk().is_some_and(|d| std::sync::Arc::ptr_eq(&d, &dc));
+    assert!(attached(&s), "attached at once");
+    // A sequence of 5000 frames that don't even exist.
+    let seq_dir = std::env::temp_dir().join(format!("effectcraft-no-scan-{}", std::process::id()));
+    let f = effectcraft_project::Footage {
+        path: seq_dir.join("f_00000.exr").to_string_lossy().to_string(),
+        kind: effectcraft_project::FootageKind::Sequence,
+        sequence: (0..5000).map(|i| seq_dir.join(format!("f_{i:05}.exr")).to_string_lossy().to_string()).collect(),
+        width: 8,
+        height: 8,
+        has_video: true,
+        ..Default::default()
     };
-    let wait = |s: &mut Session| {
-        let t0 = std::time::Instant::now();
-        while s.poll_disk_salt() {
-            assert!(t0.elapsed().as_secs() < 20, "the salt never landed");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    };
-    assert!(s.layer_cache.disk().is_some(), "attached with its salt");
-    std::fs::write(at("a"), b"one").unwrap();
-    add(&mut s, &at("a"));
-    // The edit returned before the files were stamped, and the disk cache waits for the salt.
-    assert!(s.disk_salt.is_none() && s.layer_cache.disk().is_none());
-    // Edits that leave the footage alone don't start over (and may pick up the salt meanwhile).
-    s.execute("comp.new", json!({"name": "C", "width": 8, "height": 8, "frameRate": 30, "duration": 1})).unwrap();
-    let r = s.refresh_disk_salt(false);
-    assert!(r.is_none() || r == Some(effectcraft_render::disk_cache::footage_salt(&s.project)), "{r:?}");
-    // New footage while it is taken: the salt for the newest footage lands.
-    std::fs::write(at("b"), b"two").unwrap();
-    add(&mut s, &at("b"));
-    wait(&mut s);
-    let salt = effectcraft_render::disk_cache::footage_salt(&s.project);
-    assert_eq!(s.disk_salt.map(|(_, salt)| salt), Some(salt));
-    assert_eq!(s.refresh_disk_salt(false), Some(salt));
-    assert!(s.layer_cache.disk().is_some(), "attached again");
-    // Another setting keeps the salt and the disk cache attached.
+    s.edit("add", None, |p, _| {
+        p.add_item("seq", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
+        Ok(())
+    })
+    .unwrap();
+    assert!(attached(&s), "an import keeps it attached");
+    let cid = project(&mut s);
+    s.execute("prop.set", json!({"layer": "#1", "path": "transform/opacity", "value": 50})).unwrap();
     s.execute_checked("prefs.set", json!({"key": "disk.diskCacheMaxGb", "value": 30})).unwrap();
-    assert!(s.layer_cache.disk().is_some() && s.disk_salt.map(|(_, salt)| salt) == Some(salt));
-    // Turned off and on again: stamped anew, in the background.
+    assert!(attached(&s), "edits and other settings keep it attached");
+    let same = (*s.project).clone();
+    s.replace_project(same, None);
+    assert!(attached(&s), "opening a project keeps it attached");
+    // The first render uses it: a solid reads no file, so nothing is checked either.
+    s.render(cid, s.time(), RenderOpts::default());
+    dc.flush();
+    assert!(dc.stats().entries > 0, "written by the first render");
+    assert_eq!(dc.file_checks(), 0, "no file looked at for the disk cache");
+    // Switched off and on: attached again at once.
     s.execute_checked("prefs.set", json!({"key": "disk.diskCacheEnabled", "value": false})).unwrap();
+    assert!(s.layer_cache.disk().is_none());
     s.execute_checked("prefs.set", json!({"key": "disk.diskCacheEnabled", "value": true})).unwrap();
-    wait(&mut s);
-    assert_eq!(s.refresh_disk_salt(false), Some(salt));
-    let _ = std::fs::remove_file(at("a"));
-    let _ = std::fs::remove_file(at("b"));
+    assert!(s.layer_cache.disk().is_some());
 }
 
 /// Marker edits keep the disk key (the sound of a playing preview must not wait for frames to
@@ -256,40 +241,4 @@ fn protected_markers_with_a_duration_change_the_content_key() {
     assert_ne!(k1, k0, "a protected marker with a duration");
     s.execute("markers.set", json!({"comp": inner.0, "index": index, "duration": 2.0})).unwrap();
     assert_ne!(key(&s), k1, "its duration");
-}
-
-/// A project opened while a footage salt is still being taken must not keep that salt when it
-/// names the same footage: its files may have changed since the worker read them.
-#[test]
-fn opening_a_project_drops_the_footage_salt_being_taken() {
-    let dir = folder("bg-salt-open");
-    let mut s = session(&dir);
-    s.disk_salt_background = true;
-    let path = std::env::temp_dir().join(format!("effectcraft-bg-salt-open-{}.png", std::process::id()));
-    std::fs::write(&path, b"one").unwrap();
-    let f = effectcraft_project::Footage {
-        path: path.to_string_lossy().to_string(),
-        kind: effectcraft_project::FootageKind::Still,
-        width: 1,
-        height: 1,
-        has_video: true,
-        ..Default::default()
-    };
-    s.edit("add", None, |p, _| {
-        p.add_item("f.png", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
-        Ok(())
-    })
-    .unwrap();
-    // The file changes after the edit started the salt, before the same footage is opened again.
-    std::fs::write(&path, b"a longer content").unwrap();
-    let same = (*s.project).clone();
-    s.replace_project(same, None);
-    let t0 = std::time::Instant::now();
-    while s.poll_disk_salt() {
-        assert!(t0.elapsed().as_secs() < 20, "the salt never landed");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    let now = effectcraft_render::disk_cache::footage_salt(&s.project);
-    assert_eq!(s.disk_salt.map(|(_, salt)| salt), Some(now), "the salt reflects the file as it is now");
-    let _ = std::fs::remove_file(&path);
 }

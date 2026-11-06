@@ -354,8 +354,9 @@ frame whose files can't all be named is not stored.
   Cache / `edit.purge {what: "disk"}` clears it. `effectcraft.info().diskCache` has the same.
 
 **Layer buffers (M13.30).** Slow layer buffers (≥ 20 ms to render) go to the disk cache too
-(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keys salted per project
-and footage as on the desktop). A layer lookup happens in the middle of a synchronous render,
+(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keyed as on the desktop:
+`disk_cache::layer_disk_key`; each entry keeps the source files its buffer was made of, with
+the file table's size and content hash, and is used only while they are unchanged). A layer lookup happens in the middle of a synchronous render,
 where the browser's file system can't be read, so it is made synchronous by fetching first:
 
 1. Each frame worker backs its layer cache with a `PrefetchStore` (`effectcraft_render::cache`):

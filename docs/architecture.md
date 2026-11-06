@@ -242,9 +242,14 @@ frame's float values. The browser keeps 8-bit frames for now (its frame workers 
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
 the layer cache and the viewer's RAM preview: layer buffers that were slow to render and every
 preview frame are written (LZ4, atomic rename, checksummed) under 128-bit content keys — the
-comp's content hash (the comp, what it uses, footage file size and time) plus frame, scale and
-view for frames; the layer key salted with the footage fingerprint for layers — so entries
-survive restarts and never go stale. Frame entries are 8-bit RGBA, or for 32 bpc viewer frames
+comp's content hash (the comp and what it uses, footage items with their settings and paths,
+from memory alone) plus frame, scale and view for frames; the layer cache's content key (which
+names the footage items a buffer uses with their paths) and the renderer version for layers.
+Every frame and layer entry keeps the source files it was made of, with the size and
+modification time they were read with, and is used only while they are unchanged: a handful of
+`metadata` calls when an entry is read, never a scan of the project's files (#3184). Entries
+survive restarts and never go stale; frames and buffers whose files can't all be named are not
+written. Frame entries are 8-bit RGBA, or for 32 bpc viewer frames
 half floats with their bytes shuffled into planes before LZ4 (the entry header's format byte
 tells them apart; the render options in the key keep the two kinds apart). LRU eviction keeps it under the size limit; Edit ▸ Purge
 empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue. In the

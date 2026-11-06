@@ -12,8 +12,8 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// The identity of a file as a render read it (see [`file_stamp`](crate::disk_cache) for the
-/// same identity in the layer-cache salt; frame entries store it, see `disk_cache::EntryFiles`).
+/// The identity of a file as a render read it (frame and layer entries on disk store it, see
+/// [`EntryFiles`](crate::disk_cache::EntryFiles)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FileStamp {
     /// A file on disk: its size in bytes and its modification time (nanoseconds since the Unix

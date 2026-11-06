@@ -27,8 +27,9 @@
 //! - Layer buffers on disk: with `layers`, the server's layer cache is backed by a
 //!   [`PrefetchStore`] ([`FrameServer::set_layer_store`]): before the request the transport
 //!   fetches the entries named in `prefetch` (recent misses that are on disk, chosen by the
-//!   page, `disk_cache::LayerPrefetch`), so the lookups in the middle of the render find them;
-//!   the reply lists the layer keys that missed and those served from the store
+//!   page, `disk_cache::LayerPrefetch`), so the lookups in the middle of the render find them
+//!   (each entry keeps the source files its buffer was made of and is used only while they are
+//!   unchanged, #3184); the reply lists the layer keys that missed and those served from the store
 //!   ([`FrameReply::Frame`] `layer_misses` / `layer_hits`), and slow buffers queue up for the
 //!   transport to write after the frame ([`PrefetchStore::take_writes`], reported as
 //!   [`FrameReply::Stored`] with `layer`).
@@ -180,7 +181,7 @@ pub enum FrameReply {
         passes: u32,
         #[serde(default)]
         gpu: bool,
-        /// Layer-cache lookups that missed the store (salted keys, 32 hex digits).
+        /// Layer-cache lookups that missed the store (disk keys, 32 hex digits).
         #[serde(default, rename = "layerMisses", skip_serializing_if = "Vec::is_empty")]
         layer_misses: Vec<String>,
         /// Layer buffers served from the store (fetched from disk).
@@ -263,9 +264,8 @@ pub struct FrameServer {
     revision: Option<u64>,
     /// The frame being rendered in passes.
     pending: Option<Pending>,
-    /// The disk cache's layer buffers (see the module docs) and the project's salt.
+    /// The disk cache's layer buffers (see the module docs).
     layer_store: Option<Arc<PrefetchStore>>,
-    salt: u64,
     /// Size and content hash for footage paths with no native metadata (the browser file table).
     virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
     /// The source files the last finished frame read ([`FrameServer::take_files`]).
@@ -300,15 +300,15 @@ impl FrameServer {
             revision: None,
             pending: None,
             layer_store: None,
-            salt: 0,
             virtual_id: None,
             files: None,
         }
     }
 
-    /// Identity of virtual footage files, used when native metadata cannot describe the path.
-    /// Called from `FrameServer::load`, not from the UI thread's cache lookup.
+    /// Identity of virtual footage files, used when native metadata cannot describe the path:
+    /// what the disk entries of frames and layer buffers keep for them and are checked against.
     pub fn set_virtual_id(&mut self, id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>) {
+        self.cache.set_virtual_id(id.clone());
         self.virtual_id = id;
     }
 
@@ -332,11 +332,6 @@ impl FrameServer {
 
     pub fn layer_store(&self) -> Option<&Arc<PrefetchStore>> {
         self.layer_store.as_ref()
-    }
-
-    /// The salt of the replica's layer keys on disk (keys are `(salt, key)`).
-    pub fn salt(&self) -> u64 {
-        self.salt
     }
 
     /// Render with `accel` when the request's backend asks for it (the worker's GPU). Its miss
@@ -365,8 +360,6 @@ impl FrameServer {
 
     fn load(&mut self, revision: u64) -> Result<(), String> {
         let p = Project::from_json(&self.doc.to_string()).map_err(|e| e.to_string())?;
-        self.salt = effectcraft_render::disk_cache::footage_salt_with(&p, self.virtual_id.as_deref());
-        self.cache.set_store_salt(self.salt);
         self.project = Some(Arc::new(p));
         self.revision = Some(revision);
         Ok(())
@@ -410,7 +403,7 @@ impl FrameServer {
             }
             FrameMsg::Render { id, revision, comp, time, opts, layers, .. } => {
                 let store = self.layer_store.clone().filter(|_| layers);
-                self.cache.set_store(store.map(|s| (s as Arc<dyn LayerStore>, self.salt)));
+                self.cache.set_store(store.map(|s| s as Arc<dyn LayerStore>));
                 let fail = |error: String, stale: bool| vec![(FrameReply::Failed { id, error, stale }, None)];
                 if self.revision != Some(revision) {
                     return fail(format!("the replica is at {:?}, not {revision}", self.revision), true);
