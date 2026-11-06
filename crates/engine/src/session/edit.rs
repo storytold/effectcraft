@@ -324,6 +324,9 @@ impl Session {
         self.project = Arc::new(p);
         // Its files may have changed since they were last stamped.
         self.disk_salt = None;
+        // A salt still being taken is for the old project's files: dropped, so that the next refresh
+        // stamps the new project anew (a matching fingerprint would otherwise keep the stale job).
+        self.disk_salt_job = None;
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
         self.history = History::default();

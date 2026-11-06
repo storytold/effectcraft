@@ -257,3 +257,39 @@ fn protected_markers_with_a_duration_change_the_content_key() {
     s.execute("markers.set", json!({"comp": inner.0, "index": index, "duration": 2.0})).unwrap();
     assert_ne!(key(&s), k1, "its duration");
 }
+
+/// A project opened while a footage salt is still being taken must not keep that salt when it
+/// names the same footage: its files may have changed since the worker read them.
+#[test]
+fn opening_a_project_drops_the_footage_salt_being_taken() {
+    let dir = folder("bg-salt-open");
+    let mut s = session(&dir);
+    s.disk_salt_background = true;
+    let path = std::env::temp_dir().join(format!("effectcraft-bg-salt-open-{}.png", std::process::id()));
+    std::fs::write(&path, b"one").unwrap();
+    let f = effectcraft_project::Footage {
+        path: path.to_string_lossy().to_string(),
+        kind: effectcraft_project::FootageKind::Still,
+        width: 1,
+        height: 1,
+        has_video: true,
+        ..Default::default()
+    };
+    s.edit("add", None, |p, _| {
+        p.add_item("f.png", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f));
+        Ok(())
+    })
+    .unwrap();
+    // The file changes after the edit started the salt, before the same footage is opened again.
+    std::fs::write(&path, b"a longer content").unwrap();
+    let same = (*s.project).clone();
+    s.replace_project(same, None);
+    let t0 = std::time::Instant::now();
+    while s.poll_disk_salt() {
+        assert!(t0.elapsed().as_secs() < 20, "the salt never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let now = effectcraft_render::disk_cache::footage_salt(&s.project);
+    assert_eq!(s.disk_salt.map(|(_, salt)| salt), Some(now), "the salt reflects the file as it is now");
+    let _ = std::fs::remove_file(&path);
+}
