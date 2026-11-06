@@ -32,7 +32,9 @@ fn device() -> Option<Dev> {
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("display pass tests"), ..Default::default() })).ok()?;
     let info = adapter.get_info();
     eprintln!("display pass tests on {:?} ({:?})", info.name, info.device_type);
-    Some(Dev { cpu: info.device_type == wgpu::DeviceType::Cpu, instance, adapter, device, queue })
+    // (macOS CI runners' Metal is a virtual "Apple Paravirtual device": it rounds like a software one)
+    let cpu = info.device_type == wgpu::DeviceType::Cpu || info.name.contains("Paravirtual");
+    Some(Dev { cpu, instance, adapter, device, queue })
 }
 
 /// `compare`'s result is exact, or (software rasterizers) at most 1 LSB on at most 1 % of bytes.
