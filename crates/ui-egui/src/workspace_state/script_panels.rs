@@ -124,10 +124,14 @@ fn show_hidden(workspace: &mut Workspace, open: impl Fn(&PanelKind) -> bool) {
     let stays_open = |panel: &PanelKind| Permissions { closable: !open(panel), ..crate::dock::permissions(panel) };
     workspace.reconcile(|_| true, stays_open, &Workspace::default());
     // With its anchor gone, `reconcile` tries an edge frame, which a dock-only root or a tree at
-    // its depth limit can't take. A tab needs no room; like `reconcile`, it expands nothing.
+    // its depth limit can't take. Joining a group needs no room; like `reconcile`, it expands
+    // nothing. With no panel to join, only empty docks can be left, and opening needs no root.
     let waiting: Vec<PanelKind> = workspace.hidden.iter().map(|(panel, _)| *panel).filter(|panel| open(panel)).collect();
     for panel in waiting {
         let anchor = workspace.panels().first().copied();
+        if anchor.is_none() {
+            workspace.layout.root = None;
+        }
         if let Err(error) = workspace.apply(Action::Open { panel, anchor }, crate::dock::permissions) {
             log::warn!("An open ScriptUI panel stays hidden: {error}");
         }
