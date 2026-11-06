@@ -161,6 +161,8 @@ pub fn legacy_default(effect: &str, param: &str) -> Option<Value> {
         ("ec.key.advancedspill", "ultraSettings/tolerance") => Value::Scalar(100.0),
         // Transition: Block Dissolve's blocks had hard edges.
         ("ec.transition.blockdissolve", "softEdges") => Value::Bool(false),
+        // 3D Channel: Cryptomatte's Matte Only put the matte in alpha too (#3127).
+        ("ec.3d.cryptomatte", crate::channel3d::MATTE_ONLY_IN_ALPHA) => Value::Bool(true),
         _ => return None,
     })
 }
@@ -514,6 +516,21 @@ mod tests {
         assert_eq!(pr.name, popup.name);
         assert_eq!(pr.value, Value::Enum(options.len() as u32 - 1));
         assert_eq!(pr.ui, popup.ui);
+    }
+
+    /// #3127: Cryptomatte's Matte Only moved the matte from RGBA to RGB over alpha 1; a project
+    /// saved before has no Matte Only In Alpha switch and gets it on, keeping its render. A fresh
+    /// instance has it off.
+    #[test]
+    fn cryptomatte_saved_before_matte_only_in_rgb_keeps_the_matte_in_alpha() {
+        let id = crate::channel3d::MATTE_ONLY_IN_ALPHA;
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.3d.cryptomatte", &mut next);
+        assert_eq!(g.get(id).map(|p| p.value.clone()), Some(Value::Bool(false)));
+        g.children.retain(|c| c.match_id() != id);
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        let pr = g.get(id).expect("added on upgrade");
+        assert_eq!((&pr.value, &pr.ui), (&Value::Bool(true), &ParamUi::Hidden));
     }
 
     /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the

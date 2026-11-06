@@ -41,7 +41,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | PNG | R/W | yes | yes (sequence) | good |
 | JPEG | R/W | yes | yes (sequence) | good |
 | TIFF | R/W | yes | yes (sequence) | good |
-| OpenEXR (multi-layer, Cryptomatte) | R/W | yes | yes (32-bit sequence) | good; HTJ2K compression fails (#482); EXRs without an unnamed RGB layer decode twice (#474) |
+| OpenEXR (multi-layer, Cryptomatte) | R/W | yes | yes (scan-line sequence, half or 32-bit float, every compression but HTJ2K) | good; HTJ2K compression fails (#482); a multi-layer frame decodes once for its picture and EXtractoR / Cryptomatte from the first frame on, except Media Replacement items, which are learned at their first frame, and files whose picture the `image` crate still decodes (#474); footage alone keeps only its picture's channels, though a single-part file still decompresses every channel's pixels; decoded channels are held as f32 |
 | Photoshop PSD / PSB | R (footage, composition) / W (layers, sequence) | yes (layers, groups, masks, styles, smart objects) | Save Frame As ▸ Photoshop Layers; no Photoshop sequence output | good, from Adobe's published spec |
 | Illustrator `.ai`, PDF, EPS | R | yes (vector, Continuously Rasterize, Create Shapes; Composition and Composition - Retain Layer Sizes, #1536) | — | partial: no JPX / JBIG2 images, no Illustrator procset EPS |
 | SVG | R | yes | — | good; SVG markup on the clipboard pastes as a shape layer (26.3, #738); Illustrator's own clipboard data (PDF/AI) doesn't |
@@ -100,6 +100,10 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 H.264 MP4, HEVC MP4, AV1 MP4, ProRes MOV, uncompressed 8-bit RGB / RGB + Alpha MOV (`raw `, + PCM;
 #372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, WAV, AIFF.
+OpenEXR sequences are scan-line RGBA files in half or 32-bit float (default) with None, RLE, ZIPS,
+ZIP (default), PIZ, PXR24, B44, B44A, DWAA or DWAB compression; PXR24 on float, B44 / B44A on half
+and DWAA / DWAB are lossy (#2911). No tiled or multi-part output, no HTJ2K (the `exr` crate can't
+write it).
 Missing against After Effects + Media Encoder: 16-bpc uncompressed, AVI and lossless-compressed
 single-file video (Animation / PNG codecs), DPX / Photoshop sequences, MXF, DNxHR, hardware
 encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over an existing file

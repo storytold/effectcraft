@@ -319,6 +319,13 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  OpenEXR sequences (`format: exr`) are scan-line files, linear and premultiplied, and take
+  `exrCompression: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab` (default `zip`, 16-line
+  blocks; `zips` is ZIP one scan line per block, the "Zip (1 scanline)" many compositing
+  pipelines default to) and `exrBitDepth: half|float` (default `float`); `renderQueue.formats`
+  lists them.
+  PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
+  stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both
@@ -752,6 +759,7 @@ effectcraft-cli exec layer.newNull --bridge 9877                 # same commands
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
+effectcraft-cli render main.ecproj --comp Main --out 'main_[#####].exr' --exr-compression piz --exr-depth half   # half-float PIZ OpenEXR frames
 ```
 
 Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
