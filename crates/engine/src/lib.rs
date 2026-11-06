@@ -255,6 +255,9 @@ pub struct Session {
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
     /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
     pub disk_salt: Option<(u64, u64)>,
+    /// The footage files effects read the channels of, as last given to the footage source
+    /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
+    pub aux_footage: Option<Vec<String>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -382,6 +385,7 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             disk_salt: None,
+            aux_footage: None,
             script_calls: ScriptCalls::default(),
         }
     }

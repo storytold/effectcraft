@@ -120,9 +120,20 @@ Nuke's `beauty`) show the beauty pass: the layer named Combined, Beauty, Image, 
 Color, else the first colour layer that isn't a data pass. Cryptomatte, depth, mist, normals,
 vectors, positions and IDs are never the picture. EXtractoR reads every other layer and channel.
 
+Footage on its own keeps only the channels of its picture (a single-part file still
+decompresses all of its pixels to read them). Once an effect reads an item's channels
+(EXtractoR, Cryptomatte, the 3D Channel effects), each frame, the first included, is decoded
+once for the picture and the effects together, and kept for a while: about 1 GB of decoded
+channels (512 MB in the browser), a soft bound, as the newest file and files still in use
+stay whatever their size. Several frames asking for the same file at once wait for one
+decode. Once no enabled effect reads the item any more, its frames go back to the picture's
+channels alone.
+
 The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the
-Composition viewer (Shift adds, Alt or Ctrl removes).
+Composition viewer (Shift adds, Alt or Ctrl removes). Matte Only shows the matte as grey in
+RGB over full alpha, as After Effects' Cryptomatte plug-in does; projects saved before that
+change keep their matte in alpha as well.
 
 ## Replacing and reloading
 
