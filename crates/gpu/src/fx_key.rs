@@ -313,6 +313,10 @@ fn key_cleaner(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 
 fn simple_choker(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let c = ctx.params.f("chokeMatte") * b.scale;
+    if c < -effectcraft_effects::util::FILL_REACH {
+        // The colour fill beyond the small blur (nearest pixel) runs on the CPU.
+        return None;
+    }
     if c.abs() > 1e-6 {
         if c < 0.0 && !ctx.adjustment {
             b.pad(e, (-c).ceil() as u32 + 1)?;
