@@ -169,9 +169,12 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   (`ashow`, `widthshow`, `awidthshow`, `kshow`, `cshow`, `xshow`, `yshow`, `xyshow`, `glyphshow`)
   and `charpath` pay for the glyphs they draw; `stringwidth` builds no outlines and is paid by the
   string's bytes.
-  `array` and `string` requests are clamped to 1,000,000 slots and 10,000,000 bytes. At most 1,024
-  graphics-state copies (`gsave`, `save`) are kept at once, `begin` keeps at most 64 dictionaries
-  on the stack, and procedures nest at most 256 deep.
+  `array` and `string` requests are clamped to 1,000,000 slots and 10,000,000 bytes without a
+  diagnostic. Numeric `copy` and `roll` clamp their count to the available operands; `roll` reduces
+  its rotation modulo that count. At most 1,024 graphics-state copies (`gsave`, `save`) are kept
+  at once, `begin` keeps at most 64 dictionaries on the stack, and procedures nest at most 256 deep.
+  Each `loop` has a legacy cap of 1,000,000 iterations: `{} loop` silently returns at that cap and
+  execution continues. A busier loop can exhaust the 8,000,000-operation budget first and quit.
   A name or dictionary key made or kept at runtime is at most 255 bytes of text: converted by
   `cvn`, kept by `load` as the operator it makes, made by `findfont`, `selectfont` or `definefont`
   from a string, a string font or glyph name when it is drawn, or any new dictionary key, including
@@ -184,9 +187,10 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   step over (an indirect data source, an unknown image operator, a bare `readhexstring`) reaches
   the scanner as names, so a cap there would reject it; the seventeen reference files this was
   checked against create names of at most 85 bytes, and real generator output at most 28.
-  Reaching a limit stops execution with a note in `Doc::skipped` (operation limit, allocation
+  Resource refusals stop execution with a note in `Doc::skipped` (operation limit, allocation
   limit, operand stack limit, path limit, recursion limit, graphics state depth limit, name length
-  limit), keeping artwork already drawn, rather than continuing with partial results.
+  limit), keeping artwork already drawn in an `Ok(Doc)` rather than returning `Err` or continuing
+  with partial results from the refused operation.
   This is not a process-memory guarantee. Outside the allocation budget, each bounded another way:
   the file's source tokens (the names, strings and procedures the scanner reads) and the one copy
   of each embedded font program taken from the file before the program runs, both bounded by the

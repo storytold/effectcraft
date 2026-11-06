@@ -392,6 +392,49 @@ fn eps_soon(body: &str) -> Doc {
     rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap_or_else(|_| panic!("parsing {body} did not finish")).unwrap()
 }
 
+/// Huge operands clamp without diagnostics; predicates check lengths and stack order before drawing.
+#[test]
+fn eps_resource_clamps_and_legacy_loop_cap_continue_drawing() {
+    for (body, predicate) in [
+        ("1000000000 array", "length 1000000 eq"),
+        ("3 array", "length 3 eq"),
+        ("1000000000 string", "length 10000000 eq"),
+        ("3 string", "length 3 eq"),
+        ("1 1000000000 copy", "count 2 eq exch 1 eq and exch 1 eq and"),
+        ("1 2 3 2 copy", "count 5 eq exch 3 eq and exch 2 eq and exch 3 eq and exch 2 eq and exch 1 eq and"),
+        ("1 2 3 1000000000 1000000000 roll", "count 3 eq exch 2 eq and exch 1 eq and exch 3 eq and"),
+        ("1 2 3 3 1 roll", "count 3 eq exch 2 eq and exch 1 eq and exch 3 eq and"),
+        ("/a { 7 } def a", "count 1 eq exch 7 eq and"),
+        // The empty infinite loop reaches the legacy iteration cap, not the operation limit.
+        ("{} loop", "count 0 eq"),
+        ("{ exit } loop", "count 0 eq"),
+    ] {
+        let doc = eps_soon(&format!("1 0 0 setrgbcolor 0 0 10 10 rectfill {body} {predicate} {{ 0 1 0 setrgbcolor 20 0 10 10 rectfill }} if"));
+        assert!(doc.skipped.is_empty(), "{body}: {:?}", doc.skipped);
+        assert_eq!(doc.flatten().len(), 2, "{body}: predicate must accept the result");
+        let img = render(&doc);
+        assert_eq!(img.get(5, 95), [1.0, 0.0, 0.0, 1.0], "{body}: earlier red square");
+        assert_eq!(img.get(25, 95), [0.0, 1.0, 0.0, 1.0], "{body}: later green square");
+    }
+}
+
+/// Refusals return a partial `Ok(Doc)` with an exact diagnostic, preserving only earlier artwork.
+#[test]
+fn eps_resource_refusals_stop_before_later_artwork() {
+    for (body, diagnostic) in [
+        ("0 1 50000 {} for 1000000000 copy", "PostScript (operand stack limit)"),
+        ("/a { a } def a", "PostScript (recursion limit)"),
+        ("{ 0 0 0 0 0 0 0 0 clear } loop", "PostScript (operation limit)"),
+    ] {
+        let doc = eps_soon(&format!("1 0 0 setrgbcolor 0 0 10 10 rectfill {body} 0 1 0 setrgbcolor 20 0 10 10 rectfill"));
+        assert_eq!(doc.skipped, [diagnostic], "{body}");
+        assert_eq!(doc.flatten().len(), 1, "{body}");
+        let img = render(&doc);
+        assert_eq!(img.get(5, 95), [1.0, 0.0, 0.0, 1.0], "{body}: earlier artwork survives");
+        assert_eq!(img.get(25, 95)[3], 0.0, "{body}: execution must stop");
+    }
+}
+
 /// Public EPS parsing must stop exponential stack copying and retain artwork drawn before refusal.
 #[test]
 fn eps_copy_stops_before_overflowing_the_operand_stack() {

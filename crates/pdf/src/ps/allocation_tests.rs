@@ -536,6 +536,42 @@ fn eps_encoding_names_preserve_fresh_arrays_and_legacy_mappings() {
     }
 }
 
+/// Huge operands charge only clamped payloads; an overflowing copy refuses before any charge.
+#[test]
+fn eps_resource_huge_operands_charge_only_bounded_payloads() {
+    let slot = std::mem::size_of::<V>();
+    for (body, depth, charged, skipped) in [
+        ("1000000000 array", 1, 1_000_000 * slot, &[][..]),
+        ("1000000000 string", 1, 10_000_000, &[][..]),
+        ("1 1000000000 copy", 2, slot, &[][..]),
+        ("1 2 3 1000000000 1000000000 roll", 3, 0, &[][..]),
+        ("0 1 50000 {} for 1000000000 copy", 50_001, 0, &["PostScript (operand stack limit)"][..]),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(body.as_bytes());
+        assert_eq!(it.st.len(), depth, "{body}");
+        assert_eq!((256usize << 20) - it.allocation_budget, charged, "{body}");
+        assert_eq!(it.b.skipped, skipped, "{body}");
+        if !skipped.is_empty() {
+            assert!(it.st.iter().enumerate().all(|(i, v)| v.num() == Some(i as f64)), "{body}: no partial copy");
+        }
+    }
+}
+
+/// An empty loop spends one million passes; a busy loop exhausts the default operation budget.
+#[test]
+fn eps_resource_empty_and_busy_loops_have_distinct_limits() {
+    for (body, spent, skipped) in [("{} loop", 1_000_001, &[][..]), ("{ 0 0 0 0 0 0 0 0 clear } loop", 8_000_000, &["PostScript (operation limit)"][..])] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(body.as_bytes());
+        assert_eq!(8_000_000 - it.budget, spent, "{body}");
+        assert_eq!(it.allocation_budget, 256usize << 20, "{body}: no payload allocations");
+        assert!(it.st.len() <= 8, "{body}: bounded live operands");
+        assert_eq!(it.calls, 0, "{body}: procedure calls unwind");
+        assert_eq!(it.b.skipped, skipped, "{body}");
+    }
+}
+
 /// Numeric `copy` must charge all new operand slots before extending the stack.
 #[test]
 fn eps_numeric_copy_charges_new_operand_slots() {
