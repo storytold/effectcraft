@@ -699,6 +699,7 @@ fn mask_reveal_add(app: &mut EffectcraftApp) -> u64 {
     mask
 }
 
+/// Whole-mask rows and shortcut-selected properties must coexist without rendering controls twice.
 #[test]
 fn mask_reveal_opens_controls_and_preserves_other_properties_without_duplicates() {
     for kinds in [vec![], vec!["position"], vec!["feather"], vec!["masks"], vec!["masks", "feather"]] {
@@ -722,6 +723,7 @@ fn mask_reveal_opens_controls_and_preserves_other_properties_without_duplicates(
     }
 }
 
+/// Revealing controls is a presentation change; explicit search and the active drawing selection retain authority.
 #[test]
 fn mask_reveal_preserves_search_selection_focus_document_and_revision() {
     let (mut app, layer) = mask_reveal_app();
@@ -750,6 +752,7 @@ fn mask_reveal_preserves_search_selection_focus_document_and_revision() {
     assert!(app.ui.timeline.open_layers.contains(&layer));
 }
 
+/// Queued events can outlive their target or project, so stale delivery must leave Timeline presentation untouched.
 #[test]
 fn mask_reveal_ignores_undone_deleted_inactive_and_replaced_project_events() {
     for stale in ["undo", "delete", "inactive", "replace"] {
@@ -786,6 +789,7 @@ fn mask_reveal_ignores_undone_deleted_inactive_and_replaced_project_events() {
     }
 }
 
+/// Adding an unkeyed mask must retain the visible Position key and restore its controls on redo.
 #[test]
 fn mask_reveal_undo_redo_restores_visible_controls_and_keeps_keyframe_scope() {
     let (mut app, layer) = mask_reveal_app();
@@ -803,6 +807,7 @@ fn mask_reveal_undo_redo_restores_visible_controls_and_keeps_keyframe_scope() {
     assert!(labels(&app).iter().any(|r| r.trim() == "Position"));
 }
 
+/// Repeated delivery must converge to the same presentation, while malformed external arguments fail without mutation.
 #[test]
 fn mask_reveal_validates_arguments_and_repeated_delivery_is_idempotent() {
     let (mut app, layer) = mask_reveal_app();
@@ -822,6 +827,7 @@ fn mask_reveal_validates_arguments_and_repeated_delivery_is_idempotent() {
     }
 }
 
+/// An ID reused by paste or another history branch must not inherit the removed mask's pending reveal.
 #[test]
 fn mask_reveal_does_not_follow_reused_ids_after_undo_or_history_jump() {
     for route in ["undo", "ancestor", "branch"] {
@@ -863,6 +869,7 @@ fn mask_reveal_does_not_follow_reused_ids_after_undo_or_history_jump() {
     }
 }
 
+/// History sanitation must retain notifications for masks that survive restoration, even after later edits.
 #[test]
 fn mask_reveal_keeps_valid_queued_creations_after_an_unrelated_undo() {
     let (mut app, layer) = mask_reveal_app();
@@ -879,6 +886,7 @@ fn mask_reveal_keeps_valid_queued_creations_after_an_unrelated_undo() {
     }
 }
 
+/// Collapsing a whole-mask row must not leave duplicate flat properties visible through another reveal filter.
 #[test]
 fn mask_reveal_collapsing_a_mask_hides_its_children_under_mixed_filters() {
     let (mut app, layer) = mask_reveal_app();

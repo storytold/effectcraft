@@ -2,6 +2,7 @@ use crate::{Event, Session};
 use effectcraft_project::{LayerId, Project};
 use serde_json::json;
 
+/// The frontend notification must remain separate from document history and saved mask values.
 #[test]
 fn mask_reveal_creation_notifies_once_and_keeps_one_undo_step() {
     for (command, params) in [("layer.addMask", json!({})), ("mask.new", json!({"vertices": [[1, 2], [10, 2], [10, 12]], "closed": true}))] {
@@ -35,6 +36,7 @@ fn mask_reveal_creation_notifies_once_and_keeps_one_undo_step() {
     }
 }
 
+/// Invalid tool inputs must not leave either a partial mask or a queued reveal behind.
 #[test]
 fn mask_reveal_failed_creation_emits_no_notice_and_keeps_document() {
     let mut s = Session::default();
@@ -49,6 +51,7 @@ fn mask_reveal_failed_creation_emits_no_notice_and_keeps_document() {
     }
 }
 
+/// Mask creation must use the same notification contract for still and video footage.
 #[test]
 fn mask_reveal_image_and_video_layers_keep_their_source_and_mask() {
     use effectcraft_project::{Footage, FootageKind, ItemKind, LayerSource};

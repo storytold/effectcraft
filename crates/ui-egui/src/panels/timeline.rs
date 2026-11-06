@@ -913,6 +913,7 @@ pub(crate) fn visible_props(app: &EffectcraftApp, comp: &Comp) -> Vec<serde_json
         .collect()
 }
 
+/// Project the property tree into Timeline rows; explicit search takes precedence over collapse and shortcut reveals.
 fn build_rows(app: &EffectcraftApp, comp: &Comp) -> Vec<Row> {
     let tl = &app.ui.timeline;
     let search = tl.search.trim().to_lowercase();

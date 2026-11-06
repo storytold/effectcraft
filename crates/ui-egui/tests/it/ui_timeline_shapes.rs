@@ -527,6 +527,7 @@ fn text_animate_menu_adds_an_animator_with_the_property() {
     assert!(has(&a, "opacity"), "Opacity was added: {:?}", a.sub("properties"));
 }
 
+/// Both creation commands must expose editable widgets while preserving Position and the drawing panel's focus.
 #[test]
 fn mask_reveal_created_controls_are_editable_without_leaving_the_viewer() {
     for command in ["layer.addMask", "mask.new"] {

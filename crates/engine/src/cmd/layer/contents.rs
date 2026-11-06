@@ -4,6 +4,7 @@ use super::{
     layer_p, merge_p, str_p,
 };
 
+/// Add a tool-shaped mask in one document edit, then request its Timeline controls separately.
 pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.addMask")?;
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).ok_or(EngineError::NoComp)?.clone();
