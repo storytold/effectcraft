@@ -483,3 +483,18 @@ fn foam_flow_map_pop_velocity_wobble_textures_and_reflection() {
     let z2 = with(&[off.as_slice(), &[("producer/zoomProducerPoint", Value::Bool(true))]].concat(), 1.0);
     assert!((cx(&z2) - 8.0).abs() < 2.0 && cx(&z1) < 4.0, "{} vs {}", cx(&z2), cx(&z1));
 }
+
+/// Wave World's vertical resolution follows the layer's aspect, but the grid as a whole stays
+/// within its cell budget however tall (or degenerate) the layer is.
+#[test]
+fn wave_world_grid_is_bounded() {
+    use super::surfaces::{MAX_WAVE_CELLS, wave_grid};
+    assert_eq!(wave_grid(60, 160.0, 90.0), (61, 35));
+    assert_eq!(wave_grid(400, 100.0, 400.0), (401, 1601));
+    for (res, lw, lh) in [(400, 1.0, 1e9), (400, 0.0, f64::MAX), (400, 1.0, f64::INFINITY), (400, 1.0, f64::NAN), (100_000, 1e6, 1e6)] {
+        let (nx, ny) = wave_grid(res, lw, lh);
+        assert!(nx >= 3 && ny >= 3 && nx * ny <= MAX_WAVE_CELLS, "{res} {lw}×{lh}: {nx}×{ny}");
+    }
+    let img = run("ec.sim.waveworld", &[("simulation/gridResolution", num(400.0))], Image::new(1, 4000), 0.1);
+    assert_eq!((img.width, img.height), (1, 4000));
+}
