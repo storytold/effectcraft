@@ -755,34 +755,40 @@ fn mask_reveal_preserves_search_selection_focus_document_and_revision() {
 /// Queued events can outlive their target or project, so stale delivery must leave Timeline presentation untouched.
 #[test]
 fn mask_reveal_ignores_undone_deleted_inactive_and_replaced_project_events() {
-    for stale in ["undo", "delete", "inactive", "replace"] {
+    #[derive(Clone, Copy, Debug)]
+    enum Stale {
+        Undo,
+        Delete,
+        Inactive,
+        Replace,
+    }
+    for stale in [Stale::Undo, Stale::Delete, Stale::Inactive, Stale::Replace] {
         let (mut app, layer) = mask_reveal_app();
         let mask = app.session.execute("layer.addMask", json!({})).unwrap()["mask"].as_u64().unwrap();
         match stale {
-            "undo" => {
+            Stale::Undo => {
                 assert!(app.session.undo());
             }
-            "delete" => {
+            Stale::Delete => {
                 app.session.execute("mask.remove", json!({"mask": mask})).unwrap();
             }
-            "inactive" => {
+            Stale::Inactive => {
                 app.session.execute("comp.new", json!({"name": "Other"})).unwrap();
             }
-            "replace" => {
+            Stale::Replace => {
                 let project = (*app.session.project).clone();
                 let comp = app.session.active_comp_id().unwrap();
                 app.session.replace_project(project, None);
                 app.session.execute("comp.open", json!({"comp": comp.0})).unwrap();
             }
-            _ => unreachable!(),
         }
         let before = serde_json::to_value(&app.ui.timeline).unwrap();
         app.handle_events(&egui::Context::default());
         // Opening a composition can update its zoom, but must not reveal the stale mask.
-        assert!(app.ui.timeline.open_layers.is_empty(), "{stale}");
-        assert!(app.ui.timeline.open_groups.is_empty(), "{stale}");
-        assert!(app.ui.timeline.layer_reveal.is_empty(), "{stale}");
-        if stale != "inactive" && stale != "replace" {
+        assert!(app.ui.timeline.open_layers.is_empty(), "{stale:?}");
+        assert!(app.ui.timeline.open_groups.is_empty(), "{stale:?}");
+        assert!(app.ui.timeline.layer_reveal.is_empty(), "{stale:?}");
+        if !matches!(stale, Stale::Inactive | Stale::Replace) {
             assert_eq!(serde_json::to_value(&app.ui.timeline).unwrap(), before);
         }
         assert!(!app.ui.timeline.open_layers.contains(&layer));
