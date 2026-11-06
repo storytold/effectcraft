@@ -375,3 +375,71 @@ fn every_frame_begin_has_a_frame_end() {
     assert!(matches!(w.handle(req(6, s.revision, comp, cpu))[0].0, FrameReply::Frame { id: 6, .. }));
     assert_eq!(load(), (3, 3));
 }
+
+/// Footage that reads one file from memory (the browser's file table) for every frame.
+struct OneVirtualFile {
+    /// Tell which files it reads (else every render's list is incomplete).
+    records: bool,
+}
+
+impl FootageSource for OneVirtualFile {
+    fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<Arc<Image>> {
+        Some(Arc::new(Image::filled(4, 4, [1.0, 0.5, 0.0, 1.0])))
+    }
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        if self.records {
+            reads.note(effectcraft_render::reads::ReadFile::new("/clip.png", effectcraft_render::reads::FileStamp::Virtual));
+        } else {
+            reads.mark_incomplete();
+        }
+        f()
+    }
+}
+
+/// The worker hands the transport the files each frame read, so its disk entry keeps them; the
+/// page reads the entry back only while those files are unchanged. A frame whose files can't
+/// all be named is not stored (#3184).
+#[test]
+fn the_worker_reports_the_files_of_each_frame_for_its_disk_entry() {
+    use effectcraft_project::{Comp, Footage, ItemKind, LayerSource, Project, build};
+    use effectcraft_render::disk_cache::{frame_entry, read_frame_entry};
+    use effectcraft_time::FrameRate;
+    let mut p = Project::default();
+    let f = Footage { path: "/clip.png".into(), width: 4, height: 4, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
+    let fid = p.add_item("clip.png", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+    let mut comp = Comp::new(4, 4, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (4, 4), None)].into();
+    let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+    let id = |mark: u64| move |path: &str| (path == "/clip.png").then_some((10, mark));
+    let (one, two) = (id(1), id(2));
+    for records in [true, false] {
+        let mut w = FrameServer::new(Arc::new(OneVirtualFile { records }), None);
+        w.set_virtual_id(Some(Arc::new(one)));
+        let mut m = Mirror::default();
+        assert!(w.handle(round(&m.sync(1, &p).unwrap())).is_empty());
+        assert!(w.take_files().is_none(), "no frame yet");
+        let out = w.handle(round(&FrameMsg::Render {
+            id: 1,
+            revision: 1,
+            comp: cid,
+            time: Tick::ZERO,
+            opts: Box::default(),
+            disk: Some(format!("{:032x}", 5u128)),
+            layers: false,
+            prefetch: vec![],
+        }));
+        let (FrameReply::Frame { width, height, .. }, Some(px)) = &out[0] else { panic!("{:?}", out[0].0) };
+        let files = w.take_files().expect("the frame's files");
+        assert!(w.take_files().is_none(), "taken once");
+        let vid = w.virtual_id().cloned();
+        let entry = frame_entry(*width, *height, px, &files, vid.as_deref());
+        if !records {
+            assert!(!files.is_complete() && entry.is_none(), "an incomplete list is not stored");
+            continue;
+        }
+        assert_eq!(files.files().iter().map(|f| &*f.path).collect::<Vec<_>>(), ["/clip.png"]);
+        let entry = entry.expect("stored");
+        assert_eq!(read_frame_entry(&entry, Some(&one)).map(|f| f.rgba), Some(px.clone()));
+        assert!(read_frame_entry(&entry, Some(&two)).is_none(), "the file was replaced: a miss");
+    }
+}

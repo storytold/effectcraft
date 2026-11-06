@@ -332,9 +332,11 @@ pixels.
 
 Settings ▸ Disk ▸ Disk Cache works in the browser, backed by the **Origin Private File System**
 (`src/diskcache.rs`): viewer frames are kept under `effectcraft-cache/v1/frames/<32 hex>.ecc`
-between visits, in the desktop cache's format (`disk_cache::frame_entry`: 8-bit premultiplied
-RGBA, LZ4, a checksum), keyed by the same content hash (the comp and everything it uses, frame,
-scale, view, render options).
+between visits, in the desktop cache's format (`disk_cache::frame_entry`: the source files the
+frame read with their size and content hash, then 8-bit premultiplied RGBA, LZ4, a checksum),
+keyed by the same content hash (the comp and everything it uses as held in memory, frame, scale,
+view, render options). The page reads an entry only while the files it lists are unchanged; a
+frame whose files can't all be named is not stored.
 
 - A render request to a frame worker carries the frame's disk key; the worker posts the frame,
   then writes the entry with a **synchronous access handle** into a temporary file moved into

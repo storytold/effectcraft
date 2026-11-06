@@ -2,13 +2,18 @@
 //! and layer cache entries kept on disk between sessions, like After Effects' disk cache.
 //!
 //! * Entries are files keyed by a 128-bit content hash (`<folder>/v1/<kind>/<2 hex>/<32 hex>.ecc`):
-//!   frames by the hash of the composition's content (the comp and everything it uses, footage
-//!   files' size and modification time included) plus frame, scale and view; layer buffers by
-//!   the layer cache's content key salted with the project's footage fingerprint. A changed
-//!   project therefore never reads stale pixels: its keys simply change.
+//!   frames by the hash of the composition's content as it is in memory (the comp and everything
+//!   it uses, footage items with their settings and paths; no file is looked at) plus frame,
+//!   scale and view; layer buffers by the layer cache's content key salted with the project's
+//!   footage fingerprint. A changed project therefore never reads stale pixels: its keys simply
+//!   change.
+//! * A frame entry keeps the source files the frame was made of, each with the size and
+//!   modification time it was read with ([`EntryFiles`], #3184). An entry is used only while
+//!   those files are unchanged: a handful of `metadata` calls when the frame is read, never a
+//!   scan of the project's files. A frame whose files can't all be named is not stored.
 //! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
 //!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
-//!   header's format byte tells them apart, 8-bit entries keep format 0), layer
+//!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
 //!   buffers as `f32` RGBA with the bytes shuffled into planes (exact, so cached and fresh
 //!   renders are bit-identical), Roto Brush / Object Matte segmentations as
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
@@ -31,6 +36,11 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use effectcraft_effects::Buf;
 use effectcraft_raster::Image;
+
+use crate::reads::ReadFiles;
+
+mod entry_files;
+pub use entry_files::{EntryFile, EntryFiles, EntryStamp};
 
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
@@ -87,9 +97,13 @@ pub struct FrameF16 {
     pub rgba: Vec<u16>,
 }
 
-/// The entry header's format byte of frame entries.
+/// The entry header's format byte: layer buffers and segmentations (and 8-bit frames before
+/// #3184).
 const FORMAT_RGBA8: u8 = 0;
-const FORMAT_F16: u8 = 1;
+/// Frame entries: their source files ([`EntryFiles`]), then 8-bit or half-float pixels. The
+/// formats before them (0: 8-bit, 1: half float, without files) read as misses and are deleted.
+const FORMAT_RGBA8_FILES: u8 = 2;
+const FORMAT_F16_FILES: u8 = 3;
 
 /// Counters for tests, the Info panel and `cache.diskStats`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -286,6 +300,8 @@ pub struct DiskCache {
     evictions: AtomicU64,
     dropped: AtomicU64,
     failed: AtomicU64,
+    /// Source files looked at to check frame entries ([`DiskCache::file_checks`]).
+    file_checks: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
@@ -362,6 +378,7 @@ impl DiskCache {
             evictions: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             failed: AtomicU64::new(0),
+            file_checks: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
             queue: Arc::new((
                 Mutex::new(Queue {
@@ -541,36 +558,82 @@ impl DiskCache {
 
     /// An entry's payload and its header's format byte.
     fn read_entry(&self, kind: Kind, key: u128) -> Option<(u8, Vec<u8>)> {
+        let entry = self.load(kind, key);
+        match &entry {
+            Some(_) => self.hit(kind, key),
+            None => _ = self.misses.fetch_add(1, Ordering::Relaxed),
+        }
+        entry
+    }
+
+    /// An entry's payload and format byte, without counting it as a hit or miss. A damaged file
+    /// is deleted; a missing one forgotten.
+    fn load(&self, kind: Kind, key: u128) -> Option<(u8, Vec<u8>)> {
         if !self.contains(kind, key) {
-            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         let path = self.path(kind, key);
         let data = std::fs::read(&path).ok();
-        let ok = data.as_deref().and_then(|d| verify(d, kind).map(|p| (d[5], p)));
-        match ok {
-            Some((format, payload)) => {
-                let payload = (format, payload.to_vec());
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut g) = self.index.lock() {
-                    g.touch(kind, key);
-                }
-                // Persist the recency for the next session (best effort).
-                if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-                    let _ = f.set_modified(std::time::SystemTime::now());
-                }
-                Some(payload)
+        let ok = data.as_deref().and_then(|d| Some((*d.get(5)?, verify(d, kind)?.to_vec())));
+        if ok.is_none() {
+            // Gone (another process evicted it) or damaged: forget it.
+            if data.is_some() {
+                let _ = std::fs::remove_file(&path);
             }
-            None => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                // Gone (another process evicted it) or damaged: forget it.
-                if data.is_some() {
-                    let _ = std::fs::remove_file(&path);
-                }
-                self.forget(kind, key);
-                None
-            }
+            self.forget(kind, key);
         }
+        ok
+    }
+
+    /// Count a hit: the entry becomes the most recently used, also for the next session.
+    fn hit(&self, kind: Kind, key: u128) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut g) = self.index.lock() {
+            g.touch(kind, key);
+        }
+        // Persist the recency for the next session (best effort).
+        if let Ok(f) = std::fs::File::options().append(true).open(self.path(kind, key)) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+
+    /// A frame entry of `format` whose source files are unchanged, decoded by `decode`, with
+    /// those files. An entry whose files changed, of the format before #3184, or damaged, is a
+    /// miss and is deleted (the frame renders again and is stored anew). An entry of the other
+    /// current format (8-bit and half-float frames have keys of their own) is a miss and stays.
+    fn get_checked<T>(&self, key: u128, format: u8, virtual_id: Option<VirtualFileId<'_>>, decode: impl FnOnce(&[u8]) -> Option<T>) -> Option<(T, ReadFiles)> {
+        let miss = || {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
+        };
+        let Some((found, payload)) = self.load(Kind::Frame, key) else { return miss() };
+        if found != format {
+            if found != FORMAT_RGBA8_FILES && found != FORMAT_F16_FILES {
+                self.discard(Kind::Frame, key);
+            }
+            return miss();
+        }
+        let Some((files, pixels)) = EntryFiles::decode(&payload) else {
+            self.discard(Kind::Frame, key);
+            return miss();
+        };
+        self.file_checks.fetch_add(files.len() as u64, Ordering::Relaxed);
+        if !files.unchanged(virtual_id) {
+            self.discard(Kind::Frame, key);
+            return miss();
+        }
+        let Some(frame) = decode(pixels) else {
+            self.discard(Kind::Frame, key);
+            return miss();
+        };
+        self.hit(Kind::Frame, key);
+        Some((frame, files.to_read_files()))
+    }
+
+    /// Source files looked at so far to check frame entries before using them (one per file a
+    /// read frame lists; tests).
+    pub fn file_checks(&self) -> u64 {
+        self.file_checks.load(Ordering::Relaxed)
     }
 
     /// A valid file whose payload does not decode: delete it, as a damaged one.
@@ -682,50 +745,45 @@ impl DiskCache {
 
     // ------------------------------------------------------------ typed entries
 
-    /// An 8-bit frame (`None` for a half-float entry of that key, which [`DiskCache::get_frame_f16`]
-    /// reads).
-    pub fn get_frame(&self, key: u128) -> Option<Frame8> {
-        let (format, p) = self.read_entry(Kind::Frame, key)?;
-        if format != FORMAT_RGBA8 {
-            return None;
-        }
-        decode_frame(&p)
+    /// An 8-bit frame whose source files are unchanged (see [`DiskCache::get_checked`]), with
+    /// those files; `None` for a half-float entry of that key, which
+    /// [`DiskCache::get_frame_f16`] reads. `virtual_id` names files served from memory.
+    pub fn get_frame(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Frame8, ReadFiles)> {
+        self.get_checked(key, FORMAT_RGBA8_FILES, virtual_id, decode_frame)
     }
 
-    /// A half-float frame (32 bpc viewer frames). A damaged one is deleted.
-    pub fn get_frame_f16(&self, key: u128) -> Option<FrameF16> {
-        let (format, p) = self.read_entry(Kind::Frame, key)?;
-        if format != FORMAT_F16 {
-            return None;
-        }
-        let f = decode_frame_f16(&p);
-        if f.is_none() {
-            self.discard(Kind::Frame, key);
-        }
-        f
+    /// A half-float frame (32 bpc viewer frames), as [`DiskCache::get_frame`].
+    pub fn get_frame_f16(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(FrameF16, ReadFiles)> {
+        self.get_checked(key, FORMAT_F16_FILES, virtual_id, decode_frame_f16)
     }
 
-    /// Queue a half-float frame for writing (`width * height * 4` binary16 values). `true` when
-    /// it is on disk or queued; `false` when refused (wrong size, a full queue).
-    pub fn put_frame_f16(&self, key: u128, width: u32, height: u32, rgba: &[u16]) -> bool {
+    /// Queue a half-float frame for writing (`width * height * 4` binary16 values) with the
+    /// source files it was made of. `true` when it is on disk or queued; `false` when refused
+    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`]).
+    pub fn put_frame_f16(&self, key: u128, width: u32, height: u32, rgba: &[u16], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
-        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16, encode_frame_f16(width, height, rgba))
+        let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, with_files(&files, encode_frame_f16(width, height, rgba)))
     }
 
-    /// Write a half-float frame synchronously (tests).
-    pub fn put_frame_f16_now(&self, key: u128, width: u32, height: u32, rgba: &[u16]) {
-        self.write_format(Kind::Frame, key, FORMAT_F16, &encode_frame_f16(width, height, rgba));
+    /// Write a half-float frame synchronously (tests); a list that can't be stored is not.
+    pub fn put_frame_f16_now(&self, key: u128, width: u32, height: u32, rgba: &[u16], files: &ReadFiles) {
+        if let Some(files) = EntryFiles::of(files, None) {
+            self.write_format(Kind::Frame, key, FORMAT_F16_FILES, &with_files(&files, encode_frame_f16(width, height, rgba)));
+        }
     }
 
-    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes). `true`
-    /// when it is on disk or queued; `false` when refused (wrong size, a full queue).
-    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) -> bool {
-        if rgba.len() != width as usize * height as usize * 4 {
+    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes) with the
+    /// source files it was made of. `true` when it is on disk or queued; `false` when refused
+    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`]).
+    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> bool {
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
-        self.contains(Kind::Frame, key) || self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba))
+        let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, with_files(&files, encode_frame(width, height, rgba)))
     }
 
     pub fn get_layer(&self, key: u128) -> Option<Buf> {
@@ -794,10 +852,20 @@ impl DiskCache {
         true
     }
 
-    /// Write a frame synchronously (tests).
-    pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        self.write_now(Kind::Frame, key, &encode_frame(width, height, rgba));
+    /// Write a frame synchronously (tests); a list that can't be stored is not.
+    pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles) {
+        if let Some(files) = EntryFiles::of(files, None) {
+            self.write_format(Kind::Frame, key, FORMAT_RGBA8_FILES, &with_files(&files, encode_frame(width, height, rgba)));
+        }
     }
+}
+
+/// A frame entry's payload: its source files, then its pixels.
+fn with_files(files: &EntryFiles, pixels: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len() + 64);
+    files.encode(&mut out);
+    out.extend_from_slice(&pixels);
+    out
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -860,15 +928,29 @@ fn seal_format(kind: Kind, format: u8, payload: &[u8]) -> Vec<u8> {
     data
 }
 
-/// A sealed frame entry ([`seal`] of the encoded frame): what the browser's frame workers
-/// write to the Origin Private File System.
-pub fn frame_entry(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
-    seal(Kind::Frame, &encode_frame(width, height, rgba))
+/// A sealed 8-bit frame entry with the source files it was made of: what the browser's frame
+/// workers write to the Origin Private File System. `None` when the frame must not be stored
+/// (its files can't be checked later, see [`EntryFiles::of`]; or a wrong size).
+pub fn frame_entry(width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> Option<Vec<u8>> {
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return None;
+    }
+    let files = EntryFiles::of(files, virtual_id)?;
+    Some(seal_format(Kind::Frame, FORMAT_RGBA8_FILES, &with_files(&files, encode_frame(width, height, rgba))))
 }
 
-/// A frame from a sealed entry's bytes (`None` when damaged).
-pub fn read_frame_entry(data: &[u8]) -> Option<Frame8> {
-    decode_frame(verify(data, Kind::Frame)?)
+/// The frame of a sealed entry's bytes, if its source files are unchanged. `None` when damaged,
+/// of another format, or made of files that changed since: a miss, to be rendered again.
+pub fn read_frame_entry(data: &[u8], virtual_id: Option<VirtualFileId<'_>>) -> Option<Frame8> {
+    let payload = verify(data, Kind::Frame)?;
+    if data.get(5) != Some(&FORMAT_RGBA8_FILES) {
+        return None;
+    }
+    let (files, pixels) = EntryFiles::decode(payload)?;
+    if !files.unchanged(virtual_id) {
+        return None;
+    }
+    decode_frame(pixels)
 }
 
 /// A sealed layer-buffer entry: what the browser's frame workers write to the Origin Private
@@ -1055,9 +1137,9 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
 /// Size and content hash of a path that has no native metadata (the browser file table).
 pub type VirtualFileId<'a> = &'a (dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync);
 
-/// A file's size and modification time (so edited footage gets new keys): the identity a render
-/// records for the files it reads ([`crate::reads::FileStamp`]). When the path has no native
-/// metadata, `virtual_id` supplies a durable size and content hash instead.
+/// A file's size and modification time (so edited footage gets a new layer salt): the identity a
+/// render records for the files it reads ([`crate::reads::FileStamp`]). When the path has no
+/// native metadata, `virtual_id` supplies a durable size and content hash instead.
 fn file_stamp(h: &mut Hash128, path: &str, virtual_id: Option<VirtualFileId<'_>>) {
     if path.is_empty() {
         return;
@@ -1126,26 +1208,18 @@ pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Opt
     (v as u64) ^ ((v >> 64) as u64)
 }
 
-/// Content key of a composition's pixels: project render settings, the comp and everything it
-/// uses (nested comps, footage, solids, their proxies and Use Proxy switches, footage and proxy
-/// files' size and time). With expressions in play (which can read any comp) the whole project
-/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count, and
-/// neither do markers unless an expression mentions them.
+/// Content key of a composition's pixels, from the project in memory alone (no file is looked
+/// at: the frame entries check their own source files when read, see [`EntryFiles`]): project
+/// render settings, the comp and everything it uses (nested comps, footage items with their
+/// settings and paths, solids, their proxies and Use Proxy switches). With expressions in play
+/// (which can read any comp) the whole project counts. Switches that don't change pixels (Audio,
+/// Lock, Shy, Hide Shy Layers) don't count, and neither do markers unless an expression mentions
+/// them.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
-    comp_content_key_with(project, comp, None)
+    comp_content_key_for_renderer(project, comp, RENDER_VERSION)
 }
 
-/// [`comp_content_key`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
-pub fn comp_content_key_with(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, virtual_id: Option<VirtualFileId<'_>>) -> u128 {
-    comp_content_key_for_renderer(project, comp, virtual_id, RENDER_VERSION)
-}
-
-fn comp_content_key_for_renderer(
-    project: &effectcraft_project::Project,
-    comp: effectcraft_project::ItemId,
-    virtual_id: Option<VirtualFileId<'_>>,
-    renderer: &str,
-) -> u128 {
+fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, renderer: &str) -> u128 {
     use effectcraft_project::{ItemKind, LayerSource};
     let mut h = Hash128::default();
     h.write(renderer.as_bytes());
@@ -1192,21 +1266,21 @@ fn comp_content_key_for_renderer(
             }
             k => hash_debug(&mut h, k),
         }
-        if let ItemKind::Footage(f) = &it.kind {
-            footage_stamp(&mut h, f, virtual_id);
-        }
         hash_debug(&mut h, &it.proxy);
-        if let Some(px) = &it.proxy {
-            footage_stamp(&mut h, &px.footage, virtual_id);
-        }
     }
     h.write_u64(comp.0);
     h.finish()
 }
 
+/// Frame entries with their source files (#3184), part of every frame key: entries of the
+/// earlier format (keyed by footage stamps instead) are never looked up again; least recently
+/// used, they are evicted.
+const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-1";
+
 /// Disk key of one viewer frame.
 pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128 {
     let mut h = Hash128::default();
+    h.write(FRAME_ENTRY_VERSION);
     h.write(&content.to_le_bytes());
     h.write_u64(frame as u64);
     h.write_u64(scale_milli as u64);
@@ -1230,18 +1304,18 @@ mod tests {
     fn link_frame_serves_a_frame_under_a_new_key() {
         let dc = DiskCache::open(tmpdir("link"), 1 << 30).unwrap();
         let rgba: Vec<u8> = (0..16).collect();
-        dc.put_frame_now(1, 2, 2, &rgba);
+        dc.put_frame_now(1, 2, 2, &rgba, &ReadFiles::default());
         assert!(dc.link_frame(1, 2));
-        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba.clone()));
         assert!(!dc.link_frame(1, 2), "already there");
         assert!(!dc.link_frame(3, 4), "nothing to link");
         assert!(!dc.contains(Kind::Frame, 4));
-        dc.put_frame_now(5, 2, 2, &[7; 16]);
+        dc.put_frame_now(5, 2, 2, &[7; 16], &ReadFiles::default());
         assert!(!dc.link_frame(5, 2), "an existing entry stays");
-        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba.clone()));
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba.clone()));
         let _ = std::fs::remove_file(dc.path(Kind::Frame, 1));
         dc.forget(Kind::Frame, 1);
-        assert_eq!(dc.get_frame(2).map(|f| f.rgba), Some(rgba), "the link outlives the original");
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba), "the link outlives the original");
     }
 
     fn buf(seed: u32, w: u32, h: u32) -> Buf {
@@ -1276,11 +1350,21 @@ mod tests {
     #[test]
     fn frame_entries_round_trip_and_names_parse() {
         let rgba: Vec<u8> = (0..4 * 6 * 3).map(|i| (i * 7 % 256) as u8).collect();
-        let e = frame_entry(6, 3, &rgba);
-        assert_eq!(read_frame_entry(&e), Some(Frame8 { width: 6, height: 3, rgba: rgba.clone() }));
+        let files: ReadFiles = [crate::reads::ReadFile::new("/v.png", crate::reads::FileStamp::Virtual)].into_iter().collect();
+        let (one, two) = (|_: &str| Some((4, 1)), |_: &str| Some((4, 2)));
+        assert!(frame_entry(6, 3, &rgba, &files, None).is_none(), "a file from memory needs its identity");
+        assert!(frame_entry(6, 3, &rgba[1..], &files, Some(&one)).is_none(), "a wrong size");
+        let e = frame_entry(6, 3, &rgba, &files, Some(&one)).unwrap();
+        assert_eq!(read_frame_entry(&e, Some(&one)), Some(Frame8 { width: 6, height: 3, rgba: rgba.clone() }));
+        assert!(read_frame_entry(&e, Some(&two)).is_none(), "the file changed");
+        let mut incomplete = files.clone();
+        incomplete.mark_incomplete();
+        assert!(frame_entry(6, 3, &rgba, &incomplete, Some(&one)).is_none(), "an incomplete list is not stored");
         let mut bad = e.clone();
         bad[20] ^= 1;
-        assert!(read_frame_entry(&bad).is_none());
+        assert!(read_frame_entry(&bad, Some(&one)).is_none());
+        // An entry of the format before #3184 (pixels without files) is never read.
+        assert!(read_frame_entry(&seal(Kind::Frame, &encode_frame(6, 3, &rgba)), Some(&one)).is_none());
         let key = 0x0123_4567_89ab_cdef_0011_2233_4455_6677u128;
         assert_eq!(parse_entry_name(&entry_name(key)), Some(key));
         assert_eq!(parse_entry_name("abc.ecc"), None);
@@ -1297,27 +1381,27 @@ mod tests {
         let (w, h) = (7u32, 5u32);
         // 4.0, 16.0, -0.25, 65504 and a spread of bit patterns.
         let rgba: Vec<u16> = (0..w * h * 4).map(|i| [0x4400, 0x4c00, 0xb400, 0x7bff][i as usize % 4] ^ ((i * 37) as u16 & 0x03ff)).collect();
-        dc.put_frame_f16_now(1, w, h, &rgba);
-        assert_eq!(dc.get_frame_f16(1), Some(FrameF16 { width: w, height: h, rgba: rgba.clone() }));
-        assert!(dc.get_frame(1).is_none(), "not an 8-bit frame");
-        dc.put_frame_now(2, 2, 2, &[9; 16]);
-        assert!(dc.get_frame_f16(2).is_none() && dc.contains(Kind::Frame, 2), "an 8-bit entry stays valid");
-        assert_eq!(dc.get_frame(2).unwrap().rgba, vec![9; 16]);
+        dc.put_frame_f16_now(1, w, h, &rgba, &ReadFiles::default());
+        assert_eq!(dc.get_frame_f16(1, None).map(|f| f.0), Some(FrameF16 { width: w, height: h, rgba: rgba.clone() }));
+        assert!(dc.get_frame(1, None).map(|f| f.0).is_none(), "not an 8-bit frame");
+        dc.put_frame_now(2, 2, 2, &[9; 16], &ReadFiles::default());
+        assert!(dc.get_frame_f16(2, None).map(|f| f.0).is_none() && dc.contains(Kind::Frame, 2), "an 8-bit entry stays valid");
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
         assert!(dc.stats().bytes > 0);
         // Reopened, still there (format byte persisted).
         drop(dc);
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
-        assert_eq!(dc.get_frame_f16(1).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame_f16(1, None).map(|f| f.0).unwrap().rgba, rgba);
         // A sealed entry with a payload of the wrong size: deleted on read.
         let p = dc.path(Kind::Frame, 3);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, seal_format(Kind::Frame, FORMAT_F16, &encode_frame_f16(w, h + 1, &rgba[..])[..])).unwrap();
+        std::fs::write(&p, seal_format(Kind::Frame, FORMAT_F16_FILES, &with_files(&EntryFiles::default(), encode_frame_f16(w, h + 1, &rgba[..])))).unwrap();
         dc.rescan();
         assert!(dc.contains(Kind::Frame, 3));
-        assert!(dc.get_frame_f16(3).is_none());
+        assert!(dc.get_frame_f16(3, None).map(|f| f.0).is_none());
         assert!(!dc.contains(Kind::Frame, 3) && !p.exists());
         // Wrong lengths are not written.
-        dc.put_frame_f16(4, w, h, &rgba[1..]);
+        dc.put_frame_f16(4, w, h, &rgba[1..], &ReadFiles::default(), None);
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 4));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1367,14 +1451,14 @@ mod tests {
         assert_eq!(back.img, b.img);
         assert_eq!((back.offset, back.scale), (b.offset, b.scale));
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
-        assert!(dc.put_frame(7, 20, 10, &rgba));
-        assert!(!dc.put_frame(8, 2, 2, &[0; 3]), "a wrong-size frame is refused");
+        assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None));
+        assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None), "a wrong-size frame is refused");
         dc.flush();
-        assert_eq!(dc.get_frame(7).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame(7, None).map(|f| f.0).unwrap().rgba, rgba);
         let st = dc.stats();
         assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
         // Wrong kind is a miss.
-        assert!(dc.get_frame(42).is_none());
+        assert!(dc.get_frame(42, None).map(|f| f.0).is_none());
     }
 
     /// Music doesn't change a comp's disk keys (adding it to the timeline kept no blue frame);
@@ -1416,7 +1500,7 @@ mod tests {
         }
         let rgba = vec![7u8; 32 * 32 * 4];
         for k in 0..300 {
-            dc.put_frame(k, 32, 32, &rgba);
+            dc.put_frame(k, 32, 32, &rgba, &ReadFiles::default(), None);
         }
         dc.flush();
         assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
@@ -1431,17 +1515,17 @@ mod tests {
         let comp = Comp::new(2, 2, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
         let id = project.add_item("Cached composition", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
         let key = frame_key(comp_content_key(&project, id), 0, 1000, 0);
-        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-5"), 0, 1000, 0);
+        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, "effectcraft-render-5"), 0, 1000, 0);
         let dir = tmpdir("previous-renderer");
         {
             let cache = DiskCache::open(&dir, 1 << 30).unwrap();
-            cache.put_frame_now(previous_key, 2, 2, &[9; 16]);
+            cache.put_frame_now(previous_key, 2, 2, &[9; 16], &ReadFiles::default());
         }
         let cache = DiskCache::open(&dir, 1 << 30).unwrap();
-        assert_eq!(cache.get_frame(previous_key).unwrap().rgba, vec![9; 16]);
-        assert!(cache.get_frame(key).is_none());
-        cache.put_frame_now(key, 2, 2, &[17; 16]);
-        assert_eq!(cache.get_frame(key).unwrap().rgba, vec![17; 16]);
+        assert_eq!(cache.get_frame(previous_key, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
+        assert!(cache.get_frame(key, None).map(|f| f.0).is_none());
+        cache.put_frame_now(key, 2, 2, &[17; 16], &ReadFiles::default());
+        assert_eq!(cache.get_frame(key, None).map(|f| f.0).unwrap().rgba, vec![17; 16]);
     }
 
     #[test]
@@ -1450,15 +1534,15 @@ mod tests {
         {
             let dc = DiskCache::open(&dir, 1 << 30).unwrap();
             dc.put_layer_now(1, &buf(1, 8, 8));
-            dc.put_frame_now(2, 2, 2, &[9; 16]);
+            dc.put_frame_now(2, 2, 2, &[9; 16], &ReadFiles::default());
         }
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         assert_eq!(dc.stats().entries, 2);
         assert!(dc.contains(Kind::Layer, 1) && dc.contains(Kind::Frame, 2));
-        assert_eq!(dc.get_frame(2).unwrap().rgba, vec![9; 16]);
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
         dc.clear();
         assert_eq!(dc.stats().entries, 0);
-        assert!(dc.get_frame(2).is_none());
+        assert!(dc.get_frame(2, None).map(|f| f.0).is_none());
         let again = DiskCache::open(&dir, 1 << 30).unwrap();
         assert_eq!(again.stats().entries, 0);
     }
@@ -1569,13 +1653,13 @@ mod tests {
     fn damaged_files_are_misses() {
         let dir = tmpdir("damaged");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
-        dc.put_frame_now(5, 4, 4, &[1; 64]);
+        dc.put_frame_now(5, 4, 4, &[1; 64], &ReadFiles::default());
         let p = dc.path(Kind::Frame, 5);
         let mut d = std::fs::read(&p).unwrap();
         let n = d.len();
         d[n / 2] ^= 0xff;
         std::fs::write(&p, d).unwrap();
-        assert!(dc.get_frame(5).is_none());
+        assert!(dc.get_frame(5, None).map(|f| f.0).is_none());
         assert!(!dc.contains(Kind::Frame, 5));
         assert!(!p.exists());
     }
@@ -1633,9 +1717,11 @@ mod tests {
         assert_ne!(footage_salt_with(&p, Some(&one)), footage_salt_with(&p, Some(&two)), "read audio counts");
     }
 
-    /// A path with no native metadata takes its key from the caller's size and content hash (#1253).
+    /// A path with no native metadata takes the layer salt from the caller's size and content hash
+    /// (#1253). The comp key is from memory: replaced bytes are caught by the frame entries'
+    /// check instead (#3184).
     #[test]
-    fn virtual_file_bytes_change_content_keys() {
+    fn virtual_file_bytes_change_the_salt_not_the_comp_key() {
         use effectcraft_project::build;
         use effectcraft_project::{Comp, Footage, ItemKind, LayerSource, Project};
         use effectcraft_time::{FrameRate, Tick};
@@ -1651,10 +1737,81 @@ mod tests {
         let (one, two) = (id(1), id(2));
         let a = footage_salt_with(&p, Some(&one));
         let b = footage_salt_with(&p, Some(&two));
-        let ka = comp_content_key_with(&p, cid, Some(&one));
-        let kb = comp_content_key_with(&p, cid, Some(&two));
         assert_ne!(a, b, "replaced virtual media must not reuse the salt");
-        assert_ne!(ka, kb, "replaced virtual media must not reuse the frame key");
-        assert_eq!(comp_content_key(&p, cid), comp_content_key_with(&p, cid, None));
+        // The frame entry of replaced virtual media is a miss.
+        let dc = DiskCache::open(tmpdir("virtual"), 1 << 30).unwrap();
+        let k = frame_key(comp_content_key(&p, cid), 0, 1000, 0);
+        let files: ReadFiles = [crate::reads::ReadFile::new("/virtual.mov", crate::reads::FileStamp::Virtual)].into_iter().collect();
+        assert!(dc.put_frame(k, 1, 1, &[1, 2, 3, 4], &files, Some(&one)));
+        dc.flush();
+        assert!(dc.get_frame(k, Some(&one)).is_some_and(|(_, f)| f == files));
+        assert!(dc.get_frame(k, Some(&two)).is_none() && !dc.contains(Kind::Frame, k), "replaced: a miss, deleted");
+    }
+
+    /// A frame entry is used only while the files it lists are what it was made of: a new size,
+    /// a new time, a missing file that is back, a file replaced by a folder are misses, and the
+    /// entry is deleted so the frame is rendered and stored again. Only the listed files are
+    /// looked at. Entries of the format before #3184 are misses and deleted.
+    #[test]
+    fn frame_entries_check_their_files() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("check");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = src.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png", b"aa"), file("b.png", b"bb"));
+        let gone = src.join("gone.png").to_string_lossy().to_string();
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap_or(FileStamp::Missing))).collect() };
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &read(&[&a]));
+        dc.put_frame_now(2, 1, 1, &[2; 4], &read(&[&b, &gone]));
+        dc.put_frame_now(3, 1, 1, &[3; 4], &read(&[&b]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.1), Some(read(&[&a])));
+        assert_eq!(dc.file_checks(), 1, "only the file of that frame");
+        // a.png gets a new size: frame 1 is a miss and deleted, the others stay.
+        std::fs::write(&a, b"aaa").unwrap();
+        assert!(dc.get_frame(1, None).is_none() && !dc.contains(Kind::Frame, 1));
+        assert!(dc.get_frame(2, None).is_some() && dc.get_frame(3, None).is_some());
+        // b.png gets a new time only.
+        let t = std::fs::metadata(&b).unwrap().modified().unwrap() + std::time::Duration::from_secs(7);
+        std::fs::File::options().append(true).open(&b).unwrap().set_modified(t).unwrap();
+        assert!(dc.get_frame(3, None).is_none() && !dc.contains(Kind::Frame, 3));
+        assert!(dc.get_frame(2, None).is_none(), "b.png is listed there too");
+        // A missing file that is back.
+        dc.put_frame_now(4, 1, 1, &[4; 4], &read(&[&gone]));
+        assert!(dc.get_frame(4, None).is_some(), "missing, still missing");
+        file("gone.png", b"g");
+        assert!(dc.get_frame(4, None).is_none() && !dc.contains(Kind::Frame, 4), "back");
+        // A file replaced by a folder (unreadable).
+        let c = file("c.png", b"cc");
+        dc.put_frame_now(5, 1, 1, &[5; 4], &read(&[&c]));
+        std::fs::remove_file(&c).unwrap();
+        std::fs::create_dir(&c).unwrap();
+        assert!(dc.get_frame(5, None).is_none() && !dc.contains(Kind::Frame, 5));
+        // Written again after the miss: a hit with the new identity.
+        let fresh = file("d.png", b"dd");
+        dc.put_frame_now(1, 1, 1, &[9; 4], &read(&[&fresh]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.0.rgba), Some(vec![9; 4]));
+        // The format before #3184 (no files): a miss, deleted.
+        dc.write_format(Kind::Frame, 6, FORMAT_RGBA8, &encode_frame(1, 1, &[6; 4]));
+        assert!(dc.contains(Kind::Frame, 6));
+        assert!(dc.get_frame(6, None).is_none() && !dc.contains(Kind::Frame, 6));
+        // A valid checksum over a damaged files section: a miss, deleted.
+        let mut payload = vec![];
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&encode_frame(1, 1, &[7; 4]));
+        dc.write_format(Kind::Frame, 7, FORMAT_RGBA8_FILES, &payload);
+        assert!(dc.get_frame(7, None).is_none() && !dc.contains(Kind::Frame, 7));
+        // Frames whose files can't all be named are not stored.
+        let mut incomplete = read(&[&fresh]);
+        incomplete.mark_incomplete();
+        assert!(!dc.put_frame(8, 1, 1, &[8; 4], &incomplete, None));
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 8));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,14 +4,17 @@
 //!
 //! - **Writes** happen in the frame workers: a render request carries the frame's disk-cache key
 //!   (`effectcraft_engine::remote::FrameMsg::Render`), the worker posts the frame, then writes
-//!   the sealed entry (`disk_cache::frame_entry`: LZ4, checksum) with a synchronous access
-//!   handle into a temporary file moved into place (`js/host.js` `cacheWrite`), and reports
-//!   `FrameReply::Stored`.
+//!   the sealed entry (`disk_cache::frame_entry`: the source files the frame read, LZ4,
+//!   checksum) with a synchronous access handle into a temporary file moved into place
+//!   (`js/host.js` `cacheWrite`), and reports `FrameReply::Stored`. A frame whose files can't
+//!   all be named is not stored.
 //! - **The index** lives here, on the page ([`DiskIndex`], shared with the desktop's cache):
 //!   rebuilt at startup from the folder listing (oldest files first), updated by the workers'
 //!   `Stored` replies and by reads; eviction deletes the least recently used files.
 //! - **Reads** are asynchronous: a frame whose key is indexed is read and decoded here instead
-//!   of rendering it (`crate::frames`); a damaged or missing file is a miss and is forgotten.
+//!   of rendering it (`crate::frames`), if the files its entry lists still have the size and
+//!   content hash it was made of (the file table's identities); a damaged or missing entry, or
+//!   one whose files changed, is a miss and is deleted.
 //!
 //! - **Layer buffers** too (`layers/<32 hex>.ecc`): a layer lookup happens in the middle of a
 //!   synchronous render, where the browser's file system can't be read, so the frame workers
@@ -187,11 +190,12 @@ pub fn note_miss() {
 }
 
 /// Read and decode a cached frame; `None` (forgotten and deleted) when the file is missing or
-/// damaged.
+/// damaged, or the source files it was made of changed since.
 pub async fn read(key: u128) -> Option<disk_cache::Frame8> {
     let name = disk_cache::entry_name(key);
     let bytes = JsFuture::from(cache_read(&name)).await.ok().and_then(|b| b.dyn_into::<js_sys::Uint8Array>().ok()).map(|b| b.to_vec());
-    let frame = bytes.as_deref().and_then(disk_cache::read_frame_entry);
+    let identity = |path: &str| crate::files::STORE.file_identity(path);
+    let frame = bytes.as_deref().and_then(|b| disk_cache::read_frame_entry(b, Some(&identity)));
     ST.with(|s| {
         let mut s = s.borrow_mut();
         if frame.is_some() {
