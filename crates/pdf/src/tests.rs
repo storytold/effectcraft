@@ -989,6 +989,35 @@ fn a_fanning_out_reference_graph_is_refused_within_the_budget() {
 }
 
 #[test]
+fn a_sampled_function_shorter_than_its_table_is_refused() {
+    // 4,096 8-bit samples declared, ten bytes given: the missing ones are not made up.
+    let f = "<< /FunctionType 0 /Domain [0 1] /Size [4096] /Range [0 1] /BitsPerSample 8 >>";
+    assert_eq!(read_function(vec![(1, f.into(), Some(vec![7; 10]))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(vec![7; 4096]))]), color::Func::Unsupported);
+}
+
+#[test]
+fn a_calculator_program_past_the_operator_limit_is_refused() {
+    let f = "<< /FunctionType 4 /Domain [0 1] /Range [0 1] >>";
+    let long = format!("{{ {} }}", "1 pop ".repeat(3000));
+    assert_eq!(read_function(vec![(1, f.into(), Some(long.into_bytes()))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(b"{ 1 exch sub }".to_vec()))]), color::Func::Unsupported);
+}
+
+#[test]
+fn copies_of_a_function_are_charged_for_its_coefficients() {
+    // A stitching function listing one object 1,000 times, whose coefficient arrays hold 2,000
+    // values: each copy is charged its values, so the budget refuses it instead of copying
+    // two million values.
+    let c = format!("[{}]", "0.5 ".repeat(1000));
+    let objs: Objs = vec![
+        (1, format!("<< /FunctionType 3 /Domain [0 1] /Functions [{}] >>", "2 0 R ".repeat(1000)), None),
+        (2, format!("<< /FunctionType 2 /Domain [0 1] /C0 {c} /C1 {c} /N 1 >>"), None),
+    ];
+    assert_eq!(read_function(objs), color::Func::Unsupported);
+}
+
+#[test]
 fn colour_space_chain_of_depth_3() {
     // Indexed → Separation → ICCBased → DeviceRGB: entry 0 is tint 1 (blue), entry 1 tint 0 (white).
     let doc = parse(&image_page(
