@@ -266,11 +266,9 @@ fn no_room_for_an_edge_frame() -> Vec<Workspace> {
     for i in 1..craft_ui::docking::MAX_DEPTH {
         deep = hsplit(SplitSize::Ratio(0.5), tabs(&[PanelKind::Viewer(i as u32)], 0), deep);
     }
-    vec![
-        Workspace::new(Layout { root: Some(side), floating: Vec::new() }),
-        Workspace::new(Layout { root: Some(deep), floating: Vec::new() }),
-        Workspace::default(),
-    ]
+    let empty_dock = Node::Dock { side: Side::Start, columns: Vec::new() };
+    let rooted = |root| Workspace::new(Layout { root: Some(root), floating: Vec::new() });
+    vec![rooted(side), rooted(deep), rooted(empty_dock), Workspace::default()]
 }
 
 #[test]
@@ -279,7 +277,7 @@ fn an_open_panel_whose_anchor_is_gone_still_gets_a_tab() {
         for locked in [false, true] {
             dock.locked = locked;
             dock.hidden = vec![(script(DETACHED), place(script(DETACHED + 1), None, Vec::new()))];
-            let shown = dock.layout.root.is_some().then_some(PanelKind::Project);
+            let shown = dock.panels().contains(&PanelKind::Project).then_some(PanelKind::Project);
             let mut ui = ui_with(dock.clone(), &[(DETACHED, "A.jsx")]);
             let open = windows(&[(7, WindowKind::Panel, "A.jsx")]);
             bind(&mut ui, &open);
