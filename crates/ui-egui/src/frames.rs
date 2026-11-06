@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
+use effectcraft_engine::render::reads::{ReadFiles, ReadLog};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
 use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
@@ -1465,7 +1466,9 @@ impl Frames {
             let gpu_here = job.src.gpu.is_some() && job.src.gpu_display && !(remote.gpu() && comp_has_effects(&job.src.project, job.comp));
             if gpu_here {
                 let t0 = web_time::Instant::now();
-                if let Some(img) = w.render_gpu(&job) {
+                // (A frame kept on the GPU is not written to the disk cache: its files are not
+                // needed.)
+                if let Some((img, _files)) = w.render_gpu(&job) {
                     w.finish(&job, img, t0);
                     continue;
                 }
@@ -1617,10 +1620,11 @@ impl Worker {
             }
         });
         let disk_hit = from_disk.is_some();
-        let ci = match from_disk {
-            Some(f) => f,
+        // `files`: the source files the rendered frame was made of (see `render::reads`).
+        let (ci, files) = match from_disk {
+            Some(f) => (f, None),
             None => match self.render_guarded(&job).filter(|_| !job.cancel.load(Ordering::Relaxed)) {
-                Some(ci) => ci,
+                Some((ci, files)) => (ci, Some(files)),
                 // Called off (frames it read may be missing) or failed: not cached, and not
                 // "in progress" forever: the viewer asks for it again.
                 None => {
@@ -1633,6 +1637,16 @@ impl Worker {
         // and compression. Persistence still runs on this worker, using the same snapshot.
         self.finish(&job, ci.clone(), t0);
         if !disk_hit && let Some((dc, k)) = &disk {
+            // (#3184: the entry is to keep `files`, checked before it is used again.)
+            if let Some(files) = &files {
+                log::trace!(
+                    "frame {} of comp {}: {} source files{}",
+                    job.key.frame,
+                    job.key.comp,
+                    files.len(),
+                    if files.is_complete() { "" } else { " (incomplete)" }
+                );
+            }
             let written = match &ci {
                 FrameImage::Cpu(img) => {
                     let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
@@ -1689,9 +1703,13 @@ impl Worker {
     }
 
     /// [`Worker::render_job`], again on the CPU if it panicked (the panic hook has logged it);
-    /// `None` if that panicked too.
-    fn render_guarded(&self, job: &Job) -> Option<FrameImage> {
-        let attempt = |gpu: bool| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_job(job, gpu))).ok();
+    /// `None` if that panicked too. With the source files the frame was made of.
+    fn render_guarded(&self, job: &Job) -> Option<(FrameImage, ReadFiles)> {
+        let attempt = |gpu: bool| {
+            let files = ReadLog::new();
+            let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_job(job, gpu, &files))).ok()?;
+            Some((img, files.into_files()))
+        };
         let img = attempt(true).or_else(|| {
             log::error!("a frame render panicked (frame {})", job.key.frame);
             job.src.gpu.as_ref().and_then(|_| attempt(false))
@@ -1731,16 +1749,19 @@ impl Worker {
         !self.gpu_retired.load(Ordering::Acquire) && self.cache.lock().is_ok_and(|c| c.gpu_ready())
     }
 
-    /// The frame on the GPU, kept there for the viewer, if the compositor can do it alone.
-    fn render_gpu(&self, job: &Job) -> Option<FrameImage> {
+    /// The frame on the GPU, kept there for the viewer, if the compositor can do it alone, with
+    /// the source files it was made of.
+    fn render_gpu(&self, job: &Job) -> Option<(FrameImage, ReadFiles)> {
         if !self.gpu_ready() {
             return None;
         }
         let g = job.src.gpu.as_ref()?;
         let footage = job.footage();
+        let files = ReadLog::new();
         let mut r = Renderer::new(&job.src.project, &footage, job.opts);
         r.expr = job.src.expr.as_deref();
         r.cache = Some(&job.src.layer_cache);
+        r.reads = Some(&files);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
         let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
@@ -1750,7 +1771,7 @@ impl Worker {
                 if f.is_some() {
                     self.gpu_succeeded();
                 }
-                f.map(|f| FrameImage::Gpu(Arc::new(f)))
+                f.map(|f| (FrameImage::Gpu(Arc::new(f)), files.into_files()))
             }
             Err(e) => {
                 self.gpu_attempt_failed(g, &e);
@@ -1759,11 +1780,13 @@ impl Worker {
         }
     }
 
-    /// Render a frame; `gpu: false` keeps it off the GPU compositor.
-    fn render_job(&self, job: &Job, gpu: bool) -> FrameImage {
+    /// Render a frame; `gpu: false` keeps it off the GPU compositor. The source files it reads
+    /// are noted in `files` (a GPU attempt that falls back to the CPU notes both renders').
+    fn render_job(&self, job: &Job, gpu: bool, files: &ReadLog) -> FrameImage {
         let footage = job.footage();
         let mut r = Renderer::new(&job.src.project, &footage, job.opts);
         r.expr = job.src.expr.as_deref();
+        r.reads = Some(files);
         let gpu_allowed = gpu && self.gpu_ready();
         // A failed GPU attempt may have populated intermediate entries before its scope
         // reported failure. The CPU retry must compute its own pixels from the snapshot.
@@ -1789,7 +1812,7 @@ impl Worker {
                             // Time the GPU's work, not just its recording.
                             g.wait();
                             if g.context().check_health().is_err() {
-                                return self.render_job(job, false);
+                                return self.render_job(job, false, files);
                             }
                             p.record(key, true, t0.elapsed().as_secs_f64() * 1000.0);
                         }
@@ -1802,7 +1825,7 @@ impl Worker {
                     }
                     Err(e) => {
                         self.gpu_attempt_failed(g, &e);
-                        return self.render_job(job, false);
+                        return self.render_job(job, false, files);
                     }
                 }
             }
@@ -1822,7 +1845,7 @@ impl Worker {
                 }
                 Err(e) => {
                     self.gpu_attempt_failed(g, &e);
-                    self.render_job(job, false)
+                    self.render_job(job, false, files)
                 }
             };
         }

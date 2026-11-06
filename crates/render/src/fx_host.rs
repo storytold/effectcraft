@@ -104,7 +104,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
             return None;
         }
         let st = other.layer_time(Tick::from_seconds_f64(start));
-        self.r.footage.audio(item, f, st, frames, rate)
+        self.r.read(|| self.r.footage.audio(item, f, st, frames, rate))
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {

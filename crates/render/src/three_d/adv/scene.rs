@@ -487,7 +487,7 @@ fn model_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
         LayerSource::Model { item } => {
             let Some(it) = r.project.item(*item) else { return };
             let ItemKind::Footage(f) = &it.kind else { return };
-            let Some(m) = r.footage.model(*item, f) else { return };
+            let Some(m) = r.read(|| r.footage.model(*item, f)) else { return };
             let unit = geo.map_or(1.0, |g| ctx.f(layer, g, "unitScale", 1.0));
             let clip = geo.map_or(0, |g| ctx.e(layer, g, "animation")) as usize;
             let clip = clip.checked_sub(1).filter(|c| *c < m.animations.len());
@@ -700,7 +700,7 @@ fn card_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
     let world = b.outer * ctx.world_matrix(layer);
     if crate::text::per_char_3d(ctx, layer) {
         for (buf, m) in crate::text::per_char_planes(ctx, layer, r.opts.scale) {
-            let buf = r.to_blend(Arc::new(buf), None);
+            let buf = r.to_blend(Arc::new(buf), None, &Arc::default());
             card(b, &buf, world * m, mat);
         }
         return;

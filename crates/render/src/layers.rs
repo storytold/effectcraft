@@ -37,18 +37,17 @@ impl Shutter {
 impl<'a> Renderer<'a> {
     /// The layer with its styles: exterior passes and body (cached per pass).
     pub(crate) fn styled(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<StyledLayer> {
-        let (content, ckey) = self.content_buf_timed(ctx, layer, timing.as_deref_mut())?;
+        let (content, ckey, files) = self.content_buf_timed(ctx, layer, timing.as_deref_mut())?;
         if !styles::active(ctx, layer) {
-            return Some(StyledLayer { passes: vec![], body: content.clone(), content, key: ckey, ckey, plain: true });
+            return Some(StyledLayer { passes: vec![], body: content.clone(), content, key: ckey, ckey, plain: true, files });
         }
         let modes = styles::pass_modes(ctx, layer);
         let key = ckey.map(|k| cache::styles_key(ctx, layer, k));
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(body) = c.get(k)
-        {
-            let passes: Option<Vec<_>> = modes.iter().enumerate().map(|(i, m)| c.get(cache::derive(k, i as u64 + 1)).map(|b| (b, *m))).collect();
+        if let Some((body, _)) = self.cached(key) {
+            let passes: Option<Vec<_>> =
+                modes.iter().enumerate().map(|(i, m)| self.cached(key.map(|k| cache::derive(k, i as u64 + 1))).map(|(b, _)| (b, *m))).collect();
             if let Some(passes) = passes {
-                return Some(StyledLayer { passes, body, content, key, ckey, plain: false });
+                return Some(StyledLayer { passes, body, content, key, ckey, plain: false, files });
             }
         }
         let t0 = web_time::Instant::now();
@@ -59,16 +58,12 @@ impl<'a> Renderer<'a> {
             t.cached = false;
             t.effects.push(("layerStyles".into(), t0.elapsed().as_secs_f64() * 1e3));
         }
-        let mut body = Arc::new(st.body);
-        let mut passes: Vec<_> = st.passes.into_iter().map(|(b, m)| (Arc::new(b), m)).collect();
-        // The buffers the cache keeps (another worker's, if it kept them first).
-        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            body = c.insert(k, body);
-            for (i, (b, _)) in passes.iter_mut().enumerate() {
-                *b = c.insert(cache::derive(k, i as u64 + 1), b.clone());
-            }
-        }
-        Some(StyledLayer { passes, body, content, key, ckey, plain: false })
+        // The buffers the cache keeps (another worker's, if it kept them first), made of the
+        // content's files.
+        let body = self.keep(key, Arc::new(st.body), &files);
+        let passes: Vec<_> =
+            st.passes.into_iter().enumerate().map(|(i, (b, m))| (self.keep(key.map(|k| cache::derive(k, i as u64 + 1)), Arc::new(b), &files), m)).collect();
+        Some(StyledLayer { passes, body, content, key, ckey, plain: false, files })
     }
 
     /// The styled layer's buffers in the blending space.
@@ -76,9 +71,10 @@ impl<'a> Renderer<'a> {
         if self.pipe.to_blend().is_none() {
             return st;
         }
-        let body = self.to_blend(st.body, st.key);
-        let content = if st.plain { body.clone() } else { self.to_blend(st.content, st.ckey) };
-        let passes = st.passes.into_iter().enumerate().map(|(i, (b, m))| (self.to_blend(b, st.key.map(|k| cache::derive(k, i as u64 + 1))), m)).collect();
+        let body = self.to_blend(st.body, st.key, &st.files);
+        let content = if st.plain { body.clone() } else { self.to_blend(st.content, st.ckey, &st.files) };
+        let passes =
+            st.passes.into_iter().enumerate().map(|(i, (b, m))| (self.to_blend(b, st.key.map(|k| cache::derive(k, i as u64 + 1)), &st.files), m)).collect();
         StyledLayer { passes, body, content, ..st }
     }
 
@@ -582,6 +578,8 @@ pub struct StyledLayer {
     ckey: Option<u64>,
     /// No layer styles: composite `body` the usual way.
     pub plain: bool,
+    /// The source files the layer's buffers were made of (see [`crate::reads`]).
+    pub(crate) files: Arc<crate::reads::ReadFiles>,
 }
 
 /// Where a layer buffer lands (see [`Renderer::placement`]).

@@ -1055,18 +1055,17 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
 /// Size and content hash of a path that has no native metadata (the browser file table).
 pub type VirtualFileId<'a> = &'a (dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync);
 
-/// A file's size and modification time (so edited footage gets new keys). When the path has no
-/// native metadata, `virtual_id` supplies a durable size and content hash instead.
+/// A file's size and modification time (so edited footage gets new keys): the identity a render
+/// records for the files it reads ([`crate::reads::FileStamp`]). When the path has no native
+/// metadata, `virtual_id` supplies a durable size and content hash instead.
 fn file_stamp(h: &mut Hash128, path: &str, virtual_id: Option<VirtualFileId<'_>>) {
     if path.is_empty() {
         return;
     }
-    if let Ok(md) = std::fs::metadata(path) {
-        h.write_u64(md.len());
-        if let Ok(t) = md.modified()
-            && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
-        {
-            h.write_u64(d.as_nanos() as u64);
+    if let Some(crate::reads::FileStamp::Native { len, modified }) = crate::reads::FileStamp::native(path) {
+        h.write_u64(len);
+        if let Some(t) = modified {
+            h.write_u64(t);
         }
         return;
     }

@@ -1741,6 +1741,7 @@ version = "0.21.0"
 dependencies = [
  "craft-docpath",
  "effectcraft-color",
+ "effectcraft-effects",
  "effectcraft-model",
  "effectcraft-pdf",
  "effectcraft-project",

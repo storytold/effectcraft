@@ -25,6 +25,7 @@ use effectcraft_effects::Buf;
 use effectcraft_project::{FootageKind, ItemKind, Layer, LayerSource, Node, PropGroup};
 
 use crate::eval::EvalCtx;
+use crate::reads::ReadFiles;
 
 mod dependencies;
 
@@ -43,6 +44,8 @@ pub struct LayerCache {
 
 struct Entry {
     buf: Arc<Buf>,
+    /// The source files the buffer was made of (see [`crate::reads`]).
+    files: Arc<ReadFiles>,
     bytes: usize,
     last_use: u64,
 }
@@ -147,16 +150,19 @@ impl LayerCache {
         Some((st.clone(), salted(*salt)))
     }
 
-    pub fn get(&self, key: u64) -> Option<Arc<Buf>> {
+    /// The buffer kept under `key` and the source files it was made of (see [`crate::reads`]).
+    /// A buffer from the disk cache or another store doesn't know its files: its list is
+    /// incomplete.
+    pub fn get(&self, key: u64) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
         let mut g = self.inner.lock().ok()?;
         g.clock += 1;
         let now = g.clock;
         match g.map.get_mut(&key) {
             Some(e) => {
                 e.last_use = now;
-                let b = e.buf.clone();
+                let found = (e.buf.clone(), e.files.clone());
                 g.hits += 1;
-                Some(b)
+                Some(found)
             }
             None => {
                 g.misses += 1;
@@ -168,7 +174,10 @@ impl LayerCache {
                 // Disk cache: a hit comes back into memory.
                 let (dc, dk) = self.disk_key(key)?;
                 let buf = dc.get_layer(dk)?;
-                Some(self.insert_mem(key, buf))
+                let mut files = ReadFiles::default();
+                files.mark_incomplete();
+                let files = Arc::new(files);
+                Some((self.insert_mem(key, buf, files.clone()), files))
             }
         }
     }
@@ -178,8 +187,9 @@ impl LayerCache {
     /// together each rendered every layer; sharing the first buffer, the GPU compositor uploads
     /// and packs it once instead of once per worker, which ran it out of memory). Renders don't
     /// wait for each other: on the frame workers' shared thread pool a wait can end up under
-    /// the very work it waits for.
-    pub fn insert(&self, key: u64, buf: Arc<Buf>) -> Arc<Buf> {
+    /// the very work it waits for. `files`: the source files `buf` was made of (see
+    /// [`crate::reads`]).
+    pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> Arc<Buf> {
         if self.gated() {
             return buf;
         }
@@ -193,12 +203,12 @@ impl LayerCache {
                 dc.put_layer(dk, &buf);
             }
         }
-        self.insert_mem(key, buf)
+        self.insert_mem(key, buf, files)
     }
 
     /// See [`LayerCache::insert`]: the buffer kept under `key` (`buf`, unless one was kept first
     /// or `buf` is too large to keep).
-    fn insert_mem(&self, key: u64, buf: Arc<Buf>) -> Arc<Buf> {
+    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> Arc<Buf> {
         let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
         let Ok(mut g) = self.inner.lock() else { return buf };
         if bytes > g.budget / 4 {
@@ -210,7 +220,7 @@ impl LayerCache {
             e.last_use = now;
             return e.buf.clone();
         }
-        g.map.insert(key, Entry { buf: buf.clone(), bytes, last_use: now });
+        g.map.insert(key, Entry { buf: buf.clone(), files, bytes, last_use: now });
         g.bytes += bytes;
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
@@ -786,8 +796,8 @@ mod shared_insert_tests {
         let cache = LayerCache::default();
         let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
         let (a, b) = (buf(), buf());
-        assert!(Arc::ptr_eq(&cache.insert(3, a.clone()), &a));
-        assert!(Arc::ptr_eq(&cache.insert(3, b), &a), "the later render gets the first buffer");
-        assert!(Arc::ptr_eq(&cache.get(3).unwrap(), &a));
+        assert!(Arc::ptr_eq(&cache.insert(3, a.clone(), Default::default()), &a));
+        assert!(Arc::ptr_eq(&cache.insert(3, b, Default::default()), &a), "the later render gets the first buffer");
+        assert!(Arc::ptr_eq(&cache.get(3).unwrap().0, &a));
     }
 }
