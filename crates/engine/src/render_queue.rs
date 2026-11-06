@@ -181,6 +181,8 @@ pub fn output_bits(format: OutputFormat, depth: effectcraft_project::BitDepth) -
         BitDepth::Bpc32 => 32,
     };
     match format {
+        // The default; a module's half float ([`OutputModule::exr_bit_depth`]) is read where the
+        // module is known.
         OutputFormat::ExrSequence => 32,
         OutputFormat::PngSequence | OutputFormat::TiffSequence => project.min(16),
         OutputFormat::ProRes => 10,
@@ -460,7 +462,8 @@ impl Session {
                 Some(p) if formats.is_none_or(|f| f.contains(&om.format)) => {
                     // Settings ▸ Export: Append Bit Depth to File Name, Segment Sequences /
                     // Movie Files.
-                    let bits = output_bits(om.format, self.project.settings.bit_depth);
+                    let bits =
+                        if om.format == OutputFormat::ExrSequence { om.exr_bit_depth.bits() } else { output_bits(om.format, self.project.settings.bit_depth) };
                     let p = self.prefs.output_name(&p, bits);
                     modules.extend(self.segments(&m, &p));
                 }

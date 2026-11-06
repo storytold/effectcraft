@@ -42,6 +42,10 @@ fn aux_at(t: Tick) -> AuxChannels {
         aux.channels.push((format!("CryptoObject00.{c}"), planes[k].clone()));
     }
     aux.manifests = vec![("CryptoObject".into(), ["left", "right", "late", COMMA, "star*"].iter().map(|n| (n.to_string(), crypto_hash(n))).collect())];
+    // A second view's layer of the same kind (`Z.CryptoObject`, stored Layer 3): "right" everywhere.
+    aux.channels.push(("Z.CryptoObject00.R".into(), vec![crypto_float(crypto_hash("right")); w * h]));
+    aux.channels.push(("Z.CryptoObject00.G".into(), vec![1.0; w * h]));
+    aux.manifests.push(("Z.CryptoObject".into(), vec![("right".into(), crypto_hash("right"))]));
     aux
 }
 
@@ -128,6 +132,17 @@ fn picks_replace_add_and_remove_in_one_undo_step_each() {
     s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": " \"Green, \\\"Glossy\\\"\" "})).unwrap();
     let n = s.history.undo.len();
     assert_eq!((pick(&mut s, 2.0, "replace")["changed"].as_bool(), s.history.undo.len()), (Some(false), n));
+}
+
+/// A second layer that fits a standard slot (`Z.CryptoObject` beside `CryptoObject`) is picked by
+/// its own Layer value (3); Layer 0 still reads the first one.
+#[test]
+fn pick_reads_the_second_layer_of_a_kind() {
+    let mut s = session();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "left");
+    s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": 3})).unwrap();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "right");
+    assert_eq!(s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 1.0, "y": 1.5})).unwrap()["name"], "right");
 }
 
 #[test]
@@ -895,4 +910,43 @@ fn highlight_cost_with_six_ranks() {
             rss_mb() - r0
         );
     }
+}
+
+/// 8 × 4 footage whose Cryptomatte layers are `Mine` (`left` / `right` halves) and `CryptoMaterial`
+/// (the other way round).
+struct Layers;
+impl FootageSource for Layers {
+    fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+        Some(Arc::new(Image::new(f.width, f.height)))
+    }
+    fn aux(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<AuxChannels>> {
+        let mut aux = AuxChannels::new(8, 4, 1.0);
+        for (name, flip) in [("Mine", false), ("CryptoMaterial", true)] {
+            let ids = (0..32).map(|i| crypto_float(crypto_hash(if (i % 8 < 4) != flip { "left" } else { "right" }))).collect();
+            aux.channels.push((format!("{name}00.R"), ids));
+            aux.channels.push((format!("{name}00.G"), vec![1.0; 32]));
+        }
+        Some(Arc::new(aux))
+    }
+}
+
+/// #473: the probe reads the layer the Layer value names, as the effect does: 0 (a saved
+/// CryptoObject) on a file without it reads the file's first layer, 1 is CryptoMaterial, and 3
+/// is the file's other layer.
+#[test]
+fn pick_reads_the_layer_the_layer_value_names() {
+    let mut s = Session { footage: Arc::new(Layers), importer: Some(Arc::new(Probe)), ..Default::default() };
+    let item = s.execute("file.import", json!({"paths": ["/renders/layers.exr"]})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "C", "width": 8, "height": 4, "frameRate": 24, "duration": 2})).unwrap();
+    s.execute("layer.addItem", json!({"item": item})).unwrap();
+    s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+    let name_at = |s: &mut Session, layer: u32| {
+        s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": layer})).unwrap();
+        let r = s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 0.5, "y": 1.5})).unwrap();
+        (r["name"].clone(), r["layer"].clone())
+    };
+    // The files' layers sort as CryptoMaterial, Mine (no manifest here, so the IDs have no name).
+    assert_eq!(name_at(&mut s, 0).1, "CryptoMaterial", "a saved CryptoObject: the first layer");
+    assert_eq!(name_at(&mut s, 1).1, "CryptoMaterial");
+    assert_eq!(name_at(&mut s, 3).1, "Mine");
 }

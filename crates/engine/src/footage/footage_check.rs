@@ -12,16 +12,12 @@
 //! starts it after every open ([`Session::check_footage_on_open`]); agents and the CLI run it
 //! with `wait: true`.
 
-use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
+#[cfg(test)]
+use effectcraft_project::ItemKind;
+use effectcraft_project::{Footage, FootageKind, ItemId};
 use serde_json::{Value, json};
 
 use crate::Session;
-
-/// One item to check.
-struct Job {
-    id: ItemId,
-    footage: Footage,
-}
 
 /// What the check found for one item.
 enum Found {
@@ -34,16 +30,7 @@ enum Found {
 /// Start the check (all footage, or `items`). `wait` runs it to completion first (always on
 /// wasm32); the result is then `{checked, missing, probed}`.
 pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::Result<Value> {
-    let jobs: Vec<Job> = s
-        .project
-        .items
-        .values()
-        .filter(|i| items.as_ref().is_none_or(|v| v.contains(&i.id)))
-        .filter_map(|i| match &i.kind {
-            ItemKind::Footage(f) if f.kind != FootageKind::Data => Some(Job { id: i.id, footage: f.clone() }),
-            _ => None,
-        })
-        .collect();
+    let jobs: Vec<_> = super::availability::sources(s).into_iter().filter(|j| items.as_ref().is_none_or(|v| v.contains(&j.id))).collect();
     if jobs.is_empty() {
         return Ok(json!({"checked": 0, "missing": 0, "probed": 0}));
     }
@@ -54,7 +41,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
     let project_dir = s.path.as_deref().and_then(crate::commands::relink_moved::project_dir);
     let n = jobs.len();
     s.spawn_task("footageCheck", format!("Checking footage ({n} items)"), wait, move |ctl| {
-        let mut found: Vec<(ItemId, Found)> = Vec::with_capacity(jobs.len());
+        let mut found: Vec<(super::availability::Source, Found)> = Vec::with_capacity(jobs.len());
         let total = jobs.len() as u64;
         for (k, j) in jobs.into_iter().enumerate() {
             if !ctl.progress(k as u64, total) {
@@ -74,10 +61,11 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
                 };
             // Moved with the project: the same place under the project's folder.
             if !present
+                && !j.proxy
                 && let Some(dir) = &project_dir
                 && let Some(nf) = crate::commands::relink_moved::find_moved(services.as_ref(), dir, f)
             {
-                found.push((j.id, Found::Moved(Box::new(nf))));
+                found.push((j, Found::Moved(Box::new(nf))));
                 continue;
             }
             // Saved without metadata (a hand-written or converted project): probe it now.
@@ -102,9 +90,9 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
                 Some(Ok(mut nf)) => {
                     nf.alpha = f.alpha;
                     nf.loop_count = f.loop_count;
-                    found.push((j.id, Found::Probed(Box::new(nf))));
+                    found.push((j, Found::Probed(Box::new(nf))));
                 }
-                _ => found.push((j.id, Found::Missing(!present))),
+                _ => found.push((j, Found::Missing(!present))),
             }
         }
         ctl.progress(total, total);
@@ -115,12 +103,11 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
 
 /// Write the findings into the project. Not an undo step: it records the state of the disk,
 /// not an edit (the same as After Effects marking footage missing at open).
-fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
+fn apply(s: &mut Session, found: Vec<(super::availability::Source, Found)>) -> Value {
     let checked = found.len();
     let (mut missing, mut probed, mut moved, mut changed) = (0, 0, 0, false);
-    let p = std::sync::Arc::make_mut(&mut s.project);
-    for (id, f) in found {
-        let Some(ItemKind::Footage(cur)) = p.item_mut(id).map(|i| &mut i.kind) else { continue };
+    for (source, f) in found {
+        let Some(cur) = source.current(std::sync::Arc::make_mut(&mut s.project)) else { continue };
         match f {
             Found::Missing(m) => {
                 missing += usize::from(m);
@@ -275,6 +262,24 @@ mod tests {
         assert!(paths.contains(&d.join("Job").join("shots").join("a.png").to_string_lossy().to_string()), "{paths:?}");
         assert!(!o.is_dirty(), "finding the files is not an edit");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn moved_source_recovery_survives_a_watcher_status_update() {
+        let mut s = session_with(&["/old/project/plate.png"]);
+        s.mark_saved();
+        let source = super::super::availability::sources(&s).pop().unwrap();
+        let id = source.id;
+        let mut recovered = source.footage.clone();
+        recovered.path = "/new/project/plate.png".into();
+        let observed = super::super::availability::prepare(&s.project, std::slice::from_ref(&source), &[true], false).unwrap();
+        assert!(observed.apply(&mut s));
+        assert!(matches!(&s.project.item(id).unwrap().kind, ItemKind::Footage(f) if f.missing));
+        let result = apply(&mut s, vec![(source, Found::Moved(Box::new(recovered)))]);
+        assert_eq!(result, json!({"checked": 1, "missing": 0, "probed": 0, "relinked": 1}));
+        assert!(matches!(&s.project.item(id).unwrap().kind, ItemKind::Footage(f) if !f.missing && f.path == "/new/project/plate.png"));
+        assert!(!s.is_dirty());
+        assert!(s.history.undo.is_empty());
     }
 
     #[test]
