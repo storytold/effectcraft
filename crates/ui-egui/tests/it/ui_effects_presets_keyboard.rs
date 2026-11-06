@@ -278,3 +278,25 @@ fn mouse_picks_leave_no_focus_and_enter_after_a_click_is_the_panels() {
     assert_ne!(h.state().ui.effects_open.contains("presets"), open, "Enter toggles the clicked folder");
     assert!(h.state().auto.query("timeline.layer.").iter().all(|e| !e.id.ends_with(".nameEdit")), "no layer rename started");
 }
+
+/// The options menu browses like every other list (#2686): the press on the hamburger opens it,
+/// the rows stay up while the button is down, and the release over a row chooses it — a release
+/// that far from the press is no click for egui, and nothing is hovered while the button is down.
+#[test]
+fn the_options_menu_browses_on_the_press() {
+    let mut h = harness();
+    let at = center(&h, "effects.menu");
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Alphabetical").is_some(), "the press opens the menu");
+    assert!(!h.state().ui.effects_view.alphabetical, "and chooses nothing yet");
+    let row = h.get_by_label_contains("Alphabetical").rect().center();
+    h.input_mut().events.push(Event::PointerMoved(row));
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Alphabetical").is_some(), "the row under the pointer keeps the menu open");
+    h.input_mut().events.push(Event::PointerButton { pos: row, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(h.state().ui.effects_view.alphabetical, "the release over the row chooses it");
+    assert!(h.query_by_label_contains("Alphabetical").is_none(), "and closes the menu");
+}

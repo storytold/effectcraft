@@ -491,6 +491,45 @@ fn right_click_in_effect_controls_shows_the_effect_menu() {
 /// #295: EXtractoR on a multi-layer OpenEXR layer offers the file's layers (a Layer popup that
 /// sets red, green, blue and alpha in one undo step) and its channels (a popup per colour);
 /// there was no way to pick any.
+/// The Effect Controls drop-downs open on the press and apply the entry the button comes up over,
+/// as After Effects' do (#2686): Gaussian Blur's Blur Dimensions stays up while the button is held
+/// and takes the entry the button comes up on.
+#[test]
+fn the_blur_dimensions_drop_down_browses_on_the_press() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Blur", "width": 320, "height": 180, "frameRate": 30, "duration": 2})).unwrap();
+    let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [l], "effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
+    let dims = layer(&s, l).effects().and_then(|f| f.groups().find(|g| g.uid == fx)).and_then(|g| g.get("dimensions")).map(|p| p.uid).unwrap();
+    s.state.selected_layers = vec![LayerId(l)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| app);
+    h.run_steps(3);
+
+    let value = |h: &Harness<'_, EffectcraftApp>| -> u32 {
+        let layer = layer(&h.state().session, l);
+        let g = layer.effects().and_then(|f| f.groups().find(|g| g.uid == fx)).unwrap();
+        g.get("dimensions").map(|p| p.value.as_enum()).unwrap_or_default()
+    };
+    let at = rect_of(&h, &format!("effectControls.prop.{dims}.value")).center();
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    // (The accessibility tree is one pass behind the drawing.)
+    h.run_steps(2);
+    assert!(h.query_by_label("Horizontal").is_some(), "the press opens the list, while the button is still down");
+    assert_eq!(value(&h), 0, "and chooses nothing yet");
+    let row = h.query_by_label("Vertical").expect("the list is open").rect().center();
+    h.event(egui::Event::PointerMoved(row));
+    h.step();
+    assert!(h.query_by_label("Horizontal").is_some(), "moving onto an entry keeps the list open");
+    h.event(egui::Event::PointerButton { pos: row, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert_eq!(value(&h), 2, "the release over Vertical applies it");
+    assert!(h.query_by_label("Horizontal").is_none(), "and closes the list");
+}
+
 #[test]
 fn extractor_offers_the_exr_layers_and_channels() {
     use exr::prelude::*;

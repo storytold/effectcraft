@@ -6,7 +6,7 @@
 //! Colours are sRGB components (0–1), as the project stores them. Changes apply as they are made
 //! (After Effects' Preview); Cancel or Escape goes back to the colour the picker opened with.
 
-use egui::{Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::i18n::tr;
 use crate::widgets::{open_popup, popup_is_open, pressed_outside, select_all};
@@ -35,6 +35,8 @@ pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
 /// changes it to the colour it samples).
 pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3]) -> bool {
     if !popup_is_open(ui, id) {
+        // A gesture belongs to the open picker: closed, there is no square or slider to follow.
+        ui.data_mut(|d| d.remove::<Gesture>(id.with("gesture")));
         return false;
     }
     let orig_id = id.with("original");
@@ -86,6 +88,8 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             d.remove::<u64>(pass_id);
             // Closed: the next Escape is the dialog's again.
             d.remove::<u64>(open_pass_id());
+            // …and no gesture outlives the picker it began in.
+            d.remove::<Gesture>(id.with("gesture"));
         });
     } else {
         refresh_armed(ui.ctx(), id);
@@ -408,13 +412,27 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
     let before = pick;
     let mut out = Outcome::default();
 
+    // The press that the square and the slider share, recorded before they are drawn: which
+    // control it landed on, and the control that takes it later when it began elsewhere — the
+    // swatch the picker opened on (#2686). It lasts the whole press, the release's frame
+    // included, where the button is already up but the pointer's final position must still set
+    // the colour. With the button up and no release this frame the gesture is over; a new press
+    // starts a fresh one.
+    let gesture_id = id.with("gesture");
+    if !ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released()) {
+        ui.data_mut(|d| d.remove::<Gesture>(gesture_id));
+    }
+    if ui.input(|i| i.pointer.primary_pressed()) {
+        ui.data_mut(|d| d.insert_temp(gesture_id, Gesture { owner: None }));
+    }
+
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         // The square and slider, with OK and Cancel under the square's left edge.
         ui.vertical(|ui| {
             ui.horizontal_top(|ui| {
-                square(ui, chan, &mut pick);
-                slider(ui, chan, &mut pick);
+                square(ui, chan, &mut pick, id);
+                slider(ui, chan, &mut pick, id);
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -486,12 +504,47 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
 /// The channels in the order of their buttons.
 const CHANS: [(Chan, &str); 6] = [(Chan::H, "H"), (Chan::S, "S"), (Chan::V, "B"), (Chan::R, "R"), (Chan::G, "G"), (Chan::B, "B")];
 
+/// Which of the picker's two controls a gesture belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hand {
+    Square,
+    Slider,
+}
+
+/// The press that the square and the slider share: the control it landed on, or — when it began
+/// elsewhere, on the swatch the picker opened on — the control that has taken it since (#2686).
+#[derive(Clone, Copy)]
+struct Gesture {
+    owner: Option<Hand>,
+}
+
+/// The pointer's position for `hand` this frame: while the button is down, and on the release's
+/// frame too, where it came up (#2686). The picker opens on the press on its swatch, and egui
+/// gives that gesture to the swatch alone — `is_pointer_button_down_on` is false here — so the
+/// square and the slider share the press through the [`Gesture`] recorded before they are drawn:
+/// one that began on `hand` follows the pointer for the whole press, outside `rect` as well,
+/// where the value clamps to the edge; one that began on the other control is never taken; one
+/// that began elsewhere is taken when the pointer reaches `rect` and follows it until release.
+fn held_pos(ui: &Ui, id: egui::Id, hand: Hand, rect: Rect) -> Option<Pos2> {
+    let p = ui.input(|i| i.pointer.interact_pos())?;
+    let mut g = ui.data(|d| d.get_temp::<Gesture>(id.with("gesture")))?;
+    if g.owner == Some(hand) {
+        return Some(p);
+    }
+    if g.owner.is_none() && rect.contains(p) {
+        g.owner = Some(hand);
+        ui.data_mut(|d| d.insert_temp(id.with("gesture"), g));
+        return Some(p);
+    }
+    None
+}
+
 /// Drag or click on the square to set its two channels.
-fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
+fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick, id: egui::Id) {
     let (rect, resp) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color field"));
     let (x, y) = chan.square();
-    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+    if let Some(p) = held_pos(ui, id, Hand::Square, rect) {
         *pick = pick.at(chan, (p.x - rect.min.x) / rect.width(), 1.0 - (p.y - rect.min.y) / rect.height());
     }
     // Hue changes unevenly across a row, so the HSB squares get a finer grid.
@@ -516,11 +569,11 @@ fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
 }
 
 /// Drag or click on the slider to set `chan`; arrows on both sides mark its value.
-fn slider(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
+fn slider(ui: &mut Ui, chan: Chan, pick: &mut Pick, id: egui::Id) {
     let (outer, resp) = ui.allocate_exact_size(vec2(SLIDER_W + 12.0, SQUARE), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color slider"));
     let bar = Rect::from_center_size(outer.center(), vec2(SLIDER_W, SQUARE));
-    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+    if let Some(p) = held_pos(ui, id, Hand::Slider, outer) {
         *pick = pick.set(chan, 1.0 - (p.y - bar.min.y) / bar.height());
     }
     let n: u32 = if chan == Chan::H { 36 } else { 16 };

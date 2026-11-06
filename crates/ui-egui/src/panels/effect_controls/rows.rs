@@ -251,9 +251,8 @@ fn value_mask(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     let label = opts.get(i).cloned().unwrap_or_else(|| format!("Mask {i}"));
     let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - 56.0).clamp(80.0, 200.0), 18.0));
     let pop = egui::Id::unique(("ec-mpop", uid));
-    if widgets::dropdown(ui, dr, &label, &t, egui::Id::unique(("ec-m", uid))).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let mresp = widgets::dropdown(ui, dr, &label, &t, egui::Id::unique(("ec-m", uid)));
+    widgets::open_on_press(ui, &mresp, pop);
     app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
     if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(i)) {
         cx.set_step(actions, json!(ni as f64));
@@ -358,9 +357,8 @@ fn value_color(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
     let PropCx { t, uid, cy, vx, layer, prop, .. } = *cx;
     let sr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(30.0, 16.0));
     let pop = egui::Id::unique(("ec-cpop", uid));
-    if widgets::swatch(ui, sr, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0], egui::Id::unique(("ec-c", uid)), &t).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let cresp = widgets::swatch(ui, sr, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0], egui::Id::unique(("ec-c", uid)), &t);
+    widgets::open_on_press(ui, &cresp, pop);
     app.auto.add(&format!("effectControls.prop.{uid}.value"), sr, &prop.name);
     let er = Rect::from_center_size(pos2(sr.max.x + 14.0, cy), vec2(18.0, 18.0));
     let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == "color");
@@ -399,9 +397,8 @@ fn value_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         let widest = options.iter().map(|o| p.layout_no_wrap(o.clone(), Tokens::ui(11.5), t.text).size().x).fold(0.0, f32::max);
         let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((widest + 30.0).clamp(80.0, (r.max.x - vx - 56.0).max(80.0)), 18.0));
         let pop = egui::Id::unique(("ec-epop", uid));
-        if widgets::dropdown(ui, dr, options.get(*i as usize).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("ec-e", uid))).clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        let eresp = widgets::dropdown(ui, dr, options.get(*i as usize).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("ec-e", uid)));
+        widgets::open_on_press(ui, &eresp, pop);
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
         if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
             cx.set_step(actions, json!(ni));
@@ -454,9 +451,8 @@ fn value_layer_ref(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, val
             let opts: Vec<String> = effectcraft_engine::effects::LAYER_SOURCE_OPTIONS.iter().map(|s| s.to_string()).collect();
             let sr = Rect::from_min_size(pos2(dr.max.x + 6.0, cy - 9.0), vec2(((r.max.x - dr.max.x) - 64.0).clamp(70.0, 120.0), 18.0));
             let spop = egui::Id::unique(("ec-lspop", uid));
-            if widgets::dropdown(ui, sr, opts.get(si).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("ec-ls", uid))).clicked() {
-                widgets::open_popup(ui, spop);
-            }
+            let sresp = widgets::dropdown(ui, sr, opts.get(si).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("ec-ls", uid)));
+            widgets::open_on_press(ui, &sresp, spop);
             app.auto.add(&format!("effectControls.prop.{uid}.source"), sr, &src.name);
             if let Some(ni) = widgets::popup_menu(ui, spop, sr.left_bottom(), &opts, Some(si)) {
                 actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": src.uid, "value": ni})));
