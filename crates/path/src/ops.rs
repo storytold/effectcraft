@@ -351,7 +351,7 @@ fn round_sub(sub: &Sub, r: f64, out: &mut BezPath) {
 /// join. `copies` copies are made, copy *i* (0-based) offset by `amount · (i + 1 + copy_offset)`,
 /// all returned in the same compound path.
 pub fn offset(paths: &[BezPath], amount: f64, join: Join, miter_limit: f64, copies: f64, copy_offset: f64) -> Vec<BezPath> {
-    let n = copies.round().clamp(1.0, 1000.0) as usize;
+    let n = pieces_within_budget(paths, copies.round().clamp(1.0, 1000.0) as usize);
     paths
         .iter()
         .map(|p| {
@@ -387,6 +387,14 @@ pub fn twist(paths: &[BezPath], angle_deg: f64, center: [f64; 2]) -> Vec<BezPath
         return paths.to_vec();
     }
     let k = a / rmax;
+    // The pieces a segment asks for; the uniform cap applies only when the requests together
+    // would pass the budget (long segments keep their detail next to many short ones otherwise).
+    let want = |len: f64| ((a.abs() * len / rmax) / 0.15 + len / 50.0).ceil().clamp(1.0, 64.0) as usize;
+    let requested = paths
+        .iter()
+        .flat_map(subs)
+        .fold(0usize, |n, sub| sub.segs.iter().fold(n.saturating_add(overhead_of(&sub)), |n, seg| n.saturating_add(want(seg.arclen(ACC)))));
+    let most = if requested <= MAX_OPERATOR_SEGMENTS { 64 } else { pieces_within_budget(paths, 64) };
     let rot = |v: Vec2, th: f64| {
         let (s, co) = th.sin_cos();
         Vec2::new(v.x * co - v.y * s, v.x * s + v.y * co)
@@ -414,7 +422,7 @@ pub fn twist(paths: &[BezPath], angle_deg: f64, center: [f64; 2]) -> Vec<BezPath
                 for seg in &sub.segs {
                     let cb = seg.to_cubic();
                     let len = seg.arclen(ACC);
-                    let m = ((a.abs() * len / rmax) / 0.15 + len / 50.0).ceil().clamp(1.0, 64.0) as usize;
+                    let m = want(len).min(most);
                     for i in 0..m {
                         let q = cb.subsegment(i as f64 / m as f64..(i + 1) as f64 / m as f64);
                         let (p0, p3) = (map(q.p0), map(q.p3));
@@ -440,6 +448,28 @@ struct Sample {
     /// Length of the piece before / after this sample.
     len_prev: f64,
     len_next: f64,
+}
+
+/// Most segments an expanding operator (Zig Zag, Wiggle Paths, Twist, Offset Paths' copies)
+/// makes from its input. Operators stack, each expanding the previous one's output; capping each
+/// output keeps a short stack from multiplying a simple path into billions of points.
+pub const MAX_OPERATOR_SEGMENTS: usize = 1 << 20;
+
+/// Elements a subpath adds besides its segments: a `MoveTo`, and a `ClosePath` only when closed.
+fn overhead_of(sub: &Sub) -> usize {
+    if sub.closed { 2 } else { 1 }
+}
+
+/// `want` pieces (or copies) per input segment, reduced so the whole output (segments times
+/// pieces, plus per-subpath overhead) stays within [`MAX_OPERATOR_SEGMENTS`] (never below 1, so the input itself always passes through).
+fn pieces_within_budget(paths: &[BezPath], want: usize) -> usize {
+    // Count what is subdivided (drawn segments) and keep room for each subpath's own MoveTo/Close.
+    let (mut segs, mut overhead) = (0usize, 0usize);
+    for sub in paths.iter().flat_map(subs) {
+        segs = segs.saturating_add(sub.segs.len());
+        overhead = overhead.saturating_add(overhead_of(&sub));
+    }
+    want.min(MAX_OPERATOR_SEGMENTS.saturating_sub(overhead) / segs.max(1)).max(1)
 }
 
 /// Split every segment into `m` pieces of equal arc length. Original vertices get the average of
@@ -503,7 +533,7 @@ fn emit(samples: &[Sample], disp: &[Vec2], closed: bool, smooth: bool, handle: f
 /// `smooth` makes rounded waves instead of sharp zig zags. A closed path with `n` segments ends up
 /// with `n · (ridges + 1)` vertices (open: one more).
 pub fn zigzag(paths: &[BezPath], size: f64, ridges: f64, smooth: bool) -> Vec<BezPath> {
-    let m = ridges.round().clamp(0.0, 1000.0) as usize + 1;
+    let m = pieces_within_budget(paths, ridges.round().clamp(0.0, 1000.0) as usize + 1);
     paths
         .iter()
         .map(|p| {
@@ -586,7 +616,7 @@ pub fn wiggle(paths: &[BezPath], w: &WiggleParams, time_s: f64) -> Vec<BezPath> 
     if w.size == 0.0 {
         return paths.to_vec();
     }
-    let m = w.detail.round().clamp(0.0, 1000.0) as usize + 1;
+    let m = pieces_within_budget(paths, w.detail.round().clamp(0.0, 1000.0) as usize + 1);
     let seed = w.seed.round() as i64 as u64;
     let t = time_s * w.speed + w.phase_deg / 360.0;
     let corr = (w.correlation / 100.0).clamp(0.0, 1.0);
