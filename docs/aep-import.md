@@ -301,8 +301,10 @@ for 24.x):
 | `savedBy` | the version of the After Effects that wrote the file (`svap`): `26.2.1x2` for those copies too; `unknown` likewise |
 | `tested` | whether the major of `fileVersion` is one the importer is tested with: 24, 25 and 26 (`TESTED_MAJORS`). A major-version classification only: the 24.x and 25.x samples are copies saved by After Effects 2026 (Save a Copy As), not files authored by those versions, and it does not guarantee that every older plug-in definition was verified |
 
-A file written for another version (or an unknown one) is imported like any other: everything that
-is read arrives and every loss is reported. It is not refused for its version (the version is not a
+A file written for another version (or an unknown one) is imported like any other: the importer
+reports the losses it detects and lists its general limitations (`limitations`), but it does not
+claim a complete import, since some content is skipped (environment lights, for one) and some
+features cannot be detected or counted (frame blending, for one). It is not refused for its version (the version is not a
 loss); `limitations` gets one more line saying that the version is not tested.
 
 **Files written for 25.x and 24.x.** Every family of the corpus (12, including the Lumetri samples
