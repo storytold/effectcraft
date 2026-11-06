@@ -1,6 +1,7 @@
 //! # effectcraft-plugin (L3)
 //!
-//! Loads **WebAssembly effect plug-ins** (plug-in API v1, see `docs/plugins.md`) into the effect
+//! Loads **WebAssembly effect plug-ins** (plug-in ABI v1, see `docs/plugins.md`; the native
+//! plug-in API 2 additions such as layer parameters and host services are not part of it) into the effect
 //! registry ([`effectcraft_effects::plugin`]). A plug-in is a `.wasm` (or `.wat`) module with
 //! no imports that exports:
 //!
@@ -25,7 +26,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use effectcraft_effects::EffectSpec;
-pub use effectcraft_effects::plugin::{EffectPlugin, PLUGIN_API_VERSION, PluginFrame, PluginManifest, PluginParams, register_plugin};
+pub use effectcraft_effects::plugin::{EffectPlugin, PLUGIN_API_VERSION, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION, register_plugin};
 
 #[cfg(feature = "wasm")]
 mod wasm;
@@ -59,9 +60,51 @@ pub fn loader(bytes: &[u8], source: &str) -> Result<serde_json::Value, String> {
         "name": spec.name,
         "category": spec.category,
         "version": m.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
-        "api": PLUGIN_API_VERSION,
+        "api": m.as_ref().map(|m| m.api).unwrap_or(PLUGIN_API_VERSION),
         "params": spec.params.len(),
     }))
+}
+
+/// Render a module's effect without registering it (the Plug-in Library's preview): default
+/// parameters, `pixels` (premultiplied RGBA, `width × height`) at each of `times` (seconds).
+/// Returns the manifest as JSON and one frame per time.
+pub fn preview(bytes: &[u8], width: u32, height: u32, pixels: &[[f32; 4]], times: &[f64]) -> Result<(serde_json::Value, Vec<Vec<[f32; 4]>>), String> {
+    #[cfg(feature = "wasm")]
+    {
+        use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginParamKind, PluginParams};
+        let p = wasm::WasmPlugin::new(bytes, "preview")?;
+        let m = p.manifest();
+        let mut flat = Vec::with_capacity(m.flat_len());
+        for param in &m.params {
+            match &param.kind {
+                PluginParamKind::Slider { default, .. } | PluginParamKind::Angle { default } => flat.push(*default),
+                PluginParamKind::Checkbox { default } => flat.push(if *default { 1.0 } else { 0.0 }),
+                PluginParamKind::Popup { default, .. } => flat.push(*default as f64),
+                // Points default to fractions of the layer: the frame is the layer.
+                PluginParamKind::Point { default } => flat.extend([default[0] * f64::from(width), default[1] * f64::from(height)]),
+                PluginParamKind::Color { default } => flat.extend(default.iter().copied()),
+                // API 2 kinds: a WebAssembly module can't declare them (`WasmPlugin::new` refuses them).
+                PluginParamKind::Point3 { default } => flat.extend(default.iter().copied()),
+                PluginParamKind::Layer => flat.push(-1.0),
+                PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => {}
+            }
+        }
+        let params = PluginParams { manifest: m, flat: &flat, texts: &[] };
+        let mut frames = Vec::with_capacity(times.len());
+        for &t in times {
+            let mut px = pixels.to_vec();
+            let mut frame = PluginFrame { width, height, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [f64::from(width), f64::from(height)] };
+            p.render(&mut frame, &params, t)?;
+            frames.push(px);
+        }
+        let manifest = serde_json::to_value(m).map_err(|e| e.to_string())?;
+        Ok((manifest, frames))
+    }
+    #[cfg(not(feature = "wasm"))]
+    {
+        let _ = (bytes, width, height, pixels, times);
+        Err("WebAssembly plug-ins are not available in this build".into())
+    }
 }
 
 // Two attributes, so clippy sees `cfg(test)` and treats the module as test code.

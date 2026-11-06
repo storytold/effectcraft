@@ -1896,10 +1896,24 @@ fn phase_tail(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     crate::panels::text_range_handles::viewer_hook(app, ui, &painter, &map, ectx, &|c, l| l2c(c, l).0);
 
     // Status chips (render time / caching).
+    // The caching chip stays up a moment after the last wait, so gaps between uncached frames
+    // don't make it flicker.
+    // ponytail: fixed 0.6 s hold; tie it to the prefetch queue being empty if gaps outlast it.
+    let chip_id = egui::Id::unique("viewer-caching-chip");
+    let now = ctx.input(|i| i.time);
     if app.playback.playing && app.playback.waiting {
-        let r = Rect::from_min_size(area.min + vec2(10.0, 10.0), vec2(150.0, 22.0));
-        painter.rect_filled(r, 11.0, Color32::from_black_alpha(170));
-        painter.text(r.center(), Align2::CENTER_CENTER, crate::i18n::tr("Caching frames…"), Tokens::ui(11.5), t.cache_green);
+        ctx.data_mut(|d| d.insert_temp(chip_id, now + 0.6));
+    }
+    let until = ctx.data(|d| d.get_temp::<f64>(chip_id)).unwrap_or(0.0);
+    if app.playback.playing && now < until {
+        if !app.playback.waiting {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+        }
+        let text = painter.layout_no_wrap(crate::i18n::tr("Caching frames").to_string(), Tokens::ui(10.5), t.text_dim);
+        let r = Rect::from_min_size(area.min + vec2(8.0, 8.0), vec2(text.size().x + 30.0, 18.0));
+        painter.rect_filled(r, 9.0, Color32::from_black_alpha(140));
+        ui.put(Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(10.0, 10.0)), egui::Spinner::new().size(10.0).color(t.cache_green));
+        painter.galley(pos2(r.min.x + 22.0, r.center().y - text.size().y / 2.0), text, t.text_dim);
     }
     if app.video_preview_off().is_some() {
         let r = Rect::from_min_size(area.min + vec2(10.0, 10.0), vec2(330.0, 22.0));

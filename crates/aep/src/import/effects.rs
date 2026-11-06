@@ -133,6 +133,8 @@ struct ParamOut<'a> {
     col: &'a mut Collector,
 }
 
+/// Imports one parameter of `fx` into its EffectCraft property: its keyframes, the value in its
+/// record or the `pard` default, with a loss for what cannot be read or mapped.
 fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>, cx: &LayerCtx<'_>, shown: &str, out: ParamOut<'_>) {
     let ParamOut { group, refs, col } = out;
     if carries_nothing(p) {
@@ -269,7 +271,9 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         }
         return;
     }
-    let value = match (p.stored(), p.stored_value()) {
+    // A record in the default state (`tdsb` 3) still holds the value After Effects uses (1200,
+    // 1400: every such record reads back as recorded).
+    let value = match (p.stored(), p.recorded_value()) {
         (Some(_), Some(v)) => Some(v),
         (Some(_), None) => {
             col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, default used"));
@@ -503,7 +507,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
             return;
         }
         // EffectCraft's mesh reads the first two numbers of a vertex; moved handles follow as
-        // eight more (kept in the project, not drawn).
+        // eight more (kept for the export, not drawn).
         let mut token = format!("{},{}", px(dx * w), px(dy * h));
         if own.iter().any(|x| x.abs() > 0.01) {
             handles_moved = true;
@@ -516,7 +520,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
     if handles_moved {
         col.lose(
             LossCategory::Effects,
-            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept in the project)"),
+            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)"),
         );
     }
     if let Some(p) = group.prop_mut("rows") {

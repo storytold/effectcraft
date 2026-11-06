@@ -502,6 +502,30 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.show_panel(PanelKind::EffectsPresets);
             Value::Null
         }
+        "timeline.revealMask" => {
+            let id = |key: &str| p.get(key).and_then(Value::as_u64).ok_or_else(|| format!("timeline.revealMask: need `{key}` as an unsigned integer"));
+            let (comp, layer, mask, epoch) = (id("comp")?, id("layer")?, id("mask")?, id("projectEpoch")?);
+            if epoch != app.session.script_ui.project_epoch || app.session.active_comp_id().map(|c| c.0) != Some(comp) {
+                return Ok(json!({"revealed": false}));
+            }
+            let masks = app.session.active_comp().and_then(|c| c.layer(effectcraft_engine::project::LayerId(layer))).and_then(|l| l.masks());
+            let Some(masks) = masks.filter(|m| m.groups().any(|g| g.uid == mask && matches!(g.kind, effectcraft_engine::project::GroupKind::Mask { .. })))
+            else {
+                return Ok(json!({"revealed": false}));
+            };
+            let masks_uid = masks.uid;
+            let tl = &mut app.ui.timeline;
+            tl.open_layers.insert(layer);
+            tl.open_groups.extend([masks_uid, mask]);
+            // Add to a shortcut's existing reveal without changing the last pressed shortcut.
+            if let Some(kinds) = tl.layer_reveal.get_mut(&layer).filter(|k| !k.is_empty()) {
+                tl.reveal_props.insert(mask);
+                if !kinds.iter().any(|k| k == "props") {
+                    kinds.push("props".into());
+                }
+            }
+            json!({"revealed": true})
+        }
         "timeline.revealProps" => {
             let props = p.get("props").and_then(Value::as_array).cloned().unwrap_or_default();
             let uids = |k: &str| -> Vec<u64> { props.iter().filter_map(|x| x.get(k).and_then(Value::as_u64)).collect() };
@@ -575,6 +599,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "view.importGuides" => ("path", Ask::Open(&["json"])),
         "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py".into())),
         "file.exportLottie" => ("path", Ask::Save("Animation.json".into())),
+        "file.exportAep" => ("path", Ask::Save("Project.aep".into())),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importAep" => ("path", Ask::Open(&["aep", "aepx"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
@@ -583,6 +608,9 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
+        "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
+        "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
+        "effect.helpers.load" => ("path", Ask::Folder),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
@@ -679,9 +707,32 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
-    if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        app.ui.status = e;
+    match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
+        Ok(result) => show_result_errors(app, &result),
+        Err(e) => app.ui.status = e,
     }
+}
+
+/// A successful command can still report per-item problems in an `errors` array (Effect ▸
+/// Install Effect Plug-in Bundle does): show a short, readable report in the status line,
+/// without turning the success into an error. The full structured array stays in the result
+/// for scripts; the status line is single-line and short-lived, so it lists the first few
+/// problems and counts the rest instead of printing raw JSON.
+pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
+    let Some(errors) = result.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) else { return };
+    let parts: Vec<String> = errors
+        .iter()
+        .map(|e| match (e.get("file").and_then(Value::as_str), e.get("error").and_then(Value::as_str)) {
+            (Some(file), Some(error)) => format!("{file}: {error}"),
+            (_, Some(error)) => error.to_string(),
+            _ => e.to_string(),
+        })
+        .collect();
+    let mut msg = parts.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    if parts.len() > 3 {
+        msg.push_str(&format!("; +{} more", parts.len() - 3));
+    }
+    app.ui.status = msg;
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.
