@@ -936,6 +936,8 @@ fn every_icon_only_header_has_a_hover_text() {
     // A hidden column has no hover targets.
     let none = crate::state::TimelineState { columns: Default::default(), show_modes: false, ..Default::default() };
     assert!(header_tip_rects(&cols(0.0, 800.0, Vis::of(&none)), ch).is_empty());
+}
+
 /// One box spans the outline and the time graph (#3056): rows it crosses are selected on both
 /// sides of the boundary, and only keys in the time graph count (the part over the outline is cut).
 #[test]

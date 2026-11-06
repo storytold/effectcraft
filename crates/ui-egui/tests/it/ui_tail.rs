@@ -349,6 +349,8 @@ fn timeline_header_icons_explain_themselves_on_hover() {
     }
     h.run_steps(3);
     assert!(h.query_by_label("Hide This").is_some(), "the column menu opens under a header icon");
+}
+
 /// The Project panel's Name column edge drags to resize the column, and a double-click on the
 /// edge fits the names again.
 #[test]
