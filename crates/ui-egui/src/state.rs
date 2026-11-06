@@ -594,6 +594,36 @@ impl Default for AnimToolsState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectStatus {
+    #[default]
+    All,
+    Available,
+    Missing,
+}
+
+impl ProjectStatus {
+    pub const ALL: [Self; 3] = [Self::All, Self::Available, Self::Missing];
+    /// English catalog key; localization belongs at the widget rendering boundary.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Available => "Available",
+            Self::Missing => "Missing",
+        }
+    }
+    /// Filter the dependency inventory, including unused missing proxies. Generated items
+    /// count as available even though they have no external source file.
+    pub fn matches(self, item: &effectcraft_engine::project::Item) -> bool {
+        match self {
+            Self::All => true,
+            Self::Available => !item.has_missing_footage(),
+            Self::Missing => item.has_missing_footage(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiState {
     pub tool: Tool,
@@ -638,6 +668,8 @@ pub struct UiState {
     pub effects_search: String,
     pub effects_open: BTreeSet<String>,
     pub project_search: String,
+    #[serde(default)]
+    pub project_status: ProjectStatus,
     pub project_open_folders: BTreeSet<u64>,
     /// Project panel sort column (`name`, `type`, `size`, `fps`) and direction, as in AE's
     /// clickable column headers. Folders sort with everything else.
@@ -748,6 +780,7 @@ impl Default for UiState {
             effects_search: String::new(),
             effects_open: BTreeSet::new(),
             project_search: String::new(),
+            project_status: ProjectStatus::All,
             project_open_folders: BTreeSet::new(),
             project_sort: default_project_sort(),
             project_sort_desc: false,

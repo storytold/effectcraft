@@ -913,6 +913,7 @@ pub(crate) fn visible_props(app: &EffectcraftApp, comp: &Comp) -> Vec<serde_json
         .collect()
 }
 
+/// Project the property tree into Timeline rows; explicit search takes precedence over collapse and shortcut reveals.
 fn build_rows(app: &EffectcraftApp, comp: &Comp) -> Vec<Row> {
     let tl = &app.ui.timeline;
     let search = tl.search.trim().to_lowercase();
@@ -1106,6 +1107,9 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
         let mut groups = vec![];
         groups_in(&l.props, reveal_props, &mut groups);
         for g in groups {
+            if shown_groups.contains(&g.uid) {
+                continue;
+            }
             let open = tl.open_groups.contains(&g.uid);
             rows.push(Row {
                 layer: l.id,
@@ -1176,6 +1180,19 @@ fn revealed_rows(
             }
         }
     }
+    // Whole groups already emitted above own their properties, including under mixed reveals.
+    fn props(rows: &mut Vec<Row>, t: &Tree<'_>, g: &PropGroup) {
+        if t.skip.contains(&g.uid) {
+            return;
+        }
+        for child in &g.children {
+            match child {
+                Node::Prop(p) if (t.wanted)(p) => rows.push(Row { layer: t.l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
+                Node::Group(g) => props(rows, t, g),
+                _ => {}
+            }
+        }
+    }
     let wanted = |p: &Property| shown.contains(&p.uid) && prop_visible(p, l);
     let tree = Tree { l, wanted: &wanted, skip, open, full };
     for c in &l.props.children {
@@ -1185,11 +1202,7 @@ fn revealed_rows(
                     group(rows, &tree, e, 1);
                 }
             }
-            Node::Group(g) => {
-                let mut found = vec![];
-                collect_props(g, &mut found, &wanted);
-                rows.extend(found.into_iter().map(|uid| Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid } }));
-            }
+            Node::Group(g) => props(rows, &tree, g),
             Node::Prop(p) if wanted(p) => rows.push(Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
             Node::Prop(_) => {}
         }
@@ -2922,6 +2935,8 @@ fn layer_twirl_and_icon(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw,
 }
 
 /// The layer name: the rename field or the (selected) name cell.
+/// Reserve space for source warnings so selection backgrounds and inline renaming cannot
+/// obscure the marker or its recovery tooltip.
 fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, name_x: f32) {
     let t = g.tl.t;
     let ctx = g.tl.ctx.clone();
@@ -2932,7 +2947,21 @@ fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowC
     let r = rc.r;
     let cy = rc.cy;
     let is_sel = rc.is_sel;
-    let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
+    let problem = match &layer.source {
+        LayerSource::Footage { item } | LayerSource::Comp { item } => {
+            app.session.project.item(*item).and_then(|i| app.session.footage.item_problem(i).or_else(|| effectcraft_engine::render::missing_item_problem(i)))
+        }
+        _ => None,
+    };
+    let end = cw.name_end - 4.0;
+    if let Some(why) = &problem {
+        let marker = Rect::from_center_size(pos2(end - 7.0, cy), vec2(13.0, 12.0)).intersect(lp.clip_rect());
+        lp.add(egui::Shape::convex_polygon(vec![marker.center_top(), marker.right_bottom(), marker.left_bottom()], t.warning, Stroke::NONE));
+        lp.text(marker.center() + vec2(0.0, 1.5), Align2::CENTER_CENTER, "!", Tokens::semibold(9.0), Color32::BLACK);
+        ui.interact(marker, egui::Id::unique(("tl-problem", layer.id.0)), Sense::hover()).on_hover_text(why);
+        app.auto.add(&format!("timeline.layer.{}.problem", layer.id.0), marker, why);
+    }
+    let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2((end - if problem.is_some() { 17.0 } else { 0.0 }).max(name_x), r.max.y));
     let rename_id = egui::Id::unique("tl-rename");
     let renaming: Option<(u64, String)> = ctx.data(|d| d.get_temp(rename_id));
     if let Some((rl, mut buf)) = renaming.filter(|(rl, _)| *rl == layer.id.0) {
@@ -2959,7 +2988,7 @@ fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowC
             let g = lp.layout_no_wrap(display_name(app, layer), Tokens::ui(12.0), name_col);
             let cell = Rect::from_min_max(
                 pos2(name_rect.min.x - 3.0, r.min.y + 1.0),
-                pos2((name_rect.min.x + g.size().x + 4.0).max(cw.name_end - 4.0).min(cw.name_end - 2.0), r.max.y - 1.0),
+                pos2((name_rect.min.x + g.size().x + 4.0).max(name_rect.max.x).min(name_rect.max.x + 2.0), r.max.y - 1.0),
             );
             lp.rect_filled(cell, 0.0, SELECTED_NAME_BG);
         }

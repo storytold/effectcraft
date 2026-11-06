@@ -17,6 +17,7 @@
 //!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
+//!     [--exr-compression none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab] [--exr-depth half|float]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
 //!     [--progress]  report progress on stderr when it is not a terminal, up to four lines a second:
 //!     `progress <frames done> <frames total> <seconds elapsed> <seconds left, or - when unknown>`
@@ -114,9 +115,13 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
          [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
          [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
-         [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
+         [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
+         [--exr-compression C] [--exr-depth half|float] | --queue
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff;
-                                           --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
+                                           --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus;
+                                           --exr-compression none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab
+                                           (default zip; pxr24 on float, b44/b44a on half and dwaa/dwab are lossy),
+                                           --exr-depth (default float): OpenEXR)
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal
                                            (progress <frames done> <total> <seconds elapsed> <seconds left|->)
@@ -190,6 +195,8 @@ const VALUED: &[&str] = &[
     "--webm-codec",
     "--audio-bitrate",
     "--opus-app",
+    "--exr-compression",
+    "--exr-depth",
     // mcp
     "--automation-read-root",
     "--automation-write-root",
@@ -881,6 +888,8 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             ("--rate-control", "rateControl"),
             ("--webm-codec", "webmCodec"),
             ("--opus-app", "opusApplication"),
+            ("--exr-compression", "exrCompression"),
+            ("--exr-depth", "exrBitDepth"),
         ] {
             if let Some(v) = args.opt(flag) {
                 p[key] = json!(v);

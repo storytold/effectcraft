@@ -335,22 +335,43 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     moved
 }
 
+/// Match names and dependency status, retain folder ancestors, and expand them while filtering.
+/// Iterative traversal bounds cyclic document trees and builds each folder's child list once.
 pub(crate) fn visible_rows(app: &EffectcraftApp) -> Vec<(ItemId, usize)> {
-    fn walk(app: &EffectcraftApp, folder: Option<ItemId>, depth: usize, q: &str, out: &mut Vec<(ItemId, usize)>) {
-        let mut kids = app.session.project.children(folder);
-        sort_items(&mut kids, &app.ui.project_sort, app.ui.project_sort_desc);
-        for it in kids {
-            if !q.is_empty() && !it.is_folder() && !it.name.to_lowercase().contains(q) {
-                continue;
-            }
-            out.push((it.id, depth));
-            if it.is_folder() && (app.ui.project_open_folders.contains(&it.id.0) || !q.is_empty()) {
-                walk(app, Some(it.id), depth + 1, q, out);
+    let project = &app.session.project;
+    let q = app.ui.project_search.to_lowercase();
+    let filtered = !q.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All;
+    let mut included = std::collections::BTreeSet::new();
+    if filtered {
+        for item in project.items.values().filter(|i| !i.is_folder() && app.ui.project_status.matches(i) && i.name.to_lowercase().contains(&q)) {
+            let mut id = Some(item.id);
+            while let Some(current) = id {
+                if !included.insert(current) {
+                    break;
+                }
+                id = project.item(current).and_then(|i| i.parent);
             }
         }
     }
-    let mut rows = vec![];
-    walk(app, None, 0, &app.ui.project_search.to_lowercase(), &mut rows);
+    let mut children: std::collections::BTreeMap<Option<ItemId>, Vec<&Item>> = std::collections::BTreeMap::new();
+    for item in project.items.values() {
+        children.entry(item.parent).or_default().push(item);
+    }
+    for kids in children.values_mut() {
+        sort_items(kids, &app.ui.project_sort, app.ui.project_sort_desc);
+    }
+    let mut pending: Vec<_> = children.get(&None).into_iter().flatten().rev().map(|i| (*i, 0usize)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    while let Some((item, depth)) = pending.pop() {
+        if !seen.insert(item.id) || (filtered && !included.contains(&item.id)) {
+            continue;
+        }
+        rows.push((item.id, depth));
+        if item.is_folder() && (filtered || app.ui.project_open_folders.contains(&item.id.0)) {
+            pending.extend(children.get(&Some(item.id)).into_iter().flatten().rev().map(|i| (*i, depth.saturating_add(1))));
+        }
+    }
     rows
 }
 
@@ -375,6 +396,7 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
         }
     }
     app.ui.project_search.clear();
+    app.ui.project_status = crate::state::ProjectStatus::All;
     app.session.state.project_selection = items;
     // Force the panel's selection scroll on its next draw, even when the item was already selected.
     ctx.data_mut(|d| d.remove_temp::<Option<u64>>(selection_seen_id()));
@@ -1153,6 +1175,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     details_header(app, ui, &p, &ctx, head);
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
+    let filter_w = 88.0_f32.min(sr.width() * 0.45);
+    let filter = Rect::from_min_max(pos2(sr.max.x - filter_w, sr.min.y), sr.max);
+    let sr = Rect::from_min_max(sr.min, pos2((filter.min.x - 4.0).max(sr.min.x), sr.max.y));
+    let id = egui::Id::unique("project-status");
+    let pop = id.with("popup");
+    let status = app.ui.project_status;
+    let response = widgets::dropdown_tip(ui, filter, crate::i18n::tr(status.label()), Some(crate::i18n::tr("Filter by footage status")), &t, id);
+    app.auto.add("project.status", filter, status.label());
+    if response.clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    if widgets::popup_is_open(ui, pop) {
+        let options: Vec<_> = crate::state::ProjectStatus::ALL.iter().map(|s| crate::i18n::tr(s.label()).to_string()).collect();
+        if let Some(index) = widgets::popup_menu(ui, pop, filter.left_bottom(), &options, crate::state::ProjectStatus::ALL.iter().position(|s| *s == status))
+            && let Some(chosen) = crate::state::ProjectStatus::ALL.get(index)
+        {
+            app.ui.project_status = *chosen;
+        }
+    }
     let mut q = app.ui.project_search.clone();
     widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
     app.ui.project_search = q;
@@ -1226,7 +1267,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("project.item.{}", id.0), r, &it.name);
         // For screen readers: a tree item named by the item and its type, with its selection,
         // depth and (a folder) open state. One Tab stop per row; the panel's keys then apply.
-        let open = it.is_folder().then(|| app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty());
+        let open = it.is_folder().then(|| {
+            app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All
+        });
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
         ctx.accesskit_node_builder(resp.id, |n| {
             n.set_selected(selected);
@@ -1251,7 +1294,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         proxy_indicator(app, ui, &g, it, &mut actions);
         // Footage (or the proxy in use) that can't be decoded (no decoder for its codec /
         // profile): a warning marker at the end of the name cell, the reason on hover.
-        let problem = app.session.footage.item_problem(it);
+        let problem = app.session.footage.item_problem(it).or_else(|| effectcraft_engine::render::missing_item_problem(it));
         let name_clip =
             Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
         if let Some(why) = &problem {
@@ -1548,5 +1591,42 @@ mod tests {
         set_column(&mut cols, "path", true);
         set_column(&mut cols, "size", false);
         assert_eq!(cols, ["type", "duration", "fps", "path", "comment"]);
+    }
+}
+
+#[cfg(test)]
+mod availability_filter_tests {
+    use super::*;
+    use crate::state::ProjectStatus;
+    use effectcraft_engine::project::{Footage, Proxy};
+
+    #[test]
+    fn status_and_search_keep_only_matching_items_and_their_folder_ancestors() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let folder = p.add_item("Shots", Label::None, None, ItemKind::Folder);
+        let missing =
+            p.add_item("Lost plate", Label::None, Some(folder), ItemKind::Footage(Footage { path: "/gone.png".into(), missing: true, ..Default::default() }));
+        let present = p.add_item("Other plate", Label::None, None, ItemKind::Footage(Footage { path: "/here.png".into(), ..Default::default() }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        app.ui.project_search = "plate".into();
+        assert_eq!(visible_rows(&app), vec![(folder, 0), (missing, 1)]);
+        app.ui.project_status = ProjectStatus::Available;
+        assert_eq!(visible_rows(&app), vec![(present, 0)]);
+        app.ui.project_search = "absent name".into();
+        assert!(visible_rows(&app).is_empty());
+    }
+
+    #[test]
+    fn unused_missing_proxy_is_in_the_missing_filter() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let id = p.add_item("Plate", Label::None, None, ItemKind::Footage(Footage { path: "/original.png".into(), ..Default::default() }));
+        p.item_mut(id).unwrap().proxy =
+            Some(Box::new(Proxy { footage: Footage { path: "/proxy.png".into(), missing: true, ..Default::default() }, enabled: false }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        assert_eq!(visible_rows(&app), vec![(id, 0)]);
     }
 }
