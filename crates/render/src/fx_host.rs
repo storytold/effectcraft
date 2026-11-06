@@ -1,4 +1,5 @@
-use super::{Arc, Buf, EffectHost, EvalCtx, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::frames::frame_blend_mode;
+use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -182,17 +183,37 @@ fn effect_param<'a>(layer: &'a Layer, effect_index: usize, id: &str) -> Option<&
     None
 }
 
+/// Whether an instance's keys are in the nested comp's time, so they can go into the comp as they
+/// are: not with Time Remap, Responsive Design - Time (a stretched precomp with protected
+/// regions), a nested comp that preserves its frame rate (its time is floored to its own frames)
+/// or a layer with Frame Blending (it renders the nested comp at two other times and mixes them,
+/// so keys would pull the next frame's value in early).
+fn keys_in_nested_time(ctx: &EvalCtx, layer: &Layer) -> bool {
+    if layer.props.get("timeRemap").is_some() || frame_blend_mode(ctx, layer) != FrameBlend::Off {
+        return false;
+    }
+    let LayerSource::Comp { item } = layer.source else { return true };
+    let Some(nc) = ctx.project.comp(item) else { return true };
+    let responsive = (layer.stretch - 100.0).abs() > 1e-9 && !super::eval::protected_regions(nc).is_empty();
+    !responsive && !nc.preserve_frame_rate
+}
+
 /// The Essential Properties overrides of a precomp layer, evaluated at the context time.
 pub fn essential_overrides(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_project::essential::Override> {
     use effectcraft_project::essential;
     let over = essential::overridden(layer);
     let Some(g) = essential::group(layer).filter(|_| !over.is_empty()) else { return vec![] };
+    let same_time = keys_in_nested_time(ctx, layer);
     let mut out = vec![];
     g.walk("", &mut |_, p| {
         if over.contains(&p.uid)
             && let Some(control) = essential::control_of(&p.match_id)
         {
-            out.push(essential::Override { control, value: ctx.value(layer, p) });
+            // An expression on the instance property replaces its keys, and so does an override
+            // from a collapsed parent (only its value reaches here, the keys are the stale own ones).
+            let from_parent = ctx.property_overrides.iter().any(|o| o.layer == layer.id && o.prop == p.uid);
+            let keys = if same_time && !from_parent && !p.has_expression() { p.keys.clone() } else { vec![] };
+            out.push(essential::Override { control, value: ctx.value(layer, p), keys });
         }
     });
     out
