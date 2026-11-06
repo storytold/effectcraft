@@ -18,7 +18,7 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Panels", "width": 320, "height": 180, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     h
 }
@@ -169,7 +169,7 @@ fn saved_workspaces_persist_across_sessions() {
     let store = std::sync::Arc::new(MemoryConfig::default());
     let launch = || {
         let s = Session { config: Some(store.clone()), ..Default::default() };
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
         h.run_steps(2);
         h
     };
@@ -338,7 +338,7 @@ fn ui_scale_setting_sizes_the_interface() {
     assert_eq!(ctx.zoom_factor(), 0.9);
     // A saved scale applies from the first frame.
     let s = Session { prefs: effectcraft_engine::prefs::Prefs::from_json(&h.state().session.prefs.to_json()), ..Default::default() };
-    let mut h2 = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h2 = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h2.run_steps(3);
     assert_eq!(h2.ctx.zoom_factor(), 0.9);
 }
@@ -359,7 +359,7 @@ fn settings_buttons_stay_in_view_at_200_percent() {
     s.prefs.disk.disk_cache_enabled = false;
     s.prefs.set("appearance.uiScale", json!(200)).unwrap();
     s.save_prefs();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     assert_eq!(scale(&h), (200, 2.0));
     let rect = |h: &Harness<'_, EffectcraftApp>, id: &str| {
@@ -422,7 +422,7 @@ fn panels_snapshot() {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let solid = s.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).map(|i| i.id.0);
-    let mut app = Some(EffectcraftApp::new(s));
+    let mut app = Some(crate::app_for_test(s));
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
     h.run_steps(3);
     let ctx = h.ctx.clone();

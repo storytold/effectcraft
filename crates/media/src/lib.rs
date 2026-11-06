@@ -25,6 +25,7 @@ mod layered;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
+mod raw;
 mod stream;
 mod wav_markers;
 mod webp_anim;
@@ -64,7 +65,7 @@ impl From<filmcraft_media::MediaError> for MediaError {
 
 /// File extensions recognised as stills.
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps", "arw"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
 pub use effectcraft_project::VIDEO_EXTENSIONS;
@@ -98,6 +99,37 @@ pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u
     Ok(bytes)
 }
 
+/// Read a regular file with a strict byte ceiling. Check metadata before opening to reject
+/// FIFOs and devices without waiting for a producer; recheck the opened handle against races.
+pub(crate) fn read_regular_file_limited(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let reject_non_file = || std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display()));
+    let reject_too_large = || std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} exceeds the {limit}-byte limit", path.display()));
+    let max = u64::try_from(limit).unwrap_or(u64::MAX);
+    let path_meta = std::fs::metadata(path)?;
+    if !path_meta.is_file() {
+        return Err(reject_non_file());
+    }
+    if path_meta.len() > max {
+        return Err(reject_too_large());
+    }
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(reject_non_file());
+    }
+    if meta.len() > max {
+        return Err(reject_too_large());
+    }
+    let reserve = usize::try_from(meta.len()).unwrap_or(limit).min(limit);
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(reserve).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
+    file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(reject_too_large());
+    }
+    Ok(bytes)
+}
 pub(crate) fn ext_of(path: &std::path::Path) -> String {
     path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase()
 }
@@ -132,6 +164,8 @@ mod read_tests {
         let f = dir.join(format!("ec-read-regular-{}.bin", std::process::id()));
         std::fs::write(&f, b"abc").unwrap();
         assert_eq!(super::read_regular_file(&f).unwrap(), b"abc");
+        assert_eq!(super::read_regular_file_limited(&f, 3).unwrap(), b"abc");
+        assert_eq!(super::read_regular_file_limited(&f, 2).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         let _ = std::fs::remove_file(f);
     }
 }

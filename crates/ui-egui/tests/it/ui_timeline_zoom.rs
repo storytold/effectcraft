@@ -14,7 +14,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Long", "width": 320, "height": 180, "frameRate": 30, "duration": 600})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.ui.timeline.pps = Some(200.0);
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
     h.run_steps(3);
@@ -271,7 +271,7 @@ fn shift_dragging_the_work_area_snaps_to_the_current_time() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Short", "width": 320, "height": 180, "frameRate": 30, "duration": 10})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.ui.timeline.pps = Some(100.0);
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
     let reset = |h: &mut Harness<'_, EffectcraftApp>| {

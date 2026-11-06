@@ -637,7 +637,11 @@ impl Inner {
         if let Some(b) = lock(&self.files).get(path) {
             return Ok(b.clone());
         }
-        crate::read_regular_file(std::path::Path::new(path)).map(Into::into).map_err(|e| MediaError::Io(format!("{path}: {e}")))
+        let path_ref = std::path::Path::new(path);
+        if crate::ext_of(path_ref) == "arw" {
+            return crate::raw::read_file(path_ref).map(Into::into);
+        }
+        crate::read_regular_file(path_ref).map(Into::into).map_err(|e| MediaError::Io(format!("{path}: {e}")))
     }
 
     /// The opened movie/audio source for `path` ([`Opened`]). The first caller opens it, outside
@@ -863,6 +867,9 @@ impl Inner {
             return Ok(colour_bars(footage.width, footage.height));
         }
         let bytes = self.read(path)?;
+        if crate::raw::recognizes(path, &bytes) {
+            return crate::raw::decode(path, &bytes, op);
+        }
         if let Some(img) = crate::dpx::decode(path, &bytes)? {
             return Ok(dynamic_to_image(&img, op));
         }

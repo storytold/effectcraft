@@ -489,6 +489,7 @@ mod tests {
 
     fn app() -> EffectcraftApp {
         let mut s = effectcraft_engine::Session::default();
+        s.prefs.general.language = "en".into();
         s.execute("file.openDemoProject", json!({})).unwrap();
         EffectcraftApp::new(s)
     }

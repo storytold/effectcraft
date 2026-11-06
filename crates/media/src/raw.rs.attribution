@@ -1,0 +1,8 @@
+asset:        raw.rs (camera colour matrices supplied by the pinned lightcraft-raw dependency)
+title:        Spectral camera colour matrices used for Sony photo RAW development
+author:       LightCraft contributors; Academy Software Foundation/rawtoaces-data; Weta Digital; scitech; Jonathon Irons at NPL; CIE
+source:       https://github.com/storytold/lightcraft/blob/b70ae1741e8236757377ca85eecaafb8788a82ab/assets/ATTRIBUTION.md
+license:      Apache-2.0 AND CC-BY-4.0
+license-file: ../../../LICENSE-APACHE; CC-BY-4.0 link in ../../../NOTICE
+added:        2026-10-10 by EffectCraft contributors
+notes:        LightCraft fitted matrices from rawtoaces-data v1.1.0 spectral measurements, training reflectances and CIE 1931 colour-matching functions, and copied model aliases. EffectCraft uses the dependency's table unchanged; no Adobe matrices or decoder implementation copied. Adapter code itself is original work under MIT OR Apache-2.0.

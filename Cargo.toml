@@ -82,6 +82,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 same-file = "1.0"
 tempfile = "3.27"
 
+# First-party, clean-room sensor decoding and camera colour model (media only).
+lightcraft-raw = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab", default-features = false }
+lightcraft-color = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab" }
+lightcraft-tiff = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab" }
+
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }

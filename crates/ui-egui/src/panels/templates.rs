@@ -252,7 +252,9 @@ mod tests {
     }
 
     fn app_with_store() -> EffectcraftApp {
-        let s = effectcraft_engine::Session { config: Some(std::sync::Arc::new(effectcraft_engine::config::MemoryConfig::default())), ..Default::default() };
+        let mut s =
+            effectcraft_engine::Session { config: Some(std::sync::Arc::new(effectcraft_engine::config::MemoryConfig::default())), ..Default::default() };
+        s.prefs.general.language = "en".into();
         EffectcraftApp::new(s)
     }
 

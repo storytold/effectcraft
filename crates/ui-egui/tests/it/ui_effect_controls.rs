@@ -58,7 +58,7 @@ fn app() -> (EffectcraftApp, Ids) {
     };
     s.state.selected_layers = vec![LayerId(small)];
     s.state.selected_props.clear();
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     (app, ids)
 }
@@ -143,7 +143,7 @@ fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
     let first = s.execute("effect.apply", json!({"effect": "Tint"})).unwrap()["effects"][0].as_u64().unwrap();
     let target = s.execute("effect.apply", json!({"effect": "Tint"})).unwrap()["effects"][0].as_u64().unwrap();
     let blur = s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
     h.run_steps(4);
@@ -241,7 +241,7 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
         let KV::Color(c) = v else { panic!("{v:?}") };
         c
     };
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| crate::app_for_test(s));
     h.state_mut().ui.fx_pick = Some(FxPick { kind: "color".into(), layer: top, prop, name: "Color".into() });
     h.step();
     let pos = effectcraft_ui_egui::panels::viewer::comp_to_screen(&h.ctx, [100.0, 100.0]).unwrap();
@@ -270,7 +270,7 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
     let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Key Light"})).unwrap()["effects"][0].as_u64().unwrap();
     let prop = layer(&s, screen).effects().unwrap().groups().find(|g| g.uid == fx).and_then(|g| g.get("screenColour")).map(|p| p.uid).unwrap();
     s.state.selected_layers = vec![LayerId(screen)];
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
     settle(&mut h);
@@ -448,7 +448,7 @@ fn right_click_in_effect_controls_shows_the_effect_menu() {
     let b = s.execute("layer.newSolid", json!({"name": "B", "color": "#804060"})).unwrap()["layer"].as_u64().unwrap();
     let fill = s.execute("effect.apply", json!({"layers": [b], "effect": "Fill"})).unwrap()["effects"][0].as_u64().unwrap();
     s.state.selected_layers = vec![LayerId(b), LayerId(a)];
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
     h.run_steps(3);
@@ -511,7 +511,7 @@ fn extractor_offers_the_exr_layers_and_channels() {
     let uid = |s: &Session, id: &str| layer(s, l).effects().and_then(|f| f.groups().find(|g| g.uid == fx)).and_then(|g| g.get(id)).map(|p| p.uid).unwrap();
     let red = uid(&s, "red");
     s.state.selected_layers = vec![LayerId(l)];
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
     settle(&mut h);
@@ -622,7 +622,7 @@ fn point_picker_handle_follows_hover_then_commits_once_across_effects() {
         let fx = s.execute("effect.apply", json!({"layer":lid,"effect":effect})).unwrap()["effects"][0].as_u64().unwrap();
         let point = layer(&s, lid).effects().unwrap().find_group(fx).unwrap().get(parameter).unwrap().uid;
         s.execute("prop.set", json!({"layer":lid,"prop":point,"value":[100,50]})).unwrap();
-        let mut app = EffectcraftApp::new(s);
+        let mut app = crate::app_for_test(s);
         app.show_panel(PanelKind::EffectControls);
         app.ui.viewer.zoom = Some(0.85);
         app.ui.viewer.pan = [25.0, -10.0];
@@ -739,7 +739,7 @@ fn non_point_parameters_activate_handles_across_effect_families() {
         let prop = g.prop(parameter).unwrap().uid;
         let point_ids: Vec<_> = points.iter().map(|name| g.prop(name).unwrap().uid).collect();
         s.state.selected_props.clear();
-        let mut app = EffectcraftApp::new(s);
+        let mut app = crate::app_for_test(s);
         app.show_panel(PanelKind::EffectControls);
         let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
         settle(&mut h);
@@ -789,7 +789,7 @@ fn file_and_text_parameters_have_widgets() {
     s.execute("comp.new", json!({"name": "LUT", "width": 64, "height": 32, "frameRate": 30, "duration": 1})).unwrap();
     let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#ff0000", "width": 64, "height": 32})).unwrap()["layer"].as_u64().unwrap();
     s.state.selected_layers = vec![LayerId(l)];
-    let mut app = EffectcraftApp::new(s);
+    let mut app = crate::app_for_test(s);
     app.show_panel(PanelKind::EffectControls);
     let picked = std::sync::Arc::new(std::sync::Mutex::new(invert.to_string_lossy().to_string()));
     let pick = picked.clone();

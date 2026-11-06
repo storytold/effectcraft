@@ -14,6 +14,10 @@ the way it does in After Effects, and every step is a command an agent can run t
 
 Agents: `file.import {"paths": ["/shots/plate.mov", "/shots/logo.psd"]}`.
 
+Sony photo RAW (`.arw`) imports as still footage decoded from the sensor data. Numbered
+camera photographs stay individual stills. See [photo-raw.md](photo-raw.md) for the tested
+camera/variant, colour-development limits and local verification workflow.
+
 ## Image sequences
 
 VFX plates, 3D renders and hand-drawn animation usually come as numbered stills:
