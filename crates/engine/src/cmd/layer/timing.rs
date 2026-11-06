@@ -340,6 +340,7 @@ fn unprecompose_warnings(comp: &effectcraft_project::Comp, layer: &Layer, nested
     if comp.layers.iter().any(|o| o.id != layer.id && refers_to(&o.props, layer.id)) {
         why.push("a property of another layer refers to it (that reference is cleared)".to_string());
     }
+    why.extend(expression_warnings(comp, layer));
     if layer.blend_mode != effectcraft_color::BlendMode::default() {
         why.push("the layer has a blending mode".to_string());
     }
@@ -384,6 +385,40 @@ fn unprecompose_warnings(comp: &effectcraft_project::Comp, layer: &Layer, nested
         why.push("the composition has a soloed layer".to_string());
     }
     why
+}
+
+/// One warning per property of another layer in `comp` whose expression names `layer`: by its
+/// name in quotes, or as `layer(<index>)` with its 1-based index (not on another comp's
+/// `comp("…").layer(…)`). Detection is by text; the expressions are left as they are.
+fn expression_warnings(comp: &effectcraft_project::Comp, layer: &Layer) -> Vec<String> {
+    let index = comp.layers.iter().position(|l| l.id == layer.id).map(|i| i.saturating_add(1));
+    let quoted = [format!("\"{}\"", layer.name), format!("'{}'", layer.name)];
+    let names_it = |text: &str| quoted.iter().any(|q| text.contains(q.as_str())) || index.is_some_and(|i| names_index(text, i));
+    let mut out = vec![];
+    for o in comp.layers.iter().filter(|o| o.id != layer.id) {
+        o.props.walk("", &mut |_, p| {
+            if p.expr.as_ref().is_some_and(|e| names_it(&e.text)) {
+                out.push(format!("layer “{}” {} has an expression that refers to “{}” (it will no longer find it)", o.name, p.name, layer.name));
+            }
+        });
+    }
+    out
+}
+
+/// Whether expression `text` calls `layer(<index>)` (spaces allowed) on this comp: bare,
+/// `thisComp.layer(…)`, not `comp("Other").layer(…)` or `thisLayer(…)`.
+fn names_index(text: &str, index: usize) -> bool {
+    text.match_indices("layer(").any(|(at, _)| {
+        let before = text.get(..at).unwrap_or("");
+        let on_other = before.ends_with(").") || before.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if on_other && !before.ends_with("thisComp.") {
+            return false;
+        }
+        let rest = text.get(at + "layer(".len()..).unwrap_or("").trim_start();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let after = rest.get(digits.len()..).unwrap_or("").trim_start();
+        digits.parse::<usize>().ok() == Some(index) && after.starts_with(')')
+    })
 }
 
 /// Whether any property (value or key) in `props` holds a reference to layer `id`.

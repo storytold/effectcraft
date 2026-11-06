@@ -2357,6 +2357,38 @@ fn unprecompose_forced_drops_the_links_other_layers_had_to_it() {
     assert_eq!(s.history.undo.len(), undo);
 }
 
+/// Expressions of other layers that name the pre-comp layer (in quotes, or by its index) would no
+/// longer find it: one warning per property; an expression naming another layer is not one. Forced,
+/// the expressions stay as they are and the comp still renders.
+#[test]
+fn unprecompose_warns_about_expressions_that_refer_to_it() {
+    let (mut s, _, _, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    let d = solid(&mut s, "#ffff00");
+    s.execute("layer.rename", json!({"layers": [d], "name": "D"})).unwrap();
+    let index = s.active_comp().unwrap().layers.iter().position(|l| l.id.0 == pre).unwrap() + 1;
+    let set = |s: &mut Session, on: u64, path: &str, text: &str| {
+        s.execute("prop.setExpression", json!({"layer": on, "path": path, "expression": text})).unwrap();
+    };
+    set(&mut s, c, "transform/position", "thisComp.layer(\"Inner\").transform.position");
+    set(&mut s, c, "transform/rotation", &format!("thisComp.layer( {index} ).transform.rotation"));
+    // Naming another layer, or another comp's layer at the same index, is no reference to it.
+    set(&mut s, d, "transform/position", "thisComp.layer(\"C\").transform.position");
+    set(&mut s, d, "transform/rotation", &format!("comp(\"Other\").layer({index}).transform.rotation"));
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    let exprs: Vec<String> =
+        dry["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).filter(|w| w.contains("expression")).map(str::to_string).collect();
+    assert_eq!(exprs.len(), 2, "{exprs:?}");
+    assert!(exprs.iter().all(|w| w.contains("layer “C”") && w.contains("“Inner”") && w.contains("no longer find it")), "{exprs:?}");
+    assert!(exprs.iter().any(|w| w.contains("Position")) && exprs.iter().any(|w| w.contains("Rotation")), "{exprs:?}");
+    warned_then_forced(&mut s, pre, "has an expression that refers to “Inner”");
+    // Forced, the expressions are left as written.
+    s.execute("layer.unprecompose", json!({"layers": [pre], "force": true})).unwrap();
+    let text = layer(&s, c).transform().unwrap().get("position").unwrap().expr.clone().unwrap().text;
+    assert_eq!(text, "thisComp.layer(\"Inner\").transform.position");
+    scene_look(&mut s);
+}
+
 /// Every reason at once, forced: unpacked without a crash, one undo step, undone exactly.
 #[test]
 fn unprecompose_forced_with_everything_at_once() {
