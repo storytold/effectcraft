@@ -258,3 +258,52 @@ fn a_place_that_is_not_finite_is_reported_and_the_file_kept() {
     assert!(store.error.is_some(), "{text}");
     assert_eq!(config.read(FILE).as_deref(), Some(text.as_str()));
 }
+
+/// Workspaces where a panel can't go back to its gone anchor or to a new frame at the edge.
+fn no_room_for_an_edge_frame() -> Vec<Workspace> {
+    let side = Node::Dock { side: Side::Start, columns: vec![Column::new(vec![Group::new(vec![PanelKind::Project], 0)], 240.0)] };
+    let mut deep = tabs(&[PanelKind::Project], 0);
+    for i in 1..craft_ui::docking::MAX_DEPTH {
+        deep = hsplit(SplitSize::Ratio(0.5), tabs(&[PanelKind::Viewer(i as u32)], 0), deep);
+    }
+    vec![
+        Workspace::new(Layout { root: Some(side), floating: Vec::new() }),
+        Workspace::new(Layout { root: Some(deep), floating: Vec::new() }),
+        Workspace::default(),
+    ]
+}
+
+#[test]
+fn an_open_panel_whose_anchor_is_gone_still_gets_a_tab() {
+    for (case, mut dock) in no_room_for_an_edge_frame().into_iter().enumerate() {
+        for locked in [false, true] {
+            dock.locked = locked;
+            dock.hidden = vec![(script(DETACHED), place(script(DETACHED + 1), None, Vec::new()))];
+            let shown = dock.layout.root.is_some().then_some(PanelKind::Project);
+            let mut ui = ui_with(dock.clone(), &[(DETACHED, "A.jsx")]);
+            let open = windows(&[(7, WindowKind::Panel, "A.jsx")]);
+            bind(&mut ui, &open);
+            fit(&mut ui, &open);
+            assert!(ui.dock.is_open(script(7)), "case {case}, locked {locked}: {:?}", ui.dock);
+            assert!(ui.dock.hidden.is_empty(), "case {case}, locked {locked}");
+            ui.dock.validate().unwrap();
+            if let Some(panel) = shown {
+                assert!(ui.dock.is_visible(panel), "case {case}, locked {locked}: the selected tab stays selected");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_panel_opened_past_a_gone_anchor_at_launch_leaves_no_queued_event() {
+    for mut dock in no_room_for_an_edge_frame() {
+        dock.hidden = vec![(script(DETACHED), place(script(DETACHED + 1), None, Vec::new()))];
+        let mut ui = ui_with(dock, &[(DETACHED, "A.jsx")]);
+        ui.focused = PanelKind::Project;
+        let mut session = Session { script_ui: windows(&[(7, WindowKind::Panel, "A.jsx")]), ..Default::default() };
+        session.events.push(effectcraft_engine::Event::Frontend { command: "window.scriptPanel".into(), params: serde_json::json!({"window": 7}) });
+        restore(&mut ui, &mut session);
+        assert!(session.events.is_empty(), "{:?}", ui.dock);
+        assert_eq!(ui.focused, PanelKind::Project);
+    }
+}
