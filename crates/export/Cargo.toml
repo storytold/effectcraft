@@ -36,4 +36,5 @@ effectcraft-effects = { workspace = true }
 effectcraft-color = { workspace = true }
 filmcraft-opus = { workspace = true }
 filmcraft-vp9 = { workspace = true }
+filmcraft-matroska = { workspace = true }
 effectcraft-keyframe = { workspace = true }
