@@ -1887,6 +1887,26 @@ fn time_to_frames_preserves_coercion_and_small_durations() {
     }
 }
 
+#[test]
+fn timecode_strings_round_like_time_to_frames() {
+    let f = fx();
+    // Same rule as timeToFrames: absolute times round toward negative infinity, durations away from zero.
+    for (expression, expected) in [
+        ("timeToTimecode(0.01, 24)", "0:00:00:00"),
+        ("timeToTimecode(0.01, 24, true)", "0:00:00:01"),
+        ("timeToTimecode(61.01, 30, true)", "0:01:01:01"),
+        ("timeToTimecode(-0.01, 24)", "-0:00:00:01"),
+        ("timeToTimecode(-0.01, 24, true)", "-0:00:00:01"),
+        ("timeToTimecode(-1e-10, 24)", "0:00:00:00"),
+        ("timeToCurrentFormat(0.01, 30, true)", "0:00:00:01"),
+        ("timeToFeetAndFrames(0.01, 24, 16)", "0+00"),
+        ("timeToFeetAndFrames(0.01, 24, 16, true)", "0+01"),
+        ("timeToFeetAndFrames(-0.01, 24, 16)", "-0+01"),
+    ] {
+        assert_eq!(f.text(expression, 0.0), expected, "{expression}");
+    }
+}
+
 /// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another
 /// layer's `("effects")("Slider Control")` or `(1)`, as the pick whip writes them with Compact
 /// English off (they failed: "not a callable function"). It is still a layer.
