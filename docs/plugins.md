@@ -374,7 +374,11 @@ package can't read files, open the network or crash the app.
   Install (`library.install`) downloads the package's `.wasm`, checks its SHA-256 (and its size, when the
   catalog gives one) against the catalog and loads it. Downloads use the system's `curl`,
   `https://` only and starting on GitHub's hosts (redirects stay on `https://`; the SHA-256 check
-  is what guarantees the file).
+  is what guarantees the file). A package's `url` must be a release asset
+  (`https://github.com/<owner>/<repo>/releases/download/…`), in the package's `repo` when that is
+  a GitHub repository URL. A catalog other than the community one is read only when
+  `library.refresh {catalog}` names it: an `index.json` on GitHub's hosts over `https://`, or a
+  local `file://` path.
 * **Where it goes.** `<Plug-ins>/Library/<id>/<version>/<id>.wasm` (the `Plug-ins` folder next to
   the settings), listed in `Library/installed.json`. Installed packages load at start-up, each
   checked against the SHA-256 it was installed with. The catalog last fetched is kept as

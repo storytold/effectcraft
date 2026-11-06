@@ -193,7 +193,7 @@ Release fields (one per entry in `versions`):
 | `version` | yes | Dotted numbers only, at most 32 characters: `1.0.0`, `1.2`. No `v` and no suffixes such as `-beta`. |
 | `api` | yes | The plug-in API the module implements: `1`. |
 | `minApp` | no | The oldest EffectCraft version the release needs (`0.17.0`). Leave it out if any version with this API works. |
-| `url` | yes | The release asset's `https://` URL on GitHub. |
+| `url` | yes | The release asset's `https://` URL on GitHub: `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. When `repo` is a `https://github.com/<owner>/<repo>` URL, the asset must be in that repository. Install and Preview refuse any other `https://` URL. |
 | `sha256` | yes | The file's SHA-256, 64 hex digits. |
 | `size` | no, but reviewed | The file's size in bytes. When it is given, a download of another size is refused. |
 | `effects` | yes | The effect ids the module registers (its manifest's `id`). EffectCraft uses them to find the package that provides an effect a project needs. |
