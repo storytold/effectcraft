@@ -16,10 +16,13 @@ use crate::{EngineError, KeyRef, Result, Session, cmd};
 
 /// Preset file format version tag (`*.ecpreset`, JSON).
 pub const PRESET_TAG: &str = "effectcraftAnimationPreset";
-/// The preset format version that `anim.savePreset` writes.
-pub const PRESET_VERSION: u64 = 2;
 /// The first preset version that stores effect keys relative to the earliest key (#1971).
 const RELATIVE_EFFECT_KEYS: u64 = 2;
+
+/// The preset format version written under [`PRESET_TAG`]. 3: a property that is a Cineon
+/// Converter's Gamma, directly or through Essential Properties, records that Cineon Converter's
+/// version in `cineonVersion`; the Gamma properties of version 1 and 2 presets are version 1 Gammas.
+pub const PRESET_VERSION: u64 = 3;
 
 fn has_selected_props(s: &Session) -> std::result::Result<(), String> {
     has_comp(s)?;
@@ -80,25 +83,30 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
             continue;
         }
         let (Some(pr), Some(mp)) = (l.props.find(uid), match_path_of(&l.props, uid)) else { continue };
-        props.push((l.layer_time(t), mp, pr.clone()));
+        let version = cineon_gamma_version(&s.project, l, uid, NESTING);
+        props.push((l.layer_time(t), mp, pr.clone(), version));
     }
     if props.is_empty() && effects.is_empty() {
         return Err(bad("anim.savePreset", "select properties or effects to save"));
     }
     // Key times are stored relative to the earliest key so the preset applies at the CTI.
     let first =
-        props.iter().flat_map(|(_, _, pr)| pr.keys.iter().map(|k| k.time)).chain(earliest_key(effects.iter().map(|(_, g)| g))).min().unwrap_or(Tick::ZERO);
+        props.iter().flat_map(|(_, _, pr, _)| pr.keys.iter().map(|k| k.time)).chain(earliest_key(effects.iter().map(|(_, g)| g))).min().unwrap_or(Tick::ZERO);
     for (_, g) in &mut effects {
         retime_effect(g, 1.0, "anim.savePreset", |t| Ok(Tick(t.0.checked_sub(first.0).ok_or_else(|| effect_time_error("anim.savePreset"))?)))?;
     }
     let props_json: Vec<Value> = props
         .iter()
-        .map(|(_, mp, pr)| {
+        .map(|(_, mp, pr, version)| {
             let mut pr = pr.clone();
             for k in &mut pr.keys {
                 k.time -= first;
             }
-            json!({"path": mp, "value": pr.value, "keys": pr.keys, "expression": pr.expr})
+            let mut v = json!({"path": mp, "value": pr.value, "keys": pr.keys, "expression": pr.expr});
+            if let Some((version, _)) = version {
+                v["cineonVersion"] = json!(version);
+            }
+            v
         })
         .collect();
     let fx_json: Vec<Value> = effects.iter().map(|(_, g)| serde_json::to_value(g).unwrap_or_default()).collect();
@@ -158,7 +166,19 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             retime_effect(g, 1.0, "anim.applyPreset", |t| Ok(Tick(t.0.checked_sub(first.0).ok_or_else(|| effect_time_error("anim.applyPreset"))?)))?;
         }
     }
-    let props: Vec<(String, Property)> = doc["properties"]
+    // A Cineon Converter saved before version 2 gets its Version (1), as when a project opens.
+    if let Some(spec) = effectcraft_effects::find("ec.utility.cineon") {
+        for g in &mut effects {
+            if matches!(&g.kind, GroupKind::Effect { effect } if effect == spec.id) {
+                // The uids are reassigned when the group is applied.
+                let mut next = 0;
+                effectcraft_effects::migrate::upgrade_instance(spec, g, &mut Ids(&mut next), [0.0; 2]);
+            }
+        }
+    }
+    // The Cineon Converter version of each saved Gamma; a version 1 preset holds version 1 Gammas.
+    let legacy = doc[PRESET_TAG].as_u64().unwrap_or(1) < PRESET_VERSION;
+    let props: Vec<(String, Property, Option<f64>)> = doc["properties"]
         .as_array()
         .map(|a| {
             a.iter()
@@ -170,11 +190,28 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                     let mut pr = Property::new(0, "", "", value);
                     pr.keys = keys;
                     pr.expr = expr;
-                    Some((path, pr))
+                    let version = v["cineonVersion"].as_f64().or(legacy.then_some(1.0));
+                    Some((path, pr, version))
                 })
                 .collect()
         })
         .unwrap_or_default();
+    // Per layer and property: the version of the Cineon Converter Gammas the property drives
+    // through Essential Properties.
+    let exposed: Vec<Vec<Option<f64>>> = ids
+        .iter()
+        .map(|lid| {
+            let l = s.project.comp(cid).and_then(|c| c.layer(*lid));
+            props
+                .iter()
+                .map(|(path, _, _)| {
+                    let l = l?;
+                    let pr = l.props.prop(&resolve_effect_path(l, path))?;
+                    cineon_gamma_version(&s.project, l, pr.uid, NESTING).and_then(|(v, direct)| (!direct).then_some(v))
+                })
+                .collect()
+        })
+        .collect();
     let t = s.time();
     // Effect bounds per layer size the point defaults of parameters added since the preset was saved.
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -184,7 +221,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let mut skipped = vec![];
     s.edit("Apply Animation Preset", None, |proj, _| {
         let mut next = proj.next_id;
-        for lid in &ids {
+        for (li, lid) in ids.iter().enumerate() {
             let size = sizes.get(lid).copied().unwrap_or([100.0, 100.0]);
             let l = layer_mut(proj, cid, *lid)?;
             let lt = l.layer_time(t);
@@ -206,7 +243,23 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                     applied += 1;
                 }
             }
-            for (path, src) in &props {
+            for (pi, (path, src, version)) in props.iter().enumerate() {
+                // An exposed Gamma is converted to the scale of the Cineon Converters it drives.
+                // One with an enabled expression is skipped: expressions are applied as saved.
+                let rescaled;
+                let src = match (version, exposed[li][pi]) {
+                    (Some(from), Some(to)) if *from != to && src.has_expression() => {
+                        skipped.push(path.clone());
+                        continue;
+                    }
+                    (Some(from), Some(to)) if *from != to => {
+                        let mut c = src.clone();
+                        rescale_gamma(&mut c, effectcraft_effects::cineon_gamma_scale(*from) / effectcraft_effects::cineon_gamma_scale(to));
+                        rescaled = c;
+                        &rescaled
+                    }
+                    _ => src,
+                };
                 let resolved = resolve_effect_path(l, path);
                 match l.props.prop_mut(&resolved) {
                     Some(pr) if std::mem::discriminant(&pr.value) == std::mem::discriminant(&src.value) => {
@@ -225,7 +278,17 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                         }
                         applied += 1;
                     }
-                    _ => skipped.push(path.clone()),
+                    _ => {
+                        skipped.push(path.clone());
+                        continue;
+                    }
+                }
+                // A Cineon Converter's Gamma sets the instance's Version to the one it was saved with.
+                if let (Some(v), Some(vp)) = (version, cineon_version_path(path))
+                    && let Some(pr) = l.props.prop_mut(&resolve_effect_path(l, &vp))
+                {
+                    pr.value = KV::Scalar(*v);
+                    pr.keys.clear();
                 }
             }
         }
@@ -233,6 +296,57 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"applied": applied, "skipped": skipped}))
+}
+
+/// The preset path of the Version of the Cineon Converter whose Gamma is at preset path `path`
+/// (`effects/<match name>[#n]/gamma`, as [`match_path_of`] writes it).
+fn cineon_version_path(path: &str) -> Option<String> {
+    let (seg, tail) = path.strip_prefix("effects/")?.split_once('/')?;
+    (seg.rsplit_once('#').map_or(seg, |(m, _)| m) == "ec.utility.cineon" && tail == "gamma").then(|| format!("effects/{seg}/version"))
+}
+
+/// How many nested comps [`cineon_gamma_version`] follows Essential Properties through.
+const NESTING: u32 = 16;
+
+/// The version of the Cineon Converter whose Gamma property `uid` of `l` is, and whether that
+/// Cineon Converter is on `l`. An Essential Properties value of a precomp layer counts when its
+/// control drives only Cineon Converter Gammas of one version, in the nested comp or, through
+/// further Essential Properties, in comps up to `depth` levels deeper.
+fn cineon_gamma_version(p: &Project, l: &Layer, uid: Uid, depth: u32) -> Option<(f64, bool)> {
+    let direct = l.effects().and_then(|fx| {
+        fx.groups().find(|g| matches!(&g.kind, GroupKind::Effect { effect } if effect == "ec.utility.cineon") && g.get("gamma").is_some_and(|pr| pr.uid == uid))
+    });
+    if let Some(g) = direct {
+        return Some((g.get("version").map_or(1.0, |v| v.value.as_f64()), true));
+    }
+    let LayerSource::Comp { item } = l.source else { return None };
+    let depth = depth.checked_sub(1)?;
+    let ctl = effectcraft_project::essential::group(l)?.find(uid).and_then(|pr| effectcraft_project::essential::control_of(&pr.match_id))?;
+    let c = p.comp(item)?;
+    let mut version = None;
+    for (lid, target) in c.essential.as_ref()?.resolve(ctl)?.kind.targets() {
+        let (v, _) = cineon_gamma_version(p, c.layer(lid)?, target, depth)?;
+        if version.is_some_and(|x| x != v) {
+            return None;
+        }
+        version = Some(v);
+    }
+    version.map(|v| (v, false))
+}
+
+/// Multiplies a Gamma value, its keyframes and their speeds by `f`.
+fn rescale_gamma(pr: &mut Property, f: f64) {
+    if let KV::Scalar(x) = &mut pr.value {
+        *x *= f;
+    }
+    for k in &mut pr.keys {
+        if let KV::Scalar(x) = &mut k.value {
+            *x *= f;
+        }
+        for e in k.in_ease.iter_mut().chain(k.out_ease.iter_mut()) {
+            e.speed *= f;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- keyframes

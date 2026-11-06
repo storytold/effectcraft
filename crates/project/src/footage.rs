@@ -166,25 +166,25 @@ impl CineonSettings {
     /// A code value (0–1 of the 10-bit range) converted from log to the Current Gamma and the
     /// converted black and white levels (0–1; above 1 for over-range highlights).
     pub fn convert(&self, v: f32) -> f32 {
-        let lin = cineon_log_to_lin(v, self.black, self.white, 1.0, self.gamma, self.rolloff);
+        let lin = cineon_log_to_lin(v, self.black, self.white, 1.0, self.gamma.max(0.01), self.rolloff);
         let out = (self.converted_black + (self.converted_white - self.converted_black) * lin) / Self::MAX;
         if out.is_finite() { out } else { 0.0 }
     }
 }
 
-/// Cineon log to linear, shared by Interpret Footage ▸ Cineon Settings and the Cineon Converter
-/// effect. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
+/// Cineon log to linear for Interpret Footage and version 1 Cineon Converter effects.
+/// `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
 /// Black and White Points. The result is 0 at the black point and 1 at the white point, raised to
 /// `scale / gamma`, with values above `1 - rolloff / 100` ramped off toward 1 (Highlight Rolloff
-/// 0–100; 0 keeps over-range values). A Gamma below 0.01 is raised to 0.01. Cineon Settings passes
-/// a `scale` of 1 (Gamma 1 gives linear light) and the Cineon Converter passes 1.7 (its default
-/// Gamma 1.7 gives linear light).
+/// 0–100; 0 keeps over-range values). Cineon Settings limits its Gamma to 0.01, while the Cineon
+/// Converter can pass a version-1 Gamma divided by 1.7. Both pass a `scale` of 1 after the
+/// Converter has mapped a saved Gamma to its current scale.
 pub fn cineon_log_to_lin(v: f32, black: f32, white: f32, scale: f32, gamma: f32, rolloff: f32) -> f32 {
     // Kodak printing density: 0.002 density per code value, negative gamma 0.6.
     let exposure = |code: f32| 10f32.powf((code - white) * 0.002 / 0.6);
     let offset = exposure(black);
     let mut lin = ((exposure(v * CineonSettings::MAX) - offset) / (1.0 - offset).max(1e-6)).max(0.0);
-    lin = lin.powf(scale / gamma.max(0.01));
+    lin = lin.powf(scale / gamma.max(0.001));
     let knee = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
     if knee < 1.0 && lin > knee {
         let w = 1.0 - knee;
