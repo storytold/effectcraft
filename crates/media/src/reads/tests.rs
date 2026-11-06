@@ -112,9 +112,16 @@ fn a_sequence_frame_reports_only_its_own_file() {
     assert_stamps_match_disk(&files);
     assert_eq!(crate::opens_under(&dir) - opened, 1, "one file opened: the frame's");
     assert_eq!(crate::opens_under(&unused_dir), 0, "the unused sequence was not looked at");
-    // Another frame reads its own file.
-    let (_, files) = render(&p, &pool, &cache, cid, 4);
+    // Another frame reads its own file, also through the viewer's wrapper of the pool.
+    let viewer = effectcraft_render::CancellableFootage { inner: &pool, cancel: Default::default() };
+    let log = ReadLog::new();
+    let mut r = Renderer::new(&p, &viewer, RenderOpts::default());
+    r.cache = Some(&cache);
+    r.reads = Some(&log);
+    r.comp_frame(cid, RATE.tick_of(4));
+    let files = log.into_files();
     assert_eq!(paths(&files), [frame_4]);
+    assert!(files.is_complete());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

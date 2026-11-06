@@ -401,6 +401,11 @@ impl FootageSource for ConfinedFootage {
     fn called_off(&self) -> bool {
         self.inner.called_off()
     }
+    /// The files read inside the roots, as the inner source notes them (footage outside reads
+    /// nothing).
+    fn recording(&self, reads: &effectcraft_engine::render::reads::ReadLog, f: &mut dyn FnMut()) {
+        self.inner.recording(reads, f)
+    }
 }
 
 /// The session's file reads, only inside the read roots: what a project or an imported file
