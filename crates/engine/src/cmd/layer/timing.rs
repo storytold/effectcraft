@@ -443,7 +443,7 @@ fn expression_warnings(comp: &effectcraft_project::Comp, layer: &Layer, added: u
     for o in comp.layers.iter().filter(|o| o.id != layer.id) {
         o.props.walk("", &mut |_, p| {
             if p.expr.as_ref().is_some_and(|e| !names_it(&e.text) && renumbered(&e.text)) {
-                out.push(format!("layer “{}” {} has an expression that names a layer by number, and the layers below “{}” are renumbered", o.name, p.name, layer.name));
+                out.push(format!("layer “{}” {} names a layer by number, and the layers below “{}” are renumbered", o.name, p.name, layer.name));
             }
             if p.expr.as_ref().is_some_and(|e| names_it(&e.text)) {
                 out.push(format!("layer “{}” {} has an expression that refers to “{}” (it will no longer find it)", o.name, p.name, layer.name));
