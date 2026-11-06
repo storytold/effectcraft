@@ -12,7 +12,10 @@
 //! default 0.5: a viewer at half size), `--frames N` (frames to cache, default the whole comp),
 //! `--slots N` (frames in flight, at least 1, default one per frame thread as the app does when
 //! idle),
-//! `--disk` (with a fresh disk cache in `target/cache-bench/disk`), `--no-adjustment`.
+//! `--disk` (with a fresh disk cache in `target/cache-bench/disk`), `--no-adjustment`,
+//! `--gpu` (composite on a GPU of its own, as the desktop app does with Mercury GPU Acceleration:
+//! the GPU or the CPU, whichever Auto measures faster per comp, read back to the CPU; the viewer's
+//! backend), `--backend cpu|gpu|auto` (with `--gpu`: force one compositor, default `auto`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -122,13 +125,25 @@ fn main() {
     let slots: usize = arg("--slots").and_then(|v| v.parse().ok()).map(|n: usize| n.max(1)).unwrap_or(frames.parallelism().max(1));
     // Room for every frame: this measures speed, not eviction.
     frames.set_budget(64 << 30);
-    let opts = RenderOpts { scale, motion_blur: true, ..Default::default() };
+    use effectcraft_engine::render::Backend;
+    let backend = match arg("--backend").as_deref() {
+        Some("cpu") => Backend::Cpu,
+        Some("gpu") => Backend::Gpu,
+        _ => Backend::Auto,
+    };
+    let opts = RenderOpts { scale, motion_blur: true, backend, ..Default::default() };
+    let gpu = std::env::args().any(|a| a == "--gpu").then(|| {
+        effectcraft_gpu::Gpu::headless().unwrap_or_else(|| {
+            eprintln!("--gpu: no usable GPU adapter");
+            std::process::exit(2)
+        })
+    });
     let src = RenderSource {
         project: s.project.clone(),
         footage: s.footage.clone(),
         expr: s.expr.clone(),
         layer_cache: s.layer_cache.clone(),
-        gpu: None,
+        gpu,
         gpu_display: false,
         disk: s.disk_cache.clone(),
     };
@@ -142,7 +157,12 @@ fn main() {
         opts: opts_hash(&opts),
     };
 
-    eprintln!("caching {n} frames of {}×{} at scale {scale} with {slots} in flight…", comp.width, comp.height);
+    eprintln!(
+        "caching {n} frames of {}×{} at scale {scale} with {slots} in flight{}…",
+        comp.width,
+        comp.height,
+        if src.gpu.is_some() { " on the GPU" } else { "" }
+    );
     let (gop0, t0) = (effectcraft_media::gop_stats(), Instant::now());
     let mut next = 0;
     loop {
@@ -166,6 +186,13 @@ fn main() {
         gop.seeks - gop0.seeks,
         gop.hits - gop0.hits
     );
+    if let Some(g) = &src.gpu
+        && let Some(p) = effectcraft_engine::render::Accelerator::auto_pick(g)
+        && let Some(a) = p.stats(effectcraft_engine::render::AutoKey::new(cid, scale, false))
+    {
+        let ms = |v: Option<f64>| v.map_or("–".into(), |v| format!("{v:.1} ms"));
+        println!("auto (Mercury)    GPU {} over {} frames, CPU {} over {} frames", ms(a.gpu_ms), a.gpu_frames, ms(a.cpu_ms), a.cpu_frames);
+    }
     let p = pool.stats();
     println!("footage cache     {} hits, {} misses, {} frames ({} MB) kept", p.hits, p.misses, p.frames, p.bytes >> 20);
     if let Some(dc) = &s.disk_cache {
