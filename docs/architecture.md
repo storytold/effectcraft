@@ -414,7 +414,9 @@ mapping) is the last top-level step, for standard-dynamic-range displays and out
 renders (sequences and ProEXR) skip it (`RenderOpts::skip_hdr_step`) and decode the frame with the
 output space's own curve (`Pipe::output_linear`), so they hold linear light in the output space's
 primaries; unmanaged projects decode with the Working Gamma's curve (sRGB at 2.2, a pure 2.4 power
-curve at 2.4). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
+curve at 2.4). Every OpenEXR file (sequences and ProEXR) names those primaries and the white point in its
+`chromaticities` attribute (`ColorSpace::exr_chromaticities`; Rec. 709 / sRGB primaries for the default
+and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces with the ACES white). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by

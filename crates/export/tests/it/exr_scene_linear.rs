@@ -417,3 +417,58 @@ fn exr_decodes_with_the_output_curve() {
     let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, None, false, None);
     assert_near(exr_centre(&p, cid, "curve-gamma22"), band.map(effectcraft_color::srgb_to_linear), "Working Gamma 2.2");
 }
+
+/// The `chromaticities` attribute of an EXR file: red, green, blue, white (CIE xy), or `None`.
+fn chromaticities(path: &Path) -> Option<[[f32; 2]; 4]> {
+    let bytes = std::fs::read(path).expect("read");
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).expect("exr header");
+    meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]))
+}
+
+/// The primaries (red, green, blue, white) the standards publish for each output space, typed in
+/// here rather than read from the colour crate: Rec. 709 / sRGB, Rec. 2020 (also Rec. 2100 PQ and
+/// HLG), Display P3 (D65), ACEScg (AP1) and ACES2065-1 (AP0) with the ACES white.
+const D65: [f32; 2] = [0.3127, 0.3290];
+const ACES_WHITE: [f32; 2] = [0.32168, 0.33767];
+const REC709: [[f32; 2]; 4] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], D65];
+const REC2020: [[f32; 2]; 4] = [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], D65];
+const P3: [[f32; 2]; 4] = [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060], D65];
+const AP1: [[f32; 2]; 4] = [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044], ACES_WHITE];
+const AP0: [[f32; 2]; 4] = [[0.7347, 0.2653], [0.0, 1.0], [0.0001, -0.0770], ACES_WHITE];
+
+/// A sequence frame names the output space's primaries and white, for every space a project knows.
+#[test]
+fn exr_writes_the_output_spaces_chromaticities() {
+    let table = [
+        (ColorSpace::Srgb, REC709),
+        (ColorSpace::Rec709, REC709),
+        (ColorSpace::Rec2020, REC2020),
+        (ColorSpace::DisplayP3, P3),
+        (ColorSpace::AcesCg, AP1),
+        (ColorSpace::Aces2065, AP0),
+        (ColorSpace::Rec2100Pq, REC2020),
+        (ColorSpace::Rec2100Hlg, REC2020),
+    ];
+    assert!(ColorSpace::ALL.iter().all(|c| table.iter().filter(|(t, _)| t == c).count() == 1), "every space once");
+    for (out, want) in table {
+        for ch in [Channels::Rgba, Channels::Rgb] {
+            let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, Some(ColorSpace::Srgb), true, Some(out));
+            let d = out_dir(&format!("chroma-{out:?}-{ch:?}"));
+            let f = render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr");
+            assert_eq!(chromaticities(&f), Some(want), "{out:?} {ch:?}");
+        }
+    }
+}
+
+/// The default project (no output space chosen, managed or not) writes the standard Rec. 709 /
+/// sRGB chromaticities; an unmanaged project ignores the output space (its frame is decoded with
+/// the Working Gamma's curve, Rec. 709 primaries).
+#[test]
+fn exr_default_is_rec709_chromaticities() {
+    for (name, ws, out) in [("default", None, None), ("managed", Some(ColorSpace::Srgb), None), ("unmanaged-p3", None, Some(ColorSpace::DisplayP3))] {
+        let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, ws, false, out);
+        let d = out_dir(&format!("chroma-{name}"));
+        let f = render(&p, cid, OutputFormat::ExrSequence, Channels::Rgba, &d, "exr");
+        assert_eq!(chromaticities(&f), Some(REC709), "{name}");
+    }
+}
