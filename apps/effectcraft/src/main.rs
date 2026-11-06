@@ -383,6 +383,8 @@ fn main() -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 menu: native_menu::NativeBar::new(&cc.egui_ctx),
                 #[cfg(target_os = "macos")]
+                menu_sync: Default::default(),
+                #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
                 file_dialogs,
@@ -474,6 +476,8 @@ struct Desktop {
     file_dialogs: Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
+    #[cfg(target_os = "macos")]
+    menu_sync: effectcraft_ui_egui::native_menu::MenuSync,
     /// Documents opened from Finder, the Dock or `open` (macOS).
     #[cfg(target_os = "macos")]
     apple_events: apple_events::Opened,
@@ -489,7 +493,7 @@ impl eframe::App for Desktop {
     /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
-        self.menu.update(&mut self.app, ctx);
+        self.menu_sync.before(&mut self.app, |app| self.menu.update(app, ctx));
         self.app.tick(ctx, frame);
         self.app.finish_ime_logic(ctx);
         if let Some(asked) = &self.file_dialogs {
@@ -500,6 +504,9 @@ impl eframe::App for Desktop {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        // A file dialog this frame's commands opened (or one that closed) syncs the menu again.
+        #[cfg(target_os = "macos")]
+        self.menu_sync.after(&mut self.app, |app| self.menu.update(app, ui.ctx()));
         if let Some(asked) = &self.file_dialogs {
             sheet_dialogs::show_asked(asked, frame, ui.ctx());
         }

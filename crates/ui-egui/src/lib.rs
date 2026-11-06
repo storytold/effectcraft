@@ -426,6 +426,11 @@ impl FileDialogsUp {
         self.count = self.count.saturating_sub(1);
     }
 
+    /// How many dialogs are up, as last checked ([`FileDialogsUp::up`] drops those taken for gone).
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
     /// Whether a dialog is up at `now`, `focused`: whether one of the app's windows has the
     /// keyboard.
     pub(crate) fn up(&mut self, focused: bool, now: f64) -> bool {
