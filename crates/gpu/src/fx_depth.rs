@@ -286,7 +286,7 @@ fn cryptomatte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option
     let tex = e.g.upload_image(&img)?;
     let plane = lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]);
     let mut p = op(7);
-    p.u[0] = [7, pr.e("display"), pr.b("matteOnly") as u32, 0];
+    p.u[0] = [7, pr.e("display"), pr.b("matteOnly") as u32, pr.b(effectcraft_effects::MATTE_ONLY_IN_ALPHA) as u32];
     point(e, &p, b, &plane)
 }
 

@@ -3,6 +3,7 @@ mod aep_export;
 mod aep_import;
 mod anim_presets;
 mod anim_tools;
+mod aux_footage;
 mod blender;
 mod camera_track;
 mod codec_options;
