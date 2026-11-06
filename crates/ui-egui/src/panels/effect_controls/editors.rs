@@ -19,6 +19,15 @@ pub(super) fn warp_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui:
         app.auto.add(&format!("effectControls.warp.{}.cancel", g.uid), b2, "Cancel");
     }
     let analysed = matches!(g.get(effectcraft_engine::effects::warp_stab::ANALYSIS).map(|p| &p.value), Some(Value::Str(s)) if !s.is_empty());
+    // Subspace Warp's per-frame mesh can't be baked into a transform.
+    let subspace = g.prop("stabilization/method").is_none_or(|p| p.value.as_enum() == 3);
+    if analysed && !running && !subspace {
+        let b3 = Rect::from_min_size(pos2(b2.min.x, b1.min.y), vec2(128.0, 22.0));
+        if widgets::text_button(ui, b3, crate::i18n::tr("Apply to Transform"), false, &t, egui::Id::unique(("warp-bake", g.uid))).clicked() {
+            actions.push(("warp.applyToTransform".into(), json!({"layer": layer.id.0, "effect": g.uid})));
+        }
+        app.auto.add(&format!("effectControls.warp.{}.applyToTransform", g.uid), b3, "Apply to Transform");
+    }
     let status = match app.session.warp_progress() {
         Some(pr) if running => pr.banner(),
         _ if analysed => "Analysis complete".to_string(),

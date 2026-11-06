@@ -661,3 +661,157 @@ fn warp_plan_is_solved_in_the_job_not_on_the_page() {
     assert_eq!(here["warp"], json!(w));
     assert_eq!(here["autoScale"], st["autoScale"]);
 }
+
+/// Where layer point `q` of `layer` lands in the comp on frame `f`.
+fn comp_point(s: &Session, layer: LayerId, f: u32, q: [f64; 2]) -> [f64; 2] {
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, comp, frame_time(f));
+    let p = ctx.layer_to_comp(comp.layer(layer).unwrap()).0.apply(effectcraft_geom::vec2(q[0], q[1]));
+    [p.x, p.y]
+}
+
+/// Mean absolute difference of two renders (all channels).
+fn mean_diff(a: &Image, b: &Image) -> f32 {
+    let d: f32 = a.data.iter().zip(&b.data).map(|(p, q)| (0..4).map(|c| (p[c] - q[c]).abs()).sum::<f32>()).sum();
+    d / (a.data.len() * 4) as f32
+}
+
+fn analysed_warp(method: u32, framing: u32) -> (Session, LayerId, Uid) {
+    analysed_warp_of(shaky, method, framing)
+}
+
+fn analysed_warp_of(make: impl Fn(u32) -> Image + Send + Sync + 'static, method: u32, framing: u32) -> (Session, LayerId, Uid) {
+    let (mut s, clip, solid) = setup(make);
+    s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
+    let fx = s.execute("effect.apply", json!({"effect": "Warp Stabilizer"})).unwrap()["effects"][0].as_u64().unwrap();
+    set_param(&mut s, clip, "stabilization/method", json!(method));
+    set_param(&mut s, clip, "borders/framing", json!(framing));
+    s.execute_checked("warp.analyze", json!({"layer": clip.0, "wait": true})).unwrap();
+    (s, clip, fx)
+}
+
+#[test]
+fn warp_stabilizer_applies_to_the_layer_transform() {
+    // Position, Scale, Rotation with Stabilize Only, on a layer that is already rotated and scaled.
+    let (mut s, clip, fx) = analysed_warp(1, 0);
+    s.execute("prop.set", json!({"layer": clip.0, "path": "transform/rotation", "value": 10.0})).unwrap();
+    s.execute("prop.set", json!({"layer": clip.0, "path": "transform/scale", "value": [90.0, 90.0, 100.0]})).unwrap();
+    let pts = [[160.0, 120.0], [20.0, 30.0], [300.0, 210.0]];
+    let want: Vec<Vec<[f64; 2]>> = (0..25)
+        .map(|f| {
+            let w = warp_at(&mut s, f);
+            pts.iter().map(|q| comp_point(&s, clip, f, w.apply(*q))).collect()
+        })
+        .collect();
+    let frames = [3, 12, 21];
+    let before: Vec<Image> = frames.iter().map(|f| render(&s, *f)).collect();
+
+    let r = s.execute_checked("warp.applyToTransform", json!({"layer": clip.0})).unwrap();
+    assert_eq!(r["target"], "transform", "{r}");
+    assert_eq!(r["frames"], 25);
+    assert!(r["mask"].is_null() && r["cornerPin"].is_null(), "{r}");
+    let l = s.active_comp().unwrap().layer(clip).unwrap();
+    assert!(l.props.find_group(fx).is_none(), "the Warp Stabilizer is removed");
+    assert_eq!(l.props.prop("transform/rotation").unwrap().keys.len(), 25);
+    // Every layer point lands where the effect put it.
+    for f in 0..25 {
+        for (q, w) in pts.iter().zip(&want[f as usize]) {
+            let got = comp_point(&s, clip, f, *q);
+            assert!((got[0] - w[0]).hypot(got[1] - w[1]) < 1e-6, "frame {f} {q:?}: {got:?} vs {w:?}");
+        }
+    }
+    // The same picture where both show the layer (the effect also clips to the layer's frame,
+    // the transform doesn't).
+    for (f, b) in frames.iter().zip(&before) {
+        let a = render(&s, *f);
+        let both: Vec<f32> = b
+            .data
+            .iter()
+            .zip(&a.data)
+            .filter(|(p, q)| p[3] > 0.99 && q[3] > 0.99)
+            .map(|(p, q)| (0..3).map(|c| (p[c] - q[c]).abs()).sum::<f32>() / 3.0)
+            .collect();
+        assert!(both.len() * 2 > b.data.len(), "frame {f}");
+        let d = both.iter().sum::<f32>() / both.len() as f32;
+        assert!(d < 0.01, "frame {f}: {d}");
+    }
+    // One undo step.
+    s.execute("edit.undo", json!({})).unwrap();
+    let l = s.active_comp().unwrap().layer(clip).unwrap();
+    assert!(l.props.find_group(fx).is_some_and(|g| g.enabled), "undo brings the Warp Stabilizer back");
+    assert!(l.props.prop("transform/rotation").unwrap().keys.is_empty());
+    assert_eq!(s.execute("warp.status", json!({"layer": clip.0})).unwrap()["analyzed"], true);
+}
+
+#[test]
+fn warp_stabilizer_rotation_and_crop_apply_to_the_transform() {
+    // A rotating, scaling patch: No Motion holds it, so the keys carry real rotation and scale.
+    let (mut s, clip, _) = analysed_warp_of(patch_frames(rotating_pose), 1, 1);
+    set_param(&mut s, clip, "stabilization/result", json!(1));
+    let pts = [[160.0, 120.0], [40.0, 200.0]];
+    let want: Vec<Vec<[f64; 2]>> = (0..25)
+        .map(|f| {
+            let w = warp_at(&mut s, f);
+            pts.iter().map(|q| comp_point(&s, clip, f, w.apply(*q))).collect()
+        })
+        .collect();
+    let before = render(&s, 18);
+    let r = s.execute_checked("warp.applyToTransform", json!({})).unwrap();
+    assert_eq!(r["target"], "transform", "{r}");
+    let l = s.active_comp().unwrap().layer(clip).unwrap();
+    let rot = l.props.prop("transform/rotation").unwrap();
+    let span = rot.keys.iter().map(|k| k.value.as_f64()).fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(span > 1.0, "the stabilization rotates the layer: {span}");
+    for f in 0..25 {
+        for (q, w) in pts.iter().zip(&want[f as usize]) {
+            let got = comp_point(&s, clip, f, *q);
+            assert!((got[0] - w[0]).hypot(got[1] - w[1]) < 1e-6, "frame {f} {q:?}: {got:?} vs {w:?}");
+        }
+    }
+    // Stabilize, Crop: the mask shows what the effect showed.
+    assert!(r["mask"].as_u64().is_some(), "{r}");
+    let after = render(&s, 18);
+    let (t0, t1) = (transparent(&before), transparent(&after));
+    assert!(t0 > 0 && t0.abs_diff(t1) * 50 <= t0, "{t0} vs {t1} transparent pixels");
+    assert!(mean_diff(&before, &after) < 0.01);
+}
+
+#[test]
+fn warp_stabilizer_perspective_applies_to_a_corner_pin_and_crops_with_a_mask() {
+    let (mut s, clip, fx) = analysed_warp(2, 1);
+    let frames = [2, 11, 20];
+    let before: Vec<Image> = frames.iter().map(|f| render(&s, *f)).collect();
+    let r = s.execute_checked("warp.applyToTransform", json!({})).unwrap();
+    assert_eq!(r["target"], "cornerPin", "{r}");
+    assert!(r["reason"].as_str().unwrap().contains("Perspective"), "{r}");
+    let l = s.active_comp().unwrap().layer(clip).unwrap();
+    let names: Vec<&str> = l.effects().unwrap().groups().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, ["Corner Pin"], "the Corner Pin takes the stabilizer's place");
+    assert!(l.props.find_group(fx).is_none());
+    let mask = l.props.find_group(r["mask"].as_u64().unwrap()).expect("a crop mask");
+    assert_eq!(mask.get("path").unwrap().keys.len(), 25);
+    for (f, b) in frames.iter().zip(&before) {
+        let after = render(&s, *f);
+        let d = mean_diff(b, &after);
+        assert!(d < 0.01, "frame {f}: {d}");
+        let (t0, t1) = (transparent(b), transparent(&after));
+        assert!(t0.abs_diff(t1) * 50 <= t0.max(1), "frame {f}: the crop matches ({t0} vs {t1} transparent pixels)");
+    }
+}
+
+#[test]
+fn warp_stabilizer_apply_to_transform_refuses_what_it_cannot_bake() {
+    let (mut s, clip, _) = analysed_warp(3, 0);
+    let e = s.execute("warp.applyToTransform", json!({"layer": clip.0})).unwrap_err().to_string();
+    assert!(e.contains("Subspace Warp"), "{e}");
+    set_param(&mut s, clip, "stabilization/method", json!(0));
+    set_param(&mut s, clip, "borders/framing", json!(3));
+    let e = s.execute("warp.applyToTransform", json!({"layer": clip.0})).unwrap_err().to_string();
+    assert!(e.contains("Synthesize Edges"), "{e}");
+    // Not analysed (trimming cleared the analysis).
+    s.execute("layer.timing", json!({"layers": [clip.0], "out": 0.8})).unwrap();
+    let e = s.execute("warp.applyToTransform", json!({"layer": clip.0})).unwrap_err().to_string();
+    assert!(e.contains("analyze"), "{e}");
+}
