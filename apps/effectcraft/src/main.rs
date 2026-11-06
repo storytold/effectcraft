@@ -202,6 +202,14 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
+    // Reserve the control port before opening a second window or rotating the working app's log.
+    let control_listener = match control_port.map(control_server::bind).transpose() {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("effectcraft: cannot bind control port: {e}; no window was opened");
+            std::process::exit(1);
+        }
+    };
     // The session log lives in the settings folder (`Logs/effectcraft.log`, the previous two runs
     // kept): a launch from the Dock or a menu has no terminal. Opened after the arguments, so
     // `--version` leaves no file behind; records logged until now are written to it first.
@@ -385,9 +393,9 @@ fn main() -> eframe::Result {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
                 app.hooks.clipboard_text = Some(Box::new(native_menu::clipboard_text));
             }
-            if let Some(port) = control_port {
+            if let Some(listener) = control_listener {
                 disable_app_nap();
-                let rx = control_server::start(port, cc.egui_ctx.clone());
+                let rx = control_server::start(listener, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
             log::info!("app created; the window shows after its first frame");
