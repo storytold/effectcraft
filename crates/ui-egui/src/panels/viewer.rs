@@ -352,6 +352,7 @@ fn phase_frame(app: &mut EffectcraftApp, v: &mut Vw<'_>) {
         let stale = app.viewer_shown.as_ref().is_none_or(|(_, s)| *s != k);
         // A CPU frame goes up again when the magnification calls for another factor.
         let minify = minify_factor(app.session.prefs.viewer_zoom_smooth(), scale, (zoom * ppp) as f64);
+        // (Half-float frames have no such texture: the display pass makes mips.)
         let refit = !app.viewer_on_gpu() && app.viewer_tex.as_ref().is_some_and(|(_, _, m)| *m != minify);
         if stale || refit {
             show_frame(app, &ctx, k, img, minify);
@@ -1090,6 +1091,45 @@ fn middle_pan(app: &mut EffectcraftApp, ui: &egui::Ui, resp: &egui::Response, v:
     true
 }
 
+/// One layer of a Move: its id, start Position and the Position's per-comp-axis weights.
+type MoveLayer = (LayerId, [f64; 3], [f64; 3], [f64; 3]);
+
+/// The merge key of the drag in progress: every step it writes folds into one undo step.
+fn drag_merge_key(ui: &egui::Ui) -> String {
+    format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)))
+}
+
+/// Duplicate the layers of an Alt-drag (`edit.duplicate`, selecting the copies) and return the move
+/// entries re-pointed at the copies. If the duplicate fails the originals are dragged as they were.
+fn alt_duplicate(app: &mut EffectcraftApp, ui: &egui::Ui, layers: Vec<MoveLayer>) -> Vec<MoveLayer> {
+    let ids: Vec<u64> = layers.iter().map(|l| l.0.0).collect();
+    // A key left over from the previous drag would fold this copy into that drag's undo step.
+    app.session.history.merge_key = None;
+    let made = app.session.execute("edit.duplicate", json!({"layers": ids, "merge": drag_merge_key(ui)}));
+    let Ok(copies) = made.map(|v| serde_json::from_value::<Vec<u64>>(v).unwrap_or_default()) else { return layers };
+    layers.into_iter().zip(copies).map(|((_, p0, ax, ay), copy)| (LayerId(copy), p0, ax, ay)).collect()
+}
+
+/// For each layer of a Move, whether one of its ancestors is in the Move as well: it follows that
+/// parent, so its own Position must not get the drag too. The copies `alt_duplicate` makes keep
+/// this order and are parented to each other the same way.
+fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
+    let moved: std::collections::HashSet<LayerId> = layers.iter().map(|l| l.0).collect();
+    let led = |id: LayerId| {
+        let mut up = comp.layer(id).and_then(|l| l.parent);
+        // (bounded: a parent cycle in a broken file must not hang the viewer)
+        for _ in 0..comp.layers.len() {
+            let Some(p) = up else { return false };
+            if moved.contains(&p) {
+                return true;
+            }
+            up = comp.layer(p).and_then(|l| l.parent);
+        }
+        false
+    };
+    layers.iter().map(|l| led(l.0)).collect()
+}
+
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1261,7 +1301,12 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                 // that axis only, without snapping.
                 if let Some((lid, _, ax, ay)) = axis_at(&axis_hits, press) {
                     let p0 = comp.layer(lid).and_then(|l| Some(ectx.v3(l, l.transform()?, "position", [0.0; 3])));
-                    p0.map(|p0| Gesture::Move { layers: vec![(lid, p0, ax, ay)], start: cpt, snap_src: None })
+                    p0.map(|p0| {
+                        // Alt duplicates the layer and moves the copy along the axis.
+                        let layers = vec![(lid, p0, ax, ay)];
+                        let layers = if mods.alt { alt_duplicate(app, ui, layers) } else { layers };
+                        Gesture::Move { layers, start: cpt, snap_src: None }
+                    })
                 } else if let Some((lid, hi, ..)) = handle_hits.iter().find(|(_, _, h, _)| h.distance(press) < HANDLE + 2.0).cloned() {
                     let layer = comp.layer(lid).cloned();
                     layer.and_then(|layer| {
@@ -1287,7 +1332,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                         })
                     })
                 } else if let Some(l) = pick(app, ectx, cpt, mods.shift) {
-                    let layers: Vec<(LayerId, [f64; 3], [f64; 3], [f64; 3])> = app
+                    let layers: Vec<MoveLayer> = app
                         .session
                         .state
                         .selected_layers
@@ -1309,6 +1354,13 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                             da.total_cmp(&db)
                         })
                     });
+                    // A layer whose parent (or grandparent…) is dragged too rides along with it:
+                    // moving it as well would add the drag twice. It is still duplicated.
+                    let led = led_by_a_moved_ancestor(comp, &layers);
+                    // Alt-drag duplicates the dragged layers and moves the copies; the copy and the
+                    // drag are one undo step.
+                    let layers = if mods.alt && !layers.is_empty() { alt_duplicate(app, ui, layers) } else { layers };
+                    let layers: Vec<MoveLayer> = layers.into_iter().zip(led).filter(|(_, led)| !led).map(|(l, _)| l).collect();
                     (!layers.is_empty()).then_some(Gesture::Move { layers, start: map.to_comp(press), snap_src })
                 } else {
                     // With path vertices on screen the marquee selects vertices (layers stay
@@ -1386,7 +1438,7 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
     if let (Some(g), Some(pos)) = (gesture.clone(), resp.interact_pointer_pos()) {
         let map = edge_pan(app, &ctx, &g, map, pos);
         let cpt = map.to_comp(pos);
-        let merge = format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)));
+        let merge = drag_merge_key(ui);
         match g {
             Gesture::Pan { start_pan } => {
                 // No total drag on the release frame: keep the pan reached so far (it used to

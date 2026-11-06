@@ -23,6 +23,10 @@
 //! to the GPU) frames stay on the GPU: the compositor writes an RGBA8 texture that the viewer
 //! registers with egui-wgpu and draws directly; pixels are read back only when something needs
 //! them (Info panel, eyedroppers, histograms).
+//!
+//! 32 bpc projects keep half-float frames on the desktop ([`F16Frame`], rendered without the HDR
+//! step): twice the bytes of an 8-bit frame, so the RAM preview holds half as many. The disk
+//! cache keeps them as half-float entries.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,10 +51,14 @@ const MIN_GPU_BUDGET: usize = 64 << 20;
 const GPU_PRESSURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 const GPU_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A rendered viewer frame: CPU pixels or a GPU texture.
+mod f16;
+pub use f16::{F16_PIXEL_BYTES, F16Frame};
+
+/// A rendered viewer frame: 8-bit CPU pixels, half-float CPU pixels (32 bpc) or a GPU texture.
 #[derive(Clone)]
 pub enum FrameImage {
     Cpu(Arc<egui::ColorImage>),
+    CpuF16(Arc<F16Frame>),
     Gpu(Arc<DisplayFrame>),
 }
 
@@ -58,11 +66,14 @@ impl FrameImage {
     pub fn size(&self) -> [usize; 2] {
         match self {
             FrameImage::Cpu(c) => c.size,
+            FrameImage::CpuF16(f) => f.size(),
             FrameImage::Gpu(f) => [f.width as usize, f.height as usize],
         }
     }
-    fn bytes(&self) -> usize {
-        self.size()[0] * self.size()[1] * 4
+    /// Bytes the frame holds in the RAM preview (GPU frames: without their mips).
+    pub fn bytes(&self) -> usize {
+        let [w, h] = self.size();
+        w * h * if matches!(self, FrameImage::CpuF16(_)) { F16_PIXEL_BYTES } else { 4 }
     }
     fn is_gpu(&self) -> bool {
         matches!(self, FrameImage::Gpu(_))
@@ -615,6 +626,29 @@ impl Default for Frames {
     }
 }
 
+/// Whether viewer frames of a project with `settings` are half floats ([`F16Frame`], rendered
+/// with `RenderOpts::skip_hdr_step`): 32 bpc on the desktop. The browser's frames (its frame
+/// worker's RGBA8, the GPU compositor's display textures) stay 8-bit for now.
+pub fn f16_frames(settings: &effectcraft_engine::project::ProjectSettings) -> bool {
+    cfg!(not(target_arch = "wasm32")) && settings.bit_depth.levels().is_none()
+}
+
+/// Bytes per pixel of the viewer frames of a project with `settings` (see [`f16_frames`]).
+pub fn frame_pixel_bytes(settings: &effectcraft_engine::project::ProjectSettings) -> usize {
+    if f16_frames(settings) { F16_PIXEL_BYTES } else { 4 }
+}
+
+/// A rendered frame as a cached viewer frame: half floats for `skip_hdr_step` renders (see
+/// [`f16_frames`]), else 8-bit.
+pub fn cpu_frame(img: &effectcraft_engine::render::Image, project: &Project, opts: &RenderOpts) -> FrameImage {
+    if opts.skip_hdr_step {
+        let encoding = effectcraft_engine::viewer::FrameEncoding::of(&project.settings, true);
+        FrameImage::CpuF16(Arc::new(F16Frame::from_image(img, encoding)))
+    } else {
+        FrameImage::Cpu(Arc::new(to_color_image(img)))
+    }
+}
+
 /// Premultiplied f32 → egui premultiplied Color32 (alpha kept, so the viewer can show the
 /// transparency grid or the comp background colour underneath).
 pub fn to_color_image(img: &effectcraft_engine::render::Image) -> egui::ColorImage {
@@ -974,7 +1008,7 @@ impl Frames {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
             return true;
         };
-        let (missing, converting): (Vec<(u128, Arc<egui::ColorImage>)>, bool) = {
+        let (missing, converting): (Vec<(u128, FrameImage)>, bool) = {
             let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
             if queued.len() > 100_000 {
                 queued.clear();
@@ -988,7 +1022,10 @@ impl Frames {
                 .iter()
                 .filter(|(k, _)| k.same_series(base))
                 .filter_map(|(k, img)| {
-                    let FrameImage::Cpu(img) = img else { return None };
+                    // (GPU frames have no CPU pixels to write)
+                    if img.is_gpu() {
+                        return None;
+                    }
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
@@ -1002,12 +1039,17 @@ impl Frames {
         let (persisted, written) = (self.persisted.clone(), self.written.clone());
         let work = move || {
             for (dk, img) in missing {
-                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
                 // (accepted: the disk cache tracks it until written, and it counts as a try;
                 // refused by a full queue: retried, without counting)
-                if dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
-                    && let Ok(mut w) = written.lock()
-                {
+                let accepted = match &img {
+                    FrameImage::Cpu(img) => {
+                        let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                        dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    }
+                    FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits()),
+                    FrameImage::Gpu(_) => false,
+                };
+                if accepted && let Ok(mut w) = written.lock() {
                     let n = w.1.entry(dk).or_default();
                     *n = n.saturating_add(1);
                 }
@@ -1563,10 +1605,20 @@ impl Worker {
             .disk
             .as_ref()
             .map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts), epoch, self.virtual_id.as_deref())));
-        let from_disk = disk.as_ref().and_then(|(dc, k)| dc.get_frame(*k));
+        // Half-float frames (32 bpc) have entries of their own (their key has the options).
+        let from_disk = disk.as_ref().and_then(|(dc, k)| {
+            if job.opts.skip_hdr_step {
+                let f = dc.get_frame_f16(*k)?;
+                let encoding = effectcraft_engine::viewer::FrameEncoding::of(&job.src.project.settings, true);
+                Some(FrameImage::CpuF16(Arc::new(F16Frame::from_bits(f.width, f.height, f.rgba, encoding))))
+            } else {
+                let f = dc.get_frame(*k)?;
+                Some(FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))))
+            }
+        });
         let disk_hit = from_disk.is_some();
         let ci = match from_disk {
-            Some(f) => FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))),
+            Some(f) => f,
             None => match self.render_guarded(&job).filter(|_| !job.cancel.load(Ordering::Relaxed)) {
                 Some(ci) => ci,
                 // Called off (frames it read may be missing) or failed: not cached, and not
@@ -1580,10 +1632,20 @@ impl Worker {
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
         self.finish(&job, ci.clone(), t0);
-        if !disk_hit && let (Some((dc, k)), FrameImage::Cpu(img)) = (&disk, &ci) {
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
-            if let Some(ctx) = &self.ctx {
+        if !disk_hit && let Some((dc, k)) = &disk {
+            let written = match &ci {
+                FrameImage::Cpu(img) => {
+                    let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                    dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
+                    true
+                }
+                FrameImage::CpuF16(f) => {
+                    dc.put_frame_f16(*k, f.width, f.height, f.bits());
+                    true
+                }
+                FrameImage::Gpu(_) => false,
+            };
+            if written && let Some(ctx) = &self.ctx {
                 ctx.request_repaint();
             }
         }
@@ -1745,18 +1807,18 @@ impl Worker {
                 }
             }
             let t0 = web_time::Instant::now();
-            let img = to_color_image(&r.comp_frame_cpu(job.comp, job.t));
+            let img = cpu_frame(&r.comp_frame_cpu(job.comp, job.t), &job.src.project, &job.opts);
             if let Some((p, key)) = auto {
                 p.record(key, false, t0.elapsed().as_secs_f64() * 1000.0);
             }
-            return FrameImage::Cpu(Arc::new(img));
+            return img;
         }
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
             return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
                 Ok(img) => {
                     self.gpu_succeeded();
-                    FrameImage::Cpu(Arc::new(to_color_image(&img)))
+                    cpu_frame(&img, &job.src.project, &job.opts)
                 }
                 Err(e) => {
                     self.gpu_attempt_failed(g, &e);
@@ -1764,7 +1826,7 @@ impl Worker {
                 }
             };
         }
-        FrameImage::Cpu(Arc::new(to_color_image(&r.comp_frame(job.comp, job.t))))
+        cpu_frame(&r.comp_frame(job.comp, job.t), &job.src.project, &job.opts)
     }
 }
 
@@ -1863,4 +1925,4 @@ pub(crate) fn render_scale(thousandths: u32, factor: Option<u8>) -> f64 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

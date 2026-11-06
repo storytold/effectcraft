@@ -183,27 +183,57 @@ fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 // ---------------------------------------------------------------- transitions
 
-fn linear_wipe(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
+/// Linear Wipe (`effects::misc::linear_wipe`): the hard matte at `lo + completion·(hi − lo)`
+/// blurred by Feather with the layer's edges repeated, or the legacy linear ramp.
+fn linear_wipe(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let done = ctx.params.f("completion") / 100.0;
-    let ang = ctx.params.f("angle").to_radians();
-    let feather = (ctx.params.f("feather") * b.scale).max(0.001);
     let (w, h) = (b.img.width as f64, b.img.height as f64);
-    let (dx, dy) = (ang.sin(), -ang.cos());
-    let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
-    let proj: Vec<f64> = corners.iter().map(|(x, y)| x * dx + y * dy).collect();
-    let (lo, hi) = (proj.iter().cloned().fold(f64::INFINITY, f64::min), proj.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
-    let edge = lo - feather + (hi - lo + 2.0 * feather) * done;
-    let mut data = Vec::with_capacity(2 * (b.img.width + b.img.height) as usize);
-    for x in 0..b.img.width {
-        data.extend(hl((x as f64 + 0.5) * dx - edge));
+    let ([dx, dy], lo, hi) = effectcraft_effects::linear_wipe_axis(ctx.params.f("angle"), w, h);
+    // Per column ((x + 0.5)·dx − edge), per row ((y + 0.5)·dy), as (hi, lo) pairs.
+    let table = |edge: f64| {
+        let mut data = Vec::with_capacity(2 * (b.img.width + b.img.height) as usize);
+        for x in 0..b.img.width {
+            data.extend(hl((x as f64 + 0.5) * dx - edge));
+        }
+        for y in 0..b.img.height {
+            data.extend(hl((y as f64 + 0.5) * dy));
+        }
+        data
+    };
+    let params = |width: f64, mode: u32| {
+        let mut p = Params::default();
+        p.u[0][0] = 2 * b.img.width;
+        p.u[0][1] = mode;
+        p.f[0][0] = width as f32;
+        p
+    };
+    if ctx.params.b("legacyFeather") {
+        let feather = (ctx.params.f("feather") * b.scale).max(0.001);
+        let data = table(lo - feather + (hi - lo + 2.0 * feather) * done);
+        return run(e, "gen_linear_wipe", &params(feather, 0), b, None, Some(&data));
     }
-    for y in 0..b.img.height {
-        data.extend(hl((y as f64 + 0.5) * dy));
+    if done.is_nan() || done <= 0.0 {
+        return Some(b);
     }
-    let mut p = Params::default();
-    p.u[0][0] = 2 * b.img.width;
-    p.f[0][0] = feather as f32;
-    run(e, "gen_linear_wipe", &p, b, None, Some(&data))
+    // 100 % clears the layer whatever the angle (the CPU clears before it reads it).
+    if done >= 1.0 {
+        b.img = e.image(b.img.width, b.img.height);
+        return Some(b);
+    }
+    let edge = lo + (hi - lo) * done;
+    if !(edge.is_finite() && dx.is_finite() && dy.is_finite()) {
+        return Some(b);
+    }
+    let data = table(edge);
+    let sigma = effectcraft_effects::linear_wipe_sigma(ctx.params.f("feather"), b.scale, w, h);
+    if sigma <= 1e-3 {
+        return run(e, "gen_linear_wipe", &params(1.0, 0), b, None, Some(&data));
+    }
+    let buf = e.data(&data);
+    let matte = e.scratch(b.img.width, b.img.height);
+    e.pixels("gen_linear_wipe", &params(1.0, 1), &b.img, None, &matte, Some(&buf));
+    let blurred = gaussian_blur(e, &matte, sigma, sigma, true);
+    run(e, "gen_linear_wipe", &params(1.0, 2), b, Some(&blurred), Some(&data))
 }
 
 fn venetian(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
