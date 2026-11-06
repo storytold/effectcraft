@@ -878,6 +878,12 @@ impl<'a> Renderer<'a> {
 
     /// Source pixels of a layer in layer space (before masks/effects).
     pub(crate) fn source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
+        self.source_with(ctx, layer, false)
+    }
+
+    /// [`Renderer::source`]; with `quantized`, footage that [`Renderer::prequantized_footage`]
+    /// counts comes quantised to the project depth.
+    fn source_with(&self, ctx: &EvalCtx, layer: &Layer, quantized: bool) -> Option<Buf> {
         let s = self.opts.scale;
         match &layer.source {
             LayerSource::Solid { item } => {
@@ -910,7 +916,7 @@ impl<'a> Renderer<'a> {
                     && let Some(nc) = self.project.comp(*item)
                 {
                     let img = self.footage_frame(ctx, layer, *item, pf, lt, None)?;
-                    return Some(self.footage_buf(&img, pf, nc.width, nc.height));
+                    return Some(self.footage_buf(&img, pf, nc.width, nc.height, false));
                 }
                 // Essential Properties overrides render the nested comp with this instance's
                 // values.
@@ -959,7 +965,7 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 let (img, pf) = self.footage_picture_of(ctx, layer, item, f)?;
-                Some(self.footage_buf(&img, pf, f.width, f.height))
+                Some(self.footage_buf(&img, pf, f.width, f.height, quantized && Self::prequantized_footage(layer)))
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
             // [`Renderer::with_reads`])
@@ -992,15 +998,42 @@ impl<'a> Renderer<'a> {
 
     /// A decoded frame of `f` as a layer buffer covering `w`×`h` layer pixels (the footage's
     /// nominal size; proxies are scaled up to it), converted from its colour profile.
-    fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32) -> Buf {
-        let mut buf = match self.footage_layout(img, w, h) {
-            FootageLayout::Native { scale } => Buf { img: img.clone(), offset: [0.0; 2], scale },
-            FootageLayout::Resample { width, height, scale } => Buf { img: effectcraft_raster::resample(img, width, height), offset: [0.0; 2], scale },
-        };
-        if let Some(c) = self.pipe.media_in(f) {
-            color::convert(&mut buf.img, &c);
+    ///
+    /// `quantized`: also clamp and quantise it to the project depth, as [`Renderer::masked_source`]
+    /// would (fused with the copy of the cached frame: one pass over it instead of three).
+    fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32, quantized: bool) -> Buf {
+        let c = self.pipe.media_in(f);
+        match self.footage_layout(img, w, h) {
+            FootageLayout::Native { scale } => {
+                let img = match (quantized, &c) {
+                    (true, _) => self.pipe.copy_converted(img, c.as_ref()),
+                    (false, Some(c)) => {
+                        let mut img = img.clone();
+                        color::convert(&mut img, c);
+                        img
+                    }
+                    (false, None) => img.clone(),
+                };
+                Buf { img, offset: [0.0; 2], scale }
+            }
+            FootageLayout::Resample { width, height, scale } => {
+                let mut img = effectcraft_raster::resample(img, width, height);
+                if let Some(c) = &c {
+                    color::convert(&mut img, c);
+                }
+                if quantized {
+                    self.pipe.quantize(&mut img);
+                }
+                Buf { img, offset: [0.0; 2], scale }
+            }
         }
-        buf
+    }
+
+    /// The layer's source is footage that [`Renderer::source`] hands over already quantised
+    /// ([`Renderer::footage_buf`]): footage without masks (masks apply to unquantised pixels).
+    /// Collapsed layers may be vector footage, drawn elsewhere: not counted.
+    fn prequantized_footage(layer: &Layer) -> bool {
+        matches!(layer.source, LayerSource::Footage { .. }) && !layer.switches.collapse && layer.masks().is_none_or(|m| m.groups().next().is_none())
     }
 
     /// How [`Renderer::footage_buf`] lays out a decoded frame `img` of footage `w`×`h` layer
@@ -1159,13 +1192,14 @@ impl<'a> Renderer<'a> {
 
     /// Source → masks, clamped/quantised to the project depth.
     fn masked_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
-        let mut buf = match self.content_times(ctx, layer) {
-            Some(times) => self.blurred_source(ctx, layer, &times)?,
-            None => self.source(ctx, layer)?,
+        let (mut buf, quantized) = match self.content_times(ctx, layer) {
+            Some(times) => (self.blurred_source(ctx, layer, &times)?, false),
+            None => (self.source_with(ctx, layer, true)?, Self::prequantized_footage(layer)),
         };
-        // A solid is filled with a quantised colour: only masks can take it off the grid.
+        // A solid is filled with a quantised colour, and plain footage comes quantised: only
+        // masks can take them off the grid.
         let solid = matches!(layer.source, LayerSource::Solid { .. });
-        if masks::apply(ctx, layer, &mut buf, self.mask_blur(ctx, layer)) || !solid {
+        if masks::apply(ctx, layer, &mut buf, self.mask_blur(ctx, layer)) || !(solid || quantized) {
             self.pipe.quantize(&mut buf.img);
         }
         Some(buf)
