@@ -82,7 +82,7 @@ fn paths_of(f: &Footage) -> impl Iterator<Item = &String> {
 
 /// Footage paths that came from a document, with the path of that document (`None`: one without
 /// a file). Any other path was chosen in this session and is followed as given.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredPaths(Arc<HashMap<String, Option<String>>>);
 
 impl StoredPaths {
@@ -97,7 +97,11 @@ impl StoredPaths {
     pub(crate) fn add_items(&mut self, p: &Project, pick: impl Fn(ItemId) -> bool, document: Option<&str>) {
         let map = Arc::make_mut(&mut self.0);
         for item in p.items.values().filter(|i| pick(i.id)) {
-            if let ItemKind::Footage(f) = &item.kind {
+            let original = match &item.kind {
+                ItemKind::Footage(f) => Some(f),
+                _ => None,
+            };
+            for f in original.into_iter().chain(item.proxy.as_ref().map(|p| &p.footage)) {
                 for q in paths_of(f) {
                     map.entry(q.clone()).or_insert_with(|| document.map(str::to_string));
                 }
@@ -147,15 +151,20 @@ pub(crate) fn resolve_footage(p: &mut Project, project: Option<&str>) -> Vec<(It
 pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
     let mut refused = vec![];
     for item in p.items.values_mut().filter(|i| pick(i.id)) {
-        let ItemKind::Footage(f) = &mut item.kind else { continue };
-        match footage_paths(f, project) {
-            Ok((path, sequence)) => {
-                f.path = path;
-                f.sequence = sequence;
-            }
-            Err((path, why)) => {
-                f.missing = true;
-                refused.push((item.id, path, why));
+        let original = match &mut item.kind {
+            ItemKind::Footage(f) => Some(f),
+            _ => None,
+        };
+        for f in original.into_iter().chain(item.proxy.as_mut().map(|p| &mut p.footage)) {
+            match footage_paths(f, project) {
+                Ok((path, sequence)) => {
+                    f.path = path;
+                    f.sequence = sequence;
+                }
+                Err((path, why)) => {
+                    f.missing = true;
+                    refused.push((item.id, path, why));
+                }
             }
         }
     }

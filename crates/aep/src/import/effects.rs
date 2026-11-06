@@ -34,10 +34,10 @@
 //! import. Hue/Saturation's master values and Levels' values are arbitrary data, decoded by the
 //! reader (444-446, 512-516).
 
-use crate::effect_map::{Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, popup_key};
+use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, popup_key};
 use crate::{
-    CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef, LevelsData, MeshData,
-    ParamKind, ParamValue,
+    CryptomatteData, CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef,
+    LevelsData, MeshData, ParamKind, ParamValue,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
@@ -99,8 +99,12 @@ pub(crate) fn import_effects<'f, 'a>(
             None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
         }
         let params = defs.params(&fx);
-        for p in &params {
-            import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
+        if map.extra == Extra::Cryptomatte {
+            import_cryptomatte(&fx, &params, cx, &shown, &mut group, col);
+        } else {
+            for p in &params {
+                import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
+            }
         }
         col.imported.effects = col.imported.effects.saturating_add(1);
         target.children.push(Node::Group(group));
@@ -133,6 +137,8 @@ struct ParamOut<'a> {
     col: &'a mut Collector,
 }
 
+/// Imports one parameter of `fx` into its EffectCraft property: its keyframes, the value in its
+/// record or the `pard` default, with a loss for what cannot be read or mapped.
 fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>, cx: &LayerCtx<'_>, shown: &str, out: ParamOut<'_>) {
     let ParamOut { group, refs, col } = out;
     if carries_nothing(p) {
@@ -266,10 +272,13 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
             if let Some(map) = &popup_map {
                 remap_popup_keys(prop, map, &here, &label, col);
             }
+            report_beyond_limit(m.limit, prop.keys.iter().map(|k| &k.value), &here, &label, col);
         }
         return;
     }
-    let value = match (p.stored(), p.stored_value()) {
+    // A record in the default state (`tdsb` 3) still holds the value After Effects uses (1200,
+    // 1400: every such record reads back as recorded).
+    let value = match (p.stored(), p.recorded_value()) {
         (Some(_), Some(v)) => Some(v),
         (Some(_), None) => {
             col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, default used"));
@@ -298,8 +307,21 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         _ => convert(value, kind),
     };
     match converted {
-        Some(v) => prop.value = v,
+        Some(v) => {
+            report_beyond_limit(m.limit, std::iter::once(&v), &here, &label, col);
+            prop.value = v;
+        }
         None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
+    }
+}
+
+/// Reports a value After Effects accepts but EffectCraft's effect limits (`ParamMap::limit`): it is
+/// imported as it is, and the effect renders it as the nearest end of its range.
+fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item = &'v Value>, here: &str, label: &str, col: &mut Collector) {
+    let Some((lo, hi)) = limit else { return };
+    let beyond: Vec<f64> = values.filter_map(|v| if let Value::Scalar(x) = v { Some(*x) } else { None }).filter(|x| *x < lo || *x > hi).collect();
+    if let Some(x) = beyond.first() {
+        col.lose(LossCategory::Effects, format!("{here}: parameter {label} is {x}, EffectCraft's effect uses {lo} to {hi} (rendered as the nearest of them)"));
     }
 }
 
@@ -451,7 +473,144 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
             Some(m) => import_mesh(&m, here, size, group, col),
             None => col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh is unreadable, defaults used")),
         },
-        Extra::None => {}
+        Extra::None | Extra::Cryptomatte => {}
+    }
+}
+
+/// The Cryptomatte plug-in (`Extra::Cryptomatte`, docs/aep-format.md 3.7): 1 Settings data
+/// (the layer by name and the selection, both carried as text), 2 Output (EffectCraft's Display
+/// and Matte Only), 3 Selection Mode (reported when on). Anything else stored is reported.
+fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx: &LayerCtx<'_>, shown: &str, group: &mut PropGroup, col: &mut Collector) {
+    let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
+    let set = |group: &mut PropGroup, id: &str, v: Value| {
+        if let Some(prop) = group.prop_mut(id) {
+            prop.value = v;
+        }
+    };
+    // The plug-in's Output starts at Colors (EffectCraft's Display starts at Preview); an Output
+    // that cannot be imported keeps it.
+    let (display, matte_only) = CRYPTO_COLORS;
+    set(group, "display", Value::Enum(display));
+    set(group, "matteOnly", Value::Bool(matte_only));
+    for p in params {
+        if carries_nothing(p) {
+            continue;
+        }
+        let label = if p.name.is_empty() { p.match_name.clone() } else { format!("{} ({})", p.name, p.match_name) };
+        let moving = p.is_animated() || p.stored().is_some_and(|s| s.expression().is_some());
+        match (p.index, p.kind) {
+            (1, ParamKind::ArbitraryData) => {
+                if moving {
+                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
+                }
+                // No record: the definition's default, no layer and no selection. A record
+                // without its data (every sampled record has it) is damaged.
+                let Some(data) = fx.arbitrary_data(&p.match_name) else {
+                    if p.stored().is_some() {
+                        col.lose(LossCategory::DamagedData, format!("{here}: the Cryptomatte settings (layer, selection) have no data, none used"));
+                    }
+                    continue;
+                };
+                match CryptomatteData::parse(data) {
+                    Some(d) => {
+                        set(group, "layerName", Value::Str(d.layer));
+                        set(group, "selection", Value::Str(d.selection));
+                    }
+                    None => col.lose(LossCategory::DamagedData, format!("{here}: the Cryptomatte settings (layer, selection) are unreadable, none used")),
+                }
+            }
+            (2, ParamKind::Popup) => {
+                if moving {
+                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported, Colors used"));
+                    continue;
+                }
+                let (display, matte_only) = crypto_output(p, &here, &label, col);
+                set(group, "display", Value::Enum(display));
+                set(group, "matteOnly", Value::Bool(matte_only));
+            }
+            (3, ParamKind::Checkbox) => {
+                if moving {
+                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
+                } else {
+                    match selection_mode_on(p) {
+                        // A picking switch of the plug-in; EffectCraft picks with its own tool.
+                        Some(true) => col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart")),
+                        Some(false) => {}
+                        None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, off used")),
+                    }
+                }
+            }
+            _ => {
+                if p.stored().is_some() && !matches!(p.stored_value(), Some(ParamValue::Layer(0))) {
+                    col.lose(LossCategory::Effects, format!("{here}: parameter {label} ({:?}) not imported", p.kind));
+                }
+            }
+        }
+    }
+}
+
+/// EffectCraft's (Display, Matte Only) for the plug-in's Output Colors, its default.
+const CRYPTO_COLORS: (u32, bool) = (0, false);
+
+/// Is Selection Mode on? The plug-in writes it, when on, as a record in the default state
+/// (`tdsb` 3) holding 1.0, which [`EffectParam::stored_value`] does not read; After Effects
+/// reads it back as on and renders it (1400 `crypto-01-set-all`, `crypto-02-chk-toggled`). So
+/// the record's value counts whatever its state; no record is off (the `pard` default). `None`
+/// when a record is there but its value cannot be read (never the definition's default then).
+fn selection_mode_on(p: &EffectParam<'_, '_>) -> Option<bool> {
+    match p.stored() {
+        Some(s) => s.static_value().and_then(|v| v.first().copied()).map(|v| v != 0.0),
+        None => Some(p.value() == Some(ParamValue::Bool(true))),
+    }
+}
+
+/// Cryptomatte's Output as EffectCraft's (Display, Matte Only): Colors is Colors, Matted RGBA
+/// is Matte (the layer keyed by the selection), Matte Only is Matte Only. Matted Colors (the
+/// ID colours keyed by the selection) becomes Matte, the same matte over the layer's own
+/// colours, and is reported; a value that cannot be read is reported and Colors used.
+fn crypto_output(p: &EffectParam<'_, '_>, here: &str, label: &str, col: &mut Collector) -> (u32, bool) {
+    let items: Vec<String> = match &p.items {
+        Some(items) => items.clone(),
+        None if p.popup_item_count().map(usize::from) == Some(CRYPTOMATTE_OUTPUT.len()) => CRYPTOMATTE_OUTPUT.iter().map(|s| s.to_string()).collect(),
+        None => {
+            col.lose(
+                LossCategory::Effects,
+                format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported, Colors used", p.popup_item_count()),
+            );
+            return CRYPTO_COLORS;
+        }
+    };
+    let index = match (p.stored(), p.stored_value()) {
+        (Some(_), Some(ParamValue::Index(i))) => i,
+        (Some(_), _) => {
+            col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, Colors used"));
+            return CRYPTO_COLORS;
+        }
+        // No record: the default. The plug-in's is Colors (1): the `pard` default of the
+        // instance's own and of the project's shared definition, and what scripting reads from a
+        // fresh effect (1400 `crypto-00-defaults`). An instance's own definition with another
+        // default keeps it; a borrowed one has no reliable popup default.
+        (None, _) => match p.pard_default() {
+            Some(ParamValue::Index(i)) if i != 0 && !p.borrowed_definition => i,
+            _ => return CRYPTO_COLORS,
+        },
+    };
+    let item = usize::try_from(index).ok().and_then(|i| i.checked_sub(1)).and_then(|i| items.get(i)).map(String::as_str).unwrap_or_default();
+    match popup_key(item).as_str() {
+        "colors" => CRYPTO_COLORS,
+        "matted rgba" => (1, false),
+        "matte only" => (1, true),
+        "matted colors" => {
+            col.lose(
+                LossCategory::Effects,
+                format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, imported as Matte (the layer's colours keyed by the selection, not the ID colours)"),
+            );
+            (1, false)
+        }
+        _ => {
+            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, Colors used"));
+            CRYPTO_COLORS
+        }
     }
 }
 
@@ -503,7 +662,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
             return;
         }
         // EffectCraft's mesh reads the first two numbers of a vertex; moved handles follow as
-        // eight more (kept in the project, not drawn).
+        // eight more (kept for the export, not drawn).
         let mut token = format!("{},{}", px(dx * w), px(dy * h));
         if own.iter().any(|x| x.abs() > 0.01) {
             handles_moved = true;
@@ -516,7 +675,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
     if handles_moved {
         col.lose(
             LossCategory::Effects,
-            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept in the project)"),
+            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)"),
         );
     }
     if let Some(p) = group.prop_mut("rows") {

@@ -336,17 +336,21 @@ fn fp2_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 o = vec4<f32>(r * px.w, px.w);
             }
         }
-        // f[0].x = knee.
+        // utility::hdr_compress_pixel; f[0].x = blend t (Amount / 100).
         case 2u: {
             if (px.w > 0.0) {
                 let c = px.xyz / px.w;
-                let m = max(max(c.x, c.y), c.z);
-                let knee = P.f[0].x;
-                if (m > knee) {
-                    let w = 1.0 - knee;
-                    let k = (knee + w * (m - knee) / ((m - knee) + w)) / m;
-                    o = vec4<f32>(c * k * px.w, px.w);
-                }
+                let t = P.f[0].x;
+                let y = max(0.30 * c.x + 0.59 * c.y + 0.11 * c.z, 0.0);
+                let comp = min(c * (1.0 / (1.0 + y)), vec3<f32>(1.0));
+                let g = 0.4;
+                let mixed = vec3<f32>(
+                    (1.0 - t) * fp2_spow(c.x, g) + t * fp2_spow(comp.x, g),
+                    (1.0 - t) * fp2_spow(c.y, g) + t * fp2_spow(comp.y, g),
+                    (1.0 - t) * fp2_spow(c.z, g) + t * fp2_spow(comp.z, g),
+                );
+                let r = vec3<f32>(fp2_spow(mixed.x, 1.0 / g), fp2_spow(mixed.y, 1.0 / g), fp2_spow(mixed.z, 1.0 / g));
+                o = vec4<f32>(r * px.w, px.w);
             }
         }
         // u[0].y = channel; f[0] = highlight colour.

@@ -8,7 +8,9 @@
 //! `--demo` opens the demo project instead (also Help ▸ Open Demo Project).
 //!
 //! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
-//! see `effectcraft_ui_egui::control` for the methods.
+//! see `effectcraft_ui_egui::control` for the methods. An app started for an agent opens without
+//! taking keyboard focus and skips crash recovery, the Home screen (unless `--home`) and the
+//! startup update check.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -110,6 +112,13 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_port: Result<String, s
         };
     }
     Ok(Some(out))
+}
+
+/// Whether the app looks for a newer release when it starts. Not when started for an agent
+/// (`--control`): the "update available" prompt is modal and would block the run until a person
+/// dismisses it. Help ▸ Check for Updates still works.
+fn startup_update_check(control_port: Option<u16>) -> bool {
+    control_port.is_none()
 }
 
 /// A control-channel port from 1 to 65535 (0 would listen on a port nobody is told); `name` is
@@ -267,6 +276,9 @@ fn main() -> eframe::Result {
             // written on background threads (M13.14).
             session.check_footage_on_open = true;
             session.autosave.background = true;
+            // The disk cache's footage stamps too: an imported or opened project with thousands of
+            // sequence frames on a network share took half a minute to stamp.
+            session.disk_salt_background = true;
             // Settings, shortcut presets and the crash-recovery sentinel live in the platform
             // config directory. Agent-driven runs (`--control`) skip crash recovery.
             if let Some(dir) = effectcraft_host::config_dir() {
@@ -310,7 +322,7 @@ fn main() -> eframe::Result {
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
             let mut app = EffectcraftApp::new(session);
-            app.set_startup_update_check(true);
+            app.set_startup_update_check(startup_update_check(control_port));
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
             if let Some(n) = notice {
@@ -664,6 +676,18 @@ mod tests {
         assert_eq!((a.control_port, a.home, a.files), (Some(9877), Some(true), vec!["a.ecproj".to_string()]));
         assert_eq!(parse(&["--version"]), None);
         assert_eq!(parse_env(&[], Ok("9000".into())).unwrap().map(|a| a.control_port), Some(Some(9000)));
+    }
+
+    /// An app started for an agent (`--control` or `EFFECTCRAFT_CONTROL_PORT`) doesn't check for
+    /// updates at start, so no modal update prompt blocks the run; a normal launch still does.
+    #[test]
+    fn agent_runs_skip_the_startup_update_check() {
+        let port = |args: &[&str], env| parse_env(args, env).unwrap().unwrap_or_default().control_port;
+        assert!(super::startup_update_check(port(&[], Err(VarError::NotPresent))));
+        assert!(super::startup_update_check(port(&[], Ok(String::new()))));
+        assert!(!super::startup_update_check(port(&["--control", "9877"], Err(VarError::NotPresent))));
+        assert!(!super::startup_update_check(port(&["--control=9877"], Err(VarError::NotPresent))));
+        assert!(!super::startup_update_check(port(&[], Ok("9877".into()))));
     }
 
     /// A missing, non-numeric or zero `--control` value stops the launch instead of starting

@@ -131,6 +131,7 @@ const WRITES: &[(&str, &[&str])] = &[
     // This query checks a proposed write destination, so it follows write confinement.
     ("file.checkOutput", &["path"]),
     ("file.exportLottie", &["path"]),
+    ("file.exportAep", &["path"]),
     ("comp.saveFrameAs", &["path"]),
     ("comp.saveFrameAsPsd", &["path"]),
     ("comp.saveFrameAsExr", &["path"]),
@@ -362,6 +363,9 @@ impl FootageSource for ConfinedFootage {
     }
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
         self.inside(footage).then(|| self.inner.aux(item, footage, t)).flatten()
+    }
+    fn set_aux_footage(&self, paths: &[String]) {
+        self.inner.set_aux_footage(paths)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inside(footage).then(|| self.inner.model(item, footage)).flatten()

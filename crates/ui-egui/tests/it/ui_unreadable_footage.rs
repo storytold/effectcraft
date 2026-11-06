@@ -102,3 +102,100 @@ fn a_precomp_with_an_undecodable_proxy_has_a_notice_collapsed_or_not() {
         assert!(!h.state().auto.query("viewer.footageProblem.").is_empty(), "collapse {collapse}");
     }
 }
+
+#[test]
+fn missing_footage_marks_project_timeline_and_viewer_and_clears_after_recovery() {
+    let (mut h, clip) = harness(|_| false, None);
+    let set_missing = |h: &mut Harness<'static, EffectcraftApp>, missing| {
+        let item = Arc::make_mut(&mut h.state_mut().session.project).item_mut(clip).unwrap();
+        let ItemKind::Footage(f) = &mut item.kind else { panic!("footage fixture") };
+        f.missing = missing;
+    };
+    set_missing(&mut h, true);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&format!("project.item.{}.problem", clip.0)).unwrap().label.contains("Missing footage"));
+    assert_eq!(h.state().auto.query("timeline.layer.").iter().filter(|e| e.id.ends_with(".problem")).count(), 1);
+    assert!(!h.state().auto.query("viewer.footageProblem.").is_empty());
+    set_missing(&mut h, false);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&format!("project.item.{}.problem", clip.0)).is_none());
+    assert!(h.state().auto.query("timeline.layer.").iter().all(|e| !e.id.ends_with(".problem")));
+    assert!(h.state().auto.query("viewer.footageProblem.").is_empty());
+}
+
+#[test]
+fn missing_original_with_working_proxy_warns_inventory_without_a_viewer_failure() {
+    let proxy = Footage { path: "proxy.png".into(), has_video: true, width: 32, height: 18, ..Default::default() };
+    let (mut h, clip) = harness(|_| false, Some(proxy));
+    if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut h.state_mut().session.project).item_mut(clip).unwrap().kind {
+        f.missing = true;
+    }
+    h.run_steps(2);
+    assert!(h.state().auto.find(&format!("project.item.{}.problem", clip.0)).unwrap().label.contains("clip.mp4"));
+    assert!(h.state().auto.query("viewer.footageProblem.").is_empty(), "the active proxy still supplies the preview");
+}
+
+#[test]
+fn missing_active_proxy_explains_the_proxy_repair_action() {
+    let proxy = Footage { path: "lost_proxy.png".into(), missing: true, has_video: true, width: 32, height: 18, ..Default::default() };
+    let (h, clip) = harness(|_| false, Some(proxy));
+    let marker = h.state().auto.find(&format!("project.item.{}.problem", clip.0)).unwrap();
+    assert!(marker.label.starts_with("Proxy:") && marker.label.contains("Set Proxy"));
+    assert!(h.state().auto.query("viewer.footageProblem.").iter().any(|e| e.label.contains("lost_proxy.png")));
+}
+
+#[test]
+fn restored_original_and_active_proxy_render_new_pixels_through_media_and_disk_caches() {
+    use effectcraft_engine::render::RenderOpts;
+    for proxy in [false, true] {
+        let dir = std::env::temp_dir().join(format!("ec-offline-pixels-{}-{proxy}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255])).save(&original).unwrap();
+        let mut s = effectcraft_host::session();
+        s.prefs.import.auto_reload_footage = "off".into();
+        let item = s.execute("file.import", json!({"paths": [original], "sequence": false})).unwrap()["items"][0].as_u64().unwrap();
+        let active = if proxy {
+            let path = dir.join("proxy.png");
+            image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 255, 0, 255])).save(&path).unwrap();
+            s.execute("file.setProxy", json!({"item": item, "path": path})).unwrap();
+            path
+        } else {
+            original
+        };
+        let inner = s.execute("comp.new", json!({"name": "Media", "width": 16, "height": 16, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+        s.execute("layer.addItem", json!({"item": item})).unwrap();
+        // A zero-echo identity effect reads the real layer-input cache, including for proxies.
+        s.execute("effect.apply", json!({"layer": "#1", "effect": "Echo"})).unwrap();
+        s.execute("prop.set", json!({"layer": "#1", "path": "effects/#1/numberOfEchoes", "value": 0})).unwrap();
+        s.execute("prop.set", json!({"layer": "#1", "path": "effects/#1/echoOperator", "value": 4})).unwrap();
+        s.execute("comp.new", json!({"name": "Output", "width": 16, "height": 16, "duration": 1})).unwrap();
+        s.execute("layer.addItem", json!({"item": inner})).unwrap();
+        let comp = s.active_comp_id().unwrap();
+        let cache = effectcraft_render::disk_cache::DiskCache::open(dir.join("cache"), 1 << 20).unwrap();
+        cache.set_min_layer_ms(0);
+        s.disk_cache = Some(cache.clone());
+        let salt = s.refresh_disk_salt(true).unwrap();
+        s.layer_cache.set_disk(Some((cache.clone(), salt)));
+        let before = s.render(comp, Tick::ZERO, RenderOpts::default());
+        assert_eq!(before.data[8 * 16 + 8], if proxy { [0.0, 1.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] });
+        cache.flush();
+        assert!(cache.stats().entries > 0, "the first render populated the disk cache");
+        s.layer_cache.clear();
+        let cached = s.render(comp, Tick::ZERO, RenderOpts::default());
+        assert_eq!(cached.data, before.data);
+        assert!(cache.stats().hits > 0, "the same media was read back through the disk cache");
+        std::fs::remove_file(&active).unwrap();
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
+        let offline = s.render(comp, Tick::ZERO, RenderOpts::default());
+        assert_eq!(offline.data[8 * 16 + 8], [0.0, 0.0, 0.0, 0.0]);
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&active).unwrap();
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
+        let restored = s.render(comp, Tick::ZERO, RenderOpts::default());
+        assert_eq!(restored.data[8 * 16 + 8], [0.0, 0.0, 1.0, 1.0], "restored pixels replace decoded and composited cached frames");
+        cache.flush();
+        drop(cache);
+        drop(s);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

@@ -2065,3 +2065,197 @@ fn precompose_unlinks_layers_left_behind_and_numbers_default_names() {
     names.sort();
     assert_eq!(names, ["Pre-comp 1", "Pre-comp 2"]);
 }
+
+/// Quick Set Anchor (#2967): every one of the nine points moves the Anchor Point of a rotated,
+/// scaled layer with keyed Position to that point of its content, and the layer looks the same
+/// on every frame (Position and its keys are compensated), in one undo step.
+#[test]
+fn quick_set_anchor_moves_the_anchor_without_moving_the_layer_over_its_keys() {
+    let near = |a: [f64; 4], b: [f64; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+    // (name, anchor in the 200×100 solid's layer space)
+    let points = [
+        ("topLeft", [0.0, 0.0]),
+        ("top", [100.0, 0.0]),
+        ("topRight", [200.0, 0.0]),
+        ("left", [0.0, 50.0]),
+        ("center", [100.0, 50.0]),
+        ("right", [200.0, 50.0]),
+        ("bottomLeft", [0.0, 100.0]),
+        ("bottom", [100.0, 100.0]),
+        ("bottomRight", [200.0, 100.0]),
+    ];
+    for (name, want) in points {
+        let mut s = comp();
+        let a = solid(&mut s, "#ff0000");
+        s.execute("prop.set", json!({"layer": a, "path": "transform/scale", "value": [150, 80]})).unwrap();
+        s.execute("prop.set", json!({"layer": a, "path": "transform/rotation", "value": 30})).unwrap();
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 0, "value": [100, 80]})).unwrap();
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 1, "value": [400, 250]})).unwrap();
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 2, "value": [300, 60]})).unwrap();
+        let look = |s: &mut Session| {
+            [0.0, 0.4, 1.0, 1.5, 2.0]
+                .map(|t| {
+                    s.execute("time.set", json!({"time": t})).unwrap();
+                    seen_bounds(s, a)
+                })
+                .to_vec()
+        };
+        let before = look(&mut s);
+        let undo = s.history.undo.len();
+        s.execute("layer.quickSetAnchor", json!({"layers": [a], "point": name})).unwrap();
+        let anchor = layer(&s, a).transform().unwrap().get("anchor").unwrap().value.as_vec3();
+        assert!(anchor[0] == want[0] && anchor[1] == want[1], "{name}: anchor {anchor:?}, wanted {want:?}");
+        for (b, n) in before.iter().zip(look(&mut s)) {
+            assert!(near(*b, n), "{name}: the layer moved, {b:?} → {n:?}");
+        }
+        // The centre is where the anchor already is: nothing changes, so there's no undo step.
+        assert_eq!(s.history.undo.len(), undo + usize::from(name != "center"), "{name}: one undo step");
+        if name == "center" {
+            continue;
+        }
+        s.execute("edit.undo", json!({})).unwrap();
+        let back = layer(&s, a).transform().unwrap().get("anchor").unwrap().value.as_vec3();
+        assert_eq!(back[..2], [100.0, 50.0], "{name}: undo restores the anchor");
+    }
+}
+
+/// Same as above with Position split into X and Y, each with its own keys: both channels get the
+/// shift, so the layer still looks the same on every frame.
+#[test]
+fn quick_set_anchor_keeps_a_layer_with_separated_keyed_position_in_place() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("prop.set", json!({"layer": a, "path": "transform/scale", "value": [150, 80]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/rotation", "value": 30})).unwrap();
+    s.execute("prop.separateDimensions", json!({"layer": a, "value": true})).unwrap();
+    for (path, values) in [("transform/positionX", [100.0, 400.0, 300.0]), ("transform/positionY", [80.0, 250.0, 60.0])] {
+        for (time, value) in [0.0, 1.0, 2.0].into_iter().zip(values) {
+            s.execute("prop.addKey", json!({"layer": a, "path": path, "time": time, "value": value})).unwrap();
+        }
+    }
+    let look = |s: &mut Session| {
+        [0.0, 0.4, 1.0, 1.5, 2.0]
+            .map(|t| {
+                s.execute("time.set", json!({"time": t})).unwrap();
+                seen_bounds(s, a)
+            })
+            .to_vec()
+    };
+    let before = look(&mut s);
+    s.execute("layer.quickSetAnchor", json!({"layers": [a], "point": "topLeft"})).unwrap();
+    let anchor = layer(&s, a).transform().unwrap().get("anchor").unwrap().value.as_vec3();
+    assert_eq!(anchor[..2], [0.0, 0.0], "the anchor moved to the top left");
+    for (b, n) in before.iter().zip(look(&mut s)) {
+        assert!(b.iter().zip(n).all(|(x, y)| (x - y).abs() < 1e-6), "the layer moved, {b:?} → {n:?}");
+    }
+}
+
+#[test]
+fn quick_set_anchor_skips_locked_and_3d_layers_and_checks_its_point() {
+    let mut s = comp();
+    let flat = solid(&mut s, "#00ff00");
+    let deep = solid(&mut s, "#0000ff");
+    let locked = solid(&mut s, "#ffffff");
+    s.execute("layer.setSwitch", json!({"layers": [deep], "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [locked], "switch": "lock", "value": true})).unwrap();
+    let anchor_of = |s: &Session, l: u64| layer(s, l).transform().unwrap().get("anchor").unwrap().value.as_vec3();
+    let r = s.execute("layer.quickSetAnchor", json!({"layers": [flat, deep, locked], "point": "topLeft"})).unwrap();
+    assert_eq!(r["layers"], 1, "only the unlocked 2D layer changed");
+    assert_eq!(anchor_of(&s, flat)[..2], [0.0, 0.0]);
+    assert_eq!(anchor_of(&s, deep)[..2], [100.0, 50.0]);
+    assert_eq!(anchor_of(&s, locked)[..2], [100.0, 50.0]);
+    assert!(s.execute("layer.quickSetAnchor", json!({"layers": [deep], "point": "top"})).is_err(), "3D only: nothing to do");
+    assert!(s.execute("layer.quickSetAnchor", json!({"layers": [flat], "point": "middle"})).is_err());
+    assert!(s.execute("layer.quickSetAnchor", json!({"layers": [flat]})).is_err());
+}
+
+/// The anchor is set at the current time and the Position shift comes from the current Anchor
+/// Point, Scale and Rotation, so a layer where one of them is keyed would move at other frames:
+/// it is skipped, and alone it is an error.
+#[test]
+fn quick_set_anchor_skips_layers_whose_anchor_scale_or_rotation_is_keyed() {
+    for path in ["transform/anchor", "transform/scale", "transform/rotation"] {
+        let mut s = comp();
+        let flat = solid(&mut s, "#00ff00");
+        let keyed = solid(&mut s, "#0000ff");
+        let value = if path.ends_with("rotation") {
+            json!(0)
+        } else if path.ends_with("scale") {
+            json!([100, 100])
+        } else {
+            json!([100, 50])
+        };
+        let later = if path.ends_with("rotation") {
+            json!(90)
+        } else if path.ends_with("scale") {
+            json!([50, 50])
+        } else {
+            json!([20, 10])
+        };
+        s.execute("prop.addKey", json!({"layer": keyed, "path": path, "time": 0, "value": value})).unwrap();
+        s.execute("prop.addKey", json!({"layer": keyed, "path": path, "time": 2, "value": later})).unwrap();
+        let before = layer(&s, keyed);
+        let r = s.execute("layer.quickSetAnchor", json!({"layers": [flat, keyed], "point": "topLeft"})).unwrap();
+        assert_eq!(r["layers"], 1, "{path}: only the layer without keys changed");
+        assert_eq!(layer(&s, keyed), before, "{path}: the keyed layer is untouched");
+        assert!(s.execute("layer.quickSetAnchor", json!({"layers": [keyed], "point": "top"})).is_err(), "{path}: nothing to do");
+    }
+}
+
+/// An expression on Position (or on the separated X / Y) would override the shifted value, and
+/// Auto-Orient along the path adds a rotation the shift does not know: those layers are skipped.
+#[test]
+fn quick_set_anchor_skips_position_expressions_and_along_path_layers() {
+    for case in ["position", "positionX", "alongPath"] {
+        let mut s = comp();
+        let flat = solid(&mut s, "#00ff00");
+        let other = solid(&mut s, "#0000ff");
+        match case {
+            "alongPath" => {
+                s.execute("layer.autoOrient", json!({"layers": [other], "mode": "alongPath"})).unwrap();
+            }
+            "position" => {
+                s.execute("prop.setExpression", json!({"layer": other, "path": "transform/position", "expression": "[100, 50]"})).unwrap();
+            }
+            _ => {
+                s.execute("prop.separateDimensions", json!({"layer": other, "value": true})).unwrap();
+                s.execute("prop.setExpression", json!({"layer": other, "path": "transform/positionX", "expression": "100"})).unwrap();
+            }
+        }
+        let before = layer(&s, other);
+        let r = s.execute("layer.quickSetAnchor", json!({"layers": [flat, other], "point": "topLeft"})).unwrap();
+        assert_eq!(r["layers"], 1, "{case}: only the plain layer changed");
+        assert_eq!(layer(&s, other), before, "{case}: the layer is untouched");
+        assert!(s.execute("layer.quickSetAnchor", json!({"layers": [other], "point": "top"})).is_err(), "{case}: nothing to do");
+    }
+}
+
+/// A selection of only empty text layers (no content bounds) is an error, not a silent `{layers: 0}`;
+/// `layer.centerAnchor` keeps reporting 0 for it.
+#[test]
+fn quick_set_anchor_errors_when_no_layer_has_content_bounds() {
+    let mut s = comp();
+    let t = s.execute("layer.newText", json!({"text": ""})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.execute("layer.quickSetAnchor", json!({"layers": [t], "point": "center"})).is_err());
+    let r = s.execute("layer.centerAnchor", json!({"layers": [t]})).unwrap();
+    assert_eq!(r["layers"], 0);
+}
+
+/// A child of a rotated, scaled parent keeps its place when its anchor moves (Position is in the
+/// parent's space).
+#[test]
+fn quick_set_anchor_keeps_a_parented_layer_in_place() {
+    let mut s = comp();
+    let parent = solid(&mut s, "#ff0000");
+    let child = solid(&mut s, "#00ff00");
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/rotation", "value": 25})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/scale", "value": [120, 70]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [child], "parent": parent})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/rotation", "value": -40})).unwrap();
+    s.execute("prop.set", json!({"layer": child, "path": "transform/scale", "value": [60, 90]})).unwrap();
+    let before = seen_bounds(&s, child);
+    s.execute("layer.quickSetAnchor", json!({"layers": [child], "point": "bottomRight"})).unwrap();
+    let after = seen_bounds(&s, child);
+    assert!(before.iter().zip(after).all(|(a, b)| (a - b).abs() < 1e-6), "{before:?} → {after:?}");
+    assert_eq!(layer(&s, child).transform().unwrap().get("anchor").unwrap().value.as_vec3()[..2], [200.0, 100.0]);
+}
