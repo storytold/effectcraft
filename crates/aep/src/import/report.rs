@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::container::AepFile;
+
 /// Most example lines kept per loss category (the count is always exact).
 pub const MAX_DETAILS: usize = 20;
 
@@ -177,6 +179,65 @@ pub struct ImportReport {
     pub missing_fonts: Vec<String>,
     /// What the file reader cannot see at all, so it can be neither imported nor counted.
     pub limitations: Vec<String>,
+    /// The After Effects version the file is written for and the one that wrote it.
+    #[serde(default)]
+    pub ae_version: AeVersionInfo,
+}
+
+/// The After Effects versions the importer is tested with (the major of the version a file is
+/// written for): files written for 24.x, 25.x and 26.x.
+pub const TESTED_MAJORS: std::ops::RangeInclusive<u8> = 24..=26;
+
+/// The After Effects versions of a file, decoded from the container (never from the XMP packet,
+/// which names the application of the first save).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AeVersionInfo {
+    /// The version the file is written for (`head`): `26.2.1x2` for a file saved by After Effects
+    /// 26.2.1, `25.6.0x97` for a copy that After Effects 2026 saved as 25.x. `unknown` when the file
+    /// does not say.
+    pub file_version: String,
+    /// The version of the After Effects that wrote the file (`svap`): `26.2.1x2` for that copy too.
+    /// `unknown` when the file does not say.
+    pub saved_by: String,
+    /// Whether the importer is tested with files written for this version ([`TESTED_MAJORS`]).
+    /// When not, what is read is still imported, and a line in
+    /// [`ImportReport::limitations`] says the version is not tested.
+    pub tested: bool,
+}
+
+impl Default for AeVersionInfo {
+    fn default() -> Self {
+        Self { file_version: UNKNOWN.to_string(), saved_by: UNKNOWN.to_string(), tested: false }
+    }
+}
+
+/// The text of a version the file does not state.
+pub const UNKNOWN: &str = "unknown";
+
+impl AeVersionInfo {
+    /// Reads the versions of a parsed file.
+    pub fn of(file: &AepFile<'_>) -> Self {
+        let file_version = file.file_version();
+        Self {
+            file_version: file_version.map_or_else(|| UNKNOWN.to_string(), |v| v.text()),
+            saved_by: file.saved_by_version().map_or_else(|| UNKNOWN.to_string(), |v| v.text()),
+            tested: file_version.is_some_and(|v| TESTED_MAJORS.contains(&v.major)),
+        }
+    }
+
+    /// The limitation line for a version that is not tested; `None` for a tested one.
+    pub fn limitation(&self) -> Option<String> {
+        (!self.tested).then(|| {
+            format!(
+                "The file is written for After Effects {} (saved by {}); the importer is tested with files written for After Effects {} to {} only. What it reads is imported, but this version is not tested.",
+                self.file_version,
+                self.saved_by,
+                TESTED_MAJORS.start(),
+                TESTED_MAJORS.end()
+            )
+        })
+    }
 }
 
 impl ImportReport {
@@ -227,6 +288,7 @@ impl Collector {
             missing_footage: self.missing_footage,
             missing_fonts: self.missing_fonts,
             limitations: LIMITATIONS.iter().map(|s| (*s).to_string()).collect(),
+            ae_version: AeVersionInfo::default(),
         }
     }
 }
