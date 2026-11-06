@@ -392,6 +392,82 @@ fn eps_soon(body: &str) -> Doc {
     rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap_or_else(|_| panic!("parsing {body} did not finish")).unwrap()
 }
 
+/// Huge operands clamp without diagnostics; predicates check lengths and stack order before drawing.
+#[test]
+fn eps_resource_clamps_and_legacy_loop_cap_continue_drawing() {
+    for (body, predicate) in [
+        ("1000000000 array", "length 1000000 eq"),
+        ("3 array", "length 3 eq"),
+        ("1000000000 string", "length 10000000 eq"),
+        ("3 string", "length 3 eq"),
+        ("1 1000000000 copy", "count 2 eq exch 1 eq and exch 1 eq and"),
+        ("1 2 3 2 copy", "count 5 eq exch 3 eq and exch 2 eq and exch 3 eq and exch 2 eq and exch 1 eq and"),
+        ("1 2 3 1000000000 1000000000 roll", "count 3 eq exch 2 eq and exch 1 eq and exch 3 eq and"),
+        ("1 2 3 3 1 roll", "count 3 eq exch 2 eq and exch 1 eq and exch 3 eq and"),
+        ("/a { 7 } def a", "count 1 eq exch 7 eq and"),
+        // The empty infinite loop reaches the legacy iteration cap, not the operation limit.
+        ("{} loop", "count 0 eq"),
+        ("{ exit } loop", "count 0 eq"),
+    ] {
+        let doc = eps_soon(&format!("1 0 0 setrgbcolor 0 0 10 10 rectfill {body} {predicate} {{ 0 1 0 setrgbcolor 20 0 10 10 rectfill }} if"));
+        assert!(doc.skipped.is_empty(), "{body}: {:?}", doc.skipped);
+        assert_eq!(doc.flatten().len(), 2, "{body}: predicate must accept the result");
+        let img = render(&doc);
+        assert_eq!(img.get(5, 95), [1.0, 0.0, 0.0, 1.0], "{body}: earlier red square");
+        assert_eq!(img.get(25, 95), [0.0, 1.0, 0.0, 1.0], "{body}: later green square");
+    }
+}
+
+/// Refusals return a partial `Ok(Doc)` with an exact diagnostic, preserving only earlier artwork.
+#[test]
+fn eps_resource_refusals_stop_before_later_artwork() {
+    for (body, diagnostic) in [
+        ("0 1 50000 {} for 1000000000 copy", "PostScript (operand stack limit)"),
+        ("/a { a } def a", "PostScript (recursion limit)"),
+        ("{ 0 0 0 0 0 0 0 0 clear } loop", "PostScript (operation limit)"),
+    ] {
+        let doc = eps_soon(&format!("1 0 0 setrgbcolor 0 0 10 10 rectfill {body} 0 1 0 setrgbcolor 20 0 10 10 rectfill"));
+        assert_eq!(doc.skipped, [diagnostic], "{body}");
+        assert_eq!(doc.flatten().len(), 1, "{body}");
+        let img = render(&doc);
+        assert_eq!(img.get(5, 95), [1.0, 0.0, 0.0, 1.0], "{body}: earlier artwork survives");
+        assert_eq!(img.get(25, 95)[3], 0.0, "{body}: execution must stop");
+    }
+}
+
+/// Public EPS parsing must stop exponential stack copying and retain artwork drawn before refusal.
+#[test]
+fn eps_copy_stops_before_overflowing_the_operand_stack() {
+    // Eighteen rounds are deliberately bounded: enough to breach the cap on the unguarded
+    // interpreter, without attempting the audit report's out-of-memory input.
+    let doc = eps_soon("0 0 10 10 rectfill 1 18 { count copy } repeat clear 20 20 10 10 rectfill");
+    assert_eq!(doc.skipped, ["PostScript (operand stack limit)"]);
+    assert_eq!(doc.flatten().len(), 1, "artwork before the limit survives; execution stops");
+}
+
+/// A stack-limit quit from `aload` must escape `stopped` without discarding prior artwork.
+#[test]
+fn eps_aload_stops_before_partially_filling_the_operand_stack() {
+    let doc = eps_soon("0 0 10 10 rectfill { 100000 array aload } stopped clear 20 20 10 10 rectfill");
+    assert_eq!(doc.skipped, ["PostScript (operand stack limit)"]);
+    assert_eq!(doc.flatten().len(), 1, "stopped must not swallow a resource-limit quit");
+}
+
+/// Ordinary copies, compound stack transfers and string intervals must preserve rendered placement.
+#[test]
+fn eps_copy_and_compound_values_still_draw_in_order() {
+    let doc = eps(b"0 0 10 10 4 copy rectfill 20 0 translate rectfill \
+        [ 0 0 10 10 ] 4 array copy aload pop 40 0 translate rectfill \
+        0 0 10 10 4 array astore aload pop 20 0 translate rectfill \
+        (ab) 0 2 getinterval length 2 eq { 0 20 10 10 rectfill } if\n");
+    assert_eq!(doc.flatten().len(), 5);
+    let img = render(&doc);
+    for x in [5, 25, 65, 85] {
+        assert!(img.get(x, 95)[3] > 0.99, "square at x={x}");
+    }
+    assert!(img.get(85, 75)[3] > 0.99);
+}
+
 #[test]
 fn arcs_with_huge_angles_end_at_their_second_angle() {
     use kurbo::{Point, Rect, Shape as _};
@@ -491,11 +567,16 @@ fn nested_loops_run_out_of_the_budget() {
         "{ 0 1 999999 {} for clear } loop",
         "/s 1000000 string def { s {} forall clear } loop",
         "/a 1000000 array def { a {} forall clear } loop",
-        "/d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop",
         literals.as_str(),
     ] {
         runs_out_of_budget(body);
     }
+    // `forall` over a dictionary snapshots its entries into a key-value pair list before running
+    // the procedure. The snapshot's slots are charged, so a loop that keeps re-snapshotting a
+    // large dictionary stops at the allocation limit rather than growing until the operation limit.
+    let doc = eps_soon("0 0 10 10 rectfill /d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop");
+    assert_eq!(doc.flatten().len(), 1);
+    assert_eq!(doc.skipped, ["PostScript (allocation limit)"]);
 }
 
 #[test]
@@ -582,5 +663,52 @@ fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
     ] {
         let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
         assert_eq!(shape_names(&doc).len(), 1, "{prog}");
+    }
+}
+
+/// Inline image data must never be read as a name: a long line of hex or ASCII85, or raw binary,
+/// following an `image` — directly, through an indirect data-source procedure, an unknown image
+/// operator, or a bare `readhexstring` — leaves the trailing square drawn and raises no name-length
+/// note. (A regression where a 255-byte name cap stopped on image bytes.)
+#[test]
+fn image_data_is_not_read_as_a_name() {
+    let n = 300;
+    let pat: Vec<u8> = (0..n).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+    let hex: String = pat.iter().map(|b| format!("{b:02X}")).collect();
+    let mat = "300 1 8 [1 0 0 1 0 0]";
+    let mut cases: Vec<(String, Vec<u8>)> = vec![];
+    let mut body = |label: &str, prolog: &str, trailer: Vec<u8>| {
+        let mut b = format!("/picstr {n} string def\n{prolog}\n").into_bytes();
+        b.extend_from_slice(&trailer);
+        b.extend_from_slice(b"\n0 0 10 10 rectfill\n");
+        cases.push((label.to_string(), b));
+    };
+    body("indirect proc hex, one line", "/rdhex { currentfile picstr readhexstring pop } bind def", format!("{mat} {{ rdhex }} image\n{hex}").into_bytes());
+    body("unknown image op, hex one line", "", format!("{mat} {{ currentfile picstr readhexstring pop }} myimageop\n{hex}").into_bytes());
+    body("bare readhexstring, hex one line", "", format!("currentfile picstr readhexstring pop pop\n{hex}").into_bytes());
+    let mut a85 = vec![b'z'; 300];
+    a85.extend_from_slice(b"~>");
+    body("ASCII85 'z' one line via filter", "", {
+        let mut t = format!("{mat} currentfile /ASCII85Decode filter image\n").into_bytes();
+        t.extend_from_slice(&a85);
+        t
+    });
+    body("binary solid 0xFF, no DSC wrapper", "", {
+        let mut t = format!("{mat} {{ currentfile picstr readstring pop }} image\n").into_bytes();
+        t.extend(std::iter::repeat_n(0xFFu8, n));
+        t
+    });
+    body("indirect proc, high-bit bytes short line", "/rdbin { currentfile picstr readstring pop } bind def", {
+        let mut t = format!("{mat} {{ rdbin }} image\n").into_bytes();
+        t.extend(std::iter::repeat_n(0xC8u8, 100));
+        t
+    });
+    for (label, bytes) in cases {
+        // The data is not always UTF-8, so assemble the EPS bytes and parse them directly.
+        let mut full = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n".to_vec();
+        full.extend_from_slice(&bytes);
+        let doc = parse(&full).unwrap();
+        assert_eq!(doc.flatten().len(), 1, "{label}: the trailing square must survive; skipped={:?}", doc.skipped);
+        assert!(!doc.skipped.iter().any(|s| s.contains("name length")), "{label}: image data must not hit the name length limit: {:?}", doc.skipped);
     }
 }

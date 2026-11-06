@@ -1,21 +1,22 @@
 use super::eps::find_from;
+use super::exec::MAX_NAME;
 use super::scanner::Src;
-use super::text::encoding_array;
-use super::value::{Flow, V, array, matrix_of, matrix_val, new_dict};
+use super::value::{Flow, V, array, matrix_of, new_dict};
 use super::{Affine, BezPath, Cap, FillRule, Interp, Join, PathEl, Point, Rc, RefCell, parse_num};
 
 impl Interp {
+    /// Dispatch a built-in operator, propagating resource-limit quits to stop the program.
     pub(super) fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         // Every handler leaves the stacks untouched when the operator is outside its family.
-        if self.try_stack_op(n)
+        if self.try_stack_op(n)?
             || self.try_arithmetic_op(n)
-            || self.try_logic_op(n)
+            || self.try_logic_op(n)?
             || self.try_control_op(n, src)?
-            || self.try_dictionary_op(n)
-            || self.try_collection_op(n)
+            || self.try_dictionary_op(n)?
+            || self.try_collection_op(n)?
             || self.try_environment_op(n, src)?
             || self.try_graphics_op(n)?
-            || self.try_coordinate_op(n)
+            || self.try_coordinate_op(n)?
             || self.try_path_op(n)?
             || self.try_paint_op(n)?
         {
@@ -65,8 +66,12 @@ impl Interp {
                 self.b.skip("image");
             }
             _ => {
-                if self.unknown.len() < 32 && !self.unknown.iter().any(|u| u == n) {
-                    self.unknown.push(n.to_string());
+                // Noted for the report by the start of the name, however long the file made it.
+                if self.unknown.len() < 32 {
+                    let name: String = n.chars().take(64).collect();
+                    if !self.unknown.contains(&name) {
+                        self.unknown.push(name);
+                    }
                 }
             }
         }
@@ -124,10 +129,19 @@ impl Interp {
         let p = self.pop();
         match self.pop() {
             V::Dict(d) => {
-                let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                for (k, v) in items {
+                // The entries are snapshotted before the procedure runs (it may change the
+                // dictionary), each key as a literal name of its own the procedure can
+                // keep: charge the key copies and the snapshot's two slots an entry before
+                // taking it.
+                for k in d.borrow().keys() {
+                    self.charge_key(k)?;
+                }
+                let entries = d.borrow().len();
+                self.allocate_items(entries.saturating_mul(2))?;
+                let items: Vec<(V, V)> = d.borrow().iter().map(|(k, v)| (V::Lit(k.as_str().into()), v.clone())).collect();
+                for (key, v) in items {
                     self.spend(1)?;
-                    self.push(V::Lit(k.into()));
+                    self.push(key);
                     self.push(v);
                     match self.exec_obj(p.clone(), src) {
                         Err(Flow::Exit) => break,
@@ -136,6 +150,7 @@ impl Interp {
                 }
             }
             V::Str(s) => {
+                self.allocate(s.borrow().len())?;
                 let bytes = s.borrow().clone();
                 for c in bytes {
                     self.spend(1)?;
@@ -147,7 +162,7 @@ impl Interp {
                 }
             }
             a => {
-                for v in a.items().unwrap_or_default() {
+                for v in self.items(&a)? {
                     self.spend(1)?;
                     self.push(v);
                     match self.exec_obj(p.clone(), src) {
@@ -161,7 +176,7 @@ impl Interp {
         Ok(())
     }
 
-    fn try_stack_op(&mut self, n: &str) -> bool {
+    fn try_stack_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Stack.
             "pop" => {
@@ -181,11 +196,13 @@ impl Interp {
                 match self.pop() {
                     V::Num(k) => {
                         let k = (k.max(0.0) as usize).min(self.st.len());
-                        let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
-                        self.st.extend(tail);
+                        self.stack_room(k)?;
+                        self.allocate_items(k)?;
+                        self.st.extend_from_within(self.st.len() - k..);
                     }
                     V::Array(dst) => {
-                        let s = self.pop().items().unwrap_or_default();
+                        let a = self.pop();
+                        let s = self.items(&a)?;
                         let mut d = dst.borrow_mut();
                         for (i, v) in s.into_iter().enumerate() {
                             if i < d.len() {
@@ -228,6 +245,7 @@ impl Interp {
             }
             "]" => {
                 let k = self.st.iter().rev().position(|v| matches!(v, V::Mark)).unwrap_or(self.st.len());
+                self.allocate_items(k)?;
                 let items = self.st.split_off(self.st.len() - k);
                 self.st.pop();
                 self.push(array(items));
@@ -238,13 +256,13 @@ impl Interp {
                 self.st.pop();
                 let d = new_dict();
                 for kv in items.as_chunks::<2>().0 {
-                    d.borrow_mut().insert(kv[0].key(), kv[1].clone());
+                    self.dict_insert(&d, &kv[0], kv[1].clone())?;
                 }
                 self.push(V::Dict(d));
             }
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     fn try_arithmetic_op(&mut self, n: &str) -> bool {
@@ -301,7 +319,7 @@ impl Interp {
         true
     }
 
-    fn try_logic_op(&mut self, n: &str) -> bool {
+    fn try_logic_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Comparison and logic.
             "eq" | "ne" => {
@@ -313,7 +331,10 @@ impl Interp {
                     (V::Null, V::Null) => true,
                     (V::Array(x), V::Array(y)) => Rc::ptr_eq(x, y),
                     (V::Dict(x), V::Dict(y)) => Rc::ptr_eq(x, y),
-                    (x, y) => !x.key().is_empty() && x.key() == y.key(),
+                    (x, y) => {
+                        let key = self.comparison_key(x)?;
+                        !key.is_empty() && key == self.comparison_key(y)?
+                    }
                 };
                 self.push(V::Bool(eq == (n == "eq")));
             }
@@ -353,9 +374,9 @@ impl Interp {
             "true" => self.push(V::Bool(true)),
             "false" => self.push(V::Bool(false)),
             "null" => self.push(V::Null),
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     fn try_control_op(&mut self, n: &str, src: &mut Src) -> Result<bool, Flow> {
@@ -400,33 +421,39 @@ impl Interp {
         Ok(true)
     }
 
-    fn try_dictionary_op(&mut self, n: &str) -> bool {
+    fn try_dictionary_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Dictionaries.
             "def" => {
                 let v = self.pop();
-                let k = self.pop().key();
-                if let Some(d) = self.dicts.last() {
-                    d.borrow_mut().insert(k, v);
+                let k = self.pop();
+                if let Some(d) = self.dicts.last().cloned() {
+                    self.dict_insert(&d, &k, v)?;
                 }
             }
             "store" => {
                 let v = self.pop();
-                let k = self.pop().key();
-                let d = self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).or(self.dicts.last()).cloned();
-                if let Some(d) = d {
-                    d.borrow_mut().insert(k, v);
+                let k = self.pop();
+                self.charge_scan(&k)?;
+                if let Some(d) = self.defining_dict(&k).or_else(|| self.dicts.last().cloned()) {
+                    self.dict_insert(&d, &k, v)?;
                 }
             }
             "load" => {
-                let k = self.pop().key();
-                let v = self.lookup(&k).unwrap_or(V::Op(k.into()));
+                let k = self.pop();
+                self.charge_scan(&k)?;
+                let v = match k.with_key(|t| self.lookup(t)) {
+                    Some(v) => v,
+                    // The operator keeps the whole name, however long the file made it.
+                    None => V::Op(self.converted_name(&k)?),
+                };
                 self.push(v);
             }
             "undef" => {
-                let k = self.pop().key();
+                let k = self.pop();
                 if let V::Dict(d) = self.pop() {
-                    d.borrow_mut().remove(&k);
+                    self.charge_scan(&k)?;
+                    k.with_key(|t| d.borrow_mut().remove(t));
                 }
             }
             "dict" => {
@@ -454,8 +481,9 @@ impl Interp {
                 self.push(V::Dict(d));
             }
             "where" => {
-                let k = self.pop().key();
-                match self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).cloned() {
+                let k = self.pop();
+                self.charge_scan(&k)?;
+                match self.defining_dict(&k) {
                     Some(d) => {
                         self.push(V::Dict(d));
                         self.push(V::Bool(true));
@@ -464,9 +492,12 @@ impl Interp {
                 }
             }
             "known" => {
-                let k = self.pop().key();
+                let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => d.borrow().contains_key(&k),
+                    V::Dict(d) => {
+                        self.charge_scan(&k)?;
+                        k.with_key(|t| d.borrow().contains_key(t))
+                    }
                     _ => false,
                 };
                 self.push(V::Bool(v));
@@ -474,23 +505,26 @@ impl Interp {
             "countdictstack" => self.push(V::Num(self.dicts.len() as f64)),
             "cleardictstack" => self.dicts.truncate(1),
             "findresource" | "findfont" | "findencoding" => {
-                let category = if n == "findresource" { self.pop().key() } else { String::new() };
-                let key = self.pop().key();
-                match (n, category.as_str()) {
-                    ("findfont", _) | (_, "Font") => {
-                        let f = self.find_font(&key);
-                        self.push(V::Dict(f));
-                    }
-                    ("findencoding", _) | (_, "Encoding") => self.push(encoding_array(&key)),
-                    _ => self.push(V::Dict(new_dict())),
+                let category = if n == "findresource" { self.pop() } else { V::Null };
+                let key = self.pop();
+                self.charge_scan(&category)?;
+                if n == "findfont" || category.with_key(|t| t == "Font") {
+                    let f = self.find_font(&key)?;
+                    self.push(V::Dict(f));
+                } else if n == "findencoding" || category.with_key(|t| t == "Encoding") {
+                    self.charge_scan(&key)?;
+                    key.with_key(|t| self.push_encoding(t))?;
+                } else {
+                    self.push(V::Dict(new_dict()));
                 }
             }
             "defineresource" => {
-                let category = self.pop().key();
+                let category = self.pop();
                 let v = self.pop();
-                let key = self.pop().key();
-                if let (V::Dict(d), "Font") = (&v, category.as_str()) {
-                    self.font_dir.insert(key, d.clone());
+                let key = self.pop();
+                self.charge_scan(&category)?;
+                if matches!(v, V::Dict(_)) && category.with_key(|t| t == "Font") {
+                    self.define_font(&key, v.clone())?;
                 }
                 self.push(v);
             }
@@ -499,20 +533,22 @@ impl Interp {
                 self.pop();
                 self.push(V::Bool(false));
             }
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
-    fn try_collection_op(&mut self, n: &str) -> bool {
+    fn try_collection_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Arrays and strings.
             "array" => {
                 let k = self.popn().clamp(0.0, 1e6) as usize;
+                self.allocate_items(k)?;
                 self.push(array(vec![V::Null; k]));
             }
             "string" => {
                 let k = self.popn().clamp(0.0, 1e7) as usize;
+                self.allocate(k)?;
                 self.push(V::Str(Rc::new(RefCell::new(vec![0; k]))));
             }
             "length" => {
@@ -520,16 +556,21 @@ impl Interp {
                     V::Str(s) => s.borrow().len(),
                     V::Dict(d) => d.borrow().len(),
                     V::Name(s) | V::Lit(s) => s.len(),
-                    v => v.items().map_or(0, |i| i.len()),
+                    v => v.item_count(),
                 };
                 self.push(V::Num(l as f64));
             }
             "get" => {
                 let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => d.borrow().get(&k.key()).cloned().unwrap_or(V::Null),
+                    V::Dict(d) => {
+                        self.charge_scan(&k)?;
+                        k.with_key(|t| d.borrow().get(t).cloned()).unwrap_or(V::Null)
+                    }
                     V::Str(s) => V::Num(s.borrow().get(k.num().unwrap_or(0.0) as usize).copied().unwrap_or(0) as f64),
-                    a => a.items().and_then(|i| i.get(k.num().unwrap_or(0.0) as usize).cloned()).unwrap_or(V::Null),
+                    V::Array(a) => a.borrow().get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    V::Proc(p) => p.get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    _ => V::Null,
                 };
                 self.push(v);
             }
@@ -537,9 +578,7 @@ impl Interp {
                 let v = self.pop();
                 let k = self.pop();
                 match self.pop() {
-                    V::Dict(d) => {
-                        d.borrow_mut().insert(k.key(), v);
-                    }
+                    V::Dict(d) => self.dict_insert(&d, &k, v)?,
                     V::Array(a) => {
                         let i = k.num().unwrap_or(0.0) as usize;
                         if let Some(slot) = a.borrow_mut().get_mut(i) {
@@ -561,13 +600,22 @@ impl Interp {
                 match self.pop() {
                     V::Str(s) => {
                         let b = s.borrow();
-                        let part = b.get(i.min(b.len())..(i + c).min(b.len())).unwrap_or(&[]).to_vec();
+                        let part = b.get(i.min(b.len())..i.saturating_add(c).min(b.len())).unwrap_or(&[]);
+                        self.allocate(part.len())?;
+                        let part = part.to_vec();
                         drop(b);
                         self.push(V::Str(Rc::new(RefCell::new(part))));
                     }
                     a => {
-                        let items = a.items().unwrap_or_default();
-                        let part = items.get(i.min(items.len())..(i + c).min(items.len())).unwrap_or(&[]).to_vec();
+                        let len = a.item_count();
+                        let start = i.min(len);
+                        let end = i.saturating_add(c).min(len);
+                        self.allocate_items(end.saturating_sub(start))?;
+                        let part = match a {
+                            V::Array(a) => a.borrow().get(start..end).unwrap_or(&[]).to_vec(),
+                            V::Proc(p) => p.get(start..end).unwrap_or(&[]).to_vec(),
+                            _ => vec![],
+                        };
                         self.push(array(part));
                     }
                 }
@@ -579,7 +627,9 @@ impl Interp {
             }
             "aload" => {
                 let a = self.pop();
-                for v in a.items().unwrap_or_default() {
+                let len = a.item_count();
+                self.stack_room(len.saturating_add(1))?;
+                for v in self.items(&a)? {
                     self.push(v);
                 }
                 self.push(a);
@@ -588,18 +638,26 @@ impl Interp {
                 let a = self.pop();
                 if let V::Array(arr) = &a {
                     let k = arr.borrow().len().min(self.st.len());
+                    self.allocate_items(k)?;
                     let items = self.st.split_off(self.st.len() - k);
                     *arr.borrow_mut() = items;
                 }
                 self.push(a);
             }
             "cvx" => match self.pop() {
-                V::Array(a) => self.push(V::Proc(Rc::new(a.borrow().clone()))),
+                V::Array(a) => {
+                    self.allocate_items(a.borrow().len())?;
+                    self.push(V::Proc(Rc::new(a.borrow().clone())));
+                }
                 V::Lit(s) => self.push(V::Name(s)),
                 V::Str(s) => {
                     // Executable string: tokenize it as a procedure.
+                    // At most one value per source byte, plus up to four decoded bytes per
+                    // source byte (ASCII85's `z`), and the source snapshot itself. Charge the
+                    // conservative bound before parsing.
+                    self.allocate(s.borrow().len().saturating_mul(std::mem::size_of::<V>() + 5))?;
                     let bytes = s.borrow().clone();
-                    let mut sub = Src { d: &bytes, pos: 0 };
+                    let mut sub = Src::new(&bytes);
                     let mut body = vec![];
                     while let Some(t) = sub.token(0) {
                         body.push(t);
@@ -609,17 +667,22 @@ impl Interp {
                 v => self.push(v),
             },
             "cvlit" => match self.pop() {
-                V::Proc(p) => self.push(array(p.as_ref().clone())),
+                V::Proc(p) => {
+                    self.allocate_items(p.len())?;
+                    self.push(array(p.as_ref().clone()));
+                }
                 V::Name(s) => self.push(V::Lit(s)),
                 v => self.push(v),
             },
             "cvn" => {
-                let k = self.pop().key();
-                self.push(V::Lit(k.into()));
+                let v = self.pop();
+                let k = self.converted_name(&v)?;
+                self.push(V::Lit(k));
             }
             "cvs" => {
                 self.pop();
-                let k = self.pop().key();
+                let v = self.pop();
+                let k: String = self.converted_key(&v)?;
                 self.push(V::Str(Rc::new(RefCell::new(k.into_bytes()))));
             }
             "xcheck" => {
@@ -642,17 +705,20 @@ impl Interp {
                 self.push(V::Name(t.into()));
             }
             "bind" | "readonly" | "executeonly" | "noaccess" => {}
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     fn try_environment_op(&mut self, n: &str, src: &mut Src) -> Result<bool, Flow> {
         match n {
             "languagelevel" => self.push(V::Num(3.0)),
-            "version" | "product" => self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec())))),
+            "version" | "product" => {
+                self.allocate(4)?;
+                self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec()))));
+            }
             "save" => {
-                self.spend(self.gs.path.elements().len())?;
+                self.charge_gstate_copy()?;
                 self.saved.push(self.gs.clone());
                 self.gs.depth = self.b.depth();
                 self.push(V::Null);
@@ -710,6 +776,7 @@ impl Interp {
             }
             "dictstack" => {
                 self.pop();
+                self.allocate_items(self.dicts.len())?;
                 let ds: Vec<V> = self.dicts.iter().map(|d| V::Dict(d.clone())).collect();
                 self.push(array(ds));
             }
@@ -741,16 +808,20 @@ impl Interp {
             // 0 reads to its end-of-data string: skip that data (an embedded XMP packet, which
             // otherwise ran as PostScript). Other filters read what their source reads.
             "filter" => {
-                let name = self.pop().key();
+                let name = self.pop();
                 let mut skipped = false;
-                let source = if name == "SubFileDecode" && !matches!(self.st.last(), Some(V::Dict(_))) {
+                let source = if name.with_key(|t| t == "SubFileDecode") && !matches!(self.st.last(), Some(V::Dict(_))) {
                     let eod = match self.pop() {
-                        V::Str(s) => s.borrow().clone(),
-                        _ => vec![],
+                        V::Str(s) => s,
+                        _ => Rc::default(),
                     };
+                    let eod = eod.borrow();
                     let count = self.popn();
                     let source = self.pop();
-                    if matches!(source, V::File) && count == 0.0 && !eod.is_empty() {
+                    // Searching for the end-of-data string costs its length at each file position,
+                    // so cap it: a real marker (`%%EndBinary` and the like) is short, and the
+                    // search then stays O(MAX_NAME) per byte as `pos` only moves forward.
+                    if matches!(source, V::File) && count == 0.0 && !eod.is_empty() && eod.len() <= MAX_NAME {
                         src.pos = match find_from(src.d, &eod, src.pos) {
                             Some(p) => p.saturating_add(eod.len()),
                             None => src.d.len(),
@@ -781,7 +852,7 @@ impl Interp {
         match n {
             // Graphics state.
             "gsave" => {
-                self.spend(self.gs.path.elements().len())?;
+                self.charge_gstate_copy()?;
                 let mut g = self.gs.clone();
                 g.depth = self.b.depth();
                 self.saved.push(g);
@@ -804,7 +875,8 @@ impl Interp {
             "setmiterlimit" => self.gs.miter = self.popn(),
             "setdash" => {
                 let off = self.popn();
-                let a: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
+                let v = self.pop();
+                let a: Vec<f64> = self.items(&v)?.iter().filter_map(V::num).collect();
                 self.gs.dash = (!a.is_empty() && a.iter().any(|v| *v > 0.0)).then_some((a, off));
             }
             "setflat" | "setstrokeadjust" | "setoverprint" | "setrenderingintent" | "setcolorrendering" | "sethalftone" | "settransfer" => {
@@ -873,17 +945,17 @@ impl Interp {
         Ok(true)
     }
 
-    fn try_coordinate_op(&mut self, n: &str) -> bool {
+    fn try_coordinate_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Coordinates.
-            "matrix" => self.push(matrix_val(Affine::IDENTITY)),
+            "matrix" => self.push_matrix(Affine::IDENTITY)?,
             "identmatrix" | "defaultmatrix" => {
                 self.pop();
-                self.push(matrix_val(Affine::IDENTITY));
+                self.push_matrix(Affine::IDENTITY)?;
             }
             "currentmatrix" => {
                 self.pop();
-                self.push(matrix_val(self.gs.ctm));
+                self.push_matrix(self.gs.ctm)?;
             }
             "setmatrix" => {
                 let m = self.pop();
@@ -900,12 +972,12 @@ impl Interp {
                 let b = self.pop();
                 let a = self.pop();
                 let (a, b) = (matrix_of(&a).unwrap_or(Affine::IDENTITY), matrix_of(&b).unwrap_or(Affine::IDENTITY));
-                self.push(matrix_val(b * a));
+                self.push_matrix(b * a)?;
             }
             "invertmatrix" => {
                 self.pop();
                 let a = self.pop();
-                self.push(matrix_val(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse()));
+                self.push_matrix(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse())?;
             }
             "translate" | "scale" => {
                 let top = self.pop();
@@ -916,7 +988,7 @@ impl Interp {
                 let x = self.popn();
                 let t = if n == "translate" { Affine::translate((x, y)) } else { Affine::scale_non_uniform(x, y) };
                 match m_out {
-                    Some(_) => self.push(matrix_val(t)),
+                    Some(_) => self.push_matrix(t)?,
                     None => self.gs.ctm *= t,
                 }
             }
@@ -925,7 +997,7 @@ impl Interp {
                 match top {
                     V::Array(_) => {
                         let a = self.popn();
-                        self.push(matrix_val(Affine::rotate(a.to_radians())));
+                        self.push_matrix(Affine::rotate(a.to_radians()))?;
                     }
                     v => self.gs.ctm *= Affine::rotate(v.num().unwrap_or(0.0).to_radians()),
                 }
@@ -947,9 +1019,9 @@ impl Interp {
                 self.push(V::Num(p.x));
                 self.push(V::Num(p.y));
             }
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     fn try_path_op(&mut self, n: &str) -> Result<bool, Flow> {
@@ -1026,9 +1098,9 @@ impl Interp {
     fn try_paint_op(&mut self, n: &str) -> Result<bool, Flow> {
         match n {
             // Painting.
-            "fill" => self.paint(Some(FillRule::NonZero), false),
-            "eofill" => self.paint(Some(FillRule::EvenOdd), false),
-            "stroke" => self.paint(None, true),
+            "fill" => self.paint(Some(FillRule::NonZero), false)?,
+            "eofill" => self.paint(Some(FillRule::EvenOdd), false)?,
+            "stroke" => self.paint(None, true)?,
             "clip" | "eoclip" => {
                 let rule = if n == "clip" { FillRule::NonZero } else { FillRule::EvenOdd };
                 self.spend(self.gs.path.elements().len())?;
@@ -1050,7 +1122,7 @@ impl Interp {
                     "rectclip" => self.b.clip(all, FillRule::NonZero),
                     _ => {
                         let saved = std::mem::replace(&mut self.gs.path, all);
-                        self.paint(if n == "rectfill" { Some(FillRule::NonZero) } else { None }, n == "rectstroke");
+                        self.paint(if n == "rectfill" { Some(FillRule::NonZero) } else { None }, n == "rectstroke")?;
                         self.gs.path = saved;
                     }
                 }
