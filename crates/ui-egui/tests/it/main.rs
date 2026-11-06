@@ -9,6 +9,7 @@ mod ui_3d;
 mod ui_accessibility;
 mod ui_accessibility_audit;
 mod ui_agent_audit;
+mod ui_alt_drag_duplicate;
 mod ui_angles;
 mod ui_audio_scrub;
 mod ui_azerty_shortcuts;
