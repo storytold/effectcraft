@@ -851,6 +851,8 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut material_of: HashMap<i64, usize> = HashMap::new();
     let mut texture_of: HashMap<i64, Option<usize>> = HashMap::new();
+    // One pixel budget for every texture of the import.
+    let mut pixels_left = crate::MAX_IMPORT_TEXTURE_PIXELS;
     let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
         if let Some(t) = texture_of.get(&tid) {
             return *t;
@@ -874,7 +876,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
                     resolve(&f).or_else(|| resolve(f.rsplit('/').next()?))
                 })
             })?;
-            let t = Texture::decode(&bytes).ok()?;
+            let t = Texture::decode_within(&bytes, &mut pixels_left).ok()?;
             textures.push(Arc::new(t));
             Some(textures.len() - 1)
         })();
