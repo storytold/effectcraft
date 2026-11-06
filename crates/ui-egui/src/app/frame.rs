@@ -336,6 +336,7 @@ impl EffectcraftApp {
         panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
         panels::crypto_pick::upkeep(self, &ctx);
+        self.full_screen_transitions(&ctx, frame);
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
@@ -392,6 +393,8 @@ impl EffectcraftApp {
         }
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         menus::handle_shortcuts(self, &ctx);
+        self.sync_full_screen(&ctx);
+        let full_screen = self.full_screen_shown();
         if !ctx.input(|i| i.pointer.primary_down()) {
             self.ui.viewer.property_interacting = false;
         }
@@ -407,7 +410,7 @@ impl EffectcraftApp {
         }
         ui.painter().rect_filled(full, 0.0, t.app_bg);
         let mut top = full.min.y;
-        if self.ui.show_menu_bar {
+        if self.ui.show_menu_bar && !full_screen {
             let mb = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), 24.0));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(mb));
             child.painter().rect_filled(mb, 0.0, t.header_bg);
@@ -416,25 +419,35 @@ impl EffectcraftApp {
         }
         let header_h = 40.0;
         let header = egui::Rect::from_min_size(egui::pos2(full.min.x, top), egui::vec2(full.width(), header_h));
-        header::show(self, ui, header);
+        if !full_screen {
+            header::show(self, ui, header);
+        }
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 4.0, header.max.y + 2.0), egui::pos2(full.max.x - 4.0, full.max.y - 4.0));
         crate::color_picker::note_dialog(&ctx, self.dialog);
         // After the shortcuts, menus and header, which can replace the project (New, Open).
         self.ui.timeline.scope_links(self.session.script_ui.project_epoch);
-        self.dock_area(ui, body);
+        if full_screen {
+            self.full_screen_area(ui, full);
+        } else {
+            self.dock_area(ui, body);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         prefs_live::dropped_files(self, ui, full);
         if !tab_had_widget_focus {
             menus::handle_tab_shortcut(self, &ctx);
         }
-        panels::precomp::mini_flowchart(self, &ctx);
+        if !full_screen {
+            panels::precomp::mini_flowchart(self, &ctx);
+        }
         panels::home::capture_thumbnail(self);
         panels::dialogs::show(self, &ctx);
         updates_ui::show(self, &ctx);
         panels::scriptui_view::sync_panels(self);
         panels::scriptui_view::show_windows(self, &ctx);
-        panels::learn::coach(self, &ctx);
-        let lift = panels::media_panels::import_card(self, ui, full);
+        if !full_screen {
+            panels::learn::coach(self, &ctx);
+        }
+        let lift = if full_screen { 0.0 } else { panels::media_panels::import_card(self, ui, full) };
         self.draw_toast(ui, full, lift);
     }
 

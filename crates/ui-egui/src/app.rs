@@ -6,6 +6,7 @@ use super::*;
 mod clipboard;
 mod files;
 mod frame;
+mod full_screen;
 mod gpu;
 mod input;
 mod playback;
@@ -41,6 +42,9 @@ impl EffectcraftApp {
             tokens: Tokens::for_kind(Default::default()),
             auto: Default::default(),
             frames: Frames::default(),
+            full_screen: None,
+            full_screen_window: None,
+            transitions_off_until: None,
             playback: Playback::default(),
             dialog: None,
             hooks: Hooks::default(),

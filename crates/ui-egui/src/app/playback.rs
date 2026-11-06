@@ -18,10 +18,8 @@ impl EffectcraftApp {
         if plan.video {
             self.session.set_time(fr.tick_of(plan.first));
         }
-        let restore_max = preset.full_screen.then_some(self.ui.maximized);
-        let viewer = panels::viewers::active_panel(self);
-        if preset.full_screen && self.ui.dock.is_docked(viewer) {
-            self.ui.maximized = Some(viewer);
+        if preset.full_screen && self.full_screen.is_none() {
+            self.enter_full_screen(true);
         }
         self.playback = Playback {
             playing: true,
@@ -37,7 +35,6 @@ impl EffectcraftApp {
             res: preset.resolution.factor(preset.custom_resolution),
             overlays: preset.include_overlays,
             layer_controls: preset.include_layer_controls,
-            restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_held: false,
             starting: false,
@@ -113,8 +110,8 @@ impl EffectcraftApp {
         if !was {
             return;
         }
-        if let Some(m) = self.playback.restore_max.take() {
-            self.ui.maximized = m;
+        if self.full_screen.is_some_and(|f| f.from_preview) {
+            self.exit_full_screen();
         }
         let Some(pl) = self.playback.plan else { return };
         let move_time = self.session.prefs.preview.get(self.playback.shortcut).move_time_to_preview_time;
@@ -178,15 +175,15 @@ impl EffectcraftApp {
         (!p.video).then_some(self.playback.audio_frame)
     }
 
-    /// The viewer shows grids, guides and safe margins (hidden while a preview without
-    /// Include Overlays plays).
+    /// The viewer shows grids, guides and safe margins (hidden in Full Screen and while a preview
+    /// without Include Overlays plays).
     pub fn overlays_visible(&self) -> bool {
-        !self.playback.playing || self.playback.overlays
+        !self.full_screen_shown() && (!self.playback.playing || self.playback.overlays)
     }
 
     /// The viewer shows layer handles and paths (View ▸ Show Layer Controls, and Include Layer
-    /// Controls while a preview plays).
+    /// Controls while a preview plays; never in Full Screen).
     pub fn layer_controls_visible(&self) -> bool {
-        self.ui.viewer.show_layer_controls && (!self.playback.playing || self.playback.layer_controls)
+        !self.full_screen_shown() && self.ui.viewer.show_layer_controls && (!self.playback.playing || self.playback.layer_controls)
     }
 }

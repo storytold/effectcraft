@@ -99,6 +99,8 @@ thread_local! {
 /// composition it draws `empty_state` and returns.
 /// What the passes of one viewer frame share (see [`show`]).
 struct Vw<'a> {
+    /// Off in Full Screen: the video alone, without the viewer's bars, rulers or overlays.
+    chrome: bool,
     t: Tokens,
     cid: effectcraft_engine::project::ItemId,
     nav: Rect,
@@ -155,6 +157,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().clone();
     VIEW_CAM.with(|c| c.set(app.session.view_camera(cid)));
     let mut v = Vw {
+        chrome: !app.full_screen_shown(),
         t,
         cid,
         nav: Rect::NOTHING,
@@ -214,6 +217,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         media_overrides: &[],
     };
     phase_guides(app, &ectx, &mut v);
+    if !v.chrome {
+        return;
+    }
     phase_layers(app, ui, &ectx, &mut v);
     phase_scene(app, &ectx, &mut v);
     phase_rigs(app, ui, &ectx, &mut v);
@@ -234,6 +240,10 @@ fn phase_nav(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut Vw
     let t = v.t;
     let cid = v.cid;
     let p = v.p.clone();
+    if !v.chrome {
+        v.nav = Rect::from_min_size(rect.min, vec2(rect.width(), 0.0));
+        return;
+    }
     // Navigator bar (open comps as breadcrumbs). After Effects shows a single breadcrumb row:
     // when the Composition Navigator (nested comp flow) is above the viewer, this row is left
     // out.
@@ -277,22 +287,49 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let p = v.p.clone();
     let comp = v.comp;
     // Bottom control bar.
-    let bar_h = 36.0;
+    let bar_h = if v.chrome { 36.0 } else { 0.0 };
     let bar = Rect::from_min_max(pos2(rect.min.x, rect.max.y - bar_h), rect.max);
     // The expression error bar sits above the control bar while expressions fail.
-    let err_h = super::expr_bar::height(app, &ctx, cid);
+    let err_h = if v.chrome { super::expr_bar::height(app, &ctx, cid) } else { 0.0 };
     let err_bar = Rect::from_min_max(pos2(rect.min.x, bar.min.y - err_h), pos2(rect.max.x, bar.min.y));
     let full = Rect::from_min_max(pos2(rect.min.x, nav.max.y), pos2(rect.max.x, err_bar.min.y));
-    let pasteboard = app.ui.viewer.pasteboard.map(|[r, g, b]| Color32::from_rgb(r, g, b)).unwrap_or(t.pasteboard);
+    let pasteboard = if v.chrome { app.ui.viewer.pasteboard.map(|[r, g, b]| Color32::from_rgb(r, g, b)).unwrap_or(t.pasteboard) } else { Color32::BLACK };
     // View ▸ Switch View Layout: extra views (Top / Front / Right) beside the main view, which
     // keeps the overlays and the interaction.
-    let full = locked_pane(app, ui, full, pasteboard);
-    let area = aux_views(app, ui, comp, cid, full, pasteboard);
+    let area = if v.chrome {
+        let full = locked_pane(app, ui, full, pasteboard);
+        aux_views(app, ui, comp, cid, full, pasteboard)
+    } else {
+        full
+    };
     p.rect_filled(area, 0.0, pasteboard);
     // View ▸ Show Rulers takes a strip on the top and left.
     let outer = area;
-    let area = vt::inset(app, area);
+    let area = if v.chrome { vt::inset(app, area) } else { area };
 
+    // Full Screen blows the panel up: the view keeps its place in it (Fit stays Fit, below), all
+    // the way to the screen when the window only gets there after the video first shows. A window
+    // with no area has nothing to scale to: the view and the map wait for one that has.
+    let sized = area.is_finite() && area.is_positive();
+    let shown = app.full_screen_shown();
+    if shown
+        && sized
+        && let Some(last) = ctx.data(|d| d.get_temp::<ViewerMap>(map_id())).map(|m| m.area.size()).filter(|s| *s != area.size())
+        && let Some(f) = app.full_screen.as_mut()
+    {
+        // From the panel's view each time, so a window that gets there in steps ends the same.
+        let panel = *f.panel.get_or_insert(last);
+        let s = (area.width() / panel.x).min(area.height() / panel.y);
+        // The pan follows the zoom actually set, or a clamped zoom would show another part of the comp.
+        let (ratio, zoom) = f.saved_zoom.map_or((s, None), |z| {
+            let scaled = (z * s).clamp(0.01, 32.0);
+            (scaled / z, Some(scaled))
+        });
+        let ratio = if ratio.is_finite() { ratio } else { s };
+        let pan = f.saved_pan.map(|p| p * ratio);
+        app.ui.viewer.zoom = zoom;
+        app.ui.viewer.pan = if pan.iter().all(|p| p.is_finite()) { pan } else { f.saved_pan };
+    }
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
     // Fit up to 100% follows the panel's size like Fit does, and stops at 100%.
@@ -305,7 +342,9 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let ppp = ctx.pixels_per_point();
     let origin = snap_to_pixels(center - vec2(cw * zoom / 2.0, ch * zoom / 2.0), ppp);
     let map = ViewerMap { origin, zoom, comp: [cw, ch], area };
-    ctx.data_mut(|d| d.insert_temp(map_id(), map));
+    if sized {
+        ctx.data_mut(|d| d.insert_temp(map_id(), map));
+    }
     let comp_rect = Rect::from_min_size(origin, vec2(cw * zoom, ch * zoom));
     let painter = p.with_clip_rect(area);
     // Settings ▸ 3D ▸ Extended Viewer: custom 3D views (and Draft 3D) render the visible
@@ -439,7 +478,9 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
         }
     }
 
-    vt::proportional_grid(app, &painter, comp_rect);
+    if v.chrome {
+        vt::proportional_grid(app, &painter, comp_rect);
+    }
 
     // Comp guides (View ▸ Show Guides) and the region of interest.
     if overlays && app.ui.viewer.guides {
@@ -457,7 +498,7 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
             }
         }
     }
-    if let Some([rx, ry, rw, rh]) = app.session.state.region_of_interest {
+    if let Some([rx, ry, rw, rh]) = app.session.state.region_of_interest.filter(|_| v.chrome) {
         let r = Rect::from_min_size(comp_rect.min + vec2(rx as f32 * zoom, ry as f32 * zoom), vec2(rw as f32 * zoom, rh as f32 * zoom));
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Middle);
         // Resize handles: corners and edge midpoints (drag with any tool).

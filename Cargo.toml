@@ -120,6 +120,8 @@ half = "2.7"
 craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", features = ["serde"] }
 # `default_fonts` and `monochrome_emoji_fonts` are explicit: the app's `FontDefinitions::default()`
 # and its `✔`/`▣` chrome glyphs need both, and kittest's own dev-dependencies do not propagate.
+raw-window-handle = "0.6"
+winsafe = { version = "0.0.29", features = ["dwm", "user"] }
 egui = { version = "0.37", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
 eframe = { version = "0.37", default-features = false }
 # Resizable table columns (About ▸ Contributors / Models); no image loaders.

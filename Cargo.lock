@@ -1998,6 +1998,7 @@ dependencies = [
  "kurbo",
  "log",
  "pollster 1.0.1",
+ "raw-window-handle",
  "rayon",
  "serde",
  "serde_json",
@@ -2005,6 +2006,7 @@ dependencies = [
  "tempfile",
  "toml",
  "web-time",
+ "winsafe",
 ]
 
 [[package]]

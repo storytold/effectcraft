@@ -45,6 +45,11 @@ craft-update = { workspace = true }
 pollster = { workspace = true }
 sys-locale = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Full Screen turns off the OS window animations without `unsafe` code here.
+raw-window-handle = { workspace = true }
+winsafe = { workspace = true }
+
 [dev-dependencies]
 # Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them
 # here documents the requirement (kittest's own dev-dependencies do not propagate to consumers).
