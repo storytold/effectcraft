@@ -6,7 +6,7 @@
 //! | ProRes | QuickTime MOV | FilmCraft ProRes 422 Proxy/LT/422/HQ, 10-bit; 4444/4444 XQ 4:4:4 | 4444 (16-bit alpha coding) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |
-//! | OpenEXR sequence | one file per frame | 32-bit float, linear light, premultiplied | yes | — |
+//! | OpenEXR sequence | one file per frame, scan lines | 32-bit float (default) or half float, linear light, premultiplied; compression None, RLE, ZIPS, ZIP (default), PIZ, PXR24, B44, B44A, DWAA, DWAB | yes | — |
 //! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
 //! | WebM | WebM (Matroska) | VP9 profile 0 (`effectcraft-vp9enc`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`effectcraft-av1enc`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
@@ -34,6 +34,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod encode;
+pub mod exr_out;
 mod hevc_av1;
 mod out;
 mod pipeline;
@@ -318,7 +319,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             // Colour is floored at 0 but not capped at 1: a 32 bpc frame's over-range values survive (#339).
             // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
             // decoded with the output space's curve, in the output space's primaries.
-            let dec = effectcraft_render::color::Pipe::of(&cx.project.settings).output_linear();
+            let pipe = effectcraft_render::color::Pipe::of(&cx.project.settings);
+            let dec = pipe.output_linear();
             let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
             let mut data = Vec::with_capacity((w * h * 4) as usize);
             for y in 0..h {
@@ -333,6 +335,8 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                             (c, a)
                         }
                         Channels::Rgb => {
+                            // The background is added to the output-encoded frame as it is, as every other output
+                            // does (`Image::to_rgba8_over`), then decoded with the frame: same colour as a PNG.
                             let k = 1.0 - p[3].clamp(0.0, 1.0);
                             (lin3([0, 1, 2].map(|i| p[i] + comp.background[i] * k)), 1.0)
                         }
@@ -340,16 +344,12 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                     data.extend_from_slice(&[c[0], c[1], c[2], a]);
                 }
             }
-            // Scan lines with ZIP like `comp.saveFrameAsExr`: `image`'s encoder writes 64×64 RLE tiles,
-            // which FilmCraft and other scan-line readers refuse (#2805).
-            use exr::prelude::{Encoding, Layer, LayerAttributes, SpecificChannels, Vec2, WritableImage};
-            let row = w as usize * 4;
-            let pixels = SpecificChannels::rgba(|p: Vec2<usize>| {
-                let o = p.y() * row + p.x() * 4;
-                (data[o], data[o + 1], data[o + 2], data[o + 3])
-            });
-            let layer = Layer::new((w as usize, h as usize), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, pixels);
-            exr::image::Image::from_layer(layer).write().to_buffered(file).map_err(|e| ExportError::Encode(e.to_string()))
+            // Scan lines with the module's compression and sample type (`exr_out`), naming the primaries and
+            // white the values are in (the output space's), for Nuke, AE and Blender.
+            let om = cx.output;
+            let chroma = Some(pipe.output_linear_space().exr_chromaticities());
+            exr_out::write_rgba(file, &data, (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma)
+                .map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
             let px = cx.pixels(img, comp, if channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb }, w, h);

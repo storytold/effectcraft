@@ -1136,6 +1136,175 @@ fn timing_markers_and_expressions_still_change_the_frames() {
     assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }
 
+const SRGB: effectcraft_engine::viewer::FrameEncoding =
+    effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Srgb, hdr: effectcraft_engine::project::HdrMode::Clip };
+
+/// Half floats keep over-range values (the point of #2797); NaN becomes 0 and values past the
+/// half-float range ±65504.
+#[test]
+fn half_float_frames_keep_over_range_values() {
+    let mut img = effectcraft_engine::render::Image::new(3, 1);
+    img.data.copy_from_slice(&[[4.0, 16.0, 1.825, 1.0], [70_000.0, f32::NAN, -f32::INFINITY, 0.5], [0.1, -0.25, 1000.0, f32::NAN]]);
+    let f = F16Frame::from_image(&img, SRGB);
+    assert_eq!(f.pixel(0), Some([4.0, 16.0, half::f16::from_f32(1.825).to_f32(), 1.0]));
+    assert_eq!(f.pixel(1), Some([65504.0, 0.0, -65504.0, 0.5]));
+    let p = f.pixel(2).unwrap();
+    assert_eq!((p[2], p[3]), (1000.0, 0.0));
+    assert!((p[0] - 0.1).abs() < 1e-4 && (p[1] + 0.25).abs() < 1e-4);
+    assert_eq!(f.bytes(), 3 * F16_PIXEL_BYTES);
+}
+
+/// Oversized half-float frames take the CPU pass: display conversion, then averaging down. Linear
+/// 8 and 0 alternating in Clip mode at -2 EV is white and black (byte 128 averaged); averaging the
+/// scene values first would give 4.0 x 0.25 = 1.0, byte 255.
+#[test]
+fn oversized_half_float_frames_convert_before_averaging() {
+    use crate::display_gpu::Source;
+    use effectcraft_engine::viewer::{Channel, DisplayPass};
+    let mut img = effectcraft_engine::render::Image::new(2, 1);
+    img.data.copy_from_slice(&[[8.0, 8.0, 8.0, 1.0], [0.0, 0.0, 0.0, 1.0]]);
+    let lin =
+        effectcraft_engine::viewer::FrameEncoding { curve: effectcraft_engine::viewer::PassCurve::Linear, hdr: effectcraft_engine::project::HdrMode::Clip };
+    let f = Arc::new(F16Frame::from_image(&img, lin));
+    let pass = DisplayPass::new(Channel::Rgb, false, -2.0, lin, None);
+    let src = Source::F16(f.clone());
+    assert!(src.needs_cpu_pass(1) && !src.needs_cpu_pass(2));
+    assert!(!Source::Rgba8(Arc::new(egui::ColorImage::new([2, 1], vec![egui::Color32::WHITE; 2]))).needs_cpu_pass(1), "8-bit frames are averaged on the GPU");
+    let out = fit_texture_by(f.to_color_image(&pass), 1, 1);
+    assert_eq!(out.size, [1, 1]);
+    assert_eq!(out.pixels[0].to_array(), [128, 128, 128, 255]);
+}
+
+/// 65 536 colours spread over 0..1 (each channel on its own 16-bit grid), premultiplied by
+/// `alpha`: the 8-bit parity input.
+pub(crate) fn parity_frame(alpha: f32) -> effectcraft_engine::render::Image {
+    let mut img = effectcraft_engine::render::Image::new(256, 256);
+    for (i, p) in img.data.iter_mut().enumerate() {
+        let v = |k: usize| ((i * k) % 65_536) as f32 / 65_535.0;
+        *p = [v(1) * alpha, v(7_919) * alpha, v(104_729) * alpha, alpha];
+    }
+    img
+}
+
+/// At 0 EV the half-float viewer shows the bytes of the old 8-bit frames for values in 0..1: at
+/// least 97.9 % of the colour bytes equal (alpha all), never more than 1 apart. The rest is the
+/// half-float storage.
+#[test]
+fn half_float_frames_show_what_8_bit_frames_showed() {
+    use effectcraft_engine::viewer::{Channel, DisplayPass};
+    let pass = DisplayPass::new(Channel::Rgb, false, 0.0, SRGB, None);
+    for alpha in [1.0f32, 0.5] {
+        let img = parity_frame(alpha);
+        let f = F16Frame::from_image(&img, SRGB);
+        let new = f.to_color_image(&pass);
+        let old = to_color_image(&img);
+        let (mut same, mut total, mut max) = (0, 0, 0);
+        for (n, o) in new.pixels.iter().zip(&old.pixels) {
+            let (n, o) = (n.to_array(), o.to_array());
+            assert_eq!(n[3], o[3]);
+            for c in 0..3 {
+                total += 1;
+                same += (n[c] == o[c]) as usize;
+                max = max.max((n[c] as i32 - o[c] as i32).abs());
+            }
+        }
+        let share = same as f64 / total as f64;
+        eprintln!("alpha {alpha}: {:.2} % of colour bytes equal, max {max}", share * 100.0);
+        assert!(share >= 0.979 && max <= 1, "alpha {alpha}: {share} equal, max {max}");
+    }
+}
+
+/// The RAM preview counts half-float frames at 8 bytes a pixel: in a budget of three 8-bit
+/// frames, a half-float frame of the same size takes the room of two.
+#[test]
+fn half_float_frames_count_twice_the_bytes() {
+    let f16 = || FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(2, 2), SRGB)));
+    assert_eq!(f16().bytes(), 32);
+    assert_eq!(img().bytes(), 16);
+    let frames = Frames::default();
+    frames.set_budget(48);
+    for i in 0..3 {
+        frames.cache.lock().unwrap().insert(key(1, i, 0), img());
+    }
+    assert_eq!(frames.cached_frames(&key(1, 0, 0)).len(), 3);
+    frames.cache.lock().unwrap().insert(key(2, 0, 0), f16());
+    let c = frames.cache.lock().unwrap();
+    assert!(c.bytes <= 48, "{}", c.bytes);
+    assert_eq!(c.map.len(), 2, "the half-float frame took two 8-bit frames' room");
+}
+
+/// 32 bpc viewer frames go to the disk cache as half floats and come back from it bit for bit
+/// in a new session (over-range values kept); the timeline's disk bar sees them.
+#[test]
+fn half_float_frames_survive_in_the_disk_cache() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    // Removed on drop, a failed assertion included.
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"width": 16, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb", "hdr": "compand"})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layers": [lid], "effect": "Exposure"})).unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
+    let src = |disk: &Arc<DiskCache>| RenderSource {
+        project: s.project.clone(),
+        footage: s.footage.clone(),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let opts = RenderOpts { skip_hdr_step: true, ..Default::default() };
+    let shown = |f: &Frames, disk: &Arc<DiskCache>| {
+        let key = FrameKey {
+            revision: s.revision,
+            content: f.content_of(&s.project, s.revision, cid),
+            comp: cid.0,
+            frame: 0,
+            scale: 1000,
+            view: 0,
+            opts: opts_hash(&opts),
+        };
+        f.request_urgent(&src(disk), key, cid, Tick::ZERO, opts);
+        wait_for_renders(f);
+        match f.get(&key) {
+            Some(FrameImage::CpuF16(img)) => (key, img),
+            _ => panic!("a half-float frame"),
+        }
+    };
+    let first = Frames::default();
+    let (key, rendered) = shown(&first, &disk);
+    assert!(rendered.pixel(0).unwrap()[0] > 1.0, "over range, without the HDR step");
+    // The worker releases the frame before it queues the disk write: wait for the entry, not
+    // only for the queue to drain.
+    for _ in 0..400 {
+        disk.flush();
+        if disk.stats().entries >= 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(disk.stats().entries, 1, "written as a frame entry");
+    // The timeline's blue bar: on disk, not in this (new) RAM cache.
+    let again = Frames::default();
+    let key2 = FrameKey { content: again.content_of(&s.project, s.revision, cid), ..key };
+    for _ in 0..200 {
+        if !again.disk_frames(&src(&disk), &key2, 0..1, &opts).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(again.disk_frames(&src(&disk), &key2, 0..1, &opts), vec![0]);
+    let hits = disk.stats().hits;
+    let (_, read) = shown(&again, &disk);
+    assert_eq!(disk.stats().hits, hits + 1, "read from the disk cache");
+    assert_eq!(read.bits(), rendered.bits());
+    assert_eq!(read.encoding, rendered.encoding);
+}
+
 /// The oracle for [`Comp::changed_spans`]: every frame an edit keeps renders the same in the edited
 /// project. Moves, trims, splits, deletes and duplicates of moving clips, under adjustment
 /// layers, with seeded noise, motion blur, mattes, parents and effects that read other times.
@@ -1415,9 +1584,19 @@ fn disk_keys_survive_save_and_reopen() {
 /// Roto Brush model stamp in its opts; the disk keys are the worker's, without it.
 #[test]
 fn ram_frames_missing_on_disk_are_written() {
+    ram_frames_missing_on_disk_are_written_as(false);
+}
+
+/// Same for a 32 bpc project, whose RAM frames are half-float.
+#[test]
+fn half_float_ram_frames_missing_on_disk_are_written() {
+    ram_frames_missing_on_disk_are_written_as(true);
+}
+
+fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     use effectcraft_engine::Session;
     use serde_json::json;
-    let dir = std::env::temp_dir().join(format!("ec-persist-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ec-persist-{}-{half}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let disk = DiskCache::open(&dir, 1 << 30).unwrap();
     let mut s = Session::default();
@@ -1436,7 +1615,8 @@ fn ram_frames_missing_on_disk_are_written() {
     let series =
         FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
     for fr in 0..10 {
-        insert(&f, FrameKey { frame: fr, ..series });
+        let frame = if half { FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(8, 8), SRGB))) } else { img() };
+        f.cache.lock().unwrap().insert(FrameKey { frame: fr, ..series }, frame);
     }
     let on_disk = |fr: i64| {
         disk.contains(
