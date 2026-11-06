@@ -55,29 +55,42 @@ fn overbrights(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Soft-knee, hue-preserving compression of the brightest channel into [0, 1).
-fn hdr_compress_value(m: f32, knee: f32) -> f32 {
-    if m <= knee {
-        return m;
-    }
-    let w = 1.0 - knee;
-    knee + w * (m - knee) / ((m - knee) + w)
+/// Luma weights HDR Highlight Compression divides by (measured against After Effects 2026).
+const HDR_LUMA: [f32; 3] = [0.30, 0.59, 0.11];
+/// Exponent of the domain the Amount blend happens in (out^0.4 is mixed linearly).
+const HDR_BLEND_GAMMA: f32 = 0.4;
+
+/// `v^e` with the sign of `v` kept (negative input stays negative, as on the GPU).
+#[inline]
+fn hdr_spow(v: f32, e: f32) -> f32 {
+    v.signum() * v.abs().powf(e)
 }
 
+/// One straight-colour pixel through HDR Highlight Compression at blend `t` (Amount / 100, > 0).
+///
+/// Measured behaviour (16-bit renders of a 0–4 HDR ramp and coloured patches at Amount 100,
+/// 90, 84, 75, 50 and 25): every channel is divided by `1 + Y` (`Y` = 0.30 R + 0.59 G + 0.11 B, so a grey
+/// value `x` lands on `x / (1 + x)`), clipped at 1, then mixed with the input as `x^0.4` values.
+fn hdr_compress_pixel(c: [f32; 3], t: f32) -> [f32; 3] {
+    let y = (HDR_LUMA[0] * c[0] + HDR_LUMA[1] * c[1] + HDR_LUMA[2] * c[2]).max(0.0);
+    let s = 1.0 / (1.0 + y);
+    let g = HDR_BLEND_GAMMA;
+    c.map(|x| {
+        let comp = (x * s).min(1.0);
+        let mixed = (1.0 - t) * hdr_spow(x, g) + t * hdr_spow(comp, g);
+        let o = hdr_spow(mixed, 1.0 / g);
+        if o.is_finite() { o } else { x }
+    })
+}
+
+/// HDR Highlight Compression: every straight-colour pixel through [`hdr_compress_pixel`] at
+/// Amount / 100; Amount 0 or NaN returns the layer unchanged.
 fn hdr_compression(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let t = (ctx.params.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
-    if t <= 0.0 {
+    if t <= 0.0 || !t.is_finite() {
         return b;
     }
-    let knee = 1.0 - 0.5 * t;
-    b.img.map_straight(|c| {
-        let m = c[0].max(c[1]).max(c[2]);
-        if m <= knee {
-            return c;
-        }
-        let k = hdr_compress_value(m, knee) / m;
-        c.map(|v| v * k)
-    });
+    b.img.map_straight(|c| hdr_compress_pixel(c, t));
     b
 }
 
@@ -575,10 +588,68 @@ mod tests {
         let mut img = Image::new(2, 1);
         img.set(0, 0, [0.2, 0.3, 0.4, 1.0]);
         img.set(1, 0, [4.0, 2.0, 1.0, 1.0]);
+        let out = run("ec.utility.hdrcompression", &[("amount", num(0.0))], img.clone());
+        assert_eq!(out.img.data, img.data, "Amount 0 leaves the image alone");
         let out = run("ec.utility.hdrcompression", &[], img);
-        assert_eq!(out.img.data[0], [0.2, 0.3, 0.4, 1.0]);
-        let o = out.img.data[1];
-        assert!(o[0] <= 1.0 && o[0] > 0.5 && (o[0] / o[1] - 2.0).abs() < 1e-4, "{o:?}");
+        for o in &out.img.data {
+            assert!(o.iter().all(|v| v.is_finite() && *v <= 1.0), "{o:?}");
+        }
+        // Negative and huge input stays finite.
+        let mut img = Image::new(2, 1);
+        img.set(0, 0, [-0.5, 0.2, 3.0, 1.0]);
+        img.set(1, 0, [1e30, -1e30, 0.0, 1.0]);
+        let out = run("ec.utility.hdrcompression", &[("amount", num(50.0))], img);
+        assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "{:?}", out.img.data);
+    }
+
+    /// A linear value up to 1 as a code of After Effects' 16-bit PNG renders: the sRGB curve × 6553.5.
+    fn png_code(x: f32) -> f32 {
+        (if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }) * 6553.5
+    }
+
+    /// Our own measurements of After Effects 2026 (32 bpc, no working space; 16-bit PNG renders
+    /// decoded back to linear): input pixel, then the output at Amount 100, 90, 84, 75, 50 and 25.
+    #[test]
+    fn hdr_compression_matches_measured_reference() {
+        const AMOUNTS: [f64; 6] = [100.0, 90.0, 84.0, 75.0, 50.0, 25.0];
+        #[rustfmt::skip]
+        let table: [([f32; 3], [[f32; 3]; 6]); 9] = [
+            ([0.18005371; 3], [[0.1524; 3], [0.1550; 3], [0.1566; 3], [0.1590; 3], [0.1660; 3], [0.1729; 3]]),
+            ([0.49365234; 3], [[0.3302; 3], [0.3450; 3], [0.3540; 3], [0.3674; 3], [0.4073; 3], [0.4492; 3]]),
+            ([1.0058594; 3], [[0.5014; 3], [0.5427; 3], [0.5683; 3], [0.6085; 3], [0.7280; 3], [0.8602; 3]]),
+            ([2.0058594; 3], [[0.6673; 3], [0.7637; 3], [0.8256; 3], [0.9232; 3], [1.2292; 3], [1.5892; 3]]),
+            ([2.9941406; 3], [[0.7496; 3], [0.8962; 3], [0.9922; 3], [1.1465; 3], [1.6475; 3], [2.2604; 3]]),
+            ([3.9941406; 3], [[0.7998; 3], [0.9929; 3], [1.1213; 3], [1.3303; 3], [2.0312; 3], [2.9141; 3]]),
+            ([0.7998047, 0.099975586, 0.099975586], [
+                [0.6101, 0.0762, 0.0762], [0.6279, 0.0784, 0.0784], [0.6386, 0.0798, 0.0798],
+                [0.6547, 0.0817, 0.0817], [0.7012, 0.0877, 0.0877], [0.7496, 0.0937, 0.0937],
+            ]),
+            ([0.099975586, 0.7001953, 0.19995117], [
+                [0.0681, 0.4776, 0.1363], [0.0711, 0.4976, 0.1420], [0.0727, 0.5097, 0.1456],
+                [0.0754, 0.5287, 0.1508], [0.0832, 0.5829, 0.1662], [0.0912, 0.6397, 0.1825],
+            ]),
+            ([0.30004883, 0.5, 2.5], [
+                [0.1807, 0.3012, 0.9998], [0.1911, 0.3184, 1.1147], [0.1972, 0.3288, 1.1860],
+                [0.2071, 0.3453, 1.2995], [0.2359, 0.3931, 1.6484], [0.2669, 0.4444, 2.0482],
+            ]),
+        ];
+        let mut img = Image::new(table.len() as u32, 1);
+        for (x, (c, _)) in table.iter().enumerate() {
+            img.set(x as u32, 0, [c[0], c[1], c[2], 1.0]);
+        }
+        for (i, amount) in AMOUNTS.into_iter().enumerate() {
+            let out = run("ec.utility.hdrcompression", &[("amount", num(amount))], img.clone());
+            for (x, (input, want)) in table.iter().enumerate() {
+                let got = out.img.data[x];
+                for c in 0..3 {
+                    let w = want[i][c];
+                    // Up to 1: within 20 codes of the 16-bit PNG (the sRGB curve × 6553.5) the
+                    // renders were read from. Above 1 the PNG's lookup table is not known: 0.1 %.
+                    let ok = if w <= 1.0 { (png_code(got[c]) - png_code(w)).abs() <= 20.0 } else { (got[c] - w).abs() <= w * 1e-3 };
+                    assert!(ok, "amount {amount}, input {input:?}, channel {c}: {} vs AE {w}", got[c]);
+                }
+            }
+        }
     }
 
     #[test]

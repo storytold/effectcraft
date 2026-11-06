@@ -684,3 +684,300 @@ fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
         assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
     }
 }
+
+fn mask_reveal_app() -> (EffectcraftApp, u64) {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 36})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate"})).unwrap()["layer"].as_u64().unwrap();
+    s.drain_events();
+    (EffectcraftApp::new(s), layer)
+}
+
+fn mask_reveal_add(app: &mut EffectcraftApp) -> u64 {
+    let mask = app.session.execute("layer.addMask", json!({})).unwrap()["mask"].as_u64().unwrap();
+    app.handle_events(&egui::Context::default());
+    mask
+}
+
+/// Whole-mask rows and shortcut-selected properties must coexist without rendering controls twice.
+#[test]
+fn mask_reveal_opens_controls_and_preserves_other_properties_without_duplicates() {
+    for kinds in [vec![], vec!["position"], vec!["feather"], vec!["masks"], vec!["masks", "feather"]] {
+        let (mut app, layer) = mask_reveal_app();
+        app.ui.timeline.reveal = vec!["rotation".into()];
+        if !kinds.is_empty() {
+            app.ui.timeline.layer_reveal.insert(layer, kinds.iter().map(|s| s.to_string()).collect());
+        }
+        mask_reveal_add(&mut app);
+        mask_reveal_add(&mut app);
+        let names = labels(&app);
+        for name in [">Mask 1", ">Mask 2"] {
+            assert_eq!(names.iter().filter(|r| r.trim() == name).count(), 1, "{kinds:?}: {names:?}");
+        }
+        assert_eq!(names.iter().filter(|r| r.trim() == "Mask Feather").count(), 2, "{names:?}");
+        assert_eq!(names.iter().filter(|r| r.trim() == "Mask Path").count(), 2, "{names:?}");
+        if kinds.contains(&"position") {
+            assert_eq!(names.iter().filter(|r| r.trim() == "Position").count(), 1, "{names:?}");
+        }
+        assert_eq!(app.ui.timeline.reveal, ["rotation"]);
+    }
+}
+
+/// Revealing controls is a presentation change; explicit search and the active drawing selection retain authority.
+#[test]
+fn mask_reveal_preserves_search_selection_focus_document_and_revision() {
+    let (mut app, layer) = mask_reveal_app();
+    app.ui.timeline.search = "position".into();
+    app.ui.timeline.open_layers.insert(999);
+    app.ui.timeline.layer_reveal.insert(999, vec!["scale".into()]);
+    app.ui.focused = crate::dock::PanelKind::Composition;
+    let selected = app.session.state.selected_layers.clone();
+    let mask = app.session.execute("mask.new", json!({"vertices": [[2, 3]]})).unwrap()["mask"].as_u64().unwrap();
+    let vertices = app.session.state.selected_vertices.clone();
+    let before = app.session.project.to_json();
+    let revision = app.session.revision;
+    app.handle_events(&egui::Context::default());
+    assert_eq!(app.session.project.to_json(), before);
+    assert_eq!(app.session.revision, revision);
+    assert_eq!(app.session.state.selected_layers, selected);
+    assert_eq!(app.session.state.selected_vertices, vertices);
+    assert_eq!(app.ui.focused, crate::dock::PanelKind::Composition);
+    assert_eq!(app.ui.timeline.search, "position");
+    assert_eq!(app.ui.timeline.layer_reveal.get(&999).unwrap(), &["scale"]);
+    assert!(app.ui.timeline.open_layers.contains(&999));
+    assert!(!labels(&app).iter().any(|r| r.trim() == ">Mask 1"));
+    app.ui.timeline.search.clear();
+    assert!(labels(&app).iter().any(|r| r.trim() == ">Mask 1"));
+    assert!(app.ui.timeline.open_groups.contains(&mask));
+    assert!(app.ui.timeline.open_layers.contains(&layer));
+}
+
+/// Queued events can outlive their target or project, so stale delivery must leave Timeline presentation untouched.
+#[test]
+fn mask_reveal_ignores_undone_deleted_inactive_and_replaced_project_events() {
+    #[derive(Clone, Copy, Debug)]
+    enum Stale {
+        Undo,
+        Delete,
+        Inactive,
+        Replace,
+    }
+    for stale in [Stale::Undo, Stale::Delete, Stale::Inactive, Stale::Replace] {
+        let (mut app, layer) = mask_reveal_app();
+        let mask = app.session.execute("layer.addMask", json!({})).unwrap()["mask"].as_u64().unwrap();
+        match stale {
+            Stale::Undo => {
+                assert!(app.session.undo());
+            }
+            Stale::Delete => {
+                app.session.execute("mask.remove", json!({"mask": mask})).unwrap();
+            }
+            Stale::Inactive => {
+                app.session.execute("comp.new", json!({"name": "Other"})).unwrap();
+            }
+            Stale::Replace => {
+                let project = (*app.session.project).clone();
+                let comp = app.session.active_comp_id().unwrap();
+                app.session.replace_project(project, None);
+                app.session.execute("comp.open", json!({"comp": comp.0})).unwrap();
+            }
+        }
+        let before = serde_json::to_value(&app.ui.timeline).unwrap();
+        app.handle_events(&egui::Context::default());
+        // Opening a composition can update its zoom, but must not reveal the stale mask.
+        assert!(app.ui.timeline.open_layers.is_empty(), "{stale:?}");
+        assert!(app.ui.timeline.open_groups.is_empty(), "{stale:?}");
+        assert!(app.ui.timeline.layer_reveal.is_empty(), "{stale:?}");
+        if !matches!(stale, Stale::Inactive | Stale::Replace) {
+            assert_eq!(serde_json::to_value(&app.ui.timeline).unwrap(), before);
+        }
+        assert!(!app.ui.timeline.open_layers.contains(&layer));
+    }
+}
+
+/// Adding an unkeyed mask must retain the visible Position key and restore its controls on redo.
+#[test]
+fn mask_reveal_undo_redo_restores_visible_controls_and_keeps_keyframe_scope() {
+    let (mut app, layer) = mask_reveal_app();
+    app.session.execute("prop.toggleAnimation", json!({"path": "transform/position"})).unwrap();
+    app.ui.timeline.layer_reveal.insert(layer, vec!["position".into()]);
+    mask_reveal_add(&mut app);
+    let visible = visible_props(&app, app.session.active_comp().unwrap());
+    assert_eq!(app.session.execute("keys.selectAll", json!({"visible": visible})).unwrap(), json!(1));
+    assert!(app.session.undo());
+    app.handle_events(&egui::Context::default());
+    assert!(!labels(&app).iter().any(|r| r.trim() == ">Mask 1"));
+    assert!(app.session.redo());
+    app.handle_events(&egui::Context::default());
+    assert!(labels(&app).iter().any(|r| r.trim() == ">Mask 1"));
+    assert!(labels(&app).iter().any(|r| r.trim() == "Position"));
+}
+
+/// Repeated delivery must converge to the same presentation, while malformed external arguments fail without mutation.
+#[test]
+fn mask_reveal_validates_arguments_and_repeated_delivery_is_idempotent() {
+    let (mut app, layer) = mask_reveal_app();
+    let mask = mask_reveal_add(&mut app);
+    let comp = app.session.active_comp_id().unwrap().0;
+    let epoch = app.session.script_ui.project_epoch;
+    let params = json!({"comp": comp, "layer": layer, "mask": mask, "projectEpoch": epoch});
+    let ctx = egui::Context::default();
+    let before = serde_json::to_value(&app.ui.timeline).unwrap();
+    for _ in 0..2 {
+        assert_eq!(crate::menus::frontend(&mut app, &ctx, "timeline.revealMask", params.clone()).unwrap(), json!({"revealed": true}));
+        assert_eq!(serde_json::to_value(&app.ui.timeline).unwrap(), before);
+    }
+    for bad in [json!({}), json!({"comp": -1, "layer": layer, "mask": mask, "projectEpoch": epoch})] {
+        assert!(crate::menus::frontend(&mut app, &ctx, "timeline.revealMask", bad).is_err());
+        assert_eq!(serde_json::to_value(&app.ui.timeline).unwrap(), before);
+    }
+}
+
+/// An ID reused by paste or another history branch must not inherit the removed mask's pending reveal.
+#[test]
+fn mask_reveal_does_not_follow_reused_ids_after_undo_or_history_jump() {
+    for route in ["undo", "ancestor", "branch"] {
+        let (mut app, layer) = mask_reveal_app();
+        let source = mask_reveal_add(&mut app);
+        app.ui.timeline = Default::default();
+        app.session.state.selected_props = vec![(LayerId(layer), source)];
+        app.session.execute("edit.copy", json!({})).unwrap();
+        assert_eq!(app.session.state.mask_clipboard.len(), 1);
+        let ancestor = app.session.history_tree().into_iter().find(|n| n.current).unwrap().id;
+        let branch = if route == "branch" {
+            app.session.execute("edit.paste", json!({"layers": [layer]})).unwrap();
+            let id = app.session.history_tree().into_iter().find(|n| n.current).unwrap().id;
+            assert!(app.session.undo());
+            Some(id)
+        } else {
+            None
+        };
+        // Folder allocation aligns the creation UID with paste's increment-first allocator.
+        app.session.execute("project.newFolder", json!({})).unwrap();
+        let removed = app.session.execute("layer.addMask", json!({"layer": layer})).unwrap()["mask"].as_u64().unwrap();
+        app.session.events.push(effectcraft_engine::Event::Toast { message: "keep unrelated events".into(), error: false });
+        if route == "undo" {
+            assert!(app.session.undo());
+            assert!(app.session.undo());
+        } else {
+            assert!(app.session.goto_history(branch.as_deref().unwrap_or(&ancestor)));
+        }
+        let replacement = if route == "branch" {
+            app.session.active_comp().unwrap().layer(LayerId(layer)).unwrap().masks().unwrap().groups().last().unwrap().uid
+        } else {
+            app.session.execute("edit.paste", json!({"layers": [layer]})).unwrap()["masks"][0].as_u64().unwrap()
+        };
+        assert_eq!(removed, replacement, "this regression must actually reuse the UID");
+        app.handle_events(&egui::Context::default());
+        assert!(app.ui.timeline.open_layers.is_empty(), "{route}");
+        assert!(app.ui.timeline.open_groups.is_empty(), "{route}");
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("keep unrelated events"));
+    }
+}
+
+/// History sanitation must retain notifications for masks that survive restoration, even after later edits.
+#[test]
+fn mask_reveal_keeps_valid_queued_creations_after_an_unrelated_undo() {
+    let (mut app, layer) = mask_reveal_app();
+    for _ in 0..2 {
+        app.session.execute("layer.addMask", json!({})).unwrap();
+    }
+    app.session.execute("prop.set", json!({"path": "transform/opacity", "value": 50})).unwrap();
+    assert!(app.session.undo());
+    app.handle_events(&egui::Context::default());
+    let names = labels(&app);
+    assert!(app.ui.timeline.open_layers.contains(&layer));
+    for name in [">Mask 1", ">Mask 2"] {
+        assert_eq!(names.iter().filter(|r| r.trim() == name).count(), 1, "{names:?}");
+    }
+}
+
+/// Collapsing a whole-mask row must not leave duplicate flat properties visible through another reveal filter.
+#[test]
+fn mask_reveal_collapsing_a_mask_hides_its_children_under_mixed_filters() {
+    let (mut app, layer) = mask_reveal_app();
+    app.ui.timeline.layer_reveal.insert(layer, vec!["masks".into(), "feather".into()]);
+    let mask = mask_reveal_add(&mut app);
+    app.ui.timeline.open_groups.remove(&mask);
+    let names = labels(&app);
+    assert_eq!(names.iter().filter(|r| r.trim() == ">Mask 1").count(), 1);
+    assert!(!names.iter().any(|r| r.trim() == "Mask Feather"));
+    app.ui.timeline.open_groups.insert(mask);
+    assert_eq!(labels(&app).iter().filter(|r| r.trim() == "Mask Feather").count(), 1);
+}
+
+/// Every icon-only column header says what it is on hover, over the icon it explains, and every
+/// layer switch under one shows the same text.
+#[test]
+fn every_icon_only_header_has_a_hover_text() {
+    let all = crate::state::TimelineState { columns: COLUMNS.iter().map(|c| c.0.to_string()).collect(), show_modes: true, ..Default::default() };
+    let cw = cols(0.0, 2000.0, Vis::of(&all));
+    let ch = Rect::from_min_max(pos2(0.0, 0.0), pos2(2000.0, 20.0));
+    let rects = header_tip_rects(&cw, ch);
+    assert_eq!(rects.len(), HEADER_TIPS.len(), "every header icon is placed with every column shown");
+    for (col, key, r) in &rects {
+        assert_eq!(column_at(&cw, r.center().x), Some(*col), "{key} sits in its column");
+        let (_, _, name, tip) = HEADER_TIPS.iter().find(|t| t.1 == *key).unwrap();
+        assert!(tip.starts_with(&format!("{name}:")) || *key == "num", "{key}: {tip}");
+    }
+    for (i, (_, a, ra)) in rects.iter().enumerate() {
+        for (_, b, rb) in &rects[i + 1..] {
+            assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() < 1.0, "{a} and {b} overlap");
+        }
+    }
+    // The icons the header draws over the A/V and switch columns, left to right.
+    let av: Vec<&str> = rects.iter().filter(|r| r.0 == "av").map(|r| r.1).collect();
+    assert_eq!(av, ["video", "audio", "solo", "lock"]);
+    let sw: Vec<&str> = rects.iter().filter(|r| r.0 == "switches").map(|r| r.1).collect();
+    assert_eq!(sw, ["shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"]);
+    for name in av.iter().chain(&sw).chain(&["preserveTransparency"]) {
+        assert!(switch_tip(name).is_some(), "the {name} switch has a hover text");
+    }
+    // A hidden column has no hover targets.
+    let none = crate::state::TimelineState { columns: Default::default(), show_modes: false, ..Default::default() };
+    assert!(header_tip_rects(&cols(0.0, 800.0, Vis::of(&none)), ch).is_empty());
+}
+
+/// One box spans the outline and the time graph (#3056): rows it crosses are selected on both
+/// sides of the boundary, and only keys in the time graph count (the part over the outline is cut).
+#[test]
+fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4, "frameRate": 30})).unwrap();
+    let mut layers = vec![];
+    for name in ["A", "B", "C"] {
+        let id = s.execute("layer.newSolid", json!({"name": name, "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": 0.0, "value": 50})).unwrap();
+        layers.push(id);
+    }
+    s.execute("layer.setSwitch", json!({"layers": [layers[2]], "switch": "lock", "value": true})).unwrap();
+    let comp = s.active_comp().unwrap();
+    let uid = |id: u64| comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let mut rows = vec![];
+    for id in &layers {
+        rows.push(Row { layer: LayerId(*id), depth: 0, kind: RowKind::Layer });
+        rows.push(Row { layer: LayerId(*id), depth: 1, kind: RowKind::Prop { uid: uid(*id) } });
+    }
+    // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
+    let hit_rows: Vec<(Rect, Row)> =
+        rows.iter().enumerate().map(|(i, r)| (Rect::from_min_size(pos2(0.0, 20.0 * i as f32), vec2(400.0, 20.0)), r.clone())).collect();
+    let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
+    let go = |br: Rect| box_targets(comp, &rows, &hit_rows, &tm, 0.0, 20.0, 200.0, false, br);
+    let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();
+    // From the outline across the boundary: layer A's row (y 0..20) and B's row, and their keys.
+    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 65.0)));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    assert_eq!(keyed(&ks), [layers[0], layers[1]]);
+    // The same box dragged the other way is the same rectangle: the same rows, the same keys.
+    let (ls, ks) = go(Rect::from_two_pos(pos2(260.0, 65.0), pos2(10.0, 5.0)));
+    assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
+    // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
+    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
+    assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
+    // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
+    let (ls, ks) = go(Rect::from_min_max(pos2(204.0, 5.0), pos2(260.0, 65.0)));
+    assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
+    // A locked layer is not selected as a row (the engine drops its keys in keys.select).
+    let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
+    assert_eq!(ls, [layers[0], layers[1]]);
+}

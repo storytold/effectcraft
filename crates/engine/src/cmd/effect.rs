@@ -517,12 +517,11 @@ impl CryptoProbe {
                 media_overrides: &[],
             };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-            let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
             let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
             if !live() {
                 return Ok(None);
             }
-            let layer_name = aux.resolve_crypto_layer(want).ok_or(NO_CRYPTO)?;
+            let layer_name = effectcraft_effects::crypto_layer_named(&aux, params.s("layerName"), params.e("layer") as usize).ok_or(NO_CRYPTO)?;
             // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
             // up, proxies have their own size, earlier effects can pad it), rendered and cached.
             if !live() {
