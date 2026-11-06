@@ -318,8 +318,10 @@ build real projects through these interfaces; they are worked examples of everyt
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
   (`prop.set {"path":"effects/#1/red","value":"depth.Z"}`). Effect Controls offers them as popups.
-* **Masks**: `layer.addMask {layer, shape: rect|ellipse, rect}` first, then `layer.mask.set
-  {field: feather|expansion|opacity, value}`.
+* **Masks**: `layer.addMask {layer, shape: rect|ellipse|rounded, rect, roundness}` first, then
+  `layer.mask.set {field: feather|expansion|opacity, value}`. A Rounded Rectangle mask's corner
+  radius (`roundness`, layer pixels) is set when it's added and changed later with
+  `mask.setRoundness {layer, mask, roundness}` (0 = square corners); it only reshapes a rectangular mask.
 * **Renders**: `renderQueue.add {comp, format: h264|prores|webm|png…, channels: rgba,
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
