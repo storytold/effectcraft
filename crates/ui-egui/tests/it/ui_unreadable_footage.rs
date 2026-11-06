@@ -186,11 +186,11 @@ fn restored_original_and_active_proxy_render_new_pixels_through_media_and_disk_c
         assert_eq!(cached.data, before.data);
         assert!(cache.stats().hits > 0, "the same media was read back through the disk cache");
         std::fs::remove_file(&active).unwrap();
-        s.execute("footage.reloadChanged", json!({})).unwrap();
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
         let offline = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(offline.data[8 * 16 + 8], [0.0, 0.0, 0.0, 0.0]);
         image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&active).unwrap();
-        s.execute("footage.reloadChanged", json!({})).unwrap();
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
         let restored = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(restored.data[8 * 16 + 8], [0.0, 0.0, 1.0, 1.0], "restored pixels replace decoded and composited cached frames");
         cache.flush();

@@ -40,9 +40,6 @@ pub type Stamps = Vec<(String, Option<Stamp>)>;
 /// default, Non-Sequence Footage, leaves them alone: thousands of frames on a share add up).
 /// Items with a stored path that is not followed ([`crate::doc_path`]) are not watched.
 fn reload_paths(s: &Session) -> BTreeSet<String> {
-    if s.prefs.import.auto_reload_footage == "off" {
-        return BTreeSet::new();
-    }
     let sequences = s.prefs.import.auto_reload_footage == "all";
     let mut paths = BTreeSet::new();
     for it in s.project.items.values() {
@@ -57,6 +54,19 @@ fn reload_paths(s: &Session) -> BTreeSet<String> {
         }
     }
     paths
+}
+
+fn automatic_paths(s: &Session) -> BTreeSet<String> {
+    if s.prefs.import.auto_reload_footage == "off" { BTreeSet::new() } else { reload_paths(s) }
+}
+
+/// Embedded data is excluded from availability warnings, but its external file can still be
+/// reloaded. Compare these paths without cloning sequences during unrelated project edits.
+fn data_paths(project: &effectcraft_project::Project) -> impl Iterator<Item = (ItemId, &str, &[String])> {
+    project.items.values().filter_map(|item| match &item.kind {
+        ItemKind::Footage(f) if f.kind == FootageKind::Data => Some((item.id, f.path.as_str(), f.sequence.as_slice())),
+        _ => None,
+    })
 }
 
 /// Files and source identities watched by the single background disk worker.
@@ -82,7 +92,7 @@ impl PartialEq for Watched {
 
 pub fn watched(s: &Session) -> Watched {
     Watched {
-        reload: reload_paths(s),
+        reload: automatic_paths(s),
         sources: Arc::new(if s.check_footage_on_open { availability::sources(s) } else { Vec::new() }),
         project: Some(s.project.clone()),
         cache_enabled: s.disk_cache.is_some(),
@@ -106,17 +116,24 @@ struct Observation {
     missing: Vec<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReloadPolicy {
+    Automatic,
+    Manual,
+}
+
 /// A complete disk observation paired with the sources that were actually checked.
 pub struct Scan {
     watched: Watched,
     observation: Observation,
     update: Option<availability::Update>,
+    policy: ReloadPolicy,
 }
 
 impl Scan {
-    fn new(watched: Watched, observation: Observation) -> Self {
+    fn new(watched: Watched, observation: Observation, policy: ReloadPolicy) -> Self {
         let update = watched.project.as_ref().and_then(|p| availability::prepare(p, &watched.sources, &observation.missing, watched.cache_enabled));
-        Self { watched, observation, update }
+        Self { watched, observation, update, policy }
     }
 
     pub fn apply(self, s: &mut Session) -> crate::Result<Value> {
@@ -125,8 +142,15 @@ impl Scan {
         {
             return Ok(json!({"files": 0, "reloaded": 0, "stale": true}));
         }
-        // A stale worker must not reload paths removed or excluded since it ran.
-        let current = reload_paths(s);
+        // Availability-only scans must preserve the baseline used by the manual command.
+        // A scan captured before automatic reload was disabled must not reload stale paths.
+        if self.policy == ReloadPolicy::Automatic && (self.watched.reload_mode == "off" || s.prefs.import.auto_reload_footage == "off") {
+            return Ok(json!({"files": 0, "reloaded": 0}));
+        }
+        let current = match self.policy {
+            ReloadPolicy::Automatic => automatic_paths(s),
+            ReloadPolicy::Manual => reload_paths(s),
+        };
         let stamps = self.observation.stamps.into_iter().filter(|(p, _)| current.contains(p)).collect();
         apply_stamps(s, stamps)
     }
@@ -357,7 +381,7 @@ pub(crate) fn command(s: &mut Session, _: &Value) -> crate::Result<Value> {
         stored_paths: s.stored_paths.clone(),
     };
     let observation = watched.scan(services.as_ref());
-    Scan::new(watched, observation).apply(s)
+    Scan::new(watched, observation, ReloadPolicy::Manual).apply(s)
 }
 
 /// How often the watched files are stamped while the window is in front.
@@ -412,7 +436,9 @@ impl Watcher {
     /// the worker when the sources, path provenance and reload policy are unchanged.
     pub fn update(&mut self, s: &Session) {
         let same_sources = availability::sources_match(s, &self.paths.sources);
+        let same_data = self.paths.project.as_ref().is_some_and(|before| data_paths(before).eq(data_paths(&s.project)));
         if same_sources
+            && same_data
             && self.paths.stored_paths == s.stored_paths
             && self.paths.reload_mode == s.prefs.import.auto_reload_footage
             && self.paths.cache_enabled == s.disk_cache.is_some()
@@ -504,7 +530,7 @@ fn watch(
             Observation { stamps: paths.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: scanner.poll(&paths.sources, services) };
         if last.as_ref() != Some(&stamps) {
             last = Some(stamps.clone());
-            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(Scan::new(paths.clone(), stamps));
+            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(Scan::new(paths.clone(), stamps, ReloadPolicy::Automatic));
             wake();
         }
     }
@@ -694,6 +720,71 @@ mod watcher_tests {
             s.project.item(id).unwrap().has_missing_footage()
         });
         assert_eq!(s.project.item(id).unwrap().name, "Keep this edit");
+    }
+
+    #[test]
+    fn manual_reload_with_automatic_reload_off_keeps_its_baseline_and_reloads_changed_data() {
+        struct DataProbe(Arc<Disk>);
+        impl crate::Importer for DataProbe {
+            fn probe(&self, path: &str) -> std::result::Result<Footage, String> {
+                let data = if self.0.stamp(path) == Some((2, 2)) { "updated" } else { "original" };
+                Ok(Footage { path: path.into(), kind: FootageKind::Data, data: Some(data.into()), ..Default::default() })
+            }
+        }
+        let disk = Arc::new(Disk::default());
+        disk.set("/data.csv", (1, 1));
+        let mut s = Session { services: disk.clone(), importer: Some(Arc::new(DataProbe(disk.clone()))), ..Default::default() };
+        s.prefs.import.auto_reload_footage = "off".into();
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Data",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/data.csv".into(), kind: FootageKind::Data, data: Some("original".into()), ..Default::default() }),
+        );
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap(), json!({"files": 0, "reloaded": 0}));
+        let baseline = s.footage_stamps.clone();
+        assert_eq!(baseline.get("/data.csv"), Some(&(1, 1)));
+        let off = watched(&s);
+        Scan::new(off.clone(), off.scan(disk.as_ref()), ReloadPolicy::Automatic).apply(&mut s).unwrap();
+        assert_eq!(s.footage_stamps, baseline, "availability-only scans retain the manual baseline");
+        s.prefs.import.auto_reload_footage = "nonSequence".into();
+        disk.set("/data.csv", (2, 2));
+        let old = watched(&s);
+        let pending = Scan::new(old.clone(), old.scan(disk.as_ref()), ReloadPolicy::Automatic);
+        s.prefs.import.auto_reload_footage = "off".into();
+        assert_eq!(pending.apply(&mut s).unwrap(), json!({"files": 0, "reloaded": 0}));
+        assert_eq!(s.footage_stamps, baseline, "a stale automatic result cannot reload or erase the baseline");
+        assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap(), json!({"files": 1, "reloaded": 1}));
+        assert!(matches!(&s.project.item(id).unwrap().kind, ItemKind::Footage(f) if f.data.as_deref() == Some("updated")));
+        assert!(s.history.undo.is_empty());
+    }
+
+    #[test]
+    fn watcher_updates_external_data_paths_after_import_relink_and_removal() {
+        let disk = Arc::new(Disk::default());
+        let mut s = Session { services: disk.clone(), check_footage_on_open: true, ..Default::default() };
+        s.prefs.import.auto_reload_footage = "all".into();
+        let (mut w, wakes) = start(&disk, LONG, LONG).unwrap();
+        w.update(&s);
+        disk.set("/first.csv", (1, 1));
+        let id = Arc::make_mut(&mut s.project).add_item(
+            "Data",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { path: "/first.csv".into(), kind: FootageKind::Data, ..Default::default() }),
+        );
+        w.update(&s);
+        assert_eq!(wait_for(&w, &wakes, 1), vec![("/first.csv".into(), Some((1, 1)))]);
+        disk.set("/second.csv", (2, 2));
+        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+            f.path = "/second.csv".into();
+        }
+        w.update(&s);
+        assert_eq!(wait_for(&w, &wakes, 2), vec![("/second.csv".into(), Some((2, 2)))]);
+        Arc::make_mut(&mut s.project).items.remove(&id);
+        w.update(&s);
+        assert!(w.paths.reload.is_empty());
+        assert!(w.pending.lock().unwrap().paths.reload.is_empty());
     }
 
     /// Behind another app the files are stamped only at the slow interval; the window coming
