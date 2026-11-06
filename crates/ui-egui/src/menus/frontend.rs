@@ -30,15 +30,40 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
     }
 }
 
+/// What a command is checked against for leaving the Home screen: the active composition and
+/// the project (its epoch, which a replaced project steps even when its composition has the same
+/// id).
+type HomeMark = (Option<effectcraft_project::ItemId>, u64);
+
+/// The [`HomeMark`] of the session now.
+fn home_mark(app: &EffectcraftApp) -> HomeMark {
+    (app.session.active_comp_id(), app.session.script_ui.project_epoch)
+}
+
+/// A command that opened a composition (an imported After Effects project, a new or opened
+/// project) leaves the Home screen, as the Home screen's own buttons do: it otherwise stayed
+/// over the opened project.
+fn leave_home_if_opened(app: &mut EffectcraftApp, before: HomeMark, ok: bool) {
+    if ok && app.session.active_comp_id().is_some() && home_mark(app) != before {
+        app.ui.start_screen = false;
+    }
+}
+
+/// Runs engine command `id` from a menu, key or the control channel: the status line shows a
+/// failure, Copy commands fill the clipboard, the frontend events it queued run, and a command
+/// that opened a composition leaves the Home screen.
 pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     // Events already queued belong to earlier invocations (`engine.execute` defers them).
     let queued = app.session.events.len();
+    let before = home_mark(app);
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
     }
+    // Frontend events below may show the Home screen again (Help ▸ In-App Tutorials).
+    leave_home_if_opened(app, before, r.is_ok());
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
         match ev {
@@ -770,10 +795,12 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     }
     // Save (untitled) becomes Save As.
     let id = if id == "file.save" { "file.saveAs" } else { id };
+    let before = home_mark(app);
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
     }
+    leave_home_if_opened(app, before, r.is_ok());
     r
 }
 

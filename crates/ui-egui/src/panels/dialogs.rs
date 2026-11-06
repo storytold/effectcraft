@@ -503,6 +503,8 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
             };
             if !existing && r.is_ok() {
                 app.dialog_state.last_new_comp = Some(app.dialog_state.comp.clone());
+                // The new composition opens: it leaves the Home screen, as `run_engine` does.
+                app.ui.start_screen = false;
             }
             if let Err(e) = r {
                 app.ui.status = e.to_string();
