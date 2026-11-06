@@ -977,7 +977,7 @@ impl TextDoc {
             if r.start >= r.end && n > 0 {
                 return Ok(true);
             }
-            self.apply_style(r.start..r.end.max(r.start + usize::from(n == 0)), |s| {
+            self.apply_style(r.start..r.end.max(r.start.saturating_add(usize::from(n == 0))), |s| {
                 let _ = apply_char_attr(s, key, v);
             });
             return Ok(true);
@@ -1320,6 +1320,12 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_attr_on_an_empty_doc_survives_a_range_at_usize_max() {
+        let mut doc = TextDoc::plain("");
+        let _ = doc.set_attr("size", &J::from(12.0), Some(usize::MAX..usize::MAX));
+    }
 
     #[test]
     fn mixed_line_breaks_keep_original_byte_and_character_ranges() {
