@@ -28,6 +28,13 @@ pub const MOTION_BLUR_SAMPLES: (u32, u32) = (2, 64);
 /// Composition Settings ▸ Advanced ▸ Adaptive Sample Limit.
 pub const ADAPTIVE_SAMPLE_LIMIT: (u32, u32) = (16, 256);
 
+/// The largest id counter a project may hold ([`Project::next_id`](crate::Project::next_id)):
+/// 2³² below `u64::MAX`, so even after loading a project at the limit there is room for four
+/// billion more ids, far beyond what any edit session allocates. A file whose ids or counter go
+/// past it is refused rather than letting the counter overflow or wrap to ids already in use
+/// (#1251).
+pub const MAX_NEXT_ID: u64 = u64::MAX - (1 << 32);
+
 /// A width or height from 1 to [`MAX_SIZE`].
 pub fn size(v: u64) -> u32 {
     // In range after the clamp, so the cast can't truncate.
@@ -215,6 +222,59 @@ mod tests {
                 "Clip (proxy): native frame rate -24/1 fps → 30/1 fps",
             ]
         );
+    }
+
+    /// A project with one comp holding one solid layer, saved; `edit` changes the layer, and the
+    /// project once it is built (so an edited counter isn't used by the build itself).
+    fn saved(edit: impl Fn(&mut crate::Project, &mut crate::Layer)) -> String {
+        use crate::{LayerSource, Project, build};
+        let mut p = Project::default();
+        let mut comp = Comp::new(64, 48, FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let solid =
+            p.add_item("Solid", effectcraft_color::Label::None, None, ItemKind::Solid(Solid { color: [1.0; 3], width: 8, height: 8, pixel_aspect: 1.0 }));
+        let mut layer = build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: solid }, (8, 8), None);
+        let mut scratch = crate::Project::default();
+        edit(&mut scratch, &mut layer);
+        comp.layers.push(layer);
+        p.add_item("Comp", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+        let mut spare = layer_stub();
+        edit(&mut p, &mut spare);
+        p.to_json()
+    }
+
+    fn layer_stub() -> crate::Layer {
+        let mut p = crate::Project::default();
+        let comp = Comp::new(8, 8, FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        crate::build::layer(&mut p, &comp, "Stub", crate::LayerSource::Null, (8, 8), None)
+    }
+
+    #[test]
+    fn a_file_whose_ids_reach_the_limit_is_refused() {
+        // The counter itself, a layer id and a property uid at the top of the range (#1251): the
+        // next id would overflow, or wrap to ids already in use.
+        let at_max: [Box<dyn Fn(&mut crate::Project, &mut crate::Layer)>; 4] = [
+            Box::new(|p, _| p.next_id = u64::MAX),
+            Box::new(|p, _| p.next_id = MAX_NEXT_ID + 1),
+            Box::new(|_, l| l.id = crate::LayerId(u64::MAX - 1)),
+            Box::new(|_, l| l.props.prop_mut("transform/opacity").unwrap().uid = u64::MAX),
+        ];
+        for (i, edit) in at_max.iter().enumerate() {
+            let text = saved(|p, l| edit(p, l));
+            let e = crate::Project::from_json(&text).expect_err(&format!("case {i} opened"));
+            assert!(e.to_string().contains("ids"), "case {i}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_file_just_below_the_limit_opens_and_allocates_fresh_ids() {
+        let text = saved(|_, l| l.id = crate::LayerId(MAX_NEXT_ID - 1));
+        let mut p = crate::Project::from_json(&text).unwrap();
+        assert_eq!(p.next_id, MAX_NEXT_ID);
+        let (a, b) = (p.alloc(), p.alloc());
+        assert_eq!((a, b), (MAX_NEXT_ID, MAX_NEXT_ID + 1), "new ids follow every id in the file");
+        // An ordinary project is untouched.
+        let p = crate::Project::from_json(&saved(|_, _| {})).unwrap();
+        assert!(p.next_id < 100);
     }
 
     #[test]
