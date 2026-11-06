@@ -451,3 +451,14 @@ fn mute_round_trips_and_survives_value_replacement() {
     assert!(keys[0].muted);
     assert_eq!(keys[0].value, Value::Scalar(2.0));
 }
+
+#[test]
+fn feather_after_insert_survives_extreme_segment_index() {
+    let mut p = ShapePath::polygon(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], true);
+    for segment in [usize::MAX, usize::MAX - 1] {
+        p.feather = vec![FeatherPoint { segment, t: 0.9, radius: 1.0, tension: 0.0 }];
+        p.feather_after_insert(0, None);
+        p.feather = vec![FeatherPoint { segment, t: 0.9, radius: 1.0, tension: 0.0 }];
+        p.feather_after_insert(segment.wrapping_add(1), Some(0.5));
+    }
+}
