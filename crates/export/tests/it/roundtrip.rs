@@ -379,6 +379,105 @@ fn exr_sequence_writes_scan_lines() {
     assert_eq!(meta.headers[0].compression, exr::compression::Compression::ZIP16);
 }
 
+/// The RGBA samples of an EXR file, as stored (f16 widened to f32), and their sample types.
+fn exr_samples(path: &Path) -> (Vec<f32>, Vec<exr::prelude::SampleType>) {
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let image = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .rgba_channels(
+            |res, _| (res.width(), vec![0f32; res.width() * res.height() * 4]),
+            |(w, v): &mut (usize, Vec<f32>), p: exr::prelude::Vec2<usize>, (r, g, b, a): (f32, f32, f32, f32)| {
+                let o = (p.y() * *w + p.x()) * 4;
+                v[o..o + 4].copy_from_slice(&[r, g, b, a]);
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(path)
+        .expect("read exr");
+    let c = &image.layer_data.channel_data.channels;
+    (image.layer_data.channel_data.pixels.1, vec![c.0.sample_type, c.1.sample_type, c.2.sample_type, c.3.as_ref().expect("alpha").sample_type])
+}
+
+/// Every OpenEXR compression at both bit depths renders through the Render Queue as scan lines
+/// with that compression and sample type, and reads back through the media pool (#2911):
+/// lossless 32-bit float matches the uncompressed render exactly, lossless half float stores
+/// exactly the half rounding of it, and lossy methods stay within the tolerance the docs give.
+#[test]
+fn exr_compressions_and_bit_depths_round_trip() {
+    use effectcraft_export::render_queue::{ExrBitDepth, ExrCompression};
+    use exr::prelude::{SampleType, f16};
+    let (p, cid) = project(None);
+    let render = |c: ExrCompression, d: ExrBitDepth| {
+        let dir = out_dir(&format!("seq-exr-{}-{}", c.name(), d.name()));
+        let om = OutputModule { channels: Channels::Rgba, exr_compression: c, exr_bit_depth: d, ..OutputModule::for_format(OutputFormat::ExrSequence) };
+        run(&p, cid, &NoFootage, &om, &dir.join("f_[#####].exr"));
+        dir.join("f_00007.exr")
+    };
+    let pooled = |path: &Path| {
+        let f = effectcraft_media::probe(path).expect("probe");
+        MediaPool::new().frame_at(&f, Tick(0)).expect("decode")
+    };
+    let reference = render(ExrCompression::None, ExrBitDepth::Float);
+    let (want, _) = exr_samples(&reference);
+    let want_pooled = pooled(&reference);
+    assert!(want.iter().any(|v| *v > 0.5) && want.contains(&0.0), "the frame has red, background and transparent corners");
+    for d in ExrBitDepth::ALL {
+        let ty = if d == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
+        for c in ExrCompression::ALL {
+            let path = render(c, d);
+            let bytes = std::fs::read(&path).expect("exr");
+            assert_eq!(&bytes[4..6], &[2, 0], "{c:?} {d:?}: single-part scan lines");
+            let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes), false).expect("exr header");
+            assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines, "{c:?} {d:?}");
+            assert_eq!(meta.headers[0].compression.to_string(), exr_compression_name(c), "{c:?} {d:?}");
+            let (got, types) = exr_samples(&path);
+            assert_eq!(types, [ty; 4], "{c:?} {d:?}");
+            let lossy = c.is_lossy(d);
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let w = if d == ExrBitDepth::Half { f16::from_f32(*w).to_f32() } else { *w };
+                if lossy {
+                    assert!((g - w).abs() <= 0.03 + 0.06 * w.abs(), "{c:?} {d:?} sample {i}: {g} vs {w}");
+                } else {
+                    assert_eq!(g.to_bits(), w.to_bits(), "{c:?} {d:?} sample {i}: {g} vs {w}");
+                }
+            }
+            let img = pooled(&path);
+            assert_eq!((img.width, img.height), (W, H));
+            let tol = if lossy {
+                0.06
+            } else if d == ExrBitDepth::Half {
+                2e-3
+            } else {
+                0.0
+            };
+            for (k, (a, b)) in img.data.iter().zip(&want_pooled.data).enumerate() {
+                assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol), "{c:?} {d:?} pixel {k}: {a:?} vs {b:?}");
+            }
+        }
+    }
+}
+
+/// The `exr` crate's name for the compression an Output Module setting writes.
+fn exr_compression_name(c: effectcraft_export::render_queue::ExrCompression) -> String {
+    use effectcraft_export::render_queue::ExrCompression::*;
+    use exr::compression::Compression as X;
+    match c {
+        None => X::Uncompressed,
+        Rle => X::RLE,
+        Zips => X::ZIP1,
+        Zip => X::ZIP16,
+        Piz => X::PIZ,
+        Pxr24 => X::PXR24,
+        B44 => X::B44,
+        B44a => X::B44A,
+        Dwaa => X::DWAA(Option::None),
+        Dwab => X::DWAB(Option::None),
+    }
+    .to_string()
+}
+
 /// A 32 bpc project whose only layer is a full-frame opaque solid of the given colour.
 fn bright_project(color: [f32; 3]) -> (Project, ItemId) {
     let mut p = Project::default();

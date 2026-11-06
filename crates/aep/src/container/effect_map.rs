@@ -1,7 +1,8 @@
-//! The effect table of the importer (`crate::import`): an After Effects effect (its match name) and its parameters (by
+//! The effect table shared by the importer (`crate::import`) and the exporter
+//! (`crate::export`): an After Effects effect (its match name) and its parameters (by
 //! their index in `parT`) map to an EffectCraft effect, a parameter id and a unit conversion.
 //! Plain data; the evidence for each row is in `docs/aep-format.md` 3.7 and the case numbers in
-//! the comments.
+//! the comments. The importer reads a file through it, the exporter writes the inverse.
 
 use crate::container::effects::ParamKind;
 use ParamKind as K;
@@ -109,6 +110,8 @@ pub const HUE_SAT_CHANNEL: &[&str] = &["Master", "Reds", "Yellows", "Greens", "C
 pub const LEVELS_CHANNEL: &[&str] = &["RGB", "Red", "Green", "Blue", "Alpha"];
 /// 511.
 pub const LEVELS_CLIP: &[&str] = &["On", "Off", "Off for 32 bpc Color"];
+/// The Cryptomatte plug-in's Output (`Cryptomatte-0002`).
+pub const CRYPTOMATTE_OUTPUT: &[&str] = &["Colors", "Matted Colors", "Matted RGBA", "Matte Only"];
 
 /// One mapped parameter.
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +145,10 @@ pub enum Extra {
     Extractor,
     /// IDentifier's Channel Info (`identifier_channel_type`): the chosen channel by name.
     Identifier,
+    /// The Cryptomatte plug-in: the layer and selection in its Settings data
+    /// (`CryptomatteData`), Output split over EffectCraft's Display and Matte Only; every
+    /// parameter is handled by the importer's Cryptomatte step, none by the table.
+    Cryptomatte,
 }
 
 /// One mapped effect.
@@ -531,6 +538,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // The Cryptomatte plug-in (docs/aep-format.md 3.7): 1 Settings data, 2 Output, 3 Selection
+    // Mode, imported by the Cryptomatte step (`Extra::Cryptomatte`).
+    EffectMap { match_name: "Cryptomatte", effect: "ec.3d.cryptomatte", params: &[], extra: Extra::Cryptomatte },
     // Expression controls (070-077, 217-221, 310).
     // Directional Blur (711): Direction in degrees, Blur Length in pixels (valid max 1 000).
     fx(
@@ -1129,6 +1139,16 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 pub fn popup_key(item: &str) -> String {
     let s = item.trim().to_ascii_lowercase();
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+}
+
+/// The table row of an After Effects match name.
+pub fn by_match_name(match_name: &str) -> Option<&'static EffectMap> {
+    EFFECTS.iter().find(|m| m.match_name == match_name)
+}
+
+/// The table row of an EffectCraft effect id.
+pub fn by_effect(effect: &str) -> Option<&'static EffectMap> {
+    EFFECTS.iter().find(|m| m.effect == effect)
 }
 
 /// The EffectCraft parameters Hue/Saturation's master values (`Extra::HueSaturation`) go to,
