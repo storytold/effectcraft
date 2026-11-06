@@ -129,7 +129,7 @@ over and to receive the result. The methods below only exist for that hand-off.
 | `link.close` | `{link_id}` | Unbinds the link. The comp and its edits stay. Returns `{comp, comp_name, edited}`. |
 | `app.activate` | `{token?, from_pid?, open?}` | Brings the window to the front when the platform allows it. The reply says whether it did. |
 
-Errors carry a `code` and a message. The codes are `bad_params`, `not_ready`, `comp_missing`, `footage_missing`, `link_unknown`, `busy`, `payload_invalid`, `payload_too_large`, `result_path_refused`, `io_error` and `internal`. The header
+Errors carry a `code` and a message. The codes are `bad_params`, `not_ready`, `comp_missing`, `footage_missing`, `link_unknown`, `busy`, `payload_invalid`, `payload_too_large`, `result_path_refused`, `superseded`, `io_error` and `internal`. The header
 button "Back to FilmCraft" renders the result, sends `link.focus` and `app.activate` to FilmCraft, and
 shows progress on the status line.
 

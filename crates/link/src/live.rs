@@ -424,6 +424,12 @@ impl Live {
                     Err(err) => log::warn!("link {}: could not store the result epoch: {err}", done.link_id),
                 },
                 Err(err) if err.code == "cancelled" => state.tracker.render_ended(&done.link_id, false),
+                Err(err) if err.code == "superseded" => {
+                    // The file holds a newer result than this render. Back or `link.renderResult`
+                    // wrote it, and a later edit is still stale in the tracker, so nothing is owed.
+                    log::info!("link {}: the render at epoch {} was dropped: {err}", done.link_id, done.epoch);
+                    state.tracker.render_ended(&done.link_id, true);
+                }
                 Err(err) => {
                     // Not retried until the comp changes again: the same render would fail again.
                     log::warn!("link {}: the result at epoch {} was not rendered: {err}", done.link_id, done.epoch);
@@ -612,6 +618,26 @@ mod tests {
             live.tick(&mut session, now);
         }
         assert_eq!(names(&events), vec!["link.changed", "link.result"], "storing the epoch is not an edit, so no second round");
+    }
+
+    /// A render dropped because a newer result is on disk owes nothing: it is not retried, and it
+    /// sends no `link.result`.
+    #[test]
+    fn a_superseded_render_is_not_retried_and_announces_nothing() {
+        const LINK: &str = "3434-4444-4444-8444-444444444444";
+        let dir = scratch("superseded");
+        let result = dir.join(format!("{LINK}.mov"));
+        let mut session = session_with_link(LINK, &result);
+        let (live, events) = live();
+        let t0 = Instant::now();
+        live.tick(&mut session, t0);
+        let superseded = RenderError::superseded(&result, 1, 2);
+        lock(&live.state).tx.send(Finished { link_id: LINK.to_string(), epoch: 1, outcome: Err(superseded) }).unwrap();
+        live.tick(&mut session, t0 + Duration::from_secs(5));
+        assert!(!lock(&live.state).tracker.has_stale(), "a dropped render must not be rendered again");
+        assert!(lock(&live.state).running.is_none());
+        assert!(names(&events).is_empty(), "{:?}", names(&events));
+        assert!(!result.exists());
     }
 
     fn sidecar_epoch(dir: &std::path::Path, link: &str) -> u64 {

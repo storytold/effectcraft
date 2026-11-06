@@ -5,13 +5,17 @@
 //! directory under a name no other encode uses (`<result_path>.<n>.part`), so two renders of one
 //! link never write the same file. The part file is renamed onto `result_path` only after that
 //! call returns `Ok`.
+//! A part file is renamed only if no newer result was published at that path: the epoch check and
+//! the rename run under one lock (see [`Published`]). An older render that finishes late is
+//! dropped with code `superseded`.
 //! The control handler calls [`render_result`] on the UI thread and waits for the file.
 //! [`spawn_render`] moves a [`Session`] to a named thread, because the session is not shared
 //! with the interface.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use effectcraft_engine::Session;
@@ -58,6 +62,10 @@ impl RenderError {
     /// The encode was stopped on purpose (the comp changed again). Not a failure to report.
     pub fn cancelled() -> Self {
         Self { code: "cancelled", message: "the render was cancelled".to_string() }
+    }
+    /// A newer result was already written to the same file, so this one was dropped.
+    pub fn superseded(path: &Path, epoch: u64, published: u64) -> Self {
+        Self { code: "superseded", message: format!("{} already holds the result for epoch {published}, which is newer than epoch {epoch}", path.display()) }
     }
     pub fn reply(&self) -> Value {
         json!({
@@ -109,6 +117,13 @@ pub fn prepare_render(session: &Session, link_id: &str, epoch: Option<u64>) -> R
         return Err(RenderError::footage_missing(&unusable));
     }
     let epoch = epoch.unwrap_or_else(|| stored.max(crate::live::epoch_of(link_id)).saturating_add(1));
+    // The file may already carry an epoch this binding does not know (the link was opened again
+    // from a sidecar with a lower one). A result must not go below it, or the guard in `encode`
+    // would refuse every render of the link.
+    let epoch = match Published::get(Path::new(&result_path)) {
+        Some(published) if epoch <= published => published.saturating_add(1),
+        _ => epoch,
+    };
     Ok(RenderPlan {
         link_id: link_id.to_string(),
         epoch,
@@ -181,11 +196,13 @@ impl RenderPlan {
             discard_temp(&temp);
             return Err(e);
         }
-        if let Err(e) = std::fs::rename(&temp, path) {
-            discard_temp(&temp);
-            return Err(RenderError::io(format!("could not replace the result file: {e}")));
+        match Published::replace(&temp, path, self.epoch) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                discard_temp(&temp);
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     /// Store the epoch on the binding. The epoch never decreases. The change is published with
@@ -252,6 +269,40 @@ pub fn unusable_footage(session: &Session, comp: ItemId) -> Vec<String> {
         }
     }
     paths
+}
+
+/// The newest epoch this process renamed onto each result path.
+///
+/// Two renders of one link can overlap: a live render that an edit did not stop in time, and the
+/// render of Back or `link.renderResult`. Each writes its own part file, but both end with a rename
+/// onto the same name, and the last rename wins. If the older render renamed last, the file would
+/// hold old footage while the binding stores the newer epoch. [`Published::replace`] checks the
+/// epoch and renames under one lock, so the older render never replaces the newer result.
+struct Published;
+
+static PUBLISHED: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+impl Published {
+    fn lock() -> MutexGuard<'static, BTreeMap<PathBuf, u64>> {
+        PUBLISHED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The newest epoch renamed onto `path` by this process.
+    fn get(path: &Path) -> Option<u64> {
+        Self::lock().get(path).copied()
+    }
+
+    /// Rename `part` onto `path` for a result at `epoch`, unless a newer epoch is published there.
+    /// An equal epoch replaces: it is the same state of the comp.
+    fn replace(part: &Path, path: &Path, epoch: u64) -> Result<(), RenderError> {
+        let mut published = Self::lock();
+        if let Some(&newest) = published.get(path).filter(|&&newest| newest > epoch) {
+            return Err(RenderError::superseded(path, epoch, newest));
+        }
+        std::fs::rename(part, path).map_err(|e| RenderError::io(format!("could not replace the result file: {e}")))?;
+        published.insert(path.to_path_buf(), epoch);
+        Ok(())
+    }
 }
 
 /// Counter for part file names. Each encode takes the next number.
@@ -443,7 +494,8 @@ mod tests {
     }
 
     /// Two renders of one link overlap: the user's edit starts a background render and Back
-    /// starts another. Each writes its own part file, and both finish with a movie.
+    /// starts another. Each writes its own part file. The newer render ends first and its movie
+    /// stays: the older render is dropped and removes its part file.
     #[test]
     fn two_overlapping_renders_of_one_link_write_separate_part_files() {
         let dir = scratch("overlap");
@@ -468,11 +520,13 @@ mod tests {
         started_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         assert_eq!(crate::test_support::result_parts(&dir).len(), 1, "the slow encode holds one part file");
         quick.encode(&|| true).unwrap();
+        let quick_bytes = std::fs::read(&result).unwrap();
         assert!(effectcraft_media::probe(&result).is_ok(), "the quick render left a movie");
         assert_eq!(crate::test_support::result_parts(&dir).len(), 1, "the quick render did not touch the slow part file");
         release_tx.send(()).unwrap();
-        worker.join().unwrap().unwrap();
-        assert!(effectcraft_media::probe(&result).is_ok());
+        let dropped = worker.join().unwrap().unwrap_err();
+        assert_eq!(dropped.code, "superseded", "{dropped}");
+        assert_eq!(std::fs::read(&result).unwrap(), quick_bytes, "the slow render replaced the newer movie");
         assert!(crate::test_support::result_parts(&dir).is_empty());
     }
 
@@ -636,14 +690,79 @@ mod tests {
         assert!(!result.exists());
         assert!(crate::test_support::result_parts(&dir).is_empty());
         assert_eq!(session.project.craft_links[LINK].epoch, 0, "nothing is stored for a render that did not finish");
-        // A finished plan stores its epoch once, and the epoch never goes down.
+        // A finished plan stores its epoch once, and the epoch never goes down. `older` is made
+        // before epoch 7 is published, so it still carries epoch 3 when it finishes.
+        let older = prepare_render(&session, LINK, Some(3)).unwrap();
         let plan = prepare_render(&session, LINK, Some(7)).unwrap();
         plan.encode(&|| true).unwrap();
         plan.finish(&mut session).unwrap();
         assert_eq!(session.project.craft_links[LINK].epoch, 7);
-        let older = prepare_render(&session, LINK, Some(3)).unwrap();
-        older.encode(&|| true).unwrap();
         older.finish(&mut session).unwrap();
         assert_eq!(session.project.craft_links[LINK].epoch, 7);
+    }
+
+    /// Give `comp` another length, so its render has other bytes than the one before. (A comp
+    /// without layers renders transparent, whatever its background.)
+    fn lengthen(session: &mut Session, comp: ItemId) {
+        let mut edited = match &session.project.item(comp).unwrap().kind {
+            ItemKind::Comp(comp) => (**comp).clone(),
+            _ => panic!("not a comp"),
+        };
+        edited.duration = FrameRate::new(24, 1).tick_of(2);
+        session.project_mut().item_mut(comp).unwrap().kind = ItemKind::Comp(Arc::new(edited));
+    }
+
+    /// An older render that ends after a newer one must not replace the newer result. The older
+    /// plan here is a live render that an edit did not stop in time. The newer plan is Back.
+    #[test]
+    fn an_older_render_that_finishes_last_does_not_replace_the_newer_result() {
+        let (dir, control) = (scratch("order"), scratch("order-control"));
+        let result = dir.join(format!("{LINK}.mov"));
+        let mut session = Session::default();
+        let comp = add_comp(&mut session);
+        bind(&mut session, LINK, comp, &result.to_string_lossy());
+
+        let older = prepare_render(&session, LINK, Some(1)).unwrap();
+        lengthen(&mut session, comp);
+        let newer = prepare_render(&session, LINK, Some(2)).unwrap();
+
+        // The newer render ends first and stores its epoch, as Back does.
+        newer.encode(&|| true).unwrap();
+        let newer_bytes = std::fs::read(&result).unwrap();
+        assert_eq!(newer.finish(&mut session).unwrap().epoch, 2);
+
+        let err = older.encode(&|| true).unwrap_err();
+        assert_eq!(err.code, "superseded", "{err}");
+        assert_eq!(err.reply()["error"]["code"], "superseded");
+        assert_eq!(std::fs::read(&result).unwrap(), newer_bytes, "the older render replaced the newer result");
+        assert!(crate::test_support::result_parts(&dir).is_empty(), "the dropped render left a part file");
+        assert_eq!(session.project.craft_links[LINK].epoch, 2);
+
+        // Control: the older plan does write different bytes when nothing newer is there. Without
+        // this, the equality above could hold because both renders look the same.
+        let mut other = Session::default();
+        let other_comp = add_comp(&mut other);
+        bind(&mut other, LINK, other_comp, &control.join(format!("{LINK}.mov")).to_string_lossy());
+        prepare_render(&other, LINK, Some(1)).unwrap().encode(&|| true).unwrap();
+        let older_bytes = std::fs::read(control.join(format!("{LINK}.mov"))).unwrap();
+        assert_ne!(older_bytes, newer_bytes, "the two comps render to the same movie");
+    }
+
+    /// A link that is opened again from a sidecar with a lower epoch must not be refused for good.
+    #[test]
+    fn a_reopened_link_with_a_lower_epoch_still_renders() {
+        let dir = scratch("reopen");
+        let result = dir.join(format!("{LINK}.mov"));
+        let mut session = Session::default();
+        let comp = add_comp(&mut session);
+        bind(&mut session, LINK, comp, &result.to_string_lossy());
+        let first = prepare_render(&session, LINK, Some(5)).unwrap();
+        first.encode(&|| true).unwrap();
+        first.finish(&mut session).unwrap();
+        // The binding goes back to epoch 0, as if the sidecar were older.
+        bind(&mut session, LINK, comp, &result.to_string_lossy());
+        let outcome = render_result(&mut session, LINK).unwrap();
+        assert_eq!(outcome.epoch, 6);
+        assert_eq!(session.project.craft_links[LINK].epoch, 6);
     }
 }
