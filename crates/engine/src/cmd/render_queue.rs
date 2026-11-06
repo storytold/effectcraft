@@ -6,9 +6,9 @@
 //! `index` (1-based, the # column).
 
 use effectcraft_project::render_queue::{
-    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, DEFAULT_SEQUENCE_TEMPLATE, DEFAULT_TEMPLATE, EffectsMode, FieldRender,
-    OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem, RenderSettings,
-    RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, post_render_parse, without_project_extension,
+    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, DEFAULT_SEQUENCE_TEMPLATE, DEFAULT_TEMPLATE, EffectsMode, ExrBitDepth,
+    ExrCompression, FieldRender, OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality,
+    RenderQueueItem, RenderSettings, RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, post_render_parse, without_project_extension,
 };
 use effectcraft_project::render_templates::{RenderTemplates, TemplateKind, TemplateSlot};
 use effectcraft_time::{FrameRate, Tick};
@@ -202,6 +202,9 @@ fn apply_om_template(om: &mut OutputModule, t: &OutputModule) {
     om.name = t.name.clone();
 }
 
+/// The `exrCompression` parameter's values.
+const EXR_COMPRESSIONS: &str = "none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab";
+
 /// The `format` parameter's values.
 const FORMATS: &str = "format: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff";
 
@@ -311,6 +314,17 @@ fn apply_resize(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+/// OpenEXR `exrCompression` and `exrBitDepth`.
+fn apply_exr(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
+    if let Some(c) = enum_p(p, "exrCompression", cmd, ExrCompression::from_name, EXR_COMPRESSIONS)? {
+        om.exr_compression = c;
+    }
+    if let Some(d) = enum_p(p, "exrBitDepth", cmd, ExrBitDepth::from_name, "half|float")? {
+        om.exr_bit_depth = d;
+    }
+    Ok(())
+}
+
 /// Apply Output Module parameters (`template` first). `roi`: the viewer's region of interest
 /// (captured by `crop.useRoi`).
 fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
@@ -344,6 +358,7 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
     if let Some(pp) = str_p(p, "proresProfile") {
         om.prores_profile = ProResProfile::from_name(pp).ok_or_else(|| bad(cmd, "proresProfile: proxy|lt|standard|hq|4444|4444xq"))?;
     }
+    apply_exr(om, p, cmd)?;
     apply_crop(om, roi, p, cmd)?;
     apply_resize(om, p, cmd)?;
     if let Some(a) = p.get("audio") {
@@ -745,6 +760,8 @@ fn formats(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({
         "formats": v,
         "proresProfiles": ProResProfile::ALL.iter().map(|p| p.label()).collect::<Vec<_>>(),
+        "exrCompressions": ExrCompression::ALL.iter().map(|c| json!({"id": c.name(), "label": c.label(), "lossyHalf": c.is_lossy(ExrBitDepth::Half), "lossyFloat": c.is_lossy(ExrBitDepth::Float)})).collect::<Vec<_>>(),
+        "exrBitDepths": ExrBitDepth::ALL.iter().map(|d| d.name()).collect::<Vec<_>>(),
         "codecProfiles": CodecProfile::ALL.iter().map(|p| p.label()).collect::<Vec<_>>(),
         "hevcLevels": VideoCodecOptions::HEVC_LEVELS.iter().map(level).collect::<Vec<_>>(),
         "av1Levels": VideoCodecOptions::AV1_LEVELS.iter().map(level).collect::<Vec<_>>(),
@@ -1036,7 +1053,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add to Render Queue",
             ["Composition"],
             ["Cmd+M", "Cmd+Shift+/"],
-            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
+            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, exrCompression?, exrBitDepth?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
             can_add,
             add
         ),
@@ -1056,7 +1073,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Output Module Settings...",
             [],
             None,
-            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
+            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, exrCompression?: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab (OpenEXR, scan lines; default zip; lossy: pxr24 on float, b44/b44a on half, dwaa/dwab), exrBitDepth?: half|float (OpenEXR; default float), profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
             has_items,
             set_output_module
         ),
@@ -1074,7 +1091,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Output Module",
             ["Composition"],
             None,
-            "{item?|index? (default: the last item), format?, output?, channels?, quality?, bitrate?, proresProfile?, audio?}",
+            "{item?|index? (default: the last item), format?, output?, channels?, quality?, bitrate?, proresProfile?, exrCompression?, exrBitDepth?, audio?}",
             has_items,
             add_output_module
         ),
