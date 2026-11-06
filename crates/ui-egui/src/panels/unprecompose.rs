@@ -36,7 +36,15 @@ pub fn guard(app: &mut EffectcraftApp, id: &str, params: &Value) -> Result<bool,
     if warnings.is_empty() {
         return Ok(false);
     }
-    app.dialog_state.unprecompose.command = Some((params.clone(), warnings));
+    // The layer the warnings are about, whatever is selected by the time the prompt is answered.
+    let mut pinned = params.as_object().cloned().unwrap_or_default();
+    if !pinned.contains_key("layer") && !pinned.contains_key("layers") {
+        pinned.insert("layers".into(), json!(app.session.state.selected_layers.iter().map(|l| l.0).collect::<Vec<_>>()));
+    }
+    if let Some(comp) = app.session.active_comp_id().filter(|_| !pinned.contains_key("comp")) {
+        pinned.insert("comp".into(), json!(comp.0));
+    }
+    app.dialog_state.unprecompose.command = Some((Value::Object(pinned), warnings));
     app.dialog = Some(Dialog::Unprecompose);
     Ok(true)
 }

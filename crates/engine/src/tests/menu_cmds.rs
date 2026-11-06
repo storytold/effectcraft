@@ -2389,6 +2389,23 @@ fn unprecompose_warns_about_expressions_that_refer_to_it() {
     scene_look(&mut s);
 }
 
+/// An expression naming a layer by a number below the pre-comp layer points at another layer once
+/// the nested comp's two layers replace it: a warning. One naming a number above it does not move.
+#[test]
+fn unprecompose_warns_when_it_renumbers_the_layers_an_expression_names() {
+    let (mut s, _, _, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    let index = s.active_comp().unwrap().layers.iter().position(|l| l.id.0 == pre).unwrap() + 1;
+    let warned = |s: &mut Session, number: usize| {
+        let text = format!("thisComp.layer({number}).transform.rotation");
+        s.execute("prop.setExpression", json!({"layer": c, "path": "transform/rotation", "expression": text})).unwrap();
+        let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+        dry["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).any(|w| w.contains("by number"))
+    };
+    assert!(warned(&mut s, index + 1), "a number below it");
+    assert!(!warned(&mut s, index - 1), "a number above it");
+}
+
 /// A nested comp that preserves its own frame rate (10 fps in a 30 fps comp) samples its layers on
 /// its own frames; expanded, they would change on every frame of the parent: a warning. Without
 /// Preserve Frame Rate the nested layers are sampled at the parent's times already: no warning.
