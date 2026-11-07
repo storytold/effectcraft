@@ -58,6 +58,7 @@ impl FootageSource for Frames {
     }
 }
 
+/// [`setup_rated`] with 24 fps footage and no recorded native rate.
 fn setup(mode: FrameBlend, size: (u32, u32)) -> (Project, ItemId) {
     setup_rated(mode, size, FrameRate::FPS_24, None)
 }
@@ -174,6 +175,7 @@ fn time_stretched_precomp_frame_mixes() {
     assert!(img.get(12, 10)[3] < 1e-3 && (img.get(17, 10)[3] - 1.0).abs() < 1e-3 && (img.get(22, 10)[3] - 1.0).abs() < 1e-3 && img.get(27, 10)[3] < 1e-3);
 }
 
+/// Fast-conformed footage (30 fps interpreted as 300 fps) averages every source frame a comp frame spans, for Frame Mix and Pixel Motion.
 #[test]
 fn frame_mix_averages_every_frame_of_fast_conformed_footage() {
     // #3180: 30 fps footage interpreted as 300 fps in a 30 fps comp. Every comp frame lands
@@ -195,6 +197,7 @@ fn frame_mix_averages_every_frame_of_fast_conformed_footage() {
     assert!(frame(&p, cid, 0, false).get(4, 4)[0].abs() < 1e-6);
 }
 
+/// Footage at the comp's rate, or only mildly faster, renders as before.
 #[test]
 fn frame_mix_of_common_footage_is_unchanged() {
     // Footage at the comp's rate: each comp frame is exactly one source frame, blended or not.
@@ -226,6 +229,7 @@ fn remap(p: &mut Project, cid: ItemId, keys: Vec<Keyframe>) {
     p.comp_mut(cid).unwrap().layers[0].props.children.push(effectcraft_project::Node::Prop(tr));
 }
 
+/// Time remap holds and cuts do not smear: a still frame stays a single source frame.
 #[test]
 fn time_remap_jumps_stay_crisp() {
     let fast = FrameRate::new(300, 1);
@@ -253,6 +257,7 @@ fn time_remap_jumps_stay_crisp() {
     assert!((v - 0.45).abs() < 1e-5, "steady remap: {v}");
 }
 
+/// A frame-blended dependency changes its owner's cache key when its source goes from holding to running at speed.
 #[test]
 fn a_frame_blended_dependency_keys_how_far_its_source_runs() {
     // A footage layer selected by another layer's effect: at comp frames 0 and 1 its source time
@@ -276,6 +281,7 @@ fn a_frame_blended_dependency_keys_how_far_its_source_runs() {
     assert_ne!(key(0), key(1));
 }
 
+/// The mix window is the source span of one comp frame, and falls back to the two-frame blend below four source frames per comp frame.
 #[test]
 fn mix_window_covers_the_source_span_of_one_comp_frame() {
     let comp_frame = |r: FrameRate| r.frame_duration();
