@@ -249,7 +249,7 @@ impl<'a> Renderer<'a> {
     /// A processed-layer cache key that also covers content motion blur (the averaged source
     /// depends on the content at every sub-sample).
     pub(crate) fn content_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
-        let k = key?;
+        let k = self.mask_gate_key(ctx, layer, key)?;
         // A layer that reads other layers through its effects' layer parameters gets them drawn
         // by this renderer: the switches it passes down (Switches Affect Nested Comps, the
         // precomp layers above, motion blur on) change those pixels, not just the layers' own.
@@ -272,6 +272,15 @@ impl<'a> Renderer<'a> {
             layer: self.layer_motion_blur(layer),
             samples: if self.opts.draft { 4 } else { ctx.comp.motion_blur_samples as usize },
         }
+    }
+
+    /// A cache key of a masked layer's buffer, told apart when mask motion blur can't run at all
+    /// in this render ([`Self::mask_blur`]'s gate: the render options, the precomp layers above).
+    /// The key has the layer's own motion blur state, but a mask set to On blurs without it.
+    pub(crate) fn mask_gate_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
+        let k = key?;
+        let masked = layer.masks().is_some_and(|m| !m.children.is_empty());
+        Some(if masked && !self.mask_blur(ctx, layer).allowed { cache::derive(k, 0x6d62_6f66) } else { k })
     }
 
     /// Motion-blur sub-samples for a layer buffer (1 = no motion blur). As in After Effects, a 2D
