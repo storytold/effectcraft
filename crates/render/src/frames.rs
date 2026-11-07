@@ -89,6 +89,84 @@ pub fn frame_position(t: Tick, rate: FrameRate) -> (i64, f64) {
     (num.div_euclid(den) as i64, num.rem_euclid(den) as f64 / den as f64)
 }
 
+/// The fewest source frames one comp frame must run through before frame blending averages all
+/// of them ([`mix_window`]); below this the two neighbouring frames blend as they always have.
+/// Conservative on purpose: common footage (60p in a 30, 25 or 24 fps comp, 50p in 25) keeps
+/// its familiar look, while fast-conformed footage (600 fps in a 25 fps comp, #3180) gets the
+/// mix. Pending a comparison with After Effects, whose exact threshold is not documented.
+pub const MIN_MIX_FRAMES: f64 = 4.0;
+
+/// The most source frames one comp frame mixes; a wider span is sampled at this many evenly
+/// spaced frames (After Effects is reported to blend about a dozen; this also bounds the
+/// decoding per comp frame). Pending a comparison with After Effects.
+pub const MAX_MIX_FRAMES: usize = 16;
+
+/// A span of more source frames than this in one comp frame is a jump (a time remap cut), not
+/// motion to blur.
+pub const MAX_MIX_SPAN: f64 = 1000.0;
+
+/// How finely [`blend_spans`] probes the source's speed: at 1/16 of a comp frame.
+const SPEED_PROBE: i64 = 16;
+
+/// How far a frame-blended layer's source runs during one comp frame from the context time
+/// (Interpret Footage's conformed rate, time stretch and time remap all show up in it), as
+/// `(local, whole)`: the local speed just after the comp frame's time scaled to a whole frame,
+/// and the actual difference to the next comp frame. They disagree across a time remap jump
+/// (a hold keyframe followed by a cut, a `loopOut` wrapping back), which then does not mix.
+/// Measured on the shown source time ([`EvalCtx::nested_time`]: a precomp proxy that preserves
+/// its frame rate is floored to its frames).
+pub(crate) fn blend_spans(ctx: &EvalCtx, layer: &Layer) -> (Tick, Tick) {
+    let frame = ctx.comp.frame_duration();
+    let t0 = ctx.nested_time(layer);
+    let probe = Tick(frame.0 / SPEED_PROBE);
+    let local = ctx.at(ctx.time + probe).nested_time(layer) - t0;
+    let whole = ctx.at(ctx.time + frame).nested_time(layer) - t0;
+    (Tick(local.0.saturating_mul(SPEED_PROBE)), whole)
+}
+
+/// The source frames a frame-blended comp frame averages when the layer runs through many
+/// source frames per comp frame (footage interpreted at a much higher frame rate than the comp,
+/// a sped-up time stretch or time remap), so a comp frame skips whole source frames: the frames
+/// at `rate` that one comp frame's worth of source from `t` overlaps, each weighted by the share
+/// of a frame it covers. `spans` is [`blend_spans`]' `(local, whole)`; playing forwards the span
+/// is `[t, t + span)`, backwards it ends with the frame at `t` (the unblended frame). `None` —
+/// the two neighbouring frames then blend ([`frame_position`], [`blend_frames`]) — when the span
+/// is shorter than [`MIN_MIX_FRAMES`], longer than [`MAX_MIX_SPAN`], or the local speed and the
+/// whole frame's difference disagree by more than a source frame (a time remap jump).
+pub fn mix_window(t: Tick, spans: (Tick, Tick), rate: FrameRate) -> Option<Vec<(i64, f64)>> {
+    if rate.num <= 0 || rate.den <= 0 {
+        return None;
+    }
+    let frames_of = |s: Tick| s.0 as f64 * rate.num as f64 / (TICKS_PER_SECOND as f64 * rate.den as f64);
+    let width = frames_of(spans.0);
+    let whole = frames_of(spans.1);
+    if !width.is_finite() || !whole.is_finite() || (width - whole).abs() > 1.0 + 1e-9 {
+        return None;
+    }
+    if width.abs() < MIN_MIX_FRAMES - 1e-9 || width.abs() > MAX_MIX_SPAN {
+        return None;
+    }
+    let (i, w) = frame_position(t, rate);
+    let p = i as f64 + w;
+    let lo = if width < 0.0 { p + 1.0 + width } else { p };
+    let width = width.abs();
+    let hi = lo + width;
+    let first = lo.floor();
+    let n = hi.ceil() - first;
+    if n <= MAX_MIX_FRAMES as f64 {
+        let frames = (0..n as usize)
+            .filter_map(|k| {
+                let j = first + k as f64;
+                let cover = (j + 1.0).min(hi) - j.max(lo);
+                (cover > 1e-9).then_some((j as i64, cover))
+            })
+            .collect();
+        return Some(frames);
+    }
+    let m = MAX_MIX_FRAMES as f64;
+    Some((0..MAX_MIX_FRAMES).map(|k| ((lo + width * (k as f64 + 0.5) / m).floor() as i64, 1.0)).collect())
+}
+
 /// Blend two neighbouring frames `w` of the way from `a` to `b`: a cross-fade (Frame Mix) or a
 /// motion-compensated interpolation (Pixel Motion).
 pub fn blend_frames(mode: FrameBlend, a: &Image, b: &Image, w: f32) -> Image {
