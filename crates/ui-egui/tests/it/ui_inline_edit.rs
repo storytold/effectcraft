@@ -634,6 +634,50 @@ fn an_expression_added_at_the_bottom_of_the_timeline_comes_into_view() {
     assert_eq!(expression(&h, layer, opacity).as_deref(), Some("25"));
 }
 
+fn right_click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// Right-click Opacity's `target` (its stopwatch or name) in the Timeline, pick Add Expression
+/// and type `text` without another click: the new expression's editor has the keyboard.
+fn add_expression_from_menu(target: &str, text: &str) {
+    let (mut h, _) = harness();
+    let (layer, opacity, _) = open_transform(&mut h, "Plate");
+    let at = center(&h, &format!("timeline.prop.{opacity}.{target}"));
+    right_click(&mut h, at);
+    let item = format!("timeline.prop.{opacity}.menu.addExpression");
+    assert!(h.state().auto.find(&item).is_some(), "the {target}'s menu offers Add Expression");
+    let animated =
+        h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(opacity).unwrap().is_animated();
+    assert!(!animated, "the right-click didn't toggle the stopwatch");
+    let at = center(&h, &item);
+    click(&mut h, at, 1);
+    assert!(expression(&h, layer, opacity).is_some(), "an expression was added from the {target}'s menu");
+    type_text(&mut h, text);
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some(text), "typing replaced the expression added from the {target}'s menu");
+}
+
+/// #3192: Linux window managers take Alt+click to move the window, so the stopwatch has a
+/// right-click menu whose Add Expression does what the Alt-click does: the expression is added
+/// and its editor takes the keyboard (the stopwatch itself isn't toggled).
+#[test]
+fn add_expression_from_the_stopwatch_menu_focuses_the_new_expression() {
+    add_expression_from_menu("stopwatch", "50");
+}
+
+/// #3192: Add Expression from the property name's menu opens the editor with the keyboard too,
+/// as the Alt-click does (it took another click).
+#[test]
+fn add_expression_from_the_name_menu_focuses_the_new_expression() {
+    add_expression_from_menu("name", "90");
+}
+
 /// A primary-button drag from `from` to `to` with `modifiers` held from the press to the release.
 fn drag_with(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: Modifiers) {
     h.input_mut().events.push(Event::PointerMoved(from));
