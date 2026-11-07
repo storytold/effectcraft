@@ -143,6 +143,7 @@ fn input_keys_ignore_later_effects() {
             footage: None,
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         let l = &comp.layers[0];
         (crate::cache::input_key(&ctx, l, 1.0, false, false, 1), crate::cache::input_key(&ctx, l, 1.0, false, false, 2))

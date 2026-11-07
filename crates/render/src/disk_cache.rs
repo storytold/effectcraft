@@ -8,12 +8,14 @@
 //!   layer cache's content key (which names the footage items a buffer uses with their settings
 //!   and paths) and the renderer version ([`layer_disk_key`]). A changed project therefore never
 //!   reads stale pixels: its keys simply change, and an edit elsewhere keeps them.
-//! * Frame and layer entries keep the source files they were made of, each with the size and
-//!   modification time it was read with ([`EntryFiles`], #3184). An entry is used only while
-//!   those files are unchanged: a handful of `metadata` calls when it is read, never a scan of
-//!   the project's files. A frame or buffer whose files can't all be named is not stored. File ▸
-//!   Reload Footage deletes the entries made of the reloaded files ([`DiskCache::drop_files`]):
-//!   a file replaced by one of the same size and time is read again.
+//! * Frame and layer entries keep the source files they were made of (footage, and the font
+//!   files text is drawn with), each with the size and modification time it was read with
+//!   ([`EntryFiles`], #3184). An entry is used only while those files are unchanged: a handful
+//!   of `metadata` calls when it is read, never a scan of the project's files. A frame or
+//!   buffer whose files can't all be named is not stored (text in a family that isn't installed
+//!   or with fallback glyphs, footage refused by automation read roots, …). File ▸ Reload
+//!   Footage deletes the entries made of the reloaded files ([`DiskCache::drop_files`]): a file
+//!   replaced by one of the same size and time is read again.
 //! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
 //!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
 //!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
@@ -1265,7 +1267,7 @@ pub type SharedVirtualFileId = Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + S
 /// Layer entries with their source files (#3184), part of every layer disk key: entries of the
 /// earlier format (keyed by a project-wide footage salt instead) are never looked up again;
 /// least recently used, they are evicted.
-const LAYER_ENTRY_VERSION: &[u8] = b"layer-entry-files-1";
+const LAYER_ENTRY_VERSION: &[u8] = b"layer-entry-files-2";
 
 /// Disk key of a layer buffer: the layer cache's content key ([`crate::cache::layer_key`] and
 /// the keys derived from it), the layer entry format and the renderer version. The content key
@@ -1342,7 +1344,7 @@ fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: e
 /// Frame entries with their source files (#3184), part of every frame key: entries of the
 /// earlier format (keyed by footage stamps instead) are never looked up again; least recently
 /// used, they are evicted.
-const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-1";
+const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-2";
 
 /// Disk key of one viewer frame.
 pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128 {

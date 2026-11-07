@@ -212,6 +212,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     phase_guides(app, &ectx, &mut v);
     phase_layers(app, ui, &ectx, &mut v);

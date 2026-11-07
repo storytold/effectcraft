@@ -194,6 +194,7 @@ fn freeze(s: &mut Session, p: &Value, last: bool) -> Result<Value> {
         footage: Some(s.footage.as_ref()),
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let now: Vec<(effectcraft_project::LayerId, f64)> = comp
         .layers

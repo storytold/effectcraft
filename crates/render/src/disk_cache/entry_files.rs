@@ -4,8 +4,9 @@
 //!
 //! Layout (little endian), before the frame's pixel payload:
 //! `u32 count`, then per file `u32 path length`, the path (UTF-8), a tag byte and its fields:
-//! `0` a file on disk (`u64 size`, `u8 has time`, `u64 time`), `1` bytes from the browser's file
-//! table (`u64 size`, `u64 content hash`), `2` a file that could not be read.
+//! `0` a file on disk (`u64 size`, `u8 has time`, `i128 time`: nanoseconds since the Unix epoch,
+//! negative before it), `1` bytes from the browser's file table (`u64 size`, `u64 content
+//! hash`), `2` a file that could not be read.
 
 use std::sync::Arc;
 
@@ -18,8 +19,9 @@ const MAX_PATH_BYTES: usize = 1 << 16;
 /// A file's identity as a frame entry keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryStamp {
-    /// Size and modification time (nanoseconds since the Unix epoch) on disk.
-    Native { len: u64, modified: Option<u64> },
+    /// Size and modification time (nanoseconds since the Unix epoch, negative before it) on
+    /// disk.
+    Native { len: u64, modified: Option<i128> },
     /// Size and content hash from the [`VirtualFileId`] hook (the browser's file table).
     Virtual { len: u64, hash: u64 },
     /// It could not be read when the frame was made: it still must not be readable.
@@ -134,7 +136,7 @@ impl EntryFiles {
                 0 => {
                     let len = r.u64()?;
                     let has = r.u8()?;
-                    let t = r.u64()?;
+                    let t = r.i128()?;
                     match has {
                         0 => EntryStamp::Native { len, modified: None },
                         1 => EntryStamp::Native { len, modified: Some(t) },
@@ -179,6 +181,9 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
+    fn i128(&mut self) -> Option<i128> {
+        Some(i128::from_le_bytes(self.take(16)?.try_into().ok()?))
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +194,9 @@ mod tests {
         [
             ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(9) }),
             ReadFile::new("/b.png", FileStamp::Native { len: 4, modified: None }),
+            // Before 1970, and past where `u64` nanoseconds end (2554).
+            ReadFile::new("/d.png", FileStamp::Native { len: 5, modified: Some(-86_400_000_000_000) }),
+            ReadFile::new("/e.png", FileStamp::Native { len: 6, modified: Some(i128::from(u64::MAX) + 1) }),
             ReadFile::new("/c.png", FileStamp::Missing),
             ReadFile::new("/v.mov", FileStamp::Virtual),
         ]
@@ -200,7 +208,7 @@ mod tests {
     fn lists_round_trip_and_damage_is_caught() {
         let id = |p: &str| (p == "/v.mov").then_some((8, 77));
         let list = EntryFiles::of(&files(), Some(&id)).unwrap();
-        assert_eq!(list.files()[3].stamp, EntryStamp::Virtual { len: 8, hash: 77 });
+        assert_eq!(list.files()[5].stamp, EntryStamp::Virtual { len: 8, hash: 77 });
         let mut bytes = vec![];
         list.encode(&mut bytes);
         bytes.extend_from_slice(b"rest");

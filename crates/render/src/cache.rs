@@ -173,7 +173,7 @@ impl LayerCache {
                 let id = self.virtual_id();
                 let (buf, files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
                 let files = Arc::new(files);
-                Some((self.insert_mem(key, buf, files.clone()), files))
+                Some(self.insert_mem(key, buf, files))
             }
         }
     }
@@ -184,12 +184,13 @@ impl LayerCache {
     /// and packs it once instead of once per worker, which ran it out of memory). Renders don't
     /// wait for each other: on the frame workers' shared thread pool a wait can end up under
     /// the very work it waits for. `files`: the source files `buf` was made of (see
-    /// [`crate::reads`]); a buffer whose files can't all be named stays in memory.
-    pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> Arc<Buf> {
+    /// [`crate::reads`]); a buffer whose files can't all be named stays in memory. The files
+    /// returned are the ones the returned buffer was made of.
+    pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
         if self.gated() {
-            return buf;
+            return (buf, files);
         }
-        if let Some(kept) = self.inner.lock().ok().and_then(|g| g.map.get(&key).map(|e| e.buf.clone())) {
+        if let Some(kept) = self.inner.lock().ok().and_then(|g| g.map.get(&key).map(|e| (e.buf.clone(), e.files.clone()))) {
             return kept;
         }
         let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
@@ -204,21 +205,21 @@ impl LayerCache {
         self.insert_mem(key, buf, files)
     }
 
-    /// See [`LayerCache::insert`]: the buffer kept under `key` (`buf`, unless one was kept first
-    /// or `buf` is too large to keep).
-    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> Arc<Buf> {
+    /// See [`LayerCache::insert`]: the buffer kept under `key` and its files (`buf` and `files`,
+    /// unless one was kept first or `buf` is too large to keep).
+    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
         let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-        let Ok(mut g) = self.inner.lock() else { return buf };
+        let Ok(mut g) = self.inner.lock() else { return (buf, files) };
         if bytes > g.budget / 4 {
-            return buf;
+            return (buf, files);
         }
         g.clock += 1;
         let now = g.clock;
         if let Some(e) = g.map.get_mut(&key) {
             e.last_use = now;
-            return e.buf.clone();
+            return (e.buf.clone(), e.files.clone());
         }
-        g.map.insert(key, Entry { buf: buf.clone(), files, bytes, last_use: now });
+        g.map.insert(key, Entry { buf: buf.clone(), files: files.clone(), bytes, last_use: now });
         g.bytes += bytes;
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
@@ -234,7 +235,7 @@ impl LayerCache {
                 }
             }
         }
-        buf
+        (buf, files)
     }
 
     /// The memory budget in bytes.
@@ -834,8 +835,8 @@ mod shared_insert_tests {
         let cache = LayerCache::default();
         let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
         let (a, b) = (buf(), buf());
-        assert!(Arc::ptr_eq(&cache.insert(3, a.clone(), Default::default()), &a));
-        assert!(Arc::ptr_eq(&cache.insert(3, b, Default::default()), &a), "the later render gets the first buffer");
+        assert!(Arc::ptr_eq(&cache.insert(3, a.clone(), Default::default()).0, &a));
+        assert!(Arc::ptr_eq(&cache.insert(3, b, Default::default()).0, &a), "the later render gets the first buffer");
         assert!(Arc::ptr_eq(&cache.get(3).unwrap().0, &a));
     }
 
@@ -880,5 +881,38 @@ mod shared_insert_tests {
         cache.insert(11, Arc::new(buf()), Arc::new(files.clone()));
         let written: Vec<u128> = store.take_writes().into_iter().map(|w| w.0).collect();
         assert_eq!(written, [layer_disk_key(11)], "only the buffer whose files are all named");
+    }
+
+    /// A render that gets another render's buffer gets that buffer's files too (#3184): when a
+    /// file changed between the two reads, its frame lists the file with both identities, so the
+    /// list is incomplete and the frame is not kept on disk with the new identity and the old
+    /// pixels.
+    #[test]
+    fn the_buffer_kept_first_brings_its_files() {
+        use crate::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
+        use crate::{NoFootage, RenderOpts, Renderer};
+        let cache = LayerCache::default();
+        let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
+        let files = |len| Arc::new([ReadFile::new("/a.png", FileStamp::Native { len, modified: Some(1) })].into_iter().collect::<ReadFiles>());
+        let (first, second) = (files(1), files(2));
+        let a = buf();
+        cache.insert(3, a.clone(), first.clone());
+        let project = effectcraft_project::Project::default();
+        let log = ReadLog::new();
+        let mut r = Renderer::new(&project, &NoFootage, RenderOpts::default());
+        r.cache = Some(&cache);
+        r.reads = Some(&log);
+        // (what `Renderer::recorded` noted for the second render)
+        log.note_all(&second);
+        let (kept, kept_files) = r.keep(Some(3), buf(), &second);
+        assert!(Arc::ptr_eq(&kept, &a));
+        assert_eq!(kept_files, first);
+        assert!(!log.files().is_complete());
+        // The same files: nothing changes.
+        let same = ReadLog::new();
+        r.reads = Some(&same);
+        same.note_all(&first);
+        let _ = r.keep(Some(3), buf(), &files(1));
+        assert!(same.files().is_complete());
     }
 }
