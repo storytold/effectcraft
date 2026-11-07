@@ -510,6 +510,7 @@ fn text_json(d: &TextDoc) -> J {
     doc
 }
 
+/// Returns the property's value at the requested time, evaluating its expression unless `pre` is set.
 fn value(s: &Session, a: &J) -> R {
     let (cid, c, l) = layer_of(s, a)?;
     let uid = u(a, "uid").ok_or("missing uid")?;

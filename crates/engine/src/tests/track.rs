@@ -440,6 +440,7 @@ fn analyze_1080p_single_point_speed() {
 struct SampleFootage;
 
 impl crate::render::ExprHost for SampleFootage {
+    /// Reads the red channel of the layer's footage pixel at (0, 0) through the context's footage source, scaled to 0-100.
     fn eval(
         &self,
         ctx: &EvalCtx,
