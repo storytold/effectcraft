@@ -1058,13 +1058,14 @@ impl Frames {
         let oh = opts_hash(opts);
         self.note_disk_series(base.comp, base.scale, base.view ^ oh);
         self.carry_disk(src);
-        // Free disk space holds the cache at 0: nothing would be stored, so nothing is converted
-        // (a refusal doesn't count as a try, so every idle pass would convert them all again).
-        // A later idle pass writes them once there is room.
+        // Free disk space leaves the cache (next to) no room: nothing would be stored, so nothing
+        // is converted (a refusal doesn't count as a try, so every idle pass would convert them
+        // all again). A later idle pass writes them once there is room (`prefs_live::memory_watch`
+        // keeps frames coming meanwhile).
         if !dc.accepts_writes() {
             return false;
         }
-        let known =self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
+        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
         let Some(content) = known else {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
             return true;

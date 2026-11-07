@@ -245,12 +245,14 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
 
 /// Settings ▸ Disk, under Maximum Disk Cache Size: the limit in effect, and why it is lower when
 /// free disk space holds the cache below the setting (it never fills the disk). Automation id
-/// `settings.disk.cacheLimit`. Nothing without an open disk cache.
+/// `settings.disk.cacheLimit`, labelled `limitMb=… maxMb=… reserveMb=… spaceLimited=… writes=…`
+/// (machine-readable, the same in every interface language). Nothing without an open disk cache.
+/// The maximum is the one applied: an edit applies at once (a dragged value on release).
 fn disk_cache_limit_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     let Some(dc) = app.session.disk_cache.clone() else { return };
-    // (two atomic reads: drawn every frame)
-    let (max, limit) = (dc.max_bytes(), dc.limit_bytes());
-    let lines = disk_cache_limit_lines(max, limit);
+    // (atomic reads: drawn every frame)
+    let (max, limit, reserve, writes) = (dc.max_bytes(), dc.limit_bytes(), dc.reserve_bytes(), dc.accepts_writes());
+    let lines = disk_cache_limit_lines(max, limit, reserve, writes);
     let color = if limit < max { t.warning } else { t.text_dim };
     let r = ui
         .vertical(|ui| {
@@ -259,18 +261,31 @@ fn disk_cache_limit_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens) 
             }
         })
         .response;
-    app.auto.add("settings.disk.cacheLimit", r.rect, &lines.join(" "));
+    let label =
+        format!("limitMb={} maxMb={} reserveMb={} spaceLimited={} writes={writes}", limit.min(max) >> 20, max >> 20, reserve.unwrap_or(0) >> 20, limit < max);
+    app.auto.add("settings.disk.cacheLimit", r.rect, &label);
 }
 
 /// The lines [`disk_cache_limit_ui`] shows for a disk cache of `max` bytes (Maximum Disk Cache
-/// Size) whose limit in effect is `limit` bytes.
-pub(crate) fn disk_cache_limit_lines(max: u64, limit: u64) -> Vec<String> {
+/// Size) whose limit in effect is `limit` bytes, leaving `reserve` bytes of its disk free (when
+/// known), and taking frame and layer writes (`writes`, [`DiskCache::accepts_writes`]).
+///
+/// [`DiskCache::accepts_writes`]: effectcraft_engine::render::disk_cache::DiskCache::accepts_writes
+pub(crate) fn disk_cache_limit_lines(max: u64, limit: u64, reserve: Option<u64>, writes: bool) -> Vec<String> {
+    use effectcraft_engine::render::disk_cache::{MAX_DISK_RESERVE, MIN_DISK_RESERVE};
+    const GB: f64 = (1u64 << 30) as f64;
     let mut lines = vec![tr_args("Disk cache limit in effect: {} MB", &[&(limit.min(max) >> 20)])];
     if limit < max {
-        lines.push(tr("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least 2 GB, at most 10 GB).").to_string());
-        if limit == 0 {
-            lines.push(tr("No room left: nothing is written to the disk cache until disk space is freed.").to_string());
-        }
+        lines.push(match reserve {
+            Some(r) => tr_args("Limited by free disk space: EffectCraft keeps {} GB of this disk free.", &[&format!("{:.1}", r as f64 / GB)]),
+            None => tr_args(
+                "Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).",
+                &[&(MIN_DISK_RESERVE >> 30), &(MAX_DISK_RESERVE >> 30)],
+            ),
+        });
+    }
+    if !writes {
+        lines.push(tr("No room left: nothing is written to the disk cache until disk space is freed.").to_string());
     }
     lines
 }
@@ -1275,25 +1290,38 @@ mod tests {
             let ctx = egui::Context::default();
             let (tokens, cur) = (app.tokens, serde_json::to_value(&app.session.prefs).unwrap());
             let mut actions = vec![];
-            let mut output = ctx.run_ui(
-                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 1200.0))), ..Default::default() },
-                |ui| page_ui(app, ui, &page, &cur, &tokens, &mut actions),
-            );
+            let mut output = ctx
+                .run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 1200.0))), ..Default::default() }, |ui| {
+                    page_ui(app, ui, &page, &cur, &tokens, &mut actions)
+                });
             output.textures_delta.clear();
             app.auto.find("settings.disk.cacheLimit").map(|e| e.label.clone())
         };
+        let text = || disk_cache_limit_lines(dc.max_bytes(), dc.limit_bytes(), dc.reserve_bytes(), dc.accepts_writes()).join(" ");
         // A 4 TB disk with 190 GB free: the 20 GB setting holds.
         dc.set_disk_space(Some((4096 * GB, 190 * GB)));
         let label = shown(&mut app).expect("the limit is shown");
-        assert!(label.contains("20480 MB") && !label.contains("free disk space"), "{label}");
+        assert_eq!(label, "limitMb=20480 maxMb=20480 reserveMb=10240 spaceLimited=false writes=true");
+        assert_eq!(text(), "Disk cache limit in effect: 20480 MB");
         // 3 GB free on a 4 TB disk: 10 GB stay free, nothing is left for the cache.
         dc.set_disk_space(Some((4096 * GB, 3 * GB)));
-        let label = shown(&mut app).unwrap();
-        assert!(label.contains(": 0 MB") && label.contains("Limited by free disk space") && label.contains("No room left"), "{label}");
+        assert_eq!(shown(&mut app).unwrap(), "limitMb=0 maxMb=20480 reserveMb=10240 spaceLimited=true writes=false");
+        assert_eq!(
+            text(),
+            "Disk cache limit in effect: 0 MB Limited by free disk space: EffectCraft keeps 10.0 GB of this disk free. No room left: nothing is written to the disk cache until disk space is freed."
+        );
         // 12 GB free: 2 GB for the cache.
         dc.set_disk_space(Some((4096 * GB, 12 * GB)));
-        let label = shown(&mut app).unwrap();
-        assert!(label.contains("2048 MB") && label.contains("Limited by free disk space") && !label.contains("No room left"), "{label}");
+        assert_eq!(shown(&mut app).unwrap(), "limitMb=2048 maxMb=20480 reserveMb=10240 spaceLimited=true writes=true");
+        assert_eq!(text(), "Disk cache limit in effect: 2048 MB Limited by free disk space: EffectCraft keeps 10.0 GB of this disk free.");
+        // A 100 GB disk keeps 5 GB.
+        dc.set_disk_space(Some((100 * GB, 6 * GB)));
+        assert_eq!(shown(&mut app).unwrap(), "limitMb=1024 maxMb=20480 reserveMb=5120 spaceLimited=true writes=true");
+        // Without the disk's size, the rule from the constants.
+        assert_eq!(
+            disk_cache_limit_lines(20 * GB, GB, None, true)[1],
+            "Limited by free disk space: EffectCraft keeps 5% of the disk free (at least 2 GB, at most 10 GB)."
+        );
         // No disk cache: no line.
         app.session.disk_cache = None;
         assert!(shown(&mut app).is_none());

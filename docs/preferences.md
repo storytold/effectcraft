@@ -145,8 +145,9 @@ Commands (CLI, MCP, control channel):
   at most half the origin's quota; the folder setting does not apply there). On the desktop the
   cache never fills its disk: it leaves 5% of the disk free, at least 2 GB and at most 10 GB, and
   is smaller than `disk.diskCacheMaxGb` when free space requires it. The Disk page shows the limit
-  in effect in MB under Maximum Disk Cache Size, with a note when free disk space lowers it (at 0
-  nothing is written, and frames and layers are not compressed for it). The Disk page also
+  in effect in MB under Maximum Disk Cache Size, with a note naming the space kept free when free
+  disk space lowers it (with less than 64 MB of room nothing is written, and frames and layers
+  are not compressed for it). The Disk page also
   shows **Browser Storage** in the web app: usage and quota, persistent storage, Clear buttons
   (`storage.info` / `storage.persist` / `storage.clear`, see [web.md](web.md))
 - `disk.mediaCacheFolder`: audio waveform summaries kept between sessions (`Peaks/`)

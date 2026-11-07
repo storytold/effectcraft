@@ -345,6 +345,8 @@ pub struct DiskCache {
     disk_cap: AtomicU64,
     /// Free space is limiting the cache (warned once per episode).
     space_limited: AtomicBool,
+    /// The free space the cache leaves on its disk ([`disk_reserve`]); 0 = unknown.
+    reserve: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     writes: AtomicU64,
@@ -399,10 +401,14 @@ fn checksum(data: &[u8]) -> u64 {
 }
 
 /// The least free space the disk cache leaves on its disk.
-const MIN_DISK_RESERVE: u64 = 2 << 30;
+pub const MIN_DISK_RESERVE: u64 = 2 << 30;
 /// The most free space the disk cache leaves on its disk: 5% of a large disk is far more than
 /// the system needs to keep working (on a 4 TB disk it held a 20 GB cache at 0 with 190 GB free).
-const MAX_DISK_RESERVE: u64 = 10 << 30;
+pub const MAX_DISK_RESERVE: u64 = 10 << 30;
+/// Below this much room left by free disk space, frame and layer writes are refused before they
+/// are encoded ([`DiskCache::accepts_writes`]): a few frames would fill it, and the rest would be
+/// compressed only to be refused.
+const MIN_WRITE_ROOM: u64 = 64 << 20;
 
 /// The free space the disk cache leaves on a disk of `total` bytes: 5% of it, at least 2 GB and
 /// at most 10 GB. It keeps the cache from filling the disk; the cache's size is the user's
@@ -441,6 +447,7 @@ impl DiskCache {
             max_bytes: AtomicU64::new(max_bytes),
             disk_cap: AtomicU64::new(u64::MAX),
             space_limited: AtomicBool::new(false),
+            reserve: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             writes: AtomicU64::new(0),
@@ -539,16 +546,18 @@ impl DiskCache {
     /// [`disk_reserve`] free (5% of the disk, at least 2 GB and at most 10 GB), evicting when it
     /// must.
     pub fn set_disk_space(&self, space: Option<(u64, u64)>) {
+        let mut reserve = 0;
         let cap = match space {
             // (a disk reported as 0 bytes, such as an automount map, is unknown)
             Some((total, available)) if total > 0 => {
-                let reserve = disk_reserve(total);
+                reserve = disk_reserve(total);
                 let used = self.index.lock().map(|g| g.total()).unwrap_or_default();
                 // The cache's own files count as free: below the reserve it gives space back.
                 used.saturating_add(available).saturating_sub(reserve)
             }
             _ => u64::MAX,
         };
+        self.reserve.store(reserve, Ordering::Relaxed);
         self.disk_cap.store(cap, Ordering::Relaxed);
         let limited = cap < self.max_bytes();
         if self.space_limited.swap(limited, Ordering::Relaxed) != limited && limited {
@@ -557,12 +566,20 @@ impl DiskCache {
         self.evict();
     }
 
-    /// Whether a write can be stored at all now: `false` while free disk space holds the limit
-    /// at 0. One atomic read, so frame and layer writes check it before they spend time
-    /// converting and compressing pixels that [`DiskCache::write_format`] would refuse anyway.
-    /// (Whether a given entry fits is known only once it is compressed: `write_format` decides.)
+    /// Whether frame and layer writes are worth encoding now: `false` while free disk space
+    /// holds the limit at 0 or under 64 MB (a limit the setting asks for is always used). Two
+    /// atomic reads, so writes check it before they spend time converting and compressing
+    /// pixels that [`DiskCache::write_format`] would refuse anyway. (Whether a given entry fits
+    /// is known only once it is compressed: `write_format` decides.)
     pub fn accepts_writes(&self) -> bool {
-        self.limit_bytes() > 0
+        let (max, limit) = (self.max_bytes(), self.limit_bytes());
+        limit > 0 && (limit >= MIN_WRITE_ROOM || limit == max)
+    }
+
+    /// The free space the cache leaves on its disk ([`disk_reserve`]), once the disk's size is
+    /// known ([`DiskCache::set_disk_space`]).
+    pub fn reserve_bytes(&self) -> Option<u64> {
+        Some(self.reserve.load(Ordering::Relaxed)).filter(|r| *r > 0)
     }
 
     /// Frame and layer entries compressed for writing so far (tests: a write refused up front
@@ -1064,7 +1081,7 @@ impl DiskCache {
             return;
         }
         self.count_encode();
-        let _ =self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
+        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
     }
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
@@ -1877,6 +1894,7 @@ mod tests {
         let st = dc.stats();
         assert_eq!((st.max_bytes, st.limit_bytes), (20 * GB, 20 * GB), "{st:?}");
         assert!(dc.accepts_writes());
+        assert_eq!(dc.reserve_bytes(), Some(10 * GB));
         // Just above the 10 GB reserve: the cache may use what is left above it.
         dc.set_disk_space(Some((4096 * GB, 15 * GB)));
         assert_eq!(dc.stats().limit_bytes, 5 * GB);
@@ -1908,6 +1926,19 @@ mod tests {
         dc.flush();
         assert_eq!(dc.encodes(), 0, "nothing compressed");
         assert_eq!(dc.stats().entries, 0);
+        // 32 MB of room above the reserve: a few frames would fill it, the rest would be
+        // compressed only to be refused. Not worth encoding either.
+        dc.set_disk_space(Some((4096 * GB, 10 * GB + (32 << 20))));
+        assert_eq!(dc.stats().limit_bytes, 32 << 20);
+        assert!(!dc.accepts_writes());
+        assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
+        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        assert_eq!(dc.encodes(), 0, "nothing compressed");
+        // A small limit the setting asks for (not free space) is used.
+        dc.set_disk_space(None);
+        dc.set_max_bytes(32 << 20);
+        assert!(dc.accepts_writes());
+        dc.set_max_bytes(20 * GB);
         // Room again: the same writes are compressed and stored.
         dc.set_disk_space(Some((4096 * GB, 500 * GB)));
         assert!(dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0));
