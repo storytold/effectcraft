@@ -1,6 +1,7 @@
 //! [`MediaPool`]: decoded footage frames for the compositor, with a memory-budgeted LRU cache.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
@@ -47,7 +48,7 @@ struct Key {
     /// A movie frame made at this size for a reduced-resolution render ((0, 0): as decoded).
     size: (u32, u32),
     /// A still at a reduced `size`: the footage's nominal size, which decides whether it is
-    /// resampled (see `Inner::still_at_size`); (0, 0) otherwise.
+    /// resampled (see `Inner::sized_still`); (0, 0) otherwise.
     nominal: (u32, u32),
 }
 
@@ -168,15 +169,145 @@ pub struct PoolStats {
     pub bytes: usize,
     /// Movie and audio files opened (each path once, however many callers ask for it at once).
     pub opened: u64,
+    /// Pictures decoded: a still's file (once for all the sizes asked for at the same time) or
+    /// a movie frame. Requests for a picture being decoded wait for it instead (#3269).
+    pub decodes: u64,
 }
+
+/// Whole stills decoded for a reduced size kept beside the frame cache ([`CacheState::recent`]):
+/// at most this many bytes in all (and half the frame cache's budget)…
+const RECENT_BYTES: usize = 512 << 20;
+/// …and only while the frame cache has taken fewer than this many frames since.
+const RECENT_AGE: u64 = 256;
+
+/// How long a request waits for another thread's decode of the same picture before it decodes
+/// a copy itself. A safety net only: decodes run on their own threads ([`decode_threads`]), so
+/// no wait depends on the waiting thread or on other requests; only a hung decode takes this long.
+#[cfg(not(target_arch = "wasm32"))]
+const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often a request asks again after the decode it waited for was called off for the
+/// request that ran it (#329), before it decodes a copy itself.
+const CANCELLED_RETRIES: u32 = 3;
 
 #[derive(Default)]
 struct CacheState {
     lru: Lru,
-    /// Frames being decoded right now (requests for them wait instead of decoding again).
-    inflight: HashSet<Key>,
+    /// Pictures being decoded right now, by what is decoded (a still's whole picture, a movie
+    /// frame at its size): requests for them wait for that decode instead of decoding again.
+    inflight: HashMap<Key, Arc<Flight>>,
+    /// The last whole stills decoded for a reduced size (their keys have no size; see
+    /// [`RECENT_BYTES`] and [`RECENT_AGE`]). Another size of the same frame shortly after (the
+    /// Project panel's thumbnail of the comp at the viewer's time) is resampled from it instead of
+    /// decoded again (#3269), and comes out as if decoded on its own. Not in the frame cache: a
+    /// large plate shown reduced is not kept whole there (#1812).
+    recent: VecDeque<Recent>,
+    /// Counts `forget` calls: a decode that started before one doesn't keep its picture (the file
+    /// may have changed meanwhile).
+    generation: u64,
     /// Last frame index requested per movie (sequential-playback detection).
     last: HashMap<Arc<str>, i64>,
+}
+
+/// A whole still in [`CacheState::recent`].
+struct Recent {
+    key: Key,
+    img: Arc<Image>,
+    bytes: usize,
+    /// The frame cache's clock when it was kept.
+    stamp: u64,
+}
+
+impl CacheState {
+    /// The whole still `key` decoded recently, if it is still kept.
+    fn recent(&mut self, key: &Key) -> Option<Arc<Image>> {
+        let clock = self.lru.clock;
+        self.recent.retain(|r| clock.saturating_sub(r.stamp) <= RECENT_AGE);
+        self.recent.iter().find(|r| r.key == *key).map(|r| r.img.clone())
+    }
+
+    /// Keep the whole still `img` decoded for a reduced size, dropping the oldest beyond
+    /// [`RECENT_BYTES`] (and half of `budget`).
+    fn keep_recent(&mut self, key: Key, img: Arc<Image>, budget: usize) {
+        let cap = RECENT_BYTES.min(budget / 2);
+        let bytes = img.data.len().saturating_mul(std::mem::size_of::<Px>());
+        self.recent.retain(|r| r.key != key);
+        if bytes > cap {
+            return;
+        }
+        let stamp = self.lru.clock;
+        self.recent.push_back(Recent { key, img, bytes, stamp });
+        while self.recent.iter().map(|r| r.bytes).sum::<usize>() > cap {
+            self.recent.pop_front();
+        }
+    }
+}
+
+/// A decode in progress ([`CacheState::inflight`]): its outcome once it ends, for the requests
+/// waiting on it.
+#[derive(Default)]
+struct Flight {
+    outcome: Mutex<Option<Result<Arc<Image>>>>,
+    ready: Condvar,
+}
+
+thread_local! {
+    /// Decodes running on this thread itself right now ([`Decoding`]; only where there are no
+    /// decode threads). Such a thread doesn't wait for another decode: a rayon worker waiting on
+    /// its decode's parallel work runs other jobs meanwhile, and one asking for a picture being
+    /// decoded could wait on a decode further down its own stack.
+    static OWNED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks a decode running on this thread ([`OWNED`]) until dropped (also when it panics).
+struct Decoding;
+
+impl Decoding {
+    fn new() -> Self {
+        OWNED.with(|n| n.set(n.get().saturating_add(1)));
+        Decoding
+    }
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        OWNED.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// The threads footage pictures are decoded on (one per core, `ec-decode-N`), `None` where they
+/// can't be started. Requests hand their decode to them and block until it is done (#3269):
+/// a frame worker then never runs part of a decode (rayon would let it pick up another frame's
+/// job meanwhile, which could wait on that very decode), and a thread decoding never runs a
+/// frame job that waits on it. The decode's own parallel work runs on these threads, which
+/// never wait for a picture.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_threads() -> Option<&'static rayon::ThreadPool> {
+    static THREADS: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    THREADS
+        .get_or_init(|| {
+            let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(4, 32);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .thread_name(|i| format!("ec-decode-{i}"))
+                // (the request waiting for it gets an error; rayon's default aborts)
+                .panic_handler(|_| log::error!("media: a footage decode panicked; that frame shows nothing"))
+                .build()
+                .inspect_err(|e| log::warn!("media: no decode threads ({e}); footage decodes on the threads asking for it"))
+                .ok()
+        })
+        .as_ref()
+}
+
+/// What waiting for another thread's decode ended with ([`Inner::wait`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum Waited {
+    /// Its outcome.
+    Got(Result<Arc<Image>>),
+    /// This request was called off meanwhile (its own cancel flag, #329).
+    Cancelled,
+    /// This thread may not wait, or waited [`WAIT_LIMIT`]: it decodes a copy itself.
+    No,
 }
 
 /// A movie/audio source by path ([`Opened`]), opened by the first caller while the others wait
@@ -226,12 +357,19 @@ struct Inner {
     /// `Err` is not retried until `forget`).
     gifs: Mutex<HashMap<Arc<str>, GifSlot>>,
     cache: Mutex<CacheState>,
-    done: Condvar,
     budget: AtomicU64,
     read_ahead: AtomicBool,
     hits: AtomicU64,
     misses: AtomicU64,
     prefetched: AtomicU64,
+    /// See [`PoolStats::decodes`].
+    decodes: AtomicU64,
+    /// Requests waiting for another thread's decode right now (tests).
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
+    /// Runs before each decode; `Some` answers in its place (tests).
+    #[cfg(test)]
+    gate: Mutex<Option<Gate>>,
     /// Settings ▸ Disk ▸ Conformed Audio Folder: decoded audio tracks written once per file and
     /// rate, read back instead of decoding again (`None` = off).
     conform: Mutex<Option<std::path::PathBuf>>,
@@ -249,6 +387,10 @@ struct Inner {
     /// Channel effects): its pictures come from the same cached decode (#474).
     aux_footage: Mutex<AuxFootage>,
 }
+
+/// [`Inner::gate`].
+#[cfg(test)]
+type Gate = Arc<dyn Fn() -> Option<Result<Image>> + Send + Sync>;
 
 /// Footage whose channels effects read ([`Inner::aux_footage`]), by [`Footage::path`].
 #[derive(Default)]
@@ -274,7 +416,9 @@ impl AuxFootage {
 /// - Converted frames live in an LRU cache bounded by a byte budget ([`DEFAULT_BUDGET`]).
 /// - Sequential playback reads one frame ahead on a worker thread (native builds), so decoding
 ///   and conversion of the next frame overlap with the caller's use of the current one.
-/// - Concurrent requests for the same frame decode it once.
+/// - Concurrent requests for the same frame decode it once: the first decodes, the others wait
+///   for its picture (#3269). A still asked for at several sizes is decoded once and resampled
+///   to each.
 #[derive(Clone)]
 pub struct MediaPool {
     inner: Arc<Inner>,
@@ -287,6 +431,7 @@ impl Default for MediaPool {
 }
 
 /// Where a frame comes from.
+#[derive(Clone)]
 struct Loc {
     key: Key,
     /// Media time for movies (`None`: an image file, `key.path`).
@@ -295,16 +440,42 @@ struct Loc {
     float: FloatCurve,
 }
 
-/// Removes an in-flight key and wakes waiters, also when decoding panics.
-struct Inflight<'a> {
+/// The request decoding a picture ([`CacheState::inflight`]). Dropped, it keeps the picture
+/// (in the frame cache, or a reduced still's whole picture in [`CacheState::recent`]; not when
+/// the file was forgotten meanwhile), ends the flight and hands its outcome to the requests
+/// waiting on it: an error when the decode panicked or returned early, so none waits for a
+/// picture that never comes.
+struct Owner<'a> {
     inner: &'a Inner,
     key: Key,
+    flight: Arc<Flight>,
+    /// The picture is the one asked for (else a still's whole picture, resampled for the request).
+    as_asked: bool,
+    /// [`CacheState::generation`] when the decode started.
+    generation: u64,
+    outcome: Option<Result<Arc<Image>>>,
 }
 
-impl Drop for Inflight<'_> {
+impl Drop for Owner<'_> {
     fn drop(&mut self) {
-        lock(&self.inner.cache).inflight.remove(&self.key);
-        self.inner.done.notify_all();
+        let outcome = self.outcome.take().unwrap_or_else(|| Err(MediaError::Decode(format!("{}: the decode stopped", self.key.path))));
+        let budget = self.inner.budget();
+        let mut c = lock(&self.inner.cache);
+        if let Ok(img) = &outcome
+            && c.generation == self.generation
+        {
+            if self.as_asked {
+                c.lru.insert(self.key.clone(), img.clone(), budget);
+            } else {
+                c.keep_recent(self.key.clone(), img.clone(), budget);
+            }
+        }
+        if c.inflight.get(&self.key).is_some_and(|f| Arc::ptr_eq(f, &self.flight)) {
+            c.inflight.remove(&self.key);
+        }
+        drop(c);
+        *lock(&self.flight.outcome) = Some(outcome);
+        self.flight.ready.notify_all();
     }
 }
 
@@ -323,12 +494,16 @@ impl MediaPool {
                 models: Mutex::default(),
                 gifs: Mutex::default(),
                 cache: Mutex::default(),
-                done: Condvar::new(),
                 budget: AtomicU64::new(bytes as u64),
                 read_ahead: AtomicBool::new(cfg!(not(target_arch = "wasm32"))),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
                 prefetched: AtomicU64::new(0),
+                decodes: AtomicU64::new(0),
+                #[cfg(test)]
+                waiting: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                gate: Mutex::default(),
                 opened: AtomicU64::new(0),
                 conform: Mutex::default(),
                 conforming: Mutex::default(),
@@ -365,6 +540,7 @@ impl MediaPool {
             frames: c.lru.map.len(),
             bytes: c.lru.bytes,
             opened: i.opened.load(Ordering::Relaxed),
+            decodes: i.decodes.load(Ordering::Relaxed),
         }
     }
 
@@ -372,6 +548,7 @@ impl MediaPool {
     pub fn clear_frames(&self) {
         let mut c = lock(&self.inner.cache);
         c.lru = Lru::default();
+        c.recent.clear();
         c.last.clear();
         drop(c);
         // Decoded GIFs sit outside the frame budget; Purge frees them too.
@@ -396,6 +573,8 @@ impl MediaPool {
         for k in keys {
             c.lru.remove(&k);
         }
+        c.recent.retain(|r| &*r.key.path != path);
+        c.generation = c.generation.wrapping_add(1);
         c.last.remove(path);
         drop(c);
         crate::exr_channels::forget(path);
@@ -767,6 +946,12 @@ impl Inner {
 
     /// The frame of `footage` at `t`, resampled to `size` (see [`FootageSource::frame_at_size`]):
     /// a movie's made at that size directly, a still's resampled once and kept at that size.
+    ///
+    /// Each picture is decoded once however many threads ask for it at the same time (#3269):
+    /// the first decodes it and the others wait for its picture. A still is decoded whole and
+    /// resampled to each size asked for, so a second size of the same frame (the Project panel's
+    /// thumbnail beside a reduced viewer) comes from the same decode, the frame cache's whole
+    /// picture or a recent one ([`CacheState::recent`]), and is the same as decoded on its own.
     fn frame_at(self: &Arc<Self>, footage: &Footage, t: Tick, playback: bool, size: Option<(u32, u32)>, float: FloatCurve) -> Result<Arc<Image>> {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
@@ -780,7 +965,14 @@ impl Inner {
                 loc.key.nominal = (footage.width, footage.height);
             }
         }
+        // What is decoded: a movie frame at its size, a still whole (its key has no size).
+        let source =
+            Loc { key: if movie { loc.key.clone() } else { Key { size: (0, 0), nominal: (0, 0), ..loc.key.clone() } }, media_t: loc.media_t, float: loc.float };
+        let as_asked = source.key == loc.key;
+        // The picture asked for, made of the decoded one.
+        let shape = |whole: Arc<Image>| if movie { whole } else { Self::sized_still(whole, &loc, footage) };
         let mut c = lock(&self.cache);
+        let generation = c.generation;
         // sequential playback of a movie: read the next frame ahead
         if playback && movie {
             let prev = c.last.insert(loc.key.path.clone(), loc.key.frame);
@@ -788,44 +980,120 @@ impl Inner {
                 let next_t = t + footage.frame_rate.frame_duration();
                 let mut next = Self::locate(footage, next_t, float);
                 next.key.size = loc.key.size;
-                if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains(&next.key) {
+                if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains_key(&next.key) {
                     self.prefetch(footage, next_t, size, float);
                 }
             }
         }
+        let mut retries = 0;
         loop {
             if let Some(img) = c.lru.get(&loc.key) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(img);
             }
-            if !c.inflight.contains(&loc.key) {
-                break;
+            // A still decoded already for another size: resampled from its whole picture.
+            if !movie {
+                let whole = c.lru.get(&source.key).or_else(|| c.recent(&source.key));
+                if let Some(whole) = whole {
+                    drop(c);
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(self.keep(&loc.key, shape(whole), generation));
+                }
             }
-            // Another thread (or the read-ahead) is decoding this frame. Never block a rayon
-            // worker on that: while the decoder waits on its own parallel join, the worker can
-            // steal this very job, and waiting here would then wait on a decode further down
-            // its own stack (deadlock). Decode a private copy instead.
-            if rayon::current_thread_index().is_some() {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                drop(c);
-                return Ok(Arc::new(self.decode(&loc, footage)?));
+            let Some(flight) = c.inflight.get(&source.key).cloned() else { break };
+            // Another request (or the read-ahead) is decoding this picture: wait for it.
+            drop(c);
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            match self.wait(&flight) {
+                // (kept also when it is the picture decoded: a still's whole picture decoded for
+                // another size is not in the frame cache)
+                Waited::Got(Ok(whole)) => return Ok(self.keep(&loc.key, shape(whole), generation)),
+                // The other request was called off (#329), not this one: ask again (and decode
+                // it here if nobody else does by now).
+                Waited::Got(Err(MediaError::Cancelled)) if retries < CANCELLED_RETRIES => retries += 1,
+                // Called off again and again, or this thread may not wait (or waited too long):
+                // decode a copy.
+                Waited::Got(Err(MediaError::Cancelled)) | Waited::No => return Ok(shape(Arc::new(self.run_decode(&source, footage)?))),
+                Waited::Got(Err(e)) => return Err(e),
+                Waited::Cancelled => return Err(MediaError::Cancelled),
             }
-            c = self.done.wait(c).unwrap_or_else(std::sync::PoisonError::into_inner);
+            c = lock(&self.cache);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
-        c.inflight.insert(loc.key.clone());
+        let flight = Arc::new(Flight::default());
+        c.inflight.insert(source.key.clone(), flight.clone());
         drop(c);
-        let _guard = Inflight { inner: self, key: loc.key.clone() };
-        let img = Arc::new(self.decode(&loc, footage)?);
-        lock(&self.cache).lru.insert(loc.key, img.clone(), self.budget());
-        Ok(img)
+        let mut owner = Owner { inner: self, key: source.key.clone(), flight, as_asked, generation, outcome: None };
+        let decoded = self.run_decode(&source, footage).map(Arc::new);
+        owner.outcome = Some(decoded.clone());
+        // (keeps the picture and hands it to the waiting requests)
+        drop(owner);
+        let whole = decoded?;
+        Ok(if as_asked { whole } else { self.keep(&loc.key, shape(whole), generation) })
+    }
+
+    /// Keep `img` in the frame cache as `key` (unless a file was forgotten since `generation`,
+    /// see [`CacheState::generation`]), and return it.
+    fn keep(&self, key: &Key, img: Arc<Image>, generation: u64) -> Arc<Image> {
+        let mut c = lock(&self.cache);
+        if c.generation == generation {
+            c.lru.insert(key.clone(), img.clone(), self.budget());
+        }
+        img
+    }
+
+    /// Wait for the outcome of another request's decode (`flight`).
+    ///
+    /// Waiting can't deadlock: decodes run on their own threads ([`decode_threads`]), which never
+    /// wait for a picture, so a decode doesn't depend on the requests waiting for it. Where there
+    /// are no decode threads, a thread running a decode itself ([`OWNED`]) doesn't wait. The time
+    /// limit is a safety net for a hung decode.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait(&self, flight: &Flight) -> Waited {
+        if OWNED.with(Cell::get) > 0 {
+            log::debug!("media: a picture asked for during a decode on this thread is being decoded elsewhere; decoding a copy");
+            return Waited::No;
+        }
+        let until = std::time::Instant::now() + WAIT_LIMIT;
+        #[cfg(test)]
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let mut outcome = lock(&flight.outcome);
+        let waited = loop {
+            if let Some(o) = outcome.as_ref() {
+                break Waited::Got(o.clone());
+            }
+            if filmcraft_media::cancel::cancelled() {
+                break Waited::Cancelled;
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                log::warn!("media: a picture took over {} s to decode on another thread; decoding a copy", WAIT_LIMIT.as_secs());
+                break Waited::No;
+            }
+            // (in slices, to notice this request being called off)
+            outcome = match flight.ready.wait_timeout(outcome, left.min(std::time::Duration::from_millis(20))) {
+                Ok((g, _)) => g,
+                Err(p) => p.into_inner().0,
+            };
+        };
+        drop(outcome);
+        #[cfg(test)]
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        waited
+    }
+
+    /// (A wasm32 build has one thread: a picture in flight there is being decoded further down
+    /// this thread's own stack.)
+    #[cfg(target_arch = "wasm32")]
+    fn wait(&self, _flight: &Flight) -> Waited {
+        Waited::No
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn prefetch(self: &Arc<Self>, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) {
         let (me, f) = (self.clone(), footage.clone());
         self.prefetched.fetch_add(1, Ordering::Relaxed);
-        // A plain thread, not a rayon job: the decode below parallelises with rayon itself.
+        // A plain thread, not a rayon job: it waits for the decode.
         std::thread::spawn(move || {
             let _ = me.frame_at(&f, t, false, size, float);
         });
@@ -834,24 +1102,72 @@ impl Inner {
     #[cfg(target_arch = "wasm32")]
     fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve) {}
 
-    /// A still (image file or sequence frame) at `loc.key.size` when one is set: resampled as the
-    /// renderer would ([`FootageSource::frame_at_size`]), so the pool keeps the reduced frame and a
-    /// reduced-resolution render neither decodes nor resamples a large still again for every frame
-    /// (#1812: 21120-px plates at Quarter). Like the renderer's `footage_buf`, an image decoded
-    /// larger than the footage's nominal size (a smart object's pixels) is resampled too, and one
-    /// decoded smaller is not (the renderer scales the layer instead).
-    fn still_at_size(img: Image, loc: &Loc, footage: &Footage) -> Image {
+    /// A still (image file or sequence frame) at `loc.key.size` when one is set, made of its
+    /// whole decoded picture `img`: resampled as the renderer would ([`FootageSource::frame_at_size`]),
+    /// so the pool keeps the reduced frame and a reduced-resolution render neither decodes nor
+    /// resamples a large still again for every frame (#1812: 21120-px plates at Quarter). Like the
+    /// renderer's `footage_buf`, an image decoded larger than the footage's nominal size (a smart
+    /// object's pixels) is resampled too, and one decoded smaller is not (the renderer scales the
+    /// layer instead).
+    fn sized_still(img: Arc<Image>, loc: &Loc, footage: &Footage) -> Arc<Image> {
         let (w, h) = loc.key.size;
         let smaller = img.width == 0 || footage.width as f64 / img.width as f64 > 1.0 + 1e-9;
         if w == 0 || h == 0 || smaller || (w, h) == (img.width, img.height) {
             return img;
         }
-        effectcraft_raster::resample(&img, w, h)
+        Arc::new(effectcraft_raster::resample(&img, w, h))
     }
 
-    fn decode(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+    /// Decode `loc`'s picture ([`Inner::decode_source`]) on the decode threads
+    /// ([`decode_threads`]) and block until it is done; on this thread where there are none
+    /// (wasm32) or this is one of them.
+    fn run_decode(self: &Arc<Self>, loc: &Loc, footage: &Footage) -> Result<Image> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(threads) = decode_threads()
+            && threads.current_thread_index().is_none()
+        {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let (me, at, f) = (self.clone(), loc.clone(), footage.clone());
+            // The request's cancel flag and decoding hints go with it (#329).
+            let hints = filmcraft_media::cancel::Context::current();
+            threads.spawn(move || {
+                #[cfg(not(test))]
+                let decoded = hints.run(|| me.decode_source(&at, &f));
+                // (the decodes counted on that thread are this thread's)
+                #[cfg(test)]
+                let decoded = crate::exr_channels::counting(|| hints.run(|| me.decode_source(&at, &f)));
+                let _ = tx.send(decoded);
+            });
+            // A plain block: this thread runs nothing else meanwhile.
+            return match rx.recv() {
+                #[cfg(not(test))]
+                Ok(decoded) => decoded,
+                #[cfg(test)]
+                Ok((decoded, counted)) => {
+                    crate::exr_channels::add_decodes(counted);
+                    decoded
+                }
+                // (the decode panicked)
+                Err(_) => Err(MediaError::Decode(format!("{}: the decode stopped", loc.key.path))),
+            };
+        }
+        let _decoding = Decoding::new();
+        self.decode_source(loc, footage)
+    }
+
+    /// Decode the picture `loc` names: a still whole, a movie frame at its size.
+    fn decode_source(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+        self.decodes.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        {
+            // (not holding the lock while it runs)
+            let gate = lock(&self.gate).clone();
+            if let Some(answer) = gate.and_then(|g| g()) {
+                return answer;
+            }
+        }
         match loc.media_t {
-            None => self.decode_still(loc, footage).map(|img| Self::still_at_size(img, loc, footage)),
+            None => self.decode_still(loc, footage),
             Some(_) => self.decode_media(loc, footage),
         }
     }
@@ -1323,5 +1639,265 @@ mod tests {
         #[cfg(unix)]
         assert!(red("slashes.obj", &format!("/{}", dir.join("red.mtl").display())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 16 × 8 OpenEXR still with a different value in every pixel, registered with `pool` at
+    /// `path`.
+    fn plate(pool: &MediaPool, path: &str) -> Footage {
+        use exr::prelude::*;
+        let (w, h) = (16usize, 8usize);
+        let ch = |n: &str, k: f32| AnyChannel::new(n, FlatSamples::F32((0..w * h).map(|i| (i as f32 * k).sin().abs()).collect()));
+        let channels = AnyChannels::sort(vec![ch("R", 0.37), ch("G", 0.11), ch("B", 0.73), AnyChannel::new("A", FlatSamples::F32(vec![1.0; w * h]))].into());
+        let image = exr::image::Image::from_layer(Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write().to_buffered(&mut bytes).unwrap();
+        let b: Arc<[u8]> = bytes.into_inner().into();
+        pool.add_bytes(path, b.clone());
+        crate::probe_bytes(path, b).unwrap()
+    }
+
+    /// Hold `pool`'s decodes until `n` requests wait for one (at most 10 s), then answer with
+    /// `then` (`None`: decode the file).
+    fn gate(pool: &MediaPool, n: usize, then: impl Fn() -> Option<Result<Image>> + Send + Sync + 'static) {
+        let inner = Arc::downgrade(&pool.inner);
+        *lock(&pool.inner.gate) = Some(Arc::new(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while inner.upgrade().is_some_and(|i| i.waiting.load(Ordering::SeqCst) < n) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            then()
+        }));
+    }
+
+    type Job<T> = Box<dyn FnOnce() -> T + Send>;
+
+    /// Run `jobs` at once, each on a rayon worker of its own (as the viewer's frame workers ask
+    /// for frames), and collect what they return; a job that panics returns nothing, and one
+    /// that hangs fails the test (20 s) instead of hanging it.
+    fn on_workers<T: Send + 'static>(jobs: Vec<Job<T>>) -> Vec<T> {
+        let n = jobs.len();
+        let workers = rayon::ThreadPoolBuilder::new().num_threads(n).panic_handler(|_| {}).build().unwrap();
+        let start = Arc::new(std::sync::Barrier::new(n));
+        let (tx, rx) = std::sync::mpsc::channel();
+        for job in jobs {
+            let (tx, start) = (tx.clone(), start.clone());
+            workers.spawn(move || {
+                // (each worker holds one job until all have started)
+                start.wait();
+                let _ = tx.send(job());
+            });
+        }
+        drop(tx);
+        (0..n).map_while(|_| rx.recv_timeout(std::time::Duration::from_secs(20)).ok()).collect()
+    }
+
+    /// Requests for the frame of `f` on `pool`, one at each of `sizes`, as [`on_workers`] jobs.
+    fn requests(pool: &MediaPool, f: &Footage, sizes: &[Option<(u32, u32)>]) -> Vec<Job<(Option<(u32, u32)>, Result<Arc<Image>>)>> {
+        sizes
+            .iter()
+            .map(|&size| {
+                let (pool, f) = (pool.clone(), f.clone());
+                Box::new(move || (size, Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, size, FloatCurve::Srgb))) as Job<_>
+            })
+            .collect()
+    }
+
+    /// #3269: requests for a frame being decoded wait for that decode and take its picture, also
+    /// on rayon workers (the viewer's frame workers), which each decoded a private copy before.
+    #[test]
+    fn concurrent_requests_for_a_frame_decode_it_once() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        const N: usize = 8;
+        gate(&pool, N - 1, || None);
+        let got = on_workers(requests(&pool, &f, &[None; N]));
+        assert_eq!(got.len(), N, "every request came back");
+        let first = got[0].1.as_ref().unwrap().clone();
+        for (_, img) in &got {
+            assert!(Arc::ptr_eq(img.as_ref().unwrap(), &first), "the same picture");
+        }
+        assert_eq!(pool.stats().decodes, 1, "one decode for {N} requests");
+        assert!(lock(&pool.inner.cache).inflight.is_empty(), "the flight ended");
+    }
+
+    /// #3269: a still asked for at several sizes at once (a reduced viewer, the Project panel's
+    /// thumbnail of its comp) is decoded once, and each size is what decoding it alone gives.
+    #[test]
+    fn sizes_of_a_still_asked_for_at_once_share_one_decode() {
+        let whole = {
+            let alone = MediaPool::new();
+            let f = plate(&alone, "/plate.exr");
+            alone.frame_at(&f, Tick::ZERO).unwrap()
+        };
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        let sizes = [Some((8, 4)), Some((4, 2)), None];
+        gate(&pool, sizes.len() - 1, || None);
+        let got = on_workers(requests(&pool, &f, &sizes));
+        assert_eq!(got.len(), sizes.len(), "every request came back");
+        assert_eq!(pool.stats().decodes, 1, "one decode for all sizes");
+        for (size, img) in got {
+            let img = img.unwrap();
+            match size {
+                None => assert_eq!(img.data, whole.data),
+                Some((w, h)) => {
+                    assert_eq!((img.width, img.height), (w, h));
+                    assert_eq!(img.data, effectcraft_raster::resample(&whole, w, h).data, "{w}×{h} as decoded alone");
+                }
+            }
+        }
+    }
+
+    /// #3269: a second size of a still shown reduced (the thumbnail after the viewer) is
+    /// resampled from the first request's decode, not decoded again, and the whole picture is
+    /// not kept in the frame cache (#1812).
+    #[test]
+    fn a_second_size_of_a_still_is_resampled_from_the_first_decode() {
+        let whole = {
+            let alone = MediaPool::new();
+            let f = plate(&alone, "/plate.exr");
+            alone.frame_at(&f, Tick::ZERO).unwrap()
+        };
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        let at = |size| Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, Some(size), FloatCurve::Srgb).unwrap();
+        let viewer = at((8, 4));
+        let thumb = at((4, 2));
+        assert_eq!(pool.stats().decodes, 1, "the thumbnail did not decode the file again");
+        assert_eq!(viewer.data, effectcraft_raster::resample(&whole, 8, 4).data);
+        assert_eq!(thumb.data, effectcraft_raster::resample(&whole, 4, 2).data, "as decoded alone");
+        assert!(lock(&pool.inner.cache).lru.map.keys().all(|k| k.size != (0, 0)), "the whole picture is not in the frame cache");
+        // Forgetting the file forgets its whole picture too.
+        pool.forget("/plate.exr");
+        at((2, 1));
+        assert_eq!(pool.stats().decodes, 2);
+    }
+
+    /// #3269: when the decode others wait for fails, or panics, every waiting request gets an
+    /// error and none hangs; the next request decodes again.
+    #[test]
+    fn a_failed_decode_fails_every_waiting_request() {
+        for panics in [false, true] {
+            let pool = MediaPool::new();
+            let f = plate(&pool, "/broken.exr");
+            const N: usize = 6;
+            gate(&pool, N - 1, move || if panics { panic!("a decoder bug") } else { Some(Err(MediaError::Decode("/broken.exr: a bad block".into()))) });
+            let got = on_workers(requests(&pool, &f, &[None; N]));
+            let errors: Vec<String> = got.iter().map(|(_, r)| r.as_ref().err().map(ToString::to_string).unwrap_or_default()).collect();
+            assert_eq!(got.len(), N, "panics: {panics}, {errors:?}");
+            let why = if panics { "the decode stopped" } else { "a bad block" };
+            assert!(errors.iter().all(|e| e.contains(why)), "panics: {panics}, {errors:?}");
+            assert_eq!(pool.stats().decodes, 1, "the waiting requests did not decode");
+            assert!(lock(&pool.inner.cache).inflight.is_empty(), "the flight ended");
+            *lock(&pool.inner.gate) = None;
+            assert!(pool.frame_at(&f, Tick::ZERO).is_ok(), "decodes again");
+        }
+    }
+
+    /// #3269: a decode runs on the decode threads, not on the frame worker asking for it: a frame
+    /// worker that ran part of it (rayon lets a worker waiting in a parallel loop take another
+    /// job) could take a request waiting for that very decode, which then never finished. Here
+    /// the decode works in parallel while a request for the same picture comes to the frame
+    /// workers: none of its work runs there, and both requests are answered at once.
+    #[test]
+    fn a_decode_runs_off_the_frame_workers() {
+        use rayon::prelude::*;
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        let workers = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let on_frame_workers = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let (workers, seen, asker, f, tx) = (workers.clone(), on_frame_workers.clone(), pool.clone(), f.clone(), tx.clone());
+            let inner = Arc::downgrade(&pool.inner);
+            *lock(&pool.inner.gate) = Some(Arc::new(move || {
+                let (asker, f, tx) = (asker.clone(), f.clone(), tx.clone());
+                workers.spawn(move || {
+                    let _ = tx.send(asker.frame_at(&f, Tick::ZERO));
+                });
+                (0..64).into_par_iter().for_each(|_| {
+                    if workers.current_thread_index().is_some() {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                });
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while inner.upgrade().is_some_and(|i| i.waiting.load(Ordering::SeqCst) < 1) && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                None
+            }));
+        }
+        let started = std::time::Instant::now();
+        {
+            let (pool, f, tx) = (pool.clone(), f.clone(), tx.clone());
+            workers.spawn(move || {
+                let _ = tx.send(pool.frame_at(&f, Tick::ZERO));
+            });
+        }
+        drop(tx);
+        let got: Vec<_> = (0..2).map_while(|_| rx.recv_timeout(std::time::Duration::from_secs(20)).ok()).collect();
+        // (the gate holds a pool: let it go)
+        *lock(&pool.inner.gate) = None;
+        assert_eq!(got.len(), 2, "both requests were answered");
+        assert!(got.iter().all(Result::is_ok));
+        assert!(started.elapsed() < WAIT_LIMIT, "nobody waited out the time limit: {:?}", started.elapsed());
+        assert_eq!(on_frame_workers.load(Ordering::SeqCst), 0, "no part of the decode ran on a frame worker");
+        assert_eq!(pool.stats().decodes, 1);
+    }
+
+    /// Where a thread decodes a picture itself (no decode threads), a request that comes to it
+    /// meanwhile (a rayon worker runs other jobs while its decode waits on its parallel work)
+    /// doesn't wait for a picture being decoded: that could be its own decode further down the
+    /// stack. It decodes a copy instead.
+    #[test]
+    fn a_thread_decoding_a_picture_does_not_wait_for_one() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        let flight = Arc::new(Flight::default());
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
+        let decoding = Decoding::new();
+        let started = std::time::Instant::now();
+        assert!(pool.frame_at(&f, Tick::ZERO).is_ok());
+        assert!(started.elapsed() < WAIT_LIMIT, "did not wait for the flight");
+        drop(decoding);
+        assert_eq!(OWNED.with(Cell::get), 0);
+    }
+
+    /// #329: a request waiting for another's decode gives up once it is called off itself.
+    #[test]
+    fn a_waiting_request_called_off_stops_waiting() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, Arc::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = std::time::Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            let got = filmcraft_media::cancel::with_cancel(&cancel, || pool.frame_at(&f, Tick::ZERO));
+            assert!(matches!(got, Err(MediaError::Cancelled)), "{:?}", got.err());
+        });
+        assert!(started.elapsed() < WAIT_LIMIT);
+    }
+
+    /// #3269: a whole still kept for a second size is kept within its own cap, and not after
+    /// the frame cache has moved on.
+    #[test]
+    fn recent_whole_stills_are_capped_and_expire() {
+        let key = |i| Key { path: "/s.exr".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0) };
+        let mut c = CacheState::default();
+        // 64 KiB each (64 × 64 pixels of 16 bytes), a budget of 512 KiB: room for 4.
+        for i in 0..6 {
+            c.keep_recent(key(i), Arc::new(Image::new(64, 64)), 512 << 10);
+        }
+        assert!(c.recent(&key(1)).is_none() && c.recent(&key(2)).is_some() && c.recent(&key(5)).is_some());
+        // Larger than the cap: not kept.
+        c.keep_recent(key(9), Arc::new(Image::new(512, 512)), 512 << 10);
+        assert!(c.recent(&key(9)).is_none());
+        c.lru.clock += RECENT_AGE + 1;
+        assert!(c.recent(&key(5)).is_none(), "expired");
     }
 }

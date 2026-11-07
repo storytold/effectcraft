@@ -644,8 +644,8 @@ impl ChannelCache {
             }
         };
         let mut decoded_here = false;
-        // Waiting here can block a rayon worker (which `Inner::frame_at` avoids for frames): that
-        // is safe because the decode never waits on rayon's global pool (the exr crate
+        // Waiting here can block a rayon worker (a footage decode thread, or a frame worker asking
+        // for channels): that is safe because the decode never waits on a rayon pool (the exr crate
         // decompresses on a pool of its own and this thread only receives the blocks), so the
         // decoding thread can't be waiting for this one.
         let v = slot
@@ -763,6 +763,26 @@ pub(crate) fn count_decode(channels: bool) {
 #[cfg(test)]
 pub(crate) fn take_decodes() -> [u64; 2] {
     DECODES.with(|d| d.replace([0; 2]))
+}
+
+/// Run `f` and return the decodes [`count_decode`] counted on this thread meanwhile, leaving
+/// this thread's count as it was (a decode thread may run another request's decode inside
+/// this one's).
+#[cfg(test)]
+pub(crate) fn counting<R>(f: impl FnOnce() -> R) -> (R, [u64; 2]) {
+    let before = DECODES.with(std::cell::Cell::get);
+    let r = f();
+    let after = DECODES.with(|d| d.replace(before));
+    (r, [after[0].saturating_sub(before[0]), after[1].saturating_sub(before[1])])
+}
+
+/// Count `n` decodes ([`counting`]) on this thread: made for it on another.
+#[cfg(test)]
+pub(crate) fn add_decodes(n: [u64; 2]) {
+    DECODES.with(|d| {
+        let c = d.get();
+        d.set([c[0] + n[0], c[1] + n[1]]);
+    });
 }
 
 #[cfg(test)]
