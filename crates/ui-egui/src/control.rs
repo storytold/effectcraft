@@ -290,6 +290,11 @@ fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
         if (on && !shown) || crate::panels::effect_controls::set_lock(app, on) != on {
             return err("effectControlsLocked: Effect Controls shows no layer to lock");
         }
+        // Locked to a layer of another comp, the panel shows this comp's selection: the tab's
+        // lock reads locked and a click unlocks, so a lock request does not lock what is shown.
+        if on && app.ui.effect_controls_lock.is_some_and(|k| app.session.active_comp_id().is_none_or(|c| c.0 != k.comp)) {
+            return err("effectControlsLocked: Effect Controls is locked to a layer of another composition; unlock it first");
+        }
     }
     set_ui_layout(app, p)
 }
