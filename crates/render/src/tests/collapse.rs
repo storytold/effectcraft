@@ -161,8 +161,17 @@ fn referenced_layer_overrides_change_the_owner_cache_key() {
     let opacity = comp.layer(aid).unwrap().props.prop("transform/opacity").unwrap().uid;
     let key = |value: f64| {
         let overrides = [crate::PropertyOverride { layer: aid, prop: opacity, value: Value::Scalar(value), font: false }];
-        let ctx =
-            EvalCtx { project: &p, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &overrides, media_overrides: &[] };
+        let ctx = EvalCtx {
+            project: &p,
+            comp_id: cid,
+            comp,
+            time: Tick::ZERO,
+            expr: None,
+            footage: None,
+            property_overrides: &overrides,
+            media_overrides: &[],
+            reads: None,
+        };
         crate::cache::layer_key(&ctx, b, 1.0, false, false)
     };
     let (opaque, half) = (key(100.0), key(50.0));

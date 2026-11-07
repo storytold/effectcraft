@@ -309,6 +309,7 @@ impl<'a> Resolver<'a> {
             footage: self.ctx.footage,
             property_overrides: if same_comp { self.ctx.property_overrides } else { &[] },
             media_overrides: if same_comp { self.ctx.media_overrides } else { &[] },
+            reads: self.ctx.reads,
         })
     }
     fn prop(&self, c: u64, l: u64, path: &str) -> Option<(&'a Layer, &'a Property)> {

@@ -140,6 +140,13 @@ impl<'a> Renderer<'a> {
         out
     }
 
+    /// `ctx` noting what it reads (fonts, `sampleImage`) in this render's [`Renderer::reads`]:
+    /// a context made by an outer render carries that render's log, not the one of the buffer
+    /// [`Renderer::recorded`] makes.
+    pub(crate) fn with_reads<'c>(&'c self, ctx: &EvalCtx<'c>) -> EvalCtx<'c> {
+        EvalCtx { reads: self.reads, ..*ctx }
+    }
+
     /// The buffer the layer cache keeps under `key`, with the files it was made of noted in
     /// [`Renderer::reads`].
     pub(crate) fn cached(&self, key: Option<u64>) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
@@ -422,7 +429,17 @@ impl<'a> Renderer<'a> {
     }
 
     pub(crate) fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
-        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage), property_overrides: &[], media_overrides: &[] }
+        EvalCtx {
+            project: self.project,
+            comp_id,
+            comp,
+            time: t,
+            expr: self.expr,
+            footage: Some(self.footage),
+            property_overrides: &[],
+            media_overrides: &[],
+            reads: self.reads,
+        }
     }
 
     /// This renderer with another accelerator (or none): the passes of
@@ -831,7 +848,9 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
+            // (the font files go to this render's log, which `ctx` may not carry: see
+            // [`Renderer::with_reads`])
+            LayerSource::Text => Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer)))),
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }

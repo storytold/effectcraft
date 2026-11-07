@@ -57,6 +57,7 @@ impl Env {
             footage: Some(self.footage.as_ref()),
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         }
     }
 }

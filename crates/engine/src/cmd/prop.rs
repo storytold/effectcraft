@@ -1397,6 +1397,7 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
             footage: Some(s.footage.as_ref()),
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         keys.push(Keyframe::new(layer.layer_time(t), ctx.value(&layer, &pr)));
         t += fd;
