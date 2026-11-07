@@ -1104,7 +1104,14 @@ pub fn open_on_press(ui: &Ui, resp: &Response, id: egui::Id) {
     // elsewhere (#2686).
     let press = pointer_steps(ui).into_iter().find(|(step, _)| *step == Step::Press).map(|(_, p)| p);
     let landed = press.filter(|p| resp.interact_rect.contains(*p));
-    let on_trigger = landed.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(resp.layer_id));
+    // The layer says which stack of windows the press landed in; `hovered` says which widget of
+    // that stack took it — egui's hit test names the topmost interactive widget at the pointer, so
+    // a control drawn over the trigger withholds hover from it and the press that control took must
+    // not open the list. egui hit-tests the frame at the position the pointer ended at, so a press
+    // that left the trigger within the same frame was never tested over where it landed, and there
+    // the layer is all that can be asked (#2686).
+    let pointer_on_trigger = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| resp.interact_rect.contains(p));
+    let on_trigger = landed.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(resp.layer_id) && (!pointer_on_trigger || resp.hovered()));
     let pressed = resp.enabled() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && (on_trigger || (open && landed.is_some()));
     ui.data_mut(|d| d.insert_temp(id.with("anchor"), resp.rect));
     if pressed {
@@ -1196,6 +1203,12 @@ pub fn browse_pick(ui: &Ui, r: &Response) -> bool {
         return false;
     };
     if !r.interact_rect.contains(pos) {
+        return false;
+    }
+    // Another layer stacked over the row owns the release — egui gives input to the topmost layer
+    // at the position, as [`open_on_press`] asks of the press — so a row under one is not the one
+    // the button came up over (#2686).
+    if ui.ctx().layer_id_at(pos) != Some(r.layer_id) {
         return false;
     }
     let trigger = ui.data(|d| d.get_temp::<Rect>(browse_trigger_id()));
@@ -1505,11 +1518,15 @@ mod tests {
         viewport: Rect,
         /// Whether the trigger is drawn disabled.
         disabled: bool,
+        /// Where a second, foreground layer is stacked over the list (a release under it belongs
+        /// to that layer).
+        cover: Option<egui::Pos2>,
     }
 
     const SIZES: [&str; 3] = ["Small", "Medium", "Large"];
 
-    const EMPTY: Browsing = Browsing { current: None, open: false, trigger: Rect::NOTHING, rows: Vec::new(), viewport: Rect::NOTHING, disabled: false };
+    const EMPTY: Browsing =
+        Browsing { current: None, open: false, trigger: Rect::NOTHING, rows: Vec::new(), viewport: Rect::NOTHING, disabled: false, cover: None };
 
     fn list() -> egui_kittest::Harness<'static, Browsing> {
         egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
@@ -1525,6 +1542,15 @@ mod tests {
                     if let Some(i) = popup_menu(ui, pop, rect.left_bottom(), &options, s.current) {
                         s.current = Some(i);
                     }
+                }
+                if let Some(at) = s.cover {
+                    // A second layer stacked over a row: egui gives input to the topmost layer at
+                    // the position, so a release here belongs to this one and not to the row.
+                    let _ =
+                        egui::Area::new(egui::Id::unique("cover-layer")).order(egui::Order::Foreground).fixed_pos(at - vec2(4.0, 4.0)).show(ui.ctx(), |ui| {
+                            ui.set_min_size(vec2(24.0, 24.0));
+                            ui.label("over");
+                        });
                 }
                 s.open = popup_is_open(ui, pop);
             },
@@ -1641,6 +1667,32 @@ mod tests {
                 s.first_open = popup_is_open(ui, first_pop);
             },
             EMPTY_TWO,
+        )
+    }
+
+    /// The same drop-down with another control drawn over its trigger: egui hands the press to the
+    /// topmost widget at the pointer, so that one owns it and the list must stay shut (#2686).
+    fn covered_list() -> egui_kittest::Harness<'static, Browsing> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 400.0)).build_ui_state(
+            |ui, s: &mut Browsing| {
+                let t = Tokens::for_kind(Default::default());
+                let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 20.0));
+                let resp = ui.add_enabled_ui(!s.disabled, |ui| dropdown(ui, rect, "Pick", &t, egui::Id::unique("covered-trigger"))).inner;
+                s.trigger = resp.rect;
+                let pop = egui::Id::unique("covered-list");
+                // Drawn after the trigger and over it, so egui's hit test names this one as the
+                // widget the press belongs to.
+                ui.interact(rect, egui::Id::unique("covered-cover"), egui::Sense::click());
+                open_on_press(ui, &resp, pop);
+                if popup_is_open(ui, pop) {
+                    let options: Vec<String> = SIZES.iter().map(|s| (*s).to_string()).collect();
+                    if let Some(i) = popup_menu(ui, pop, rect.left_bottom(), &options, s.current) {
+                        s.current = Some(i);
+                    }
+                }
+                s.open = popup_is_open(ui, pop);
+            },
+            EMPTY,
         )
     }
 
@@ -1966,5 +2018,39 @@ mod tests {
         pointer_button(&mut h, away, false);
         assert!(!h.state().open, "the release outside cancels it");
         assert_eq!(h.state().current, None, "without choosing anything");
+    }
+
+    /// A control drawn over the trigger takes the press — egui hands it to the topmost widget at
+    /// the pointer, on the same layer or not — so the list must not open on it (#2686).
+    #[test]
+    fn a_press_taken_by_a_control_over_the_trigger_does_not_open_the_list() {
+        let mut h = covered_list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        assert!(!h.state().open, "the press belongs to the control drawn over the trigger");
+        pointer_button(&mut h, trigger, false);
+        assert!(!h.state().open, "and its release leaves the list shut");
+        assert_eq!(h.state().current, None, "without choosing anything");
+    }
+
+    /// A release over a row another layer is stacked on belongs to that layer: egui gives input to
+    /// the topmost layer at the position, so the covered row must not be chosen (#2686).
+    #[test]
+    fn a_release_under_another_layer_chooses_nothing() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = list();
+        h.run();
+        let trigger = h.state().trigger.center();
+        pointer_button(&mut h, trigger, true);
+        h.run();
+        let row = h.query_by_label("Small").expect("the list is up").rect().center();
+        h.state_mut().cover = Some(row);
+        h.run();
+        h.event(egui::Event::PointerMoved(row));
+        h.step();
+        pointer_button(&mut h, row, false);
+        assert_eq!(h.state().current, None, "the release belongs to the layer drawn over the row");
+        assert!(h.state().open, "so the list is still up");
     }
 }
