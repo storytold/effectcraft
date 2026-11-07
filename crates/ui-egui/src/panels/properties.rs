@@ -291,16 +291,17 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     match &value {
         Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
-            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
+            let (rr, dr, nv, step) = super::fx_widgets::angle_field_step(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
             app.auto.add(&format!("{base}.revolutions"), rr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
+                widgets::mark_step(actions.last_mut(), step);
             }
         }
         Value::Scalar(v) => {
             let range = if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) };
-            let (vr, nv, _) = widgets::hot_number_at(
+            let (vr, nv, _, step) = widgets::hot_number_step_at(
                 ui,
                 pos2(vx, cy - 9.0),
                 egui::Id::unique(("props-v", uid)),
@@ -311,6 +312,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
+                widgets::mark_step(actions.last_mut(), step);
             }
         }
         Value::Vec2(_) | Value::Vec3(_) => {
@@ -332,7 +334,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 }
             }
             for d in 0..n.min(c.len()) {
-                let (vr, nv, _) = widgets::hot_number_at(
+                let (vr, nv, _, step) = widgets::hot_number_step_at(
                     ui,
                     pos2(x, cy - 9.0),
                     egui::Id::unique(("props-v", uid, d)),
@@ -357,6 +359,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                     if let Some((_, a)) = actions.last_mut() {
                         a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
                     }
+                    widgets::mark_step(actions.last_mut(), step);
                 }
                 x = vr.max.x + 10.0;
             }

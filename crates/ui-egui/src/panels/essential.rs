@@ -399,7 +399,13 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
             let mut rect = lr;
             for (d, &old) in comps.iter().enumerate() {
                 let mut x = old;
-                let r = ui.add(egui::DragValue::new(&mut x).speed(0.5).suffix(if d + 1 == comps.len() { "%" } else { "" }).max_decimals(1));
+                let r = ui.add(
+                    egui::DragValue::new(&mut x)
+                        .speed(0.5)
+                        .suffix(if d + 1 == comps.len() { "%" } else { "" })
+                        .max_decimals(1)
+                        .custom_parser(|text| crate::num_math::calc(text, None)),
+                );
                 app.auto.add(&format!("{auto}.{d}"), r.rect, &p.name);
                 rect = rect.union(r.rect);
                 if r.changed() {

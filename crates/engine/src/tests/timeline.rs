@@ -1531,6 +1531,29 @@ fn a_typed_component_applies_only_that_component_to_the_selected_layers() {
     assert_eq!(pos(&s, c), vec![1.0, 2.0, 3.0]);
 }
 
+/// #3195: a typed `*2` or `/2` with several layers selected scales each layer's own value (in
+/// the typed components of a vector), not the edited layer's result.
+#[test]
+fn a_typed_factor_scales_each_selected_layers_own_value() {
+    let (mut s, a) = setup();
+    let b = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/opacity", "value": 40.0})).unwrap();
+    s.execute("prop.set", json!({"layer": b, "path": "transform/opacity", "value": 30.0})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [10.0, 20.0]})).unwrap();
+    s.execute("prop.set", json!({"layer": b, "path": "transform/position", "value": [100.0, 50.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    let opacity = prop(&s, a, "transform/opacity").uid;
+    let undo = s.history.undo.len();
+    s.execute_checked("prop.set", json!({"layer": a, "prop": opacity, "value": 80.0, "selected": true, "factor": 2.0})).unwrap();
+    assert_eq!(prop(&s, a, "transform/opacity").value.as_f64(), 80.0);
+    assert_eq!(prop(&s, b, "transform/opacity").value.as_f64(), 60.0, "B doubles its own 30");
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    let position = prop(&s, a, "transform/position").uid;
+    s.execute_checked("prop.set", json!({"layer": a, "prop": position, "value": [5.0, 20.0], "selected": true, "dims": [0], "factor": 0.5})).unwrap();
+    assert_eq!(prop(&s, a, "transform/position").value.components()[..2], [5.0, 20.0]);
+    assert_eq!(prop(&s, b, "transform/position").value.components()[..2], [50.0, 50.0], "B halves its own X, keeps its Y");
+}
+
 /// #2485: linked Audio Levels typed with several layers selected: each takes the typed Left, and
 /// its Right moves by its own change, so every layer keeps its own stereo balance.
 #[test]

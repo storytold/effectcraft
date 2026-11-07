@@ -265,11 +265,12 @@ fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         return;
     };
     let PropCx { uid, cy, vx, prop, .. } = *cx;
-    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
+    let (rr, dr, nv, step) = fw::angle_field_step(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
     app.auto.add(&format!("effectControls.prop.{uid}.value"), rr.union(dr), &fw::format_angle(*v, 1));
     app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &prop.name);
     if let Some(nv) = nv {
         cx.set(actions, json!(nv));
+        widgets::mark_step(actions.last_mut(), step);
     }
     cx.twirl_open(app, ui);
 }
@@ -288,7 +289,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         _ => "",
     };
     let speed = widgets::slider_scrub_speed(&prop.ui);
-    let (vr, nv, _) = widgets::hot_number_at(
+    let (vr, nv, _, step) = widgets::hot_number_step_at(
         ui,
         pos2(vx, cy - 9.0),
         egui::Id::unique(("ec-v", uid)),
@@ -299,6 +300,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &prop.name);
     if let Some(nv) = nv {
         cx.set(actions, json!(nv));
+        widgets::mark_step(actions.last_mut(), step);
     }
     // AE hides a slider param's slider until its twirl is opened (see `slider_row`).
     if matches!(prop.ui, ParamUi::Slider { .. }) {
@@ -326,7 +328,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         x += 22.0;
     }
     for d in 0..n.min(c.len()) {
-        let (vr, nv, _) = widgets::hot_number_at(
+        let (vr, nv, _, step) = widgets::hot_number_step_at(
             ui,
             pos2(x, cy - 9.0),
             egui::Id::unique(("ec-v", uid, d)),
@@ -345,6 +347,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
             if let Some((_, a)) = actions.last_mut() {
                 a["dims"] = json!([d]);
             }
+            widgets::mark_step(actions.last_mut(), step);
         }
         x = vr.max.x + 8.0;
     }
