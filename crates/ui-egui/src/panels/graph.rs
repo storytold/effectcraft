@@ -134,6 +134,42 @@ fn speed_at(pr: &Property, spatial: bool, d: usize, lt: Tick) -> f64 {
 /// pixel, far above the tick a stretched layer's time conversion can be off by).
 const HOLD_EDGE: f64 = 1e-6;
 
+/// How many key samples one grid step of [`sample_times`] keeps as they are (a key and both
+/// sides of a Hold step fit); past that only its earliest and latest are kept.
+const BUCKET_KEEP: usize = 4;
+
+/// The key samples falling in one grid step of [`sample_times`].
+#[derive(Clone)]
+struct Bucket {
+    few: Vec<f64>,
+    first: f64,
+    last: f64,
+    /// More than [`BUCKET_KEEP`] samples fell here.
+    full: bool,
+}
+
+impl Default for Bucket {
+    fn default() -> Self {
+        Bucket { few: Vec::new(), first: f64::INFINITY, last: f64::NEG_INFINITY, full: false }
+    }
+}
+
+impl Bucket {
+    fn add(&mut self, t: f64) {
+        self.first = self.first.min(t);
+        self.last = self.last.max(t);
+        if self.full {
+            return;
+        }
+        if self.few.len() < BUCKET_KEEP {
+            self.few.push(t);
+        } else {
+            self.full = true;
+            self.few = Vec::new();
+        }
+    }
+}
+
 /// The comp times (seconds) a curve is sampled at between `t0` and `t1`: `n` evenly spaced
 /// times, plus every key time `keys` puts inside the span, and around the key after a key that
 /// holds (its out side is Hold) the instants just before and after it. `keys` are the active
@@ -142,27 +178,40 @@ const HOLD_EDGE: f64 = 1e-6;
 /// sample step (a one-frame jump zoomed out) got cut across, missing their squares, and a Hold
 /// step was drawn as a slope across one step instead of a vertical edge (#2720). With no keys
 /// this is the plain even grid. Keys denser than the grid (baked keys zoomed out) add nothing
-/// visible and would multiply the evaluations, so past `2 * n` key samples only the grid is used.
+/// visible and would multiply the evaluations: in a grid step with more than [`BUCKET_KEEP`]
+/// key samples only the earliest and latest are kept, so a curve has at most `5 * n` samples
+/// and sparse keys elsewhere in view keep every sample.
 fn sample_times(t0: f64, t1: f64, n: usize, keys: &[(f64, bool)]) -> Vec<f64> {
     let n = n.max(2);
     let mut ts: Vec<f64> = (0..n).map(|i| t0 + (t1 - t0) * i as f64 / (n - 1) as f64).collect();
     let (lo, hi) = (t0.min(t1), t0.max(t1));
     let inside = |t: f64| t > lo && t < hi;
-    let max_extra = n.saturating_mul(2);
-    let mut extra = vec![];
+    // One bucket per grid step.
+    let steps = n - 1;
+    let mut buckets = vec![Bucket::default(); steps];
+    let mut add = |t: f64| {
+        if !inside(t) {
+            return;
+        }
+        let b = (((t - lo) / (hi - lo) * steps as f64) as usize).min(steps - 1);
+        if let Some(bucket) = buckets.get_mut(b) {
+            bucket.add(t);
+        }
+    };
     for (i, &(kt, holds)) in keys.iter().enumerate() {
-        if inside(kt) {
-            extra.push(kt);
-        }
+        add(kt);
         if holds && let Some(&(next, _)) = keys.get(i + 1) {
-            extra.extend([next - HOLD_EDGE, next + HOLD_EDGE].into_iter().filter(|&t| inside(t)));
-        }
-        if extra.len() > max_extra {
-            extra.clear();
-            break;
+            add(next - HOLD_EDGE);
+            add(next + HOLD_EDGE);
         }
     }
-    ts.extend(extra);
+    for b in &buckets {
+        if b.full {
+            ts.extend([b.first, b.last]);
+        } else {
+            ts.extend_from_slice(&b.few);
+        }
+    }
     ts.retain(|t| t.is_finite());
     ts.sort_by(f64::total_cmp);
     ts.dedup();
@@ -1021,9 +1070,19 @@ mod tests {
         let keys: Vec<(f64, bool)> = (0..100_000).map(|i| (i as f64 / 100_000.0, i % 2 == 0)).collect();
         let times = sample_times(0.0, 1.0, 100, &keys);
         assert!(times.len() <= 300, "{} samples", times.len());
-        // A few keys inside the span are still all sampled.
-        let few = sample_times(0.0, 1.0, 100, &keys[..50]);
-        assert!(keys[1..50].iter().all(|(t, _)| few.contains(t)), "{few:?}");
+    }
+
+    /// A dense cluster of keys only thins its own grid steps: a Hold step elsewhere in view keeps
+    /// its key and both sides of the step.
+    #[test]
+    fn sample_times_keep_sparse_keys_beside_a_dense_cluster() {
+        let mut keys: Vec<(f64, bool)> = (0..100_000).map(|i| (0.1 * i as f64 / 100_000.0, i % 2 == 0)).collect();
+        keys.extend([(0.5, true), (0.8, false)]);
+        let times = sample_times(0.0, 1.0, 100, &keys);
+        assert!(times.len() <= 500, "{} samples", times.len());
+        for t in [0.5, 0.8 - HOLD_EDGE, 0.8, 0.8 + HOLD_EDGE] {
+            assert!(times.contains(&t), "{t} missing");
+        }
     }
 
     #[test]
