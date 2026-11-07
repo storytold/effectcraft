@@ -346,32 +346,51 @@ impl ConfinedFootage {
     fn inside(&self, f: &Footage) -> bool {
         std::iter::once(&f.path).chain(&f.sequence).filter(|p| !p.is_empty()).all(|p| self.confinement.check(p, Access::Read).is_ok())
     }
+
+    /// [`Self::inside`] for a read: a refused one is counted on this thread, so the render
+    /// [`recording`](FootageSource::recording) it can't list what it made without the footage.
+    fn readable(&self, f: &Footage) -> bool {
+        let inside = self.inside(f);
+        if !inside {
+            let _ = REFUSED_READS.try_with(|n| n.set(n.get().wrapping_add(1)));
+        }
+        inside
+    }
+}
+
+thread_local! {
+    /// Footage reads refused on this thread (see [`ConfinedFootage::readable`]).
+    static REFUSED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn refused_reads() -> u64 {
+    REFUSED_READS.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 impl FootageSource for ConfinedFootage {
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.frame(item, footage, t)).flatten()
     }
     fn frame_at_size(&self, item: ItemId, footage: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
+        self.readable(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
     }
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
+        self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        self.inside(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
+        self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
     }
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
-        self.inside(footage).then(|| self.inner.aux(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
-        self.inside(footage).then(|| self.inner.model(item, footage)).flatten()
+        self.readable(footage).then(|| self.inner.model(item, footage)).flatten()
     }
     fn vector_frame(&self, item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
+        self.readable(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
     }
     /// Says why footage outside the roots shows nothing, so the agent can act on it.
     fn problem(&self, footage: &Footage) -> Option<String> {
@@ -401,10 +420,16 @@ impl FootageSource for ConfinedFootage {
     fn called_off(&self) -> bool {
         self.inner.called_off()
     }
-    /// The files read inside the roots, as the inner source notes them (footage outside reads
-    /// nothing).
+    /// The files read inside the roots, as the inner source notes them. Footage outside reads
+    /// nothing, and what is made without it can't be listed by its files: a refused read makes
+    /// the list incomplete, so it never outlives the session in a disk cache (another session
+    /// with other roots would read the footage).
     fn recording(&self, reads: &effectcraft_engine::render::reads::ReadLog, f: &mut dyn FnMut()) {
-        self.inner.recording(reads, f)
+        let refused = refused_reads();
+        self.inner.recording(reads, f);
+        if refused_reads() != refused {
+            reads.mark_incomplete();
+        }
     }
 }
 
@@ -596,6 +621,52 @@ mod tests {
         for id in READS.iter().chain(WRITES).chain(MIXED_WRITES).map(|(c, _)| *c).chain(NOT_FILES.iter().copied()) {
             assert!(effectcraft_engine::command_specs().iter().any(|s| s.id == id), "{id} is not a command");
         }
+    }
+
+    /// Footage outside the roots shows nothing: a render that asked for it can't be listed by its
+    /// files (#3184), or a disk cache would keep the empty picture for a session with other
+    /// roots. Reads inside the roots record as the inner source tells.
+    #[test]
+    fn a_refused_footage_read_makes_the_render_unlisted() {
+        use effectcraft_engine::render::reads::{FileStamp, ReadFile, ReadLog};
+        /// Reads every file, noting it.
+        struct Noting;
+        impl FootageSource for Noting {
+            fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+                NOTED.with(|n| n.borrow_mut().push(f.path.clone()));
+                Some(Arc::new(Image::new(1, 1)))
+            }
+            fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+                f();
+                for p in NOTED.with(|n| std::mem::take(&mut *n.borrow_mut())) {
+                    reads.note(ReadFile::new(p, FileStamp::Missing));
+                }
+            }
+        }
+        thread_local! {
+            static NOTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let base = std::env::temp_dir().join(format!("ec-confine-3184-{}", std::process::id()));
+        let (inside, outside) = (base.join("in"), base.join("elsewhere"));
+        for d in [&inside, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&inside), &[]).unwrap();
+        let src = ConfinedFootage::new(Arc::new(Noting), c);
+        let footage = |d: &std::path::Path| Footage { path: d.join("a.png").to_string_lossy().into_owned(), ..Default::default() };
+        let read = |f: &Footage| {
+            let log = ReadLog::new();
+            let mut got = None;
+            src.recording(&log, &mut || got = src.frame(ItemId(1), f, Tick::ZERO));
+            (got.is_some(), log.into_files())
+        };
+        let (shown, files) = read(&footage(&inside));
+        assert!(shown && files.is_complete() && files.len() == 1, "inside the roots: {files:?}");
+        let (shown, files) = read(&footage(&outside));
+        assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
+        // The next render on the thread is not affected.
+        assert!(read(&footage(&inside)).1.is_complete());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
