@@ -29,8 +29,9 @@ fn fxe_circle(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (P.u[0].z != 0u) {
         cov = 1.0 - cov;
     }
-    let a = cov * P.f[1].z;
-    textureStore(out, p, gen_blend(textureLoad(src, p, 0), vec4<f32>(P.f[2].xyz * a, a), P.u[0].x));
+    let o = textureLoad(src, p, 0);
+    let a = gen_alpha(cov * P.f[1].z, o.w, P.u[0].x);
+    textureStore(out, p, gen_blend(o, vec4<f32>(P.f[2].xyz * a, a), P.u[0].x));
 }
 
 // ---------------------------------------------------------------- Ellipse (generate2::ellipse)
