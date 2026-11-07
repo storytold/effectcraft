@@ -1013,6 +1013,32 @@ fn replacing_the_project_unlocks_effect_controls() {
     assert_eq!(h.state().ui.effect_controls_lock, None, "the lock belongs to the replaced project");
 }
 
+/// #3193: a lock request right after the project is replaced, before the next frame, is not
+/// answered with the old project's lock: the reply matches the lock the panel keeps.
+#[test]
+fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, _, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h)["ok"], true);
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    let project = (*h.state().session.project).clone();
+    h.state_mut().session.replace_project(project, None);
+    let reply = send(&mut h);
+    h.run_steps(3);
+    assert_eq!(reply["ok"] == true, h.state().ui.effect_controls_lock.is_some(), "{reply}");
+}
+
 /// #3193: an effect dropped on the locked panel goes to the locked layer and leaves the selection
 /// alone; one applied to another layer says why the panel doesn't show it.
 #[test]

@@ -49,6 +49,9 @@ pub(super) fn shown_layer(app: &EffectcraftApp) -> Option<Layer> {
 /// does nothing; locking while already locked keeps the layer it is locked to. Returns whether
 /// the panel is locked afterwards. The tab's lock icon and `ui.set {effectControlsLocked}`.
 pub fn set_lock(app: &mut EffectcraftApp, on: bool) -> bool {
+    // A lock left from a replaced project is gone before this one is answered (a control
+    // request can run between the replacement and the next frame).
+    scope_lock(app);
     if !on {
         app.ui.effect_controls_lock = None;
         return false;
