@@ -19,6 +19,7 @@ mod export_overwrite;
 mod face;
 mod fidelity;
 mod frame_export;
+mod freeze_last_frame;
 mod fuzz_open;
 mod history;
 mod import_project;

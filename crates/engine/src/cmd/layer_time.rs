@@ -10,8 +10,11 @@ use effectcraft_project::{Layer, LayerId, LayerSource, Node, ParamUi, Property};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
+mod freeze;
+
 use super::{CommandSpec, b_p, bad, f_p, has_layers, layers_p, str_p};
 use crate::{EngineError, KeyRef, Result, Session, cmd};
+use freeze::freeze;
 
 /// Layers whose source has its own time (precomps and footage) can be remapped.
 fn remappable(l: &Layer) -> bool {
@@ -173,64 +176,6 @@ pub(crate) fn disable_time_remap(s: &mut Session, layers: &[LayerId]) -> Result<
     s.state.selected_props = props;
     s.state.selected_keys = keys;
     Ok(r)
-}
-
-/// Freeze Frame: time remapping holding the current source frame for the whole layer.
-fn freeze(s: &mut Session, p: &Value, last: bool) -> Result<Value> {
-    let (cid, ids) = layers_p(s, p)?;
-    let cti = s.time();
-    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let (fd, cdur) = (comp.frame_duration(), comp.duration);
-    if !comp.layers.iter().filter(|l| ids.contains(&l.id)).any(remappable) {
-        return Err(bad("layer.freezeFrame", "freezing needs a footage or composition layer"));
-    }
-    // What each layer shows now (honouring an existing remap) — evaluated before the edit.
-    let ectx = effectcraft_render::EvalCtx {
-        project: &s.project,
-        comp_id: cid,
-        comp,
-        time: cti,
-        expr: s.expr.as_deref(),
-        footage: Some(s.footage.as_ref()),
-        property_overrides: &[],
-        media_overrides: &[],
-    };
-    let now: Vec<(effectcraft_project::LayerId, f64)> = comp
-        .layers
-        .iter()
-        .filter(|l| ids.contains(&l.id) && remappable(l))
-        .map(|l| {
-            let at = if last { ectx.at(l.out_point - fd) } else { ectx };
-            (l.id, at.source_time(l).seconds())
-        })
-        .collect();
-    s.edit(if last { "Freeze On Last Frame" } else { "Freeze Frame" }, None, |proj, _| {
-        let mut next = proj.next_id;
-        let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        for (lid, src) in &now {
-            let Some(l) = comp.layer_mut(*lid) else { continue };
-            if l.props.get("timeRemap").is_none() {
-                l.props.children.insert(0, Node::Prop(remap_prop(&mut Ids(&mut next))));
-            }
-            let lt = if last { l.layer_time(l.out_point - fd) } else { l.layer_time(cti) };
-            let lin = l.layer_time(l.in_point);
-            let pr = l.props.get_mut("timeRemap").ok_or(EngineError::NoComp)?;
-            pr.value = KV::Scalar(*src);
-            if last {
-                // Play normally up to the last frame, then hold it to the end of the comp.
-                let mut end = Keyframe::new(lt.max(lin), KV::Scalar(*src));
-                end.out_interp = effectcraft_keyframe::Interp::Hold;
-                pr.keys = vec![Keyframe::new(lin.min(lt), KV::Scalar(lin.min(lt).seconds())), end];
-                pr.keys.dedup_by_key(|k| k.time);
-                l.out_point = cdur;
-            } else {
-                pr.keys = vec![Keyframe::new(lt, KV::Scalar(*src)).hold()];
-            }
-        }
-        proj.next_id = next;
-        Ok(())
-    })?;
-    Ok(Value::Null)
 }
 
 pub fn specs() -> Vec<CommandSpec> {
