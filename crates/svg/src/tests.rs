@@ -446,3 +446,193 @@ fn at_rule_blocks_are_skipped_by_brace_depth() {
     assert_eq!(sheet.rules.len(), 1);
     assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
 }
+
+fn solid_rect(r: kurbo::Rect, c: [f64; 3]) -> Node {
+    Node::Shape(Shape {
+        name: "rect".into(),
+        geom: Geom::Rect { x: r.x0, y: r.y0, w: r.width(), h: r.height(), rx: 0.0, ry: 0.0 },
+        transform: Affine::IDENTITY,
+        fill: Some(Paint::Color(c)),
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: None,
+        opacity: 1.0,
+    })
+}
+
+/// A PDF-style clipping group (not isolated: blend modes inside reach the backdrop).
+fn clip_group(r: kurbo::Rect, children: Vec<Node>) -> Node {
+    let mut g = Group::new("Clip Group");
+    g.clip.push((kurbo::Shape::to_path(&r, 0.1), FillRule::NonZero));
+    g.isolated = false;
+    g.children = children;
+    Node::Group(g)
+}
+
+fn doc_of(w: f64, h: f64, children: Vec<Node>) -> Doc {
+    let mut root = Group::new("page");
+    root.children = children;
+    Doc { width: w, height: h, root, skipped: vec![] }
+}
+
+/// Nested clipping groups over a backdrop: the content shows where every clip covers, half
+/// where a clip edge halves a pixel, and the backdrop everywhere else (#2895: plain clipping
+/// groups are drawn on surfaces the size of their clip).
+#[test]
+fn nested_clip_groups_keep_the_backdrop_outside_their_clips() {
+    let blue = [0.0, 0.0, 1.0];
+    let red = [1.0, 0.0, 0.0];
+    let inner = clip_group(kurbo::Rect::new(10.5, 0.0, 20.0, 40.0), vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 40.0, 40.0), red)]);
+    let doc =
+        doc_of(40.0, 40.0, vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 40.0, 40.0), blue), clip_group(kurbo::Rect::new(5.0, 5.0, 35.0, 35.0), vec![inner])]);
+    let img = rasterize(&doc, 40, 40, 1.0);
+    let (r, b) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    for (x, y, want) in [(15, 20, r), (11, 6, r), (19, 34, r), (25, 20, b), (15, 2, b), (15, 36, b), (9, 20, b), (21, 20, b)] {
+        assert!(near(px(&img, x, y), want, 1e-3), "({x}, {y}): {:?}", px(&img, x, y));
+    }
+    assert!(near(px(&img, 10, 20), [0.5, 0.0, 0.5, 1.0], 0.02), "half-covered edge pixel {:?}", px(&img, 10, 20));
+    // Scaled 4×: the clip edge at 10.5 lands on a pixel boundary (42), hard on both sides.
+    let big = rasterize(&doc, 160, 160, 4.0);
+    assert!(near(px(&big, 41, 80), b, 0.01) && near(px(&big, 42, 80), r, 0.01), "{:?} {:?}", px(&big, 41, 80), px(&big, 42, 80));
+}
+
+/// A clipping group whose content blends (Multiply) still composites with the real backdrop:
+/// red multiplied over blue is black inside the clip, blue outside.
+#[test]
+fn a_blend_mode_inside_a_clip_group_reaches_the_backdrop() {
+    let mut multiply = Group::new("Multiply");
+    multiply.blend = BlendMode::Multiply;
+    multiply.children = vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0])];
+    let doc = doc_of(
+        20.0,
+        20.0,
+        vec![
+            solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0]),
+            clip_group(kurbo::Rect::new(5.0, 5.0, 15.0, 15.0), vec![Node::Group(multiply)]),
+        ],
+    );
+    let img = rasterize(&doc, 20, 20, 1.0);
+    assert!(near(px(&img, 10, 10), [0.0, 0.0, 0.0, 1.0], 1e-3), "{:?}", px(&img, 10, 10));
+    assert!(near(px(&img, 2, 10), [0.0, 0.0, 1.0, 1.0], 1e-3), "{:?}", px(&img, 2, 10));
+}
+
+/// A stroke reaches past its path's bounds by half its width: a horizontal line (a path
+/// without height) stroked 4 px wide covers 4 rows, and its butt caps end at the path's ends.
+#[test]
+fn a_stroke_draws_its_full_width_past_the_path_bounds() {
+    let mut line = BezPath::new();
+    line.move_to((5.0, 20.0));
+    line.line_to((35.0, 20.0));
+    let shape = Node::Shape(Shape {
+        name: "line".into(),
+        geom: Geom::Path(line),
+        transform: Affine::IDENTITY,
+        fill: None,
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: Some(Stroke { paint: Paint::Color([0.0, 0.0, 0.0]), opacity: 1.0, width: 4.0, cap: Cap::Butt, join: Join::Miter, miter: 4.0, dash: None }),
+        opacity: 1.0,
+    });
+    let img = rasterize(&doc_of(40.0, 40.0, vec![shape]), 40, 40, 1.0);
+    for y in 18..22 {
+        assert!(px(&img, 20, y)[3] > 0.99, "row {y}: {:?}", px(&img, 20, y));
+    }
+    for (x, y) in [(20, 17), (20, 22), (3, 20), (36, 20)] {
+        assert!(px(&img, x, y)[3] < 0.01, "({x}, {y}): {:?}", px(&img, x, y));
+    }
+}
+
+/// Bytes of `n` RGBA f32 surfaces of `w`×`h` pixels (a surface budget for the tests below).
+fn surfaces(n: f64, w: u32, h: u32) -> usize {
+    (n * f64::from(w) * f64::from(h) * 16.0) as usize
+}
+
+/// #2895: an A4 page continuously rasterised at 400 % is a 128 MB surface, and every nested
+/// clipping group used to copy the backdrop and draw on a second surface of that size, so the
+/// second level of clips ran past the 512 MB surface budget and its artwork was dropped. Clip
+/// groups now draw on surfaces the size of their clip: with room for four canvas-size surfaces,
+/// artwork inside four nested clips still draws (it used to need nine).
+#[test]
+fn deeply_clipped_artwork_draws_within_the_surface_budget() {
+    let red = [1.0, 0.0, 0.0];
+    let mut node = solid_rect(kurbo::Rect::new(0.0, 0.0, 300.0, 300.0), red);
+    for i in 1..=4 {
+        let inset = 10.0 * f64::from(i);
+        node = clip_group(kurbo::Rect::new(inset, inset, 300.0 - inset, 300.0 - inset), vec![node]);
+    }
+    let img = crate::raster::rasterize_with_budget(&doc_of(300.0, 300.0, vec![node]), 300, 300, Affine::IDENTITY, surfaces(4.0, 300, 300));
+    assert_eq!((img.width, img.height), (300, 300));
+    assert!(near(px(&img, 150, 150), [1.0, 0.0, 0.0, 1.0], 1e-3), "centre {:?}", px(&img, 150, 150));
+    assert!(near(px(&img, 45, 150), [1.0, 0.0, 0.0, 1.0], 1e-3), "just inside every clip {:?}", px(&img, 45, 150));
+    assert!(px(&img, 35, 150)[3] < 0.01, "outside the outermost clip {:?}", px(&img, 35, 150));
+}
+
+/// #2895: clips that cover the whole canvas around the artwork inside them (a page clip, an
+/// artboard clip, the outermost groups of most PDF pages) change no pixel, so they are drawn
+/// without a surface: with room for two and a half canvas-size surfaces, the artwork inside two
+/// of them still draws, and an inner clip still cuts it.
+#[test]
+fn canvas_covering_clips_draw_without_a_surface() {
+    let red = [1.0, 0.0, 0.0];
+    let art = clip_group(kurbo::Rect::new(150.0, 0.0, 300.0, 350.0), vec![solid_rect(kurbo::Rect::new(100.0, 100.0, 250.0, 250.0), red)]);
+    let page = clip_group(kurbo::Rect::new(0.0, 0.0, 350.0, 350.0), vec![art]);
+    let outer = clip_group(kurbo::Rect::new(-1.0, -1.0, 351.0, 351.0), vec![page]);
+    let img = crate::raster::rasterize_with_budget(&doc_of(350.0, 350.0, vec![outer]), 350, 350, Affine::IDENTITY, surfaces(2.5, 350, 350));
+    assert_eq!((img.width, img.height), (350, 350));
+    for (x, y) in [(200, 200), (151, 101), (248, 248)] {
+        assert!(near(px(&img, x, y), [1.0, 0.0, 0.0, 1.0], 1e-3), "({x}, {y}): {:?}", px(&img, x, y));
+    }
+    for (x, y) in [(120, 200), (148, 200), (200, 90), (260, 200)] {
+        assert!(px(&img, x, y)[3] < 0.01, "({x}, {y}): {:?}", px(&img, x, y));
+    }
+}
+
+/// Take a tree apart without recursing (a deep one would overflow the stack when dropped).
+fn dismantle(mut nodes: Vec<Node>) {
+    while let Some(n) = nodes.pop() {
+        if let Node::Group(mut g) = n {
+            nodes.append(&mut g.children);
+        }
+    }
+}
+
+/// Never crash: drawing recurses, and clipping groups nested twenty thousand deep (a crafted
+/// file) are drawn without running out of stack, on a thread with a small one; groups past the
+/// nesting limit are not drawn, shallower artwork is.
+#[test]
+fn clip_groups_nested_without_end_do_not_overflow_the_stack() {
+    let run = std::thread::Builder::new().stack_size(4 << 20).spawn(|| {
+        let mut node = solid_rect(kurbo::Rect::new(0.0, 0.0, 64.0, 64.0), [1.0, 0.0, 0.0]);
+        for _ in 0..20_000 {
+            node = clip_group(kurbo::Rect::new(0.0, 0.0, 64.0, 64.0), vec![node]);
+        }
+        let shallow = solid_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), [0.0, 0.0, 1.0]);
+        let doc = doc_of(64.0, 64.0, vec![node, shallow]);
+        let img = rasterize(&doc, 64, 64, 1.0);
+        let out = (img.width, img.height, px(&img, 4, 4), px(&img, 40, 40));
+        dismantle(vec![Node::Group(doc.root)]);
+        out
+    });
+    let (w, h, shallow, deep) = run.unwrap().join().unwrap();
+    assert_eq!((w, h), (64, 64));
+    assert!(near(shallow, [0.0, 0.0, 1.0, 1.0], 1e-3), "{shallow:?}");
+    assert!(deep[3] < 0.01, "artwork past the nesting limit is not drawn: {deep:?}");
+}
+
+/// Only a rectangle along the pixel grid's axes counts as a clip that can be skipped: a
+/// rotated square or a path that folds back on itself does not.
+#[test]
+fn axis_rect_recognises_only_axis_aligned_rectangles() {
+    use crate::raster::axis_rect;
+    let rect = kurbo::Shape::to_path(&kurbo::Rect::new(1.0, 2.0, 5.0, 7.0), 0.1);
+    assert_eq!(axis_rect(&rect, Affine::IDENTITY), Some(kurbo::Rect::new(1.0, 2.0, 5.0, 7.0)));
+    assert_eq!(axis_rect(&rect, Affine::scale(2.0)), Some(kurbo::Rect::new(2.0, 4.0, 10.0, 14.0)));
+    assert_eq!(axis_rect(&rect, Affine::rotate(0.3)), None);
+    let mut folded = BezPath::new();
+    folded.move_to((0.0, 0.0));
+    folded.line_to((10.0, 0.0));
+    folded.line_to((10.0, 10.0));
+    folded.line_to((10.0, 0.0));
+    folded.close_path();
+    assert_eq!(axis_rect(&folded, Affine::IDENTITY), None);
+}

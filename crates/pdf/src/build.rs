@@ -7,6 +7,10 @@ use effectcraft_svg::{Affine, BezPath, FillRule, Geom, Group, Node, Paint, Shape
 /// PostScript program, or the PDF content stream.
 pub(crate) const MAX_PATH: usize = 1 << 20;
 
+/// The deepest groups (clips, layers, transparency groups) nest in the document; below the
+/// renderer's own limit (256), so everything kept is drawn.
+pub(crate) const MAX_GROUP_DEPTH: usize = 200;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Plain,
@@ -68,17 +72,29 @@ impl Builder {
         g.clip.push((path, rule));
         // Clipping is not a transparency group: blend modes inside reach the backdrop.
         g.isolated = false;
-        self.stack.push((g, Kind::Clip));
+        self.push_group(g, Kind::Clip);
     }
 
     /// Open an optional-content layer (or a named group).
     pub fn open(&mut self, name: &str, layer: bool) {
-        self.stack.push((group(name), if layer { Kind::Layer } else { Kind::Plain }));
+        self.push_group(group(name), if layer { Kind::Layer } else { Kind::Plain });
     }
 
     /// Open a group (blend mode, soft mask) closed with the graphics state.
     pub fn open_group(&mut self, g: Group) {
-        self.stack.push((g, Kind::Plain));
+        self.push_group(g, Kind::Plain);
+    }
+
+    /// Open a group, unless groups are already nested [`MAX_GROUP_DEPTH`] deep: the document
+    /// is a tree that is drawn, measured, copied and dropped recursively, and a crafted file
+    /// can nest `q … W n` without end. Deeper groups are left out (their content is drawn
+    /// in the group around them) and the document says so.
+    fn push_group(&mut self, g: Group, kind: Kind) {
+        if self.stack.len() >= MAX_GROUP_DEPTH {
+            self.skip("groups nested deeper than 200 levels");
+            return;
+        }
+        self.stack.push((g, kind));
     }
 
     /// Add a finished node (an image, pattern tiles).

@@ -20,7 +20,13 @@ pub fn rasterize(doc: &Doc, w: u32, h: u32, scale: f64) -> Image {
 
 /// Rasterise `doc` with `m` mapping document pixels to image pixels.
 pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
-    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
+    rasterize_with_budget(doc, w, h, m, MAX_LIVE_SURFACE_BYTES)
+}
+
+/// [`rasterize_with`] with at most `limit_bytes` of image surfaces (the destination included)
+/// live at once.
+pub(crate) fn rasterize_with_budget(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> Image {
+    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes, depth: 0, plain: false };
     let Some(mut img) = budget.image(w, h, None) else { return Image::default() };
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     img
@@ -29,9 +35,19 @@ pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
 /// Bound the simultaneously live offscreen image surfaces created by nested groups.
 const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
 
+/// The deepest group nesting drawn: drawing recurses, and a crafted document can nest groups
+/// without end, so groups deeper than this are not drawn.
+const MAX_GROUP_DEPTH: usize = 256;
+
+/// The state of one rasterisation: the surface budget and where the drawing is in the tree.
 struct SurfaceBudget {
     live_bytes: usize,
     limit_bytes: usize,
+    /// Groups entered on the way to the one being drawn.
+    depth: usize,
+    /// Every group being drawn below the current one composites Normal, without knockout
+    /// (known once for a whole subtree, so it isn't walked again at every level).
+    plain: bool,
 }
 
 impl SurfaceBudget {
@@ -61,6 +77,15 @@ impl SurfaceBudget {
 }
 
 fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
+    if budget.depth >= MAX_GROUP_DEPTH {
+        return;
+    }
+    budget.depth += 1;
+    draw_group_entered(g, m, opacity, dst, budget);
+    budget.depth -= 1;
+}
+
+fn draw_group_entered(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let m = m * g.transform;
     let o = opacity * g.opacity;
     if o <= 0.0 {
@@ -77,7 +102,190 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
         }
         return;
     }
+    let only_clip = !g.clip.is_empty() && g.mask.is_none() && g.blend == BlendMode::Normal && o >= 1.0 && !g.knockout;
+    let plain = only_clip && (budget.plain || !needs_backdrop(&g.children, MAX_GROUP_DEPTH.saturating_sub(budget.depth)));
+    if plain {
+        let outer = std::mem::replace(&mut budget.plain, true);
+        let left = MAX_GROUP_DEPTH.saturating_sub(budget.depth);
+        if clips_cover_content(g, m, dst.width, dst.height, left) {
+            for c in &g.children {
+                draw_node(c, m, 1.0, dst, budget);
+            }
+        } else {
+            draw_clip_local(g, m, dst, budget);
+        }
+        budget.plain = outer;
+        return;
+    }
     draw_offscreen_group(g, m, o, dst, budget);
+}
+
+/// Whether every clip of `g` is a rectangle along the pixel grid's axes that fully covers each
+/// pixel of a `w`×`h` image its children can draw on: the clips change nothing there, so the
+/// children are drawn straight onto the image, without a surface (a page or artboard clip
+/// around the artwork inside it, the outermost groups of most PDF pages). `levels`: how many
+/// levels of groups below are drawn.
+fn clips_cover_content(g: &Group, m: Affine, w: u32, h: u32, levels: usize) -> bool {
+    let Some(rects) = g.clip.iter().map(|(p, _)| axis_rect(p, m)).collect::<Option<Vec<_>>>() else { return false };
+    // Children that draw nothing need no clip.
+    let Some(b) = draw_bounds(&g.children, m, levels) else { return true };
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    // The pixels the children can touch (a pixel of margin for anti-aliasing), on the image.
+    let (bx0, by0) = ((b.x0.floor() - 1.0).max(0.0), (b.y0.floor() - 1.0).max(0.0));
+    let (bx1, by1) = ((b.x1.ceil() + 1.0).min(fw), (b.y1.ceil() + 1.0).min(fh));
+    if !(bx0 < bx1 && by0 < by1) {
+        // Nothing reaches the image (or the bounds aren't numbers): keep the clip.
+        return false;
+    }
+    rects.iter().all(|r| r.x0.ceil() <= bx0 && bx1 <= r.x1.floor() && r.y0.ceil() <= by0 && by1 <= r.y1.floor())
+}
+
+/// A device-space rectangle holding every pixel `nodes` drawn with `m` can cover, `None` when
+/// they draw nothing. Cheap rather than tight: a stroke counts as its path's bounds grown by half
+/// its width times its miter limit (at least √2, for square caps), and anything it can't
+/// bound (more than `levels` levels deep, a transform that isn't finite) as the whole plane.
+fn draw_bounds(nodes: &[Node], m: Affine, levels: usize) -> Option<kurbo::Rect> {
+    let everything = kurbo::Rect::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY);
+    if !m.as_coeffs().iter().all(|v| v.is_finite()) {
+        return Some(everything);
+    }
+    let mut out: Option<kurbo::Rect> = None;
+    for n in nodes {
+        let r = match n {
+            Node::Group(g) if levels == 0 => (!g.children.is_empty()).then_some(everything),
+            Node::Group(g) => {
+                let gm = m * g.transform;
+                let mut r = draw_bounds(&g.children, gm, levels - 1);
+                for (clip, _) in &g.clip {
+                    r = r.map(|r| r.intersect(gm.transform_rect_bbox(clip.bounding_box())));
+                }
+                r
+            }
+            Node::Shape(s) => {
+                let sm = m * s.transform;
+                let b = s.geom.to_path().bounding_box();
+                let fill = s.fill.as_ref().map(|_| sm.transform_rect_bbox(b));
+                let stroke = s.stroke.as_ref().map(|st| {
+                    let pad = (st.width.abs() * 0.5 * st.miter.max(std::f64::consts::SQRT_2)).max(0.0);
+                    sm.transform_rect_bbox(b.inflate(pad, pad))
+                });
+                match (fill, stroke) {
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (a, b) => a.or(b),
+                }
+            }
+            Node::Image(im) => Some((m * im.transform).transform_rect_bbox(kurbo::Rect::new(0.0, 0.0, f64::from(im.width), f64::from(im.height)))),
+        };
+        if let Some(r) = r {
+            let r = if [r.x0, r.y0, r.x1, r.y1].iter().any(|v| v.is_nan()) { everything } else { r };
+            out = Some(out.map_or(r, |o| o.union(r)));
+        }
+    }
+    out
+}
+
+/// The device-space rectangle a clip path is when it is one along the pixel grid's axes: a
+/// move, three or four lines and an optional close, its sides alternately horizontal and
+/// vertical.
+pub(crate) fn axis_rect(path: &kurbo::BezPath, m: Affine) -> Option<kurbo::Rect> {
+    use kurbo::PathEl;
+    let els = path.elements();
+    let mut pts: Vec<Point> = Vec::with_capacity(5);
+    for (i, el) in els.iter().enumerate() {
+        match el {
+            PathEl::MoveTo(p) if i == 0 => pts.push(m * *p),
+            PathEl::LineTo(p) if i > 0 && pts.len() < 5 => pts.push(m * *p),
+            PathEl::ClosePath if i > 0 && i + 1 == els.len() => {}
+            _ => return None,
+        }
+    }
+    const EPS: f64 = 1e-6;
+    let same = |a: Point, b: Point| (a.x - b.x).abs() <= EPS && (a.y - b.y).abs() <= EPS;
+    if pts.len() == 5 && pts.first().zip(pts.last()).is_some_and(|(a, b)| same(*a, *b)) {
+        pts.pop();
+    }
+    let p: [Point; 4] = pts.try_into().ok()?;
+    let sides = [(p[0], p[1]), (p[1], p[2]), (p[2], p[3]), (p[3], p[0])];
+    // Each side horizontal or vertical (and not a point), the next one the other way.
+    let horizontal = |(a, b): (Point, Point)| -> Option<bool> {
+        let (dx, dy) = ((b.x - a.x).abs(), (b.y - a.y).abs());
+        match (dx > EPS, dy > EPS) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    };
+    let kinds = sides.map(horizontal);
+    let [Some(k0), Some(k1), Some(k2), Some(k3)] = kinds else { return None };
+    if k0 == k1 || k1 == k2 || k2 == k3 || k3 == k0 {
+        return None;
+    }
+    let r = kurbo::Rect::from_points(p[0], p[2]);
+    [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()).then_some(r)
+}
+
+/// Whether drawing `nodes` reads what is below them beyond Normal compositing: a blend mode or
+/// a knockout group anywhere inside. Past `levels` levels of groups the answer is yes.
+fn needs_backdrop(nodes: &[Node], levels: usize) -> bool {
+    nodes.iter().any(|n| match n {
+        Node::Group(g) => levels == 0 || g.blend != BlendMode::Normal || g.knockout || needs_backdrop(&g.children, levels - 1),
+        Node::Shape(_) | Node::Image(_) => false,
+    })
+}
+
+/// A plain clipping group (no soft mask, blend mode, group opacity or knockout) whose content
+/// composites Normal throughout: drawn into a surface the size of its clip's bounds and
+/// composited over `dst`. With Normal content that is the same as drawing it over a copy of
+/// the backdrop and keeping the clip (`(C over B)·c + B·(1 − c) = (C·c) over B`), without two
+/// full-size copies per nesting level: a page continuously rasterised at 400 % lost its
+/// nested clipped artwork to the surface budget (#2895).
+fn draw_clip_local(g: &Group, m: Affine, dst: &mut Image, budget: &mut SurfaceBudget) {
+    let mut bounds: Option<kurbo::Rect> = None;
+    for (path, _) in &g.clip {
+        let b = m.transform_rect_bbox(path.bounding_box());
+        bounds = Some(bounds.map_or(b, |a| a.intersect(b)));
+    }
+    let Some((x0, y0, w, h)) = bounds.and_then(|b| pixel_rect(b, dst.width, dst.height)) else { return };
+    let Some(mut tmp) = budget.image(w, h, None) else { return };
+    let local = to_local((x0, y0), m);
+    for c in &g.children {
+        draw_node(c, local, 1.0, &mut tmp, budget);
+    }
+    let cov = clip_coverage(g, local, w, h);
+    tmp.data.par_iter_mut().zip(cov.par_iter()).for_each(|(p, c)| {
+        for v in p.iter_mut() {
+            *v *= c;
+        }
+    });
+    over_at(dst, &tmp, (x0, y0), 1.0);
+    budget.release(&tmp);
+}
+
+/// The pixels of a `w`×`h` image that the device-space rectangle `r` touches, with a pixel of
+/// margin for anti-aliasing, as `(x, y, width, height)`; `None` when it misses the image. A
+/// rectangle that isn't finite stands for the whole image.
+fn pixel_rect(r: kurbo::Rect, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) {
+        return Some((0, 0, w, h));
+    }
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let x0 = (r.x0.min(r.x1) - 1.0).floor().clamp(0.0, fw);
+    let y0 = (r.y0.min(r.y1) - 1.0).floor().clamp(0.0, fh);
+    let x1 = (r.x0.max(r.x1) + 1.0).ceil().clamp(0.0, fw);
+    let y1 = (r.y0.max(r.y1) + 1.0).ceil().clamp(0.0, fh);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
+/// A translation by `-origin`: maps device space onto a surface whose top-left pixel sits at
+/// `origin` of the device image.
+fn to_local(origin: (u32, u32), m: Affine) -> Affine {
+    Affine::translate((-f64::from(origin.0), -f64::from(origin.1))) * m
 }
 
 /// Draws a group through an offscreen buffer, then composites it onto `dst`.
@@ -191,7 +399,10 @@ fn apply_soft_mask(sm: &SoftMask, m: Affine, tmp: &mut Image, budget: &mut Surfa
     let Some(mut mk) = budget.image(tmp.width, tmp.height, None) else {
         return false;
     };
+    // The mask's content is a tree of its own: what is known of the masked group's isn't.
+    let plain = std::mem::replace(&mut budget.plain, false);
     draw_group(&sm.content, m, 1.0, &mut mk, budget);
+    budget.plain = plain;
     let bc = sm.backdrop.map(|v| v as f32);
     let lum = sm.luminosity;
     tmp.data.par_iter_mut().zip(mk.data.par_iter()).for_each(|(p, q)| {
@@ -421,12 +632,16 @@ fn draw_image(im: &crate::Image, m: Affine, opacity: f64, dst: &mut Image) {
     if !inv.as_coeffs().iter().all(|v| v.is_finite()) {
         return;
     }
-    let quad = kurbo::Rect::new(0.0, 0.0, iw as f64, ih as f64).to_path(0.01);
-    let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&quad), &mat3(full), dst.width, dst.height, effectcraft_path::FillRule::NonZero);
-    let w = dst.width as usize;
-    if w == 0 {
+    // Coverage over the pixels the image's quadrilateral reaches only (see `draw_shape`).
+    let rect = kurbo::Rect::new(0.0, 0.0, iw as f64, ih as f64);
+    let Some((x0, y0, rw, rh)) = pixel_rect(full.transform_rect_bbox(rect), dst.width, dst.height) else { return };
+    let quad = rect.to_path(0.01);
+    let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&quad), &mat3(to_local((x0, y0), full)), rw, rh, effectcraft_path::FillRule::NonZero);
+    let (w, cw) = (dst.width as usize, cov.width as usize);
+    if w == 0 || cw == 0 {
         return;
     }
+    let (ox, oy) = (x0 as usize, y0 as usize);
     let px = |x: usize, y: usize| -> [f32; 4] {
         let i = (y * iw + x) * 4;
         let a = im.rgba[i + 3] as f32 / 255.0;
@@ -438,9 +653,10 @@ fn draw_image(im: &crate::Image, m: Affine, opacity: f64, dst: &mut Image) {
     let fy = (c[2] * c[2] + c[3] * c[3]).sqrt();
     let taps = (fx.max(fy).ceil() as usize).clamp(1, 8);
     let k = opacity as f32;
-    dst.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, d) in row.iter_mut().enumerate() {
-            let cv = cov.data[y * w + x];
+    dst.data.par_chunks_mut(w).enumerate().skip(oy).zip(cov.data.par_chunks(cw)).for_each(|((y, row), crow)| {
+        let Some(seg) = row.get_mut(ox..) else { return };
+        for (lx, (d, &cv)) in seg.iter_mut().zip(crow).enumerate() {
+            let x = ox + lx;
             if cv <= 0.0 {
                 continue;
             }
@@ -486,6 +702,30 @@ fn over(dst: &mut Image, src: &Image, k: f32) {
     });
 }
 
+/// `dst = src·k over dst` for `src` placed with its top-left pixel at `origin` of `dst`.
+fn over_at(dst: &mut Image, src: &Image, origin: (u32, u32), k: f32) {
+    let (w, sw) = (dst.width as usize, src.width as usize);
+    if w == 0 || sw == 0 {
+        return;
+    }
+    let (x0, y0) = (origin.0 as usize, origin.1 as usize);
+    dst.data.par_chunks_mut(w).skip(y0).zip(src.data.par_chunks(sw)).for_each(|(row, srow)| {
+        let Some(seg) = row.get_mut(x0..) else { return };
+        for (d, s) in seg.iter_mut().zip(srow) {
+            let a = s[3] * k;
+            if a > 0.0 {
+                for c in 0..3 {
+                    d[c] = s[c] * k + d[c] * (1.0 - a);
+                }
+                d[3] = a + d[3] * (1.0 - a);
+            }
+        }
+    });
+}
+
+/// Draw a shape. Its coverage is computed over the pixels its fill or stroke can reach only,
+/// not the whole image: a page drawn at a large scale cost a full-size coverage pass per path
+/// and per run of text (#2895).
 fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
     let m = m * s.transform;
     let path = s.geom.to_path();
@@ -496,22 +736,32 @@ fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
             FillRule::NonZero => effectcraft_path::FillRule::NonZero,
             FillRule::EvenOdd => effectcraft_path::FillRule::EvenOdd,
         };
-        let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&path), &mat3(m), w, h, rule);
-        paint(dst, &cov, fill, (opacity * s.fill_opacity) as f32, m, bbox);
+        if let Some((x0, y0, rw, rh)) = pixel_rect(m.transform_rect_bbox(bbox), w, h) {
+            let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&path), &mat3(to_local((x0, y0), m)), rw, rh, rule);
+            paint(dst, &cov, (x0, y0), fill, (opacity * s.fill_opacity) as f32, m, bbox);
+        }
     }
     if let Some(st) = &s.stroke {
+        // The outline as `effectcraft_path::stroke_coverage` makes it (the resolution scale of
+        // the whole transform, which a translation doesn't change).
         let style = st.style();
-        let cov = effectcraft_path::stroke_coverage(std::slice::from_ref(&path), &style, &mat3(m), w, h);
-        paint(dst, &cov, &st.paint, (opacity * st.opacity) as f32, m, bbox);
+        if let Some(outline) = effectcraft_path::stroke_outline(std::slice::from_ref(&path), &style, mat3(m).mean_scale())
+            && let Some((x0, y0, rw, rh)) = pixel_rect(m.transform_rect_bbox(outline.bounding_box()), w, h)
+        {
+            let cov =
+                effectcraft_path::fill_coverage(std::slice::from_ref(&outline), &mat3(to_local((x0, y0), m)), rw, rh, effectcraft_path::FillRule::NonZero);
+            paint(dst, &cov, (x0, y0), &st.paint, (opacity * st.opacity) as f32, m, bbox);
+        }
     }
 }
 
-/// Composite paint through coverage.
-fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect) {
-    let w = dst.width as usize;
-    if w == 0 {
+/// Composite paint through coverage `cov`, whose top-left pixel sits at `origin` of `dst`.
+fn paint(dst: &mut Image, cov: &Mask, origin: (u32, u32), p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect) {
+    let (w, cw) = (dst.width as usize, cov.width as usize);
+    if w == 0 || cw == 0 {
         return;
     }
+    let (x0, y0) = (origin.0 as usize, origin.1 as usize);
     let shader = match p {
         Paint::Color(c) => Shader::Solid([c[0] as f32, c[1] as f32, c[2] as f32, 1.0]),
         Paint::Gradient(g) => {
@@ -523,13 +773,13 @@ fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: 
             Shader::Gradient(g, to_grad)
         }
     };
-    dst.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, d) in row.iter_mut().enumerate() {
-            let c = cov.data[y * w + x];
+    dst.data.par_chunks_mut(w).enumerate().skip(y0).zip(cov.data.par_chunks(cw)).for_each(|((y, row), crow)| {
+        let Some(seg) = row.get_mut(x0..) else { return };
+        for (lx, (d, &c)) in seg.iter_mut().zip(crow).enumerate() {
             if c <= 0.0 {
                 continue;
             }
-            let col = shader.at(x as f64 + 0.5, y as f64 + 0.5);
+            let col = shader.at((x0 + lx) as f64 + 0.5, y as f64 + 0.5);
             let a = col[3] * c * opacity;
             if a <= 0.0 {
                 continue;
