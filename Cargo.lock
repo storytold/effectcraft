@@ -1836,6 +1836,7 @@ dependencies = [
  "effectcraft-geom",
  "effectcraft-keyframe",
  "effectcraft-time",
+ "log",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

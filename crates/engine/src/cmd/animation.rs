@@ -511,7 +511,7 @@ fn reveal(s: &mut Session, p: &Value) -> Result<Value> {
                 if top.match_id == effectcraft_project::styles::GROUP {
                     found.extend(top.groups().filter(|g| g.match_id != effectcraft_project::styles::BLENDING).map(|g| g.uid));
                 }
-                if let GroupKind::Essential { overridden } = &top.kind {
+                if let GroupKind::Essential { overridden, .. } = &top.kind {
                     for u in overridden {
                         if !found.contains(u) && (top.find(*u).is_some() || top.find_group(*u).is_some()) {
                             found.push(*u);

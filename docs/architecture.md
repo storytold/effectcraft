@@ -518,7 +518,9 @@ effects crate, hence the `effects → track` edge.
 `essential` field lists its exposed controls (properties, Media Replacement, groups, comments).
 Every precomp layer of such a comp gets an Essential Properties group (`GroupKind::Essential`,
 children `eg<control id>`), kept in step by `Session::edit`; editing a child overrides it for
-that instance. A collapsed instance carries its property, Font and Media Replacement overrides
+that instance. An overridden Source Text keeps a base (the master document it is merged with,
+`EssentialBase`): it keeps its characters and the attributes it changed itself, and follows the
+master's restyles in the others (`TextDoc::merge_master`). A collapsed instance carries its property, Font and Media Replacement overrides
 into the nested render context (`Collapsed`, `EvalCtx::{property_overrides, media_overrides}`);
 other instances are drawn from a copy of the project with the overridden source properties set
 (`essential::with_overrides`). Templates are `.ectemplate`

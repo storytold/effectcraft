@@ -1772,7 +1772,7 @@ fn collapsed_clip_scene(overridden: bool, copy: bool) -> (Project, ItemId) {
         let mut ids = Ids(&mut p.next_id);
         let control = ids.prop(&essential::match_id(1), "Clip", Value::Enum(1));
         let mut group = ids.group(essential::GROUP, "Essential Properties");
-        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid], bases: vec![] };
         group.children.push(control.into());
         pre.props.children.push(group.into());
     }

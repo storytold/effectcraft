@@ -984,6 +984,311 @@ impl TextDoc {
         }
         Ok(false)
     }
+
+    /// Three-way merge of a master document into this copy of it (an Essential Properties
+    /// override of a Source Text, #3186). `base_in` is the master the copy is merged with (as it
+    /// was when the copy was made, with what the copy followed since brought up to date); `master`
+    /// is the master now. The text is always this document's own. For every character, paragraph
+    /// and document attribute: where this document still has `base_in`'s value, it takes the
+    /// master's, and so does `base_out`; where it has another value, that value is its own and
+    /// stays (and `base_out` is left alone, so it stays the copy's own whatever the master does
+    /// later). `base_out` starts as a copy of `base_in`; several documents (the keyframes of one
+    /// override) can merge against the same `base_in` into one `base_out`, which then takes every
+    /// attribute any of them followed.
+    ///
+    /// Character and paragraph attributes are merged only where they are uniform in both
+    /// `base_in` and `master` (every style run, or every paragraph, the same): a master whose mixed
+    /// formatting changed with its text (its bold first word deleted, say) is not taken for a
+    /// restyle, and an attribute mixed in the base never follows. The base is one document for
+    /// the whole copy: in a copy with mixed formatting, a run that followed moves the base on, so
+    /// another run whose own value the master reaches later counts as following from then on.
+    /// Merging again with the updated base changes nothing.
+    pub fn merge_master(&mut self, base_in: &TextDoc, base_out: &mut TextDoc, master: &TextDoc) {
+        if same_uniform_formatting(base_in, master) {
+            return;
+        }
+        let (mut ir, mut bi, mut bo, mut mr) = (self.runs(), base_in.runs(), base_out.runs(), master.runs());
+        if char_attrs(Op::Merge, &mut ir, &mut bi, &mut bo, &mut mr) {
+            self.set_runs(ir);
+            base_out.set_runs(bo);
+        }
+        let (mut ip, mut bi, mut bo, mut mp) = (self.paras(), base_in.paras(), base_out.paras(), master.paras());
+        if para_attrs(Op::Merge, &mut ip, &mut bi, &mut bo, &mut mp) {
+            self.set_paras(ip);
+            base_out.set_paras(bo);
+        }
+        merge_doc_attrs(self, base_in, base_out, master);
+    }
+
+    /// After the copy's own edit (`before` → `after`, an Essential Properties Set of an overridden
+    /// Source Text): every attribute the edit changed is set in `base` to the master's value, so
+    /// [`TextDoc::merge_master`] keeps the new value as the copy's own (or lets it follow, where
+    /// it equals the master's). Without this, a value set back to the base's would count as
+    /// following and take the master's at once. Character and paragraph attributes count as
+    /// changed when their uniform value changed, and are rebased where the master's is uniform.
+    pub fn rebase(base: &mut TextDoc, before: &TextDoc, after: &TextDoc, master: &TextDoc) {
+        let (mut br, mut ar, mut xr, mut mr) = (before.runs(), after.runs(), base.runs(), master.runs());
+        if char_attrs(Op::Rebase, &mut br, &mut ar, &mut xr, &mut mr) {
+            base.set_runs(xr);
+        }
+        let (mut bp, mut ap, mut xp, mut mp) = (before.paras(), after.paras(), base.paras(), master.paras());
+        if para_attrs(Op::Rebase, &mut bp, &mut ap, &mut xp, &mut mp) {
+            base.set_paras(xp);
+        }
+        if before.stroke_over_fill != after.stroke_over_fill {
+            base.stroke_over_fill = master.stroke_over_fill;
+        }
+        if before.line_join != after.line_join {
+            base.line_join = master.line_join;
+        }
+        if before.box_size != after.box_size {
+            base.box_size = master.box_size;
+        }
+        if before.box_pos != after.box_pos {
+            base.box_pos = master.box_pos;
+        }
+        if before.vertical != after.vertical {
+            base.vertical = master.vertical;
+        }
+    }
+}
+
+/// Whether two documents are uniform (no style runs or per-paragraph settings) and formatted
+/// alike, their text aside: then [`TextDoc::merge_master`] has nothing to take.
+fn same_uniform_formatting(a: &TextDoc, b: &TextDoc) -> bool {
+    a.runs.is_empty()
+        && b.runs.is_empty()
+        && a.paragraphs.is_empty()
+        && b.paragraphs.is_empty()
+        && a.base_style() == b.base_style()
+        && a.base_para() == b.base_para()
+        && a.stroke_over_fill == b.stroke_over_fill
+        && a.line_join == b.line_join
+        && a.box_size == b.box_size
+        && a.box_pos == b.box_pos
+        && a.vertical == b.vertical
+}
+
+/// [`TextDoc::merge_master`] for the document attributes (the others are merged per style run
+/// and paragraph). The destructuring lists every field of [`TextDoc`], so a new one has to be
+/// placed here to compile.
+fn merge_doc_attrs(v: &mut TextDoc, base_in: &TextDoc, base_out: &mut TextDoc, master: &TextDoc) {
+    let TextDoc {
+        text: _,
+        font: _,
+        style: _,
+        size: _,
+        fill: _,
+        stroke: _,
+        stroke_width: _,
+        apply_fill: _,
+        apply_stroke: _,
+        stroke_over_fill,
+        line_join,
+        tracking: _,
+        leading: _,
+        justify: _,
+        baseline_shift: _,
+        h_scale: _,
+        v_scale: _,
+        faux_bold: _,
+        faux_italic: _,
+        all_caps: _,
+        small_caps: _,
+        box_size,
+        box_pos,
+        tsume: _,
+        baseline: _,
+        kerning: _,
+        ligatures: _,
+        tate_chu_yoko: _,
+        vertical_roman_upright: _,
+        opentype: _,
+        variations: _,
+        indent_left: _,
+        indent_right: _,
+        indent_first: _,
+        space_before: _,
+        space_after: _,
+        direction: _,
+        composer: _,
+        hanging_punctuation: _,
+        vertical,
+        runs: _,
+        paragraphs: _,
+    } = v;
+    merge_one(stroke_over_fill, &base_in.stroke_over_fill, &mut base_out.stroke_over_fill, &master.stroke_over_fill);
+    merge_one(line_join, &base_in.line_join, &mut base_out.line_join, &master.line_join);
+    merge_one(box_size, &base_in.box_size, &mut base_out.box_size, &master.box_size);
+    merge_one(box_pos, &base_in.box_pos, &mut base_out.box_pos, &master.box_pos);
+    merge_one(vertical, &base_in.vertical, &mut base_out.vertical, &master.vertical);
+}
+
+/// [`TextDoc::merge_master`] for one value: `v` (and `base_out`) take `master` when `v` still
+/// equals `base_in`.
+fn merge_one<T: PartialEq + Clone>(v: &mut T, base_in: &T, base_out: &mut T, master: &T) {
+    if *v == *base_in && *base_in != *master {
+        *v = master.clone();
+        *base_out = master.clone();
+    }
+}
+
+/// The value every item has for one attribute, `None` when they differ (or there are none).
+fn uniform<S, T: PartialEq + Clone>(items: &mut [S], get: fn(&mut S) -> &mut T) -> Option<T> {
+    let mut it = items.iter_mut();
+    let first = get(it.next()?).clone();
+    for s in it {
+        if *get(s) != first {
+            return None;
+        }
+    }
+    Some(first)
+}
+
+/// What [`char_attrs`] and [`para_attrs`] do with each attribute.
+#[derive(Clone, Copy)]
+enum Op {
+    /// [`TextDoc::merge_master`]: the slices are (copy, base in, base out, master).
+    Merge,
+    /// [`TextDoc::rebase`]: the slices are (copy before, copy after, base, master).
+    Rebase,
+}
+
+/// One attribute of style runs or paragraphs, only where it is uniform in the base (`b`, for a
+/// merge) and in `master`. Merge: items of the copy `a` that still have the base value take the
+/// master's, then every item of the base out `c` does too; returns whether any followed.
+/// Rebase: when the edit `a` → `b` changed the attribute, every item of the base `c` takes the
+/// master's value; returns whether it did.
+fn attr_op<S, T: PartialEq + Clone>(op: Op, a: &mut [S], b: &mut [S], c: &mut [S], master: &mut [S], get: fn(&mut S) -> &mut T) -> bool {
+    let Some(m) = uniform(master, get) else { return false };
+    let set_all = |items: &mut [S]| {
+        for s in items.iter_mut() {
+            *get(s) = m.clone();
+        }
+    };
+    match op {
+        Op::Merge => {
+            let Some(base) = uniform(b, get) else { return false };
+            if base == m {
+                return false;
+            }
+            let mut followed = false;
+            for s in a.iter_mut() {
+                let v = get(s);
+                if *v == base {
+                    *v = m.clone();
+                    followed = true;
+                }
+            }
+            // Items with their own value keep the base, so they stay their own.
+            if followed {
+                set_all(c);
+            }
+            followed
+        }
+        Op::Rebase => {
+            if uniform(a, get) == uniform(b, get) {
+                return false;
+            }
+            set_all(c);
+            true
+        }
+    }
+}
+
+/// [`attr_op`] for every character attribute; returns whether any did something. The destructuring lists every field
+/// of [`CharStyle`], so a new attribute has to be added here to compile.
+fn char_attrs(op: Op, i: &mut [StyleRun], bi: &mut [StyleRun], bo: &mut [StyleRun], m: &mut [StyleRun]) -> bool {
+    let Some(StyleRun {
+        len: _,
+        style:
+            CharStyle {
+                font: _,
+                style: _,
+                size: _,
+                fill: _,
+                stroke: _,
+                stroke_width: _,
+                apply_fill: _,
+                apply_stroke: _,
+                tracking: _,
+                leading: _,
+                baseline_shift: _,
+                h_scale: _,
+                v_scale: _,
+                tsume: _,
+                faux_bold: _,
+                faux_italic: _,
+                all_caps: _,
+                small_caps: _,
+                baseline: _,
+                kerning: _,
+                ligatures: _,
+                tate_chu_yoko: _,
+                vertical_roman_upright: _,
+                opentype: _,
+                variations: _,
+            },
+    }) = m.first()
+    else {
+        return false;
+    };
+    let mut followed = false;
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.font);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.style);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.size);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.fill);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.stroke);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.stroke_width);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.apply_fill);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.apply_stroke);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.tracking);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.leading);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.baseline_shift);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.h_scale);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.v_scale);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.tsume);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.faux_bold);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.faux_italic);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.all_caps);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.small_caps);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.baseline);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.kerning);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.ligatures);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.tate_chu_yoko);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.vertical_roman_upright);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.opentype);
+    followed |= attr_op(op, i, bi, bo, m, |r| &mut r.style.variations);
+    followed
+}
+
+/// [`attr_op`] for every paragraph attribute (every field of [`ParaStyle`] listed, as above).
+fn para_attrs(op: Op, i: &mut [ParaStyle], bi: &mut [ParaStyle], bo: &mut [ParaStyle], m: &mut [ParaStyle]) -> bool {
+    let Some(ParaStyle {
+        justify: _,
+        indent_left: _,
+        indent_right: _,
+        indent_first: _,
+        space_before: _,
+        space_after: _,
+        direction: _,
+        composer: _,
+        hanging_punctuation: _,
+    }) = m.first()
+    else {
+        return false;
+    };
+    let mut followed = false;
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.justify);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.indent_left);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.indent_right);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.indent_first);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.space_before);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.space_after);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.direction);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.composer);
+    followed |= attr_op(op, i, bi, bo, m, |p| &mut p.hanging_punctuation);
+    followed
 }
 
 fn color_json(v: &J) -> Option<[f32; 4]> {
@@ -1320,6 +1625,147 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bubble() -> TextDoc {
+        TextDoc {
+            text: "Original".into(),
+            font: "Inter".into(),
+            style: "SemiBold".into(),
+            size: 54.0,
+            fill: [0.141, 0.443, 0.639, 1.0],
+            leading: Some(68.0),
+            justify: Justify::Left,
+            box_size: Some([820.0, 150.0]),
+            box_pos: [-410.0, -75.0],
+            ..Default::default()
+        }
+    }
+
+    /// Merge one document, its base updated in place.
+    fn merge(d: &mut TextDoc, base: &mut TextDoc, master: &TextDoc) {
+        let base_in = base.clone();
+        d.merge_master(&base_in, base, master);
+    }
+
+    /// #3186: own red, master moved to green (the base still blue), then the copy is set to blue:
+    /// after the rebase blue stays the copy's own instead of counting as following.
+    #[test]
+    fn rebase_keeps_a_value_set_back_to_the_base() {
+        let (blue, red, green) = ([0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        let mut base = TextDoc { fill: blue, ..bubble() };
+        let master = TextDoc { fill: green, size: 64.0, ..bubble() };
+        let was = TextDoc { text: "Mine".into(), fill: red, ..base.clone() };
+        let mut now = TextDoc { fill: blue, ..was.clone() };
+        TextDoc::rebase(&mut base, &was, &now, &master);
+        assert_eq!((base.fill, base.size), (green, 54.0), "only the fill was set");
+        merge(&mut now, &mut base, &master);
+        assert_eq!((now.fill, now.size, now.text.as_str()), (blue, 64.0, "Mine"));
+    }
+
+    /// #3186: keyframes of one override merge against the same base into one: an attribute one
+    /// key followed moves the base on, while a key that owns it keeps its value.
+    #[test]
+    fn merge_master_shares_one_base_between_keys() {
+        let old = bubble();
+        let new = TextDoc { fill: [0.0, 1.0, 0.0, 1.0], size: 64.0, ..old.clone() };
+        let mut own = TextDoc { text: "First".into(), fill: [1.0, 0.0, 0.0, 1.0], ..old.clone() };
+        let mut follows = TextDoc { text: "Second".into(), ..old.clone() };
+        let mut base = old.clone();
+        own.merge_master(&old, &mut base, &new);
+        follows.merge_master(&old, &mut base, &new);
+        assert_eq!((own.fill, own.size), ([1.0, 0.0, 0.0, 1.0], 64.0));
+        assert_eq!((follows.fill, follows.size), (new.fill, 64.0));
+        assert_eq!((base.fill, base.size), (new.fill, 64.0), "the base takes what any key followed");
+        // Again with the new base: nothing changes, the first key's red stays its own.
+        let (own_was, follows_was) = (own.clone(), follows.clone());
+        let base_in = base.clone();
+        own.merge_master(&base_in, &mut base, &new);
+        follows.merge_master(&base_in, &mut base, &new);
+        assert_eq!((own, follows), (own_was, follows_was));
+    }
+
+    /// #3186: an instance's copy of a document takes a restyle of the master in every attribute
+    /// it did not change itself, and keeps its text and its own attributes.
+    #[test]
+    fn merge_master_takes_the_restyle_and_keeps_own_text_and_attributes() {
+        let old = bubble();
+        let mut new = old.clone();
+        new.fill = [0.004, 0.122, 0.149, 1.0];
+        new.size = 64.0;
+        new.justify = Justify::Right;
+        new.tracking = 20.0;
+        new.box_size = Some([900.0, 150.0]);
+
+        let mut base = old.clone();
+        let mut inst = old.clone();
+        inst.set_text("Own sentence\nsecond line");
+        inst.tracking = 50.0;
+        merge(&mut inst, &mut base, &new);
+        assert_eq!(inst.text, "Own sentence\nsecond line");
+        assert_eq!((inst.fill, inst.size, inst.justify), (new.fill, 64.0, Justify::Right));
+        assert_eq!((inst.font.as_str(), inst.style.as_str(), inst.leading), ("Inter", "SemiBold", Some(68.0)));
+        assert_eq!(inst.box_size, Some([900.0, 150.0]));
+        assert_eq!(inst.tracking, 50.0, "the instance's own tracking stays");
+        assert!(inst.runs.is_empty() && inst.paragraphs.is_empty());
+        assert_eq!(inst.paras().iter().map(|p| p.justify).collect::<Vec<_>>(), vec![Justify::Right; 2]);
+        // The base took what was followed, and kept the old value of what is the instance's own.
+        assert_eq!((base.fill, base.size, base.tracking), (new.fill, 64.0, 0.0));
+
+        // Merging again with the updated base changes nothing.
+        let (inst_was, base_was) = (inst.clone(), base.clone());
+        merge(&mut inst, &mut base, &new);
+        assert_eq!((&inst, &base), (&inst_was, &base_was));
+
+        // Mixed formatting in the instance: every run takes the new fill, the bold run stays bold.
+        let mut base = old.clone();
+        let mut mixed = old.clone();
+        mixed.set_text("Bold rest");
+        mixed.apply_style(0..4, |s| s.faux_bold = true);
+        merge(&mut mixed, &mut base, &new);
+        assert!(mixed.style_at(0).faux_bold && !mixed.style_at(6).faux_bold);
+        assert_eq!((mixed.style_at(0).fill, mixed.style_at(6).fill), (new.fill, new.fill));
+        assert_eq!(mixed.style_at(6).size, 64.0);
+    }
+
+    /// #3186: an attribute the instance changed stays its own even when the master passes
+    /// through the instance's value (blue → red → green keeps the instance red).
+    #[test]
+    fn merge_master_keeps_own_value_when_the_master_passes_through_it() {
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let green = [0.0, 1.0, 0.0, 1.0];
+        let master = TextDoc { fill: blue, ..bubble() };
+        let mut base = master.clone();
+        let mut inst = TextDoc { text: "Mine".into(), fill: red, ..master.clone() };
+        for fill in [red, green] {
+            let master = TextDoc { fill, size: 60.0, ..master.clone() };
+            merge(&mut inst, &mut base, &master);
+            assert_eq!(inst.fill, red, "the instance's own fill stays");
+            assert_eq!(inst.size, 60.0);
+        }
+        assert_eq!(inst.text, "Mine");
+    }
+
+    /// #3186: deleting the master's bold first word changes its first character's style, but is
+    /// no restyle: the instance's bold word stays bold.
+    #[test]
+    fn merge_master_ignores_mixed_formatting_that_changed_with_the_text() {
+        let mut master = bubble();
+        master.set_text("Bold rest");
+        master.apply_style(0..4, |s| s.faux_bold = true);
+        let mut base = master.clone();
+        let mut inst = master.clone();
+        inst.set_text("Wow, more words");
+        inst.apply_style(0..4, |s| s.faux_bold = true);
+        inst.apply_style(4..15, |s| s.faux_bold = false);
+        let inst_was = inst.clone();
+        // The master's bold word is deleted: what is left is plain.
+        master.replace_range(0..5, "", None);
+        assert!(!master.style_at(0).faux_bold && master.runs.is_empty());
+        merge(&mut inst, &mut base, &master);
+        assert_eq!(inst, inst_was);
+        assert!(inst.style_at(0).faux_bold);
+    }
 
     #[test]
     fn mixed_line_breaks_keep_original_byte_and_character_ranges() {

@@ -23,7 +23,7 @@ use std::sync::Arc;
 pub use effectcraft_color::ColorSpace;
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_time::{FrameRate, Tick};
-pub use props::{Expression, FeatherFalloff, GroupKind, MaskMode, MaskMotionBlur, Node, ParamUi, PropGroup, Property, Uid, parse_path};
+pub use props::{EssentialBase, Expression, FeatherFalloff, GroupKind, MaskMode, MaskMotionBlur, Node, ParamUi, PropGroup, Property, Uid, parse_path};
 use serde::{Deserialize, Serialize};
 
 pub use effectcraft_keyframe as keyframe;
