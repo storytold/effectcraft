@@ -117,6 +117,7 @@ impl Tool {
         Tool::PuppetAdvanced,
         Tool::PuppetOverlap,
     ];
+    /// Returns the tool's name as After Effects shows it, e.g. `Orbit Around Cursor Tool`.
     pub fn label(self) -> &'static str {
         match self {
             Tool::Selection => "Selection Tool",
@@ -157,6 +158,7 @@ impl Tool {
             Tool::PuppetOverlap => "Puppet Overlap Pin Tool",
         }
     }
+    /// Returns the tool's key, shared by the variants in one toolbar slot, or `None` when it has none.
     pub fn shortcut(self) -> Option<&'static str> {
         match self {
             Tool::Selection => Some("V"),
@@ -175,6 +177,7 @@ impl Tool {
             Tool::Puppet | Tool::PuppetStarch | Tool::PuppetBend | Tool::PuppetAdvanced | Tool::PuppetOverlap => Some("Cmd+P"),
         }
     }
+    /// Returns the toolbar icon of the tool; the variants of one slot share an icon.
     pub fn icon(self) -> Icon {
         match self {
             Tool::Selection => Icon::Selection,
@@ -223,6 +226,7 @@ impl Tool {
             _ => None,
         }
     }
+    /// Returns whether the tool is one of the orbit, pan or dolly camera tools.
     pub fn is_camera(self) -> bool {
         self.camera_group().is_some()
     }

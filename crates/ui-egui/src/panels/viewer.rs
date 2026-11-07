@@ -918,6 +918,7 @@ fn wheel_scrub_frames(ctx: &egui::Context, pref: bool, scroll: &super::ViewerScr
     scrub.then_some((scroll.wheel_lines.round() as i64).clamp(-30, 30))
 }
 
+/// Handles the pointer moving over the viewer without a drag: hover feedback, cursors and tool hints.
 fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -1130,6 +1131,7 @@ fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
     layers.iter().map(|l| led(l.0)).collect()
 }
 
+/// Starts a drag gesture in the viewer on the first drag frame: picks what the active tool and the item under the pointer begin to move, draw or select.
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1458,6 +1460,7 @@ fn camera_drag(app: &mut EffectcraftApp, tool: Tool, cursor: [f64; 2], pivot: Op
     }
 }
 
+/// Continues the viewer gesture that `phase_dragstart` began, applying the pointer's movement to it.
 fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let t = v.t;
     let zoom = v.zoom;

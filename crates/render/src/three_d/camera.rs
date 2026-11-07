@@ -581,6 +581,7 @@ impl Rig {
     pub fn state(&self) -> CameraState {
         CameraState { view: basis_view(self.eye, self.poi - self.eye, vec3(0.0, 1.0, 0.0)), eye: self.eye, zoom: self.zoom, ortho: self.ortho, dof: None }
     }
+    /// Returns the camera's forward, right and down unit vectors.
     fn frame(&self) -> (Vec3, Vec3, Vec3) {
         let s = self.state();
         (s.forward(), s.right(), s.down())

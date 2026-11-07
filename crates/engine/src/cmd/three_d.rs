@@ -474,6 +474,8 @@ enum ToolMode {
 }
 
 impl ToolMode {
+    /// Reads the `mode` parameter of a camera tool into the variant that applies to `op`.
+    /// Without a mode, orbit and pan act about the point of interest and dolly moves plainly; an unknown name is an error.
     fn parse(p: &Value, op: ToolOp, cmd: &str) -> Result<ToolMode> {
         let Some(raw) = str_p(p, "mode") else {
             return Ok(match op {
@@ -544,6 +546,8 @@ fn tool_pivot(s: &Session, cid: ItemId, p: &Value, mode: ToolMode, cam: &camera:
     Some(camera::point_under(cam, w, h, px, &layer_quads(s, cid, &ids, t), poi))
 }
 
+/// Applies one orbit, pan or dolly step to the active camera, or to the current custom view, about the pivot its mode picks.
+/// A step that would leave a non-finite camera is dropped; returns the layer and the view it came from.
 fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
@@ -811,6 +815,7 @@ fn camera_from_view(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": id.0, "from": cur.id()}))
 }
 
+/// Returns the command specs of the 3D commands, including the eight camera tools.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(

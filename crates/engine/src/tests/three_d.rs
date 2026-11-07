@@ -325,10 +325,12 @@ fn camera_tools_edit_active_camera_with_undo() {
     assert!(o[1].abs() > 1.0, "{o:?}");
 }
 
+/// Returns the Euclidean distance between two 3D points.
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+/// Reads a JSON array of three numbers as a point; panics on anything else.
 fn arr3(v: &serde_json::Value) -> [f64; 3] {
     let a = v.as_array().unwrap_or_else(|| panic!("not a point: {v}"));
     [a[0].as_f64().unwrap(), a[1].as_f64().unwrap(), a[2].as_f64().unwrap()]

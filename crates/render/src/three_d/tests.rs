@@ -725,14 +725,17 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
 const CW: f64 = 1920.0;
 const CH: f64 = 1080.0;
 
+/// Returns the rig of the default Custom View 1 camera in a comp of size `CW` by `CH`.
 fn custom_rig() -> Rig {
     Rig::from_view(&default_view_cam(View3D::Custom1, CW, CH))
 }
 
+/// Projects the world point `p` through the rig's camera to comp pixels; panics when the point is behind the camera.
 fn screen(r: &Rig, p: Vec3) -> effectcraft_geom::Vec2 {
     r.state().project(CW, CH, p).expect("in front of the camera")
 }
 
+/// Checks that orbiting about the point of interest equals the plain orbit step.
 #[test]
 fn orbit_around_camera_poi_is_orbit_about_the_poi() {
     let (mut a, mut b) = (custom_rig(), custom_rig());
@@ -742,6 +745,7 @@ fn orbit_around_camera_poi_is_orbit_about_the_poi() {
     assert!((a.poi - b.poi).length() < 1e-9);
 }
 
+/// Checks that orbiting about a pivot keeps the pivot's distance and screen position while the point of interest turns too, and that a NaN pivot is ignored.
 #[test]
 fn orbit_around_a_pivot_keeps_it_on_screen_and_turns_the_whole_camera() {
     let mut r = custom_rig();
@@ -764,6 +768,7 @@ fn orbit_around_a_pivot_keeps_it_on_screen_and_turns_the_whole_camera() {
     assert_eq!(r, before);
 }
 
+/// Checks that Pan Under Cursor moves a point by exactly the drag, unlike Pan Camera POI, and falls back to the POI depth behind the camera.
 #[test]
 fn pan_under_cursor_keeps_the_grabbed_point_under_the_pointer() {
     // A point nearer than the point of interest: Pan Camera POI moves it by less
@@ -786,6 +791,7 @@ fn pan_under_cursor_keeps_the_grabbed_point_under_the_pointer() {
     assert!((back.eye - target.eye).length() < 1e-9);
 }
 
+/// Checks that both cursor dollies keep the point under the cursor fixed and that Dolly to Cursor stops short of it.
 #[test]
 fn dolly_towards_and_to_cursor_move_along_the_cursor_ray() {
     let r0 = custom_rig();
@@ -831,6 +837,7 @@ fn dolly_towards_cursor_keeps_going_past_the_point() {
     assert!((r.eye - target).length() > 1000.0, "well past the point");
 }
 
+/// Checks that Dolly to Camera POI leaves the camera in place when it is already within a pixel of the point.
 #[test]
 fn dolly_to_camera_poi_never_backs_off_when_closer_than_a_pixel() {
     let mut r = custom_rig();
@@ -841,6 +848,7 @@ fn dolly_to_camera_poi_never_backs_off_when_closer_than_a_pixel() {
     assert!((r.eye - eye).length() < 1e-12, "{:?}", r.eye);
 }
 
+/// Checks that every camera tool keeps the rig finite for degenerate cameras, pivots and targets.
 #[test]
 fn camera_tools_never_produce_nan_cameras() {
     let nan_free = |r: &Rig| assert!(r.is_finite(), "{r:?}");
@@ -866,6 +874,7 @@ fn camera_tools_never_produce_nan_cameras() {
     nan_free(&Rig { eye: super::camera::point_under(&cam, CW, CH, [10.0, 10.0], &[], down.poi), ..down });
 }
 
+/// Checks that the point under the cursor lies on the nearest layer it hits, else at the POI depth.
 #[test]
 fn the_point_under_the_cursor_is_on_the_layer_it_hits() {
     let r = Rig::from_view(&default_view_cam(View3D::Default, CW, CH));
