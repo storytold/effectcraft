@@ -308,3 +308,49 @@ fn project_settings_without_the_layout_marker_read_as_the_old_layout() {
     let old: effectcraft_project::ProjectSettings = serde_json::from_value(v).unwrap();
     assert_eq!(old.reverse_layout, 0);
 }
+
+#[test]
+fn reversing_a_remapped_layer_shows_every_frame_backwards_and_back() {
+    // Time Remap on (keys at the identity), then Time-Reverse Layer: the keys are mirrored with
+    // the span, so the In point names the source's end (D). A reversed layer reads the source
+    // just before the time it names, remapped or not: comp frame 0 shows frame 9, not the frame
+    // past the end (nothing, or the last frame held twice and frame 0 never shown).
+    let (mut s, cid, l) = scene(10);
+    s.execute("layer.enableTimeRemap", json!({"layers": [l]})).unwrap();
+    let before = layer(&s, cid, l);
+    s.execute("layer.timeReverse", json!({"layers": [l]})).unwrap();
+    assert_eq!(frames(&s, cid, N), (0..N).rev().map(Some).collect::<Vec<_>>());
+    // Reversing again restores the layer, keys included, and forward playback.
+    s.execute("layer.timeReverse", json!({"layers": [l]})).unwrap();
+    assert_eq!(layer(&s, cid, l), before);
+    assert_eq!(frames(&s, cid, N), (0..N).map(Some).collect::<Vec<_>>());
+}
+
+/// Comp frames 0..3N of `cid` (column alphas) for reversed layer `l` with Frame Mix on, before
+/// and after Enable Time Remapping, which keys it at the identity: they must be the same.
+fn assert_remap_keeps_frames(s: &mut Session, cid: ItemId, l: u64, what: &str) {
+    set_blending(s, cid, l, true);
+    s.execute("layer.timeReverse", json!({"comp": cid.0, "layers": [l]})).unwrap();
+    let count = 3 * N;
+    let before: Vec<Vec<f32>> = (0..count).map(|k| columns(s, cid, k)).collect();
+    s.execute("layer.enableTimeRemap", json!({"comp": cid.0, "layers": [l]})).unwrap();
+    for (k, want) in before.iter().enumerate() {
+        let got = columns(s, cid, k as i64);
+        assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 5e-3), "{what}: comp frame {k}: {got:?}, was {want:?}");
+    }
+}
+
+#[test]
+fn enabling_time_remap_on_a_reversed_layer_keeps_its_blended_frames() {
+    // 10 fps footage reversed in a 30 fps comp with Frame Mix: the remapped layer used to skip
+    // the reversed blend (0.1 s showed mostly frame 9 instead of frame 8).
+    let (mut s, cid, l) = scene(30);
+    assert_remap_keeps_frames(&mut s, cid, l, "footage");
+    // The same through an unproxied 10 fps precomp (Preserve Frame Rate off): it used to show
+    // frame 9 at 0.1 s and nothing at its first frame.
+    let (mut s, inner, _) = scene(10);
+    s.execute("comp.new", json!({"name": "Outer", "width": N, "height": 2, "frameRate": 30, "duration": 1})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    let pre = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    assert_remap_keeps_frames(&mut s, outer, pre, "precomp");
+}

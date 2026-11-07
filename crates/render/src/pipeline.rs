@@ -857,10 +857,10 @@ impl<'a> Renderer<'a> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
         if mode != FrameBlend::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
-            // A reversed layer's `t` is the instant just before its layer time (see
-            // `EvalCtx::source_time`); it blends from the frame that ends at its layer time
-            // toward the one before, the mirror of a forward layer: one source frame earlier,
-            // so a reversed layer on the footage's own frames blends nothing.
+            // A reversed layer's `t` is the instant just before the time it names (its layer
+            // time or remap value, see `EvalCtx::source_time`); it blends from the frame that ends
+            // at that time toward the one before, the mirror of a forward layer: one source
+            // frame earlier, so a reversed layer on the footage's own frames blends nothing.
             let at = if EvalCtx::plays_backwards(layer) { t + Tick(1) - f.frame_rate.frame_duration() } else { t };
             let (i, w) = frame_position(at, f.frame_rate);
             if w > 1e-6 {

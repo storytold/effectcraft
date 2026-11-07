@@ -171,14 +171,9 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 pr.value = KV::Scalar(source_secs(l, l.in_point));
                 pr.keys = vec![Keyframe::new(a, KV::Scalar(a.seconds())), Keyframe::new(b, KV::Scalar(b.seconds()))];
-                if lin > lout {
-                    // Reversed layers keep showing what they showed: the source just before the
-                    // layer time (`EvalCtx::source_time`), which a remap value names directly.
-                    let before = |t: Tick| KV::Scalar((t - Tick(1)).seconds());
-                    pr.value = before(b);
-                    pr.keys[0].value = before(a);
-                    pr.keys[1].value = before(b);
-                }
+                // A reversed layer keeps showing what it showed: it reads the source just before
+                // the time its remap names, as it does before its layer time without remapping
+                // (`EvalCtx::source_time`), so the identity keys need nothing more.
                 l.props.children.insert(0, Node::Prop(pr));
             } else if !target && has {
                 l.props.children.retain(|c| c.match_id() != "timeRemap");
