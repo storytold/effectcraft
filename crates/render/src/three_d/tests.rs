@@ -719,3 +719,174 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
     let off = r.eye - r.poi;
     assert!(off.y.abs() / off.length() < 0.9999);
 }
+
+// ---- the eight camera tools (#2586): pivots of the Cursor / Scene / Camera POI variants
+
+const CW: f64 = 1920.0;
+const CH: f64 = 1080.0;
+
+fn custom_rig() -> Rig {
+    Rig::from_view(&default_view_cam(View3D::Custom1, CW, CH))
+}
+
+fn screen(r: &Rig, p: Vec3) -> effectcraft_geom::Vec2 {
+    r.state().project(CW, CH, p).expect("in front of the camera")
+}
+
+#[test]
+fn orbit_around_camera_poi_is_orbit_about_the_poi() {
+    let (mut a, mut b) = (custom_rig(), custom_rig());
+    a.orbit(25.0, -10.0);
+    b.orbit_about(b.poi, 25.0, -10.0);
+    assert!((a.eye - b.eye).length() < 1e-6, "{:?} vs {:?}", a.eye, b.eye);
+    assert!((a.poi - b.poi).length() < 1e-9);
+}
+
+#[test]
+fn orbit_around_a_pivot_keeps_it_on_screen_and_turns_the_whole_camera() {
+    let mut r = custom_rig();
+    // A pivot well off the point of interest (the cursor over a layer, or the scene's centre).
+    let pivot = r.poi + vec3(300.0, -120.0, 400.0);
+    let (s0, de, dp, poi0) = (screen(&r, pivot), (r.eye - pivot).length(), (r.poi - pivot).length(), r.poi);
+    r.orbit_about(pivot, 30.0, -12.0);
+    let s1 = screen(&r, pivot);
+    assert!((s1.x - s0.x).abs() < 1e-6 && (s1.y - s0.y).abs() < 1e-6, "{s0:?} → {s1:?}");
+    assert!(((r.eye - pivot).length() - de).abs() < 1e-6);
+    assert!(((r.poi - pivot).length() - dp).abs() < 1e-6);
+    // Unlike Orbit Around Camera POI, the point of interest goes round too.
+    assert!((r.poi - poi0).length() > 10.0);
+    // Pitch stops short of the poles; a pivot that is not a number leaves the camera alone.
+    r.orbit_about(pivot, 0.0, 500.0);
+    let off = r.eye - r.poi;
+    assert!(off.y.abs() / off.length() < 0.9999);
+    let before = r;
+    r.orbit_about(vec3(f64::NAN, 0.0, 0.0), 10.0, 10.0);
+    assert_eq!(r, before);
+}
+
+#[test]
+fn pan_under_cursor_keeps_the_grabbed_point_under_the_pointer() {
+    // A point nearer than the point of interest: Pan Camera POI moves it by less
+    // than the drag, Pan Under Cursor by exactly the drag.
+    let r0 = custom_rig();
+    let at = r0.eye + (r0.poi - r0.eye) * 0.3 + vec3(40.0, 25.0, 0.0);
+    let s0 = screen(&r0, at);
+    let mut r = r0;
+    r.pan_at(30.0, -12.0, at);
+    let s1 = screen(&r, at);
+    assert!((s1.x - s0.x - 30.0).abs() < 1e-6 && (s1.y - s0.y + 12.0).abs() < 1e-6, "{s0:?} → {s1:?}");
+    assert!(((r.eye - r.poi) - (r0.eye - r0.poi)).length() < 1e-9, "the aim is kept");
+    let mut target = r0;
+    target.pan(30.0, -12.0);
+    let st = screen(&target, at);
+    assert!((st.x - s0.x - 30.0).abs() > 1.0, "Pan Camera POI scales by the POI depth");
+    // A point behind the camera falls back to the point of interest's depth.
+    let mut back = r0;
+    back.pan_at(30.0, -12.0, r0.eye - (r0.poi - r0.eye));
+    assert!((back.eye - target.eye).length() < 1e-9);
+}
+
+#[test]
+fn dolly_towards_and_to_cursor_move_along_the_cursor_ray() {
+    let r0 = custom_rig();
+    let target = r0.poi + vec3(-200.0, 90.0, 150.0);
+    let (s0, d0) = (screen(&r0, target), (r0.eye - target).length());
+    let mut r = r0;
+    r.dolly_towards(150.0, target, false);
+    let s1 = screen(&r, target);
+    assert!((s1.x - s0.x).abs() < 1e-6 && (s1.y - s0.y).abs() < 1e-6, "the point under the cursor stays put");
+    assert!(((r.eye - target).length() - (d0 - 150.0)).abs() < 1e-6);
+    assert!(((r.eye - r.poi) - (r0.eye - r0.poi)).length() < 1e-9, "the aim is kept");
+    // Dolly Towards Cursor goes on past the point; Dolly to Cursor stops just short of it.
+    let mut past = r0;
+    past.dolly_towards(d0 + 500.0, target, false);
+    assert!(((past.eye - target).length() - 500.0).abs() < 1e-6);
+    let mut to = r0;
+    to.dolly_towards(d0 + 500.0, target, true);
+    assert!(((to.eye - target).length() - 1.0).abs() < 1e-6);
+    to.dolly_towards(50.0, target, true);
+    assert!(((to.eye - target).length() - 1.0).abs() < 1e-6, "no further");
+    // Backwards is not limited.
+    to.dolly_towards(-100.0, target, true);
+    assert!(((to.eye - target).length() - 101.0).abs() < 1e-6);
+}
+
+/// A Dolly Towards Cursor drag is many small steps towards one point: past the point it keeps
+/// going forward instead of turning back towards it.
+#[test]
+fn dolly_towards_cursor_keeps_going_past_the_point() {
+    let r0 = custom_rig();
+    let target = r0.poi + vec3(-200.0, 90.0, 150.0);
+    let f = (r0.poi - r0.eye).normalize();
+    let d0 = (r0.eye - target).length();
+    let mut r = r0;
+    let mut last = r.eye.dot(f);
+    let steps = (d0 / 50.0) as usize + 40;
+    for _ in 0..steps {
+        r.dolly_towards(50.0, target, false);
+        let now = r.eye.dot(f);
+        assert!(now > last + 1.0, "the drag turned back at {:?}", r.eye);
+        last = now;
+    }
+    assert!((r.eye - target).length() > 1000.0, "well past the point");
+}
+
+#[test]
+fn dolly_to_camera_poi_never_backs_off_when_closer_than_a_pixel() {
+    let mut r = custom_rig();
+    let f = (r.poi - r.eye).normalize();
+    r.eye = r.poi - f * 0.5;
+    let eye = r.eye;
+    r.dolly(10.0, false);
+    assert!((r.eye - eye).length() < 1e-12, "{:?}", r.eye);
+}
+
+#[test]
+fn camera_tools_never_produce_nan_cameras() {
+    let nan_free = |r: &Rig| assert!(r.is_finite(), "{r:?}");
+    // Eye on the point of interest, zero zoom, and pivots / targets on the eye.
+    let mut r = Rig { eye: vec3(10.0, 20.0, 30.0), poi: vec3(10.0, 20.0, 30.0), zoom: 0.0, ortho: false };
+    r.orbit(10.0, 10.0);
+    nan_free(&r);
+    r.orbit_about(r.eye, 10.0, 10.0);
+    nan_free(&r);
+    r.pan_at(5.0, 5.0, r.eye);
+    nan_free(&r);
+    r.dolly_towards(10.0, r.eye, false);
+    nan_free(&r);
+    r.dolly_towards(10.0, r.eye, true);
+    nan_free(&r);
+    r.dolly(10.0, false);
+    nan_free(&r);
+    // Looking straight down: orbiting about a pivot still has an axis to pitch about.
+    let mut down = Rig { eye: vec3(0.0, -500.0, 0.0), poi: Vec3::ZERO, zoom: 800.0, ortho: false };
+    down.orbit_about(vec3(50.0, 0.0, 50.0), 20.0, -30.0);
+    nan_free(&down);
+    let cam = down.state();
+    nan_free(&Rig { eye: super::camera::point_under(&cam, CW, CH, [10.0, 10.0], &[], down.poi), ..down });
+}
+
+#[test]
+fn the_point_under_the_cursor_is_on_the_layer_it_hits() {
+    let r = Rig::from_view(&default_view_cam(View3D::Default, CW, CH));
+    let cam = r.state();
+    // A comp-sized layer at z = 0 maps 1:1 to the default camera's pixels.
+    let quad = [vec3(0.0, 0.0, 0.0), vec3(CW, 0.0, 0.0), vec3(CW, CH, 0.0), vec3(0.0, CH, 0.0)];
+    let p = super::camera::point_under(&cam, CW, CH, [100.0, 200.0], &[quad], r.poi);
+    assert!((p - vec3(100.0, 200.0, 0.0)).length() < 1e-6, "{p:?}");
+    // The nearer of two layers wins.
+    let near: [Vec3; 4] = quad.map(|c| c + vec3(0.0, 0.0, -300.0));
+    let p = super::camera::point_under(&cam, CW, CH, [960.0, 540.0], &[quad, near], r.poi);
+    assert!((p.z + 300.0).abs() < 1e-6, "{p:?}");
+    // Off every layer: the cursor's point at the depth of the point of interest.
+    let small = [vec3(0.0, 0.0, 0.0), vec3(10.0, 0.0, 0.0), vec3(10.0, 10.0, 0.0), vec3(0.0, 10.0, 0.0)];
+    let off = r.poi + vec3(0.0, 0.0, 200.0);
+    let p = super::camera::point_under(&cam, CW, CH, [1500.0, 700.0], &[small], off);
+    assert!((cam.depth(p) - cam.depth(off)).abs() < 1e-6);
+    let s = cam.project(CW, CH, p).unwrap();
+    assert!((s.x - 1500.0).abs() < 1e-6 && (s.y - 700.0).abs() < 1e-6, "{s:?}");
+    // The scene's centre is the middle of the box around the points.
+    let c = super::camera::bounds_center(&[vec3(0.0, 0.0, 0.0), vec3(100.0, 50.0, -40.0), vec3(20.0, 10.0, 60.0)]).unwrap();
+    assert!((c - vec3(50.0, 25.0, 10.0)).length() < 1e-12);
+    assert!(super::camera::bounds_center(&[]).is_none());
+}

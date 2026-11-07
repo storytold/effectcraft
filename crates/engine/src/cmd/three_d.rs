@@ -449,10 +449,99 @@ fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------------------------------------------------------------- camera tools
 
+#[derive(Clone, Copy)]
 enum ToolOp {
     Orbit(f64, f64),
     Pan(f64, f64),
     Dolly(f64),
+}
+
+/// Which of After Effects' variants of a camera tool runs: what it turns about, pans at or
+/// dollies towards (`mode` of `camera.orbit` / `camera.pan` / `camera.dolly`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolMode {
+    /// Without `mode`, `camera.dolly` keeps its original behaviour: a camera layer travels with
+    /// its point of interest along the view axis, a 3D view approaches its point of interest.
+    Plain,
+    /// The point under the cursor: Orbit Around Cursor, Pan Under Cursor, Dolly Towards Cursor.
+    Cursor,
+    /// Dolly to Cursor: towards the point under the cursor, stopping short of it.
+    ToCursor,
+    /// Orbit Around Scene: the centre of the comp's 3D layers.
+    Scene,
+    /// The camera's point of interest: Orbit Around Camera POI, Pan Camera POI, Dolly to Camera POI.
+    Target,
+}
+
+impl ToolMode {
+    fn parse(p: &Value, op: ToolOp, cmd: &str) -> Result<ToolMode> {
+        let Some(raw) = str_p(p, "mode") else {
+            return Ok(match op {
+                ToolOp::Dolly(_) => ToolMode::Plain,
+                _ => ToolMode::Target,
+            });
+        };
+        let k: String = raw.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        let mode = match (op, k.as_str()) {
+            (ToolOp::Orbit(..), "aroundcursor" | "cursor") => ToolMode::Cursor,
+            (ToolOp::Orbit(..), "aroundscene" | "scene") => ToolMode::Scene,
+            (ToolOp::Orbit(..), "aroundcamerapoi" | "camerapoi" | "aroundcameratarget" | "aroundtarget" | "cameratarget" | "target" | "poi") => {
+                ToolMode::Target
+            }
+            (ToolOp::Pan(..), "undercursor" | "cursor") => ToolMode::Cursor,
+            (ToolOp::Pan(..), "camerapoi" | "tocamerapoi" | "tocameratarget" | "totarget" | "cameratarget" | "target" | "poi") => ToolMode::Target,
+            (ToolOp::Dolly(_), "towardscursor" | "cursor") => ToolMode::Cursor,
+            (ToolOp::Dolly(_), "tocursor") => ToolMode::ToCursor,
+            (ToolOp::Dolly(_), "tocamerapoi" | "camerapoi" | "tocameratarget" | "totarget" | "cameratarget" | "target" | "poi") => ToolMode::Target,
+            _ => return Err(bad(cmd, format!("unknown mode `{raw}`"))),
+        };
+        Ok(mode)
+    }
+}
+
+/// The 3D layers that make up the scene at comp time `t`: active, visible (Video on, not a guide)
+/// and with pixels (no cameras, lights or nulls).
+fn scene_layers(comp: &Comp, t: Tick) -> Vec<LayerId> {
+    comp.layers.iter().filter(|l| l.is_active_at(t) && l.switches.three_d && l.switches.video && !l.switches.guide && l.source.is_av()).map(|l| l.id).collect()
+}
+
+/// World-space rectangles of the layers' content at comp time `t` (for picking the point under
+/// the cursor); layers without content bounds are left out.
+fn layer_quads(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<[Vec3; 4]> {
+    let Some(comp) = s.project.comp(cid) else { return vec![] };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    comp.layers
+        .iter()
+        .filter(|l| ids.contains(&l.id))
+        .filter_map(|l| {
+            let m = ctx.world_matrix(l);
+            let [x0, y0, x1, y1] = effectcraft_render::content_bounds(&ctx, l)?;
+            Some([m.apply(vec3(x0, y0, 0.0)), m.apply(vec3(x1, y0, 0.0)), m.apply(vec3(x1, y1, 0.0)), m.apply(vec3(x0, y1, 0.0))])
+        })
+        .collect()
+}
+
+/// The world point a camera tool turns about, pans at or dollies towards, for the modes that
+/// need one: `point` when given (the UI resolves it once at mouse-down and sends it with every
+/// step of the drag), else the scene's centre, or the point under `cursor` (comp pixels; default
+/// the comp's centre) as `cam` sees it, falling back to the depth of `poi`.
+fn tool_pivot(s: &Session, cid: ItemId, p: &Value, mode: ToolMode, cam: &camera::CameraState, poi: Vec3, t: Tick) -> Option<Vec3> {
+    if matches!(mode, ToolMode::Plain | ToolMode::Target) {
+        return None;
+    }
+    if let Some(pt) = v3_p(p, "point").map(Vec3::from).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) {
+        return Some(pt);
+    }
+    let comp = s.project.comp(cid)?;
+    let (w, h) = (comp.width as f64, comp.height as f64);
+    let ids = scene_layers(comp, t);
+    if mode == ToolMode::Scene {
+        let pts = layer_points(s, cid, &ids, t);
+        return Some(camera::bounds_center(&pts).unwrap_or(vec3(w / 2.0, h / 2.0, 0.0)));
+    }
+    let px = v3_p(p, "cursor").map(|c| [c[0], c[1]]).filter(|c| c[0].is_finite() && c[1].is_finite()).unwrap_or([w / 2.0, h / 2.0]);
+    Some(camera::point_under(cam, w, h, px, &layer_quads(s, cid, &ids, t), poi))
 }
 
 fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -> Result<Value> {
@@ -460,26 +549,70 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let (w, h) = (comp.width as f64, comp.height as f64);
     let cur = s.state.views3d.get(&cid).map(|v| v.current).unwrap_or_default();
-    let apply = |r: &mut Rig, layer: bool| match op {
-        ToolOp::Orbit(yaw, pitch) => r.orbit(yaw, pitch),
-        ToolOp::Pan(dx, dy) => r.pan(dx, dy),
-        ToolOp::Dolly(a) => r.dolly(a, layer),
-    };
-    if cur != View3D::ActiveCamera {
-        let vs = views(s, cid);
-        let vc = vs.cam(cur, w, h);
-        let mut r = Rig::from_view(&vc);
-        apply(&mut r, false);
-        let nc = ViewCam { eye: camera::arr(r.eye), poi: camera::arr(r.poi), zoom: r.zoom, ..vc };
-        vs.cams.insert(cur, nc);
-        return Ok(json!({"view": cur.id(), "eye": nc.eye, "poi": nc.poi, "zoom": nc.zoom}));
-    }
+    let mode = ToolMode::parse(p, op, cmd)?;
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
+    // One step of the tool; a step that would leave a non-finite camera is dropped.
+    let apply = |r: &mut Rig, layer: bool, pivot: Option<Vec3>, mode: ToolMode| {
+        let before = *r;
+        let at = pivot.unwrap_or(r.poi);
+        match (op, mode) {
+            (ToolOp::Orbit(yaw, pitch), ToolMode::Cursor | ToolMode::Scene | ToolMode::ToCursor) => r.orbit_about(at, yaw, pitch),
+            (ToolOp::Orbit(yaw, pitch), _) => r.orbit(yaw, pitch),
+            (ToolOp::Pan(dx, dy), ToolMode::Cursor | ToolMode::Scene | ToolMode::ToCursor) => r.pan_at(dx, dy, at),
+            (ToolOp::Pan(dx, dy), _) => r.pan(dx, dy),
+            (ToolOp::Dolly(a), ToolMode::Plain) => r.dolly(a, layer),
+            (ToolOp::Dolly(a), ToolMode::Target) => r.dolly(a, false),
+            (ToolOp::Dolly(a), ToolMode::Cursor | ToolMode::Scene) => r.dolly_towards(a, at, false),
+            (ToolOp::Dolly(a), ToolMode::ToCursor) => r.dolly_towards(a, at, true),
+        }
+        if !r.is_finite() {
+            *r = before;
+        }
+    };
+    let pivot_json = |pv: Option<Vec3>| pv.map(camera::arr).map_or(Value::Null, |a| json!(a));
+    if cur != View3D::ActiveCamera {
+        let vc = views(s, cid).cam(cur, w, h);
+        let mut r = Rig::from_view(&vc);
+        let pivot = tool_pivot(s, cid, p, mode, &vc.state(), r.poi, t);
+        apply(&mut r, false, pivot, mode);
+        let nc = ViewCam { eye: camera::arr(r.eye), poi: camera::arr(r.poi), zoom: r.zoom, ..vc };
+        views(s, cid).cams.insert(cur, nc);
+        return Ok(json!({"view": cur.id(), "eye": nc.eye, "poi": nc.poi, "zoom": nc.zoom, "pivot": pivot_json(pivot)}));
+    }
     let cam = match p.get("layer") {
         Some(v) => super::resolve_layer(&comp, v).filter(|id| comp.layer(*id).is_some_and(|l| l.is_camera())),
         None => comp.active_camera(t).map(|l| l.id),
     }
     .ok_or_else(|| bad(cmd, "the comp has no active camera layer (Layer ▸ New ▸ Camera), or switch to a custom 3D view"))?;
+    // The point under the cursor as the camera layer shows it, in world space (returned, and
+    // sent back by the viewer as `point`) and in the camera's parent space (what the rig edits).
+    let (pivot, local_pivot) = match comp.layer(cam) {
+        Some(l) if !matches!(mode, ToolMode::Plain | ToolMode::Target) => {
+            let ctx = EvalCtx {
+                project: &s.project,
+                comp_id: cid,
+                comp: &comp,
+                time: t,
+                expr: s.expr.as_deref(),
+                footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
+            };
+            let state = camera::layer_camera(&ctx, l);
+            let pw = camera::parent_world(&ctx, l);
+            let poi = match get_at(l, "transform/poi", t) {
+                Some(v) if camera::is_two_node(l) => pw.apply(Vec3::from(v.as_vec3())),
+                _ => state.eye + state.forward() * state.zoom,
+            };
+            let world = tool_pivot(s, cid, p, mode, &state, poi, t);
+            let local = world.and_then(|w| pw.inverse().map(|m| m.apply(w))).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite());
+            (world, local)
+        }
+        _ => (None, None),
+    };
+    // A parent that cannot be inverted leaves no pivot in the camera's space: work about its
+    // point of interest instead.
+    let mode = if pivot.is_some() && local_pivot.is_none() { ToolMode::Target } else { mode };
     let merge = merge_p(p).map(str::to_string);
     let r = s.edit(label, merge.as_deref(), |proj, _| {
         let l = layer_mut(proj, cid, cam)?;
@@ -496,7 +629,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             pos + fwd * zoom
         };
         let mut rig = Rig { eye: pos, poi, zoom, ortho: false };
-        apply(&mut rig, true);
+        apply(&mut rig, true, local_pivot, mode);
         set_at(l, "transform/position", t, KV::Vec3(camera::arr(rig.eye)));
         if two {
             set_at(l, "transform/poi", t, KV::Vec3(camera::arr(rig.poi)));
@@ -505,7 +638,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             set_at(l, "transform/rotationX", t, KV::Scalar(0.0));
             set_at(l, "transform/rotationY", t, KV::Scalar(0.0));
         }
-        Ok(json!({"layer": cam.0, "position": camera::arr(rig.eye), "poi": camera::arr(rig.poi)}))
+        Ok(json!({"layer": cam.0, "position": camera::arr(rig.eye), "poi": camera::arr(rig.poi), "pivot": pivot_json(pivot)}))
     })?;
     Ok(r)
 }
@@ -767,12 +900,28 @@ pub fn specs() -> Vec<CommandSpec> {
             "Orbit Camera",
             [],
             None,
-            "{yaw|dx deg, pitch|dy deg, layer?, merge?} — current 3D view (camera layer in Active Camera)",
+            "{yaw|dx deg, pitch|dy deg, mode?: aroundCursor|aroundScene|aroundCameraPoi (default; alias aroundCameraTarget), cursor? [x,y] comp px, point? [x,y,z] pivot, layer?, merge?} — current 3D view (camera layer in Active Camera); returns the pivot used",
             has_comp,
             orbit
         ),
-        cmd!("camera.pan", "Pan Camera", [], None, "{dx, dy (comp px), layer?, merge?}", has_comp, pan),
-        cmd!("camera.dolly", "Dolly Camera", [], None, "{amount (px, + = forward), layer?, merge?}", has_comp, dolly),
+        cmd!(
+            "camera.pan",
+            "Pan Camera",
+            [],
+            None,
+            "{dx, dy (comp px), mode?: underCursor|cameraPoi (default; alias toCameraTarget), cursor? [x,y], point? [x,y,z], layer?, merge?}",
+            has_comp,
+            pan
+        ),
+        cmd!(
+            "camera.dolly",
+            "Dolly Camera",
+            [],
+            None,
+            "{amount (px, + = forward), mode?: towardsCursor|toCursor|toCameraPoi (alias toCameraTarget; default: along the view axis), cursor? [x,y], point? [x,y,z], layer?, merge?}",
+            has_comp,
+            dolly
+        ),
         query!("view.get3D", "3D View State", "{comp?} → current 3D view, view camera, active camera layer, lights", get_3d),
     ]
 }

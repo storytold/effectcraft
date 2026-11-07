@@ -12,6 +12,10 @@ pub(super) enum Gesture {
     },
     Camera {
         tool: Tool,
+        /// Where the drag began (comp pixels): the cursor variants' point is under it.
+        cursor: [f64; 2],
+        /// The world point the tool turns about / pans at / dollies towards, once resolved.
+        pivot: Option<[f64; 3]>,
     },
     /// A bounding-box handle: scales about the anchor point so the grabbed point follows the
     /// pointer (corners both axes, edges one), relative to the layer as the drag began; the

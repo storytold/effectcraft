@@ -13,9 +13,22 @@ pub enum Tool {
     Selection,
     Hand,
     Zoom,
+    /// Orbit Around Cursor.
     Orbit,
+    /// Pan Under Cursor.
     PanCamera,
+    /// Dolly Towards Cursor.
     Dolly,
+    /// Orbit Around Scene (the centre of the comp's 3D layers).
+    OrbitScene,
+    /// Orbit Around Camera POI (the camera's point of interest).
+    OrbitTarget,
+    /// Pan Camera POI (moves as far as the point of interest's depth asks).
+    PanTarget,
+    /// Dolly to Cursor (stops short of the point under the cursor).
+    DollyToCursor,
+    /// Dolly to Camera POI (approaches the point of interest, which stays).
+    DollyTarget,
     Rotate,
     PanBehind,
     Rectangle,
@@ -50,9 +63,9 @@ impl Tool {
         &[Tool::Selection],
         &[Tool::Hand],
         &[Tool::Zoom],
-        &[Tool::Orbit],
-        &[Tool::PanCamera],
-        &[Tool::Dolly],
+        &[Tool::Orbit, Tool::OrbitScene, Tool::OrbitTarget],
+        &[Tool::PanCamera, Tool::PanTarget],
+        &[Tool::Dolly, Tool::DollyToCursor, Tool::DollyTarget],
         &[Tool::Rotate],
         &[Tool::PanBehind],
         &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Polygon, Tool::Star],
@@ -64,13 +77,20 @@ impl Tool {
         &[Tool::RotoBrush, Tool::RefineEdge, Tool::ObjectMatte],
         &[Tool::Puppet, Tool::PuppetStarch, Tool::PuppetBend, Tool::PuppetAdvanced, Tool::PuppetOverlap],
     ];
-    pub const ALL: [Tool; 31] = [
+    /// Each slot's first tool comes before its variants: [`Tool::from_name`] matches labels by
+    /// prefix, so `orbit` stays Orbit Around Cursor.
+    pub const ALL: [Tool; 36] = [
         Tool::Selection,
         Tool::Hand,
         Tool::Zoom,
         Tool::Orbit,
         Tool::PanCamera,
         Tool::Dolly,
+        Tool::OrbitScene,
+        Tool::OrbitTarget,
+        Tool::PanTarget,
+        Tool::DollyToCursor,
+        Tool::DollyTarget,
         Tool::Rotate,
         Tool::PanBehind,
         Tool::Rectangle,
@@ -105,6 +125,11 @@ impl Tool {
             Tool::Orbit => "Orbit Around Cursor Tool",
             Tool::PanCamera => "Pan Under Cursor Tool",
             Tool::Dolly => "Dolly Towards Cursor Tool",
+            Tool::OrbitScene => "Orbit Around Scene Tool",
+            Tool::OrbitTarget => "Orbit Around Camera POI Tool",
+            Tool::PanTarget => "Pan Camera POI Tool",
+            Tool::DollyToCursor => "Dolly to Cursor Tool",
+            Tool::DollyTarget => "Dolly to Camera POI Tool",
             Tool::Rotate => "Rotation Tool",
             Tool::PanBehind => "Pan Behind (Anchor Point) Tool",
             Tool::Rectangle => "Rectangle Tool",
@@ -137,9 +162,9 @@ impl Tool {
             Tool::Selection => Some("V"),
             Tool::Hand => Some("H"),
             Tool::Zoom => Some("Z"),
-            Tool::Orbit => Some("1"),
-            Tool::PanCamera => Some("2"),
-            Tool::Dolly => Some("3"),
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Some("1"),
+            Tool::PanCamera | Tool::PanTarget => Some("2"),
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Some("3"),
             Tool::Rotate => Some("W"),
             Tool::PanBehind => Some("Y"),
             Tool::Rectangle | Tool::RoundedRect | Tool::Ellipse | Tool::Polygon | Tool::Star => Some("Q"),
@@ -155,9 +180,9 @@ impl Tool {
             Tool::Selection => Icon::Selection,
             Tool::Hand => Icon::Hand,
             Tool::Zoom => Icon::Zoom,
-            Tool::Orbit => Icon::Orbit,
-            Tool::PanCamera => Icon::PanCamera,
-            Tool::Dolly => Icon::Dolly,
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Icon::Orbit,
+            Tool::PanCamera | Tool::PanTarget => Icon::PanCamera,
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Icon::Dolly,
             Tool::Rotate => Icon::Rotate,
             Tool::PanBehind => Icon::PanBehind,
             Tool::Rectangle => Icon::Rectangle,
@@ -188,6 +213,32 @@ impl Tool {
     pub fn from_name(s: &str) -> Option<Tool> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
         Tool::ALL.into_iter().find(|t| format!("{t:?}").to_ascii_lowercase() == n || t.label().to_ascii_lowercase().replace(' ', "").starts_with(&n))
+    }
+    /// The camera tools' toolbar slot (0 = the Orbit tools, 1 = Pan, 2 = Dolly); None for other tools.
+    pub fn camera_group(self) -> Option<usize> {
+        match self {
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Some(0),
+            Tool::PanCamera | Tool::PanTarget => Some(1),
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Some(2),
+            _ => None,
+        }
+    }
+    pub fn is_camera(self) -> bool {
+        self.camera_group().is_some()
+    }
+    /// A camera tool's engine command and its `mode` (After Effects' variant of the tool).
+    pub fn camera_command(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            Tool::Orbit => ("camera.orbit", "aroundCursor"),
+            Tool::OrbitScene => ("camera.orbit", "aroundScene"),
+            Tool::OrbitTarget => ("camera.orbit", "aroundCameraPoi"),
+            Tool::PanCamera => ("camera.pan", "underCursor"),
+            Tool::PanTarget => ("camera.pan", "cameraPoi"),
+            Tool::Dolly => ("camera.dolly", "towardsCursor"),
+            Tool::DollyToCursor => ("camera.dolly", "toCursor"),
+            Tool::DollyTarget => ("camera.dolly", "toCameraPoi"),
+            _ => return None,
+        })
     }
     /// Puppet pin tools, with the pin kind they place (`puppet.addPin` kind).
     pub fn puppet_kind(self) -> Option<&'static str> {

@@ -334,13 +334,23 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         return frontend(app, ctx, "window.workspace", json!({"name": ws}));
     }
     if let Some(t) = id.strip_prefix("tool.") {
-        // C cycles through the camera tools.
-        if t == "camera" {
-            let tools = [Tool::Orbit, Tool::PanCamera, Tool::Dolly];
-            let next = match tools.iter().position(|x| *x == app.ui.tool) {
-                Some(i) => tools[(i + 1) % tools.len()],
-                None => Tool::Orbit,
-            };
+        // The camera tools: the Orbit, Pan and Dolly slots, each showing the variant last picked
+        // from its flyout. C cycles the three; 1, 2 and 3 pick one.
+        let camera_tool = |g: usize| {
+            let lead = [Tool::Orbit, Tool::PanCamera, Tool::Dolly].get(g).copied().unwrap_or(Tool::Orbit);
+            let Some(si) = Tool::SLOTS.iter().position(|s| s.contains(&lead)) else { return lead };
+            let slot = Tool::SLOTS.get(si).copied().unwrap_or(&[]);
+            app.ui.slot_tools.get(si).copied().filter(|x| slot.contains(x)).unwrap_or(lead)
+        };
+        let group = match t {
+            "camera" => Some(app.ui.tool.camera_group().map_or(0, |g| (g + 1) % 3)),
+            "orbit" => Some(0),
+            "panCamera" => Some(1),
+            "dolly" => Some(2),
+            _ => None,
+        };
+        if let Some(g) = group {
+            let next = camera_tool(g);
             app.ui.tool = next;
             return Ok(json!({"tool": next}));
         }
