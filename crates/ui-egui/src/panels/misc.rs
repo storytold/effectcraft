@@ -404,6 +404,9 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     // As in the Timeline, a scrub moves every selected layer by the same change and a typed value
     // sets the typed channel.
     let scrub = ui.ctx().dragged_id().is_some() && ui.input(|i| i.pointer.is_decidedly_dragging());
+    // Proportional Scrubbing (Ctrl+Alt / Cmd+Opt): the change spreads over the selected layers by
+    // selection order, as in the Timeline.
+    let proportional = scrub && ui.input(|i| widgets::proportional_scrub(i.modifiers));
     // Linked channels move together; Alt edits one alone (Ctrl+Alt is a proportional scrub).
     let linked = app.ui.timeline.is_linked(uid, false) && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers));
     let mut actions: Vec<serde_json::Value> = vec![];
@@ -415,7 +418,7 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
         app.auto.add(if d == 0 { "audio.levelLeft" } else { "audio.levelRight" }, r, &format!("{v:.1} dB"));
         if let Some(nv) = nv {
             let merge = format!("audio-levels-{uid}");
-            let mut params = json!({"layer": lid, "prop": uid, "merge": merge, "selected": true, "offset": scrub, "dims": [d]});
+            let mut params = json!({"layer": lid, "prop": uid, "merge": merge, "selected": true, "offset": scrub, "proportional": proportional, "dims": [d]});
             if linked {
                 // The other channel follows by each layer's own change, keeping its balance.
                 params["value"] = json!(widgets::shifted(&values, d, nv));

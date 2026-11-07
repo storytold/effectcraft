@@ -157,3 +157,45 @@ fn linked_levels_move_both_channels_by_the_same_db() {
     h.run_steps(2);
     assert_eq!(levels(&h, l).value.components(), vec![-6.0, -12.0], "one Undo takes back both channels");
 }
+
+/// Proportional Scrubbing (After Effects 26.2): with three layers selected, a Ctrl+Alt scrub of
+/// Left in the Audio panel (which shows the first selected layer) leaves that layer as it is,
+/// moves the last selected by the whole change and the middle one by half, as in the Timeline.
+#[test]
+fn ctrl_alt_scrub_is_proportional_over_the_selected_layers() {
+    let mut s = Session::default();
+    let first = sound_layer(&mut s, [-20.0, -20.0]);
+    let mut ids = vec![first];
+    for _ in 0..2 {
+        let l = s.execute("layer.addItem", json!({"item": "Sound"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "audio/levels", "value": [-20.0, -20.0]})).unwrap();
+        ids.push(l);
+    }
+    // Selection order: the first created (the one the panel shows), then the second, then the third.
+    let mut h = harness(s, first);
+    for l in &ids[1..] {
+        h.state_mut().session.execute("layer.select", json!({"layers": [l], "add": true})).unwrap();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers.first().map(|l| l.0), Some(first), "the panel shows the first selected layer");
+    let from = center(&h, LEFT);
+    let ctrl_alt = Modifiers { alt: true, ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(ctrl_alt));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: ctrl_alt });
+    h.step();
+    let to = from + vec2(40.0, 0.0);
+    for k in 1..=24 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 24.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: ctrl_alt });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+    let moved: Vec<f64> = ids.iter().map(|l| levels(&h, *l).value.components()[0] + 20.0).collect();
+    assert!(moved[2] > 1.0, "the last selected layer moved: {moved:?}");
+    assert!(moved[0].abs() < 1e-9, "the first selected layer stays: {moved:?}");
+    assert!((moved[1] - moved[2] / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
+}
