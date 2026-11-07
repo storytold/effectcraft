@@ -1457,6 +1457,7 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     })
 }
 
+/// Returns the command specs for the property commands (get, set, keyframes, expressions and the rest).
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         query!("prop.get", "Get Property", "{layer?, path|prop, time? (comp s)}", get),

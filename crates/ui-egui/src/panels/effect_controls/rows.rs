@@ -260,6 +260,7 @@ fn value_mask(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     }
 }
 
+/// Draws an angle property's value cell as revolutions plus degrees and queues a set action when it is edited.
 fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
     let Value::Scalar(v) = value else {
         return;
@@ -275,6 +276,7 @@ fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
     cx.twirl_open(app, ui);
 }
 
+/// Draws a single-number property's value cell with its range, unit suffix and scrub speed, and queues a set action when it is edited.
 fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
     let Value::Scalar(v) = value else {
         return;
@@ -308,6 +310,8 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     }
 }
 
+/// Draws one numeric cell per component of a point or vector property, with the pick crosshair for points.
+/// Returns the cell rectangles.
 fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) -> Vec<Rect> {
     let mut dims = vec![];
     let PropCx { t, uid, cy, vx, layer, prop, .. } = *cx;

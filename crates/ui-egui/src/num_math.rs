@@ -126,6 +126,8 @@ struct Parser<'a> {
 }
 
 impl Parser<'_> {
+    /// Reads a sum or difference of terms, left to right.
+    /// Returns `None` on a syntax error or a non-finite result.
     fn expr(&mut self) -> Option<f64> {
         let mut v = self.term()?;
         while let Some(&op) = self.chars.peek() {
@@ -144,6 +146,8 @@ impl Parser<'_> {
         Some(v)
     }
 
+    /// Reads a product or quotient of factors, left to right.
+    /// Returns `None` on a syntax error, a division by zero or a non-finite result.
     fn term(&mut self) -> Option<f64> {
         let mut v = self.factor()?;
         while let Some(&op) = self.chars.peek() {
@@ -162,6 +166,8 @@ impl Parser<'_> {
         Some(v)
     }
 
+    /// Reads a signed factor, a bracketed expression or a number.
+    /// Nesting deeper than `MAX_DEPTH` gives `None`.
     fn factor(&mut self) -> Option<f64> {
         let c = *self.chars.peek()?;
         match c {
@@ -239,6 +245,7 @@ impl Parser<'_> {
 mod tests {
     use super::calc as eval;
 
+    /// Evaluates `text` with no current value, so a leading operator has nothing to apply to.
     fn abs(text: &str) -> Option<f64> {
         eval(text, None)
     }
