@@ -892,6 +892,30 @@ fn convert_to_bezier_gives_an_explicit_mask_priority() {
     assert_eq!(first_shape(&s, l).1, "rect", "the listed rectangle stays parametric");
 }
 
+/// #3057 review: a selected mask and a selected parametric path both convert, in one undo step;
+/// neither is dropped for the other.
+#[test]
+fn convert_to_bezier_converts_a_selected_mask_and_path_together() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50], [0, 50]], "closed": true})).unwrap();
+    let m = layer(&s, l).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("path.rotoBezier", json!({"layer": l, "mask": m, "value": true})).unwrap();
+    let (rect, _) = first_shape(&s, l);
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(l), m), (LayerId(l), rect)];
+
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["masks"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path", "the rectangle converts");
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: false, .. }), "and so does the mask");
+
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(first_shape(&s, l).1, "rect", "one undo restores the rectangle");
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "and the mask");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {

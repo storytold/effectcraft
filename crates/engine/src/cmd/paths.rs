@@ -227,6 +227,28 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     skipped.dedup();
     skipped.retain(|x| !shapes.contains(x));
     let mut skipped_animated = skipped.len();
+    // Masks the selection targets too (a selected mask or one of its properties, mask vertices)
+    // convert with the shape paths in the same step, as the command acts on every selected path:
+    // selecting a mask and a Rectangle path must not convert only the rectangle.
+    let mut sel_masks: Vec<(LayerId, Uid)> = Vec::new();
+    if !shapes.is_empty() {
+        let masks_of = |l: LayerId| comp.layer(l).filter(|ly| !ly.switches.locked).and_then(|ly| ly.masks());
+        for (l, u) in &s.state.selected_props {
+            let Some(m) = masks_of(*l) else { continue };
+            sel_masks.extend(m.groups().filter(|g| g.uid == *u || g.find(*u).is_some()).map(|g| (*l, g.uid)));
+        }
+        for v in &s.state.selected_vertices {
+            if masks_of(v.layer).is_some_and(|m| m.groups().any(|g| g.uid == v.mask)) {
+                sel_masks.push((v.layer, v.mask));
+            }
+        }
+        if explicit_layers {
+            let (_, layers) = layers_p(s, p)?;
+            sel_masks.retain(|(l, _)| layers.contains(l));
+        }
+        sel_masks.sort();
+        sel_masks.dedup();
+    }
     if shapes.is_empty() {
         let (_, mut masks) = masks_for(s, p)?;
         let mask_of = |l: LayerId, u: Uid| comp.layer(l).and_then(|l| l.masks()).and_then(|m| m.groups().find(|g| g.uid == u));
@@ -326,13 +348,22 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
             made.push((lid, new_uid));
         }
         proj.next_id = next;
-        // The new paths are what is selected, so the vertices can be edited straight away.
+        for (lid, uid) in &sel_masks {
+            let l = layer_mut(proj, cid, *lid)?;
+            if let Some(g) = l.props.sub_mut("masks").and_then(|m| m.find_group_mut(*uid))
+                && let GroupKind::Mask { roto_bezier, .. } = &mut g.kind
+            {
+                *roto_bezier = false;
+            }
+        }
+        // The new paths are what is selected, so the vertices can be edited straight away; the
+        // converted masks stay selected with them.
         if !made.is_empty() {
-            st.selected_props = made.clone();
+            st.selected_props = made.iter().chain(&sel_masks).copied().collect();
         }
         Ok(made)
     })?;
-    Ok(json!({"paths": made.len(), "of": n, "skippedAnimated": skipped_animated}))
+    Ok(json!({"paths": made.len(), "of": n, "masks": sel_masks.len(), "skippedAnimated": skipped_animated}))
 }
 
 // ---------------------------------------------------------------- mask options
