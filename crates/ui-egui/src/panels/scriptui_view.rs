@@ -525,6 +525,102 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
     }
 }
 
+/// The command that answers a script's file dialog.
+pub(crate) const FILE_DIALOG_COMMAND: &str = "scriptui.fileDialog";
+
+/// The answer to a script's file dialog shown without blocking. Dropped unanswered (a dialog that
+/// ended without its completion handler, a dialog thread that didn't start) it answers
+/// "cancelled", so the script never waits for an answer that can't come.
+struct PendingAnswer {
+    tx: std::sync::mpsc::Sender<crate::DialogAnswer>,
+    answer: Option<crate::DialogAnswer>,
+}
+
+impl PendingAnswer {
+    fn send(mut self, paths: Vec<String>) {
+        if let Some(a) = self.answer.take() {
+            let _ = self.tx.send(crate::DialogAnswer { paths, ..a });
+        }
+    }
+}
+
+impl Drop for PendingAnswer {
+    fn drop(&mut self) {
+        if let Some(a) = self.answer.take() {
+            let _ = self.tx.send(a);
+        }
+    }
+}
+
+/// Show the file dialog a script waits on (`File.openDialog`, `File.saveDialog`,
+/// `Folder.selectDialog`… from a ScriptUI Browse… button, #2778) and hand the answer back
+/// through `scriptui.fileDialog`. Where blocking the frame is unsafe the dialog shows without
+/// blocking ([`crate::Hooks::file_dialog_async`]), one at a time, and answers when it closes; a
+/// host without a dialog answers "cancelled" at once, so the script never waits for nothing.
+pub fn serve_file_dialogs(app: &mut EffectcraftApp) {
+    use effectcraft_engine::scriptui::FileDialogKind;
+    let spawn = app.hooks.file_dialog_async.is_some();
+    // A non-blocking dialog already up: the next one shows after it.
+    if spawn && app.file_dialogs.any() {
+        return;
+    }
+    let Some(asked) = app.session.script_ui.file_dialogs.iter_mut().find(|d| !d.shown) else { return };
+    asked.shown = true;
+    let asked = asked.clone();
+    let params = json!({"id": asked.id});
+    // The save dialog's default: the script's file, else a name with the filter's extension.
+    let default = match (asked.start.is_empty(), asked.exts.first()) {
+        (false, _) => asked.start.clone(),
+        (true, Some(ext)) => format!("Untitled.{ext}"),
+        (true, None) => "Untitled".to_string(),
+    };
+    let request = match asked.kind {
+        FileDialogKind::Open => crate::FileDialog::Script { label: asked.label.clone(), exts: asked.exts.clone(), any: asked.any, many: asked.many },
+        FileDialogKind::Save => crate::FileDialog::save(&default),
+        FileDialogKind::Folder => crate::FileDialog::Folder,
+    };
+    if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
+        let answer = crate::DialogAnswer { command: FILE_DIALOG_COMMAND.to_string(), key: "paths", params, paths: Vec::new() };
+        let pending = PendingAnswer { tx: app.dialog_answers.0.clone(), answer: Some(answer) };
+        app.file_dialogs.opened();
+        spawn(request, Box::new(move |paths| pending.send(paths)));
+        return;
+    }
+    let paths: Vec<String> = match (&app.hooks.pick_file_dialog, asked.kind) {
+        (Some(pick), FileDialogKind::Open | FileDialogKind::Folder) => pick(request),
+        (_, FileDialogKind::Open) => {
+            let exts: Vec<&str> = asked.exts.iter().map(String::as_str).collect();
+            app.hooks.pick_files.as_ref().map(|pick| pick(&exts)).unwrap_or_default()
+        }
+        (_, FileDialogKind::Save) => app.hooks.save_dialog(&default).flatten().into_iter().collect(),
+        (_, FileDialogKind::Folder) => app.hooks.pick_folder.as_ref().and_then(|pick| pick()).into_iter().collect(),
+    };
+    let paths = if asked.many { paths } else { paths.into_iter().take(1).collect() };
+    answer_file_dialog(app, &params, paths);
+}
+
+/// Answer a script's file dialog (`params`: `{id}`) with the picked `paths` (empty: cancelled);
+/// what the script then reports shows as [`perform`] shows a handler's. An answer that comes
+/// after the dialog was dropped (its script window closed meanwhile) is let go.
+pub(crate) fn answer_file_dialog(app: &mut EffectcraftApp, params: &Value, paths: Vec<String>) {
+    let id = params.get("id").and_then(Value::as_u64);
+    if !app.session.script_ui.file_dialogs.iter().any(|d| Some(u64::from(d.id)) == id) {
+        return;
+    }
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    match app.session.execute(FILE_DIALOG_COMMAND, json!({"id": id, "paths": paths})) {
+        Ok(r) => {
+            if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
+                let msg = e["message"].as_str().unwrap_or("script error").to_string();
+                app.toast = Some((msg, app.now()));
+            } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
+                app.ui.status = o.lines().last().unwrap_or_default().to_string();
+            }
+        }
+        Err(e) => app.ui.status = e.to_string(),
+    }
+}
+
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();

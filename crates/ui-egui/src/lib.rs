@@ -441,6 +441,11 @@ impl FileDialogsUp {
         self.count = self.count.saturating_add(1);
     }
 
+    /// Whether one is up.
+    pub(crate) fn any(&self) -> bool {
+        self.count > 0
+    }
+
     pub(crate) fn answered(&mut self) {
         self.count = self.count.saturating_sub(1);
     }

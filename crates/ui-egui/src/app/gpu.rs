@@ -141,6 +141,11 @@ impl EffectcraftApp {
     pub(crate) fn run_dialog_answers(&mut self) {
         while let Ok(answer) = self.dialog_answers.1.try_recv() {
             self.file_dialogs.answered();
+            // A script's file dialog: answered even when cancelled (the script waits on it).
+            if answer.command == panels::scriptui_view::FILE_DIALOG_COMMAND {
+                panels::scriptui_view::answer_file_dialog(self, &answer.params, answer.paths);
+                continue;
+            }
             menus::dialog_answered(self, answer);
         }
     }

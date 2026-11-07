@@ -379,6 +379,50 @@ pub struct ScriptUiEvent {
 /// The ScriptUI mouse events scripts can listen for (`addEventListener`).
 pub const MOUSE_EVENTS: [&str; 6] = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
 
+/// The [`ScriptUiEvent::kind`] that answers a script's file dialog ([`ScriptFileDialog`]); its
+/// value is `{host, paths: [path…] | null}` and it goes to the script context `host`, not to a
+/// window.
+pub const FILE_DIALOG_EVENT: &str = "fileDialog";
+
+/// What a script's file dialog picks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileDialogKind {
+    /// A file (or several) to open: `File.openDialog`, `file.openDlg`.
+    #[default]
+    Open,
+    /// Where to save: `File.saveDialog`, `file.saveDlg`.
+    Save,
+    /// A folder: `Folder.selectDialog`, `folder.selectDlg`.
+    Folder,
+}
+
+/// A file dialog a script asked for and waits on (#2778). The frontend shows it and answers with
+/// `scriptui.fileDialog`; agents can answer it the same way.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScriptFileDialog {
+    /// Unique in the process: an answer goes to this dialog only.
+    pub id: u32,
+    /// The script context waiting for the answer.
+    pub host: u32,
+    pub kind: FileDialogKind,
+    /// The script's prompt.
+    pub prompt: String,
+    /// The extensions the script's filter names, lower case (empty: any file).
+    pub exts: Vec<String>,
+    /// The filter's name (`"Audio"` in `"Audio:*.mp3;*.wav"`; empty: none given).
+    pub label: String,
+    /// The filter also offers every file (`*.*`).
+    pub any: bool,
+    /// `multiSelect`: several files may be picked.
+    pub many: bool,
+    /// The file or folder the dialog starts from (`file.saveDlg`: the default name).
+    pub start: String,
+    /// A frontend has shown it (it is not shown again).
+    pub shown: bool,
+}
+
 /// Hands an event to the script that owns the window; returns what the handler reported
 /// (`{ok, output, error}`) and updates [`Session::script_ui`].
 pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Result<Value, String>;
@@ -412,6 +456,13 @@ pub struct ScriptUi {
     /// replaced, until EffectCraft quits.
     #[serde(skip)]
     pub startup_hosts: Vec<u32>,
+    /// The file dialogs scripts wait on, until `scriptui.fileDialog` answers them.
+    pub file_dialogs: Vec<ScriptFileDialog>,
+    /// A frontend shows the scripts' file dialogs (the egui UI sets it). Without one, as in
+    /// headless runs, `File.openDialog` and the like return `null` at once, so a script never
+    /// waits on a dialog nobody shows.
+    #[serde(skip)]
+    pub answers_file_dialogs: bool,
 }
 
 impl ScriptUi {
@@ -780,10 +831,63 @@ pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
     dispatch(s, ScriptUiEvent { window, widget: 0, kind: "resize".into(), value: json!([w, h]) })
 }
 
+/// `scriptui.fileDialogs`: the file dialogs scripts wait on.
+pub(crate) fn file_dialogs(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(serde_json::to_value(&s.script_ui.file_dialogs).unwrap_or(Value::Null))
+}
+
+/// `scriptui.fileDialog`: answer a script's file dialog with the picked `paths` (`null` or
+/// empty: cancelled); the script goes on with them. The dialog stays pending until its script
+/// has the answer, so a refused answer leaves it to be answered again.
+pub(crate) fn file_dialog(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.fileDialog";
+    // A script answering a dialog (its own or another script's) would only be refused when the
+    // answer is handed over: scripts can't drive script windows.
+    if s.running_for_script() {
+        return Err(crate::commands::bad(c, "scripts can't answer file dialogs"));
+    }
+    let num = |k: &str| p.get(k).map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()));
+    let pending = &s.script_ui.file_dialogs;
+    let asked = match (num("id"), num("host")) {
+        (Some(id), _) => id.and_then(|id| pending.iter().find(|d| d.id == id)),
+        (None, Some(host)) => host.and_then(|h| pending.iter().find(|d| d.host == h)),
+        (None, None) if pending.len() == 1 => pending.first(),
+        (None, None) => None,
+    };
+    let asked = asked.cloned().ok_or_else(|| crate::commands::bad(c, "no such file dialog (give `id` from scriptui.fileDialogs)"))?;
+    let mut paths: Vec<String> = match p.get("paths").or_else(|| p.get("path")) {
+        None | Some(Value::Null) => vec![],
+        Some(Value::String(one)) => vec![one.clone()],
+        Some(Value::Array(a)) => {
+            a.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(|| crate::commands::bad(c, "`paths` must be strings"))?
+        }
+        Some(other) => return Err(crate::commands::bad(c, format!("`paths` must be a list of paths or null, not {other}"))),
+    };
+    paths.retain(|p| !p.is_empty());
+    if !asked.many {
+        paths.truncate(1);
+    }
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    // The scripting engine takes the dialog off the list when its script has the answer.
+    let value = json!({"id": asked.id, "host": asked.host, "paths": paths});
+    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value })
+}
+
 /// `scriptui.close`: close a window (a dialog's `show()` returns `result`, default 2 = Cancel).
 pub(crate) fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let window = window_p(s, p, "scriptui.close")?;
     let result = p.get("result").cloned().unwrap_or(json!(2));
+    // A script waiting on its file dialog (one whose answer never came) can still be closed:
+    // the file dialog counts as cancelled first. If that is refused, the close is tried all the
+    // same (and refused with its own reason).
+    let host = s.script_ui.window(window).map(|w| w.host);
+    let asked = host.and_then(|h| s.script_ui.file_dialogs.iter().find(|d| d.host == h)).map(|d| d.id);
+    if let Some(id) = asked
+        && let Ok(cancelled) = file_dialog(s, &json!({"id": id, "paths": null}))
+        && s.script_ui.window(window).is_none()
+    {
+        return Ok(cancelled);
+    }
     dispatch(s, ScriptUiEvent { window, widget: 0, kind: "close".into(), value: result })
 }
 

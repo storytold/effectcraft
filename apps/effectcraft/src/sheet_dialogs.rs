@@ -59,11 +59,73 @@ fn path(file: Option<FileHandle>) -> Vec<String> {
     paths(file.map(|f| vec![f]))
 }
 
+/// The filters of a script's file dialog (#2778): its own, under the script's name for it (else
+/// "Files"), then "All Files" when the script's filter offers every file. Without extensions, no
+/// filter: every file. macOS takes all the filters' extensions together as the allowed types, so a
+/// dialog that also offers every file gets no filter there.
+macro_rules! script_filters {
+    ($dialog:expr, $label:expr, $exts:expr, $any:expr) => {{
+        let (d, label, exts, any): (_, &str, &[String], bool) = ($dialog, $label, $exts, $any);
+        if exts.is_empty() || (any && cfg!(target_os = "macos")) {
+            d
+        } else {
+            let d = d.add_filter(if label.is_empty() { "Files" } else { label }, exts);
+            if any { d.add_filter("All Files", &["*"]) } else { d }
+        }
+    }};
+}
+
+/// A script's file dialog, blocking until it closes (`Hooks::pick_file_dialog`, Windows): its
+/// paths, empty when cancelled. Other dialogs have their own blocking hooks in `main.rs`.
+pub fn pick_blocking(dialog: FileDialog) -> Vec<String> {
+    let all =
+        |files: Option<Vec<std::path::PathBuf>>| -> Vec<String> { files.unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect() };
+    let one = |file: Option<std::path::PathBuf>| all(file.map(|f| vec![f]));
+    match dialog {
+        FileDialog::Script { label, exts, any, many } => {
+            let d = script_filters!(rfd::FileDialog::new(), &label, &exts, any);
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::Open { exts, many } => {
+            let d = if exts.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter("Media", &exts) };
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::OpenProject => one(rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file()),
+        FileDialog::Folder => one(rfd::FileDialog::new().pick_folder()),
+        FileDialog::Save { default, ext, project } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = if project {
+                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj"])
+            } else if ext.is_empty() {
+                rfd::FileDialog::new()
+            } else {
+                rfd::FileDialog::new().add_filter(&ext, &[ext.as_str()])
+            };
+            if let Some(dir) = at.parent().filter(|d| d.is_dir()) {
+                d = d.set_directory(dir);
+            }
+            one(d.set_file_name(name).save_file())
+        }
+    }
+}
+
 /// The dialog, as the blocking hooks in `main.rs` show it.
 fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
     match dialog {
         FileDialog::Open { exts, many } => {
-            let d = parented(frame).add_filter("Media", &exts);
+            // No extensions (a script's File.openDialog without a filter): every file.
+            let d = if exts.is_empty() { parented(frame) } else { parented(frame).add_filter("Media", &exts) };
+            if many {
+                let f = d.pick_files();
+                Box::pin(async move { paths(f.await) })
+            } else {
+                let f = d.pick_file();
+                Box::pin(async move { path(f.await) })
+            }
+        }
+        FileDialog::Script { label, exts, any, many } => {
+            let d = script_filters!(parented(frame), &label, &exts, any);
             if many {
                 let f = d.pick_files();
                 Box::pin(async move { paths(f.await) })
