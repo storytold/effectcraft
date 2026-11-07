@@ -16,6 +16,12 @@
 //! `--gpu` (composite on a GPU of its own, as the desktop app does with Mercury GPU Acceleration:
 //! the GPU or the CPU, whichever Auto measures faster per comp, read back to the CPU; the viewer's
 //! backend), `--backend cpu|gpu|auto` (with `--gpu`: force one compositor, default `auto`).
+//!
+//! `--play SECS` instead plays the comp in the app (headless, a viewer at 100 %, Resolution
+//! Auto, nothing cached, Cache Frames When Idle off) for SECS seconds of wall time, as a first
+//! playback, and prints the frames shown per second, the time stalled and the scale it played at.
+//! With `--gpu` the app composites on the GPU (Mercury Auto), otherwise on the CPU; `--res N`
+//! sets the comp's Resolution to every N-th pixel instead of Auto.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -115,6 +121,10 @@ fn main() {
             cid
         }
     };
+    if let Some(secs) = arg("--play").and_then(|v| v.parse().ok()) {
+        play(s, cid, secs, std::env::args().any(|a| a == "--gpu"));
+        return;
+    }
     let comp = s.project.comp(cid).expect("comp").clone();
     let total = comp.frame_rate.frame_at(comp.duration);
     let n = arg("--frames").and_then(|v| v.parse().ok()).unwrap_or(total).min(total);
@@ -203,4 +213,60 @@ fn main() {
         let d = dc.stats();
         println!("disk cache        {} written, {} dropped, {} entries ({} MB), flushed in {flushed:.2} s", d.writes, d.dropped, d.entries, d.bytes >> 20);
     }
+}
+
+/// `--play`: a first playback of `cid` in the app, as someone pressing play in it would see.
+fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool) {
+    use effectcraft_ui_egui::{ControlRequest, EffectcraftApp};
+    let (tx, rx) = std::sync::mpsc::channel::<ControlRequest>();
+    let builder = egui_kittest::Harness::builder().with_size(egui::vec2(1920.0, 1200.0)).with_pixels_per_point(1.0);
+    let builder = if gpu { builder.wgpu() } else { builder };
+    let mut h = builder.build_eframe(move |_| EffectcraftApp::new(session).with_control(rx));
+    {
+        let app = h.state_mut();
+        let _ = app.session.execute("comp.open", json!({"comp": cid.0}));
+        app.ui.viewer.zoom = Some(1.0);
+        app.ui.cache_when_idle = false;
+        if let (Some(n), Some(c)) = (arg("--res").and_then(|v| v.parse().ok()), Arc::make_mut(&mut app.session.project).comp_mut(cid)) {
+            c.resolution = effectcraft_engine::project::Resolution::from_factor(n);
+        }
+    }
+    // Let the UI settle (fonts, the GPU compositor's pipelines) before the clock starts.
+    let ready = Instant::now() + Duration::from_secs(if gpu { 8 } else { 2 });
+    while Instant::now() < ready {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.state().frames.clear();
+    let (reply, _r) = std::sync::mpsc::channel();
+    let _ = tx.send(ControlRequest { method: "ui.playback".into(), params: json!({"action": "play"}), reply });
+    let t0 = Instant::now();
+    let (mut started, mut stalled, mut last, mut scales) = (None, 0.0, t0, std::collections::BTreeMap::<u32, u64>::new());
+    while t0.elapsed().as_secs_f64() < secs {
+        h.step();
+        let now = Instant::now();
+        let app = h.state();
+        if app.playback.playing {
+            let t = *started.get_or_insert(now);
+            if app.playback.waiting && now > t {
+                stalled += (now - last).as_secs_f64();
+            }
+        }
+        *scales.entry(app.shown_series(cid).scale).or_default() += 1;
+        last = now;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let app = h.state();
+    let played = started.map_or(0.0, |t| t.elapsed().as_secs_f64());
+    let shown = app.playback.shown;
+    let fr = app.session.project.comp(cid).map(|c| c.frame_rate);
+    let frame = fr.map_or(0, |fr| fr.frame_at(app.session.time()));
+    println!(
+        "played            {shown} frames shown in {played:.2} s: {:.1} frames/s, stalled {stalled:.2} s, reached frame {frame}{}",
+        shown as f64 / played.max(1e-9),
+        if gpu { " (GPU)" } else { "" }
+    );
+    let passes: u64 = scales.values().sum();
+    let s: Vec<String> = scales.iter().map(|(k, v)| format!("{:.3}: {:.0} %", *k as f64 / 1000.0, 100.0 * *v as f64 / passes.max(1) as f64)).collect();
+    println!("viewer scale      {}", s.join(", "));
 }
