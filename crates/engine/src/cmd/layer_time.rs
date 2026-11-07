@@ -89,24 +89,21 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// The last EffectCraft version whose Time-Reverse Layer put a reversed layer one comp frame
-/// early (its In point at layer time D - 1 frame instead of D, #3245). Projects saved by it or an
-/// earlier version, or saying no version, are checked when they open
-/// ([`repair_old_time_reverse`]).
-pub(crate) const OLD_TIME_REVERSE_UNTIL: &str = "0.21.0";
-
-/// Reversed layers a project file saved before #3245 has in the old Time-Reverse Layer layout,
-/// moved to After Effects' layout: the layers with the unambiguous signature (reversed, no Time
-/// Remap, footage or a precomp, the Out point exactly one comp frame below layer time 0, which is
-/// what the old command made of a layer starting at its source's start) start one comp frame
-/// later. Returns (the layers moved, the other reversed layers left as they are because they may
-/// be either layout), each as "Comp ▸ Layer". Files from a version after
-/// [`OLD_TIME_REVERSE_UNTIL`] are left alone.
-pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project, saved_by: Option<&str>) -> (Vec<String>, Vec<String>) {
+/// Reversed layers a project file from before #3245 has in the old Time-Reverse Layer layout,
+/// moved to After Effects' layout. A file written since carries
+/// [`effectcraft_project::REVERSE_LAYOUT_AE`] in its settings (`reverse_layout`) and is left
+/// alone; in an older one (no marker), the layers with the unambiguous signature (reversed, no
+/// Time Remap, footage or a precomp, the Out point exactly one comp frame below layer time 0,
+/// which is what the old command made of a layer starting at its source's start) start one comp
+/// frame later. Returns (the layers moved, the other reversed layers left as they are because
+/// they may be either layout), each as "Comp ▸ Layer". The project is marked as checked either
+/// way, so saving it writes the marker and it is not checked again.
+pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project) -> (Vec<String>, Vec<String>) {
     let (mut moved, mut unsure) = (vec![], vec![]);
-    if saved_by.is_some_and(|v| effectcraft_project::is_newer_version(v, OLD_TIME_REVERSE_UNTIL)) {
+    if project.settings.reverse_layout >= effectcraft_project::REVERSE_LAYOUT_AE {
         return (moved, unsure);
     }
+    project.settings.reverse_layout = effectcraft_project::REVERSE_LAYOUT_AE;
     let reversed = |l: &Layer| l.stretch < 0.0 && l.stretch.is_finite() && l.props.get("timeRemap").is_none() && remappable(l);
     let cids: Vec<(effectcraft_project::ItemId, String)> = project
         .comps()

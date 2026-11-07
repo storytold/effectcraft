@@ -253,25 +253,58 @@ fn projects_saved_with_the_old_time_reverse_layout_open_in_after_effects_layout(
         let ly = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(id)).unwrap();
         ly.start_time -= fd;
     }
-    let dir = std::env::temp_dir().join(format!("ec-time-reverse-{}", std::process::id()));
+    // A file from before #3245 has no layout marker (it reads 0).
+    Arc::make_mut(&mut s.project).settings.reverse_layout = 0;
+    let dir = std::env::temp_dir().join(format!("ec-time-reverse-old-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("old.ecproj").to_string_lossy().to_string();
     s.execute("file.saveAs", json!({"path": path})).unwrap();
-    // As the last version with the old command (0.21.0) saved it.
-    let saved = std::fs::read_to_string(&path).unwrap().replacen(effectcraft_project::APP_VERSION, "0.21.0", 1);
-    std::fs::write(&path, &saved).unwrap();
     let r = s.execute("file.open", json!({"path": path})).unwrap();
     let cid = s.state.active_comp.unwrap_or(cid);
     assert_eq!(layer(&s, cid, l).start_time, new.start_time, "the untrimmed layer is moved to the new layout");
     assert_eq!(layer(&s, cid, t).start_time, trimmed.start_time - fd, "the trimmed one is left as it is");
     assert_eq!(r["reversedLayers"]["moved"].as_array().unwrap().len(), 1, "{r}");
     assert_eq!(r["reversedLayers"]["unchanged"].as_array().unwrap().len(), 1, "{r}");
-    // Saved by a version with the fix: nothing is touched.
-    let newer = dir.join("newer.ecproj").to_string_lossy().to_string();
-    std::fs::write(&newer, saved.replacen("0.21.0", "999.0.0", 1)).unwrap();
-    let r = s.execute("file.open", json!({"path": newer})).unwrap();
+    // Checked once: saved again, it carries the marker and opens untouched.
+    assert_eq!(s.project.settings.reverse_layout, effectcraft_project::REVERSE_LAYOUT_AE);
+    s.execute("file.save", json!({})).unwrap();
+    let r = s.execute("file.open", json!({"path": path})).unwrap();
     let cid = s.state.active_comp.unwrap_or(cid);
-    assert_eq!(layer(&s, cid, l).start_time, new.start_time - fd);
-    assert_eq!(r["reversedLayers"]["moved"], json!([]));
+    assert_eq!(layer(&s, cid, l).start_time, new.start_time);
+    assert_eq!(r["reversedLayers"], json!({"moved": [], "unchanged": []}));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_project_saved_since_the_fix_reopens_with_its_reversed_layers_untouched() {
+    // Two reversed layers in After Effects' layout that look like the old one: an untrimmed layer
+    // whose Out point is one frame past its source (layer time -1 frame there), and a trimmed one.
+    // The file carries the layout marker, so neither moves nor is reported (they used to be: the
+    // check went by the saving version, which is still 0.21.0 with the fix).
+    let (mut s, cid, l) = scene(10);
+    let fd = FrameRate::new(10, 1).frame_duration();
+    let t = s.execute("layer.addItem", json!({"item": layer(&s, cid, l).source.item().unwrap().0})).unwrap()["layer"].as_u64().unwrap();
+    Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(t)).unwrap().in_point = FrameRate::new(10, 1).tick_of(2);
+    s.execute("layer.timeReverse", json!({"layers": [l, t]})).unwrap();
+    Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().out_point += fd;
+    let before = [layer(&s, cid, l), layer(&s, cid, t)];
+    assert_eq!(before[0].layer_time(before[0].out_point), Tick::ZERO - fd, "the old layout's signature");
+    let dir = std::env::temp_dir().join(format!("ec-time-reverse-new-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("new.ecproj").to_string_lossy().to_string();
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    let r = s.execute("file.open", json!({"path": path})).unwrap();
+    let cid = s.state.active_comp.unwrap_or(cid);
+    assert_eq!([layer(&s, cid, l), layer(&s, cid, t)], before);
+    assert_eq!(r["reversedLayers"], json!({"moved": [], "unchanged": []}));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn project_settings_without_the_layout_marker_read_as_the_old_layout() {
+    let mut v = serde_json::to_value(effectcraft_project::ProjectSettings::default()).unwrap();
+    assert_eq!(v["reverse_layout"], json!(effectcraft_project::REVERSE_LAYOUT_AE), "a new project has the current layout");
+    v.as_object_mut().unwrap().remove("reverse_layout");
+    let old: effectcraft_project::ProjectSettings = serde_json::from_value(v).unwrap();
+    assert_eq!(old.reverse_layout, 0);
 }

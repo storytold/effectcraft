@@ -53,8 +53,8 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
     // Layers reversed by Time-Reverse Layer before #3245 were one comp frame early.
+    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut proj);
     let saved_by = effectcraft_project::saved_by(&text);
-    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut proj, saved_by.as_deref());
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));

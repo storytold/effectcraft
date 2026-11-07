@@ -148,7 +148,7 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         }
     }
     if resp.clicked() {
-        ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
+        ui.data_mut(|d| d.insert_temp(editing_id, fixed(value, decimals)));
     }
     (rect, out, resp.drag_stopped())
 }
@@ -1127,6 +1127,27 @@ mod tests {
         assert_eq!(fixed(-0.05, 1), "-0.1");
         assert_eq!(fixed(-2.6, 0), "-3");
         assert_eq!(fixed(1.25, 2), "1.25");
+    }
+
+    #[test]
+    fn a_clicked_hot_number_edits_the_value_it_shows() {
+        // Shown as 0.0, a value a tick below zero opens its editor with 0.0 too, not -0.0.
+        let ctx = egui::Context::default();
+        let t = Tokens::for_kind(Default::default());
+        let id = egui::Id::unique("hot");
+        let pos = pos2(24.0, 26.0);
+        let spec = HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: "" };
+        let frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                hot_number_at(ui, pos2(20.0, 20.0), id, -1.0 / 254_016_000_000.0, &spec, &t);
+            });
+            output.textures_delta.clear();
+        };
+        let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(vec![]);
+        frame(vec![egui::Event::PointerMoved(pos), press(true)]);
+        frame(vec![press(false)]);
+        assert_eq!(ctx.data(|d| d.get_temp::<String>(id.with("editing"))).as_deref(), Some("0.0"));
     }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.

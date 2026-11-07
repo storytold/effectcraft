@@ -63,7 +63,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let (mut sub, saved_by) = read_project(s, &path)?;
     crate::upgrade_effects(&mut sub);
     // Layers reversed by Time-Reverse Layer before #3245 were one comp frame early.
-    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut sub, saved_by.as_deref());
+    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut sub);
     let file = std::path::Path::new(&path);
     let missing = resolve_footage(s, &mut sub, &path);
     s.stored_paths.add(&sub, Some(&path));

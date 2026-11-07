@@ -241,7 +241,17 @@ pub struct ProjectSettings {
     /// working space (as in After Effects).
     #[serde(default = "gamma_22")]
     pub working_gamma: f64,
+    /// How time-reversed layers are laid out: [`REVERSE_LAYOUT_AE`] (After Effects' layout,
+    /// written by every version since #3245) or 0, a file from before it, whose layers reversed
+    /// by Time-Reverse Layer may sit one comp frame early (checked when it opens). Missing in
+    /// older files, so it reads 0 there; a new project has the current layout.
+    #[serde(default)]
+    pub reverse_layout: u32,
 }
+
+/// [`ProjectSettings::reverse_layout`] of projects whose reversed layers are laid out as After
+/// Effects does: the start at the later end, layer time D at the In point (#3245).
+pub const REVERSE_LAYOUT_AE: u32 = 1;
 
 fn gamma_22() -> f64 {
     2.2
@@ -270,6 +280,7 @@ impl Default for ProjectSettings {
             hdr: HdrMode::Clip,
             output_space: None,
             working_gamma: 2.2,
+            reverse_layout: REVERSE_LAYOUT_AE,
         }
     }
 }
