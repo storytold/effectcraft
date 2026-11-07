@@ -30,6 +30,7 @@ mod effects;
 mod markers;
 mod masks;
 mod props;
+mod puppet;
 mod report;
 mod settings;
 mod shapes;

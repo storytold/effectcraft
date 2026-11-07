@@ -19,6 +19,7 @@ mod fx_inject;
 mod markers;
 mod masks;
 mod mattes;
+mod puppet;
 mod resaved_defaults;
 mod robustness;
 mod shapes;

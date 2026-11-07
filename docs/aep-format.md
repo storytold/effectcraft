@@ -1,6 +1,6 @@
 # After Effects project format (`.aep`)
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-07 · **Change:** Puppet (`ADBE FreePin3`, 3.7): the property tree from an external scripting listing, **?** until a byte sample exists (#3093); before that: versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
 
 What `crates/aep` ([`effectcraft-aep`](../crates/aep/README.md)) reads and writes, and the evidence
 for each statement. Everything here was observed on project files we generated ourselves; no
@@ -610,6 +610,52 @@ presets, and After Effects draws exactly the picked objects as selected (`crypto
 `crypto-07`: box and disc, the two objects of `mat_paint`). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
 a non-zero byte at 112).
 
+**Puppet (`ADBE FreePin3`; ?: external listing, not the corpus, #3093).** No file of the
+corpus, the committed fixtures or the samples holds a Puppet. The tree below comes from outside
+the corpus: a public scripting listing of the effect's properties (a forum post, an After Effects
+release from before the Advanced and Bend pins and Density). It is not bytes we have seen; that
+After Effects writes it by the general rule (a `tdmn` and the `LIST tdgp` or `tdbs` it names,
+nested in the instance's value group `sspc/tdgp`, as masks, shapes and layer styles are) is
+**H**:
+
+```text
+Puppet                ADBE FreePin3
+  On Transparent      ADBE FreePin3 On Transparent
+  arap                ADBE FreePin3 ARAP Group            (hidden)
+    Auto-traced Shapes  ADBE FreePin3 Outlines
+    Mesh              ADBE FreePin3 Mesh Group            (hidden)
+      Mesh 1          ADBE FreePin3 Mesh Atom
+        Mesh          ADBE FreePin3 Mesh                  (hidden: the triangulation)
+        Triangles     ADBE FreePin3 Mesh Tri Count
+        Expansion     ADBE FreePin3 Mesh Expansion
+        Deform        ADBE FreePin3 PosPins
+          Puppet Pin 1  ADBE FreePin3 PosPin Atom
+            Vertex Offset ADBE FreePin3 PosPin Vtx Offset  (hidden, 2 values)
+            Vertex Index  ADBE FreePin3 PosPin Vtx Index   (hidden; 4294967295 = none)
+            Position      ADBE FreePin3 PosPin Position
+        Overlap       ADBE FreePin3 HghtPins              (hidden while empty)
+        Stiffness     ADBE FreePin3 StarchPins            (hidden while empty)
+```
+
+A pin's rest place is not a property: it is a vertex of the hidden mesh (Vertex Index) plus an
+offset, so it cannot be read without decoding the mesh data. The unit of Position (layer pixels,
+or a fraction of the layer as effect points are) is **?**. The match names of the Overlap and
+Starch pin atoms and their properties, of the Advanced and Bend pins (Scale, Rotation) and of
+Density, Mesh Rotation Refinement and the Puppet Engine are **?**, and so is which of them are
+`parT` parameters; whether After Effects stores some `parT` parameters of a fresh Puppet even at
+their defaults (the importer would then report them every time) is **?**; whether a Puppet
+without pins has an (empty) Mesh Group, or no ARAP group at all, is **?**. The importer
+(`import/puppet.rs`) therefore brings the effect in as EffectCraft's Puppet without meshes or
+pins and reports, per mesh, Triangles, Expansion and per pin group the pins, how many are keyed
+or carry an expression, and their atom match names; every entry outside this tree is named in the
+report. The sample that settles it: a fresh Puppet with no pins in one composition and, in
+another, a 400 x 800 solid in a larger composition (pixels against fractions) with a Puppet of
+three Position pins (one keyed, one moved off its rest place without
+keys), one Advanced, one Bend, one Starch and one Overlap pin, Triangles, Expansion and Density
+off their defaults, a second mesh, and a scripting read-back of every property's match name and
+value, the hidden ones included. Pins added by script are reported to come out disabled, so the
+pins are placed by hand or by a preset.
+
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
 | Field | Chunk path | Offset | Type | Meaning | Evidence | Conf. |
@@ -894,6 +940,7 @@ another value).
 **Effects**
 
 - `pard` byte 48 (flags: **?**), 68 / 72 (the point default as a percent pair: **V** in the corpus for 074 and 368, not exposed), 120 (the float slider default again as f32: **V**, not exposed), 124 (display decimals: **H**), 132..147 (fixed slider slider-max, default copy and flags; the low bit of @144 is set on the two percent-displayed sliders and clear on Scatter: **H** "display as percent"), the colour default copy at @60, and the stale memory after the parameter name. The fixed slider valid minimum is not decoded (the float slider one is, 389).
+- Puppet (`ADBE FreePin3`, 3.7): the hidden mesh data, a pin's Vertex Index and Vertex Offset (its rest place), the unit of a pin's Position, the Overlap, Starch, Advanced and Bend pins, Density, Mesh Rotation Refinement and the Puppet Engine: no sample (**?**).
 - Effects renamed, or stacked twice on ONE layer (`Gradient Ramp 2`: does the second keep an empty `parT`?); which instance keeps the full `parT` when a second instance is created on a layer below the first; expressions on effect parameters; keyed per-channel Exposure values and a keyed checkbox; Curves / Levels (arrays), Fractal Noise, and whether the `tdpi` of a Layer Control holds an id or an index after the referenced layer is reordered or deleted.
 
 **Masks, shapes**
