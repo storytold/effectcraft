@@ -195,11 +195,26 @@ pub enum GroupKind {
     Tracker { settings: Box<crate::tracking::TrackerSettings> },
     /// The Essential Properties of a precomp layer (master properties): one child per control
     /// of the nested comp's Essential Graphics; `overridden` lists the children (uids) whose
-    /// values this instance overrides.
+    /// values this instance overrides. `bases`: for overridden Source Text children, the master
+    /// document they are merged with (see [`crate::essential`]).
     Essential {
         #[serde(default)]
         overridden: Vec<Uid>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bases: Vec<EssentialBase>,
     },
+}
+
+/// The master document an overridden Source Text of an Essential Properties group is merged
+/// with: the master as it was when the instance overrode it, with every attribute the instance
+/// has not changed since brought up to date ([`effectcraft_keyframe::TextDoc::merge_master`]).
+/// Projects saved before bases existed have none; the instance's value then counts as its own
+/// only where it differs from the master when the project is opened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EssentialBase {
+    /// The instance property (uid of the Essential Properties child).
+    pub prop: Uid,
+    pub doc: Box<effectcraft_keyframe::TextDoc>,
 }
 
 /// Mask motion blur (sub-frame samples of an animated mask path).

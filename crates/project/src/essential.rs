@@ -11,10 +11,24 @@
 //!   match id `eg<control id>`. Changing a child marks it *overridden* for that instance only;
 //!   [`sync_project`] keeps the groups in step with the controls (and refreshes the values of
 //!   controls that are not overridden), [`with_overrides`] builds the project an instance renders.
+//! - An overridden Source Text is not frozen (#3186): the group keeps, per override, the master
+//!   document it is merged with (its base, [`EssentialBase`]), and every sync merges the master
+//!   into the instance's value ([`TextDoc::merge_master`]). The instance keeps its characters and
+//!   the attributes it changed itself; the others follow the master's restyles. A Set of an
+//!   overridden Source Text rebases what it changed ([`TextDoc::rebase`]), so the value set
+//!   stays the instance's own. Limits: only the master's Source Text at time 0 is compared (a
+//!   style that changes at a later master keyframe does not reach instances); character and
+//!   paragraph attributes are merged only where uniform in base and master; and the base is one
+//!   document per override, so in an instance with mixed formatting a run that followed moves
+//!   the base on for every run.
 
 use serde::{Deserialize, Serialize};
 
-use crate::props::{GroupKind, Node, ParamUi, PropGroup, Property, Uid};
+use std::collections::HashMap;
+
+use effectcraft_keyframe::TextDoc;
+
+use crate::props::{EssentialBase, GroupKind, Node, ParamUi, PropGroup, Property, Uid};
 use crate::{ItemId, ItemKind, Layer, LayerId, LayerSource, Project, Value};
 
 /// Match id of the Essential Properties group on precomp layers.
@@ -296,8 +310,16 @@ pub fn group(layer: &Layer) -> Option<&PropGroup> {
 /// Uids of the overridden master properties of a layer.
 pub fn overridden(layer: &Layer) -> Vec<Uid> {
     match group(layer).map(|g| &g.kind) {
-        Some(GroupKind::Essential { overridden }) => overridden.clone(),
+        Some(GroupKind::Essential { overridden, .. }) => overridden.clone(),
         _ => vec![],
+    }
+}
+
+/// The Source Text document control `c` of `comp` exposes, at time 0 (`None`: not text).
+fn master_text(project: &Project, comp: ItemId, c: &EgControl) -> Option<Box<TextDoc>> {
+    match source_prop(project, comp, c)?.1.value_at(effectcraft_time::Tick::ZERO) {
+        Value::Text(d) => Some(d),
+        _ => None,
     }
 }
 
@@ -397,12 +419,18 @@ pub fn source_media(project: &Project, comp: ItemId, c: &EgControl) -> Option<It
     }
 }
 
+/// Master Source Text documents (at time 0) by (comp, control), each read once per pass of
+/// [`sync_project`]; `None`: the control's property is not text.
+type Masters = HashMap<(ItemId, u64), Option<Box<TextDoc>>>;
+
 /// Build the Essential Properties group a layer nesting `comp` should have, reusing uids and
-/// override values from `old`. Uids for new nodes come from `next`.
-fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Option<&PropGroup>, next: &mut u64) -> PropGroup {
-    let over = match old.map(|g| &g.kind) {
-        Some(GroupKind::Essential { overridden }) => overridden.clone(),
-        _ => vec![],
+/// override values from `old`. Uids for new nodes come from `next`. An overridden Source Text is
+/// merged with its master ([`TextDoc::merge_master`]): the instance keeps its characters and the
+/// attributes it changed itself, every other attribute follows the master.
+fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Option<&PropGroup>, masters: &mut Masters, next: &mut u64) -> PropGroup {
+    let (over, old_bases): (Vec<Uid>, &[EssentialBase]) = match old.map(|g| &g.kind) {
+        Some(GroupKind::Essential { overridden, bases }) => (overridden.clone(), bases.as_slice()),
+        _ => (vec![], &[][..]),
     };
     let mut alloc = || {
         let v = *next;
@@ -470,6 +498,37 @@ fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Opt
     let uid = old.map(|g| g.uid).unwrap_or_else(&mut alloc);
     let mut keep = vec![];
     let mut children = build(project, comp, &eg.controls, old, &over, &mut alloc, &mut keep);
+    // An overridden Source Text keeps its own characters and the attributes the instance
+    // changed itself; every other attribute follows its master (#3186). An override without a
+    // base (just made, or saved before bases existed) starts from the master as it is now.
+    let mut bases = vec![];
+    for c in eg.flat() {
+        if !matches!(c.kind, EgKind::Property { .. }) {
+            continue;
+        }
+        let Some(p) = find_prop_mut(&mut children, &match_id(c.id)) else { continue };
+        if !keep.contains(&p.uid) || !matches!(p.value, Value::Text(_)) {
+            continue;
+        }
+        let old_base = old_bases.iter().find(|b| b.prop == p.uid);
+        let master = masters.entry((comp, c.id)).or_insert_with(|| master_text(project, comp, c));
+        let Some(master) = master.as_deref() else {
+            // The master can't be read now: keep the base for when it can.
+            bases.extend(old_base.cloned());
+            continue;
+        };
+        let base_in = old_base.map_or_else(|| master.clone(), |b| (*b.doc).clone());
+        let mut base_out = base_in.clone();
+        // Keyframes (else the value) all merge against the same base into one: the base takes
+        // every attribute any of them followed.
+        let docs: Vec<&mut Value> = if p.keys.is_empty() { vec![&mut p.value] } else { p.keys.iter_mut().map(|k| &mut k.value).collect() };
+        for v in docs {
+            if let Value::Text(d) = v {
+                d.merge_master(&base_in, &mut base_out, master);
+            }
+        }
+        bases.push(EssentialBase { prop: p.uid, doc: Box::new(base_out) });
+    }
     // Mirrors show their master's instance value (and override state).
     for c in eg.flat() {
         if !matches!(c.kind, EgKind::Mirror { .. }) {
@@ -491,7 +550,7 @@ fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Opt
         uid,
         match_id: GROUP.into(),
         name: "Essential Properties".into(),
-        kind: GroupKind::Essential { overridden: keep },
+        kind: GroupKind::Essential { overridden: keep, bases },
         enabled: true,
         label: None,
         children,
@@ -555,24 +614,36 @@ fn propagate_mirrors(before: &Project, after: &mut Project) {
     }
 }
 
-/// Master properties the user changed in this edit (`before` → `after`) become overridden.
+/// Master properties the user changed in this edit (`before` → `after`) become overridden. An
+/// overridden Source Text the edit changed gets its base rebased ([`TextDoc::rebase`]): what the
+/// user set stays the instance's own.
 fn mark_overrides(before: &Project, after: &mut Project) {
     let ids: Vec<ItemId> = after.comps().map(|(i, _)| *i).collect();
     for cid in ids {
         let Some(comp) = after.comp(cid) else { continue };
         let Some(old_comp) = before.comp(cid) else { continue };
         let mut changes: Vec<(LayerId, Vec<Uid>)> = vec![];
+        let mut rebases: Vec<(LayerId, Uid, TextDoc)> = vec![];
         for l in &comp.layers {
             let Some(g) = group(l) else { continue };
             let Some(ol) = old_comp.layer(l.id) else { continue };
             let Some(og) = group(ol) else { continue };
             // Properties overridden before this edit stay as the edit left them (Revert and
             // Push to Comp clear overrides by editing them).
-            let mut over = overridden(l);
+            let now_over = overridden(l);
+            let mut over = now_over.clone();
             over.extend(overridden(ol));
             let mut add = vec![];
+            let mut set = vec![];
             g.walk("", &mut |_, p| {
                 if over.contains(&p.uid) {
+                    if now_over.contains(&p.uid)
+                        && let Some(op) = og.find(p.uid)
+                        && let (Value::Text(was), Value::Text(now)) = (&op.value, &p.value)
+                        && was != now
+                    {
+                        set.push((p.uid, was.clone(), now.clone()));
+                    }
                     return;
                 }
                 if let Some(op) = og.find(p.uid)
@@ -584,16 +655,38 @@ fn mark_overrides(before: &Project, after: &mut Project) {
             if !add.is_empty() {
                 changes.push((l.id, add));
             }
+            if !set.is_empty()
+                && let LayerSource::Comp { item } = l.source
+                && let Some(eg) = after.comp(item).and_then(|c| c.essential.as_ref())
+                && let GroupKind::Essential { bases, .. } = &g.kind
+            {
+                for (uid, was, now) in set {
+                    let Some(base) = bases.iter().find(|b| b.prop == uid) else { continue };
+                    let Some(ctl) = g.find(uid).and_then(|p| control_of(&p.match_id)).and_then(|id| eg.find(id)) else { continue };
+                    let Some(master) = master_text(after, item, ctl) else { continue };
+                    let mut rebased = (*base.doc).clone();
+                    TextDoc::rebase(&mut rebased, &was, &now, &master);
+                    rebases.push((l.id, uid, rebased));
+                }
+            }
         }
-        if changes.is_empty() {
+        if changes.is_empty() && rebases.is_empty() {
             continue;
         }
         let Some(c) = after.comp_mut(cid) else { continue };
         for (lid, add) in changes {
             if let Some(g) = c.layer_mut(lid).and_then(|l| l.props.sub_mut(GROUP))
-                && let GroupKind::Essential { overridden } = &mut g.kind
+                && let GroupKind::Essential { overridden, .. } = &mut g.kind
             {
                 overridden.extend(add);
+            }
+        }
+        for (lid, uid, rebased) in rebases {
+            if let Some(g) = c.layer_mut(lid).and_then(|l| l.props.sub_mut(GROUP))
+                && let GroupKind::Essential { bases, .. } = &mut g.kind
+                && let Some(b) = bases.iter_mut().find(|b| b.prop == uid)
+            {
+                *b.doc = rebased;
             }
         }
     }
@@ -605,8 +698,26 @@ pub fn sync_project(before: &Project, after: &mut Project) {
     sync_links(before, after);
     propagate_mirrors(before, after);
     mark_overrides(before, after);
+    // A control can expose another instance's Essential Property (precomps nested in precomps),
+    // and comps are visited in id order: an outer comp can be visited before the comp whose
+    // group it reads changed. Passes repeat until nothing changes, bounded by this nesting depth.
+    const MAX_PASSES: usize = 16;
+    for pass in 0..MAX_PASSES {
+        if !sync_groups(after) {
+            return;
+        }
+        if pass + 1 == MAX_PASSES {
+            log::debug!("essential: groups still changing after {MAX_PASSES} sync passes (nesting deeper than that, or a cycle)");
+        }
+    }
+}
+
+/// One pass of [`sync_project`] over every comp. Returns whether any group changed.
+fn sync_groups(after: &mut Project) -> bool {
     let ids: Vec<ItemId> = after.comps().map(|(i, _)| *i).collect();
     let mut next = after.next_id;
+    let mut masters = Masters::new();
+    let mut changed = false;
     for cid in ids {
         let Some(comp) = after.comp(cid) else { continue };
         let mut updates: Vec<(usize, Option<PropGroup>)> = vec![];
@@ -618,7 +729,7 @@ pub fn sync_project(before: &Project, after: &mut Project) {
             let old = group(l);
             match want {
                 Some((item, eg)) => {
-                    let g = build_group(after, item, eg, old, &mut next);
+                    let g = build_group(after, item, eg, old, &mut masters, &mut next);
                     if old != Some(&g) {
                         updates.push((i, Some(g)));
                     }
@@ -630,12 +741,17 @@ pub fn sync_project(before: &Project, after: &mut Project) {
         if updates.is_empty() {
             continue;
         }
+        changed = true;
         let Some(c) = after.comp_mut(cid) else { continue };
         for (i, g) in updates {
-            let l = &mut c.layers[i];
+            let Some(l) = c.layers.get_mut(i) else { continue };
             let pos = l.props.children.iter().position(|n| n.match_id() == GROUP);
             match (pos, g) {
-                (Some(p), Some(g)) => l.props.children[p] = Node::Group(g),
+                (Some(p), Some(g)) => {
+                    if let Some(n) = l.props.children.get_mut(p) {
+                        *n = Node::Group(g);
+                    }
+                }
                 (None, Some(g)) => l.props.children.insert(0, Node::Group(g)),
                 (Some(p), None) => {
                     l.props.children.remove(p);
@@ -645,6 +761,46 @@ pub fn sync_project(before: &Project, after: &mut Project) {
         }
     }
     after.next_id = after.next_id.max(next);
+    changed
+}
+
+/// Give every overridden Source Text without a base (saved before bases existed) the master as
+/// it is now as its base: nothing changes on opening, and from then on the attributes the
+/// instance shares with the master follow the master's restyles, while those that differ stay
+/// the instance's own. Called on a project just opened.
+pub fn init_bases(p: &mut Project) {
+    let mut adds: Vec<(ItemId, usize, Vec<EssentialBase>)> = vec![];
+    for (cid, comp) in p.comps() {
+        for (i, l) in comp.layers.iter().enumerate() {
+            let LayerSource::Comp { item } = l.source else { continue };
+            let Some(eg) = p.comp(item).and_then(|c| c.essential.as_ref()) else { continue };
+            let Some(g) = group(l) else { continue };
+            let GroupKind::Essential { overridden, bases } = &g.kind else { continue };
+            let mut add = vec![];
+            g.walk("", &mut |_, pr| {
+                if !overridden.contains(&pr.uid) || bases.iter().any(|b| b.prop == pr.uid) || !matches!(pr.value, Value::Text(_)) {
+                    return;
+                }
+                let Some(c) = control_of(&pr.match_id).and_then(|id| eg.find(id)) else { return };
+                if !matches!(c.kind, EgKind::Property { .. }) {
+                    return;
+                }
+                if let Some(doc) = master_text(p, item, c) {
+                    add.push(EssentialBase { prop: pr.uid, doc });
+                }
+            });
+            if !add.is_empty() {
+                adds.push((*cid, i, add));
+            }
+        }
+    }
+    for (cid, i, add) in adds {
+        if let Some(GroupKind::Essential { bases, .. }) =
+            p.comp_mut(cid).and_then(|c| c.layers.get_mut(i)).and_then(|l| l.props.sub_mut(GROUP)).map(|g| &mut g.kind)
+        {
+            bases.extend(add);
+        }
+    }
 }
 
 /// One instance override: the control and the value it takes in this instance.
@@ -765,9 +921,12 @@ fn offset_layer(l: &mut Layer, o: u64) {
     fn group(g: &mut PropGroup, o: u64, essential_parent: bool) {
         g.uid = g.uid.saturating_add(o);
         match &mut g.kind {
-            GroupKind::Essential { overridden } => {
+            GroupKind::Essential { overridden, bases } => {
                 for u in overridden.iter_mut() {
                     *u = u.saturating_add(o);
+                }
+                for b in bases.iter_mut() {
+                    b.prop = b.prop.saturating_add(o);
                 }
             }
             // A tracker's Motion Target is a layer of the same comp.

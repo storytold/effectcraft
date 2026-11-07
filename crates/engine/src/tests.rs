@@ -15,6 +15,7 @@ mod display_pass;
 mod effects;
 mod essential;
 mod essential_more;
+mod essential_text;
 mod export_overwrite;
 mod face;
 mod fidelity;
