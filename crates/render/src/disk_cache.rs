@@ -1183,44 +1183,38 @@ pub fn layer_disk_key(key: u64) -> u128 {
 
 /// Content key of a composition's pixels, from the project in memory alone (no file is looked
 /// at: the frame entries check their own source files when read, see [`EntryFiles`]): project
-/// render settings, the comp and everything it uses (nested comps, footage items with their
-/// settings and paths, solids, their proxies and Use Proxy switches). With expressions in play
-/// (which can read any comp) the whole project counts. Switches that don't change pixels (Audio,
-/// Lock, Shy, Hide Shy Layers) don't count, and neither do markers unless an expression mentions
-/// them.
+/// render settings, the comp and the items it can draw (nested comps, footage items with their
+/// settings and paths, solids, Media Replacement footage, their proxies and Use Proxy switches;
+/// [`effectcraft_project::Project::pixel_reach`]). With expressions among them, everything those
+/// expressions can read counts too: every layer of their comps, markers, the comps and footage
+/// they name with literal names (and which items have those names), or the whole project when
+/// they compute a name or reach items another way. An edit to an item the comp can't reach keeps
+/// its key and its frames on disk (#3184, #1492). Switches that don't change pixels (Audio, Lock,
+/// Shy, Hide Shy Layers) don't count, and neither do markers unless an expression can read them.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
     comp_content_key_for_renderer(project, comp, RENDER_VERSION)
 }
 
 fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, renderer: &str) -> u128 {
-    use effectcraft_project::{ItemKind, LayerSource};
+    use effectcraft_project::ItemKind;
     let mut h = Hash128::default();
     h.write(renderer.as_bytes());
     hash_debug(&mut h, &project.settings);
-    // Expressions can read anything (every item counts); without them, layers that can't
-    // change the picture (music, hidden layers nothing reads) and their files don't count.
-    let expressions = project.reads_markers();
     let heard = project.heard_layers();
+    let reach = project.pixel_reach(comp, &heard);
+    // Expressions can read any layer of the comps they reach, hidden or not, and their markers
+    // (#1083); without them, layers that can't change the picture (music, hidden layers nothing
+    // reads) don't count.
+    let expressions = reach.expressions;
     let silent = |id, c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(id, c, &heard) };
-    let mut seen = std::collections::BTreeSet::new();
-    let mut stack = vec![comp];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(it) = project.item(id) else { continue };
-        if let ItemKind::Comp(c) = &it.kind {
-            let quiet = silent(id, c);
-            for l in c.layers.iter().filter(|l| !quiet.contains(&l.id)) {
-                if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
-                    stack.push(item);
-                }
-            }
-        }
+    // (the names expressions look items up by: which items have them now)
+    if !reach.names.is_empty() {
+        hash_debug(&mut h, &reach.names);
     }
-    // Markers are pixels only to the expressions that read them (#1083).
-    let markers = expressions;
-    let ids: Vec<effectcraft_project::ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
+    let ids: Vec<effectcraft_project::ItemId> = match reach.items {
+        Some(items) => items.into_iter().collect(),
+        None => project.items.keys().copied().collect(),
+    };
     for id in ids {
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
@@ -1230,11 +1224,11 @@ fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: e
                 let quiet = silent(id, c);
                 let heard = |l| heard.contains(id, l);
                 if quiet.is_empty() {
-                    hash_debug(&mut h, &c.pixel_form_with(markers, &heard));
+                    hash_debug(&mut h, &c.pixel_form_with(expressions, &heard));
                 } else {
                     let mut pic = (**c).clone();
                     pic.layers.retain(|l| !quiet.contains(&l.id));
-                    hash_debug(&mut h, &pic.pixel_form_with(markers, &heard));
+                    hash_debug(&mut h, &pic.pixel_form_with(expressions, &heard));
                 }
             }
             k => hash_debug(&mut h, k),

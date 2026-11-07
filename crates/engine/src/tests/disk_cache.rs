@@ -242,3 +242,100 @@ fn protected_markers_with_a_duration_change_the_content_key() {
     s.execute("markers.set", json!({"comp": inner.0, "index": index, "duration": 2.0})).unwrap();
     assert_ne!(key(&s), k1, "its duration");
 }
+
+/// With expressions the comp key covers what they can read, not the whole project (#3184,
+/// #1492): an expression reading only its own comp keeps the key through edits of another comp
+/// and of unused footage; `comp("Other")` makes "Other" count (and which comps have that name),
+/// not a third comp; a computed name counts every item.
+#[test]
+fn expressions_reach_only_what_they_name() {
+    let mut s = Session::default();
+    let comp = |s: &mut Session, name: &str| {
+        let c = s.execute("comp.new", json!({"name": name, "width": 8, "height": 8, "frameRate": 30, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+        let l = s.execute("layer.newSolid", json!({"comp": c, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+        (effectcraft_project::ItemId(c), (c, l))
+    };
+    let (main, ml) = comp(&mut s, "Main");
+    let (_, ol) = comp(&mut s, "Other");
+    let (third, tl) = comp(&mut s, "Third");
+    let unused = s.edit("add", None, |p, _| {
+        let f = effectcraft_project::Footage { path: "/nowhere/a.png".into(), has_video: true, ..Default::default() };
+        Ok(p.add_item("a.png", effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f)))
+    });
+    let unused = unused.unwrap();
+    let key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, main);
+    let expr = |s: &mut Session, (comp, layer): (u64, u64), text: &str| {
+        s.execute("prop.setExpression", json!({"comp": comp, "layer": layer, "path": "transform/opacity", "expression": text})).unwrap();
+    };
+    let opacity = |s: &mut Session, (comp, layer): (u64, u64), v: f64| {
+        s.execute("prop.set", json!({"comp": comp, "layer": layer, "path": "transform/opacity", "value": v})).unwrap();
+    };
+    let repath = |s: &mut Session, path: &str| {
+        let path = path.to_string();
+        s.edit("repath", None, move |p, _| {
+            if let Some(effectcraft_project::ItemKind::Footage(f)) = p.item_mut(unused).map(|i| &mut i.kind) {
+                f.path = path;
+            }
+            Ok(())
+        })
+        .unwrap();
+    };
+    // Its own comp only.
+    expr(&mut s, ml, "thisComp.layer(1).transform.rotation + wiggle(1, 1)[0]");
+    expr(&mut s, ol, "wiggle(2, 10)");
+    let k0 = key(&s);
+    opacity(&mut s, ol, 40.0);
+    expr(&mut s, tl, "time * 10");
+    repath(&mut s, "/nowhere/b.png");
+    s.execute("comp.addMarker", json!({"comp": third.0, "time": 0.5})).unwrap();
+    assert_eq!(key(&s), k0, "edits elsewhere keep the key");
+    // An edit in the comp itself changes it.
+    opacity(&mut s, ml, 30.0);
+    assert_ne!(key(&s), k0);
+    // `comp("Other")`: Other counts, Third doesn't.
+    expr(&mut s, ml, "comp(\"Other\").layer(1).transform.opacity");
+    let k1 = key(&s);
+    expr(&mut s, ol, "wiggle(3, 10)");
+    let k2 = key(&s);
+    assert_ne!(k2, k1, "the comp it names");
+    opacity(&mut s, tl, 20.0);
+    repath(&mut s, "/nowhere/c.png");
+    assert_eq!(key(&s), k2, "a comp it doesn't name");
+    // Another comp taking the name changes what it may read.
+    s.edit("rename", None, |p, _| {
+        p.item_mut(third).unwrap().name = "Other".into();
+        Ok(())
+    })
+    .unwrap();
+    let k3 = key(&s);
+    assert_ne!(k3, k2, "a second comp named Other");
+    // A computed name reaches every item.
+    expr(&mut s, ml, "comp(\"Oth\" + \"er\").layer(1).transform.opacity");
+    let k4 = key(&s);
+    repath(&mut s, "/nowhere/d.png");
+    assert_ne!(key(&s), k4, "unused footage counts with a computed name");
+}
+
+/// Markers count only for the comps whose expressions can read them (#1083): an expression in
+/// another comp that reads markers leaves this comp's markers out of its key.
+#[test]
+fn markers_count_only_where_an_expression_can_read_them() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "M", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    let other = s.execute("comp.new", json!({"name": "N", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    let ol = s.execute("layer.newSolid", json!({"comp": other, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.setExpression", json!({"comp": other, "layer": ol, "path": "transform/opacity", "expression": "thisComp.marker.numKeys"})).unwrap();
+    let key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, cid);
+    let k0 = key(&s);
+    s.execute("comp.addMarker", json!({"comp": cid.0, "time": 0.5, "comment": "beat"})).unwrap();
+    assert_eq!(key(&s), k0, "no expression of M reads its markers");
+    s.execute("prop.setExpression", json!({"comp": other, "layer": ol, "path": "transform/opacity", "expression": "comp(\"M\").marker.numKeys"})).unwrap();
+    let other_key = |s: &Session| effectcraft_render::disk_cache::comp_content_key(&s.project, effectcraft_project::ItemId(other));
+    let n0 = other_key(&s);
+    s.execute("comp.addMarker", json!({"comp": cid.0, "time": 1.0})).unwrap();
+    assert_ne!(other_key(&s), n0, "N reads M's markers");
+    assert_eq!(key(&s), k0, "M itself still doesn't");
+}
+

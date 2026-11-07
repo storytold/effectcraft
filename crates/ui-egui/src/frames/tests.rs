@@ -1975,6 +1975,80 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// With expressions the disk key covers what they can read (#3184, #1492): an edit to a comp no
+/// expression names keeps every frame on disk under the same key; an edit to the comp one names
+/// gives the comp a new key, and the frames outside the layer with that expression are carried to
+/// it (the dirty spans of #2795).
+#[test]
+fn disk_frames_outlive_edits_their_expressions_cant_read() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Expression, LayerId, Value};
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-disk-carry-expr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let comp = |s: &mut Session, name: &str| {
+        ItemId(s.execute("comp.new", json!({"name": name, "width": 8, "height": 8, "duration": 1, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap())
+    };
+    let solid = |s: &mut Session, c: ItemId| LayerId(s.execute("layer.newSolid", json!({"comp": c.0, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+    let cid = comp(&mut s, "A");
+    let (a, b) = (solid(&mut s, cid), solid(&mut s, cid));
+    let other = comp(&mut s, "Other");
+    let o = solid(&mut s, other);
+    let third = comp(&mut s, "Third");
+    let t = solid(&mut s, third);
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    let mut p0 = (*s.project).clone();
+    for (l, i, out) in [(a, 0, 15), (b, 15, 30)] {
+        let l = p0.comp_mut(cid).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(out));
+    }
+    p0.comp_mut(cid).unwrap().layer_mut(a).unwrap().props.prop_mut("transform/opacity").unwrap().expr =
+        Some(Expression { text: "comp(\"Other\").layer(1).transform.opacity".into(), enabled: true });
+    let p0 = Arc::new(p0);
+    let opts = RenderOpts::default();
+    let oh = opts_hash(&opts);
+    let src = |p: &Arc<Project>| RenderSource {
+        project: p.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let content0 = disk_cache::comp_content_key(&p0, cid);
+    for f in 0..30 {
+        disk.put_frame_now(disk_cache::frame_key(content0, f, 1000, oh), 1, 1, &[1, 2, 3, 255], &ReadFiles::default());
+    }
+    let opacity = |p: &mut Project, c: ItemId, l: LayerId| {
+        p.comp_mut(c).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(40.0)
+    };
+    for (name, edited, layer, same_key, kept) in [("Third", third, t, true, (0..30).collect::<Vec<i64>>()), ("Other", other, o, false, (17..30).collect())] {
+        let f = Frames::default();
+        let series = |p: &Arc<Project>, rev: u64| FrameKey { revision: rev, content: f.content_of(p, rev, cid), comp: cid.0, opts: oh, ..key(0, 0, 0) };
+        let blue = |p: &Arc<Project>, rev: u64, want: &[i64]| {
+            let base = series(p, rev);
+            let mut got = vec![];
+            for _ in 0..1000 {
+                got = f.disk_frames(&src(p), &base, 0..30, &opts);
+                if got == want {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got
+        };
+        assert_eq!(blue(&p0, 1, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: before");
+        let mut p1 = p0.clone();
+        opacity(Arc::make_mut(&mut p1), edited, layer);
+        assert_eq!(disk_cache::comp_content_key(&p1, cid) == content0, same_key, "{name}: the key");
+        assert_eq!(blue(&p1, 2, &kept), kept, "{name}: after");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A keyframe edit re-renders only around the keys it changed: two keys either side (auto-Bezier
 /// and continuous tangents reach the neighbouring segments), and from the layer's in point when
 /// the first key changes. A static value or an expression still reaches the whole layer. Every
