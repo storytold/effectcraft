@@ -945,7 +945,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Pan Under Cursor Tool", "カーソルの下でパンツール"),
     ("Dolly Towards Cursor Tool", "カーソルに向かってドリーツール"),
     ("Orbit Around Scene Tool", "シーンのまわりを周回ツール"),
-    ("Orbit Around Camera POI Tool", "カメラ目標点のまわりを周回"),
+    ("Orbit Around Camera POI Tool", "カメラ目標点のまわりを周回ツール"),
     ("Pan Camera POI Tool", "カメラの目標点にパンツール"),
     ("Dolly to Cursor Tool", "カーソルにドリーツール"),
     ("Dolly to Camera POI Tool", "カメラの目標点にドリーツール"),
