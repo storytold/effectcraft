@@ -66,6 +66,17 @@ fn generates(l: &Layer) -> bool {
     audio_effect_groups(l).any(|(id, _)| audio_fx::generates_audio(id))
 }
 
+/// Does the mix play the layer at its time stretch? Reversed layers (negative stretch) are
+/// silent for now; the Timeline waveform shares this rule so it draws what is heard.
+pub fn stretch_is_mixed(l: &Layer) -> bool {
+    l.stretch > 0.0
+}
+
+/// Does an enabled audio effect (Backwards) play the layer's [in, out) span reversed?
+pub fn plays_backwards(l: &Layer) -> bool {
+    audio_effect_groups(l).any(|(id, _)| audio_fx::reverses(id))
+}
+
 /// Does the layer contribute to the mix (Audio switch on and something to hear)?
 pub fn audible(project: &Project, l: &Layer) -> bool {
     l.switches.audio
@@ -210,7 +221,7 @@ impl MixEnv<'_> {
         if fx.is_empty() {
             return self.layer_raw(l, i0, n, false);
         }
-        let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
+        let reversed = plays_backwards(l);
         let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum();
         let pre = (pre_s * self.rate as f64).ceil() as usize;
         let b0 = i0 - pre as i64;
@@ -291,7 +302,7 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
-        if !audible(project, l) || (any_solo && !l.switches.solo) || l.stretch <= 0.0 {
+        if !audible(project, l) || (any_solo && !l.switches.solo) || !stretch_is_mixed(l) {
             continue;
         }
         // Sample range of the block that falls inside the layer's [in, out).
