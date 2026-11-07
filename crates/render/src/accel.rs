@@ -353,6 +353,8 @@ impl<'a> Renderer<'a> {
             return Some(b);
         }
         let (foot, files) = self.recorded(key, |r| {
+            // (what the masks' expressions read, at shutter times too, goes to the buffer's files)
+            let ctx = &r.with_reads(ctx);
             let mut foot = r.source(ctx, layer)?;
             let _ = masks::apply(ctx, layer, &mut foot, r.mask_blur(ctx, layer));
             Some(foot)

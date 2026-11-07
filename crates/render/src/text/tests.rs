@@ -749,16 +749,22 @@ fn text_notes_the_font_files_it_draws_with() {
     std::fs::write(&font, fonts::INTER_REGULAR).unwrap();
     fonts::add_source(&OneFile(font.clone()));
     let stamp = FileStamp::native(&font.to_string_lossy()).unwrap();
-    let files_of = |family: &str| {
+    // (`value`: a Character Value animator puts that character in for every one)
+    let files_with = |family: &str, value: Option<char>| {
         let (mut p, cid, comp) = setup(200, 80);
-        let l =
+        let mut l =
             text_layer(&mut p, &comp, TextDoc { text: "Hi there\rtwo".into(), font: family.into(), style: "Regular".into(), size: 30.0, ..Default::default() });
+        if let Some(c) = value {
+            animator(&mut p, &mut l, &["characterValue"], &["range"]);
+            set(&mut l, "text/animators/#1/properties/characterValue", Value::Scalar(c as u32 as f64));
+        }
         p.comp_mut(cid).unwrap().layers.push(l);
         let log = ReadLog::new();
         let c = EvalCtx { reads: Some(&log), ..ctx(&p, cid, 0.0) };
         assert!(text_geom(&c, &p.comp(cid).unwrap().layers[0]).is_some());
         log.into_files()
     };
+    let files_of = |family: &str| files_with(family, None);
     let files = files_of("Reads Test Sans");
     assert!(files.is_complete(), "{files:?}");
     assert_eq!(files.files().len(), 1, "{files:?}");
@@ -768,5 +774,12 @@ fn text_notes_the_font_files_it_draws_with() {
     assert!(files.is_complete() && files.is_empty(), "{files:?}");
     // A family that isn't installed falls back: installing it would change the text.
     assert!(!files_of("No Such Family 3184").is_complete());
+    // A substituted character the face has is drawn with it: the same one file.
+    let files = files_with("Reads Test Sans", Some('B'));
+    assert!(files.is_complete(), "{files:?}");
+    assert_eq!(files.get(&font.to_string_lossy()), Some(stamp));
+    // One it lacks (Inter has no CJK) is drawn with a fallback face, or none: another installed
+    // font could take it, so the list can't vouch for the text.
+    assert!(!files_with("Reads Test Sans", Some('\u{4e2d}')).is_complete());
     let _ = std::fs::remove_dir_all(&dir);
 }

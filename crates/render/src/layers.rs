@@ -34,6 +34,17 @@ impl Shutter {
     }
 }
 
+/// `files` (a content's) with the files of the buffers made of it that the layer cache kept:
+/// `files` itself when they are all its own.
+fn with_kept_files(files: Arc<crate::reads::ReadFiles>, kept: &[Arc<crate::reads::ReadFiles>]) -> Arc<crate::reads::ReadFiles> {
+    if kept.iter().all(|f| Arc::ptr_eq(f, &files)) {
+        return files;
+    }
+    let mut all = (*files).clone();
+    kept.iter().for_each(|f| all.extend(f));
+    Arc::new(all)
+}
+
 impl<'a> Renderer<'a> {
     /// The layer with its styles: exterior passes and body (cached per pass).
     pub(crate) fn styled(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<StyledLayer> {
@@ -43,10 +54,22 @@ impl<'a> Renderer<'a> {
         }
         let modes = styles::pass_modes(ctx, layer);
         let key = ckey.map(|k| cache::styles_key(ctx, layer, k));
-        if let Some((body, _)) = self.cached(key) {
-            let passes: Option<Vec<_>> =
-                modes.iter().enumerate().map(|(i, m)| self.cached(key.map(|k| cache::derive(k, i as u64 + 1))).map(|(b, _)| (b, *m))).collect();
+        // (a cached body or pass may have been made of other files than the content: another
+        // worker's, or one from disk; the styled layer lists the files of every buffer it holds)
+        if let Some((body, body_files)) = self.cached(key) {
+            let mut kept_files = vec![body_files];
+            let passes: Option<Vec<_>> = modes
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    self.cached(key.map(|k| cache::derive(k, i as u64 + 1))).map(|(b, f)| {
+                        kept_files.push(f);
+                        (b, *m)
+                    })
+                })
+                .collect();
             if let Some(passes) = passes {
+                let files = with_kept_files(files, &kept_files);
                 return Some(StyledLayer { passes, body, content, key, ckey, plain: false, files });
             }
         }
@@ -73,13 +96,7 @@ impl<'a> Renderer<'a> {
                 (b, m)
             })
             .collect();
-        let files = if kept_files.iter().all(|f| Arc::ptr_eq(f, &files)) {
-            files
-        } else {
-            let mut all = (*files).clone();
-            kept_files.iter().for_each(|f| all.extend(f));
-            Arc::new(all)
-        };
+        let files = with_kept_files(files, &kept_files);
         Some(StyledLayer { passes, body, content, key, ckey, plain: false, files })
     }
 
