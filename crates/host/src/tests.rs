@@ -538,6 +538,22 @@ fn script_renders_through_the_render_queue() {
     assert!(bytes.starts_with(b"GIF89a"));
 }
 
+/// `applyTemplate` picks the format from the template name: a WebP name that says "Lossless"
+/// is WebP, not PNG.
+#[test]
+fn script_apply_template_reads_webp_before_lossless() {
+    let mut s = super::session();
+    let code = r#"
+        var comp = app.project.items.addComp("Scripted", 64, 48, 1, 0.2, 10);
+        var item = app.project.renderQueue.items.add(comp);
+        item.outputModule(1).applyTemplate("Animated WebP (Lossless) with Alpha");
+        true
+    "#;
+    let r = s.execute("script.run", json!({"code": code})).unwrap();
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(s.project.render_queue.last().map(|q| q.output.format), Some(effectcraft_project::render_queue::OutputFormat::WebP));
+}
+
 /// importFile, layers.add(footage) and project save/open from a script.
 #[test]
 fn script_imports_footage_and_saves() {

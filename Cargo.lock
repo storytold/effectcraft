@@ -1577,6 +1577,7 @@ dependencies = [
  "effectcraft-raster",
  "effectcraft-render",
  "effectcraft-time",
+ "effectcraft-vp8enc",
  "effectcraft-vp9enc",
  "exr",
  "filmcraft-aac",
@@ -2005,6 +2006,14 @@ dependencies = [
  "tempfile",
  "toml",
  "web-time",
+]
+
+[[package]]
+name = "effectcraft-vp8enc"
+version = "0.21.0"
+dependencies = [
+ "image",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
