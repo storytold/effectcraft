@@ -128,11 +128,23 @@ fn better(a: (f64, u8), b: (f64, u8)) -> bool {
     if (a.0 - b.0).abs() < 1e-6 { a.1 < b.1 } else { a.0 < b.0 }
 }
 
+/// How much nearer (as a share of the tolerance: 2 of the viewer's 8 screen points, whatever the
+/// zoom) a vertical and a horizontal line together must be than a point target to win over it
+/// when one of the two lines runs through the point. A layer's point lies on that layer's own
+/// edge and centre lines, so such a pair is only as near as the point itself plus whatever a
+/// foreign line (the comp's centre row, a guide) gains on the other axis; without the margin that
+/// pair took the foreign axis and left the feature just off the point, more often the wider the
+/// tolerance is in comp pixels, i.e. at 100 % rather than zoomed in (#2681). A pair of lines that
+/// both miss the point (a guide crossing beside a layer's point) gets no margin, so such an
+/// intersection stays reachable right next to the point.
+pub const POINT_BIAS: f64 = 0.25;
+
 /// Snap feature points `sources` (comp pixels) to the nearest target within `tol` comp pixels.
 /// A point target snaps both axes and wins unless a vertical and a horizontal line both resolve
-/// and together lie nearer than it (one line alone leaves the other axis free, so it never beats
-/// a point: a layer's edge midpoint lies on its edge line); otherwise the nearest vertical and
-/// horizontal lines snap x and y independently. Ties go to the lower priority value.
+/// and together lie nearer than it, by more than [`POINT_BIAS`] of `tol` when one of them runs
+/// through the point (one line alone leaves the other axis free, so it never beats a point: a
+/// layer's edge midpoint lies on its edge line); otherwise the nearest vertical and horizontal
+/// lines snap x and y independently. Ties go to the lower priority value.
 pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Snap> {
     let mut best_pt: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
     let mut best_x: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
@@ -155,8 +167,15 @@ pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Sn
         }
     }
     let both_lines = best_x.zip(best_y).map_or(f64::INFINITY, |(x, y)| x.0.0.hypot(y.0.0));
+    // A line of the pair through the point: the point's own edge / centre line (`at`: the
+    // line's axis, 0 for x).
+    let through = |line: Option<((f64, u8), [f64; 2], SnapTarget)>, at: usize| {
+        best_pt.zip(line).is_some_and(|((_, _, p), (_, _, l))| (l.pos[at] - p.pos[at]).abs() < 1e-6)
+    };
+    // (At least a hair, so an exact tie goes to the point.)
+    let bias = if through(best_x, 0) || through(best_y, 1) { (tol * POINT_BIAS).max(1e-9) } else { 1e-9 };
     if let Some((k, s, t)) = best_pt
-        && k.0 <= both_lines + 1e-9
+        && k.0 <= both_lines + bias
     {
         return Some(Snap { delta: [t.pos[0] - s[0], t.pos[1] - s[1]], hits: vec![t], at: t.pos });
     }
