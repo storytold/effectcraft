@@ -32,6 +32,7 @@ fn layer_of<'a>(s: &'a Session, a: &J) -> Result<(ItemId, &'a Comp, &'a Layer), 
     Ok((cid, c, l))
 }
 
+/// Answers a script model query of the given `kind` against the session, dispatching to the matching reader, and errors on an unknown kind.
 pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
     match kind {
         "project" => Ok(project(s)),
@@ -51,13 +52,7 @@ pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
             let i = u(a, "index").unwrap_or(0) as usize;
             Ok(effectcraft_engine::command_specs().get(i.wrapping_sub(1)).map(|c| json!(c.id)).unwrap_or(J::Null))
         }
-        "exprError" => {
-            let code = a.get("code").and_then(J::as_str).unwrap_or("");
-            Ok(match s.expr_check {
-                Some(check) => json!(check(code).err().unwrap_or_default()),
-                None => json!(""),
-            })
-        }
+        "exprError" => expr_error(s, a),
         "labels" => Ok(json!(Label::ALL.iter().map(|l| l.name()).collect::<Vec<_>>())),
         "effects" => Ok(json!(
             effectcraft_engine::effects::all()
@@ -527,6 +522,21 @@ fn value(s: &Session, a: &J) -> R {
         ctx.value(l, p)
     };
     Ok(js_value(c, &v))
+}
+
+/// `Property.expressionError`: why the property's expression fails at the comp's current time
+/// (where After Effects evaluates it; the prelude sends no `time`, a direct query may give one
+/// in comp seconds). The message is the one `expr.errors` gives: an evaluation error (an
+/// exception or a non-finite result) or the syntax error that disabled it; `""` when it
+/// evaluates (#3219).
+fn expr_error(s: &Session, a: &J) -> R {
+    let (cid, c, l) = layer_of(s, a)?;
+    let uid = u(a, "uid").ok_or("missing uid")?;
+    let p = l.props.find(uid).ok_or("the property no longer exists (it was deleted)")?;
+    let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
+    // With the footage source, like `value`: `sampleImage` must not fail for want of it (#1000).
+    let ctx = EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, c, t) };
+    Ok(json!(effectcraft_engine::commands::expr_tools::property_error(&ctx, s.expr_check, l, p).unwrap_or_default()))
 }
 
 fn interp(i: Interp) -> &'static str {
