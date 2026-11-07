@@ -371,24 +371,30 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let follow: Vec<usize> =
         p.get("follow").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).filter_map(|d| usize::try_from(d).ok()).collect();
-    // A typed `*2` or `/2` (#3195): each layer's own value times it, not the edited layer's result.
+    // A typed `*2`, `/2` (`factor`) or `+10` (`addend`) (#3195): each layer's own value times it
+    // or plus it, not the edited layer's result (which its range may have clamped).
     let factor = p.get("factor").and_then(Value::as_f64).filter(|k| k.is_finite() && delta.is_none());
+    let addend = p.get("addend").and_then(Value::as_f64).filter(|n| n.is_finite() && delta.is_none());
+    let own_step = |v: f64| -> Option<f64> {
+        let r = match (factor, addend) {
+            (Some(k), _) => v * k,
+            (None, Some(n)) => v + n,
+            (None, None) => return None,
+        };
+        r.is_finite().then_some(r)
+    };
     // Each layer's own value where `set` writes it (a `time` other than the CTI keys there).
     let typed = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid| {
         let at = snapped_key_time(s, cid, olid, q, "prop.set").ok().flatten();
-        if let (true, Some(k)) = (scalar, factor)
-            && let Some(own) = components_at(s, cid, olid, ouid, at).and_then(|c| c.first().copied())
-            && (own * k).is_finite()
-        {
-            q["value"] = json!(own * k);
+        if scalar && let Some(v) = components_at(s, cid, olid, ouid, at).and_then(|c| c.first().copied()).and_then(own_step) {
+            q["value"] = json!(v);
         }
         if let (Some(dims), Some(n)) = (&dims, &new)
             && let Some(mut c) = components_at(s, cid, olid, ouid, at)
         {
             // The typed components' new values on this layer.
-            let typed_value = |c: &[f64], d: usize| match factor {
-                Some(k) => c.get(d).map(|v| v * k).filter(|v| v.is_finite()),
-                None => n.get(d).copied(),
+            let typed_value = |c: &[f64], d: usize| {
+                if factor.is_some() || addend.is_some() { c.get(d).copied().and_then(own_step) } else { n.get(d).copied() }
             };
             let change = dims.first().and_then(|&d| Some(typed_value(&c, d)? - c.get(d)?)).unwrap_or(0.0);
             let values: Vec<Option<f64>> = dims.iter().map(|&d| typed_value(&c, d)).collect();
@@ -1459,7 +1465,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Property Value",
             [],
             None,
-            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes), factor? (with selected, a typed `*` or `/`: the other layers take their own value times it, in the dims components of a vector)}",
+            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes), factor? (with selected, a typed `*` or `/`: the other layers take their own value times it, in the dims components of a vector), addend? (the same for a typed `+`: their own value plus it)}",
             has_layers,
             set_selected
         ),

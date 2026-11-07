@@ -164,14 +164,15 @@ pub fn hot_number_step_at(
 
 /// Mark a queued `prop.set` (with `selected`) as the typed `step` it came from, so every other
 /// selected layer takes that step from its own value rather than the edited layer's result
-/// (#3195): `+n` by the same change (`offset`), `*n` and `/n` by the same `factor`.
+/// (#3195): `+n` adds `n` to each (`addend`; not the edited layer's change, which its range may
+/// have clamped), `*n` and `/n` multiply each by the same `factor`.
 pub fn mark_step(action: Option<&mut (String, serde_json::Value)>, step: Option<crate::num_math::Step>) {
     let (Some((_, a)), Some(step)) = (action, step) else { return };
-    match step.factor() {
-        Some(k) => a["factor"] = serde_json::json!(k),
-        None if matches!(step, crate::num_math::Step::Add(_)) => a["offset"] = serde_json::json!(true),
+    match (step, step.factor()) {
+        (crate::num_math::Step::Add(n), _) => a["addend"] = serde_json::json!(n),
+        (_, Some(k)) => a["factor"] = serde_json::json!(k),
         // (A factor too large to send: the other layers take the typed result.)
-        None => {}
+        (_, None) => {}
     }
 }
 

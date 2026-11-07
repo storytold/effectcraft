@@ -480,6 +480,16 @@ fn a_typed_step_applies_to_each_selected_layer() {
         key(&mut h, Key::Enter);
         assert_eq!((opacity_of(&h, a), opacity_of(&h, b)), expected, "{text}");
     }
+    // `+10` where the edited layer stops at 100: the others still add 10, not the 5 it moved.
+    for (l, v) in [(a, 95.0), (b, 30.0)] {
+        h.state_mut().session.execute("prop.set", json!({"layer": l, "path": "transform/opacity", "value": v})).unwrap();
+    }
+    h.run_steps(5);
+    let p = center(&h, &format!("timeline.prop.{opacity}.value"));
+    click(&mut h, p, 1);
+    type_text(&mut h, "+10");
+    key(&mut h, Key::Enter);
+    assert_eq!((opacity_of(&h, a), opacity_of(&h, b)), (100.0, 40.0));
 }
 
 /// A click at `p` with `modifiers` held.

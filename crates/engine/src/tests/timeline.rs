@@ -1552,6 +1552,17 @@ fn a_typed_factor_scales_each_selected_layers_own_value() {
     s.execute_checked("prop.set", json!({"layer": a, "prop": position, "value": [5.0, 20.0], "selected": true, "dims": [0], "factor": 0.5})).unwrap();
     assert_eq!(prop(&s, a, "transform/position").value.components()[..2], [5.0, 20.0]);
     assert_eq!(prop(&s, b, "transform/position").value.components()[..2], [50.0, 50.0], "B halves its own X, keeps its Y");
+    // A typed `+10` (`addend`): each layer's own value plus 10, within its own range, even where
+    // the edited layer's range cut its change short (95 + 10 stops at 100).
+    s.execute("prop.set", json!({"layer": a, "path": "transform/opacity", "value": 95.0})).unwrap();
+    s.execute("prop.set", json!({"layer": b, "path": "transform/opacity", "value": 30.0})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": a, "prop": opacity, "value": 100.0, "selected": true, "addend": 10.0})).unwrap();
+    assert_eq!(prop(&s, b, "transform/opacity").value.as_f64(), 40.0, "B adds 10, not the 5 A moved");
+    s.execute("prop.set", json!({"layer": b, "path": "transform/opacity", "value": 95.0})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": a, "prop": opacity, "value": 100.0, "selected": true, "addend": 10.0})).unwrap();
+    assert_eq!(prop(&s, b, "transform/opacity").value.as_f64(), 100.0, "B's own range still applies");
+    s.execute_checked("prop.set", json!({"layer": a, "prop": position, "value": [15.0, 20.0], "selected": true, "dims": [0], "addend": 10.0})).unwrap();
+    assert_eq!(prop(&s, b, "transform/position").value.components()[..2], [60.0, 50.0], "B adds 10 to its own X");
 }
 
 /// #3195: Mask Feather is never negative on the other selected layers either, when a typed `*-1`
