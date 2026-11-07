@@ -240,16 +240,43 @@ converted on demand with the HDR step and without the exposure; the Info panel s
 frame's float values. The browser keeps 8-bit frames for now (its frame workers send RGBA8).
 
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
-the layer cache and the viewer's RAM preview: layer buffers that were slow to render and every
-preview frame are written (LZ4, atomic rename, checksummed) under 128-bit content keys — the
-comp's content hash (the comp, what it uses, footage file size and time) plus frame, scale and
-view for frames; the layer key salted with the footage fingerprint for layers — so entries
-survive restarts and never go stale. Frame entries are 8-bit RGBA, or for 32 bpc viewer frames
-half floats with their bytes shuffled into planes before LZ4 (the entry header's format byte
-tells them apart; the render options in the key keep the two kinds apart). LRU eviction keeps it under the size limit; Edit ▸ Purge
-empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue. In the
-browser the frames live in the Origin Private File System: frame workers write them, the page
-keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
+the layer cache and the viewer's RAM preview: layer buffers that were slow to render, every
+preview frame and Roto Brush / Object Matte segmentations are written (LZ4, atomic rename,
+checksummed) and survive restarts. The design (#3184):
+
+- **Keys from memory.** A frame's key is its comp's content key plus frame, scale, view and
+  render options; the content key hashes the project settings and the items the comp can draw
+  (its layers but those that can't change the picture, nested comps, footage with its settings
+  and paths, solids, Media Replacement footage, proxies: `Project::pixel_reach`). Expressions
+  among them add what they can read: every layer of their comps, the markers, the comps and
+  footage they name with literal names (`comp("Name")`, `footage("Name")`, and which items have
+  those names), or the whole project when they compute a name or reach items another way
+  (`expression_reach`). An edit to anything else keeps the key. A layer buffer's key is the
+  layer cache's content key (which names the footage it uses with its paths) and the renderer
+  version. Nothing here looks at a file, and nothing ever scans the project's files.
+- **File lists checked on hit.** Every frame and layer entry keeps the source files it was
+  made of, with the size and modification time they were read with (the browser: size and
+  content hash). An entry is used only while they are unchanged: one `metadata` call per listed
+  file when it is read. A changed, missing or unreadable file, a damaged entry or an older
+  format is a miss; the entry is deleted and the frame renders again and replaces it.
+- **Incomplete lists stay in memory.** A frame or buffer whose files can't all be named (a
+  source that doesn't say what it read, more than 4096 files) is shown but never written.
+- **Reload Footage drops entries.** File ▸ Reload Footage deletes the frame and layer entries
+  whose lists name the item's files (the writer thread reads each entry's list, not its
+  pixels), so a file replaced by one with the same size and time is read again. A reload while
+  the cache is off is remembered for the session and applied when it is switched on, before it
+  is read. A render already under way offers entries made of the files as they were: each
+  render takes the cache's drop generation before it reads, and an entry listing a file dropped
+  after that is refused (`DiskCache::drop_generation`); the frame is shown, never stored.
+- **Edits keep what they can't change.** RAM frames outside an edit's dirty spans are kept
+  (`Project::dirty_spans`), and their disk entries are linked to the comp's new key.
+
+Frame entries are 8-bit RGBA, or for 32 bpc viewer frames half floats with their bytes shuffled
+into planes before LZ4 (the entry header's format byte tells them apart; the render options in
+the key keep the two kinds apart). LRU eviction keeps the cache under the size limit; Edit ▸
+Purge empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue.
+In the browser the frames live in the Origin Private File System: frame workers write them, the
+page keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
 
 **Deferred readbacks** (`effectcraft-gpu` `deferred`): where a readback can't be waited for (WebGPU
 in a browser worker) a frame renders in passes. `Accelerator::frame_begin` / `pass_begin` /
