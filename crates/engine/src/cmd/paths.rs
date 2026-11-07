@@ -167,6 +167,8 @@ fn parametric_in(g: &PropGroup, lid: LayerId, depth: usize, out: &mut Vec<(Layer
     }
 }
 
+/// Converts masks and the selected parametric shape paths (Rectangle, Ellipse, Polystar) to editable Bezier paths of the same geometry at the current time.
+/// Items on locked layers are skipped, and it errors when nothing is left to convert.
 fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     // On a shape layer this replaces a Rectangle, Ellipse or Polystar path with an editable
     // Path 1 of the same geometry, as After Effects does (#932). The parametric properties are
@@ -529,6 +531,8 @@ fn has_shape_items(s: &Session) -> std::result::Result<(), String> {
     if ok { Ok(()) } else { Err("select shape items (Contents ▸ …) in the timeline".into()) }
 }
 
+/// Wraps the selected shape items of one layer in a new group placed where the first of them was.
+/// Errors when no shape items are selected or they do not share one parent group.
 fn group_shapes(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, items) = selected_shape_items(s, p, "path.groupShapes")?;
     let Some(lid) = items.first().map(|x| x.0) else { return Err(bad("path.groupShapes", "select shape items to group")) };
@@ -604,6 +608,8 @@ fn offset_items(g: &mut PropGroup, d: [f64; 2]) {
     }
 }
 
+/// Replaces each selected shape group with its children, baking the group's position offset into them.
+/// Errors when no group is selected or a group has a scale, rotation, skew, opacity or animated transform.
 fn ungroup_shapes(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, items) = selected_shape_items(s, p, "path.ungroupShapes")?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -656,6 +662,7 @@ fn ungroup_shapes(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"ungrouped": n}))
 }
 
+/// The command specs for the path commands: RotoBezier, Convert To Bezier Path, Group Shapes, Ungroup Shapes and the rest of this module.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("path.rotoBezier", "RotoBezier", ["Layer", "Mask and Shape Path"], None, "{layer?, mask?, value?}", has_layers, roto_bezier),

@@ -651,6 +651,7 @@ fn convert_to_bezier_evaluates_corner_expressions() {
 
 /// The uid of the first shape item with `match_id` in a shape layer's Contents.
 fn shape_item(s: &Session, l: u64, match_id: &str) -> u64 {
+    /// Depth-first search of a property group tree for the uid of the first group with the given match id.
     fn walk(g: &effectcraft_project::PropGroup, id: &str) -> Option<u64> {
         if g.match_id == id {
             return Some(g.uid);
