@@ -482,6 +482,69 @@ impl crate::eval::ExprHost for ControllerRate {
     }
 }
 
+/// An expression that reads a file (as `sampleImage` does, into [`EvalCtx::reads`]) and keeps
+/// the value.
+///
+/// [`EvalCtx::reads`]: crate::eval::EvalCtx::reads
+struct ReadsAFile;
+
+impl crate::eval::ExprHost for ReadsAFile {
+    fn eval(&self, ctx: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        if let Some(log) = ctx.reads {
+            log.note(crate::reads::ReadFile::new("/sampled.png", crate::reads::FileStamp::Native { len: 3, modified: Some(1) }));
+        }
+        Ok(value.clone())
+    }
+}
+
+/// What expressions read while a cached buffer is made (a mask expression, which mask motion
+/// blur also runs at shutter times the cache key doesn't see) goes to that buffer's files, not
+/// only to the frame's (#3184): a later render served the buffer lists the file too. Content,
+/// a Time effect's input and an adjustment layer's footprint.
+#[test]
+fn what_expressions_read_goes_to_the_files_of_the_buffer_they_make() {
+    use crate::reads::ReadLog;
+    use crate::{NoFootage, RenderOpts, Renderer};
+    let (mut p, cid, comp) = setup();
+    for adjustment in [false, true] {
+        let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+        l.switches.adjustment = adjustment;
+        let mut next = p.next_id;
+        let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+        p.next_id = next;
+        l.props.sub_mut("masks").unwrap().children.push(m.into());
+        l.props.prop_mut("masks/#1/path").unwrap().expr = Some(effectcraft_project::Expression { text: "sampled".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.push(l);
+    }
+    let cache = crate::LayerCache::default();
+    let c = p.comp(cid).unwrap();
+    let (content, adjustment) = (&c.layers[0], &c.layers[1]);
+    // `make`, rendered once with the expressions (the files go to `log`) and then served from
+    // the cache to a render without them: the files that render lists.
+    let files_served = |what: &str, make: &dyn Fn(&Renderer, &crate::eval::EvalCtx) -> bool| {
+        let log = ReadLog::new();
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&ReadsAFile);
+        r.cache = Some(&cache);
+        r.reads = Some(&log);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(log.files().get("/sampled.png").is_some(), "{what}: the frame lists the file");
+        let hits = cache.stats().hits;
+        let served = ReadLog::new();
+        r.expr = None;
+        r.reads = Some(&served);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(cache.stats().hits > hits, "{what}: served from the cache");
+        served.into_files()
+    };
+    let files = files_served("content", &|r, ctx| r.content_buf(ctx, content).is_some());
+    assert!(files.get("/sampled.png").is_some(), "content: {files:?}");
+    let files = files_served("input", &|r, ctx| r.layer_input(ctx, content, 0).is_some());
+    assert!(files.get("/sampled.png").is_some(), "input: {files:?}");
+    let files = files_served("footprint", &|r, ctx| r.adjustment_footprint(ctx, adjustment).is_some());
+    assert!(files.get("/sampled.png").is_some(), "footprint: {files:?}");
+}
+
 /// A Birth Rate expression reading another layer: changing that layer changes the history but
 /// not the current rate (0) nor this layer's properties, which is all the layer cache key sees.
 /// CC Particle World layers with expressions therefore aren't layer cached.
