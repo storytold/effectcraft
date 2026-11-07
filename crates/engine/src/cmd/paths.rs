@@ -175,7 +175,13 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     // read at the current time and the path that comes out is static: a size or roundness
     // animation cannot survive the conversion, in After Effects either.
     const LABEL: &str = "Convert To Bezier Path";
-    let (cid, mut items) = selected_shape_items(s, p, "path.convertToBezier")?;
+    // An explicit `mask` is what converts: selected shape items (or `items`) don't take its place,
+    // and a `mask` that matches nothing is reported below rather than converting a shape.
+    let (cid, mut items) = if p.get("mask").is_some() {
+        (s.active_comp_id().ok_or(EngineError::NoComp)?, Vec::new())
+    } else {
+        selected_shape_items(s, p, "path.convertToBezier")?
+    };
     // An explicit `layer` / `layers` limits the selected shape items to those layers.
     let explicit_layers = p.get("layer").is_some_and(|v| !v.is_null()) || p.get("layers").is_some();
     if explicit_layers && p.get("items").is_none() {

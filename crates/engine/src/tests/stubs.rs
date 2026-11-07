@@ -855,6 +855,43 @@ fn convert_to_bezier_skips_animated_paths_of_a_selected_group() {
     assert_eq!(first_shape(&s, l).1, "path");
 }
 
+/// #3057 review: an explicit `mask` is what converts, even with a parametric path selected or
+/// `items` given; a `mask` that matches nothing is an error and converts no shape.
+#[test]
+fn convert_to_bezier_gives_an_explicit_mask_priority() {
+    // A shape layer with a rectangle and a RotoBezier mask; the rectangle's path is selected.
+    let setup = || {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50], [0, 50]], "closed": true})).unwrap();
+        let m = layer(&s, l).masks().unwrap().groups().next().unwrap().uid;
+        s.execute("path.rotoBezier", json!({"layer": l, "mask": m, "value": true})).unwrap();
+        let (rect, _) = first_shape(&s, l);
+        s.state.selected_props = vec![(LayerId(l), rect)];
+        (s, l, m, rect)
+    };
+
+    // A matching mask converts, not the selected rectangle.
+    let (mut s, l, m, _) = setup();
+    s.execute("path.convertToBezier", json!({"layer": l, "mask": m})).unwrap();
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: false, .. }), "the mask converts");
+    assert_eq!(first_shape(&s, l).1, "rect", "the selected rectangle stays parametric");
+
+    // An unmatched mask is an error, and the selected rectangle is not converted in its place.
+    let (mut s, l, _, _) = setup();
+    let err = s.execute("path.convertToBezier", json!({"layer": l, "mask": "No Such Mask"})).unwrap_err().to_string();
+    assert!(err.contains("mask"), "{err}");
+    assert_eq!(first_shape(&s, l).1, "rect");
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }));
+
+    // `mask` and `items` together: the mask converts, the items don't.
+    let (mut s, l, m, rect) = setup();
+    s.state.selected_props.clear();
+    s.execute("path.convertToBezier", json!({"layer": l, "mask": m, "items": [rect]})).unwrap();
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: false, .. }), "the mask converts");
+    assert_eq!(first_shape(&s, l).1, "rect", "the listed rectangle stays parametric");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {
