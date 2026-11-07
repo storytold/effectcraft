@@ -189,6 +189,17 @@ fn a_file_list_with_a_name_that_is_not_a_plain_file_name_is_reported() {
 }
 
 #[test]
+fn a_file_list_without_a_readable_count_is_reported() {
+    // No `StVS`, or one too short for its `u32`: the list is not read rather than taken whole.
+    for count in [None, Some(vec![2u8, 0])] {
+        let mut kids: Vec<Chunk<'static>> = count.map(|c| Chunk::data(*b"StVS", c)).into_iter().collect();
+        kids.extend([utf8("a.png"), utf8("b.png")]);
+        let bytes = with_sequence_naming(&[Chunk::list(*b"StVc", kids)], Some([u32::MAX, u32::MAX, 0]));
+        reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
+    }
+}
+
+#[test]
 fn a_sequence_imported_with_force_alphabetical_order_imports_its_file_list() {
     // Force alphabetical order: `LIST StVc` with `StVS` (the count, little-endian) and one `Utf8`
     // per file instead of the prefix and suffix; the numbering in `sspc` is not set. Before, the
