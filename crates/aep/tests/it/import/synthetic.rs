@@ -139,10 +139,12 @@ fn shorten<'a>(c: &Chunk<'static>) -> Chunk<'a> {
     c.clone()
 }
 
+/// A `Utf8` string chunk holding `s`.
 fn utf8(s: &str) -> Chunk<'static> {
     Chunk::data(*b"Utf8", s.as_bytes().to_vec())
 }
 
+/// A sequence whose naming has only a suffix (no filename prefix) imports as a sequence of its files.
 #[test]
 fn a_sequence_without_a_filename_prefix_imports_its_files() {
     // `0001.png` .. `0003.png`: After Effects omits the empty prefix, so only `.png` follows the
@@ -156,6 +158,7 @@ fn a_sequence_without_a_filename_prefix_imports_its_files() {
     assert!(f.path.ends_with("0001.png"), "{}", f.path);
 }
 
+/// A single `Utf8` naming part is read as the suffix or the prefix depending on how the stored first file name matches it.
 #[test]
 fn a_single_naming_part_is_placed_by_the_stored_first_file_name() {
     // `0001_v2.png` ..: the one `Utf8` is the suffix, as the first file name (`opti`) ends with it.
@@ -176,6 +179,7 @@ fn a_single_naming_part_is_placed_by_the_stored_first_file_name() {
     reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
 }
 
+/// A file list containing a name with a separator, drive colon, dot directory or control character is refused and reported.
 #[test]
 fn a_file_list_with_a_name_that_is_not_a_plain_file_name_is_reported() {
     // The listed names are joined to the folder: a separator, a drive colon or a dot directory
@@ -188,6 +192,7 @@ fn a_file_list_with_a_name_that_is_not_a_plain_file_name_is_reported() {
     }
 }
 
+/// A file list with a missing or too short count chunk is refused and reported.
 #[test]
 fn a_file_list_without_a_readable_count_is_reported() {
     // No `StVS`, or one too short for its `u32`: the list is not read rather than taken whole.
@@ -199,6 +204,7 @@ fn a_file_list_without_a_readable_count_is_reported() {
     }
 }
 
+/// A force-alphabetical sequence imports its stored file list in the stored order.
 #[test]
 fn a_sequence_imported_with_force_alphabetical_order_imports_its_file_list() {
     // Force alphabetical order: `LIST StVc` with `StVS` (the count, little-endian) and one `Utf8`
@@ -220,6 +226,7 @@ fn a_sequence_imported_with_force_alphabetical_order_imports_its_file_list() {
     assert_eq!(file_names(&the_footage(&p)), ["x.png", "y.png"]);
 }
 
+/// A sequence with no naming or an empty file list is reported and linked to its folder.
 #[test]
 fn a_sequence_whose_naming_cannot_be_read_is_reported() {
     // No naming at all after the alias. Before, the item silently linked its folder.

@@ -206,6 +206,8 @@ fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: 
     comp
 }
 
+/// Adds one footage item to the project under the given parent.
+/// Unreadable footage is recorded as a loss, solids and null placeholders are handled separately, and file and sequence footage is linked to its files.
 fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_>, name: String, label: Label, parent: ItemId, null_only: &HashSet<u32>) {
     let Some(f) = item.footage() else {
         cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': data unreadable, not imported"));
