@@ -99,7 +99,10 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
     let shown = |t: Tick| t >= layer.in_point && t < layer.out_point;
     let stretched_regions = (layer.stretch - 100.0).abs() > 1e-9 && nc.markers.iter().any(|m| m.protected);
     if layer.props.get("timeRemap").is_none() && !stretched_regions {
-        return nc.markers.iter().enumerate().map(|(i, m)| (layer.comp_time(m.time), i, m)).filter(|(t, _, _)| shown(*t)).collect();
+        // A reversed layer shows nested frame [m, m + fd) from the comp time where its layer time
+        // is the end of that frame (`EvalCtx::nested_time`).
+        let end = if effectcraft_render::EvalCtx::plays_backwards(layer) { nc.frame_duration() } else { Tick::ZERO };
+        return nc.markers.iter().enumerate().map(|(i, m)| (layer.comp_time(m.time + end), i, m)).filter(|(t, _, _)| shown(*t)).collect();
     }
     // The layer's source time at every frame of its range; each marker at the first frame that
     // reaches it (within rounding: a thousandth of a nested frame).

@@ -62,6 +62,8 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ecproj)"))?.to_string();
     let (mut sub, saved_by) = read_project(s, &path)?;
     crate::upgrade_effects(&mut sub);
+    // Layers reversed by Time-Reverse Layer before #3245 were one comp frame early.
+    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut sub, saved_by.as_deref());
     let file = std::path::Path::new(&path);
     let missing = resolve_footage(s, &mut sub, &path);
     s.stored_paths.add(&sub, Some(&path));
@@ -98,6 +100,13 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let mut warnings = vec![];
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         warnings.push(format!("saved by EffectCraft {v}, newer than this version ({})", effectcraft_project::APP_VERSION));
+    }
+    if !reversed_moved.is_empty() {
+        warnings
+            .push(format!("time-reversed layers from an earlier EffectCraft now start one frame later, as in After Effects: {}", reversed_moved.join(", ")));
+    }
+    if !reversed_unsure.is_empty() {
+        warnings.push(format!("time-reversed layers may be one frame early (reversed in an earlier EffectCraft): {}", reversed_unsure.join(", ")));
     }
     if !missing.is_empty() {
         warnings.push(format!("{} footage file{} missing", missing.len(), if missing.len() == 1 { " is" } else { "s are" }));

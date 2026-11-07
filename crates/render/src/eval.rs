@@ -120,7 +120,7 @@ impl<'a> EvalCtx<'a> {
         }
     }
     /// Source time of a layer at the context time: Time Remap's value when enabled, else the
-    /// (stretch-aware) layer time.
+    /// (stretch-aware) layer time, one tick earlier on a time-reversed layer.
     pub fn source_time(&self, layer: &Layer) -> Tick {
         if let Some(tr) = layer.props.get("timeRemap") {
             return Tick::from_seconds_f64(self.value(layer, tr).as_f64());
@@ -134,16 +134,32 @@ impl<'a> EvalCtx<'a> {
         {
             return t;
         }
-        layer.layer_time(self.time)
+        let lt = layer.layer_time(self.time);
+        // A time-reversed layer plays its source backwards: comp frame [t, t + fd) covers the
+        // source just before `layer_time(t)`, so it shows the frame that ends there (the In
+        // point of a reversed layer laid out as After Effects does, at layer time D, shows the
+        // last frame [D - fd, D); its last frame shows frame 0). One tick earlier selects it
+        // under the floor of frame lookup, the mirror of a forward layer's frame start. The
+        // reversed audio read (#3239) takes the sample just before the layer time the same way.
+        if layer.stretch < 0.0 { lt - Tick(1) } else { lt }
+    }
+
+    /// Whether `layer` plays its source backwards without Time Remapping, so that
+    /// [`Self::source_time`] is the instant just before its layer time.
+    pub fn plays_backwards(layer: &Layer) -> bool {
+        layer.stretch < 0.0 && layer.props.get("timeRemap").is_none()
     }
     /// The time a precomp layer's nested comp is shown at: [`Self::source_time`], floored to
     /// the nested comp's own frames when it preserves its frame rate (Composition Settings ▸
-    /// Preserve frame rate when nested or in render queue).
+    /// Preserve frame rate when nested or in render queue) or plays backwards: a reversed
+    /// precomp shows its own frames, the frame ending at the layer time first (its last frame at
+    /// the In point), so keys, text, shapes and footage inside it stay in step. (Not floored, its
+    /// content would be evaluated a tick before the layer time, one frame later than its footage.)
     pub fn nested_time(&self, layer: &Layer) -> Tick {
         let t = self.source_time(layer);
         match layer.source {
             LayerSource::Comp { item } => match self.project.comp(item) {
-                Some(nc) if nc.preserve_frame_rate => nc.frame_rate.tick_of(crate::frame_position(t, nc.frame_rate).0),
+                Some(nc) if nc.preserve_frame_rate || Self::plays_backwards(layer) => nc.frame_rate.tick_of(crate::frame_position(t, nc.frame_rate).0),
                 _ => t,
             },
             _ => t,

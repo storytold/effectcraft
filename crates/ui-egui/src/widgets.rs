@@ -61,6 +61,16 @@ pub struct HotSpec<'a> {
     pub suffix: &'a str,
 }
 
+/// `value` with `decimals` places, rounded; a value that rounds to zero reads 0, never -0 (a
+/// Time Remap key a tick before 0 s, #3245).
+pub fn fixed(value: f64, decimals: usize) -> String {
+    let text = format!("{value:.decimals$}");
+    match text.strip_prefix('-') {
+        Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
+        _ => text,
+    }
+}
+
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
 /// Returns (response, Some(new value) when changed, drag finished).
@@ -69,9 +79,9 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
     let editing_id = id.with("editing");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     if tab_stop(ui, id) && editing.is_none() {
-        editing = Some(format!("{value:.decimals$}"));
+        editing = Some(fixed(value, decimals));
     }
-    let text = format!("{value:.decimals$}{suffix}");
+    let text = format!("{}{suffix}", fixed(value, decimals));
     let galley = ui.painter().layout_no_wrap(text, Tokens::ui(12.0), t.hot_text);
     let rect = Rect::from_min_size(rect_min, galley.size() + vec2(4.0, 4.0));
     if let Some(mut buf) = editing {
@@ -1108,6 +1118,16 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hot_numbers_round_to_zero_without_a_sign() {
+        // A Time Remap key a tick before 0 s (a reversed layer, #3245) reads 0.0, not -0.0.
+        assert_eq!(fixed(-1.0 / 254_016_000_000.0, 1), "0.0");
+        assert_eq!(fixed(-0.04, 1), "0.0");
+        assert_eq!(fixed(-0.05, 1), "-0.1");
+        assert_eq!(fixed(-2.6, 0), "-3");
+        assert_eq!(fixed(1.25, 2), "1.25");
+    }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
     fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {

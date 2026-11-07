@@ -37,10 +37,17 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
         for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let old = l.stretch;
             if reverse {
-                // Keep the in/out points; play the visible span backwards.
-                let last = l.layer_time(l.out_point - fd);
+                // Keep the in/out points and play the span backwards, mirrored exactly: the start
+                // moves to `in + out - start`, so the In point shows the layer time the Out point
+                // showed and the Out point the In point's (`layer_time(in) = D`, `layer_time(out)
+                // = 0` for an untrimmed layer of duration D), at any stretch. This is how After
+                // Effects lays a reversed layer out (the start at the later end, as an imported
+                // .aep has it); a reversed layer shows the source just before its layer time
+                // (`EvalCtx::source_time`), so the In point shows the last frame. Integer ticks:
+                // reversing twice restores the start exactly. Keys stay in layer time, so they
+                // are mirrored with the span.
                 l.stretch = -old;
-                l.start_time = l.in_point - Tick((last.0 as f64 * l.stretch / 100.0).round() as i64);
+                l.start_time = Tick(l.in_point.0.saturating_add(l.out_point.0).saturating_sub(l.start_time.0));
                 continue;
             }
             let span = (l.out_point - l.in_point).seconds();
@@ -82,6 +89,49 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// The last EffectCraft version whose Time-Reverse Layer put a reversed layer one comp frame
+/// early (its In point at layer time D - 1 frame instead of D, #3245). Projects saved by it or an
+/// earlier version, or saying no version, are checked when they open
+/// ([`repair_old_time_reverse`]).
+pub(crate) const OLD_TIME_REVERSE_UNTIL: &str = "0.21.0";
+
+/// Reversed layers a project file saved before #3245 has in the old Time-Reverse Layer layout,
+/// moved to After Effects' layout: the layers with the unambiguous signature (reversed, no Time
+/// Remap, footage or a precomp, the Out point exactly one comp frame below layer time 0, which is
+/// what the old command made of a layer starting at its source's start) start one comp frame
+/// later. Returns (the layers moved, the other reversed layers left as they are because they may
+/// be either layout), each as "Comp ▸ Layer". Files from a version after
+/// [`OLD_TIME_REVERSE_UNTIL`] are left alone.
+pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project, saved_by: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let (mut moved, mut unsure) = (vec![], vec![]);
+    if saved_by.is_some_and(|v| effectcraft_project::is_newer_version(v, OLD_TIME_REVERSE_UNTIL)) {
+        return (moved, unsure);
+    }
+    let reversed = |l: &Layer| l.stretch < 0.0 && l.stretch.is_finite() && l.props.get("timeRemap").is_none() && remappable(l);
+    let cids: Vec<(effectcraft_project::ItemId, String)> = project
+        .comps()
+        .filter(|(_, c)| c.layers.iter().any(reversed))
+        .map(|(id, _)| (*id, project.item(*id).map_or_else(String::new, |i| i.name.clone())))
+        .collect();
+    for (cid, comp_name) in cids {
+        let Some(comp) = project.comp_mut(cid) else { continue };
+        let fd = comp.frame_duration();
+        for l in comp.layers.iter_mut_where(reversed) {
+            // One comp frame in layer time.
+            let frame = fd.0 as f64 * 100.0 / l.stretch.abs();
+            let out = l.layer_time(l.out_point).0 as f64;
+            let name = format!("{comp_name} ▸ {}", l.name);
+            if (out + frame).abs() <= 2.0 {
+                l.start_time += fd;
+                moved.push(name);
+            } else if out != 0.0 {
+                unsure.push(name);
+            }
+        }
+    }
+    (moved, unsure)
+}
+
 fn remap_prop(ids: &mut Ids) -> Property {
     let mut p = ids.prop("timeRemap", "Time Remap", KV::Scalar(0.0)).with_ui(ParamUi::Number);
     p.ui = ParamUi::Number;
@@ -96,7 +146,6 @@ fn source_secs(l: &Layer, t: Tick) -> f64 {
 fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let want = b_p(p, "value");
-    let fd = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_duration();
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     if !comp.layers.iter().filter(|l| ids.contains(&l.id)).any(remappable) {
         return Err(bad("layer.enableTimeRemap", "time remapping needs a footage or composition layer"));
@@ -126,9 +175,12 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
                 pr.value = KV::Scalar(source_secs(l, l.in_point));
                 pr.keys = vec![Keyframe::new(a, KV::Scalar(a.seconds())), Keyframe::new(b, KV::Scalar(b.seconds()))];
                 if lin > lout {
-                    // Reversed layers keep showing what they showed.
-                    pr.keys[0].value = KV::Scalar(source_secs(l, l.out_point - fd));
-                    pr.keys[1].value = KV::Scalar(source_secs(l, l.in_point));
+                    // Reversed layers keep showing what they showed: the source just before the
+                    // layer time (`EvalCtx::source_time`), which a remap value names directly.
+                    let before = |t: Tick| KV::Scalar((t - Tick(1)).seconds());
+                    pr.value = before(b);
+                    pr.keys[0].value = before(a);
+                    pr.keys[1].value = before(b);
                 }
                 l.props.children.insert(0, Node::Prop(pr));
             } else if !target && has {

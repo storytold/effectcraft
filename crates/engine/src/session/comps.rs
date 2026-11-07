@@ -150,21 +150,26 @@ impl Session {
                 found.push((cid, ct));
             }
             let Some(c) = self.project.comp(cid) else { continue };
-            // Down: the comps this one nests.
+            // Down: the comps this one nests, at the time each layer shows them (its timing, Time
+            // Remap, a reversed layer's frame).
+            let at = effectcraft_render::EvalCtx { expr: self.expr.as_deref(), ..effectcraft_render::EvalCtx::new(&self.project, cid, c, ct) };
             for l in &c.layers {
                 if let effectcraft_project::LayerSource::Comp { item } = &l.source
                     && seen.insert(*item)
                 {
-                    todo.push((*item, l.layer_time(ct)));
+                    todo.push((*item, at.nested_time(l)));
                 }
             }
-            // Up: the comps nesting this one.
+            // Up: the comps nesting this one. A reversed layer shows nested frame [ct, ct + fd)
+            // from the comp time where its layer time is the end of that frame.
+            let fd = c.frame_duration();
             for iid in self.project.items.keys() {
                 if let Some(pc) = self.project.comp(*iid)
                     && let Some(l) = pc.layers.iter().find(|l| matches!(&l.source, effectcraft_project::LayerSource::Comp { item } if *item == cid))
                     && seen.insert(*iid)
                 {
-                    todo.push((*iid, l.comp_time(ct)));
+                    let lt = if effectcraft_render::EvalCtx::plays_backwards(l) { ct + fd } else { ct };
+                    todo.push((*iid, l.comp_time(lt)));
                 }
             }
         }
