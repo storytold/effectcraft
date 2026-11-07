@@ -143,6 +143,7 @@ struct Vw<'a> {
     puppet_layers: Vec<(&'a Layer, super::puppet_tool::Overlay)>,
 }
 
+/// Draws the viewer panel in `rect` for the active comp and handles its input.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();

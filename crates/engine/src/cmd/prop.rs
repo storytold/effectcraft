@@ -1380,6 +1380,8 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     convert_one_expr(s, cid, lid, uid)
 }
 
+/// Replaces the expression on one property with keyframes sampled from its evaluated values.
+/// Returns the number of properties converted.
 fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();

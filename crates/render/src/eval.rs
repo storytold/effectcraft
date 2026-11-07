@@ -50,6 +50,7 @@ pub struct EvalCtx<'a> {
 }
 
 impl<'a> EvalCtx<'a> {
+    /// A context for `comp` at `time` with no expressions, footage, overrides or read log.
     pub fn new(project: &'a Project, comp_id: ItemId, comp: &'a Comp, time: Tick) -> EvalCtx<'a> {
         EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[], reads: None }
     }

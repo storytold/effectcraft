@@ -208,6 +208,7 @@ pub struct VMetrics {
 }
 
 impl Face {
+    /// The font file bytes, loaded once on first use, or `None` when they cannot be read.
     fn bytes(&self) -> Option<&[u8]> {
         self.bytes
             .get_or_init(|| match &self.info.data {
@@ -356,6 +357,7 @@ fn db() -> &'static RwLock<Db> {
     })
 }
 
+/// Adds a face to the database and returns its id.
 fn push(db: &mut Db, info: FaceInfo) -> FaceId {
     let id = db.faces.len();
     db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), file_meta: OnceLock::new(), shaper: OnceLock::new() }));

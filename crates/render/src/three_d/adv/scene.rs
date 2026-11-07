@@ -477,6 +477,7 @@ fn clip_start(ctx: &EvalCtx, layer: &Layer, prop: &Property, lt: Tick) -> Tick {
     start
 }
 
+/// Adds a model layer to the Advanced 3D scene with its material options, opacity and world transform.
 fn model_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
     let lin = b.s.linear_io;
     let (opts, prim_mat) = model_options(ctx, layer, lin);
@@ -651,6 +652,7 @@ pub fn extruded_meshes(ctx: &EvalCtx, layer: &Layer, p: &model::extrude::Extrude
     out
 }
 
+/// Adds an extruded layer to the Advanced 3D scene with its card material, opacity and world transform.
 fn extruded_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, p: &model::extrude::ExtrudeParams, b: &mut Builder) {
     let base = card_material(ctx, layer);
     let opacity = (ctx.opacity(layer) as f32 * r.opacity_mul()).clamp(0.0, 1.0);
@@ -694,6 +696,7 @@ fn card(b: &mut Builder, buf: &Buf, world: Mat4, mut mat: Material) {
     b.emit(&p, m, &|_| world);
 }
 
+/// Adds a flat card layer to the Advanced 3D scene with its material, opacity and world transform.
 fn card_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
     let mut mat = card_material(ctx, layer);
     mat.opacity = (ctx.opacity(layer) as f32 * r.opacity_mul()).clamp(0.0, 1.0);

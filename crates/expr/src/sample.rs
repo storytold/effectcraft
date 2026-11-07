@@ -46,6 +46,8 @@ fn fingerprint(layer: &Layer) -> u64 {
     h.finish()
 }
 
+/// Renders `layer` of `comp` at time `t` for an expression sample, before or after effects as `post` says.
+/// Returns `None` once the nesting depth limit is reached.
 fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Option<Sampled> {
     let depth = DEPTH.with(|d| *d.borrow());
     if depth >= MAX_DEPTH {

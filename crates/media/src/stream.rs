@@ -26,6 +26,7 @@ pub(crate) struct FileReader {
 
 #[cfg(any(unix, windows))]
 impl FileReader {
+    /// Opens `path` for reading and records its length and modification time.
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
         #[cfg(test)]
         crate::count_open(path);
@@ -87,6 +88,7 @@ pub(crate) fn open_source(path: &Path) -> Option<(Result<SharedSource>, FileStam
     Some((opened.map_err(Into::into), stamp))
 }
 
+/// Without a native file system there is no in-place source: always `None`.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn open_source(_path: &Path) -> Option<(Result<SharedSource>, FileStamp)> {
     None

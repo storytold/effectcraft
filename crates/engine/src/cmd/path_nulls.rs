@@ -73,6 +73,8 @@ struct PathInfo {
     span: (f64, f64),
 }
 
+/// Reads a mask or shape path at the current time and returns its comp-space vertices, value, expression reference and layer name.
+/// Errors when the property is missing, is not a path or has no vertices.
 fn info(s: &Session, cid: ItemId, lid: LayerId, uid: Uid, cmd: &str) -> Result<PathInfo> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;

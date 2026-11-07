@@ -300,6 +300,7 @@ struct Drops {
 }
 
 impl Drops {
+    /// Notes that the given paths were dropped, bumping the generation and tracking them for later checks.
     fn record(&mut self, paths: &[Arc<str>]) {
         self.generation = self.generation.saturating_add(1);
         if self.last.len().saturating_add(paths.len()) > MAX_DROPPED_PATHS {
@@ -320,6 +321,7 @@ impl Drops {
 }
 
 impl Queue {
+    /// Takes the next queued job, frames first, and releases the bytes it held.
     #[cfg(not(target_arch = "wasm32"))]
     fn pop(&mut self) -> Option<Job> {
         if let Some(j) = self.frames.pop_front() {
@@ -1081,6 +1083,7 @@ fn with_files(files: &EntryFiles, pixels: Vec<u8>) -> Vec<u8> {
     out
 }
 
+/// The writer thread: evicts to the limit at open, then drains the job queue until the cache is dropped.
 #[cfg(not(target_arch = "wasm32"))]
 fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     let (m, cv) = &*q;
@@ -1208,12 +1211,15 @@ impl effectcraft_effects::roto::SegStore for DiskCache {
 }
 
 impl crate::cache::LayerStore for DiskCache {
+    /// The layer for `key` from the disk cache, or `None` when it is missing or stale.
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
         DiskCache::get_layer(self, key, virtual_id).map(|(b, f)| (Arc::new(b), f))
     }
+    /// Queues a layer write on the disk cache.
     fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
         DiskCache::put_layer(self, key, buf, files, since);
     }
+    /// The current drop generation of the disk cache.
     fn drop_generation(&self) -> u64 {
         DiskCache::drop_generation(self)
     }
@@ -1325,6 +1331,7 @@ fn encode_layer(b: &Buf) -> Vec<u8> {
     out
 }
 
+/// Decodes a stored layer payload into a buffer, or `None` when it is too short or damaged.
 fn decode_layer(p: &[u8]) -> Option<Buf> {
     if p.len() < 32 {
         return None;
@@ -1357,6 +1364,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 /// Bump when rendering changes in a way that makes old disk entries wrong.
 const RENDER_VERSION: &str = "effectcraft-render-6";
 
+/// Feeds the `Debug` form of `v` into the hash, followed by a separator byte.
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
     h.write(&[0xff]);
@@ -1401,6 +1409,7 @@ pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraf
     comp_content_key_for_renderer(project, comp, RENDER_VERSION)
 }
 
+/// The content key of `comp` for one renderer: its settings, the comps and footage it uses, and the renderer name.
 fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, renderer: &str) -> u128 {
     use effectcraft_project::ItemKind;
     let mut h = Hash128::default();

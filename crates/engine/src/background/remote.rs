@@ -289,6 +289,7 @@ struct Pending {
 pub const MAX_PASSES: u32 = 24;
 
 impl FrameServer {
+    /// A frame server over `footage` and the optional expression host, with an empty layer cache.
     pub fn new(footage: Arc<dyn FootageSource>, expr: Option<Arc<dyn ExprHost>>) -> FrameServer {
         FrameServer {
             footage,

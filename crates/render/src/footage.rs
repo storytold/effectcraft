@@ -204,6 +204,7 @@ impl FootageSource for CancellableFootage<'_> {
     fn called_off(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.inner.called_off()
     }
+    /// Runs `f` with the inner source, collecting the files it reads into `reads`.
     fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
         self.inner.recording(reads, f)
     }
@@ -224,6 +225,7 @@ pub fn is_vector_footage(f: &Footage) -> bool {
 pub struct NoFootage;
 
 impl FootageSource for NoFootage {
+    /// Always `None`: there is no footage.
     fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
         None
     }

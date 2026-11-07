@@ -197,6 +197,8 @@ pub fn expression_reach(text: &str) -> ExprReach {
     expression_names(text).map_or(ExprReach::Anything, |(comps, footage)| ExprReach::Names { comps, footage })
 }
 
+/// The comp names and footage names an expression references by literal name.
+/// Returns `None` when it can reach anything by a computed name or cannot be tokenised.
 fn expression_names(text: &str) -> Option<(Vec<String>, Vec<String>)> {
     let toks = tokens(text)?;
     let (mut comps, mut footage) = (Vec::new(), Vec::new());

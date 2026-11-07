@@ -363,32 +363,41 @@ thread_local! {
     static REFUSED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// The number of reads this thread has refused for lying outside the allowed roots.
 fn refused_reads() -> u64 {
     REFUSED_READS.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 impl FootageSource for ConfinedFootage {
+    /// The frame from the inner source, or `None` when the footage lies outside the allowed roots.
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame(item, footage, t)).flatten()
     }
+    /// The frame scaled to `width` by `height`, or `None` when the footage lies outside the allowed roots.
     fn frame_at_size(&self, item: ItemId, footage: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
     }
+    /// The frame with an explicit size and float curve, or `None` when the footage lies outside the allowed roots.
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
+    /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
         self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
     }
+    /// The auxiliary channels of the footage frame, or `None` when the footage lies outside the allowed roots.
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
         self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
+    /// Forwards the auxiliary footage paths to the inner source.
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
     }
+    /// The 3D model for the footage, or `None` when the footage lies outside the allowed roots.
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.readable(footage).then(|| self.inner.model(item, footage)).flatten()
     }
+    /// The rasterised vector footage at `scale`, or `None` when the footage lies outside the allowed roots.
     fn vector_frame(&self, item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
     }
@@ -411,12 +420,15 @@ impl FootageSource for ConfinedFootage {
     fn set_conform_folder(&self, folder: Option<PathBuf>) {
         self.inner.set_conform_folder(folder)
     }
+    /// The inner source's cache budget.
     fn cache_budget(&self) -> Option<usize> {
         self.inner.cache_budget()
     }
+    /// Runs `f` under the inner source's cancel flag.
     fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
         self.inner.cancellable(cancel, f)
     }
+    /// Whether the inner source has been called off.
     fn called_off(&self) -> bool {
         self.inner.called_off()
     }
@@ -632,10 +644,12 @@ mod tests {
         /// Reads every file, noting it.
         struct Noting;
         impl FootageSource for Noting {
+            /// Returns a 1x1 frame and notes the footage path it was asked for.
             fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
                 NOTED.with(|n| n.borrow_mut().push(f.path.clone()));
                 Some(Arc::new(Image::new(1, 1)))
             }
+            /// Runs `f`, then reports every path noted meanwhile to `reads` as a file with a missing stamp.
             fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
                 f();
                 for p in NOTED.with(|n| std::mem::take(&mut *n.borrow_mut())) {

@@ -189,6 +189,7 @@ pub struct Store {
 }
 
 impl Default for Store {
+    /// An empty store with no mirror contents, change callback or clock.
     fn default() -> Self {
         Self { mirror: Mutex::default(), on_change: OnceLock::new(), clock: OnceLock::new() }
     }

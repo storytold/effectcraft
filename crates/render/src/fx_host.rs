@@ -95,6 +95,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(self.pixels(other, buf, false))
     }
 
+    /// The audio of footage layer `id` from `start`, or `None` when the layer is not footage.
     fn audio(&self, id: u64, start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         let LayerSource::Footage { item } = &other.source else { return None };

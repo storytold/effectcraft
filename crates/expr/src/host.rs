@@ -297,6 +297,7 @@ impl<'a> Resolver<'a> {
         }
         self.comp(c)?.layer(LayerId(l))
     }
+    /// The evaluation context for comp `c` at time `t` seconds, or `None` when the comp does not exist.
     fn ctx_at(&self, c: u64, t: f64) -> Option<EvalCtx<'a>> {
         let comp = self.comp(c)?;
         let same_comp = c == self.ctx.comp_id.0;

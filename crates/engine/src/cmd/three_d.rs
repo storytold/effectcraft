@@ -418,6 +418,7 @@ fn set_view_camera(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"view": v.id()}))
 }
 
+/// Returns the active comp's 3D view state, with the comp size, for the 3D view commands.
 fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;

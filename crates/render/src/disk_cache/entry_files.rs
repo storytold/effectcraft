@@ -63,14 +63,17 @@ impl EntryFiles {
         Some(EntryFiles(out))
     }
 
+    /// The listed files.
     pub fn files(&self) -> &[EntryFile] {
         &self.0
     }
 
+    /// The number of listed files.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether no files are listed.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -96,6 +99,7 @@ impl EntryFiles {
         self.0.iter().all(|f| file_unchanged(f, virtual_id))
     }
 
+    /// Appends the list to `out` in little-endian binary form.
     pub(super) fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
         for f in &self.0 {
@@ -153,6 +157,7 @@ impl EntryFiles {
     }
 }
 
+/// Whether the file still matches its stored stamp, by its native stamp or by its in-memory identity.
 fn file_unchanged(f: &EntryFile, virtual_id: Option<VirtualFileId<'_>>) -> bool {
     let from_memory = || virtual_id.and_then(|id| id(&f.path));
     match f.stamp {
@@ -167,20 +172,25 @@ fn file_unchanged(f: &EntryFile, virtual_id: Option<VirtualFileId<'_>>) -> bool 
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
+    /// Takes the next `n` bytes, or `None` when fewer remain.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let head = self.0.get(..n)?;
         self.0 = self.0.get(n..)?;
         Some(head)
     }
+    /// Reads one byte.
     fn u8(&mut self) -> Option<u8> {
         self.take(1)?.first().copied()
     }
+    /// Reads a little-endian `u32`.
     fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
+    /// Reads a little-endian `u64`.
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
+    /// Reads a little-endian `i128`.
     fn i128(&mut self) -> Option<i128> {
         Some(i128::from_le_bytes(self.take(16)?.try_into().ok()?))
     }
@@ -190,6 +200,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
+    /// A sample list of native, missing and virtual files for the tests.
     fn files() -> ReadFiles {
         [
             ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(9) }),

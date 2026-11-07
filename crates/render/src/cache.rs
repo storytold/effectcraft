@@ -117,6 +117,7 @@ impl LayerCache {
         }
     }
 
+    /// The attached disk cache, if any.
     pub fn disk(&self) -> Option<Arc<crate::disk_cache::DiskCache>> {
         self.disk.lock().ok()?.clone()
     }
@@ -137,6 +138,7 @@ impl LayerCache {
         }
     }
 
+    /// The attached virtual-file identity lookup, if any.
     fn virtual_id(&self) -> Option<SharedVirtualFileId> {
         self.virtual_id.lock().ok()?.clone()
     }
@@ -329,6 +331,7 @@ struct Fetched {
     used: u64,
 }
 
+/// The memory a buffer's pixels take, in bytes.
 fn buf_bytes(b: &Buf) -> usize {
     b.img.data.len().saturating_mul(std::mem::size_of::<effectcraft_raster::Px>())
 }
@@ -346,12 +349,14 @@ struct Prefetched {
 }
 
 impl Prefetched {
+    /// Records a missed key for prefetching, up to a fixed bound.
     fn note_miss(&mut self, key: u128) {
         if !self.misses.contains(&key) && self.misses.len() < 1024 {
             self.misses.push(key);
         }
     }
 
+    /// Drops the prefetched entry for `key` and frees its bytes.
     fn remove(&mut self, key: u128) {
         if let Some(f) = self.ready.remove(&key) {
             self.bytes = self.bytes.saturating_sub(buf_bytes(&f.buf));
@@ -425,6 +430,7 @@ impl PrefetchStore {
 }
 
 impl LayerStore for PrefetchStore {
+    /// The prefetched layer for `key` with its read files, or `None` when it is not ready.
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
         let found = {
             let mut s = self.st.lock().ok()?;
@@ -459,6 +465,7 @@ impl LayerStore for PrefetchStore {
         Some((buf, files.to_read_files()))
     }
 
+    /// Queues the layer for writing to the persistent store the first time `key` is seen.
     fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, _since: u64) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
@@ -810,6 +817,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
 /// Set Matte…)? Those layers are drawn by the reading layer's renderer, so the switches it
 /// passes down belong in the key (`Renderer::nested_look`).
 pub(crate) fn reads_layers(ctx: &EvalCtx, layer: &Layer) -> bool {
+    /// Whether any enabled layer-valued property of `layer` points at another layer.
     fn reads(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, depth: usize) -> bool {
         depth < 32
             && g.children.iter().any(|n| match n {

@@ -59,6 +59,7 @@ pub struct ReadFile {
 }
 
 impl ReadFile {
+    /// A file read with the given path and stamp.
     pub fn new(path: impl Into<Arc<str>>, stamp: FileStamp) -> ReadFile {
         ReadFile { path: path.into(), stamp }
     }
@@ -128,16 +129,19 @@ impl ReadFiles {
         self.files.get(i).map(|f| f.stamp)
     }
 
+    /// The number of files in the list.
     pub fn len(&self) -> usize {
         self.files.len()
     }
 
+    /// Whether the list holds no files.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 }
 
 impl FromIterator<ReadFile> for ReadFiles {
+    /// Collects files into a list, adding each in turn.
     fn from_iter<I: IntoIterator<Item = ReadFile>>(iter: I) -> Self {
         let mut out = ReadFiles::default();
         for f in iter {
@@ -155,10 +159,12 @@ pub struct ReadLog {
 }
 
 impl ReadLog {
+    /// An empty read log.
     pub fn new() -> ReadLog {
         ReadLog::default()
     }
 
+    /// Locks the file list, recovering from a poisoned lock.
     fn lock(&self) -> std::sync::MutexGuard<'_, ReadFiles> {
         self.files.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -196,6 +202,7 @@ impl ReadLog {
 mod tests {
     use super::*;
 
+    /// A native file with the given length for the tests.
     fn file(path: &str, len: u64) -> ReadFile {
         ReadFile::new(path, FileStamp::Native { len, modified: Some(7) })
     }

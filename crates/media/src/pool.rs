@@ -110,6 +110,7 @@ struct Lru {
 }
 
 impl Lru {
+    /// The cached image and its read files for `k`, marking the entry as most recently used.
     fn get(&mut self, k: &Key) -> Option<(Arc<Image>, Arc<ReadFiles>)> {
         let e = self.map.get_mut(k)?;
         self.order.remove(&e.stamp);
@@ -118,6 +119,7 @@ impl Lru {
         self.order.insert(e.stamp, k.clone());
         Some((e.img.clone(), e.files.clone()))
     }
+    /// Stores an image with its read files under `k` and evicts the least recently used entries until the cache fits `budget` bytes.
     fn insert(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize) {
         let bytes = img.data.len() * std::mem::size_of::<Px>() + 64;
         self.clock += 1;
@@ -905,6 +907,8 @@ impl Inner {
         }
     }
 
+    /// Decodes the still image at `loc` and applies the footage alpha and float handling.
+    /// A placeholder path decodes to colour bars.
     fn decode_still(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
         let op = AlphaOp::of(footage, loc.float);
         let path = &loc.key.path;

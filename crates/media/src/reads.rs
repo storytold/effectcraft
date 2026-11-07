@@ -64,6 +64,8 @@ enum Out<'a> {
 }
 
 impl Scope<'_> {
+    /// Starts collecting the files read on this thread into `out`.
+    /// At the nesting limit the scope stays closed and reports an incomplete list.
     fn open(out: Out<'_>) -> Scope<'_> {
         let opened = SCOPES
             .try_with(|s| match s.try_borrow_mut() {
@@ -79,6 +81,7 @@ impl Scope<'_> {
 }
 
 impl Drop for Scope<'_> {
+    /// Ends the scope and hands the collected files to its output, marked incomplete when the scope could not be opened.
     fn drop(&mut self) {
         let files = if self.opened { SCOPES.try_with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.pop())).ok().flatten() } else { None };
         // A scope that could not open saw nothing: what it made can't name its files.

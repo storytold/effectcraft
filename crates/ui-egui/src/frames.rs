@@ -180,6 +180,7 @@ struct Cached {
 struct DiskSince(std::sync::Weak<DiskCache>, u64);
 
 impl DiskSince {
+    /// A marker for the drop generation of `dc` at the time of a render.
     fn of(dc: &Arc<DiskCache>, generation: u64) -> DiskSince {
         DiskSince(Arc::downgrade(dc), generation)
     }
@@ -294,6 +295,7 @@ impl Cache {
             self.gpu_bytes = self.gpu_bytes.saturating_sub(img.bytes());
         }
     }
+    /// Removes the entry for `k` and releases its image.
     fn remove(&mut self, k: &FrameKey) {
         if let Some(i) = self.map.remove(k) {
             self.forget(&i.img);
@@ -371,6 +373,7 @@ struct ContentKeyJobs {
     pending: VecDeque<(Arc<Project>, u64, u64)>,
 }
 
+/// The content key of `comp` at `revision`, memoised per revision.
 fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) -> u128 {
     if let Some(k) = keys.lock().ok().and_then(|m| m.get(&(revision, comp)).copied()) {
         return k;
@@ -1183,6 +1186,7 @@ impl Frames {
         }
     }
 
+    /// Queues a background hash of `comp` at `revision`, coalescing rapid edits so only a bounded number of snapshots are kept.
     #[cfg(not(target_arch = "wasm32"))]
     fn request_content_key(&self, project: Arc<Project>, revision: u64, comp: u64) {
         let mut jobs = self.content_key_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1235,6 +1239,7 @@ impl Frames {
         self.cache.lock().map(|c| c.budget).unwrap_or(0)
     }
 
+    /// Drops every cached frame and purges the remote server, if there is one.
     pub fn clear(&self) {
         if let Some(r) = &self.remote {
             r.purge();
@@ -1428,6 +1433,7 @@ impl Frames {
         }
     }
 
+    /// A render worker sharing this cache's queue, cache and in-flight set.
     fn worker(&self) -> Worker {
         Worker {
             queue: self.queue.clone(),
@@ -1701,6 +1707,7 @@ impl Worker {
         self.finish_key(job.key, job.urgent, img, files, since, t0);
     }
 
+    /// Stores a finished frame in the cache with its read files, records the render time for urgent jobs, then releases the job.
     fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, t0: web_time::Instant) {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1769,12 +1776,14 @@ impl Worker {
         }
     }
 
+    /// Tells the cache that a GPU render succeeded.
     fn gpu_succeeded(&self) {
         if let Ok(mut c) = self.cache.lock() {
             c.gpu_succeeded();
         }
     }
 
+    /// Whether GPU rendering is available and has not been retired.
     fn gpu_ready(&self) -> bool {
         !self.gpu_retired.load(Ordering::Acquire) && self.cache.lock().is_ok_and(|c| c.gpu_ready())
     }

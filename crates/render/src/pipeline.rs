@@ -102,6 +102,7 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
 }
 
 impl<'a> Renderer<'a> {
+    /// A renderer over `project` and `footage` with the given options.
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
         Renderer {
             project,
@@ -446,6 +447,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// The evaluation context of `comp` at `t`, carrying this renderer's expressions, footage and read log.
     pub(crate) fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
         EvalCtx {
             project: self.project,
@@ -936,6 +938,8 @@ impl<'a> Renderer<'a> {
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
+    /// The footage frame at source time `t` after frame blending: the average of the source frames one comp frame spans, else a blend of the two neighbouring frames, else the plain frame.
+    /// Log scans are converted first, and blended frames are cached.
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
