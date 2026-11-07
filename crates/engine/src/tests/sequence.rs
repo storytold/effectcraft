@@ -1,6 +1,6 @@
 //! Image sequences (#297): File ▸ Import with the "<format> Sequence" option, picked ranges,
 //! folders, Force Alphabetical Order, the import frame rate, Replace Footage, missing frames
-//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Timecode.
+//! (they hold the previous frame) and Interpret Footage ▸ Start Timecode.
 
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
 use effectcraft_time::{FrameRate, Tick};
@@ -62,12 +62,13 @@ fn one_picked_numbered_file_imports_its_run_as_one_sequence() {
     assert_eq!(name, "shot_[0001-0005].png");
     assert_eq!((f.kind, f.sequence.len(), f.alphabetical), (FootageKind::Sequence, 4, false));
     assert_eq!(f.path, at(&dir, "shot_0001.png"));
-    // Frames 1–5 at Settings ▸ Import ▸ Sequence Footage (30 fps); frame 3 is a placeholder.
+    // Frames 1–5 at Settings ▸ Import ▸ Sequence Footage (30 fps); frame 3 holds frame 2.
     assert_eq!(f.duration, FrameRate::FPS_30.tick_of(5));
     assert_eq!(f.sequence_file(2), None);
     // Settings ▸ Import ▸ Report Missing Frames.
     let w = r["warnings"][0].as_str().unwrap();
     assert!(w.contains("1 missing frame (3)"), "{w}");
+    assert!(w.contains("previous frame is held") && !w.contains("placeholder"), "{w}");
 }
 
 /// Picking every frame of a sequence used to make one item per frame (each a whole sequence on

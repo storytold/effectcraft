@@ -261,6 +261,30 @@ build real projects through these interfaces; they are worked examples of everyt
   `layer.centerAnchor` skip them and fail when every target is locked ("… is locked"); Select
   All and `layer.selectNext` / `selectPrevious` step over them. Unlock with
   `layer.setSwitch {"layers": [...], "switch": "lock", "value": false}` or `layer.unlockAll`.
+* **Un-precompose**: `layer.unprecompose {layer?, force?, dryRun?}` (Layer ▸ Un-precompose) expands the
+  selected pre-comp layer into copies of its composition's layers at its place (order, keyframes,
+  effects, masks, parenting, mattes, markers kept; timing moved by the layer's Start and trimmed to
+  what it showed; Position minus Anchor Point added to the unparented ones). One undo step; the
+  nested comp stays in the project; the nested comp's frame no longer clips what its layers draw
+  outside it. Only a **locked** pre-comp layer is refused (with or without `force`), changing
+  nothing. Everything that would change the picture or drop something is a warning: the pre-comp
+  layer has a parent or matte, effects, masks, layer styles, a non-default Scale / Rotation /
+  Opacity, an animated transform, time remap or stretch, a blending mode, Video or Audio off, Solo
+  or Guide on, the 3D / collapse / adjustment switch or Preserve Transparency, or is used by another
+  layer (parent, matte or a layer property), or an expression of another layer names it (by name in
+  quotes or as `layer(<index>)`; listed per property, the expression is left as written and will
+  no longer find it); or the nested comp holds a camera, light, adjustment,
+  3D, collapsing or soloed layer, or a layer with a blending mode or Preserve Transparency, preserves
+  a frame rate other than the comp's, has a motion-blur shutter other than the comp's (with motion
+  blur layers), or has an unparented layer with a Position expression while the pre-comp layer's
+  Position differs from its Anchor Point (the move is added to stored values only). Without
+  `force` such a call is an error listing every reason and nothing changes; `dryRun: true` returns
+  `{dryRun, warnings}` without changing anything. With `force: true` it unpacks anyway and returns
+  `{layers, warnings}`: what the pre-comp layer itself carried (effects, masks, styles, transform
+  beyond Position, time remap, blending mode, switches, its parent and matte) is dropped, and other
+  layers' parent, track matte and layer-property links to it are removed. The menu shows the
+  reasons and asks (Unpack Anyway / Cancel, `dialog.unprecompose.force` /
+  `dialog.unprecompose.cancel`); a layer without reasons unpacks without asking.
 * **Quick Set Anchor**: `layer.quickSetAnchor {point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?}`
   (Layer ▸ Transform ▸ Quick Set Anchor) moves the Anchor Point of 2D layers to that point of their
   content and shifts Position and its keys so the layers don't move, in one undo step. 3D and
@@ -302,8 +326,8 @@ build real projects through these interfaces; they are worked examples of everyt
   file's whole numbered run as one item (several picked frames: that range; a folder: each run in
   it, also without `sequence`). Without `"sequence": true` a picked or dropped numbered file imports
   as one still, as in After Effects; `"alphabetical": true`: Force Alphabetical Order, the files
-  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). Missing frames show
-  colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
+  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). A gap in the numbering holds
+  the previous frame, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
   "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
   length). See [footage.md](footage.md).
 * **Colour of footage**: `file.interpretFootage {"items":[id], "preserveRgb":true}` is Interpret
