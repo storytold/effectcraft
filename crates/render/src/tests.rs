@@ -784,6 +784,30 @@ fn effects_see_layer_masks() {
     assert!(img.get(150, 50)[3] > 0.99, "mode None mask does not cut the layer");
 }
 
+/// Masks come before effects: Grid (Blending Mode None) draws only inside a masked solid (#3121).
+#[test]
+fn grid_stays_inside_the_layer_mask() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children.push(m.into());
+    // Inverted, the grid covers nearly every pixel, so the check does not depend on where the
+    // lines fall.
+    let set = [("width", Value::Scalar(10.0)), ("border", Value::Scalar(2.0)), ("invertGrid", Value::Bool(true))];
+    add_effect(&mut p, &mut l, "ec.generate.grid", [200.0, 100.0], &set);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    for y in 0..100 {
+        for x in 100..200 {
+            assert!(img.get(x, y)[3] < 0.01, "grid outside the mask at ({x}, {y}): {:?}", img.get(x, y));
+        }
+    }
+    assert!(img.get(15, 15)[3] < 0.01, "grid left of and above the mask: {:?}", img.get(15, 15));
+    assert!(img.get(55, 55)[3] > 0.5, "grid inside the mask: {:?}", img.get(55, 55));
+}
+
 /// An open mask (the Pen still drawing it) leaves the layer whole; closed, it masks (#290).
 #[test]
 fn open_masks_make_no_transparency() {
