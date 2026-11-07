@@ -139,6 +139,42 @@ fn fill_parameters_use_documented_match_names() {
     assert_eq!(o.result, json!("Color|All Masks|ADBE Fill-0007"));
 }
 
+/// #3113: effects carry After Effects' match names (`ADBE Noise2`, `ADBE OFMotionBlur`); the
+/// names earlier versions emitted still add and find the effect and its parameters.
+#[test]
+fn effects_use_after_effects_match_names_and_accept_legacy_ones() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("N", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var a = fx.addProperty("ADBE Noise2"), b = fx.addProperty("ADBE Noise"), m = fx.addProperty("ADBE OFMotionBlur");
+           var p = fx.addProperty("ADBE Pixel Motion Blur");
+           [a.matchName, b.matchName, m.matchName, p.matchName, a.property("ADBE Noise2-0001").name,
+            fx.property("ADBE Noise").matchName, a.property("ADBE Noise-0001").name, fx.numProperties]"#,
+    );
+    assert_eq!(
+        o.result,
+        json!(["ADBE Noise2", "ADBE Noise2", "ADBE OFMotionBlur", "ADBE OFMotionBlur", "Amount of Noise", "ADBE Noise2", "Amount of Noise", 4])
+    );
+}
+
+/// #3113: names that changed only in case (`ADBE Ellipse` → `ADBE ELLIPSE`, `ADBE Grow Bounds` →
+/// `ADBE GROW BOUNDS`) still find the effect and its parameters.
+#[test]
+fn match_names_that_changed_case_still_find_effects_and_parameters() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("E", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var e = fx.addProperty("ADBE Ellipse"), g = fx.addProperty("ADBE Grow Bounds");
+           [e.matchName, fx.property("ADBE Ellipse").matchName, e.property("ADBE Ellipse-0001").matchName,
+            g.matchName, fx.property("ADBE Grow Bounds").matchName, g.property("ADBE Grow Bounds-0001").matchName]"#,
+    );
+    assert_eq!(o.result, json!(["ADBE ELLIPSE", "ADBE ELLIPSE", "ADBE ELLIPSE-0001", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS-0001"]));
+}
+
 #[test]
 fn stroke_parameters_use_after_effects_match_names() {
     // #1405: `ADBE Stroke-0002` is Stroke's Color in After Effects, not All Masks.
@@ -307,6 +343,59 @@ fn wiggle_paths_properties_by_match_name() {
     let (_, c) = comp_named(&s, "W");
     let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
     assert_eq!(sh.props.prop("contents/wiggle/spatialPhase").unwrap().value, KV::Scalar(45.0));
+}
+
+/// Scripts reach Offset Paths' and Zig Zag's properties by their match names.
+#[test]
+fn offset_paths_and_zig_zag_properties_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("O", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var root = sh.property("ADBE Root Vectors Group");
+        root.addProperty("ADBE Vector Filter - Offset");
+        root.addProperty("ADBE Vector Filter - Zigzag");
+        var o = root.property("ADBE Vector Filter - Offset");
+        var z = root.property("ADBE Vector Filter - Zigzag");
+        var on = ["ADBE Vector Offset Amount", "ADBE Vector Offset Line Join", "ADBE Vector Offset Miter Limit",
+                  "ADBE Vector Offset Copies", "ADBE Vector Offset Copy Offset"];
+        var zn = ["ADBE Vector Zigzag Size", "ADBE Vector Zigzag Detail", "ADBE Vector Zigzag Points"];
+        var names = [];
+        for (var i = 0; i < on.length; i++) names.push([o.property(on[i]).matchName, o.property(on[i]).name]);
+        for (var j = 0; j < zn.length; j++) names.push([z.property(zn[j]).matchName, z.property(zn[j]).name]);
+        var before = [o.property("ADBE Vector Offset Amount").value, o.property("ADBE Vector Offset Line Join").value,
+                      z.property("ADBE Vector Zigzag Points").value];
+        o.property("ADBE Vector Offset Amount").setValue(-6);
+        o.property("ADBE Vector Offset Copies").setValue(3);
+        z.property("ADBE Vector Zigzag Detail").setValue(8);
+        [names, before, o.property("ADBE Vector Offset Nope") === null, z.property("ADBE Vector Zigzag Nope") === null]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            [
+                ["ADBE Vector Offset Amount", "Amount"],
+                ["ADBE Vector Offset Line Join", "Line Join"],
+                ["ADBE Vector Offset Miter Limit", "Miter Limit"],
+                ["ADBE Vector Offset Copies", "Copies"],
+                ["ADBE Vector Offset Copy Offset", "Copy Offset"],
+                ["ADBE Vector Zigzag Size", "Size"],
+                ["ADBE Vector Zigzag Detail", "Ridges per segment"],
+                ["ADBE Vector Zigzag Points", "Points"]
+            ],
+            [10, 1, 1],
+            true,
+            true
+        ])
+    );
+    let (_, c) = comp_named(&s, "O");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/offset/amount").unwrap().value, KV::Scalar(-6.0));
+    assert_eq!(sh.props.prop("contents/offset/copies").unwrap().value, KV::Scalar(3.0));
+    assert_eq!(sh.props.prop("contents/zigzag/ridges").unwrap().value, KV::Scalar(8.0));
 }
 
 #[test]

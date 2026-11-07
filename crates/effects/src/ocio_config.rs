@@ -168,19 +168,29 @@ fn split_key(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Bracket balance of a flow fragment (outside quotes).
-fn balance(s: &str) -> i32 {
-    let (mut sq, mut dq, mut d) = (false, false, 0i32);
-    for c in s.chars() {
-        match c {
-            '\'' if !dq => sq = !sq,
-            '"' if !sq => dq = !dq,
-            '{' | '[' if !sq && !dq => d = d.saturating_add(1),
-            '}' | ']' if !sq && !dq => d = d.saturating_sub(1),
-            _ => {}
+/// Bracket balance of a flow fragment (outside quotes), kept as lines are appended so each
+/// character is looked at once however many lines a collection spans.
+#[derive(Default)]
+struct Balance {
+    sq: bool,
+    dq: bool,
+    d: i32,
+}
+
+impl Balance {
+    /// Takes in the next piece of the fragment and returns the balance so far.
+    fn feed(&mut self, s: &str) -> i32 {
+        for c in s.chars() {
+            match c {
+                '\'' if !self.dq => self.sq = !self.sq,
+                '"' if !self.sq => self.dq = !self.dq,
+                '{' | '[' if !self.sq && !self.dq => self.d = self.d.saturating_add(1),
+                '}' | ']' if !self.sq && !self.dq => self.d = self.d.saturating_sub(1),
+                _ => {}
+            }
         }
+        self.d
     }
-    d
 }
 
 struct Flow<'a> {
@@ -223,12 +233,19 @@ impl Flow<'_> {
                             self.i += 1;
                             break;
                         }
+                        // A `]` cannot close a mapping: the text is malformed, so the rest is
+                        // skipped (as past the depth limit) instead of read again and again.
+                        Some(b']') => {
+                            self.i = self.s.len();
+                            break;
+                        }
                         Some(b',') => {
                             self.i += 1;
                             continue;
                         }
                         _ => {}
                     }
+                    let start = self.i;
                     let k = self.scalar(true);
                     self.ws();
                     if self.peek() == Some(b':') {
@@ -236,6 +253,11 @@ impl Flow<'_> {
                     }
                     let v = self.nested();
                     m.push((unquote(&k), v));
+                    // Every entry consumes text; one that did not would repeat forever.
+                    if self.i == start {
+                        self.i = self.s.len();
+                        break;
+                    }
                 }
                 Yaml::Map(m)
             }
@@ -250,11 +272,23 @@ impl Flow<'_> {
                             self.i += 1;
                             break;
                         }
+                        // A `}` cannot close a sequence: skip the malformed rest (see above).
+                        Some(b'}') => {
+                            self.i = self.s.len();
+                            break;
+                        }
                         Some(b',') => {
                             self.i += 1;
                             continue;
                         }
-                        _ => v.push(self.nested()),
+                        _ => {
+                            let start = self.i;
+                            v.push(self.nested());
+                            if self.i == start {
+                                self.i = self.s.len();
+                                break;
+                            }
+                        }
                     }
                 }
                 Yaml::Seq(v)
@@ -364,11 +398,14 @@ impl Lines {
         if rest.starts_with('{') || rest.starts_with('[') || (rest.starts_with('!') && (rest.contains('{') || rest.contains('['))) {
             // Flow collections may continue on the next lines.
             let mut text = rest.to_string();
-            while balance(&text) > 0
+            let mut bal = Balance::default();
+            let mut open = bal.feed(&text);
+            while open > 0
                 && let Some((_, next)) = self.v.get(*i)
             {
                 text.push(' ');
                 text.push_str(next);
+                open = bal.feed(next);
                 *i += 1;
             }
             return flow(&text, depth);
