@@ -742,10 +742,9 @@ fn text_notes_the_font_files_it_draws_with() {
             }]
         }
     }
-    let dir = std::env::temp_dir().join(format!("effectcraft-font-reads-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let font = dir.join("reads-test-sans.ttf");
+    // (a fresh directory, removed when the test ends, panicking or not)
+    let dir = tempfile::tempdir().unwrap();
+    let font = dir.path().join("reads-test-sans.ttf");
     std::fs::write(&font, fonts::INTER_REGULAR).unwrap();
     fonts::add_source(&OneFile(font.clone()));
     let stamp = FileStamp::native(&font.to_string_lossy()).unwrap();
@@ -781,5 +780,25 @@ fn text_notes_the_font_files_it_draws_with() {
     // One it lacks (Inter has no CJK) is drawn with a fallback face, or none: another installed
     // font could take it, so the list can't vouch for the text.
     assert!(!files_with("Reads Test Sans", Some('\u{4e2d}')).is_complete());
-    let _ = std::fs::remove_dir_all(&dir);
+    // An empty first paragraph in the face draws no glyph, but in a box its face sets the first
+    // baseline that places the lines after it: the file is read all the same.
+    let (mut p, cid, comp) = setup(200, 80);
+    let base = TextDoc {
+        text: "\rHi".into(),
+        font: fonts::DEFAULT_FAMILY.into(),
+        style: "Regular".into(),
+        size: 30.0,
+        box_size: Some([180.0, 60.0]),
+        ..Default::default()
+    };
+    let first = effectcraft_keyframe::CharStyle { font: "Reads Test Sans".into(), ..base.base_style() };
+    let runs = vec![effectcraft_keyframe::StyleRun { len: 1, style: first }, effectcraft_keyframe::StyleRun { len: 2, style: base.base_style() }];
+    let l = text_layer(&mut p, &comp, TextDoc { runs, ..base });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let log = ReadLog::new();
+    let c = EvalCtx { reads: Some(&log), ..ctx(&p, cid, 0.0) };
+    assert!(text_geom(&c, &p.comp(cid).unwrap().layers[0]).is_some());
+    let files = log.into_files();
+    assert!(files.is_complete(), "{files:?}");
+    assert_eq!(files.get(&font.to_string_lossy()), Some(stamp), "{files:?}");
 }
