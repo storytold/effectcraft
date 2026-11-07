@@ -168,6 +168,28 @@ struct Cached {
     /// (the browser's frames are stored by its frame workers, not from here)
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     files: Option<Arc<ReadFiles>>,
+    /// The disk cache its render started with and that cache's drop generation then: the frame
+    /// is written to that cache only, and only while none of its files was dropped since
+    /// (`None`: rendered without a disk cache, or elsewhere; never written from here).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    since: Option<DiskSince>,
+}
+
+/// A disk cache and its drop generation ([`DiskCache::drop_generation`]) when a render started.
+#[derive(Clone)]
+struct DiskSince(std::sync::Weak<DiskCache>, u64);
+
+impl DiskSince {
+    fn of(dc: &Arc<DiskCache>, generation: u64) -> DiskSince {
+        DiskSince(Arc::downgrade(dc), generation)
+    }
+
+    /// The generation, when `dc` is the cache it was taken from (the weak reference keeps that
+    /// cache's address from being reused by another).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn for_cache(&self, dc: &Arc<DiskCache>) -> Option<u64> {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(dc)).then_some(self.1)
+    }
 }
 
 struct Cache {
@@ -191,12 +213,13 @@ impl Cache {
     /// A frame without its source files (tests).
     #[cfg(test)]
     fn insert(&mut self, k: FrameKey, img: FrameImage) {
-        self.insert_with(k, img, None);
+        self.insert_with(k, img, None, None);
     }
-    /// [`Cache::insert`] with the source files the frame was made of.
-    fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>) {
+    /// [`Cache::insert`] with the source files the frame was made of and the disk cache's drop
+    /// generation when its render started.
+    fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>) {
         let (sz, gpu) = (img.bytes(), img.is_gpu());
-        if let Some(old) = self.map.insert(k, Cached { img, files }) {
+        if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
             self.forget(&old.img);
         } else {
             self.order.push_back(k);
@@ -1036,7 +1059,7 @@ impl Frames {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
             return true;
         };
-        let (missing, converting): (Vec<(u128, FrameImage, Arc<ReadFiles>)>, bool) = {
+        let (missing, converting): (Vec<(u128, FrameImage, Arc<ReadFiles>, u64)>, bool) = {
             let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
             if queued.len() > 100_000 {
                 queued.clear();
@@ -1053,10 +1076,13 @@ impl Frames {
                     // (GPU frames have no CPU pixels to write; a frame that can't name its files
                     // can't be checked when read)
                     let files = c.files.as_ref().filter(|f| f.is_complete() && !c.img.is_gpu())?;
+                    // (only with the generation its render started at, for this cache: a frame
+                    // made of a file Reload Footage dropped since holds the pixels from before)
+                    let since = c.since.as_ref().and_then(|s| s.for_cache(&dc)).filter(|s| !dc.dropped_since(files, *s))?;
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk))
-                        .then(|| (dk, c.img.clone(), files.clone()))
+                        .then(|| (dk, c.img.clone(), files.clone(), since))
                 })
                 .collect();
             (missing, !queued.is_empty())
@@ -1066,9 +1092,7 @@ impl Frames {
         }
         let (persisted, written, virtual_id) = (self.persisted.clone(), self.written.clone(), self.virtual_id.clone());
         let work = move || {
-            // (a frame made of a file dropped while it rendered kept an incomplete list: not here)
-            let since = dc.drop_generation();
-            for (dk, img, files) in missing {
+            for (dk, img, files, since) in missing {
                 // (accepted: the disk cache tracks it until written, and it counts as a try;
                 // refused by a full queue: retried, without counting)
                 let accepted = put_disk_frame(&dc, dk, &img, &files, virtual_id.as_deref(), since);
@@ -1481,7 +1505,7 @@ impl Frames {
                 // (A frame kept on the GPU is not written to the disk cache: its files are not
                 // needed.)
                 if let Some((img, _files)) = w.render_gpu(&job) {
-                    w.finish(&job, img, None, t0);
+                    w.finish(&job, img, None, None, t0);
                     continue;
                 }
             }
@@ -1504,7 +1528,7 @@ impl Frames {
                     match r {
                         Ok(f) => {
                             let img = egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba);
-                            fw.finish_key(key, urgent, FrameImage::Cpu(Arc::new(img)), None, t0);
+                            fw.finish_key(key, urgent, FrameImage::Cpu(Arc::new(img)), None, None, t0);
                         }
                         Err(e) => {
                             // Not rendered (a stale revision, a lost worker): the viewer asks again.
@@ -1642,7 +1666,8 @@ impl Worker {
         let files = Arc::new(files);
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
-        self.finish(&job, ci.clone(), Some(files.clone()), t0);
+        let since = disk.as_ref().map(|(dc, _, since)| DiskSince::of(dc, *since));
+        self.finish(&job, ci.clone(), Some(files.clone()), since, t0);
         if !disk_hit
             && let Some((dc, k, since)) = &disk
             && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
@@ -1672,18 +1697,18 @@ impl Worker {
 
     /// Store a finished frame (with the source files it was made of, when known) and release its
     /// job.
-    fn finish(&self, job: &Job, img: FrameImage, files: Option<Arc<ReadFiles>>, t0: web_time::Instant) {
-        self.finish_key(job.key, job.urgent, img, files, t0);
+    fn finish(&self, job: &Job, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, t0: web_time::Instant) {
+        self.finish_key(job.key, job.urgent, img, files, since, t0);
     }
 
-    fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, files: Option<Arc<ReadFiles>>, t0: web_time::Instant) {
+    fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, t0: web_time::Instant) {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
         if let Ok(mut c) = self.cache.lock()
             && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
-            c.insert_with(key, img, files);
+            c.insert_with(key, img, files, since);
         }
         self.release(key, urgent);
     }

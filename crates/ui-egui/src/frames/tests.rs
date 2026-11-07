@@ -211,7 +211,7 @@ fn retirement_reaches_existing_workers_and_keeps_cpu_frames_and_completion_live(
     let next = key(1, 1, 0);
     frames.inflight.lock().unwrap().insert(next);
     frames.queue.lock().unwrap().running.insert(next);
-    worker.finish_key(next, false, img(), None, web_time::Instant::now());
+    worker.finish_key(next, false, img(), None, None, web_time::Instant::now());
     assert!(frames.is_cached(&next), "CPU retry can still publish");
     assert_eq!(frames.inflight(), 0);
     assert!(frames.queue.lock().unwrap().running.is_empty());
@@ -1593,6 +1593,71 @@ fn half_float_ram_frames_missing_on_disk_are_written() {
     ram_frames_missing_on_disk_are_written_as(true);
 }
 
+/// A RAM frame whose render started before Reload Footage dropped one of its files (#3184)
+/// holds the pixels from before: writing it later to the disk cache (an idle pass after the
+/// drop) would bring them back, also after a restart, since the file kept its size and time. It
+/// is written only with the drop generation its render started at, for the cache it started
+/// with: so it is not written, nor is a frame rendered without that cache. Frames of other files,
+/// and frames rendered after the drop, are written.
+#[test]
+fn ram_frames_from_before_a_drop_are_not_written() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::render::reads::{FileStamp, ReadFile};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path().join("cache"), 1 << 30).unwrap();
+    let other = DiskCache::open(dir.path().join("other"), 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series = FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()), ..key(0, 0, 0) };
+    let read = |p: &str| Some(Arc::new([ReadFile::new(p, FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect::<ReadFiles>()));
+    let before = DiskSince::of(&disk, disk.drop_generation());
+    {
+        let mut c = f.cache.lock().unwrap();
+        c.insert_with(FrameKey { frame: 0, ..series }, img(), read("/a.png"), Some(before.clone()));
+        c.insert_with(FrameKey { frame: 1, ..series }, img(), read("/b.png"), Some(before));
+        c.insert_with(FrameKey { frame: 2, ..series }, img(), read("/a.png"), None);
+        c.insert_with(FrameKey { frame: 3, ..series }, img(), read("/a.png"), Some(DiskSince::of(&other, other.drop_generation())));
+    }
+    // Reload Footage of a.png.
+    disk.drop_files(["/a.png"]);
+    disk.flush();
+    f.cache.lock().unwrap().insert_with(FrameKey { frame: 4, ..series }, img(), read("/a.png"), Some(DiskSince::of(&disk, disk.drop_generation())));
+    let on_disk = |fr: i64| {
+        disk.contains(
+            disk_cache::Kind::Frame,
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, opts_hash(&RenderOpts::default())),
+        )
+    };
+    // Idle passes until there is nothing left to write.
+    let mut done = false;
+    for _ in 0..1000 {
+        let more = f.persist_missing(&src, &series, &RenderOpts::default());
+        disk.flush();
+        if !more && f.persisted.lock().unwrap().is_empty() {
+            done = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(done, "the idle passes end");
+    assert!(on_disk(1) && on_disk(4), "another file's frame, and a frame rendered after the drop");
+    assert!(!on_disk(0), "made of a.png as it was before the drop");
+    assert!(!on_disk(2) && !on_disk(3), "rendered without this disk cache");
+    assert_eq!(disk.stats().entries, 2);
+}
+
 fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     use effectcraft_engine::Session;
     use serde_json::json;
@@ -1616,7 +1681,7 @@ fn ram_frames_missing_on_disk_are_written_as(half: bool) {
         FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
     for fr in 0..10 {
         let frame = if half { FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(8, 8), SRGB))) } else { img() };
-        f.cache.lock().unwrap().insert_with(FrameKey { frame: fr, ..series }, frame, Some(Arc::default()));
+        f.cache.lock().unwrap().insert_with(FrameKey { frame: fr, ..series }, frame, Some(Arc::default()), Some(DiskSince::of(&disk, disk.drop_generation())));
     }
     let on_disk = |fr: i64| {
         disk.contains(
@@ -2529,12 +2594,12 @@ mod frame_files {
     const RATE: FrameRate = FrameRate::FPS_30;
     const FRAMES: i64 = 5;
 
-    /// A fresh folder for test `name` (on the build drive, not the system temp folder).
-    fn folder(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/test-frame-files-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh folder for test `name` (on the build drive, not the system temp folder), deleted
+    /// when the guard is dropped.
+    fn folder(name: &str) -> tempfile::TempDir {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&target).unwrap();
+        tempfile::Builder::new().prefix(&format!("test-frame-files-{name}-")).tempdir_in(target).unwrap()
     }
 
     /// A flat grey PNG of `level` at `path`.
@@ -2671,10 +2736,11 @@ mod frame_files {
     /// others come from disk, also after reopening.
     #[test]
     fn a_changed_source_file_re_renders_exactly_its_frames() {
-        let dir = folder("correct");
-        let (p, cid, files) = project(&dir);
+        let tmp = folder("correct");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
         let all: Vec<i64> = (0..FRAMES).collect();
-        let first = session(&p, &dir);
+        let first = session(&p, dir);
         let shown = first.show(cid, &all);
         assert!(all.iter().all(|f| close(shown[*f as usize], level(*f))), "{shown:?}");
         assert_eq!(first.hits(), (0, FRAMES as u64), "rendered, nothing on disk yet");
@@ -2683,7 +2749,7 @@ mod frame_files {
         // Frame 2's file gets new pixels (and size), frame 3's only a new time.
         png(Path::new(&files[2]), 250);
         touch(&files[3], 30);
-        let second = session(&p, &dir);
+        let second = session(&p, dir);
         let shown = second.show(cid, &all);
         assert!(close(shown[2], 250), "frame 2 shows its new file: {shown:?}");
         assert!([0, 1, 3, 4].iter().all(|f| close(shown[*f as usize], level(*f))), "{shown:?}");
@@ -2692,11 +2758,10 @@ mod frame_files {
         assert_eq!(second.disk.stats().entries, FRAMES as usize, "the entries of 2 and 3 were replaced");
         drop(second);
         // Reopened: every frame from disk, the replaced ones with their new pixels.
-        let third = session(&p, &dir);
+        let third = session(&p, dir);
         let shown = third.show(cid, &all);
         assert_eq!(third.hits(), (FRAMES as u64, 0));
         assert!(close(shown[2], 250) && close(shown[3], level(3)), "{shown:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Reopened (a new preview cache, media pool, layer cache and disk cache on the same folder):
@@ -2704,21 +2769,21 @@ mod frame_files {
     /// source file is opened or decoded for it.
     #[test]
     fn a_reopened_project_serves_its_frame_from_disk_without_opening_a_source_file() {
-        let dir = folder("reopen");
-        let (p, cid, _) = project(&dir);
-        let first = session(&p, &dir);
+        let tmp = folder("reopen");
+        let dir = tmp.path();
+        let (p, cid, _) = project(dir);
+        let first = session(&p, dir);
         let shown = first.show(cid, &[1]);
         assert!(close(shown[0], level(1)), "{shown:?}");
         assert!(first.pool.stats().misses > 0, "the first session decodes the frame's file: {:?}", first.pool.stats());
         assert!(first.disk.contains(disk_cache::Kind::Frame, first.disk_key(cid, 1)));
         drop(first);
-        let again = session(&p, &dir);
+        let again = session(&p, dir);
         let shown = again.show(cid, &[1]);
         assert!(close(shown[0], level(1)), "{shown:?}");
         assert_eq!(again.hits(), (1, 0), "served from disk");
         assert_eq!(again.disk.file_checks(), 1, "its one file checked");
         assert_eq!(again.pool.stats(), effectcraft_media::PoolStats::default(), "no source file opened or decoded");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No scan: opening a comp of a project that also holds a large sequence, and showing a
@@ -2726,16 +2791,17 @@ mod frame_files {
     /// stays the same when its files change, and never asks for the identity of a path).
     #[test]
     fn showing_a_frame_checks_only_the_files_it_reads() {
-        let dir = folder("no-scan");
-        let (p, cid, files) = project(&dir);
+        let tmp = folder("no-scan");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
         let key = disk_cache::comp_content_key(&p, cid);
         png(Path::new(&files[1]), 99);
         touch(&files[2], 5);
         assert_eq!(disk_cache::comp_content_key(&p, cid), key, "the key looks at no file");
-        let first = session(&p, &dir);
+        let first = session(&p, dir);
         first.show(cid, &[2]);
         drop(first);
-        let again = session(&p, &dir);
+        let again = session(&p, dir);
         // (the indicator's key is computed off the UI thread first)
         let mut blue = vec![];
         for _ in 0..400 {
@@ -2752,7 +2818,6 @@ mod frame_files {
         assert_eq!(again.hits(), (1, 0));
         assert_eq!(again.disk.file_checks(), 1, "only the file frame 2 read");
         assert_eq!(again.hook_calls.load(Ordering::Relaxed), 0, "no path of the unused sequence was asked about");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The frame entry files under the cache folder.
@@ -2776,22 +2841,23 @@ mod frame_files {
     /// cache entry never serve the frame from before; each is rendered again and stored anew.
     #[test]
     fn missing_or_unreadable_files_and_damaged_entries_never_serve_a_stale_frame() {
-        let dir = folder("safe");
-        let (p, cid, files) = project(&dir);
-        let first = session(&p, &dir);
+        let tmp = folder("safe");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
+        let first = session(&p, dir);
         first.show(cid, &[0]);
         assert_eq!(first.disk.stats().entries, 1);
         drop(first);
         // Missing: not served; the frame is rendered without it.
         std::fs::remove_file(&files[0]).unwrap();
-        let missing = session(&p, &dir);
+        let missing = session(&p, dir);
         let shown = missing.show(cid, &[0]);
         assert!(!close(shown[0], level(0)), "the frame from before was served: {shown:?}");
         assert_eq!(missing.hits(), (0, 1));
         drop(missing);
         // Back, with other pixels: the entry made while it was missing is not served either.
         png(Path::new(&files[0]), 180);
-        let back = session(&p, &dir);
+        let back = session(&p, dir);
         let shown = back.show(cid, &[0]);
         assert!(close(shown[0], 180), "{shown:?}");
         assert_eq!(back.hits(), (0, 1));
@@ -2799,30 +2865,29 @@ mod frame_files {
         // Unreadable (a folder in its place).
         std::fs::remove_file(&files[0]).unwrap();
         std::fs::create_dir(&files[0]).unwrap();
-        let unreadable = session(&p, &dir);
+        let unreadable = session(&p, dir);
         let shown = unreadable.show(cid, &[0]);
         assert!(!close(shown[0], 180), "the frame from before was served: {shown:?}");
         assert_eq!(unreadable.hits(), (0, 1));
         drop(unreadable);
         std::fs::remove_dir(&files[0]).unwrap();
         png(Path::new(&files[0]), 120);
-        let fresh = session(&p, &dir);
+        let fresh = session(&p, dir);
         assert!(close(fresh.show(cid, &[0])[0], 120));
         drop(fresh);
         // A damaged entry: a miss, rendered, stored again, then served.
-        let found = entries(&dir);
+        let found = entries(dir);
         assert_eq!(found.len(), 1, "{found:?}");
         let mut bytes = std::fs::read(&found[0]).unwrap();
         let n = bytes.len() / 2;
         bytes[n] ^= 0x5a;
         std::fs::write(&found[0], bytes).unwrap();
-        let damaged = session(&p, &dir);
+        let damaged = session(&p, dir);
         assert!(close(damaged.show(cid, &[0])[0], 120));
         assert_eq!(damaged.hits(), (0, 1));
         drop(damaged);
-        let healed = session(&p, &dir);
+        let healed = session(&p, dir);
         assert!(close(healed.show(cid, &[0])[0], 120));
         assert_eq!(healed.hits(), (1, 0), "the rewritten entry is used");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

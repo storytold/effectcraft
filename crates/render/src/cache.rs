@@ -920,9 +920,8 @@ mod shared_insert_tests {
     fn a_buffer_rendered_across_a_drop_is_not_written() {
         use crate::disk_cache::{DiskCache, Kind, layer_disk_key};
         use crate::reads::{FileStamp, ReadFile, ReadFiles};
-        let dir = std::env::temp_dir().join(format!("effectcraft-layer-drop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
         dc.set_min_layer_ms(0);
         let cache = LayerCache::default();
         cache.set_disk(Some(dc.clone()));
@@ -939,7 +938,6 @@ mod shared_insert_tests {
         assert!(!dc.contains(Kind::Layer, layer_disk_key(1)), "made of the file as it was before the drop");
         assert!(dc.contains(Kind::Layer, layer_disk_key(2)));
         drop((cache, dc));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A render that gets another render's buffer gets that buffer's files too (#3184): when a
