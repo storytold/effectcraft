@@ -1013,6 +1013,36 @@ fn replacing_the_project_unlocks_effect_controls() {
     assert_eq!(h.state().ui.effect_controls_lock, None, "the lock belongs to the replaced project");
 }
 
+/// #3193: with the lock kept for a layer of another comp and no layer selected in the active one,
+/// Effect Controls shows no layer: a lock request is an error and the kept lock stays.
+#[test]
+fn a_lock_request_with_no_layer_shown_fails_and_keeps_the_other_comps_lock() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, _, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h)["ok"], true);
+    let kept = h.state().ui.effect_controls_lock;
+    assert_eq!(kept.map(|l| l.layer), Some(a));
+    // Another comp becomes active, nothing selected in it.
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    h.state_mut().session.state.selected_layers.clear();
+    h.run_steps(3);
+    assert_ne!(h.state().session.active_comp_id().map(|c| c.0), kept.map(|l| l.comp), "another comp is active");
+    let reply = send(&mut h);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(h.state().ui.effect_controls_lock, kept, "the other comp's lock stays");
+}
+
 /// #3193: a lock request right after the project is replaced, before the next frame, is not
 /// answered with the old project's lock: the reply matches the lock the panel keeps.
 #[test]

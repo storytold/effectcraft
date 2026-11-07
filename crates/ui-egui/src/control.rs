@@ -281,11 +281,15 @@ fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     {
         return err(e);
     }
-    // Effect Controls' tab lock: on locks it to the layer it shows.
-    if let Some(on) = p.get("effectControlsLocked").and_then(Value::as_bool)
-        && crate::panels::effect_controls::set_lock(app, on) != on
-    {
-        return err("effectControlsLocked: Effect Controls shows no layer to lock");
+    // Effect Controls' tab lock: on locks it to the layer it shows. With no layer shown (the
+    // lock kept for a layer of another comp, nothing selected here) a lock request is an error
+    // and the kept lock stays.
+    if let Some(on) = p.get("effectControlsLocked").and_then(Value::as_bool) {
+        crate::panels::effect_controls::scope_lock(app);
+        let shown = crate::panels::effect_controls::shown_layer_id(app).is_some();
+        if (on && !shown) || crate::panels::effect_controls::set_lock(app, on) != on {
+            return err("effectControlsLocked: Effect Controls shows no layer to lock");
+        }
     }
     set_ui_layout(app, p)
 }
