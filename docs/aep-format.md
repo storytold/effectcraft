@@ -558,6 +558,34 @@ compositions, the items from one composition per popup item).** Each set value i
 | `ADBE Offset` | 1 Shift Center To: point, default the layer centre; 2 Blend With Original: fixed, **max 1 (a 0..1 fraction)**, default 0 |
 | `ADBE Deflicker` (Color Stabilizer) | 1 Stabilize: popup (Brightness, Levels, Curves), **default 2 (Levels)**; 2 Black Point, 3 Mid Point, 4 White Point: points, defaults 0.2 / 0.5 / 0.8 of the width at half the height; 5 Sample Size: fixed, max 50, default 3. The reference frame the Set Frame button picks is not among the parameters |
 
+**Importer block 2026-11-05, #3112 (`1300-thirdparty.aep`; V for the parameter lists, H for the
+data layouts, read from default instances only):**
+
+| Effect (match name, plug-in version) | Parameters (`parT` index: type, valid range, default) |
+|---|---|
+| `CS Color Neutralizer` (CC Color Neutralizer, 1.3) | 1 / 7 / 13 Shadows / Midtones / Highlights Unbalance: colours (black, 127 grey, white; pickers: setting one sets the range's sliders, e.g. [0.27, 0.55, 0.85] gives Red 42.94, Green 1.18, Blue -44.12 = (mean - channel) x 150 / 255 on 8-bit values, and leaves no colour record); 2-6, 8-12, 14-18 a group per range (start, Red, Green, Blue, end) with float sliders -100..100 (slider -50..50), default 0; 19 Pinning: float 0..100 (slider 0..50); 20 Blend w. Original: float 0..100; 21-25 the Special group: 22 View popup (Final Result, Correction B to W, Correction Stair), default 1, 23 Black Point float 0..49.9, default 0, 24 White Point float 50.1..100, default 100 |
+| `EXtractoR` (2.6.6) | 1 Channel Info (`EXtractoR-0013`): arbitrary data, 688 bytes, below; 2-6 the Process group: 3 Black Point and 4 White Point float sliders, valid ±3.4028235e38 (the float32 range; slider ±1 000), default 0 / 1; 5 UnMult: checkbox (empty `pard` name, the label in `pdnm`), default off |
+| `IDentifier` (2.6.6) | 1 Channel Info (`IDentifier-0005`): arbitrary data, 148 bytes, below; 2 Display: popup (Colors, Luma Matte, Alpha Matte, Raw), default 1; 3 ID: integer slider, max 2 147 483 647, default 0 |
+
+EXtractoR's Channel Info is the plug-in's own **little-endian** layout: `u32` 1 and 28 bytes, then
+four 164-byte records (Red, Green, Blue, Alpha), each a kind in byte 0 (1 a channel of the footage by
+name: `R`, `G`, `B` by default; 2 the input's own channel, named `(copy)`: Alpha by default) and the
+channel name NUL-terminated from record byte 35. The rest is not read: it differs between instances
+with the same channels (uninitialised-looking values, also in bytes 1..4 of a record: `02 00 00 32`
+on Alpha in one definition's default, which is why only byte 0 is the kind). **A chosen channel**
+(`extractor-07-preset-channel-z`, a preset of our own that reads `Z` into Red, Green and Blue) is kind
+1 with its name (`Z`), and the `u32` at record byte 4 is then 13, which looks like the channel's
+position in the EXR's sorted channel list of 14 (the defaults hold 0 there: H). IDentifier's data
+differs between instances with the same settings except for **the chosen channel's name**,
+NUL-terminated from byte 19, which is `Object ID` when no channel is chosen. After Effects lists
+only integer (UINT) channels: in 1300's EXR (a FLOAT `ID` channel) it found none ("No ID channels
+available"), so that block's preset `identifier-09-preset-channel-id` only sets ID 2; in 1310's
+EXR (UINT `objectId` and `IndexOB.X` added) the preset `identifier-09-preset-channel-objectid-id2`
+stores `objectId`, with 15 at byte 4 (the channel's position in the sorted list of 16, as for
+EXtractoR: H). Without a chosen channel After Effects leaves the layer unchanged (1300 and 1310
+defaults). The other bytes are not read. API: `ExtractorChannels`,
+`identifier_channel_type`.
+
 **Curves and Mesh Warp** (961-965, 985; applied from presets, the data is not scriptable): their
 arbitrary-data parameter (type 11) always has a record (`tdbs` with a 4-byte `cdat`) and a `LIST
 aRbs` / `aRbp`, also at the default. Curves (`ADBE CurvesCustom-0001`, 1644 bytes): `u16` 1, 1;
