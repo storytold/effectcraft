@@ -35,7 +35,8 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
-  through the catalog, so a project file is identical whichever interface language opens it.
+  through the catalog, so effect names are the same whichever interface language opens the
+  project (layer and composition names are project data; see the next bullet).
   A repeat (`Gaussian Blur 2`) keeps the index the engine appends, and a group the user renamed
   in Effect Controls stays verbatim. Adding a language there is two tables and one arm, and no
   panel changes: Traditional Chinese now covers all 308 ids and 21 categories, and Japanese fills
@@ -43,6 +44,16 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   decides for itself which names stay English — Adobe's Japanese interface leaves the `CC`, `VR`
   and `OCIO` sets in English while its Chinese one translates them — so a row repeating the English
   name is a choice, not a missing row.
+- **New layer and composition names:** these are project data, not drawing, so they follow the
+  interface language the way the reference application's does: a Japanese interface creates
+  `平面 1`, `カメラ 1`, `コンポ 1` (the menu's `コンポジション` is the label, not the name), and a
+  project taken to English keeps those names.
+  The nouns live in `crates/ui-egui/src/i18n/names.rs` (Japanese today; a language adds its own
+  rows, and one without a row keeps the English noun). The engine only numbers and stores the
+  name and holds the English default, so a script, MCP call or `engine.execute` that names
+  nothing still creates the English noun; unnamed duplicates now number (`Null 1`, `Null 2`).
+  3D primitives (`Cube`…), text layers and the compositions Pre-compose creates keep their English
+  names for now.
 - **Missing strings:** a string with no row in the interface language shows in English, and no
   test, build or release fails on a missing translation. The `missing_translations_report` test
   (`crates/ui-egui/src/i18n.rs`) prints, per language, the fixed menu entries, panel strings, effect
@@ -120,6 +131,7 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | feature | Layer and composition names are created in the interface language (`平面 1`, `カメラ 1`, `コンポ 1`) through `i18n/names.rs`; the engine keeps the English default and other languages keep it until they add rows |
 | 2026-11-03 | minor | Traditional Chinese (`zh-hant`): effect names complete — 308 names and 21 categories (#2037); the menu and panel catalogs stay at 630 and 951 rows |
 | 2026-10-30 | minor | Recounted on the merged tree after #1774: Japanese 1,923 (46%, 297 effect names), Simplified Chinese 1,935 (46%, 307 effect names), Traditional Chinese 1,581 (38%, 951 panel rows after #2244's prune); overall ≈ 24% |
 | 2026-10-22 | minor | Panel/dialog second step: 300 more catalog rows in Japanese, Simplified Chinese and Traditional Chinese, plus the three rows the review found missing (Basic, Advanced and Play/Stop) — panel tabs, form and dialog labels, panel context menus, the tracker and graph controls, text-panel options, File-panel footers and credits; the panel tables are now 996 Japanese and 998 Simplified Chinese rows, all drawn through `tr`/`tr_args`, with the tests keeping the three catalogs listing the same sources; the 30 October recount above carries the share |

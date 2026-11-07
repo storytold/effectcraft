@@ -84,8 +84,14 @@ pub struct DialogState {
 pub fn open_new_comp(app: &mut EffectcraftApp) {
     let n = app.session.project.comps().count() + 1;
     let last = app.dialog_state.last_new_comp.clone().unwrap_or_default();
-    app.dialog_state.comp =
-        CompDraft { name: format!("Comp {n}"), tab: super::comp_settings::Tab::Basic, start_tc: None, dur_tc: None, preset_name: None, ..last };
+    app.dialog_state.comp = CompDraft {
+        name: format!("{} {n}", crate::i18n::names::noun("Comp")),
+        tab: super::comp_settings::Tab::Basic,
+        start_tc: None,
+        dur_tc: None,
+        preset_name: None,
+        ..last
+    };
     app.dialog_state.editing_existing = false;
     app.dialog_state.live = Default::default();
     app.dialog = Some(Dialog::NewComp);
@@ -127,9 +133,17 @@ pub fn open_comp_settings_for(app: &mut EffectcraftApp, cid: ItemId) -> Result<(
 
 pub fn open_new_solid(app: &mut EffectcraftApp) -> Result<(), String> {
     let c = app.session.active_comp().ok_or("no composition is open")?;
-    let n = app.session.project.items.values().filter(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).count() + 1;
+    // Unique across the project's solids (the item is named after the layer) and across the
+    // active comp's layers, so a name never resolves to two items (#3068 review).
+    let base = crate::i18n::names::noun("Solid");
+    let mut n = app.session.project.items.values().filter(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).count() + 1;
+    let mut name = format!("{base} {n}");
+    while c.layers.iter().any(|l| l.name == name) {
+        n += 1;
+        name = format!("{base} {n}");
+    }
     let d = &mut app.dialog_state;
-    d.solid_name = format!("Solid {n}");
+    d.solid_name = name;
     d.solid_size = [c.width, c.height];
     d.solid_pixel_aspect = c.pixel_aspect;
     d.solid_layer = None;

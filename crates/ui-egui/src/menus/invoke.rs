@@ -182,8 +182,59 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
     m.get("comp")?.as_u64().map(effectcraft_engine::project::ItemId)
 }
 
+/// The interface's word for the layer type a command creates, so a new layer is named in the
+/// interface's language (`カメラ 1`, `平面 1`) as After Effects names it (#2689). The engine
+/// numbers and stores the name; the catalogue supplies only the noun, and a language without a
+/// row falls back to the English key.
+fn layer_name_base(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "layer.newCamera" | "camera.fromView" => crate::i18n::names::noun("Camera"),
+        "layer.newLight" => crate::i18n::names::noun("Light"),
+        "layer.newSolid" => crate::i18n::names::noun("Solid"),
+        "layer.newAdjustment" => crate::i18n::names::noun("Adjustment Layer"),
+        "layer.newNull" => crate::i18n::names::noun("Null"),
+        "layer.newShape" | "shape.newShape" => crate::i18n::names::noun("Shape Layer"),
+        "comp.new" => crate::i18n::names::noun("Comp"),
+        _ => return None,
+    })
+}
+
+/// Adds the localized `base` a create command numbers from, unless the caller named the layer
+/// itself. `engine.execute` bypasses this (it runs commands as headless), so only a click,
+/// shortcut or menu dispatch localizes the default name.
+fn with_layer_base(id: &str, params: Value) -> Value {
+    let Some(base) = layer_name_base(id) else { return params };
+    // A dialog edits an existing object when it is given exactly `layer` (camera/light) or
+    // `comp` (composition). Any other parameter means "create", where the noun is what we want.
+    let edits_existing =
+        (matches!(id, "layer.newCamera" | "layer.newLight") && params.get("layer").is_some()) || (id == "comp.new" && params.get("comp").is_some());
+    if edits_existing {
+        return params;
+    }
+    let named = params.get("name").and_then(Value::as_str).is_some();
+    let based = params.get("base").and_then(Value::as_str).is_some_and(|b| !b.is_empty());
+    if named || based {
+        return params;
+    }
+    let mut map = match params {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => return other,
+    };
+    map.insert("base".to_string(), json!(base));
+    Value::Object(map)
+}
+
+/// Commands that open their dialog when invoked with no parameters (Layer ▸ New ▸ Solid… and so
+/// on). The dialog prefills the localized name, so this must not add parameters to them: a
+/// non-empty parameter list sends them straight to the command instead of the dialog.
+fn opens_its_dialog(id: &str) -> bool {
+    matches!(id, "layer.newSolid" | "layer.newCamera" | "layer.newLight" | "comp.new")
+}
+
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    let params = if opens_its_dialog(id) && no_params(&params) { params } else { with_layer_base(id, params) };
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -247,7 +298,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if id == "edit.paste" && no_params(&params) && app.session.state.text_edit.is_none() {
         let text = ctx.data_mut(|d| d.remove_temp::<String>(system_paste_id())).or_else(|| app.hooks.clipboard_text.as_ref().and_then(|f| f()));
         if let Some(svg) = text.filter(|t| effectcraft_engine::vector::is_svg_text(t)) {
-            return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
+            return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg, "base": crate::i18n::names::noun("Shape Layer")}));
         }
     }
     // Clear follows panel focus, including the Edit menu and keyboard shortcut. An open text

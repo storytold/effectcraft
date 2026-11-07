@@ -7,6 +7,8 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+/// The noun a newly created layer or composition is named with, per language (#2689).
+pub(crate) mod names;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};

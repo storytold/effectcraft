@@ -132,7 +132,7 @@ fn apply_camera(l: &mut Layer, comp: &Comp, p: &Value, t: Tick, cmd: &str) -> Re
 fn new_camera(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
-    let name = str_p(p, "name").unwrap_or("Camera 1").to_string();
+    let name = crate::cmd::new_layer_name(&comp, p, "Camera");
     let t = time_p(s, p, Some(&comp));
     let id = s.edit("New Camera", None, |proj, st| {
         let mut l = build::layer(proj, &comp, &name, LayerSource::Camera, (comp.width, comp.height), None);
@@ -226,7 +226,7 @@ fn new_light(s: &mut Session, p: &Value) -> Result<Value> {
         }
         None => LightKind::Spot,
     };
-    let name = str_p(p, "name").unwrap_or("Light 1").to_string();
+    let name = crate::cmd::new_layer_name(&comp, p, "Light");
     let t = time_p(s, p, Some(&comp));
     // Only the Advanced 3D renderer lights with Environment lights, so adding one switches a
     // Classic 3D comp to it, like After Effects (inside the adding edit: one undo step).
@@ -667,7 +667,7 @@ fn camera_from_view(s: &mut Session, p: &Value) -> Result<Value> {
     let zoom = if vc.ortho { effectcraft_geom::default_camera_zoom(w) } else { vc.zoom };
     let eye = if vc.ortho { poi - fwd * zoom } else { Vec3::from(vc.eye) };
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
-    let name = comp.unique_layer_name("Camera 1");
+    let name = crate::cmd::new_layer_name(&comp, p, "Camera");
     let params = json!({"position": camera::arr(eye), "poi": camera::arr(poi), "zoom": zoom});
     let id = s.edit("Create Camera from 3D View", None, |proj, st| {
         let mut l = build::layer(proj, &comp, &name, LayerSource::Camera, (comp.width, comp.height), None);
@@ -694,7 +694,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Light...",
             ["Layer", "New"],
             Some("Cmd+Alt+Shift+L"),
-            "{kind?: Parallel|Spot|Point|Ambient|Environment (default Spot; Environment lights and reflects from an equirectangular image layer: prop.set its lightOptions/source to that layer's id, or leave it empty for the comp's Environment Layer or a flat default environment of its colour and intensity, see layer.environment; an Environment light switches a Classic 3D comp to Advanced 3D), name?, color?, intensity?, coneAngle?, coneFeather?, falloff?: None|Smooth|Inverse Square Clamped, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position? [x,y,z], poi? [x,y,z]}",
+            "{kind?: Parallel|Spot|Point|Ambient|Environment (default Spot; Environment lights and reflects from an equirectangular image layer: prop.set its lightOptions/source to that layer's id, or leave it empty for the comp's Environment Layer or a flat default environment of its colour and intensity, see layer.environment; an Environment light switches a Classic 3D comp to Advanced 3D), name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), color?, intensity?, coneAngle?, coneFeather?, falloff?: None|Smooth|Inverse Square Clamped, radius?, falloffDistance?, castsShadows?, shadowDarkness?, shadowDiffusion?, position? [x,y,z], poi? [x,y,z]}",
             has_comp,
             new_light
         ),
@@ -703,7 +703,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Camera...",
             ["Layer", "New"],
             Some("Cmd+Alt+Shift+C"),
-            "{name?, type?: oneNode|twoNode (default twoNode), preset?: 15mm|20mm|24mm|28mm|35mm|50mm|80mm|135mm|200mm, zoom?, focalLength? mm, angleOfView? deg, dof?, focusDistance?, aperture?, fStop?, blurLevel?, lockToZoom?, position? [x,y,z], poi? [x,y,z]}",
+            "{name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), type?: oneNode|twoNode (default twoNode), preset?: 15mm|20mm|24mm|28mm|35mm|50mm|80mm|135mm|200mm, zoom?, focalLength? mm, angleOfView? deg, dof?, focusDistance?, aperture?, fStop?, blurLevel?, lockToZoom?, position? [x,y,z], poi? [x,y,z]}",
             has_comp,
             new_camera
         ),
@@ -759,7 +759,15 @@ pub fn specs() -> Vec<CommandSpec> {
             s, p, false
         )),
         cmd!("view.lookAtAll", "Look at All Layers", ["View"], None, "{comp?}", has_comp, |s, p| look_at(s, p, true)),
-        cmd!("camera.fromView", "Create Camera from 3D View", ["Layer", "Camera"], None, "{comp?}", has_comp, camera_from_view),
+        cmd!(
+            "camera.fromView",
+            "Create Camera from 3D View",
+            ["Layer", "Camera"],
+            None,
+            "{comp?, name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it)}",
+            has_comp,
+            camera_from_view
+        ),
         cmd!("view.reset3DView", "Reset 3D View", ["View"], None, "{comp?}", has_comp, reset_view),
         cmd!("view.set3DViewCamera", "Set 3D View Camera", [], None, "{view, eye? [x,y,z], poi? [x,y,z], zoom?}", has_comp, set_view_camera),
         cmd!(
