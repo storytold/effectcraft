@@ -538,6 +538,8 @@ fn run_step(h: &mut Harness<'_, EffectcraftApp>, f: &Fix, m: &mut Model, size: [
         }
         Step::ApplyCrypto(layer) => {
             h.state_mut().session.execute_checked("effect.apply", json!({"comp": f.comp, "layers": [layer], "effect": "Cryptomatte"})).unwrap();
+            // Not left selected: the model covers the armed eyedropper alone (#2839).
+            h.state_mut().session.state.selected_props.clear();
             let uid = sel_uid(&h.state().session, f.comp, *layer).unwrap();
             layer_mut(&mut o, *layer).effects.push((CRYPTO.into(), Some((uid, String::new()))));
             (format!("#{n} apply Cryptomatte to {layer}"), true)

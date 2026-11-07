@@ -76,6 +76,9 @@ fn crypto_session(tag: &str, w: usize, h: usize, blur: bool) -> (Session, Ids) {
         s.execute_checked("prop.set", json!({"path": "effects/#1/blurriness", "value": 40.0})).unwrap();
     }
     s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+    // Not selected: these test the armed eyedropper alone (the Selection tool picks too while
+    // the effect is selected, #2839: `ui_crypto_select`).
+    s.state.selected_props.clear();
     let fx = s.active_comp().unwrap().layers[0].effects().unwrap().groups().last().unwrap();
     let sel = fx.get("selection").unwrap().uid;
     (s, Ids { layer, sel, footage, dir })

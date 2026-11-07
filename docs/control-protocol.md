@@ -152,7 +152,9 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 `viewer.motionPath.<layer>.<key>[.in|.out]`, `viewer.puppetPin.<uid>[.rotate|.scale]`,
 `viewer.freeTransform.handle.<i>`, `viewer.cryptoPick` (the Cryptomatte eyedropper's hover chip; its
 label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
-`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area) and
+`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area),
+`viewer.cryptoSelect` (the Selection tool picking Cryptomatte IDs over the layer while its Cryptomatte
+effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
 `timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
 
