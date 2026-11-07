@@ -222,7 +222,11 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         // whole layer, and an animated parametric path is left alone here: converting keeps only
         // the shape at the current time, so that takes selecting the path itself.
         if items.is_empty() {
-            let (lcid, layers) = layers_p(s, p)?;
+            let (lcid, mut layers) = layers_p(s, p)?;
+            // A layer named twice (`layers: [1, "Shape 1"]`) converts once: its paths would
+            // otherwise be replaced twice, and the second replacement finds no such item.
+            layers.sort();
+            layers.dedup();
             if lcid == cid {
                 for lid in unlocked(s, cid, layers, "path.convertToBezier")? {
                     let Some(l) = comp.layer(lid).filter(|l| matches!(l.source, LayerSource::Shape)) else { continue };

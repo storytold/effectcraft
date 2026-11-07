@@ -774,6 +774,32 @@ fn convert_to_bezier_skips_animated_paths_of_a_selected_layer() {
     assert_eq!(first_shape(&s, l).1, "path", "the selected path converts");
 }
 
+/// #3057 review: a layer named twice in `layers` (by id and by name) converts once, and its
+/// animated paths are counted once.
+#[test]
+fn convert_to_bezier_with_a_layer_named_twice() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let name = layer(&s, l).name;
+    let out = s.execute("path.convertToBezier", json!({"layers": [l, name, l]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["of"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "ellipse", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, a);
+    let size = layer(&s, a).props.sub("contents").unwrap().find_group(rect).unwrap().get("size").unwrap().uid;
+    for (t, v) in [(0.0, [120.0, 80.0]), (1.0, [200.0, 100.0])] {
+        s.execute("prop.addKey", json!({"layer": a, "path": format!("@{size}"), "time": t, "value": v})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let out = s.execute("path.convertToBezier", json!({"layers": [a, a, b]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["skippedAnimated"].as_u64(), Some(1), "{out}");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {
