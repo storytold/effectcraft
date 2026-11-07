@@ -918,6 +918,7 @@ fn wheel_scrub_frames(ctx: &egui::Context, pref: bool, scroll: &super::ViewerScr
     scrub.then_some((scroll.wheel_lines.round() as i64).clamp(-30, 30))
 }
 
+/// Handles the pointer moving over the viewer without a drag: hover feedback, cursors and tool hints.
 fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -952,9 +953,9 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
             Tool::Hand => egui::CursorIcon::Grab,
             Tool::Zoom => egui::CursorIcon::ZoomIn,
             Tool::Type | Tool::TypeVertical => egui::CursorIcon::Text,
-            Tool::Orbit => egui::CursorIcon::Alias,
-            Tool::PanCamera => egui::CursorIcon::Move,
-            Tool::Dolly => egui::CursorIcon::ResizeVertical,
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => egui::CursorIcon::Alias,
+            Tool::PanCamera | Tool::PanTarget => egui::CursorIcon::Move,
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => egui::CursorIcon::ResizeVertical,
             t if t.is_pen() => {
                 pen_cursor(
                     &ctx,
@@ -1130,6 +1131,7 @@ fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
     layers.iter().map(|l| led(l.0)).collect()
 }
 
+/// Starts a drag gesture in the viewer on the first drag frame: picks what the active tool and the item under the pointer begin to move, draw or select.
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1261,7 +1263,9 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                 }
                 Some(Gesture::PuppetPin { layer: h.layer, pin: h.pin, inv })
             }),
-            Tool::Orbit | Tool::PanCamera | Tool::Dolly => Some(Gesture::Camera { tool }),
+            // The cursor variants turn about / pan at / dolly towards the point under the press;
+            // the engine resolves it on the first step and the drag keeps it (`pivot`).
+            t if t.is_camera() => Some(Gesture::Camera { tool, cursor: map.to_comp(press), pivot: None }),
             Tool::Selection if super::tracker::hit_at(&track_hits, press).is_some() => {
                 let hit = super::tracker::hit_at(&track_hits, press);
                 track_cur.zip(hit).and_then(|((tl, tu), hit)| {
@@ -1426,6 +1430,37 @@ fn edge_pan_speed(area: Rect, pos: Pos2) -> egui::Vec2 {
     vec2(axis(pos.x, area.min.x, area.max.x), axis(pos.y, area.min.y, area.max.y))
 }
 
+/// One step of a camera tool's drag: the tool's command with its `mode`, the press point and, once
+/// known, the point it works about. Returns the point the first step found, for the drag to keep.
+fn camera_drag(app: &mut EffectcraftApp, tool: Tool, cursor: [f64; 2], pivot: Option<[f64; 3]>, d: egui::Vec2, zoom: f32, merge: String) -> Option<[f64; 3]> {
+    let (id, mode) = tool.camera_command()?;
+    if d == egui::Vec2::ZERO {
+        return None;
+    }
+    let (dx, dy) = ((d.x / zoom) as f64, (d.y / zoom) as f64);
+    let mut params = match id {
+        "camera.orbit" => json!({"yaw": -d.x as f64 * 0.4, "pitch": d.y as f64 * 0.4}),
+        "camera.pan" => json!({"dx": dx, "dy": dy}),
+        _ => json!({"amount": -dy * 2.0}),
+    };
+    params["mode"] = json!(mode);
+    params["merge"] = json!(merge);
+    params["cursor"] = json!(cursor);
+    if let Some(pv) = pivot {
+        params["point"] = json!(pv);
+    }
+    match app.session.execute(id, params) {
+        // Keep the point the first step found for the rest of the drag.
+        Ok(r) if pivot.is_none() => r["pivot"].as_array().and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])),
+        Ok(_) => None,
+        Err(e) => {
+            app.ui.status = e.to_string();
+            None
+        }
+    }
+}
+
+/// Continues the viewer gesture that `phase_dragstart` began, applying the pointer's movement to it.
 fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let t = v.t;
     let zoom = v.zoom;
@@ -1507,18 +1542,9 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                     let _ = app.session.execute("prop.set", json!({"layer": layer.0, "path": "transform/position", "value": np, "merge": merge}));
                 }
             }
-            Gesture::Camera { tool } => {
-                let d = resp.drag_delta();
-                if d != egui::Vec2::ZERO {
-                    let (dx, dy) = ((d.x / zoom) as f64, (d.y / zoom) as f64);
-                    let (id, params) = match tool {
-                        Tool::Orbit => ("camera.orbit", json!({"yaw": -d.x as f64 * 0.4, "pitch": d.y as f64 * 0.4, "merge": merge})),
-                        Tool::PanCamera => ("camera.pan", json!({"dx": dx, "dy": dy, "merge": merge})),
-                        _ => ("camera.dolly", json!({"amount": -dy * 2.0, "merge": merge})),
-                    };
-                    if let Err(e) = app.session.execute(id, params) {
-                        app.ui.status = e.to_string();
-                    }
+            Gesture::Camera { tool, cursor, pivot } => {
+                if let Some(found) = camera_drag(app, tool, cursor, pivot, resp.drag_delta(), zoom, merge) {
+                    ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Camera { tool, cursor, pivot: Some(found) }));
                 }
             }
             Gesture::Create { tool, start } => {

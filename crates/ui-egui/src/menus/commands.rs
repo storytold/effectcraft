@@ -92,6 +92,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("tool.selection", "Selection Tool", [], Some("V")),
     uic!("tool.hand", "Hand Tool", [], Some("H")),
     uic!("tool.zoom", "Zoom Tool", [], Some("Z")),
+    // 1, 2 and 3 select the Orbit, Pan and Dolly slots' variant as the slot last showed it.
     uic!("tool.orbit", "Orbit Tool", [], Some("1")),
     uic!("tool.panCamera", "Pan Camera Tool", [], Some("2")),
     uic!("tool.dolly", "Dolly Tool", [], Some("3")),

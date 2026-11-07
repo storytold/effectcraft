@@ -325,6 +325,106 @@ fn camera_tools_edit_active_camera_with_undo() {
     assert!(o[1].abs() > 1.0, "{o:?}");
 }
 
+/// Returns the Euclidean distance between two 3D points.
+fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Reads a JSON array of three numbers as a point; panics on anything else.
+fn arr3(v: &serde_json::Value) -> [f64; 3] {
+    let a = v.as_array().unwrap_or_else(|| panic!("not a point: {v}"));
+    [a[0].as_f64().unwrap(), a[1].as_f64().unwrap(), a[2].as_f64().unwrap()]
+}
+
+/// Orbit Around Scene (#2586) turns a 3D view about the centre of the comp's 3D layers, not
+/// about the view's point of interest.
+#[test]
+fn orbit_around_scene_turns_the_view_about_the_layers_centre() {
+    let mut s = session();
+    let cid = s.active_comp_id().unwrap();
+    let id = s.execute("layer.newSolid", json!({"width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": id, "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": id, "path": "transform/position", "value": [500, 100, 300]})).unwrap();
+    s.execute("view.3d.custom1", json!({})).unwrap();
+    let cam0 = s.state.views3d[&cid].cam(View3D::Custom1, 640.0, 360.0);
+    let r = s.execute("camera.orbit", json!({"yaw": 25, "mode": "aroundScene"})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!(dist3(pivot, [500.0, 100.0, 300.0]) < 1e-6, "{pivot:?}");
+    let cam1 = s.state.views3d[&cid].cam(View3D::Custom1, 640.0, 360.0);
+    assert!(dist3(cam1.poi, cam0.poi) > 1.0, "the point of interest goes round the scene too");
+    assert!((dist3(cam1.eye, pivot) - dist3(cam0.eye, pivot)).abs() < 1e-6);
+    // Around Camera POI (the default; the old mode name still works) keeps the point of interest.
+    s.execute("camera.orbit", json!({"yaw": 25, "mode": "aroundCameraTarget"})).unwrap();
+    assert!(dist3(s.state.views3d[&cid].cam(View3D::Custom1, 640.0, 360.0).poi, cam1.poi) < 1e-9);
+    assert!(s.execute("camera.orbit", json!({"yaw": 5, "mode": "sideways"})).is_err());
+    assert!(s.execute("camera.pan", json!({"dx": 5, "mode": "aroundScene"})).is_err(), "Pan has no scene variant");
+}
+
+/// The cursor variants on a camera layer pick the point under the cursor on a 3D layer;
+/// Dolly to Cursor and Dolly to Camera POI stop short of their point (#2586).
+#[test]
+fn cursor_and_target_camera_tools_on_a_camera_layer() {
+    let mut s = session();
+    let id = s.execute("layer.newSolid", json!({"width": 640, "height": 360})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": id, "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let poi0 = prop(&s, cam, "transform/poi").as_vec3();
+    // The cursor off centre picks a point on the solid (z = 0), not the point of interest.
+    let r = s.execute("camera.pan", json!({"dx": 0, "dy": 0, "mode": "underCursor", "cursor": [100, 60]})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!(pivot[2].abs() < 1e-6, "{pivot:?}");
+    assert!(dist3(pivot, poi0) > 50.0, "{pivot:?}");
+    // Dolly to Cursor: a long dolly ends just short of the point, with the aim kept.
+    let aim0 = {
+        let (p, q) = (prop(&s, cam, "transform/position").as_vec3(), prop(&s, cam, "transform/poi").as_vec3());
+        [q[0] - p[0], q[1] - p[1], q[2] - p[2]]
+    };
+    s.execute("camera.dolly", json!({"amount": 1.0e7, "mode": "toCursor", "point": pivot})).unwrap();
+    let (p1, q1) = (prop(&s, cam, "transform/position").as_vec3(), prop(&s, cam, "transform/poi").as_vec3());
+    assert!((dist3(p1, pivot) - 1.0).abs() < 1e-6, "{p1:?}");
+    assert!(dist3([q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]], aim0) < 1e-6);
+    s.undo();
+    // Dolly to Camera POI: the point of interest stays and the camera stops 1 px from it.
+    s.execute("camera.dolly", json!({"amount": 1.0e7, "mode": "toCameraTarget"})).unwrap();
+    assert_eq!(prop(&s, cam, "transform/poi").as_vec3(), poi0);
+    assert!((dist3(prop(&s, cam, "transform/position").as_vec3(), poi0) - 1.0).abs() < 1e-6);
+    s.undo();
+    // Orbit Around Cursor keeps both distances to the picked point.
+    let p0 = prop(&s, cam, "transform/position").as_vec3();
+    s.execute("camera.orbit", json!({"yaw": 20, "pitch": -5, "mode": "aroundCursor", "point": pivot})).unwrap();
+    let p2 = prop(&s, cam, "transform/position").as_vec3();
+    assert!((dist3(p2, pivot) - dist3(p0, pivot)).abs() < 1e-6);
+    assert!(dist3(prop(&s, cam, "transform/poi").as_vec3(), poi0) > 1.0);
+}
+
+/// A camera parented to a moved and turned null: the tools pick their point in world space and
+/// move the camera about it, converting into the camera's parent space (#2586).
+#[test]
+fn camera_tools_on_a_parented_camera_use_the_world_point() {
+    let mut s = session();
+    let id = s.execute("layer.newSolid", json!({"width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": id, "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": id, "path": "transform/position", "value": [400, 120, 200]})).unwrap();
+    let parent = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": parent, "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [150, -60, 250]})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/rotationY", "value": 30})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/rotationX", "value": 15})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setParent", json!({"layers": [cam], "parent": parent})).unwrap();
+    let world_eye = |s: &mut Session| arr3(&s.execute("view.get3D", json!({})).unwrap()["camera"]["eye"]);
+    let e0 = world_eye(&mut s);
+    let r = s.execute("camera.orbit", json!({"yaw": 25, "pitch": -10, "mode": "aroundScene"})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!(dist3(pivot, [400.0, 120.0, 200.0]) < 1e-6, "the scene centre is a world point: {pivot:?}");
+    let e1 = world_eye(&mut s);
+    assert!(dist3(e1, e0) > 10.0);
+    assert!((dist3(e1, pivot) - dist3(e0, pivot)).abs() < 1e-6, "{e0:?} → {e1:?} about {pivot:?}");
+    s.undo();
+    s.execute("camera.dolly", json!({"amount": 1.0e7, "mode": "toCursor", "point": pivot})).unwrap();
+    assert!((dist3(world_eye(&mut s), pivot) - 1.0).abs() < 1e-6);
+}
+
 #[test]
 fn demo_has_3d_showcase() {
     let mut s = Session::default();

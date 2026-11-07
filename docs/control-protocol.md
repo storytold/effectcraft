@@ -175,6 +175,14 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
 
+Camera tools: the Tools bar's Orbit, Pan and Dolly slots hold After Effects' variants
+(`tools.Orbit|OrbitScene|OrbitTarget`, `tools.PanCamera|PanTarget`,
+`tools.Dolly|DollyToCursor|DollyTarget`; flyout rows `tools.select.<tool>`). `tool.orbit`,
+`tool.panCamera` and `tool.dolly` (1, 2, 3) select the variant the slot last showed, `tool.camera`
+(C) cycles the three slots, and `tool.<tool>` (e.g. `tool.OrbitScene`) selects one directly. A drag
+runs `camera.orbit` / `camera.pan` / `camera.dolly` with the tool's `mode` and the press point as
+`cursor`; the result's `pivot` is the world point used, sent back as `point` for the rest of the drag.
+
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
 
