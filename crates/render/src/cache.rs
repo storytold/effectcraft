@@ -477,6 +477,15 @@ fn group_has(g: &PropGroup, match_id: &str) -> bool {
     })
 }
 
+/// A frame-blended layer's pixels also depend on how far its source runs during the comp frame:
+/// a fast-conformed clip mixes every source frame the comp frame spans (#3180), so a time
+/// stretch or remap change can alter the pixels at an unchanged source time.
+fn hash_blend_spans(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
+    if crate::frames::frame_blend_mode(ctx, layer) != effectcraft_project::FrameBlend::Off {
+        crate::frames::blend_spans(ctx, layer).hash(h);
+    }
+}
+
 /// Feed every property of `g` that can change over time (keyframes or expression) as its value
 /// at the context time. The static structure is hashed separately.
 /// Mix the collapsed-instance overrides that target `id` into a cache key. They replace values
@@ -646,6 +655,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             }
             // Frame blending mixes neighbouring source frames.
             ctx.comp.enable_frame_blending.hash(&mut h);
+            hash_blend_spans(&mut h, ctx, layer);
         }
         _ => return None,
     }

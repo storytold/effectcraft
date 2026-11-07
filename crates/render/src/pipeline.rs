@@ -50,6 +50,23 @@ pub struct Collapsed {
     pub(crate) media_overrides: Vec<MediaOverride>,
 }
 
+/// Cache key of a frame-blended footage frame: `seed` (which frames, how they mix, the footage
+/// file) and the Interpret Footage settings that change the decoded pixels.
+fn blended_frame_key(f: &Footage, seed: impl std::hash::Hash) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h);
+    (f.alpha as u8).hash(&mut h);
+    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
+        f.premul_color.map(f32::to_bits).hash(&mut h);
+    }
+    if f.cineon_applies() {
+        let c = &f.cineon;
+        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
+    }
+    h.finish()
+}
+
 /// The property and media overrides of a collapsed precomp layer. `None` when its Essential
 /// Properties group or the source comp's definitions are missing (the flattened path then
 /// preserves the old behaviour).
@@ -848,23 +865,16 @@ impl<'a> Renderer<'a> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
         if mode != FrameBlend::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
+            // Many source frames per comp frame (footage interpreted much faster than the comp,
+            // #3180): the frames the comp frame spans are averaged.
+            if let Some(img) = self.mixed_span_frame(ctx, layer, item, f, t, size) {
+                return Some(img);
+            }
             let (i, w) = frame_position(t, f.frame_rate);
             if w > 1e-6 {
                 // Blended frames are cached (Pixel Motion is expensive).
-                let key = self.cache.map(|_| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
-                    (f.alpha as u8).hash(&mut h);
-                    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
-                        f.premul_color.map(f32::to_bits).hash(&mut h);
-                    }
-                    if f.cineon_applies() {
-                        let c = &f.cineon;
-                        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
-                    }
-                    h.finish()
-                });
+                let seed = (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+                let key = self.cache.map(|_| blended_frame_key(f, seed));
                 if let (Some(c), Some(k)) = (self.cache, key)
                     && let Some(b) = c.get(k)
                 {
@@ -883,6 +893,59 @@ impl<'a> Renderer<'a> {
             }
         }
         self.footage.frame_with(item, f, t, size, float).map(|img| cineon_frame(img, f))
+    }
+
+    /// A frame-blended footage frame at source time `t` when one comp frame runs through many
+    /// source frames: the average of the source frames the comp frame spans, each weighted by
+    /// the share of it the span covers ([`super::frames::mix_window`]). Both Frame Mix and
+    /// Pixel Motion average real frames here (there is no in-between frame to synthesise).
+    /// `size`: the frames may come resampled to it ([`FootageSource::frame_at_size`]). `None`
+    /// when the span is too short (or a jump) to mix, or no frame decodes.
+    fn mixed_span_frame(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
+        use rayon::prelude::*;
+        let float = self.pipe.float_curve(f);
+        let spans = super::frames::blend_spans(ctx, layer);
+        let frames = super::frames::mix_window(t, spans, f.frame_rate)?;
+        let seed = (0x00f8_a3e6_u64, item, t.0, spans, size, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+        let key = self.cache.map(|_| blended_frame_key(f, seed));
+        if let (Some(c), Some(k)) = (self.cache, key)
+            && let Some(b) = c.get(k)
+        {
+            return Some(Arc::new(b.img.clone()));
+        }
+        // A weighted sum in one buffer, divided by the total weight at the end. A frame that does
+        // not decode, or has another size than the first (a sequence of mixed sizes), is left
+        // out and the mix renormalises over the rest. Log scans are converted before they mix.
+        let mut acc: Option<Image> = None;
+        let mut total = 0.0;
+        for (j, w) in frames {
+            let Some(img) = self.footage.frame_with(item, f, f.frame_rate.tick_of(j), size, float).map(|a| cineon_frame(a, f)) else { continue };
+            let sum = acc.get_or_insert_with(|| Image::new(img.width, img.height));
+            if (sum.width, sum.height) != (img.width, img.height) {
+                continue;
+            }
+            let wf = w as f32;
+            sum.data.par_iter_mut().zip(img.data.par_iter()).for_each(|(s, p)| {
+                for (a, b) in s.iter_mut().zip(p) {
+                    *a += b * wf;
+                }
+            });
+            total += w;
+        }
+        let mut img = acc?;
+        if total <= 1e-9 {
+            return None;
+        }
+        let norm = (1.0 / total) as f32;
+        img.data.par_iter_mut().for_each(|s| {
+            for c in s.iter_mut() {
+                *c *= norm;
+            }
+        });
+        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
+            c.insert(k, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }));
+        }
+        Some(Arc::new(img))
     }
 
     /// Source → masks, clamped/quantised to the project depth.

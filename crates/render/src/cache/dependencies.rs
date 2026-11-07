@@ -165,7 +165,10 @@ impl Dependencies<'_> {
                 hash_debug(self.h, &source);
                 if let Some(source) = source {
                     match &source.kind {
-                        ItemKind::Footage(_) => ctx.source_time(layer).0.hash(self.h),
+                        ItemKind::Footage(_) => {
+                            ctx.source_time(layer).0.hash(self.h);
+                            super::hash_blend_spans(self.h, ctx, layer);
+                        }
                         ItemKind::Comp(comp) => {
                             let time = ctx.source_time(layer);
                             time.0.hash(self.h);
