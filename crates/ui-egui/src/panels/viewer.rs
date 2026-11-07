@@ -1130,6 +1130,7 @@ fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
     layers.iter().map(|l| led(l.0)).collect()
 }
 
+/// Starts the viewer drag gesture for the active tool from the press point, picking the layer, vertex or handle under it.
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
