@@ -638,11 +638,49 @@ fn align_index(j: Justify) -> u8 {
     }
 }
 
+/// Note the font files `lay` is drawn with in [`EvalCtx::reads`] (#3184), each with its identity
+/// as its bytes were read, so a cache entry of the text is checked against them. What the
+/// files can't vouch for makes the list incomplete: a family that is not installed (installing
+/// it changes the text), a character drawn with a fallback face or with none (another installed
+/// font could take it), a font from memory.
+fn note_fonts(ctx: &EvalCtx, lay: &TextLayout) {
+    use crate::reads::{FileStamp, ReadFile};
+    use effectcraft_text::fonts;
+    let Some(log) = ctx.reads else { return };
+    let resolved: Vec<fonts::Resolved> = lay.styles.iter().map(|s| fonts::resolve(&s.font, &s.style)).collect();
+    if resolved.iter().any(|r| r.missing) {
+        log.mark_incomplete();
+    }
+    let mut faces: Vec<fonts::FaceId> = Vec::new();
+    for g in &lay.layout.glyphs {
+        if g.id == 0 || resolved.get(g.run).is_none_or(|r| r.face != g.face) {
+            log.mark_incomplete();
+        }
+        if !faces.contains(&g.face) {
+            faces.push(g.face);
+        }
+    }
+    for id in faces {
+        let face = fonts::face(id);
+        match &face.info.data {
+            fonts::FaceData::Static(_) => {}
+            fonts::FaceData::Shared(_) => log.mark_incomplete(),
+            fonts::FaceData::File(_) => {
+                if let Some((path, meta)) = face.file_read() {
+                    let stamp = meta.map_or(FileStamp::Missing, FileStamp::of_metadata);
+                    log.note(ReadFile::new(path.to_string_lossy().as_ref(), stamp));
+                }
+            }
+        }
+    }
+}
+
 /// Lay out and animate a text layer.
 pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
     let doc = source_text(ctx, layer)?;
     let text = layer.props.sub("text")?;
     let lay = layout_doc(&doc);
+    note_fonts(ctx, &lay);
     let xfs = char_transforms(ctx, layer, text, &lay);
     let three = per_char_3d(ctx, layer);
     let more = text.sub("moreOptions");
@@ -665,6 +703,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         // Same character count: the style runs still line up.
         let d2 = TextDoc { text: chars.into_iter().collect(), ..doc.clone() };
         let l2 = layout_doc(&d2);
+        note_fonts(ctx, &l2);
         let by_char: std::collections::HashMap<usize, CharXf> = lay.glyphs.iter().zip(&xfs).map(|(g, x)| (g.char_index, *x)).collect();
         let x2: Vec<CharXf> = l2.glyphs.iter().map(|g| by_char.get(&g.char_index).copied().unwrap_or_default()).collect();
         subs = vec![None; l2.glyphs.len()];

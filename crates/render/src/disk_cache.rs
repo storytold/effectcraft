@@ -1248,7 +1248,7 @@ fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: e
 /// Frame entries with their source files (#3184), part of every frame key: entries of the
 /// earlier format (keyed by footage stamps instead) are never looked up again; least recently
 /// used, they are evicted.
-const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-1";
+const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-2";
 
 /// Disk key of one viewer frame.
 pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128 {

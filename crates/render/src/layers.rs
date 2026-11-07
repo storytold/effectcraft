@@ -59,10 +59,27 @@ impl<'a> Renderer<'a> {
             t.effects.push(("layerStyles".into(), t0.elapsed().as_secs_f64() * 1e3));
         }
         // The buffers the cache keeps (another worker's, if it kept them first), made of the
-        // content's files.
-        let body = self.keep(key, Arc::new(st.body), &files);
-        let passes: Vec<_> =
-            st.passes.into_iter().enumerate().map(|(i, (b, m))| (self.keep(key.map(|k| cache::derive(k, i as u64 + 1)), Arc::new(b), &files), m)).collect();
+        // content's files; the styled layer then lists the files of every buffer it holds.
+        let mut kept_files = vec![];
+        let (body, f) = self.keep(key, Arc::new(st.body), &files);
+        kept_files.push(f);
+        let passes: Vec<_> = st
+            .passes
+            .into_iter()
+            .enumerate()
+            .map(|(i, (b, m))| {
+                let (b, f) = self.keep(key.map(|k| cache::derive(k, i as u64 + 1)), Arc::new(b), &files);
+                kept_files.push(f);
+                (b, m)
+            })
+            .collect();
+        let files = if kept_files.iter().all(|f| Arc::ptr_eq(f, &files)) {
+            files
+        } else {
+            let mut all = (*files).clone();
+            kept_files.iter().for_each(|f| all.extend(f));
+            Arc::new(all)
+        };
         Some(StyledLayer { passes, body, content, key, ckey, plain: false, files })
     }
 
