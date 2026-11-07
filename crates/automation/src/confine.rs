@@ -646,7 +646,9 @@ mod tests {
         thread_local! {
             static NOTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        let base = std::env::temp_dir().join(format!("ec-confine-3184-{}", std::process::id()));
+        // (a fresh directory, removed when the test ends, panicking or not)
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
         let (inside, outside) = (base.join("in"), base.join("elsewhere"));
         for d in [&inside, &outside] {
             std::fs::create_dir_all(d).unwrap();
@@ -666,7 +668,6 @@ mod tests {
         assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
         // The next render on the thread is not affected.
         assert!(read(&footage(&inside)).1.is_complete());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
