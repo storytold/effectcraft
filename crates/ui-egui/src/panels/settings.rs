@@ -5,7 +5,8 @@
 //!
 //! Automation ids: `settings.page.<id>`, `settings.<key>` (e.g. `settings.general.undoLevels`),
 //! `settings.labels.<n>.name` / `.color`, `settings.button.<label>`, `settings.ok`,
-//! `settings.cancel`, `settings.previous`, `settings.next`.
+//! `settings.cancel`, `settings.previous`, `settings.next`, `settings.disk.cacheLimit` (the disk
+//! cache's limit in effect, a label).
 
 use crate::i18n::{tr, tr_args};
 use effectcraft_engine::prefs::{APPEARANCE_MODES, DARK_THEMES, Item, Kind, LIGHT_THEMES, Page, pages};
@@ -234,9 +235,44 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                     };
                     reg(app, &id, &r, label);
                 }
+                if key == "disk.diskCacheMaxGb" {
+                    disk_cache_limit_ui(app, ui, t);
+                }
             }
         }
     }
+}
+
+/// Settings ▸ Disk, under Maximum Disk Cache Size: the limit in effect, and why it is lower when
+/// free disk space holds the cache below the setting (it never fills the disk). Automation id
+/// `settings.disk.cacheLimit`. Nothing without an open disk cache.
+fn disk_cache_limit_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let Some(dc) = app.session.disk_cache.clone() else { return };
+    // (two atomic reads: drawn every frame)
+    let (max, limit) = (dc.max_bytes(), dc.limit_bytes());
+    let lines = disk_cache_limit_lines(max, limit);
+    let color = if limit < max { t.warning } else { t.text_dim };
+    let r = ui
+        .vertical(|ui| {
+            for line in &lines {
+                ui.label(RichText::new(line).color(color));
+            }
+        })
+        .response;
+    app.auto.add("settings.disk.cacheLimit", r.rect, &lines.join(" "));
+}
+
+/// The lines [`disk_cache_limit_ui`] shows for a disk cache of `max` bytes (Maximum Disk Cache
+/// Size) whose limit in effect is `limit` bytes.
+pub(crate) fn disk_cache_limit_lines(max: u64, limit: u64) -> Vec<String> {
+    let mut lines = vec![tr_args("Disk cache limit in effect: {} MB", &[&(limit.min(max) >> 20)])];
+    if limit < max {
+        lines.push(tr("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least 2 GB, at most 10 GB).").to_string());
+        if limit == 0 {
+            lines.push(tr("No room left: nothing is written to the disk cache until disk space is freed.").to_string());
+        }
+    }
+    lines
 }
 
 /// A small EffectCraft window painted with theme `kind`'s tokens: the Tools bar, the Project
@@ -1219,5 +1255,49 @@ mod tests {
             assert_eq!(app.auto.find(&format!("settings.roto.source.{id}")).unwrap().label, "model.safetensors");
         }
         assert!(actions.is_empty());
+    }
+
+    /// Settings ▸ Disk shows the disk cache's limit in effect under Maximum Disk Cache Size, and
+    /// says when free disk space holds it lower (a 20 GB cache held at 0 showed nothing).
+    #[test]
+    fn the_disk_page_shows_the_limit_free_space_allows() {
+        use effectcraft_engine::render::disk_cache::DiskCache;
+        const GB: u64 = 1 << 30;
+        let dir = std::env::temp_dir().join(format!("ec-settings-disk-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let dc = DiskCache::open(&dir, 20 * GB).unwrap();
+        app.session.disk_cache = Some(dc.clone());
+        let page = pages().into_iter().find(|p| p.id == "disk").unwrap();
+        let shown = |app: &mut EffectcraftApp| {
+            // (one frame's elements: `find` returns the first match)
+            app.auto = Default::default();
+            let ctx = egui::Context::default();
+            let (tokens, cur) = (app.tokens, serde_json::to_value(&app.session.prefs).unwrap());
+            let mut actions = vec![];
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 1200.0))), ..Default::default() },
+                |ui| page_ui(app, ui, &page, &cur, &tokens, &mut actions),
+            );
+            output.textures_delta.clear();
+            app.auto.find("settings.disk.cacheLimit").map(|e| e.label.clone())
+        };
+        // A 4 TB disk with 190 GB free: the 20 GB setting holds.
+        dc.set_disk_space(Some((4096 * GB, 190 * GB)));
+        let label = shown(&mut app).expect("the limit is shown");
+        assert!(label.contains("20480 MB") && !label.contains("free disk space"), "{label}");
+        // 3 GB free on a 4 TB disk: 10 GB stay free, nothing is left for the cache.
+        dc.set_disk_space(Some((4096 * GB, 3 * GB)));
+        let label = shown(&mut app).unwrap();
+        assert!(label.contains(": 0 MB") && label.contains("Limited by free disk space") && label.contains("No room left"), "{label}");
+        // 12 GB free: 2 GB for the cache.
+        dc.set_disk_space(Some((4096 * GB, 12 * GB)));
+        let label = shown(&mut app).unwrap();
+        assert!(label.contains("2048 MB") && label.contains("Limited by free disk space") && !label.contains("No room left"), "{label}");
+        // No disk cache: no line.
+        app.session.disk_cache = None;
+        assert!(shown(&mut app).is_none());
+        drop(dc);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1732,6 +1732,71 @@ fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// While free disk space holds the disk cache at 0, frames are not converted or compressed for
+/// it (the frame workers spent about 8 ms per frame on writes that were then refused), and idle
+/// passes don't keep converting the RAM frames; with room again they are written.
+#[test]
+fn no_frame_is_encoded_while_the_disk_has_no_room() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    const GB: u64 = 1 << 30;
+    let dir = std::env::temp_dir().join(format!("ec-persist-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 20 * GB).unwrap();
+    // 4 TB disk, 1 GB free: under the 10 GB reserve.
+    disk.set_disk_space(Some((4096 * GB, GB)));
+    assert!(!disk.accepts_writes());
+    // The frame worker's write: refused up front.
+    assert!(!put_disk_frame(&disk, 1, &img(), &ReadFiles::default(), None, disk.drop_generation()));
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series =
+        FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
+    for fr in 0..10 {
+        f.cache.lock().unwrap().insert_with(FrameKey { frame: fr, ..series }, img(), Some(Arc::default()), Some(DiskSince::of(&disk, disk.drop_generation())));
+    }
+    // Idle passes: nothing to do, nothing converted.
+    for _ in 0..20 {
+        assert!(!f.persist_missing(&src, &series, &RenderOpts::default()), "no idle passes while there is no room");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    disk.flush();
+    assert!(f.persisted.lock().unwrap().is_empty());
+    assert_eq!((disk.encodes(), disk.stats().entries), (0, 0));
+    // Room again: the RAM frames are written.
+    disk.set_disk_space(Some((4096 * GB, 500 * GB)));
+    let on_disk = |fr: i64| {
+        disk.contains(
+            disk_cache::Kind::Frame,
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, opts_hash(&RenderOpts::default())),
+        )
+    };
+    let mut written = false;
+    for _ in 0..1000 {
+        f.persist_missing(&src, &series, &RenderOpts::default());
+        disk.flush();
+        if (0..10).all(on_disk) && f.persisted.lock().unwrap().is_empty() {
+            written = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(written, "every RAM frame written once there is room");
+    assert_eq!(disk.encodes(), 10);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Audio changes pixels only where something draws it: a clip's Audio Levels, audio effects and
 /// Audio switch keep every frame, in RAM and on disk, until a waveform picks the clip (on another
 /// layer, on itself, or through a precomp of it); then the frames of the reader render again.

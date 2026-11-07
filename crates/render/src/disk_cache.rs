@@ -353,6 +353,8 @@ pub struct DiskCache {
     failed: AtomicU64,
     /// Source files looked at to check frame and layer entries ([`DiskCache::file_checks`]).
     file_checks: AtomicU64,
+    /// Frame and layer entries compressed for a queued write ([`DiskCache::encodes`]).
+    encodes: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
@@ -396,6 +398,19 @@ fn checksum(data: &[u8]) -> u64 {
     h
 }
 
+/// The least free space the disk cache leaves on its disk.
+const MIN_DISK_RESERVE: u64 = 2 << 30;
+/// The most free space the disk cache leaves on its disk: 5% of a large disk is far more than
+/// the system needs to keep working (on a 4 TB disk it held a 20 GB cache at 0 with 190 GB free).
+const MAX_DISK_RESERVE: u64 = 10 << 30;
+
+/// The free space the disk cache leaves on a disk of `total` bytes: 5% of it, at least 2 GB and
+/// at most 10 GB. It keeps the cache from filling the disk; the cache's size is the user's
+/// Maximum Disk Cache Size (After Effects has that maximum and no reserve).
+pub fn disk_reserve(total: u64) -> u64 {
+    (total / 20).clamp(MIN_DISK_RESERVE, MAX_DISK_RESERVE)
+}
+
 /// The platform's default disk cache folder.
 pub fn default_folder() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -433,6 +448,7 @@ impl DiskCache {
             dropped: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             file_checks: AtomicU64::new(0),
+            encodes: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
             queue: Arc::new((
                 Mutex::new(Queue {
@@ -519,13 +535,14 @@ impl DiskCache {
         self.max_bytes().min(self.disk_cap.load(Ordering::Relaxed))
     }
 
-    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves at least
-    /// 2 GB or 5% of the disk free, whichever is more (evicting when it must).
+    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves
+    /// [`disk_reserve`] free (5% of the disk, at least 2 GB and at most 10 GB), evicting when it
+    /// must.
     pub fn set_disk_space(&self, space: Option<(u64, u64)>) {
         let cap = match space {
             // (a disk reported as 0 bytes, such as an automount map, is unknown)
             Some((total, available)) if total > 0 => {
-                let reserve = (2u64 << 30).max(total / 20);
+                let reserve = disk_reserve(total);
                 let used = self.index.lock().map(|g| g.total()).unwrap_or_default();
                 // The cache's own files count as free: below the reserve it gives space back.
                 used.saturating_add(available).saturating_sub(reserve)
@@ -538,6 +555,25 @@ impl DiskCache {
             log::warn!("disk cache at {}: little free disk space, limiting the cache to {} MB", self.folder().display(), cap >> 20);
         }
         self.evict();
+    }
+
+    /// Whether a write can be stored at all now: `false` while free disk space holds the limit
+    /// at 0. One atomic read, so frame and layer writes check it before they spend time
+    /// converting and compressing pixels that [`DiskCache::write_format`] would refuse anyway.
+    /// (Whether a given entry fits is known only once it is compressed: `write_format` decides.)
+    pub fn accepts_writes(&self) -> bool {
+        self.limit_bytes() > 0
+    }
+
+    /// Frame and layer entries compressed for writing so far (tests: a write refused up front
+    /// costs no encode).
+    pub fn encodes(&self) -> u64 {
+        self.encodes.load(Ordering::Relaxed)
+    }
+
+    /// Count one entry compressed for a queued write.
+    fn count_encode(&self) {
+        self.encodes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Layer buffers faster to render than this are not worth a disk write.
@@ -950,8 +986,9 @@ impl DiskCache {
 
     /// Queue a half-float frame for writing (`width * height * 4` binary16 values) with the
     /// source files it was made of. `true` when it is on disk or queued; `false` when refused
-    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`];
-    /// a file dropped after `since`, the [`DiskCache::drop_generation`] the render started at).
+    /// (wrong size, a full queue, no room on the disk, files that can't be checked later: see
+    /// [`EntryFiles::of`]; a file dropped after `since`, the [`DiskCache::drop_generation`] the
+    /// render started at).
     #[allow(clippy::too_many_arguments)]
     pub fn put_frame_f16(
         &self,
@@ -967,8 +1004,16 @@ impl DiskCache {
             return false;
         }
         let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        if self.contains(Kind::Frame, key) {
+            return true;
+        }
+        // (no room on the disk: refused before the pixels are compressed)
+        if !self.accepts_writes() {
+            return false;
+        }
+        self.count_encode();
         let payload = with_files(&files, encode_frame_f16(width, height, rgba));
-        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
+        self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
     }
 
     /// Write a half-float frame synchronously (tests); a list that can't be stored is not.
@@ -980,16 +1025,25 @@ impl DiskCache {
 
     /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes) with the
     /// source files it was made of. `true` when it is on disk or queued; `false` when refused
-    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`];
-    /// a file dropped after `since`, the [`DiskCache::drop_generation`] the render started at).
+    /// (wrong size, a full queue, no room on the disk, files that can't be checked later: see
+    /// [`EntryFiles::of`]; a file dropped after `since`, the [`DiskCache::drop_generation`] the
+    /// render started at).
     #[allow(clippy::too_many_arguments)]
     pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
         let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        if self.contains(Kind::Frame, key) {
+            return true;
+        }
+        // (no room on the disk: refused before the pixels are compressed)
+        if !self.accepts_writes() {
+            return false;
+        }
+        self.count_encode();
         let payload = with_files(&files, encode_frame(width, height, rgba));
-        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
+        self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
     }
 
     /// A layer buffer (key: [`layer_disk_key`]) whose source files are unchanged, with those
@@ -1005,10 +1059,12 @@ impl DiskCache {
     /// when one of them was dropped after `since`, the [`DiskCache::drop_generation`] its render
     /// started at.
     pub fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
-        if self.contains(Kind::Layer, key) {
+        // (no room on the disk: refused before the buffer is compressed)
+        if self.contains(Kind::Layer, key) || !self.accepts_writes() {
             return;
         }
-        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
+        self.count_encode();
+        let _ =self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
     }
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
@@ -1785,7 +1841,8 @@ mod tests {
         // A disk reported as 0 bytes is unknown.
         dc.set_disk_space(Some((0, 0)));
         assert_eq!(dc.stats().limit_bytes, 1 << 30);
-        // 100 GB disk, 5 GB reserved, exactly 5 GB free: the cache may not grow.
+        // 100 GB disk, 5 GB reserved (5%, between the 2 GB floor and the 10 GB cap), exactly
+        // 5 GB free: the cache may not grow.
         dc.set_disk_space(Some((100 << 30, 5 << 30)));
         let st = dc.stats();
         assert_eq!((st.max_bytes, st.limit_bytes), (1 << 30, used));
@@ -1801,6 +1858,64 @@ mod tests {
         // Plenty of space again: back to the setting.
         dc.set_disk_space(Some((100 << 30, 50 << 30)));
         assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reserve is 5% of the disk, at least 2 GB and at most 10 GB: a large disk with plenty
+    /// free keeps the user's size. (A 4 TB disk with 190 GB free reserved 200 GB, held a 20 GB
+    /// cache at 0, and every write was refused.)
+    #[test]
+    fn a_large_disk_reserves_at_most_ten_gb() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(disk_reserve(4096 * GB), 10 * GB);
+        assert_eq!(disk_reserve(100 * GB), 5 * GB);
+        assert_eq!(disk_reserve(32 * GB), 2 * GB);
+        assert_eq!(disk_reserve(1), 2 * GB);
+        let dir = tmpdir("space-large");
+        let dc = DiskCache::open(&dir, 20 * GB).unwrap();
+        dc.set_disk_space(Some((4096 * GB, 190 * GB)));
+        let st = dc.stats();
+        assert_eq!((st.max_bytes, st.limit_bytes), (20 * GB, 20 * GB), "{st:?}");
+        assert!(dc.accepts_writes());
+        // Just above the 10 GB reserve: the cache may use what is left above it.
+        dc.set_disk_space(Some((4096 * GB, 15 * GB)));
+        assert_eq!(dc.stats().limit_bytes, 5 * GB);
+        // A small disk still keeps 2 GB free: 3 GB free leaves 1 GB for the cache.
+        dc.set_disk_space(Some((32 * GB, 3 * GB)));
+        assert_eq!(dc.stats().limit_bytes, GB);
+        // Below the floor: nothing.
+        dc.set_disk_space(Some((32 * GB, GB)));
+        assert_eq!(dc.stats().limit_bytes, 0);
+        assert!(!dc.accepts_writes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write the free disk space refuses is refused before its pixels are compressed: the
+    /// frame workers spent about 8 ms per frame and 14 ms per layer encoding entries that were
+    /// then refused (`limit_bytes=0`).
+    #[test]
+    fn no_encode_while_the_disk_has_no_room() {
+        const GB: u64 = 1 << 30;
+        let dir = tmpdir("space-no-encode");
+        let dc = DiskCache::open(&dir, 20 * GB).unwrap();
+        // 4 TB disk, 1 GB free: under the 10 GB reserve, the limit is 0.
+        dc.set_disk_space(Some((4096 * GB, GB)));
+        assert_eq!(dc.stats().limit_bytes, 0);
+        let rgba = vec![7u8; 16 * 16 * 4];
+        assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
+        assert!(!dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0), "refused");
+        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), 0, "nothing compressed");
+        assert_eq!(dc.stats().entries, 0);
+        // Room again: the same writes are compressed and stored.
+        dc.set_disk_space(Some((4096 * GB, 500 * GB)));
+        assert!(dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0));
+        assert!(dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0));
+        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), 3);
+        assert_eq!(dc.stats().entries, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

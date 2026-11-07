@@ -477,9 +477,10 @@ fn frame_disk_key(keys: &ContentKeys, project: &Project, key: &FrameKey, opts_ha
 /// Queue `img` for the disk cache under `dk` with the source files it was made of. `false` when
 /// refused: a GPU frame (no CPU pixels), files that can't be checked when the entry is read
 /// (an incomplete list, #3184: the frame is shown, not stored), a full queue, a file dropped
-/// (File ▸ Reload Footage) after `since`, the drop generation its render started at.
+/// (File ▸ Reload Footage) after `since`, the drop generation its render started at; no room on
+/// the disk (checked first: the conversion and compression would be wasted).
 fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles, virtual_id: Option<disk_cache::VirtualFileId<'_>>, since: u64) -> bool {
-    if !files.is_complete() {
+    if !files.is_complete() || !dc.accepts_writes() {
         return false;
     }
     match img {
@@ -1057,7 +1058,13 @@ impl Frames {
         let oh = opts_hash(opts);
         self.note_disk_series(base.comp, base.scale, base.view ^ oh);
         self.carry_disk(src);
-        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
+        // Free disk space holds the cache at 0: nothing would be stored, so nothing is converted
+        // (a refusal doesn't count as a try, so every idle pass would convert them all again).
+        // A later idle pass writes them once there is room.
+        if !dc.accepts_writes() {
+            return false;
+        }
+        let known =self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
         let Some(content) = known else {
             self.request_content_key(src.project.clone(), base.revision, base.comp);
             return true;
