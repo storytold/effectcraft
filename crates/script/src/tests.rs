@@ -1252,6 +1252,41 @@ fn sample_image_reads_footage_pixels_in_scripts() {
     assert_eq!(out.result, json!([0, 1, 0, 1, ""]), "green footage sampled, not transparent black");
 }
 
+/// `expressionError` reports what evaluating the expression at the comp's current time does, as
+/// After Effects: a non-finite result and an exception, not only a syntax error (#3219).
+#[test]
+fn expression_error_reports_evaluation_errors() {
+    let mut s = session();
+    let out = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("E", 320, 240, 1, 5, 30);
+        var p = c.layers.addSolid([1, 1, 1], "S", 320, 240, 1).transform.opacity;
+        p.expression = "Math.sqrt(-1)";
+        var nan = p.expressionError;
+        p.expression = 'throw new Error("boom")';
+        var thrown = p.expressionError;
+        p.expression = "value";
+        var fine = p.expressionError;
+        p.expression = "thisLayer.nope(";
+        var syntax = p.expressionError;
+        p.expression = "time > 1 ? Math.sqrt(-1) : value";
+        c.time = 0;
+        var early = p.expressionError;
+        c.time = 2;
+        var late = p.expressionError;
+        [nan, thrown, fine, syntax.length > 0, early, late];
+        "#,
+    );
+    let v = out.result;
+    assert!(v[0].as_str().is_some_and(|e| e.contains("not a finite number")), "{v}");
+    assert!(v[1].as_str().is_some_and(|e| e.contains("boom")), "{v}");
+    assert_eq!(v[2], json!(""), "{v}");
+    assert_eq!(v[3], json!(true), "a syntax error is still reported: {v}");
+    assert_eq!(v[4], json!(""), "evaluated at the current time (0), where it is fine: {v}");
+    assert!(v[5].as_str().is_some_and(|e| e.contains("not a finite number")), "evaluated at the current time (2): {v}");
+}
+
 #[test]
 fn binary_file_io_preserves_all_byte_values() {
     let dir = std::env::temp_dir().join(format!("ec-script-binary-{}", std::process::id()));
