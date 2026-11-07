@@ -1468,6 +1468,7 @@ dependencies = [
  "effectcraft-script",
  "image",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -1878,6 +1879,7 @@ dependencies = [
  "lz4_flex",
  "rayon",
  "serde",
+ "tempfile",
  "web-time",
 ]
 

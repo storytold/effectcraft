@@ -668,7 +668,14 @@ fn note_layout_fonts(ctx: &EvalCtx, styles: &[effectcraft_keyframe::CharStyle], 
     if resolved.iter().any(|r| r.missing) {
         log.mark_incomplete();
     }
+    // Each run's face, glyphs or not: an empty paragraph's face sets its line's metrics (in a
+    // box, the first baseline that places every later line).
     let mut faces: Vec<fonts::FaceId> = Vec::new();
+    for r in &resolved {
+        if !faces.contains(&r.face) {
+            faces.push(r.face);
+        }
+    }
     for g in &layout.glyphs {
         if g.id == 0 || resolved.get(g.run).is_none_or(|r| r.face != g.face) {
             log.mark_incomplete();
