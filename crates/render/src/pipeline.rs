@@ -140,6 +140,13 @@ impl<'a> Renderer<'a> {
         out
     }
 
+    /// `ctx` noting what it reads (fonts, `sampleImage`) in this render's [`Renderer::reads`]:
+    /// a context made by an outer render carries that render's log, not the one of the buffer
+    /// [`Renderer::recorded`] makes.
+    pub(crate) fn with_reads<'c>(&'c self, ctx: &EvalCtx<'c>) -> EvalCtx<'c> {
+        EvalCtx { reads: self.reads, ..*ctx }
+    }
+
     /// The buffer the layer cache keeps under `key`, with the files it was made of noted in
     /// [`Renderer::reads`].
     pub(crate) fn cached(&self, key: Option<u64>) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
@@ -151,12 +158,19 @@ impl<'a> Renderer<'a> {
     }
 
     /// Keep `buf`, made of `files`, under `key` (see [`Renderer::recorded`]): the buffer the cache
-    /// keeps (another worker's, if it kept one first), or `buf` when nothing is kept.
-    pub(crate) fn keep(&self, key: Option<u64>, buf: Arc<Buf>, files: &Arc<ReadFiles>) -> Arc<Buf> {
-        match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, buf, files.clone()),
-            _ => buf,
+    /// keeps (another worker's, if it kept one first), or `buf` when nothing is kept, with the
+    /// files that buffer was made of. Another worker's files are noted in [`Renderer::reads`]
+    /// too: its pixels are the ones this render uses (a file that changed between the two reads
+    /// then has two identities, and the list is incomplete).
+    pub(crate) fn keep(&self, key: Option<u64>, buf: Arc<Buf>, files: &Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
+        let (Some(c), Some(k)) = (self.cache_to_keep(), key) else { return (buf, files.clone()) };
+        let (kept, kept_files) = c.insert(k, buf, files.clone());
+        if !Arc::ptr_eq(&kept_files, files)
+            && let Some(log) = self.reads
+        {
+            log.note_all(&kept_files);
         }
+        (kept, kept_files)
     }
 
     /// Run `make`, which makes a buffer to keep under `key` in the layer cache, on this renderer
@@ -415,7 +429,17 @@ impl<'a> Renderer<'a> {
     }
 
     pub(crate) fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
-        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage), property_overrides: &[], media_overrides: &[] }
+        EvalCtx {
+            project: self.project,
+            comp_id,
+            comp,
+            time: t,
+            expr: self.expr,
+            footage: Some(self.footage),
+            property_overrides: &[],
+            media_overrides: &[],
+            reads: self.reads,
+        }
     }
 
     /// This renderer with another accelerator (or none): the passes of
@@ -824,7 +848,9 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
+            // (the font files go to this render's log, which `ctx` may not carry: see
+            // [`Renderer::with_reads`])
+            LayerSource::Text => Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer)))),
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }
@@ -923,7 +949,7 @@ impl<'a> Renderer<'a> {
                 });
                 if let (Some(a), Some(b)) = (a, b) {
                     let img = blend_frames(mode, &a, &b, w as f32);
-                    self.keep(key, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }), &files);
+                    let _kept = self.keep(key, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }), &files);
                     return Some(Arc::new(img));
                 }
             }
@@ -967,7 +993,7 @@ impl<'a> Renderer<'a> {
         }
         let mut nb = (*b).clone();
         color::convert(&mut nb.img, &c);
-        self.keep(key, Arc::new(nb), files)
+        self.keep(key, Arc::new(nb), files).0
     }
 
     /// The flattened layer buffer, its cache key and the source files it was made of.
@@ -981,7 +1007,8 @@ impl<'a> Renderer<'a> {
             return Some((b, key, files));
         }
         let flat = Arc::new(styles::Styled { passes: st.passes.iter().map(|(b, m)| ((**b).clone(), *m)).collect(), body: (*st.body).clone() }.flatten());
-        Some((self.keep(key, flat, &st.files), key, st.files))
+        let (flat, files) = self.keep(key, flat, &st.files);
+        Some((flat, key, files))
     }
 
     /// A layer's source pixels at the context time, before masks, effects and the transform
@@ -1039,7 +1066,8 @@ impl<'a> Renderer<'a> {
             let buf = r.masked_source(ctx, layer)?;
             Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
         });
-        Some((self.keep(key, Arc::new(buf?), &files), key, files))
+        let (buf, files) = self.keep(key, Arc::new(buf?), &files);
+        Some((buf, key, files))
     }
 
     /// A layer's input at the context time: source → masks → its first `effects` effects
@@ -1061,6 +1089,6 @@ impl<'a> Renderer<'a> {
             }
             Some(buf)
         });
-        Some(self.keep(key, Arc::new(buf?), &files))
+        Some(self.keep(key, Arc::new(buf?), &files).0)
     }
 }

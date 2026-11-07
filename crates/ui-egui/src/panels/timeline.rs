@@ -1982,6 +1982,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut rw = begin_rows(app, ui, tl);
     let g = &mut rw;

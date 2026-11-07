@@ -219,6 +219,7 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let inv = l2c(&ectx, &l).0.inverse().unwrap_or(Mat3::IDENTITY);
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));

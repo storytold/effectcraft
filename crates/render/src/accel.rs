@@ -358,7 +358,7 @@ impl<'a> Renderer<'a> {
             Some(foot)
         });
         // The buffer the cache keeps (another worker's, if it kept one first).
-        Some(self.keep(key, Arc::new(foot?), &files))
+        Some(self.keep(key, Arc::new(foot?), &files).0)
     }
 
     /// Draw one 2D layer into `canvas` on the CPU (any kind: adjustment, wireframe, styled…).

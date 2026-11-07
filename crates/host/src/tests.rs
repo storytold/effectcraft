@@ -343,6 +343,7 @@ fn value(s: &effectcraft_engine::Session, l: u64, path: &str) -> effectcraft_eng
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     ctx.value(layer, layer.props.prop(path).unwrap())
 }
@@ -606,6 +607,7 @@ fn stereo_rig_expressions_follow_the_master_camera() {
             footage: None,
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         ctx.value(layer, layer.props.prop(path).unwrap()).as_vec3()
     };
