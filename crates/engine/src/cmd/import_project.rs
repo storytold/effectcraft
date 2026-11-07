@@ -58,6 +58,8 @@ fn root_comps(project: &Project) -> Vec<ItemId> {
     project.comps().map(|(id, _)| *id).filter(|id| !nested.contains(id)).collect()
 }
 
+/// Imports another `.ecproj` file into the open project.
+/// Collects warnings for a newer saving version, old time-reverse layouts and missing footage.
 fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ecproj)"))?.to_string();
     let (mut sub, saved_by) = read_project(s, &path)?;

@@ -265,6 +265,7 @@ impl ProjectSettings {
 }
 
 impl Default for ProjectSettings {
+    /// Returns the settings of a new project: 8 bpc, gamma 2.2 and the current time-reverse layout.
     fn default() -> Self {
         ProjectSettings {
             bit_depth: BitDepth::Bpc8,

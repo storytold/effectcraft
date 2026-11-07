@@ -853,6 +853,8 @@ impl<'a> Renderer<'a> {
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
+    /// Fetches the footage frame at `t` without colour interpretation, frame-blending neighbours for video and sequences.
+    /// A reversed layer blends from the frame ending at `t` toward the one before.
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);

@@ -372,6 +372,7 @@ fn graph_editor_ease_edits_reject_a_locked_layer() {
     assert_eq!(prop(&s, l, "transform/opacity").keys, after.keys);
 }
 
+/// Checks that Convert Expression to Keyframes on a reversed layer samples the same values the expression gave.
 #[test]
 fn convert_expression_to_keyframes_on_a_reversed_layer_keeps_values() {
     let (mut s, l) = setup();

@@ -1119,6 +1119,7 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    /// Checks that a hot number a hair below zero formats as `0.0`, not `-0.0`, and that other values still round normally.
     #[test]
     fn hot_numbers_round_to_zero_without_a_sign() {
         // A Time Remap key a tick before 0 s (a reversed layer, #3245) reads 0.0, not -0.0.
@@ -1129,6 +1130,7 @@ mod tests {
         assert_eq!(fixed(1.25, 2), "1.25");
     }
 
+    /// Checks that clicking a hot number opens its editor with the same text the field displays.
     #[test]
     fn a_clicked_hot_number_edits_the_value_it_shows() {
         // Shown as 0.0, a value a tick below zero opens its editor with 0.0 too, not -0.0.

@@ -320,6 +320,7 @@ fn a_video_with_sound_arrives_audible() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Checks that Time-Reverse Layer round-trips an imported After Effects reversed layer to forward playback and back to the saved layout.
 #[test]
 fn time_reverse_layer_lays_a_layer_out_as_after_effects_does() {
     // 981: a layer reversed in After Effects (-100 %, start 5 s, over 0..5 s). Time-Reverse Layer

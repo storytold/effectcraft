@@ -40,6 +40,8 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"comp": s.state.active_comp.map(|c| c.0)}))
 }
 
+/// Opens a project file in place of the current one: reads and upgrades it, repairs old time-reverse layouts, re-resolves footage paths and toasts what changed.
+/// Returns the path, the saving version and the repaired layers.
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;

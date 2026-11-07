@@ -18,6 +18,7 @@ fn remappable(l: &Layer) -> bool {
     matches!(l.source, LayerSource::Comp { .. } | LayerSource::Footage { .. })
 }
 
+/// Handles `layer.timeStretch` and `layer.timeReverse`: sets the selected layers' stretch to a percentage, or mirrors them when `op` is `reverse`.
 fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let reverse = str_p(p, "op") == Some("reverse");
@@ -140,6 +141,7 @@ fn source_secs(l: &Layer, t: Tick) -> f64 {
     l.layer_time(t).seconds()
 }
 
+/// Turns Time Remapping on or off for the selected layers, keeping the frames each layer shows.
 fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let want = b_p(p, "value");

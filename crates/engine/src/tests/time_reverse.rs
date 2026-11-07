@@ -21,6 +21,7 @@ const N: i64 = 10;
 struct Numbered;
 
 impl FootageSource for Numbered {
+    /// Returns the test image for the frame at `t`, or `None` outside the `N` frames.
     fn frame(&self, _: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
         let i = f.frame_rate.frame_at(t);
         if !(0..N).contains(&i) {
@@ -57,6 +58,7 @@ fn scene(fps: u32) -> (Session, ItemId, u64) {
     (s, cid, l)
 }
 
+/// Returns a clone of layer `l` of comp `cid`.
 fn layer(s: &Session, cid: ItemId, l: u64) -> Layer {
     s.project.comp(cid).unwrap().layer(LayerId(l)).unwrap().clone()
 }
@@ -79,10 +81,12 @@ fn column_alpha(img: &Image) -> Vec<f32> {
     (0..N).map(|x| (0..i64::from(img.height)).map(|y| img.get(x, y)[3]).fold(0.0, f32::max)).collect()
 }
 
+/// Returns what each of the first `count` comp frames shows, as source frame numbers.
 fn frames(s: &Session, cid: ItemId, count: i64) -> Vec<Option<i64>> {
     (0..count).map(|k| shown(s, cid, k)).collect()
 }
 
+/// Checks the layout the command produces (stretch, start time, In and Out layer times) and that Time Remapping keeps the same frames.
 #[test]
 fn time_reverse_layer_mirrors_the_span_like_after_effects() {
     let (mut s, cid, l) = scene(10);
@@ -104,6 +108,7 @@ fn time_reverse_layer_mirrors_the_span_like_after_effects() {
     assert_eq!(frames(&s, cid, N), (0..N).rev().map(Some).collect::<Vec<_>>());
 }
 
+/// Checks that 10 fps footage in a 30 fps comp holds each frame for three comp frames, forwards and reversed.
 #[test]
 fn a_reversed_layer_in_a_faster_comp_holds_each_frame_as_long_as_forwards() {
     // 10 fps footage in a 30 fps comp: forwards each source frame shows for three comp frames,
@@ -114,6 +119,7 @@ fn a_reversed_layer_in_a_faster_comp_holds_each_frame_as_long_as_forwards() {
     assert_eq!(frames(&s, cid, 3 * N), (0..3 * N).map(|k| Some(N - 1 - k / 3)).collect::<Vec<_>>());
 }
 
+/// Checks that a layer laid out as an `.aep` stores it shows every source frame once, last first, with and without frame blending.
 #[test]
 fn an_after_effects_reversed_layer_shows_every_frame_backwards() {
     // Laid out as an .aep stores a reversed layer (981-983): -100 %, starting at its Out point.
@@ -134,6 +140,7 @@ fn an_after_effects_reversed_layer_shows_every_frame_backwards() {
     }
 }
 
+/// Checks that two Time-Reverse Layer runs give back the original layer, for unstretched, 150 % and -50 % layers.
 #[test]
 fn reversing_twice_restores_the_layer_exactly() {
     for percent in [None, Some(150.0), Some(-50.0)] {
@@ -178,12 +185,14 @@ fn assert_mirrored(s: &mut Session, cid: ItemId, l: u64, what: &str) {
     }
 }
 
+/// Switches frame blending on or off for the comp and layer `l` together.
 fn set_blending(s: &mut Session, cid: ItemId, l: u64, on: bool) {
     let comp = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
     comp.enable_frame_blending = on;
     comp.layer_mut(LayerId(l)).unwrap().switches.frame_blend = if on { FrameBlend::FrameMix } else { FrameBlend::Off };
 }
 
+/// Checks that reversed footage and reversed precomps render as the mirror of the forward render, blended or not.
 #[test]
 fn reversed_footage_and_precomps_mirror_forward_playback_with_and_without_blending() {
     for blend in [false, true] {
@@ -201,6 +210,7 @@ fn reversed_footage_and_precomps_mirror_forward_playback_with_and_without_blendi
     }
 }
 
+/// Checks that a reversed precomp evaluates the nested comp's keys on its own frames, last frame first.
 #[test]
 fn a_reversed_precomp_shows_its_own_frames_last_first() {
     // A 10 fps precomp whose 1 px solid moves one column per frame (column k at its frame k),
@@ -222,6 +232,7 @@ fn a_reversed_precomp_shows_its_own_frames_last_first() {
     assert_eq!(frames(&s, outer, N), (0..N).rev().map(Some).collect::<Vec<_>>());
 }
 
+/// Checks that Synchronize Time of All Related Items maps comp times to the frame a reversed precomp shows, and back.
 #[test]
 fn related_times_follow_the_frame_a_reversed_precomp_shows() {
     // Synchronize Time of All Related Items: comp frame 2 of a reversed 10 fps precomp shows its
@@ -238,6 +249,7 @@ fn related_times_follow_the_frame_a_reversed_precomp_shows() {
     assert_eq!(s.state.times.get(&outer), Some(&rate.tick_of(2)));
 }
 
+/// Checks that opening a file saved before the layout marker moves the layers that are surely one frame early and only names the unsure ones.
 #[test]
 fn projects_saved_with_the_old_time_reverse_layout_open_in_after_effects_layout() {
     let (mut s, cid, l) = scene(10);
@@ -275,6 +287,7 @@ fn projects_saved_with_the_old_time_reverse_layout_open_in_after_effects_layout(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Checks that a file carrying the layout marker reopens without moving or reporting any reversed layer.
 #[test]
 fn a_project_saved_since_the_fix_reopens_with_its_reversed_layers_untouched() {
     // Two reversed layers in After Effects' layout that look like the old one: an untrimmed layer
@@ -300,6 +313,7 @@ fn a_project_saved_since_the_fix_reopens_with_its_reversed_layers_untouched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Checks that new projects write the current layout marker and that a missing marker reads as 0.
 #[test]
 fn project_settings_without_the_layout_marker_read_as_the_old_layout() {
     let mut v = serde_json::to_value(effectcraft_project::ProjectSettings::default()).unwrap();
@@ -309,6 +323,7 @@ fn project_settings_without_the_layout_marker_read_as_the_old_layout() {
     assert_eq!(old.reverse_layout, 0);
 }
 
+/// Checks that reversing a layer with Time Remapping shows every frame backwards and that reversing again restores it.
 #[test]
 fn reversing_a_remapped_layer_shows_every_frame_backwards_and_back() {
     // Time Remap on (keys at the identity), then Time-Reverse Layer: the keys are mirrored with
@@ -340,6 +355,7 @@ fn assert_remap_keeps_frames(s: &mut Session, cid: ItemId, l: u64, what: &str) {
     }
 }
 
+/// Checks that Time Remapping on a reversed layer keeps the blended frames, for footage and for a precomp.
 #[test]
 fn enabling_time_remap_on_a_reversed_layer_keeps_its_blended_frames() {
     // 10 fps footage reversed in a 30 fps comp with Frame Mix: the remapped layer used to skip
