@@ -72,6 +72,17 @@ pub(crate) const FORWARDED_SECONDARY: &str = "viewer-forwarded-secondary";
 /// the pointer left the layer in the pass of the press): the viewer clicks there on the next pass.
 pub(crate) const FORWARDED_PRIMARY: &str = "viewer-forwarded-primary";
 
+/// The egui data key (`()`) of a primary press an overlay claimed although egui handed it to the
+/// viewer (the Selection tool's Cryptomatte picking, #2839, when the pointer arrived on the layer
+/// and pressed in one pass, as a touch or a pen without hover does): the viewer neither clicks
+/// nor drags with it, and lets go of the claim once the button is up.
+pub(crate) const CLAIMED_PRIMARY: &str = "viewer-claimed-primary";
+
+/// Whether an overlay claimed the primary press in progress ([`CLAIMED_PRIMARY`]).
+fn press_claimed(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<()>(egui::Id::unique(CLAIMED_PRIMARY))).is_some()
+}
+
 /// What the viewer's own handles reach this pass, for overlays drawn on top of it.
 #[derive(Clone, Default)]
 struct Grabs {
@@ -1203,6 +1214,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
     };
     if resp.drag_started()
         && !text_owns
+        && !press_claimed(ui.ctx())
         && let Some(pos) = resp.interact_pointer_pos()
     {
         let cpt = map.to_comp(pos);
@@ -1804,7 +1816,9 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
         .data_mut(|d| d.remove_temp::<(Pos2, egui::Modifiers, u64)>(egui::Id::unique(FORWARDED_PRIMARY)))
         .filter(|f| f.2.saturating_add(1) == pass)
         .map(|f| (f.0, f.1));
-    let clicked = if resp.clicked() && !text_owns { resp.interact_pointer_pos().map(|p| (p, mods)) } else { None };
+    // A press an overlay claimed (CLAIMED_PRIMARY) is not a click here.
+    let claimed = press_claimed(&ctx);
+    let clicked = if resp.clicked() && !text_owns && !claimed { resp.interact_pointer_pos().map(|p| (p, mods)) } else { None };
     if let Some((pos, mods)) = clicked.or(forwarded) {
         let cpt = map.to_comp(pos);
         match app.ui.tool {
@@ -1914,8 +1928,14 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
 
 fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let map = v.map;
-    let text_owns = v.text_owns;
     let ctx = v.ctx.clone();
+    // A press an overlay claimed (CLAIMED_PRIMARY) is no double-click here either; the claim
+    // ends with the button up (after this pass's click and double-click).
+    let claimed = press_claimed(&ctx);
+    if claimed && !ctx.input(|i| i.pointer.primary_down()) {
+        ctx.data_mut(|d| d.remove::<()>(egui::Id::unique(CLAIMED_PRIMARY)));
+    }
+    let text_owns = v.text_owns || claimed;
     let handle_hits = std::mem::take(&mut v.handle_hits);
     let vertex_hits = std::mem::take(&mut v.vertex_hits);
     let paths = std::mem::take(&mut v.paths);

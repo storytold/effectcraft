@@ -286,3 +286,44 @@ fn after_the_eyedropper_and_esc_the_selection_tool_does_not_pick() {
     assert!(!h.state().session.crypto_probe_stats().0, "no IDs kept read");
     let _ = std::fs::remove_dir_all(&ids.dir);
 }
+
+/// A touch (or a pen without hover) arrives on the layer and presses in one pass: the overlay
+/// wasn't there the pass before, so egui hands the press to the viewer. It is still a pick (and
+/// Shift still adds), and the viewer neither selects, toggles nor moves the layer with it.
+#[test]
+fn a_touch_that_arrives_and_presses_in_one_pass_picks() {
+    let (s, ids) = session("touch");
+    let mut h = harness(s);
+    let (steps, before) = (undo_steps(&h), position(&h, ids.plate));
+    let (a, b) = (on_plate(&h, 50.0, 40.0), on_plate(&h, 120.0, 100.0));
+    let touch = |h: &mut Harness<'_, EffectcraftApp>, pos: Pos2, modifiers: Modifiers, by: egui::Vec2| {
+        h.event(Event::PointerGone);
+        h.run_steps(2);
+        let ev = &mut h.input_mut().events;
+        ev.push(Event::ModifiersChanged(modifiers));
+        ev.push(Event::PointerMoved(pos));
+        ev.push(Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers });
+        h.step();
+        for k in 1..=4 {
+            h.event(Event::PointerMoved(pos + by * k as f32 / 4.0));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: pos + by, button: PointerButton::Primary, pressed: false, modifiers });
+        h.step();
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.event(Event::PointerGone);
+        h.step();
+        wait_probe(h);
+        h.run_steps(2);
+    };
+    touch(&mut h, a, Modifiers::NONE, vec2(0.0, 0.0));
+    assert_eq!(selection(&h, &ids), "c1_1", "the touch picked");
+    touch(&mut h, b, Modifiers::SHIFT, vec2(0.0, 0.0));
+    assert_eq!(selection(&h, &ids), "c1_1, c3_3", "Shift added");
+    assert_eq!(selected_layers(&h), vec![ids.plate], "the viewer didn't toggle the layer");
+    // A touch that drags moves nothing (and picks nothing).
+    touch(&mut h, a, Modifiers::NONE, vec2(120.0, 40.0));
+    assert_eq!((position(&h, ids.plate), undo_steps(&h)), (before, steps + 2), "the layer stays put");
+    assert_eq!(selection(&h, &ids), "c1_1, c3_3");
+    let _ = std::fs::remove_dir_all(&ids.dir);
+}

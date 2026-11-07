@@ -11,7 +11,8 @@
 //! "Over the layer" is its bounding quad, as the viewer's own hit test (not its alpha), less the
 //! viewer's handles on it ([`super::viewer::grabs_at`]: bounding-box handles, mask vertices,
 //! motion-path keys, guides), which keep scaling, reshaping and moving. A press in the very pass
-//! the pointer leaves the layer is passed on to the viewer as a click. While the effect is
+//! the pointer leaves the layer is passed on to the viewer as a click; one in the pass it arrives
+//! on the layer (a touch, a pen without hover) is claimed from the viewer and picks. While the effect is
 //! selected (or the eyedropper armed), a double-click on the layer picks (one step: the second
 //! click changes nothing) instead of opening its precomp or editing its text.
 //!
@@ -307,7 +308,7 @@ fn viewer_pan_and_secondary(app: &mut EffectcraftApp, ctx: &egui::Context, resp:
 
 /// Whether Space / Hand / Zoom (`tools`) or middle/right buttons (`nav`) own the pointer, and
 /// whether a press at a point is the overlay's (`owned`: the Selection tool picking only over the
-/// effect's layer, and only where the overlay took the press from the viewer).
+/// effect's layer, off the viewer's own handles there).
 struct PointerNav<'a> {
     tools: bool,
     nav: bool,
@@ -315,6 +316,10 @@ struct PointerNav<'a> {
     /// The overlay took the pass's presses from the viewer (it sensed clicks the pass before):
     /// one it does not own is passed on to the viewer ([`super::viewer::FORWARDED_PRIMARY`]).
     forward: bool,
+    /// The overlay did not sense clicks the pass before, so egui hands the pass's presses to the
+    /// viewer: one it owns (a touch, or a pen without hover, arriving on the layer and pressing in
+    /// one pass) is claimed from the viewer ([`super::viewer::CLAIMED_PRIMARY`]).
+    claim: bool,
 }
 
 /// Queues Cryptomatte picks from primary presses and releases on the armed eyedropper overlay.
@@ -365,6 +370,10 @@ fn viewer_click_to_pick(
             if pointer.forward && in_viewer && !ours && !pointer.nav {
                 let pass = ctx.cumulative_pass_nr();
                 ctx.data_mut(|d| d.insert_temp(egui::Id::unique(super::viewer::FORWARDED_PRIMARY), (pos, keys, pass)));
+            }
+            // Handed to the viewer but ours: the viewer leaves it alone, so it only picks.
+            if pointer.claim && ours && !pointer.nav {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique(super::viewer::CLAIMED_PRIMARY), ()));
             }
             st.press = (!pointer.nav && ours).then(|| Press {
                 pos,
@@ -637,8 +646,9 @@ pub fn viewer_hook(
     let panning = ctx.is_being_dragged(oid) && ctx.input(|i| i.pointer.middle_down());
     let over = st.press.is_some() || panning || ctx.pointer_hover_pos().is_some_and(on_layer);
     let pass = ctx.cumulative_pass_nr();
-    // A press is the overlay's only where it sensed clicks the pass before (egui handed it the
-    // press, not the viewer underneath, which would select or move the layer as well).
+    // Whether the overlay sensed clicks the pass before: egui handed it the pass's presses, not the
+    // viewer underneath (which would select or move the layer as well). If it didn't, a press of
+    // ours is claimed from the viewer; if it did, one not ours is passed on to the viewer.
     let owned_before = !implicit || st.sensed.is_some_and(|n| n.saturating_add(1) == pass);
     st.implicit = implicit;
     let mut reading = false;
@@ -655,8 +665,8 @@ pub fn viewer_hook(
     } else {
         (st.asked, st.reply) = (None, None);
     }
-    let owned = |p: egui::Pos2| owned_before && on_layer(p);
-    viewer_click_to_pick(app, ui, map, ectx, &mut st, PointerNav { tools, nav, owned: &owned, forward: implicit && owned_before }, &at);
+    let pointer = PointerNav { tools, nav, owned: &on_layer, forward: implicit && owned_before, claim: implicit && !owned_before };
+    viewer_click_to_pick(app, ui, map, ectx, &mut st, pointer, &at);
     // Clicks waiting for their probe ([`make_waiting`], at the end of the pass).
     reading |= !st.pending.is_empty();
     draw_coverage_highlight(app, &ctx, painter, map, m, &mut st);
