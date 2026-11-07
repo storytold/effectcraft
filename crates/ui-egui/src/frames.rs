@@ -35,7 +35,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
+use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::reads::{ReadFiles, ReadLog};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
@@ -434,7 +434,8 @@ fn comp_content_with<'a>(
         let Some(ItemKind::Comp(c)) = item(id).map(|i| &i.kind) else { continue };
         let c = version(id, c);
         for l in &c.layers {
-            if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
+            // (a 3D model's item too)
+            if let Some(item) = l.source.item() {
                 stack.push(item);
             }
             expressions = expressions || (everything && has_expression(&l.props));

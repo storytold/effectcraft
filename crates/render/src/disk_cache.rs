@@ -1745,6 +1745,28 @@ mod tests {
         assert_ne!(comp_content_key(&p, cid), key, "a hidden clip");
     }
 
+    /// An expression that reads a 3D model layer's source (`thisComp.layer("Model").source.name`)
+    /// gives a new key when the model item is renamed: the frames on disk hold the old name.
+    #[test]
+    fn renaming_a_model_an_expression_reads_changes_the_disk_key() {
+        use effectcraft_project::{Comp, Expression, Footage, FootageKind, ItemKind, LayerSource, Project, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut p = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Main", Default::default(), None, ItemKind::Comp(comp.clone().into()));
+        let model = p.add_item("chair.glb", Default::default(), None, ItemKind::Footage(Footage { kind: FootageKind::Model, ..Default::default() }));
+        let sid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+        let mut m = build::layer(&mut p, &comp, "Model", LayerSource::Model { item: model }, (64, 64), None);
+        m.switches.video = false;
+        let mut s = build::layer(&mut p, &comp, "Reader", LayerSource::Solid { item: sid }, (64, 64), None);
+        s.props.prop_mut("transform/opacity").unwrap().expr =
+            Some(Expression { text: "thisComp.layer(\"Model\").source.name.length * 10".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.extend([s, m]);
+        let key = comp_content_key(&p, cid);
+        p.item_mut(model).unwrap().name = "table.glb".into();
+        assert_ne!(comp_content_key(&p, cid), key, "the expression reads the model's name");
+    }
+
     /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
     /// on disk afterwards (the blue bar came back with gaps).
     #[test]

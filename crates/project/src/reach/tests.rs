@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Expression, Solid, build};
+use crate::{Expression, LayerSource, Solid, build};
 use effectcraft_time::{FrameRate, Tick};
 
 fn names(comps: &[&str], footage: &[&str]) -> ExprReach {
@@ -174,4 +174,25 @@ fn nested_comps_bring_their_expressions_reach() {
     f.p.comp_mut(f.third).unwrap().layers.push(l);
     set_expr(&mut f.p, f.third, "comp(\"Main\").width");
     assert!(reach(&f.p, f.main).items.unwrap().contains(&f.main));
+}
+
+/// A 3D model layer's item is reached like any other source: it is drawn, and an expression
+/// reads its name and size through `layer.source` (a renamed model left the comp's disk key and
+/// its old frames in place).
+#[test]
+fn model_sources_are_reached() {
+    let mut f = fixture();
+    let model = f.p.add_item(
+        "chair.glb",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(crate::Footage { kind: crate::FootageKind::Model, ..Default::default() }),
+    );
+    let comp = f.p.comp(f.main).unwrap().clone();
+    let l = build::layer(&mut f.p, &comp, "Model", LayerSource::Model { item: model }, (64, 64), None);
+    f.p.comp_mut(f.main).unwrap().layers.push(l);
+    assert!(reach(&f.p, f.main).items.unwrap().contains(&model), "drawn");
+    set_expr(&mut f.p, f.main, "thisComp.layer(\"Model\").source.name.length");
+    let r = reach(&f.p, f.main);
+    assert!(r.expressions && r.items.unwrap().contains(&model), "read by an expression");
 }

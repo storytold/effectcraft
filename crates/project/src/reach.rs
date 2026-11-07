@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Comp, ItemId, ItemKind, LayerId, LayerSource, Node, Project, PropGroup, Value};
+use crate::{Comp, ItemId, ItemKind, LayerId, Node, Project, PropGroup, Value};
 
 /// What an expression's text can reach outside its own comp and the layers it can read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,7 +351,9 @@ impl Project {
             let Some(c) = self.comp(id) else { continue };
             let quiet = quiet(id, c);
             for l in c.layers.iter().filter(|l| !quiet.contains(&l.id)) {
-                if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
+                // Every source item: a 3D model's too (it is drawn, and `layer.source` reads its
+                // name and size).
+                if let Some(item) = l.source.item() {
                     stack.push(item);
                 }
                 stack.extend(self.media_replacements(l)?);

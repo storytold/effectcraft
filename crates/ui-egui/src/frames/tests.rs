@@ -1,4 +1,5 @@
 use super::*;
+use effectcraft_engine::project::LayerSource;
 
 #[test]
 fn render_scales_are_the_factors_the_thousandths_stand_for() {
