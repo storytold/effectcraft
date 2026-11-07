@@ -1063,6 +1063,8 @@ impl<'a> Renderer<'a> {
             return Some((b, key, files));
         }
         let (buf, files) = self.recorded(key, |r| {
+            // (what expressions read while it is made, at shutter times too, goes to its files)
+            let ctx = &r.with_reads(ctx);
             let buf = r.masked_source(ctx, layer)?;
             Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
         });
@@ -1081,6 +1083,7 @@ impl<'a> Renderer<'a> {
             return Some(b);
         }
         let (buf, files) = self.recorded(key, |r| {
+            let ctx = &r.with_reads(ctx);
             let mut buf = r.masked_source(ctx, layer)?;
             let origin = ctx.effect_bounds(layer).1;
             buf.rebase(origin);

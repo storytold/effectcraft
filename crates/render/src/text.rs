@@ -644,15 +644,32 @@ fn align_index(j: Justify) -> u8 {
 /// it changes the text), a character drawn with a fallback face or with none (another installed
 /// font could take it), a font from memory.
 fn note_fonts(ctx: &EvalCtx, lay: &TextLayout) {
+    note_layout_fonts(ctx, &lay.styles, &lay.layout);
+}
+
+/// A character put in by Character Offset or Character Value (`ch`, in style `st`), outside a
+/// relayout: its outline and advance, with the font it is drawn with noted as [`note_fonts`] does
+/// (the run's face may not have it: a fallback face then draws it).
+fn substituted_glyph(ctx: &EvalCtx, st: &effectcraft_keyframe::CharStyle, ch: char) -> (BezPath, f64) {
+    if ctx.reads.is_some() {
+        // (the layout `char_glyph_style` makes, served from the layout cache there)
+        let lay = effectcraft_text::layout_text(&ch.to_string(), &effectcraft_text::text_style(st), &effectcraft_text::ParagraphStyle::default());
+        note_layout_fonts(ctx, std::slice::from_ref(st), &lay);
+    }
+    char_glyph_style(st, ch)
+}
+
+/// [`note_fonts`] for `layout`, whose glyphs' runs index `styles`.
+fn note_layout_fonts(ctx: &EvalCtx, styles: &[effectcraft_keyframe::CharStyle], layout: &effectcraft_text::Layout) {
     use crate::reads::{FileStamp, ReadFile};
     use effectcraft_text::fonts;
     let Some(log) = ctx.reads else { return };
-    let resolved: Vec<fonts::Resolved> = lay.styles.iter().map(|s| fonts::resolve(&s.font, &s.style)).collect();
+    let resolved: Vec<fonts::Resolved> = styles.iter().map(|s| fonts::resolve(&s.font, &s.style)).collect();
     if resolved.iter().any(|r| r.missing) {
         log.mark_incomplete();
     }
     let mut faces: Vec<fonts::FaceId> = Vec::new();
-    for g in &lay.layout.glyphs {
+    for g in &layout.glyphs {
         if g.id == 0 || resolved.get(g.run).is_none_or(|r| r.face != g.face) {
             log.mark_incomplete();
         }
@@ -828,7 +845,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         // Outline (substituted characters aligned in the original slot).
         let (outline, adv) = match subs[gi] {
             Some(c) => {
-                let (p, a) = char_glyph_style(st, c);
+                let (p, a) = substituted_glyph(ctx, st, c);
                 let dx = match x.char_align {
                     0 => 0.0,
                     2 => g.advance - a,
