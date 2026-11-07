@@ -410,3 +410,116 @@ fn upgrading_deeply_nested_shape_groups_fits_a_small_stack() {
     let ids: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
     assert_eq!(ids, ["size", "detail", "points", "speed", "correlation", "phase", "spatialPhase", "seed"]);
 }
+
+/// Music in a precomp is heard, and so not silent, when a layer of a comp nesting it picks the
+/// precomp layer (an Audio Waveform drawing the precomp's mix).
+#[test]
+fn music_in_a_precomp_a_waveform_picks_is_not_silent() {
+    use crate::{Footage, FootageKind, GroupKind};
+    let (mut p, inner) = project_with_layer();
+    let song = p.add_item(
+        "song.wav",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+    );
+    let comp = p.comp(inner).unwrap().clone();
+    let music = build::layer(&mut p, &comp, "Music", LayerSource::Footage { item: song }, (1920, 1080), None);
+    let music_id = music.id;
+    p.comp_mut(inner).unwrap().layers.push(music);
+    let outer = p.add_item("Outer", effectcraft_color::Label::None, None, ItemKind::Comp(comp.clone().into()));
+    let pre = build::layer(&mut p, &comp, "Pre", LayerSource::Comp { item: inner }, (1920, 1080), None);
+    let pre_id = pre.id;
+    p.comp_mut(outer).unwrap().layers.push(pre);
+    let silent = |p: &Project| p.silent_layers(inner, p.comp(inner).unwrap(), &p.heard_layers()).contains(&music_id);
+    assert!(silent(&p), "nothing draws the precomp's audio");
+    let mut n = 1_000_000;
+    let mut ids = build::Ids(&mut n);
+    let mut g = ids.group("waveform", "Audio Waveform");
+    g.kind = GroupKind::Effect { effect: "ec.generate.audiowaveform".into() };
+    g.children.push(ids.prop("audioLayer", "Audio Layer", Value::Layer(Some(pre_id.0))).into());
+    let solid = p.comp(outer).unwrap().layers[0].id;
+    p.comp_mut(outer).unwrap().layer_mut(solid).unwrap().props.group_mut("effects").unwrap().children.push(g.into());
+    assert!(!silent(&p), "the outer comp's waveform draws the music");
+}
+
+/// Layers that can't change the picture: music, hidden layers nothing reads. A hidden matte is
+/// read by the layer it mattes; nulls and cameras are never silent.
+#[test]
+fn silent_layers_are_music_and_unread_hidden_layers() {
+    use crate::{Footage, FootageKind, LayerId, MatteKind, TrackMatte};
+    let (mut p, cid) = project_with_layer();
+    let comp = p.comp(cid).unwrap().clone();
+    let song = p.add_item(
+        "song.wav",
+        effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+    );
+    let add = |p: &mut Project, name: &str, source: LayerSource| {
+        let l = build::layer(p, &comp, name, source, (1920, 1080), None);
+        let id = l.id;
+        p.comp_mut(cid).unwrap().layers.push(l);
+        id
+    };
+    let music = add(&mut p, "Music", LayerSource::Footage { item: song });
+    let solid = p.comp(cid).unwrap().layers[0].source.clone();
+    let hidden = add(&mut p, "Hidden", solid.clone());
+    let matte = add(&mut p, "Matte", solid);
+    let null = add(&mut p, "Null", LayerSource::Null);
+    let first = p.comp(cid).unwrap().layers[0].id;
+    let c = p.comp_mut(cid).unwrap();
+    for id in [hidden, matte, null] {
+        c.layer_mut(id).unwrap().switches.video = false;
+    }
+    c.layer_mut(first).unwrap().track_matte = Some(TrackMatte { layer: matte, kind: MatteKind::Alpha });
+    let c = p.comp(cid).unwrap();
+    assert_eq!(p.silent_layers(cid, c, &p.heard_layers()).into_iter().collect::<Vec<LayerId>>(), vec![music, hidden]);
+    // Solo hides every other layer, so a soloed music or hidden layer changes the picture.
+    for (soloed, rest) in [(music, hidden), (hidden, music)] {
+        let mut q = p.clone();
+        q.comp_mut(cid).unwrap().layer_mut(soloed).unwrap().switches.solo = true;
+        assert_eq!(q.silent_layers(cid, q.comp(cid).unwrap(), &q.heard_layers()).into_iter().collect::<Vec<LayerId>>(), vec![rest]);
+    }
+}
+
+/// Plug-in effects read their input at other times (plug-in API 2), so a precomp under one is
+/// re-rendered over its whole span; built-in effects only when they are on the list.
+#[test]
+fn plug_in_effects_read_other_frames() {
+    assert!(crate::reads_other_frames("org.example.glow"));
+    assert!(crate::reads_other_frames("ec.time.echo"));
+    assert!(!crate::reads_other_frames("ec.blur.gaussian"));
+}
+
+/// An item whose parent is a composition (or an item that is not there) lists under no folder, and
+/// the AEP export lost it without a word (review finding): opening such a file moves it to the top
+/// level and says so; a parent that is a folder stays.
+#[test]
+fn an_item_inside_a_non_folder_moves_to_the_top_level_when_a_project_is_opened() {
+    let mut p = Project::default();
+    let folder = p.add_item("Folder", Default::default(), None, ItemKind::Folder);
+    let comp = p.add_item(
+        "Comp",
+        Default::default(),
+        None,
+        ItemKind::Comp(std::sync::Arc::new(Comp::new(64, 36, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0)))),
+    );
+    let inside_folder = p.add_item("Fine", Default::default(), Some(folder), ItemKind::Folder);
+    let inside_comp = p.add_item("Inside comp", Default::default(), None, ItemKind::Folder);
+    let orphan = p.add_item("Orphan", Default::default(), None, ItemKind::Folder);
+    if let Some(i) = p.item_mut(inside_comp) {
+        i.parent = Some(comp);
+    }
+    if let Some(i) = p.item_mut(orphan) {
+        i.parent = Some(crate::ItemId(9_999));
+    }
+    let (q, notes) = Project::from_json_repaired(&p.to_json()).expect("opens");
+    assert_eq!(q.item(inside_folder).and_then(|i| i.parent), Some(folder));
+    assert_eq!(q.item(inside_comp).and_then(|i| i.parent), None);
+    assert_eq!(q.item(orphan).and_then(|i| i.parent), None);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes.iter().all(|n| n.contains("not a folder")), "{notes:?}");
+    // Nothing to repair in a sound project.
+    assert!(Project::from_json_repaired(&q.to_json()).expect("opens").1.is_empty());
+}
