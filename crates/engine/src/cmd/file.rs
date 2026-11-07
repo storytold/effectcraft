@@ -40,6 +40,8 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"comp": s.state.active_comp.map(|c| c.0)}))
 }
 
+/// Opens a project file in place of the current one: reads and upgrades it, repairs old time-reverse layouts, re-resolves footage paths and toasts what changed.
+/// Returns the path, the saving version and the repaired layers.
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
@@ -52,6 +54,9 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
+    // Layers reversed by Time-Reverse Layer before #3245 were one comp frame early.
+    let (reversed_moved, reversed_unsure) = super::layer_time::repair_old_time_reverse(&mut proj);
+    let saved_by = effectcraft_project::saved_by(&text);
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
@@ -67,8 +72,24 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         let n = refused.len();
         s.toast(format!("{n} footage item{} marked missing: {}.", if n == 1 { "" } else { "s" }, crate::doc_path::refusal(first, *why)));
     }
+    let names = |v: &[String]| {
+        let more = v.len().saturating_sub(3);
+        let shown = v.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        if more > 0 { format!("{shown} and {more} more") } else { shown }
+    };
+    if !reversed_moved.is_empty() {
+        s.toast(format!(
+            "Time-reversed layers from an earlier EffectCraft were one frame early and now start one frame later, as in After Effects: {}.",
+            names(&reversed_moved)
+        ));
+    }
+    if !reversed_unsure.is_empty() {
+        s.toast(format!(
+            "Time-reversed layers that may be one frame early (reversed in an earlier EffectCraft; check their first and last frames): {}.",
+            names(&reversed_unsure)
+        ));
+    }
     // Written by a newer EffectCraft: what this version doesn't know would be lost on saving.
-    let saved_by = effectcraft_project::saved_by(&text);
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         s.toast(format!(
             "This project was saved by EffectCraft {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
@@ -80,7 +101,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if s.check_footage_on_open {
         crate::footage_check::start(s, None, false)?;
     }
-    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired, "reversedLayers": {"moved": reversed_moved, "unchanged": reversed_unsure}}))
 }
 
 /// The project file's text for `path`: `.ecproj` JSON, or XML for `.ecprojx` / `.xml` (a

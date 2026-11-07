@@ -59,6 +59,7 @@ mod tail;
 mod text;
 mod text_edit;
 mod three_d;
+mod time_reverse;
 mod timeline;
 mod timeline_interchange;
 pub(crate) mod track;

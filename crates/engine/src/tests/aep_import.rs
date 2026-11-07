@@ -319,3 +319,28 @@ fn a_video_with_sound_arrives_audible() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Checks that Time-Reverse Layer round-trips an imported After Effects reversed layer to forward playback and back to the saved layout.
+#[test]
+fn time_reverse_layer_lays_a_layer_out_as_after_effects_does() {
+    // 981: a layer reversed in After Effects (-100 %, start 5 s, over 0..5 s). Time-Reverse Layer
+    // brings it back to forward playback with its In point at layer time 0, and reversing it again
+    // gives exactly the layer After Effects saved (#3245: the command used to put the reversed
+    // In point one frame before the end).
+    let mut s = Session::default();
+    let r = s.execute_checked("file.importAep", json!({"path": fixture!("981-layer-stretch-minus100-start5.aep"), "allowLosses": true})).unwrap();
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    let saved = s.project.comp(cid).unwrap().layers.iter().find(|l| l.stretch < 0.0).cloned().expect("a reversed layer");
+    assert_eq!(saved.stretch, -100.0);
+    let layer = |s: &Session| s.project.comp(cid).unwrap().layer(saved.id).cloned().unwrap();
+    let one = |s: &mut Session| s.execute_checked("layer.timeReverse", json!({"comp": cid.0, "layers": [saved.id.0]})).unwrap();
+    one(&mut s);
+    let forward = layer(&s);
+    assert_eq!(forward.stretch, 100.0);
+    assert_eq!((forward.in_point, forward.out_point), (saved.in_point, saved.out_point));
+    assert_eq!(forward.layer_time(forward.in_point), saved.layer_time(saved.out_point));
+    assert_eq!(forward.layer_time(forward.in_point), effectcraft_time::Tick::ZERO);
+    assert_eq!(forward.layer_time(forward.out_point), saved.layer_time(saved.in_point));
+    one(&mut s);
+    assert_eq!(layer(&s), saved);
+}
