@@ -339,3 +339,61 @@ fn markers_count_only_where_an_expression_can_read_them() {
     assert_eq!(key(&s), k0, "M itself still doesn't");
 }
 
+/// File ▸ Reload Footage drops the disk entries made of the item's files (#3184): a file
+/// replaced by one with the same size and modification time is read again (the check on hit
+/// can't tell), and entries of other files stay.
+#[test]
+fn reload_footage_drops_the_entries_of_its_files() {
+    use crate::render::reads::{FileStamp, ReadFile, ReadFiles};
+    struct Probe;
+    impl crate::Importer for Probe {
+        fn probe(&self, path: &str) -> std::result::Result<effectcraft_project::Footage, String> {
+            Ok(effectcraft_project::Footage {
+                path: path.into(),
+                kind: effectcraft_project::FootageKind::Still,
+                width: 1,
+                height: 1,
+                has_video: true,
+                ..Default::default()
+            })
+        }
+    }
+    let dir = folder("reload");
+    let mut s = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+    s.execute_checked("prefs.set", json!({"values": {"disk.diskCacheFolder": &dir, "disk.diskCacheEnabled": true}})).unwrap();
+    let src = std::path::Path::new(&dir).join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut add = |name: &str| {
+        let p = src.join(name);
+        std::fs::write(&p, b"aa").unwrap();
+        let path = p.to_string_lossy().to_string();
+        let f = effectcraft_project::Footage {
+            path: path.clone(),
+            kind: effectcraft_project::FootageKind::Still,
+            width: 1,
+            height: 1,
+            has_video: true,
+            ..Default::default()
+        };
+        let id = s.edit("add", None, |p, _| Ok(p.add_item(name, effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f)))).unwrap();
+        (id, path)
+    };
+    let (a, a_path) = add("a.png");
+    let (_, b_path) = add("b.png");
+    let dc = s.disk_cache.clone().unwrap();
+    let read = |p: &str| -> ReadFiles { [ReadFile::new(p, FileStamp::native(p).unwrap())].into_iter().collect() };
+    dc.put_frame_now(1, 1, 1, &[1; 4], &read(&a_path));
+    dc.put_frame_now(2, 1, 1, &[2; 4], &read(&b_path));
+    dc.put_layer_now(3, &effectcraft_effects::Buf { img: effectcraft_raster::Image::new(1, 1), offset: [0.0; 2], scale: 1.0 }, &read(&a_path));
+    // Other bytes, same size, the old time back.
+    let t = std::fs::metadata(&a_path).unwrap().modified().unwrap();
+    std::fs::write(&a_path, b"AA").unwrap();
+    std::fs::File::options().append(true).open(&a_path).unwrap().set_modified(t).unwrap();
+    assert!(dc.contains(crate::render::disk_cache::Kind::Frame, 1));
+    s.execute_checked("file.reloadFootage", json!({"item": a.0})).unwrap();
+    dc.flush();
+    assert!(dc.get_frame(1, None).is_none(), "the reloaded file's frame renders again");
+    assert!(dc.get_layer(3, None).is_none(), "and its layer buffer");
+    assert!(dc.get_frame(2, None).is_some(), "another file's frame stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2,16 +2,18 @@
 //! and layer cache entries kept on disk between sessions, like After Effects' disk cache.
 //!
 //! * Entries are files keyed by a 128-bit content hash (`<folder>/v1/<kind>/<2 hex>/<32 hex>.ecc`):
-//!   frames by the hash of the composition's content as it is in memory (the comp and everything
-//!   it uses, footage items with their settings and paths; no file is looked at) plus frame,
-//!   scale and view; layer buffers by the layer cache's content key (which names the footage
-//!   items a buffer uses with their settings and paths) and the renderer version
-//!   ([`layer_disk_key`]). A changed project therefore never reads stale pixels: its keys simply
-//!   change.
+//!   frames by the hash of the composition's content as it is in memory (the comp and what it can
+//!   draw, footage items with their settings and paths, and what its expressions can read; no
+//!   file is looked at, [`comp_content_key`]) plus frame, scale and view; layer buffers by the
+//!   layer cache's content key (which names the footage items a buffer uses with their settings
+//!   and paths) and the renderer version ([`layer_disk_key`]). A changed project therefore never
+//!   reads stale pixels: its keys simply change, and an edit elsewhere keeps them.
 //! * Frame and layer entries keep the source files they were made of, each with the size and
 //!   modification time it was read with ([`EntryFiles`], #3184). An entry is used only while
 //!   those files are unchanged: a handful of `metadata` calls when it is read, never a scan of
-//!   the project's files. A frame or buffer whose files can't all be named is not stored.
+//!   the project's files. A frame or buffer whose files can't all be named is not stored. File ▸
+//!   Reload Footage deletes the entries made of the reloaded files ([`DiskCache::drop_files`]):
+//!   a file replaced by one of the same size and time is read again.
 //! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
 //!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
 //!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
@@ -261,6 +263,8 @@ impl LayerPrefetch {
 enum Job {
     /// Kind, key, header format byte, payload.
     Write(Kind, u128, u8, Vec<u8>),
+    /// Delete the frame and layer entries made of these files ([`DiskCache::drop_files`]).
+    Drop(Vec<Arc<str>>),
 }
 
 struct Queue {
@@ -279,8 +283,9 @@ impl Queue {
     #[cfg(not(target_arch = "wasm32"))]
     fn pop(&mut self) -> Option<Job> {
         if let Some(j) = self.frames.pop_front() {
-            let Job::Write(_, _, _, p) = &j;
-            self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+            if let Job::Write(_, _, _, p) = &j {
+                self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+            }
             return Some(j);
         }
         self.jobs.pop_front()
@@ -310,6 +315,9 @@ pub struct DiskCache {
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
     min_layer_ms: AtomicU64,
+    /// Files whose entries are being deleted ([`DiskCache::drop_files`]), each with the number
+    /// of drops of it pending: until then an entry made of one is a miss.
+    dropping: Mutex<HashMap<Arc<str>, u32>>,
 }
 
 /// FNV-1a 128-bit (content keys).
@@ -395,6 +403,7 @@ impl DiskCache {
                 Condvar::new(),
             )),
             min_layer_ms: AtomicU64::new(30),
+            dropping: Mutex::new(HashMap::new()),
         });
         dc.rescan();
         // Shrinking a large cache deletes many files: the writer thread does it.
@@ -631,7 +640,7 @@ impl DiskCache {
             return miss();
         };
         self.file_checks.fetch_add(files.len() as u64, Ordering::Relaxed);
-        if !files.unchanged(virtual_id) {
+        if self.made_of_dropped(&files) || !files.unchanged(virtual_id) {
             self.discard(kind, key);
             return miss();
         }
@@ -752,6 +761,91 @@ impl DiskCache {
         }
     }
 
+    /// Delete the frame and layer entries made of any of `paths` (File ▸ Reload Footage: a file
+    /// replaced by one with the same size and modification time must be read again, which the
+    /// check on hit can't tell). The index knows keys, not files, so the writer thread reads the
+    /// files section at the start of each frame and layer entry (no pixels) and deletes the
+    /// entries that list one of `paths`, after the writes queued before (those are swept too);
+    /// until it is done, an entry made of one of them is a miss. Entries are deleted for good,
+    /// so they don't come back after a restart. Nothing else in the cache is touched.
+    pub fn drop_files(&self, paths: impl IntoIterator<Item = impl Into<Arc<str>>>) {
+        let paths: Vec<Arc<str>> = paths.into_iter().map(Into::into).collect();
+        if paths.is_empty() {
+            return;
+        }
+        {
+            let mut d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for p in &paths {
+                let n = d.entry(p.clone()).or_default();
+                *n = n.saturating_add(1);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (m, cv) = &*self.queue;
+            if let Ok(mut q) = m.lock() {
+                // (never refused for a full queue)
+                q.jobs.push_back(Job::Drop(paths));
+                cv.notify_all();
+                return;
+            }
+        }
+        self.sweep(&paths);
+    }
+
+    /// Whether a [`DiskCache::drop_files`] is pending.
+    pub fn is_dropping(&self) -> bool {
+        !self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+    }
+
+    /// An entry made of a file being dropped.
+    fn made_of_dropped(&self, files: &EntryFiles) -> bool {
+        let d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        !d.is_empty() && files.files().iter().any(|f| d.contains_key(&f.path))
+    }
+
+    /// The writer's part of [`DiskCache::drop_files`]: delete the entries made of `paths`, then
+    /// end their drop.
+    fn sweep(&self, paths: &[Arc<str>]) {
+        let set: std::collections::HashSet<&str> = paths.iter().map(|p| &**p).collect();
+        for kind in [Kind::Frame, Kind::Layer] {
+            for key in self.keys(kind) {
+                if self.entry_files(kind, key).is_some_and(|f| f.files().iter().any(|f| set.contains(&*f.path))) {
+                    self.discard(kind, key);
+                }
+            }
+        }
+        let mut d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in paths {
+            if let Some(n) = d.get_mut(p) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    d.remove(p);
+                }
+            }
+        }
+    }
+
+    /// The source files a frame or layer entry lists, read from the start of its file (the
+    /// whole file only when the list is longer than that). `None` when it has none to read (an
+    /// earlier format, gone, damaged): such an entry is never used anyway.
+    fn entry_files(&self, kind: Kind, key: u128) -> Option<EntryFiles> {
+        use std::io::Read;
+        const HEAD: u64 = 64 << 10;
+        let parse = |d: &[u8]| {
+            let format = *d.get(5)?;
+            let ours = d.get(..4)? == MAGIC && *d.get(4)? == kind.tag();
+            if !ours || !matches!(format, FORMAT_RGBA8_FILES | FORMAT_F16_FILES | FORMAT_LAYER_FILES) {
+                return None;
+            }
+            EntryFiles::decode(d.get(8..)?).map(|(files, _)| files)
+        };
+        let path = self.path(kind, key);
+        let mut head = Vec::new();
+        std::fs::File::open(&path).ok()?.take(HEAD).read_to_end(&mut head).ok()?;
+        parse(&head).or_else(|| if head.len() as u64 == HEAD { parse(&std::fs::read(&path).ok()?) } else { None })
+    }
+
     // ------------------------------------------------------------ typed entries
 
     /// An 8-bit frame whose source files are unchanged (see [`DiskCache::get_checked`]), with
@@ -840,7 +934,8 @@ impl DiskCache {
     /// has no links. `false` when `from` isn't cached, `to` already is, or the file system
     /// refused. (Entries don't contain their key, so the same file serves both.)
     pub fn link_frame(&self, from: u128, to: u128) -> bool {
-        if !self.contains(Kind::Frame, from) || self.contains(Kind::Frame, to) {
+        // (while files are being dropped, `from` may be made of one: it renders again instead)
+        if !self.contains(Kind::Frame, from) || self.contains(Kind::Frame, to) || self.is_dropping() {
             return false;
         }
         let (src, dst) = (self.path(Kind::Frame, from), self.path(Kind::Frame, to));
@@ -913,12 +1008,20 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
-        let Job::Write(kind, key, format, payload) = job;
-        cache.write_format(kind, key, format, &payload);
+        let written = match job {
+            Job::Write(kind, key, format, payload) => {
+                cache.write_format(kind, key, format, &payload);
+                (kind == Kind::Frame).then_some(key)
+            }
+            Job::Drop(paths) => {
+                cache.sweep(&paths);
+                None
+            }
+        };
         drop(cache);
         if let Ok(mut g) = m.lock() {
             g.busy = false;
-            if kind == Kind::Frame {
+            if let Some(key) = written {
                 g.pending_frames.remove(&key);
             }
         }
@@ -926,12 +1029,9 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     }
 }
 
-/// An entry file's bytes: header (magic, kind, format 0), payload, checksum.
-pub fn seal(kind: Kind, payload: &[u8]) -> Vec<u8> {
-    seal_format(kind, FORMAT_RGBA8, payload)
-}
-
-/// [`seal`] with the header's format byte (frames: 0 = 8-bit, 1 = half float).
+/// An entry file's bytes: header (magic, kind, the format byte: [`FORMAT_RGBA8`] for
+/// segmentations, [`FORMAT_RGBA8_FILES`] / [`FORMAT_F16_FILES`] for frames,
+/// [`FORMAT_LAYER_FILES`] for layer buffers), payload, checksum.
 fn seal_format(kind: Kind, format: u8, payload: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(payload.len() + 16);
     data.extend_from_slice(MAGIC);
@@ -1331,7 +1431,7 @@ mod tests {
         bad[20] ^= 1;
         assert!(read_frame_entry(&bad, Some(&one)).is_none());
         // An entry of the format before #3184 (pixels without files) is never read.
-        assert!(read_frame_entry(&seal(Kind::Frame, &encode_frame(6, 3, &rgba)), Some(&one)).is_none());
+        assert!(read_frame_entry(&seal_format(Kind::Frame, FORMAT_RGBA8, &encode_frame(6, 3, &rgba)), Some(&one)).is_none());
         let key = 0x0123_4567_89ab_cdef_0011_2233_4455_6677u128;
         assert_eq!(parse_entry_name(&entry_name(key)), Some(key));
         assert_eq!(parse_entry_name("abc.ecc"), None);
@@ -1698,7 +1798,7 @@ mod tests {
         let e = layer_entry(&buf(2, 3, 2), &EntryFiles::of(&files, Some(&one)).unwrap());
         let (b, list) = read_layer_entry(&e).unwrap();
         assert!(b.img == buf(2, 3, 2).img && list.unchanged(Some(&one)) && !list.unchanged(Some(&two)));
-        assert!(read_layer_entry(&seal(Kind::Layer, &encode_layer(&buf(2, 3, 2)))).is_none(), "the format before #3184");
+        assert!(read_layer_entry(&seal_format(Kind::Layer, FORMAT_RGBA8, &encode_layer(&buf(2, 3, 2)))).is_none(), "the format before #3184");
         let mut bad = e.clone();
         bad[12] ^= 1;
         assert!(read_layer_entry(&bad).is_none(), "damaged");
@@ -1858,6 +1958,74 @@ mod tests {
         assert!(!dc.put_frame(8, 1, 1, &[8; 4], &incomplete, None));
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reload Footage drops the entries made of the reloaded files (#3184): a file replaced by
+    /// one with the same size and modification time passes the check on hit, so only the drop
+    /// makes the next use a miss. Entries of other files stay; an entry written after the drop
+    /// is used; a layer entry and one written while the drop waits in the queue are dropped too;
+    /// the drop survives a restart (the files are gone).
+    #[test]
+    fn dropped_files_take_their_entries_with_them() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = src.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png", b"aa"), file("b.png", b"bb"));
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap())).collect() };
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &read(&[&a]));
+        dc.put_frame_now(2, 1, 1, &[2; 4], &read(&[&b]));
+        dc.put_frame_now(3, 1, 1, &[3; 4], &read(&[&a, &b]));
+        dc.put_layer_now(4, &buf(4, 2, 2), &read(&[&a]));
+        // a.png gets other bytes of the same size and its old time back: the check can't tell.
+        let t = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::fs::write(&a, b"AA").unwrap();
+        std::fs::File::options().append(true).open(&a).unwrap().set_modified(t).unwrap();
+        assert!(dc.get_frame(1, None).is_some(), "same size and time: still a hit");
+        // A frame queued (not written yet) when the drop comes is dropped too.
+        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None));
+        dc.drop_files([a.clone()]);
+        dc.flush();
+        assert!(!dc.is_dropping());
+        for (kind, key) in [(Kind::Frame, 1), (Kind::Frame, 3), (Kind::Layer, 4), (Kind::Frame, 5)] {
+            assert!(!dc.contains(kind, key), "{kind:?} {key} made of a.png is gone");
+        }
+        assert!(dc.get_frame(1, None).is_none() && dc.get_layer(4, None).is_none());
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0.rgba), Some(vec![2; 4]), "b.png's frame stays");
+        // Written again from the reloaded file: used.
+        dc.put_frame_now(1, 1, 1, &[9; 4], &read(&[&a]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.0.rgba), Some(vec![9; 4]));
+        // The drop is for good: a new session on the folder finds what is left.
+        drop(dc);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        assert_eq!(dc.keys(Kind::Frame).into_iter().collect::<std::collections::BTreeSet<_>>(), [1, 2].into());
+        assert!(dc.keys(Kind::Layer).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While a drop waits, an entry made of a dropped file is a miss (and deleted), and frames
+    /// aren't linked to new keys.
+    #[test]
+    fn entries_of_a_pending_drop_are_misses() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-pending");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.png");
+        std::fs::write(&a, b"aa").unwrap();
+        let a = a.to_string_lossy().to_string();
+        let files: ReadFiles = [ReadFile::new(a.as_str(), FileStamp::native(&a).unwrap())].into_iter().collect();
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &files);
+        dc.dropping.lock().unwrap().insert(a.as_str().into(), 1);
+        assert!(!dc.link_frame(1, 2));
+        assert!(dc.get_frame(1, None).is_none() && !dc.contains(Kind::Frame, 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

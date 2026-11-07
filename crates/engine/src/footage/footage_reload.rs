@@ -6,7 +6,8 @@
 //! or PDF page an item shows and its interpretation (alpha, conformed frame rate, pixel aspect,
 //! fields, colour). A Photoshop layer is found again by name when layers were added or removed
 //! around it. The media layer then forgets the file and the layer cache is emptied, so the next
-//! render reads the new pixels.
+//! render reads the new pixels; File ▸ Reload Footage also deletes the disk cache entries made of
+//! the file (#3184).
 //!
 //! The automatic part compares each footage file's size and modification time with what they
 //! were when the file was last seen. The desktop app keeps a [`Watcher`]: a worker thread that
@@ -279,6 +280,12 @@ fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usi
     let n = updates.len();
     apply_reloads(s, updates, undoable)?;
     forget_media(s, &paths);
+    // An explicit reload also reads files again that kept their size and time (the check on hit
+    // can't tell those apart): their entries in the disk cache go (#3184). An automatic one
+    // only follows a changed stamp, which the check catches.
+    if undoable && let Some(dc) = &s.disk_cache {
+        dc.drop_files(paths.iter().map(String::as_str));
+    }
     Ok((n, failed))
 }
 
@@ -317,8 +324,9 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
     Ok(())
 }
 
-/// Make the media layer and the layer cache let go of `paths`, so renders read them again. The
-/// disk cache needs nothing: its entries check the files they were made of when read (#3184).
+/// Make the media layer and the layer cache let go of `paths`, so renders read them again. Disk
+/// cache entries check the files they were made of when read (#3184); File ▸ Reload Footage
+/// also drops the entries of its files ([`reload`]).
 pub(crate) fn forget_media(s: &mut Session, paths: &BTreeSet<String>) {
     for p in paths {
         s.footage.forget(p);
