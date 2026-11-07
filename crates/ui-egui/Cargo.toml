@@ -45,7 +45,17 @@ craft-update = { workspace = true }
 pollster = { workspace = true }
 sys-locale = { workspace = true }
 
+[features]
+# Tests only, never enable in a product: Settings ▸ General ▸ Language ▸ Match System resolves to
+# English, so English label lookups pass on any system language (#3244). The self dev-dependency
+# below turns it on wherever dev-dependencies are built: this crate's integration tests, its
+# examples (`snapshot` shots are deterministic English unless a step sets a language) and
+# workspace test builds of the apps (`cargo test --workspace`).
+test-support = []
+
 [dev-dependencies]
+# This crate's own integration tests build it with `test-support` (see `[features]`).
+effectcraft-ui-egui = { workspace = true, features = ["test-support"] }
 # Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them
 # here documents the requirement (kittest's own dev-dependencies do not propagate to consumers).
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
