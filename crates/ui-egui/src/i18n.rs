@@ -84,7 +84,14 @@ pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
 /// language. The browser build follows the locales its page passes in ([`set_system_locales`]).
+///
+/// Test builds (this crate's unit tests, and its integration tests through the `test-support`
+/// feature) resolve Match System to English, so tests that look up English labels pass on any
+/// system language (#3244); tests about a translation choose their language explicitly.
 fn system_language() -> &'static str {
+    if cfg!(any(test, feature = "test-support")) {
+        return "en";
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         static LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
@@ -9169,13 +9176,22 @@ mod tests {
         }
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         assert_eq!(app.session.prefs.general.language, "system", "the default");
-        assert_eq!(japanese(&app), system_language() == "ja");
-        assert_eq!(simplified(&app), system_language() == "zh-hans");
-        assert_eq!(traditional(&app), system_language() == "zh-hant");
-        assert_eq!(spanish(&app), system_language() == "es");
-        assert_eq!(czech(&app), system_language() == "cs");
-        assert_eq!(polish(&app), system_language() == "pl");
-        assert_eq!(swedish(&app), system_language() == "sv");
+        assert_eq!(system_language(), "en", "test builds pin Match System to English (#3244)");
+        assert_eq!(language(&app), "en");
+        for (flag, name) in [
+            (japanese(&app), "ja"),
+            (simplified(&app), "zh-hans"),
+            (traditional(&app), "zh-hant"),
+            (ukrainian(&app), "uk"),
+            (spanish(&app), "es"),
+            (brazilian_portuguese(&app), "pt-br"),
+            (czech(&app), "cs"),
+            (polish(&app), "pl"),
+            (georgian(&app), "ka"),
+            (swedish(&app), "sv"),
+        ] {
+            assert!(!flag, "Match System shows {name} in a test build");
+        }
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ja"})).unwrap();
         assert!(japanese(&app));
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hans"})).unwrap();
