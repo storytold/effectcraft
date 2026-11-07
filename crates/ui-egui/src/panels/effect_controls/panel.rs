@@ -1,4 +1,4 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, selected_layer};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
@@ -158,7 +158,8 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
     }
 }
 
-/// The Effect Controls panel for the selected layer: a header with the comp and layer names, then
+/// The Effect Controls panel for the selected layer (or the layer the panel is locked to, see
+/// `common::shown_layer_id`): a header with the comp and layer names, then
 /// one header per effect (Fx toggle, twirl, rename, Reset, About, label bar, reorder drag and its
 /// right-click menu) followed by that effect's custom editor and its property rows. Dragging
 /// effects or presets onto the panel applies them; a right-click on empty space opens the Effect
@@ -168,7 +169,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
-    let Some(layer) = selected_layer(app) else {
+    // A locked layer that was deleted unlocks the panel, which then follows the selection.
+    prune_lock(app);
+    let Some(layer) = shown_layer(app) else {
         p.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("Select a layer to see its effects"), Tokens::ui(12.0), t.text_faint);
         return;
     };

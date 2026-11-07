@@ -676,8 +676,8 @@ pub fn doc_tabs(
     out
 }
 
-/// A viewer lock button (Composition viewers and the Timeline keep their comp while locked): a
-/// closed padlock while locked, an open one while unlocked.
+/// A panel lock button (Composition viewers and the Timeline keep their comp while locked,
+/// Effect Controls its layer): a closed padlock while locked, an open one while unlocked.
 /// Returns true when clicked. Automation: `panel.tab.<panel>.lock`.
 pub fn lock_button(ui: &mut egui::Ui, rect: Rect, panel: PanelKind, locked: bool, t: &Tokens, reg: &mut crate::automation::Registry) -> bool {
     let resp = ui.interact(rect, egui::Id::unique(("tab-lock", panel.id())), Sense::click());
