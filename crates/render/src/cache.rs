@@ -22,6 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::Buf;
+use effectcraft_keyframe::Value;
 use effectcraft_project::{FootageKind, ItemKind, Layer, LayerSource, Node, PropGroup};
 
 use crate::disk_cache::{EntryFiles, SharedVirtualFileId, VirtualFileId, layer_disk_key};
@@ -788,6 +789,20 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         hash_debug(&mut h, &crate::comp_scene(ctx, layer));
     }
     Some(h.finish())
+}
+
+/// Does the layer read another layer through an enabled effect's layer parameter (Gradient Wipe,
+/// Set Matte…)? Those layers are drawn by the reading layer's renderer, so the switches it
+/// passes down belong in the key (`Renderer::nested_look`).
+pub(crate) fn reads_layers(ctx: &EvalCtx, layer: &Layer) -> bool {
+    fn reads(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, depth: usize) -> bool {
+        depth < 32
+            && g.children.iter().any(|n| match n {
+                Node::Prop(p) => matches!(p.value, Value::Layer(_)) && ctx.value(layer, p).as_layer().is_some_and(|id| id != layer.id.0),
+                Node::Group(sub) => sub.enabled && reads(ctx, layer, sub, depth + 1),
+            })
+    }
+    layer.switches.effects && layer.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled && reads(ctx, layer, g, 0)))
 }
 
 /// Does the layer run an effect that reads the comp camera or lights (Card Dance, CC Particle

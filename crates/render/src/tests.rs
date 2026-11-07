@@ -820,6 +820,41 @@ fn effects_read_layer_params() {
     assert!(px[2] > 0.99 && px[0] < 0.01, "{px:?}");
 }
 
+/// A cached layer whose effect reads a precomp layer: how the precomp's layers render depends on
+/// Switches Affect Nested Comps (the precomp layer's Draft quality passes down) and on the
+/// switches the reading layer's own comp inherits, so the key must tell them apart (a buffer
+/// made under the other setting, from memory or disk, is stale).
+#[test]
+fn a_cached_layer_reading_a_precomp_is_keyed_by_the_nested_switches() {
+    let (mut p, cid, comp) = setup();
+    let mut inner = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    // A rotated square off the pixel grid: Draft (nearest) and Best (bilinear) sampling differ.
+    let mut dot = solid(&mut p, &inner, [1.0, 1.0, 1.0], 40, 40);
+    dot.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.3, 50.6, 0.0]);
+    dot.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(30.0);
+    inner.layers.push(dot);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut pre = build::layer(&mut p, &comp, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
+    pre.switches.video = false;
+    pre.switches.quality = effectcraft_project::Quality::Draft;
+    let mut top = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    add_effect_200(&mut p, &mut top, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(pre.id.0)))]);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(top);
+    c.layers.push(pre);
+    let frame = |nested_switches: bool, cache: Option<&crate::LayerCache>| {
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { nested_switches, ..Default::default() });
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO).data
+    };
+    let (on, off) = (frame(true, None), frame(false, None));
+    assert!(on != off, "the precomp layer's Draft quality passes down");
+    let cache = crate::LayerCache::default();
+    assert!(frame(true, Some(&cache)) == on);
+    assert!(frame(false, Some(&cache)) == off, "not the buffer made with switches affecting nested comps");
+    assert!(frame(true, Some(&cache)) == on, "and back");
+}
+
 /// Records whether the GPU compositor was asked to draw a frame.
 struct ProbeAccel(std::sync::atomic::AtomicBool);
 impl crate::Accelerator for ProbeAccel {

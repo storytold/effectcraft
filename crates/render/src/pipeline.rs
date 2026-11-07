@@ -205,6 +205,24 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// What this renderer passes down to the layers it draws beyond their own switches
+    /// ([`RenderOpts::nested_switches`], the switches inherited from the precomp layers above,
+    /// motion blur on): part of the cache key of a buffer that reads other layers.
+    pub(crate) fn nested_look(&self) -> u64 {
+        let inherited = match self.inherited {
+            None => 0,
+            Some((q, mb)) => {
+                let q = match q {
+                    Quality::Best => 0,
+                    Quality::Draft => 1,
+                    Quality::Wireframe => 2,
+                };
+                1 + q * 2 + u64::from(mb)
+            }
+        };
+        0x6e65_7374_0000_0000 | inherited << 2 | u64::from(self.opts.nested_switches) << 1 | u64::from(self.opts.motion_blur)
+    }
+
     /// A layer's Motion Blur switch, limited by the precomp layers above it.
     pub(crate) fn layer_motion_blur(&self, layer: &Layer) -> bool {
         layer.switches.motion_blur && self.inherited.is_none_or(|(_, mb)| mb)

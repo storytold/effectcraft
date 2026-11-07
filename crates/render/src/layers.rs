@@ -250,6 +250,10 @@ impl<'a> Renderer<'a> {
     /// depends on the content at every sub-sample).
     pub(crate) fn content_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
         let k = key?;
+        // A layer that reads other layers through its effects' layer parameters gets them drawn
+        // by this renderer: the switches it passes down (Switches Affect Nested Comps, the
+        // precomp layers above, motion blur on) change those pixels, not just the layers' own.
+        let k = if cache::reads_layers(ctx, layer) { cache::derive(k, self.nested_look()) } else { k };
         let Some(times) = self.content_times(ctx, layer) else { return Some(k) };
         times.iter().try_fold(cache::derive(k, 0x6d62_6c72), |d, t| Some(cache::derive(d, cache::layer_key(&ctx.at(*t), layer, 1.0, false, false)?)))
     }
