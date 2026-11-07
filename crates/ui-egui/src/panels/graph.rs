@@ -130,6 +130,45 @@ fn speed_at(pr: &Property, spatial: bool, d: usize, lt: Tick) -> f64 {
     }
 }
 
+/// How far either side of the key after a Hold key the step is sampled (seconds; far below a
+/// pixel, far above the tick a stretched layer's time conversion can be off by).
+const HOLD_EDGE: f64 = 1e-6;
+
+/// The comp times (seconds) a curve is sampled at between `t0` and `t1`: `n` evenly spaced
+/// times, plus every key time `keys` puts inside the span, and around the key after a key that
+/// holds (its out side is Hold) the instants just before and after it. `keys` are the active
+/// keys in key order, as (comp seconds, holds); on a reversed layer their comp times descend.
+/// Without the key times the polyline only passes near the keys: keys closer together than a
+/// sample step (a one-frame jump zoomed out) got cut across, missing their squares, and a Hold
+/// step was drawn as a slope across one step instead of a vertical edge (#2720). With no keys
+/// this is the plain even grid. Keys denser than the grid (baked keys zoomed out) add nothing
+/// visible and would multiply the evaluations, so past `2 * n` key samples only the grid is used.
+fn sample_times(t0: f64, t1: f64, n: usize, keys: &[(f64, bool)]) -> Vec<f64> {
+    let n = n.max(2);
+    let mut ts: Vec<f64> = (0..n).map(|i| t0 + (t1 - t0) * i as f64 / (n - 1) as f64).collect();
+    let (lo, hi) = (t0.min(t1), t0.max(t1));
+    let inside = |t: f64| t > lo && t < hi;
+    let max_extra = n.saturating_mul(2);
+    let mut extra = vec![];
+    for (i, &(kt, holds)) in keys.iter().enumerate() {
+        if inside(kt) {
+            extra.push(kt);
+        }
+        if holds && let Some(&(next, _)) = keys.get(i + 1) {
+            extra.extend([next - HOLD_EDGE, next + HOLD_EDGE].into_iter().filter(|&t| inside(t)));
+        }
+        if extra.len() > max_extra {
+            extra.clear();
+            break;
+        }
+    }
+    ts.extend(extra);
+    ts.retain(|t| t.is_finite());
+    ts.sort_by(f64::total_cmp);
+    ts.dedup();
+    ts
+}
+
 /// Build the curves for the visible time span.
 fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, plot: Rect, speed: bool) -> Vec<Curve<'a>> {
     let sel = &app.session.state.selected_keys;
@@ -140,12 +179,14 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
         let Some(pr) = l.props.find(uid) else { continue };
         let spatial = pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_));
         let dims = if speed && spatial { 1 } else { shown_dims(l, pr) };
+        // The active keys (muted ones are skipped by evaluation) in comp seconds, and whether each
+        // holds its value up to the next one.
+        let active: Vec<(f64, bool)> = pr.keys.iter().filter(|k| !k.muted).map(|k| (l.comp_time(k.time).seconds(), k.out_interp == Interp::Hold)).collect();
+        let times = sample_times(tm.t(plot.min.x), tm.t(plot.max.x), n, &active);
         for d in 0..dims {
             let color = if dims > 1 { DIM_COLORS[d % 4] } else { PROP_COLORS[pi % PROP_COLORS.len()] };
-            let mut pts = Vec::with_capacity(n);
-            for i in 0..n {
-                let x = plot.min.x + plot.width() * i as f32 / (n - 1) as f32;
-                let ct = tm.t(x);
+            let mut pts = Vec::with_capacity(times.len());
+            for &ct in &times {
                 let tt = Tick::from_seconds_f64(ct);
                 let v = if speed { speed_at(pr, spatial, d, l.layer_time(tt)) } else { ectx.at(tt).value(l, pr).components().get(d).copied().unwrap_or(0.0) };
                 pts.push((ct, v));
@@ -892,7 +933,98 @@ fn shift_axes(shift: bool, dx: f32, dy: f32) -> (bool, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::shift_axes;
+    use super::{HOLD_EDGE, sample_times, shift_axes};
+    use effectcraft_engine::keyframe::{Keyframe, Value, evaluate};
+    use effectcraft_engine::time::Tick;
+
+    /// The value-graph polyline of `keys` (layer time = comp time) sampled at `times`.
+    fn polyline(keys: &[Keyframe], times: &[f64]) -> Vec<(f64, f64)> {
+        times
+            .iter()
+            .map(|&t| {
+                let v = evaluate(keys, Tick::from_seconds_f64(t), false).map(|v| v.components().first().copied().unwrap_or(f64::NAN)).unwrap_or(f64::NAN);
+                (t, v)
+            })
+            .collect()
+    }
+
+    fn active(keys: &[Keyframe]) -> Vec<(f64, bool)> {
+        keys.iter().map(|k| (k.time.seconds(), k.out_interp == effectcraft_engine::keyframe::Interp::Hold)).collect()
+    }
+
+    /// #2720: a step one frame wide, zoomed out so it is narrower than a sample step. The curve
+    /// has to pass through every key square: the old even grid (`sample_times` with no keys)
+    /// never sampled 0.2 s or 0.2 s + 1 frame and drew a slope from 0 to 1 across the step.
+    #[test]
+    fn value_graph_passes_through_keys_narrower_than_a_sample_step() {
+        let keys = [
+            Keyframe::new(Tick::from_seconds_f64(0.0), Value::Scalar(0.0)),
+            Keyframe::new(Tick::from_seconds_f64(0.2), Value::Scalar(0.0)),
+            Keyframe::new(Tick::from_seconds_f64(0.2 + 1.0 / 30.0), Value::Scalar(1.0)),
+            Keyframe::new(Tick::from_seconds_f64(0.9), Value::Scalar(1.0)),
+        ];
+        let times = sample_times(0.0, 1.0, 4, &active(&keys));
+        let pts = polyline(&keys, &times);
+        for k in &keys {
+            let (t, v) = (k.time.seconds(), k.value.components()[0]);
+            assert!(pts.iter().any(|p| p.0 == t && (p.1 - v).abs() < 1e-12), "no curve point on the key at {t} s ({v}): {pts:?}");
+        }
+        // The spans between equal keys are flat: no sample between 0 and 0.2 s leaves 0, none
+        // between 0.2 s + 1 frame and 0.9 s leaves 1.
+        for &(t, v) in &pts {
+            if t <= 0.2 {
+                assert!(v.abs() < 1e-12, "{t} s: {v}");
+            } else if (0.2 + 1.0 / 30.0..=0.9).contains(&t) {
+                assert!((v - 1.0).abs() < 1e-12, "{t} s: {v}");
+            }
+        }
+        // Times are sorted and unique, the even grid is still there.
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
+        assert!([0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].iter().all(|g| times.iter().any(|t| (t - g).abs() < 1e-12)), "{times:?}");
+    }
+
+    /// #2720: a Hold key draws a vertical step at the next key, not a slope across a sample step.
+    #[test]
+    fn hold_step_is_vertical() {
+        let keys = [Keyframe::new(Tick::from_seconds_f64(0.1), Value::Scalar(0.0)).hold(), Keyframe::new(Tick::from_seconds_f64(0.5), Value::Scalar(1.0))];
+        let pts = polyline(&keys, &sample_times(0.0, 1.0, 4, &active(&keys)));
+        let at = pts.iter().position(|p| p.0 == 0.5).unwrap_or_else(|| panic!("no sample on the key at 0.5 s: {pts:?}"));
+        let before = pts[at - 1];
+        assert!((0.5 - before.0 - HOLD_EDGE).abs() < 1e-12 && before.1.abs() < 1e-12, "the held value ends right before the next key: {pts:?}");
+        assert!((pts[at].1 - 1.0).abs() < 1e-12, "{pts:?}");
+    }
+
+    #[test]
+    fn sample_times_keep_keys_inside_the_span_only() {
+        let times = sample_times(1.0, 2.0, 3, &[(0.5, true), (1.25, false), (2.5, false)]);
+        // 0.5 s and 2.5 s are off screen; the hold from 0.5 s ends at 1.25 s, inside it.
+        assert_eq!(times, vec![1.0, 1.25 - HOLD_EDGE, 1.25, 1.25 + HOLD_EDGE, 1.5, 2.0]);
+        // Degenerate input never panics: an empty span is one point, a NaN span has no points.
+        assert_eq!(sample_times(0.0, 0.0, 0, &[]), vec![0.0]);
+        assert!(sample_times(f64::NAN, 1.0, 4, &[(0.5, true)]).iter().all(|t| t.is_finite()));
+    }
+
+    /// A reversed layer: its keys run backwards in comp time, and both sides of each step after
+    /// a Hold key are still sampled.
+    #[test]
+    fn sample_times_cover_hold_steps_on_a_reversed_layer() {
+        let times = sample_times(1.0, 2.0, 10, &[(1.8, true), (1.4, true), (1.1, false)]);
+        for t in [1.8, 1.4 - HOLD_EDGE, 1.4, 1.4 + HOLD_EDGE, 1.1 - HOLD_EDGE, 1.1, 1.1 + HOLD_EDGE] {
+            assert!(times.contains(&t), "{t} missing: {times:?}");
+        }
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
+    }
+
+    /// Dense keys zoomed out (100 000 in one second, half of them Hold) don't multiply the samples.
+    #[test]
+    fn sample_times_stay_bounded_with_dense_keys() {
+        let keys: Vec<(f64, bool)> = (0..100_000).map(|i| (i as f64 / 100_000.0, i % 2 == 0)).collect();
+        let times = sample_times(0.0, 1.0, 100, &keys);
+        assert!(times.len() <= 300, "{} samples", times.len());
+        // A few keys inside the span are still all sampled.
+        let few = sample_times(0.0, 1.0, 100, &keys[..50]);
+        assert!(keys[1..50].iter().all(|(t, _)| few.contains(t)), "{few:?}");
+    }
 
     #[test]
     fn shift_locks_drag_to_dominant_axis() {
