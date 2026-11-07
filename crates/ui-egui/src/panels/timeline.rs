@@ -5831,17 +5831,18 @@ fn scalar_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
         _ => (-1e9, 1e9, 1, 1.0),
     };
     if matches!(prop.ui, ParamUi::Angle) {
-        let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(x, y), egui::Id::unique(("v", uid, 0)), *v, 1, &vt);
+        let (rr, dr, nv, step) = super::fx_widgets::angle_field_step(ui, pos2(x, y), egui::Id::unique(("v", uid, 0)), *v, 1, &vt);
         app.auto.add(&format!("timeline.prop.{uid}.value"), dr, &prop.name);
         app.auto.add(&format!("timeline.prop.{uid}.revolutions"), rr, &prop.name);
         if let Some(nv) = nv {
             ve.set(actions, json!(nv));
+            widgets::mark_step(actions.last_mut(), step);
         }
     } else {
         // A Range Selector's Start, End and Offset count characters with Units = Index (#1814).
         let pct = (matches!(prop.ui, ParamUi::Percent) || prop.match_id == "opacity") && !effectcraft_engine::render::text::in_index_units(layer, uid);
         let suffix = if pct { "%" } else { "" };
-        let (r, nv, _) = widgets::hot_number_at(
+        let (r, nv, _, step) = widgets::hot_number_step_at(
             ui,
             pos2(x, y),
             egui::Id::unique(("v", uid, 0)),
@@ -5852,6 +5853,7 @@ fn scalar_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         if let Some(nv) = nv {
             ve.set(actions, json!(nv));
+            widgets::mark_step(actions.last_mut(), step);
         }
     }
 }
@@ -5890,7 +5892,7 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
     }
     for d in 0..n.min(c.len()) {
         let suffix = if pct && d + 1 == n { "%" } else { "" };
-        let (r, nv, _) = widgets::hot_number_at(
+        let (r, nv, _, step) = widgets::hot_number_step_at(
             ui,
             pos2(x, y),
             egui::Id::unique(("v", uid, d)),
@@ -5924,6 +5926,7 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
                     a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
                 }
             }
+            widgets::mark_step(actions.last_mut(), step);
         }
         x = r.max.x + if d + 1 < n { 2.0 } else { 0.0 };
         if d + 1 < n {
