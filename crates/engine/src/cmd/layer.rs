@@ -31,7 +31,7 @@ use replace::{has_replace_source, replace_source};
 pub(crate) use select::select_only;
 use select::{select, select_next, select_prev, select_step};
 use switches::{blend, rename, set_comment, set_switch, track_matte};
-use timing::{arrange, move_frames, precompose, slip, timing};
+use timing::{arrange, move_frames, precompose, slip, timing, unprecompose};
 use transform::{has_layer_settings, layer_settings, transform_op};
 pub(crate) use transform::{offset_position, transform_default, update_position};
 
@@ -176,6 +176,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{layers?, name?, mode?: move|leave, adjustDuration?, open?}",
             has_layers,
             precompose
+        ),
+        cmd!(
+            "layer.unprecompose",
+            "Un-precompose",
+            ["Layer"],
+            None,
+            "{layer?, force?, dryRun?} → {layers, warnings}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over). A locked pre-comp layer is refused, changing nothing. What would change the picture (the pre-comp layer has a parent, matte, effects, masks, layer styles, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, Solo/Guide on, is 3D/collapsing/adjustment, is used by another layer or named in another layer's expression; or the nested comp has cameras, lights, adjustment, 3D, collapsing, soloed or blend-mode / Preserve Transparency layers, preserves another frame rate, has another motion-blur shutter, or has Position expressions the move can't reach) is an error listing the reasons, changing nothing, unless `force`: then it unpacks anyway in one undo step, drops what the pre-comp layer carried, removes other layers' parent/matte/property links to it and lists the reasons as `warnings`. `dryRun` returns {dryRun, warnings} and changes nothing",
+            has_layers,
+            unprecompose
         ),
         cmd!(
             "layer.addMask",

@@ -2066,6 +2066,472 @@ fn precompose_unlinks_layers_left_behind_and_numbers_default_names() {
     assert_eq!(names, ["Pre-comp 1", "Pre-comp 2"]);
 }
 
+fn id_named(s: &Session, name: &str) -> u64 {
+    s.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("no layer {name}")).id.0
+}
+
+/// A comp with solids A (keyed Position, parent of B), B and C.
+fn precomp_scene() -> Session {
+    let mut s = comp();
+    for (name, color, pos) in [("A", "#ff0000", [150.0, 100.0]), ("B", "#00ff00", [350.0, 220.0]), ("C", "#0000ff", [500.0, 100.0])] {
+        let l = solid(&mut s, color);
+        s.execute("layer.rename", json!({"layers": [l], "name": name})).unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": pos})).unwrap();
+    }
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 0, "value": [150, 100]})).unwrap();
+    s.execute("prop.addKey", json!({"layer": a, "path": "transform/position", "time": 1, "value": [300, 200]})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [b], "parent": a})).unwrap();
+    s
+}
+
+/// Where A, B and C are drawn at a few times.
+fn scene_look(s: &mut Session) -> Vec<[f64; 4]> {
+    let mut out = vec![];
+    for t in [0.0, 0.5, 1.0, 2.0] {
+        s.execute("time.set", json!({"time": t})).unwrap();
+        for n in ["A", "B", "C"] {
+            let id = id_named(s, n);
+            out.push(seen_bounds(s, id));
+        }
+    }
+    out
+}
+
+/// Un-precompose (#2918) gives the picture back: precompose A and B, expand the pre-comp layer
+/// again, and every layer is drawn where it was at every time, parenting and stacking order are
+/// kept, as one undo step.
+#[test]
+fn unprecompose_restores_what_precompose_nested() {
+    let mut s = precomp_scene();
+    let before = scene_look(&mut s);
+    let order: Vec<String> = s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let r = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap();
+    let pre = r["layer"].as_u64().unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 2);
+    let undo = s.history.undo.len();
+    let r = s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    assert_eq!(r["layers"].as_array().unwrap().len(), 2);
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    let after: Vec<String> = s.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(after, order, "the layers are back in their order");
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    assert_eq!(layer(&s, b).parent, Some(effectcraft_project::LayerId(a)), "B is still A's child");
+    for (w, g) in before.iter().zip(scene_look(&mut s)) {
+        assert!(w.iter().zip(g).all(|(x, y)| (x - y).abs() < 1e-6), "a layer moved: {w:?} → {g:?}");
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 2, "undo brings the pre-comp layer back");
+}
+
+/// A pre-comp layer that was moved or started later places the nested layers the same way after it
+/// is expanded: its Position (against the Anchor Point) and its Start carry over.
+#[test]
+fn unprecompose_carries_the_precomp_layers_position_and_start() {
+    let mut s = precomp_scene();
+    let before = scene_look(&mut s);
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let pre = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/position", "value": [360, 160]})).unwrap();
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    // The pre-comp's Anchor Point sat at the comp centre (320, 180): everything moved by (+40, −20).
+    let after = scene_look(&mut s);
+    for (i, (w, g)) in before.iter().zip(after).enumerate() {
+        let n = i % 3;
+        let (dx, dy) = if n < 2 { (40.0, -20.0) } else { (0.0, 0.0) };
+        let want = [w[0] + dx, w[1] + dy, w[2] + dx, w[3] + dy];
+        assert!(want.iter().zip(g).all(|(x, y)| (x - y).abs() < 1e-6), "layer {n}: wanted {want:?}, drawn {g:?}");
+    }
+
+    // Starting later: the nested layers start later by as much, and are trimmed to the span shown.
+    let mut s = precomp_scene();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let pre = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.timing", json!({"layers": [pre], "op": "set", "start": 2.0})).unwrap();
+    let start = layer(&s, pre).start_time;
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    let a = layer(&s, id_named(&s, "A"));
+    assert_eq!(a.start_time, start, "the nested layer's time 0 sits at the pre-comp layer's Start");
+    assert!(a.in_point >= start, "and it doesn't show before it");
+}
+
+/// A pre-comp scene: the outer comp, the nested comp and the pre-comp layer (A and B nested).
+fn unprecompose_scene() -> (Session, effectcraft_project::ItemId, u64, u64) {
+    let mut s = precomp_scene();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    let outer = s.active_comp_id().unwrap();
+    let r = s.execute("layer.precompose", json!({"layers": [a, b], "name": "Inner"})).unwrap();
+    (s, outer, r["comp"].as_u64().unwrap(), r["layer"].as_u64().unwrap())
+}
+
+/// Everything un-precompose could change: every comp (layers and markers) and the item count.
+fn whole_project(s: &Session) -> (Vec<effectcraft_project::Comp>, usize) {
+    (s.project.comps().map(|(_, c)| c.clone()).collect(), s.project.items.len())
+}
+
+/// Without `force`, a reason is an error naming it that changes nothing (no undo step), and the
+/// dry run lists it; with `force` the layer is unpacked anyway in one undo step, the result lists
+/// the reason as a warning, and undo restores the exact project.
+fn warned_then_forced(s: &mut Session, pre: u64, what: &str) {
+    let undo = s.history.undo.len();
+    let before = whole_project(s);
+    let e = s.execute("layer.unprecompose", json!({"layers": [pre]})).expect_err(what).to_string();
+    assert!(e.contains(what) && e.contains("force"), "{what}: {e}");
+    assert!(whole_project(s) == before, "{what}: nothing changed");
+    assert_eq!(s.history.undo.len(), undo, "{what}: no undo step");
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert!(dry["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains(what)), "{what}: {dry}");
+    assert!(whole_project(s) == before, "{what}: the dry run changed nothing");
+    let r = s.execute("layer.unprecompose", json!({"layers": [pre], "force": true})).expect(what);
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains(what)), "{what}: {r}");
+    assert!(r["layers"].as_array().unwrap().len() >= 2, "{what}: A and B are back");
+    assert_eq!(s.history.undo.len(), undo + 1, "{what}: one undo step");
+    let comp = s.active_comp().unwrap();
+    assert!(comp.layers.iter().all(|l| l.id.0 != pre), "{what}: the pre-comp layer is gone");
+    for l in &comp.layers {
+        assert!(l.parent.is_none_or(|p| comp.layer(p).is_some()), "{what}: {} has a dangling parent", l.name);
+        assert!(l.track_matte.is_none_or(|m| comp.layer(m.layer).is_some()), "{what}: {} has a dangling matte", l.name);
+    }
+    scene_look(s);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(whole_project(s) == before, "{what}: undo restores the exact project");
+}
+
+/// What the pre-comp layer itself adds to the look is a warning (#2918): an error listing it
+/// without `force`, unpacked anyway with it.
+#[test]
+fn unprecompose_warns_about_what_the_precomp_layer_itself_adds() {
+    let fresh = unprecompose_scene;
+    let (mut s, _, _, pre) = fresh();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/opacity", "value": 50})).unwrap();
+    warned_then_forced(&mut s, pre, "Opacity");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/rotation", "value": 10})).unwrap();
+    warned_then_forced(&mut s, pre, "Rotation");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("prop.addKey", json!({"layer": pre, "path": "transform/scale", "time": 0, "value": [100, 100]})).unwrap();
+    warned_then_forced(&mut s, pre, "animated");
+    for switch in ["solo", "guide"] {
+        let (mut s, _, _, pre) = fresh();
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": switch, "value": true})).unwrap();
+        warned_then_forced(&mut s, pre, "Solo or Guide");
+    }
+    for switch in ["video", "audio"] {
+        let (mut s, _, _, pre) = fresh();
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": switch, "value": false})).unwrap();
+        warned_then_forced(&mut s, pre, "Video or Audio");
+    }
+    for switch in ["threeD", "collapse", "adjustment", "preserveTransparency"] {
+        let (mut s, _, _, pre) = fresh();
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": switch, "value": true})).unwrap();
+        warned_then_forced(&mut s, pre, "3D, collapses");
+    }
+    let (mut s, _, _, pre) = fresh();
+    let c = id_named(&s, "C");
+    s.execute("layer.setParent", json!({"layers": [pre], "parent": c})).unwrap();
+    warned_then_forced(&mut s, pre, "has a parent");
+    let (mut s, _, _, pre) = fresh();
+    let c = id_named(&s, "C");
+    s.execute("layer.setTrackMatte", json!({"layer": pre, "matte": c})).unwrap();
+    warned_then_forced(&mut s, pre, "has a track matte");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("effect.apply", json!({"layers": [pre], "effect": "Gaussian Blur"})).unwrap();
+    warned_then_forced(&mut s, pre, "effects");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("layer.addMask", json!({"layer": pre})).unwrap();
+    warned_then_forced(&mut s, pre, "masks");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("layer.style.add", json!({"layers": [pre], "style": "dropShadow"})).unwrap();
+    warned_then_forced(&mut s, pre, "layer styles");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("layer.setBlendMode", json!({"layers": [pre], "mode": "Multiply"})).unwrap();
+    warned_then_forced(&mut s, pre, "blending mode");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("layer.timeStretch", json!({"layers": [pre], "percent": 200.0})).unwrap();
+    warned_then_forced(&mut s, pre, "time-stretched");
+    let (mut s, _, _, pre) = fresh();
+    s.execute("layer.enableTimeRemap", json!({"layers": [pre], "value": true})).unwrap();
+    warned_then_forced(&mut s, pre, "time-remapped");
+    // A layer that is not a pre-comp, and a selection of several, are refused, even forced.
+    let (mut s, _, _, pre) = fresh();
+    let c = id_named(&s, "C");
+    assert!(s.execute("layer.unprecompose", json!({"layers": [c], "force": true})).is_err());
+    assert!(s.execute("layer.unprecompose", json!({"layers": [pre, c], "force": true})).is_err());
+}
+
+/// What only holds inside the nested comp (a camera or light, a soloed, 3D, adjustment or
+/// Preserve Transparency layer) is a warning too.
+#[test]
+fn unprecompose_warns_about_what_only_holds_inside_the_nested_comp() {
+    let inside = |switch: &str, what: &str| {
+        let (mut s, outer, inner, pre) = unprecompose_scene();
+        s.execute("comp.open", json!({"comp": inner})).unwrap();
+        let a = id_named(&s, "A");
+        s.execute("layer.setSwitch", json!({"layers": [a], "switch": switch, "value": true})).unwrap();
+        s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+        warned_then_forced(&mut s, pre, what);
+    };
+    inside("solo", "soloed layer");
+    inside("preserveTransparency", "Preserve Transparency");
+    inside("adjustment", "adjustment, 3D");
+    inside("threeD", "adjustment, 3D");
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    s.execute("layer.newLight", json!({})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    warned_then_forced(&mut s, pre, "camera or light");
+}
+
+/// A locked pre-comp layer is the one hard stop: refused with and without `force`, and by the dry
+/// run, changing nothing.
+#[test]
+fn unprecompose_refuses_a_locked_layer_even_forced() {
+    let (mut s, _, _, pre) = unprecompose_scene();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/opacity", "value": 50})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [pre], "switch": "lock", "value": true})).unwrap();
+    let undo = s.history.undo.len();
+    let before = whole_project(&s);
+    for p in [json!({"layers": [pre]}), json!({"layers": [pre], "force": true}), json!({"layers": [pre], "dryRun": true})] {
+        let e = s.execute("layer.unprecompose", p.clone()).expect_err("locked").to_string();
+        assert!(e.contains("locked"), "{p}: {e}");
+        assert!(whole_project(&s) == before, "{p}: nothing changed");
+        assert_eq!(s.history.undo.len(), undo, "{p}: no undo step");
+    }
+    // A clean, locked pre-comp layer is refused too.
+    let (mut s, _, _, pre) = unprecompose_scene();
+    s.execute("layer.setSwitch", json!({"layers": [pre], "switch": "lock", "value": true})).unwrap();
+    assert!(s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap_err().to_string().contains("locked"));
+}
+
+/// Layers that use the pre-comp layer as parent, track matte or in a property lose that link when
+/// it is unpacked by force; links to other layers stay, and nothing dangles or crashes.
+#[test]
+fn unprecompose_forced_drops_the_links_other_layers_had_to_it() {
+    let (mut s, outer, _, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    let d = solid(&mut s, "#ffff00");
+    s.execute("layer.rename", json!({"layers": [d], "name": "D"})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [c], "parent": pre})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layer": d, "matte": pre})).unwrap();
+    s.execute("effect.apply", json!({"layers": [c], "effect": "Set Matte"})).unwrap();
+    s.execute("effect.apply", json!({"layers": [d], "effect": "Set Matte"})).unwrap();
+    {
+        let proj = std::sync::Arc::make_mut(&mut s.project);
+        let comp = proj.comp_mut(outer).unwrap();
+        let set = |comp: &mut effectcraft_project::Comp, on: u64, to: u64| {
+            let l = comp.layer_mut(effectcraft_project::LayerId(on)).unwrap();
+            l.props.walk_mut(&mut |p| {
+                if matches!(p.value, KV::Layer(_)) {
+                    p.value = KV::Layer(Some(to));
+                }
+            });
+        };
+        set(comp, c, pre);
+        set(comp, d, c);
+    }
+    let refs = |s: &Session, on: u64| {
+        let mut out = vec![];
+        layer(s, on).props.walk("", &mut |_, p| {
+            if let KV::Layer(v) = p.value {
+                out.push(v);
+            }
+        });
+        out
+    };
+    assert_eq!(refs(&s, c), vec![Some(pre)], "the test set C's reference");
+    let e = s.execute("layer.unprecompose", json!({"layers": [pre]})).expect_err("used by others").to_string();
+    assert!(e.contains("parent or track matte") && e.contains("refers to it"), "{e}");
+    let undo = s.history.undo.len();
+    let before = whole_project(&s);
+    let r = s.execute("layer.unprecompose", json!({"layers": [pre], "force": true})).unwrap();
+    let w = r["warnings"].to_string();
+    assert!(w.contains("link is removed") && w.contains("reference is cleared"), "{w}");
+    assert_eq!(layer(&s, c).parent, None, "C lost its parent");
+    assert!(layer(&s, d).track_matte.is_none(), "D lost its matte");
+    assert_eq!(refs(&s, c), vec![None], "C's reference to the pre-comp layer is cleared");
+    assert_eq!(refs(&s, d), vec![Some(c)], "D's reference to C stays");
+    scene_look(&mut s);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(whole_project(&s) == before, "undo restores the links");
+    assert_eq!(s.history.undo.len(), undo);
+}
+
+/// Expressions of other layers that name the pre-comp layer (in quotes, or by its index) would no
+/// longer find it: one warning per property; an expression naming another layer is not one. Forced,
+/// the expressions stay as they are and the comp still renders.
+#[test]
+fn unprecompose_warns_about_expressions_that_refer_to_it() {
+    let (mut s, _, _, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    let d = solid(&mut s, "#ffff00");
+    s.execute("layer.rename", json!({"layers": [d], "name": "D"})).unwrap();
+    let index = s.active_comp().unwrap().layers.iter().position(|l| l.id.0 == pre).unwrap() + 1;
+    let set = |s: &mut Session, on: u64, path: &str, text: &str| {
+        s.execute("prop.setExpression", json!({"layer": on, "path": path, "expression": text})).unwrap();
+    };
+    set(&mut s, c, "transform/position", "thisComp.layer(\"Inner\").transform.position");
+    set(&mut s, c, "transform/rotation", &format!("thisComp.layer( {index} ).transform.rotation"));
+    // Naming another layer, or another comp's layer at the same index, is no reference to it.
+    set(&mut s, d, "transform/position", "thisComp.layer(\"C\").transform.position");
+    set(&mut s, d, "transform/rotation", &format!("comp(\"Other\").layer({index}).transform.rotation"));
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    let exprs: Vec<String> =
+        dry["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).filter(|w| w.contains("expression")).map(str::to_string).collect();
+    assert_eq!(exprs.len(), 2, "{exprs:?}");
+    assert!(exprs.iter().all(|w| w.contains("layer “C”") && w.contains("“Inner”") && w.contains("no longer find it")), "{exprs:?}");
+    assert!(exprs.iter().any(|w| w.contains("Position")) && exprs.iter().any(|w| w.contains("Rotation")), "{exprs:?}");
+    warned_then_forced(&mut s, pre, "has an expression that refers to “Inner”");
+    // Forced, the expressions are left as written.
+    s.execute("layer.unprecompose", json!({"layers": [pre], "force": true})).unwrap();
+    let text = layer(&s, c).transform().unwrap().get("position").unwrap().expr.clone().unwrap().text;
+    assert_eq!(text, "thisComp.layer(\"Inner\").transform.position");
+    scene_look(&mut s);
+}
+
+/// An expression naming a layer by a number below the pre-comp layer points at another layer once
+/// the nested comp's two layers replace it: a warning. One naming a number above it does not move.
+#[test]
+fn unprecompose_warns_when_it_renumbers_the_layers_an_expression_names() {
+    let (mut s, _, _, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    let index = s.active_comp().unwrap().layers.iter().position(|l| l.id.0 == pre).unwrap() + 1;
+    let warned = |s: &mut Session, number: usize| {
+        let text = format!("thisComp.layer({number}).transform.rotation");
+        s.execute("prop.setExpression", json!({"layer": c, "path": "transform/rotation", "expression": text})).unwrap();
+        let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+        dry["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).any(|w| w.contains("by number"))
+    };
+    assert!(warned(&mut s, index + 1), "a number below it");
+    assert!(!warned(&mut s, index - 1), "a number above it");
+}
+
+/// A nested comp that preserves its own frame rate (10 fps in a 30 fps comp) samples its layers on
+/// its own frames; expanded, they would change on every frame of the parent: a warning. Without
+/// Preserve Frame Rate the nested layers are sampled at the parent's times already: no warning.
+#[test]
+fn unprecompose_warns_when_the_nested_comp_preserves_another_frame_rate() {
+    let (mut s, _, inner, pre) = unprecompose_scene();
+    s.execute("comp.settings", json!({"comp": inner, "frameRate": 10})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "a different rate alone samples at the parent's times");
+    s.execute("comp.settings", json!({"comp": inner, "preserveFrameRate": true})).unwrap();
+    warned_then_forced(&mut s, pre, "preserves a frame rate");
+
+    // A motion-blurred nested layer under another shutter would be blurred with the parent's.
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.settings", json!({"comp": inner, "shutterAngle": 90})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "no layer uses motion blur");
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let a = id_named(&s, "A");
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "motionBlur", "value": true})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    warned_then_forced(&mut s, pre, "motion blur shutter");
+}
+
+/// The pre-comp layer's move (Position against Anchor Point) is added to the stored Position of
+/// unparented nested layers; one whose Position has an expression may ignore it: a warning, only
+/// when there is a move.
+#[test]
+fn unprecompose_warns_about_position_expressions_it_cannot_move() {
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let a = id_named(&s, "A");
+    s.execute("prop.setExpression", json!({"layer": a, "path": "transform/position", "expression": "[100, 100]"})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    let dry = s.execute("layer.unprecompose", json!({"layers": [pre], "dryRun": true})).unwrap();
+    assert_eq!(dry["warnings"], json!([]), "no move, nothing to lose");
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/position", "value": [360, 160]})).unwrap();
+    warned_then_forced(&mut s, pre, "layer “A” has a Position expression");
+}
+
+/// Expanded copies keep pointing at each other: a track matte and a layer-valued effect property
+/// on a nested layer follow the copy of the layer they named, and the nested comp's markers are
+/// moved by the pre-comp layer's Start and merged in time order with the comp's own.
+#[test]
+fn unprecompose_remaps_mattes_layer_values_and_merges_markers_in_order() {
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let (a, b) = (id_named(&s, "A"), id_named(&s, "B"));
+    s.execute("layer.setParent", json!({"layers": [b], "parent": null})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layer": b, "matte": a})).unwrap();
+    s.execute("effect.apply", json!({"layers": [b], "effect": "Set Matte"})).unwrap();
+    {
+        let proj = std::sync::Arc::make_mut(&mut s.project);
+        let l = proj.comp_mut(effectcraft_project::ItemId(inner)).unwrap().layer_mut(effectcraft_project::LayerId(b)).unwrap();
+        l.props.walk_mut(&mut |p| {
+            if matches!(p.value, KV::Layer(_)) {
+                p.value = KV::Layer(Some(a));
+            }
+        });
+    }
+    for t in [2.5, 0.5] {
+        s.execute("comp.addMarker", json!({"time": t, "comment": format!("in {t}")})).unwrap();
+    }
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    s.execute("comp.addMarker", json!({"time": 2.0, "comment": "out"})).unwrap();
+    s.execute("layer.timing", json!({"layers": [pre], "op": "set", "start": 1.0})).unwrap();
+    s.execute("layer.unprecompose", json!({"layers": [pre]})).unwrap();
+    let (a, b) = (layer(&s, id_named(&s, "A")), layer(&s, id_named(&s, "B")));
+    assert_eq!(b.track_matte.map(|m| m.layer), Some(a.id), "B's matte is the copy of A");
+    let mut refs = vec![];
+    b.props.walk("", &mut |_, p| {
+        if let KV::Layer(v) = p.value {
+            refs.push(v);
+        }
+    });
+    assert_eq!(refs, vec![Some(a.id.0)], "Set Matte names the copy of A");
+    let markers: Vec<(f64, String)> = s.active_comp().unwrap().markers.iter().map(|m| (m.time.seconds(), m.comment.clone())).collect();
+    let want = [(1.5, "in 0.5"), (2.0, "out"), (3.5, "in 2.5")];
+    assert_eq!(markers.len(), 3, "{markers:?}");
+    for ((t, c), (wt, wc)) in markers.iter().zip(want) {
+        assert!((t - wt).abs() < 1e-9 && c == wc, "{markers:?}");
+    }
+    scene_look(&mut s);
+}
+
+/// Every reason at once, forced: unpacked without a crash, one undo step, undone exactly.
+#[test]
+fn unprecompose_forced_with_everything_at_once() {
+    let (mut s, outer, inner, pre) = unprecompose_scene();
+    let c = id_named(&s, "C");
+    s.execute("comp.open", json!({"comp": inner})).unwrap();
+    let a = id_named(&s, "A");
+    for sw in ["solo", "threeD", "adjustment", "preserveTransparency"] {
+        s.execute("layer.setSwitch", json!({"layers": [a], "switch": sw, "value": true})).unwrap();
+    }
+    s.execute("layer.newCamera", json!({})).unwrap();
+    s.execute("comp.open", json!({"comp": outer.0})).unwrap();
+    s.execute("prop.set", json!({"layer": pre, "path": "transform/opacity", "value": 20})).unwrap();
+    s.execute("prop.addKey", json!({"layer": pre, "path": "transform/rotation", "time": 0, "value": 30})).unwrap();
+    s.execute("effect.apply", json!({"layers": [pre], "effect": "Gaussian Blur"})).unwrap();
+    s.execute("layer.addMask", json!({"layer": pre})).unwrap();
+    s.execute("layer.style.add", json!({"layers": [pre], "style": "dropShadow"})).unwrap();
+    s.execute("layer.setBlendMode", json!({"layers": [pre], "mode": "Screen"})).unwrap();
+    s.execute("layer.enableTimeRemap", json!({"layers": [pre], "value": true})).unwrap();
+    s.execute("layer.timeStretch", json!({"layers": [pre], "percent": -50.0})).unwrap();
+    for sw in ["solo", "guide", "threeD", "collapse", "adjustment", "preserveTransparency"] {
+        s.execute("layer.setSwitch", json!({"layers": [pre], "switch": sw, "value": true})).unwrap();
+    }
+    s.execute("layer.setSwitch", json!({"layers": [pre], "switch": "video", "value": false})).unwrap();
+    s.execute("layer.setParent", json!({"layers": [pre], "parent": c})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layer": pre, "matte": c})).unwrap();
+    let undo = s.history.undo.len();
+    let before = whole_project(&s);
+    let r = s.execute("layer.unprecompose", json!({"layers": [pre], "force": true})).unwrap();
+    assert!(r["warnings"].as_array().unwrap().len() >= 10, "{r}");
+    // The undo history is capped (32 levels by default), so its length may stay; one undo is what
+    // takes the whole unpack back.
+    assert!(s.history.undo.len() == undo + 1 || s.history.undo.len() == undo, "one undo step");
+    assert!(whole_project(&s) != before, "it unpacked");
+    scene_look(&mut s);
+    assert!(s.history.redo.is_empty());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.history.redo.len(), 1, "one undo step took it all back");
+    assert!(whole_project(&s) == before, "undo restores the exact project");
+}
+
 /// Quick Set Anchor (#2967): every one of the nine points moves the Anchor Point of a rotated,
 /// scaled layer with keyed Position to that point of its content, and the layer looks the same
 /// on every frame (Position and its keys are compensated), in one undo step.

@@ -156,6 +156,8 @@ pub enum Dialog {
     /// Import an After Effects project although some of it cannot be imported exactly?
     /// (`panels::aep_losses`).
     AepLosses,
+    /// Un-precompose although it changes the picture or drops something? (`panels::unprecompose`).
+    Unprecompose,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
