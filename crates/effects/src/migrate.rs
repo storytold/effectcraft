@@ -44,6 +44,9 @@ pub const PARAM_ID_ALIASES: &[(&str, &str, &str)] = &[
     ("ec.key.innerouter", "additionalBackground", "additionalBackground/background1"),
     // Generate: Radio Waves' growth speed was called Velocity; Velocity now moves the wave.
     ("ec.generate.radiowaves", "velocity", "waveMotion/expansion"),
+    // Simulation: CC Ball Action's Instability State is treated as the control After Effects
+    // 24.2 calls Scatter Motion (#3197; an assumption: 24.2 shows no Instability State).
+    ("ec.sim.ccballaction", "instabilityState", "scatterMotion"),
 ];
 
 /// Popup option labels renamed since they were first saved:
