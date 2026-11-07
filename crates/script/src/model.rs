@@ -32,6 +32,7 @@ fn layer_of<'a>(s: &'a Session, a: &J) -> Result<(ItemId, &'a Comp, &'a Layer), 
     Ok((cid, c, l))
 }
 
+/// Answers a script model query of the given `kind` against the session, dispatching to the matching reader, and errors on an unknown kind.
 pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
     match kind {
         "project" => Ok(project(s)),
