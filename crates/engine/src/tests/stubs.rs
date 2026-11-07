@@ -649,6 +649,234 @@ fn convert_to_bezier_evaluates_corner_expressions() {
     assert_eq!(path, expected, "the expression-evaluated corner is converted");
 }
 
+/// The uid of the first shape item with `match_id` in a shape layer's Contents.
+fn shape_item(s: &Session, l: u64, match_id: &str) -> u64 {
+    /// Depth-first search of a property group tree for the uid of the first group with the given match id.
+    fn walk(g: &effectcraft_project::PropGroup, id: &str) -> Option<u64> {
+        if g.match_id == id {
+            return Some(g.uid);
+        }
+        g.groups().find_map(|c| walk(c, id))
+    }
+    let ly = layer(s, l);
+    let contents = ly.props.sub("contents").unwrap();
+    contents.groups().find_map(|c| walk(c, match_id)).unwrap()
+}
+
+/// #3057: right after drawing with the Rectangle, Ellipse or Polygon tool only the layer is
+/// selected; Convert To Bezier Path then converted nothing and reported "no masks". The selected
+/// shape layer's parametric paths convert, as the masks of a selected layer do, and so do those in
+/// a selected shape group (Rectangle 1 rather than its Rectangle Path 1).
+#[test]
+fn convert_to_bezier_on_a_selected_shape_layer_or_group() {
+    for kind in ["rect", "ellipse", "polygon"] {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", json!({"kind": kind, "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+        assert_eq!(s.state.selected_layers, vec![LayerId(l)], "the new layer is selected");
+        assert!(s.state.selected_props.is_empty(), "and no shape item");
+        let out = s.execute("path.convertToBezier", json!({})).unwrap();
+        assert_eq!(out["paths"].as_u64(), Some(1), "{kind}: {out}");
+        let (new_uid, now) = first_shape(&s, l);
+        assert_eq!(now, "path", "{kind}: the layer's parametric path is a bezier path now");
+        assert_eq!(s.state.selected_props, vec![(LayerId(l), new_uid)], "{kind}: and selected, to edit its vertices");
+    }
+
+    // A selected shape group converts the parametric path inside it.
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let group = shape_item(&s, l, "group");
+    s.state.selected_props = vec![(LayerId(l), group)];
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+
+    // Nothing parametric left: the error says what to select instead of asking for masks.
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    let err = s.execute("path.convertToBezier", json!({})).unwrap_err().to_string();
+    assert!(err.contains("Rectangle, Ellipse or Polystar"), "{err}");
+}
+
+/// #3057: a selected shape item with nothing parametric in it (a Fill) does not widen the
+/// conversion to the rest of the layer. A guard for the fix (it passes on the old code too).
+#[test]
+fn convert_to_bezier_does_not_widen_a_selected_fill() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let fill = shape_item(&s, l, "fill");
+    s.state.selected_props = vec![(LayerId(l), fill)];
+    assert!(s.execute("path.convertToBezier", json!({})).is_err());
+    assert_eq!(first_shape(&s, l).1, "rect", "the rectangle stays parametric");
+}
+
+/// #3057: a selected shape layer's plain masks are already Bezier paths, so they don't hide its
+/// rectangle: the rectangle converts. A RotoBezier mask still converts first.
+#[test]
+fn convert_to_bezier_on_a_shape_layer_with_a_plain_mask() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50], [0, 50]], "closed": true})).unwrap();
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    s.state.selected_vertices.clear();
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+
+    // Nothing parametric left and the mask is plain: say so rather than succeed doing nothing.
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    s.state.selected_vertices.clear();
+    let err = s.execute("path.convertToBezier", json!({})).unwrap_err().to_string();
+    assert!(err.contains("already Bezier"), "{err}");
+}
+
+/// #3057: an explicit `mask` that matches no mask converts nothing, rather than every parametric
+/// path of the layer.
+#[test]
+fn convert_to_bezier_with_an_unmatched_mask_converts_nothing() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.execute("path.convertToBezier", json!({"layer": l, "mask": "No Such Mask"})).is_err());
+    assert_eq!(first_shape(&s, l).1, "rect", "the rectangle stays parametric");
+}
+
+/// #3057: an explicit `layer` is the layer converted, even with a path selected on another one.
+#[test]
+fn convert_to_bezier_follows_an_explicit_layer() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "ellipse", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (a_rect, _) = first_shape(&s, a);
+    s.state.selected_props = vec![(LayerId(a), a_rect)];
+    let out = s.execute("path.convertToBezier", json!({"layer": b})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, b).1, "path", "the given layer converts");
+    assert_eq!(first_shape(&s, a).1, "rect", "the selection on another layer does not");
+}
+
+/// #3057: converting a selected layer leaves an animated parametric path alone (its animation
+/// would be lost) and reports it; selecting that path converts it at the current time, as After
+/// Effects does.
+#[test]
+fn convert_to_bezier_skips_animated_paths_of_a_selected_layer() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, l);
+    let size = layer(&s, l).props.sub("contents").unwrap().find_group(rect).unwrap().get("size").unwrap().uid;
+    for (t, v) in [(0.0, [120.0, 80.0]), (1.0, [200.0, 100.0])] {
+        s.execute("prop.addKey", json!({"layer": l, "path": format!("@{size}"), "time": t, "value": v})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    let err = s.execute("path.convertToBezier", json!({})).unwrap_err().to_string();
+    assert!(err.contains("animated"), "{err}");
+    assert_eq!(first_shape(&s, l).1, "rect", "the animated rectangle stays parametric");
+
+    s.state.selected_props = vec![(LayerId(l), rect)];
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path", "the selected path converts");
+}
+
+/// #3057 review: a layer named twice in `layers` (by id and by name) converts once, and its
+/// animated paths are counted once.
+#[test]
+fn convert_to_bezier_with_a_layer_named_twice() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let name = layer(&s, l).name;
+    let out = s.execute("path.convertToBezier", json!({"layers": [l, name, l]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["of"].as_u64(), Some(1), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "ellipse", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, a);
+    let size = layer(&s, a).props.sub("contents").unwrap().find_group(rect).unwrap().get("size").unwrap().uid;
+    for (t, v) in [(0.0, [120.0, 80.0]), (1.0, [200.0, 100.0])] {
+        s.execute("prop.addKey", json!({"layer": a, "path": format!("@{size}"), "time": t, "value": v})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let out = s.execute("path.convertToBezier", json!({"layers": [a, a, b]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["skippedAnimated"].as_u64(), Some(1), "{out}");
+}
+
+/// #3057 review: shape items on a locked layer don't convert, whether given as `items` or
+/// selected; unlocked, they do.
+#[test]
+fn convert_to_bezier_leaves_a_locked_layer_alone() {
+    for explicit in [true, false] {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+        let (rect, _) = first_shape(&s, l);
+        let lock = |s: &mut Session, v: bool| {
+            s.execute("layer.setSwitch", json!({"layers": [l], "switch": "locked", "value": v})).unwrap();
+        };
+        let run = |s: &mut Session| {
+            if explicit {
+                s.execute("path.convertToBezier", json!({"layer": l, "items": [rect]}))
+            } else {
+                s.state.selected_props = vec![(LayerId(l), rect)];
+                s.execute("path.convertToBezier", json!({}))
+            }
+        };
+        lock(&mut s, true);
+        let err = run(&mut s).unwrap_err().to_string();
+        assert!(err.contains("locked"), "explicit {explicit}: {err}");
+        assert_eq!(first_shape(&s, l).1, "rect", "explicit {explicit}: the locked rectangle stays parametric");
+        lock(&mut s, false);
+        let out = run(&mut s).unwrap();
+        assert_eq!(out["paths"].as_u64(), Some(1), "explicit {explicit}: {out}");
+        assert_eq!(first_shape(&s, l).1, "path");
+    }
+}
+
+/// #3057 review: a selected group leaves its animated paths alone and reports them, as
+/// converting a whole layer does; the path itself, selected, still converts.
+#[test]
+fn convert_to_bezier_skips_animated_paths_of_a_selected_group() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, l);
+    let group = shape_item(&s, l, "group");
+    let size = layer(&s, l).props.sub("contents").unwrap().find_group(rect).unwrap().get("size").unwrap().uid;
+    s.execute("prop.setExpression", json!({"layer": l, "path": format!("@{size}"), "expression": "[100, 100]"})).unwrap();
+
+    s.state.selected_props = vec![(LayerId(l), group)];
+    let err = s.execute("path.convertToBezier", json!({})).unwrap_err().to_string();
+    assert!(err.contains("animated"), "{err}");
+    assert_eq!(first_shape(&s, l).1, "rect", "the expression-driven rectangle stays parametric");
+
+    // The group and its path both selected: the path is converted, not skipped.
+    s.state.selected_props = vec![(LayerId(l), group), (LayerId(l), rect)];
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["skippedAnimated"].as_u64(), Some(0), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+}
+
+/// #3057: parametric paths in nested groups convert from the layer and from the outer group.
+#[test]
+fn convert_to_bezier_finds_paths_in_nested_groups() {
+    for select_outer in [false, true] {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", json!({"kind": "star", "size": [120, 120]})).unwrap()["layer"].as_u64().unwrap();
+        let inner = shape_item(&s, l, "group");
+        s.state.selected_props = vec![(LayerId(l), inner)];
+        s.execute("path.groupShapes", json!({})).unwrap();
+        let outer = shape_item(&s, l, "group");
+        assert_ne!(outer, inner, "the shape is nested one group deeper");
+        if select_outer {
+            s.state.selected_props = vec![(LayerId(l), outer)];
+        } else {
+            s.execute("layer.select", json!({"layers": [l]})).unwrap();
+        }
+        let out = s.execute("path.convertToBezier", json!({})).unwrap();
+        assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+        assert_eq!(first_shape(&s, l).1, "path");
+    }
+}
+
 /// #2201: a viewer drag on the free-transform box sends one `path.freeTransform` per frame with a
 /// shared merge key; one undo must revert the whole drag, not the last frame.
 #[test]
