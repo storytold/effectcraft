@@ -40,6 +40,7 @@ pub(crate) fn shown_layer_id(app: &EffectcraftApp) -> Option<effectcraft_engine:
     app.session.state.selected_layers.first().copied().filter(|id| comp.layer(*id).is_some())
 }
 
+/// Returns the layer Effect Controls currently shows, locked or selected, or `None` when there is none.
 pub(super) fn shown_layer(app: &EffectcraftApp) -> Option<Layer> {
     let id = shown_layer_id(app)?;
     app.session.active_comp()?.layer(id).cloned()

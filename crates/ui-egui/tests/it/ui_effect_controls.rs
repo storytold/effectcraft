@@ -936,6 +936,7 @@ fn shows_effect(h: &Harness<'_, EffectcraftApp>, fx: u64) -> bool {
     h.state().auto.elements.iter().any(|e| e.id == id)
 }
 
+/// Selects `layer` through the `layer.select` command and runs a few frames.
 fn select_layer(h: &mut Harness<'_, EffectcraftApp>, layer: u64) {
     h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
     h.run_steps(3);
@@ -1018,6 +1019,7 @@ fn replacing_the_project_unlocks_effect_controls() {
 #[test]
 fn a_lock_request_with_no_layer_shown_fails_and_keeps_the_other_comps_lock() {
     use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
     fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
         let ctx = h.ctx.clone();
         let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
@@ -1048,6 +1050,7 @@ fn a_lock_request_with_no_layer_shown_fails_and_keeps_the_other_comps_lock() {
 #[test]
 fn a_lock_request_while_locked_in_another_comp_fails() {
     use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
     fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
         let ctx = h.ctx.clone();
         let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
@@ -1079,6 +1082,7 @@ fn a_lock_request_while_locked_in_another_comp_fails() {
 #[test]
 fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
     use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
     fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
         let ctx = h.ctx.clone();
         let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
@@ -1129,6 +1133,7 @@ fn applying_an_effect_while_locked_keeps_the_selection() {
 #[test]
 fn effect_controls_lock_over_the_control_channel() {
     use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request with `params` and returns the immediate reply.
     fn send(h: &mut Harness<'_, EffectcraftApp>, params: serde_json::Value) -> serde_json::Value {
         let ctx = h.ctx.clone();
         let (req, _rx) = ControlRequest::new("ui.set", params);
