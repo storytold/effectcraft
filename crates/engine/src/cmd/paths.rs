@@ -180,19 +180,45 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         let (_, layers) = layers_p(s, p)?;
         items.retain(|(l, _)| layers.contains(l));
     }
+    // Items on a locked layer are left alone (an error when they all are), whether they come from
+    // the selection or from `items`.
+    if !items.is_empty() {
+        let mut item_layers: Vec<LayerId> = items.iter().map(|(l, _)| *l).collect();
+        item_layers.sort();
+        item_layers.dedup();
+        let open = unlocked(s, cid, item_layers, "path.convertToBezier")?;
+        items.retain(|(l, _)| open.contains(l));
+    }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    // A selected parametric path converts itself; a selected shape group converts the parametric
-    // paths inside it (#3057: selecting Rectangle 1 rather than its Rectangle Path 1 reported
-    // "no masks").
+    // A selected parametric path converts itself, animated or not (After Effects keeps the shape
+    // at the current time). A selected shape group converts the parametric paths inside it
+    // (#3057: selecting Rectangle 1 rather than its Rectangle Path 1 reported "no masks"), but
+    // leaves the animated ones alone, as converting a whole layer does.
     let mut shapes: Vec<(LayerId, Uid)> = Vec::new();
+    let mut skipped: Vec<(LayerId, Uid)> = Vec::new();
     for (lid, uid) in &items {
-        if let Some(g) = comp.layer(*lid).and_then(|l| l.props.sub("contents")).and_then(|c| c.find_group(*uid)) {
-            parametric_in(g, *lid, 0, &mut shapes);
+        let Some(g) = comp.layer(*lid).and_then(|l| l.props.sub("contents")).and_then(|c| c.find_group(*uid)) else { continue };
+        if PARAMETRIC.contains(&g.match_id.as_str()) {
+            shapes.push((*lid, *uid));
+            continue;
+        }
+        let mut found = Vec::new();
+        parametric_in(g, *lid, 0, &mut found);
+        for (fl, fu) in found {
+            if g.find_group(fu).is_some_and(PropGroup::any_animated) {
+                skipped.push((fl, fu));
+            } else {
+                shapes.push((fl, fu));
+            }
         }
     }
     shapes.sort();
     shapes.dedup();
-    let mut skipped_animated = 0usize;
+    // A path both selected itself and inside a selected group converts; it is not skipped.
+    skipped.sort();
+    skipped.dedup();
+    skipped.retain(|x| !shapes.contains(x));
+    let mut skipped_animated = skipped.len();
     if shapes.is_empty() {
         let (_, mut masks) = masks_for(s, p)?;
         let mask_of = |l: LayerId, u: Uid| comp.layer(l).and_then(|l| l.masks()).and_then(|m| m.groups().find(|g| g.uid == u));
@@ -205,7 +231,9 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
             || (p.get("layer").is_none() && !s.state.selected_vertices.is_empty())
             || s.state.selected_props.iter().any(|(l, u)| comp.layer(*l).and_then(|l| l.masks()).is_some_and(|m| m.uid != *u && m.find_group(*u).is_some()));
         let any_roto = masks.iter().any(|(l, u)| mask_of(*l, *u).is_some_and(is_roto));
-        if !masks.is_empty() && (mask_targeted || any_roto) {
+        // A selected group whose paths were all skipped as animated reports that, rather than
+        // turning to the layer's masks.
+        if !masks.is_empty() && (mask_targeted || (any_roto && skipped_animated == 0)) {
             return edit_mask_groups(s, p, LABEL, |g| {
                 if let GroupKind::Mask { roto_bezier, .. } = &mut g.kind {
                     *roto_bezier = false;

@@ -800,6 +800,60 @@ fn convert_to_bezier_with_a_layer_named_twice() {
     assert_eq!(out["skippedAnimated"].as_u64(), Some(1), "{out}");
 }
 
+/// #3057 review: shape items on a locked layer don't convert, whether given as `items` or
+/// selected; unlocked, they do.
+#[test]
+fn convert_to_bezier_leaves_a_locked_layer_alone() {
+    for explicit in [true, false] {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+        let (rect, _) = first_shape(&s, l);
+        let lock = |s: &mut Session, v: bool| {
+            s.execute("layer.setSwitch", json!({"layers": [l], "switch": "locked", "value": v})).unwrap();
+        };
+        let run = |s: &mut Session| {
+            if explicit {
+                s.execute("path.convertToBezier", json!({"layer": l, "items": [rect]}))
+            } else {
+                s.state.selected_props = vec![(LayerId(l), rect)];
+                s.execute("path.convertToBezier", json!({}))
+            }
+        };
+        lock(&mut s, true);
+        let err = run(&mut s).unwrap_err().to_string();
+        assert!(err.contains("locked"), "explicit {explicit}: {err}");
+        assert_eq!(first_shape(&s, l).1, "rect", "explicit {explicit}: the locked rectangle stays parametric");
+        lock(&mut s, false);
+        let out = run(&mut s).unwrap();
+        assert_eq!(out["paths"].as_u64(), Some(1), "explicit {explicit}: {out}");
+        assert_eq!(first_shape(&s, l).1, "path");
+    }
+}
+
+/// #3057 review: a selected group leaves its animated paths alone and reports them, as
+/// converting a whole layer does; the path itself, selected, still converts.
+#[test]
+fn convert_to_bezier_skips_animated_paths_of_a_selected_group() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, l);
+    let group = shape_item(&s, l, "group");
+    let size = layer(&s, l).props.sub("contents").unwrap().find_group(rect).unwrap().get("size").unwrap().uid;
+    s.execute("prop.setExpression", json!({"layer": l, "path": format!("@{size}"), "expression": "[100, 100]"})).unwrap();
+
+    s.state.selected_props = vec![(LayerId(l), group)];
+    let err = s.execute("path.convertToBezier", json!({})).unwrap_err().to_string();
+    assert!(err.contains("animated"), "{err}");
+    assert_eq!(first_shape(&s, l).1, "rect", "the expression-driven rectangle stays parametric");
+
+    // The group and its path both selected: the path is converted, not skipped.
+    s.state.selected_props = vec![(LayerId(l), group), (LayerId(l), rect)];
+    let out = s.execute("path.convertToBezier", json!({})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert_eq!(out["skippedAnimated"].as_u64(), Some(0), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {
