@@ -3740,6 +3740,38 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Variable Font Axes: {}", "Axlar för variabla typsnitt: {}"),
     ("Watch video", "Titta på video"),
     ("{} ({}) at default settings, on a sample frame", "{} ({}) med standardinställningar, på en exempelbildruta"),
+    ("All", "Alla"),
+    ("Alpha: {}", "Alfa: {}"),
+    ("Available", "Tillgänglig"),
+    ("Blue: {}", "Blå: {}"),
+    ("Color under the pointer: {}", "Färg under pekaren: {}"),
+    ("Effect", "Effekt"),
+    ("Export Anyway", "Exportera ändå"),
+    ("Filter by footage status", "Filtrera efter materialstatus"),
+    ("Green: {}", "Grön: {}"),
+    ("Missing", "Saknas"),
+    ("Red: {}", "Röd: {}"),
+    ("Resize the Name column", "Ändra storlek på kolumnen Namn"),
+    ("Script Console output", "Utdata från skriptkonsolen"),
+    ("Selected layers: {}", "Markerade lager: {}"),
+    ("Solid", "Enfärgad"),
+    (
+        "Some parts of this project cannot be exported exactly (left out or changed):",
+        "Vissa delar av projektet kan inte exporteras exakt (utelämnas eller ändras):",
+    ),
+    ("Unpack Anyway", "Packa upp ändå"),
+    (
+        "Unpacking this pre-comp layer changes the picture or drops something:",
+        "Om du packar upp förkompositionslagret ändras bilden eller så försvinner något:",
+    ),
+    (
+        "What the pre-comp layer itself carries is dropped. You can undo this.",
+        "Det som förkompositionslagret självt innehåller försvinner. Du kan ångra detta.",
+    ),
+    ("X: {}", "X: {}"),
+    ("Y: {}", "Y: {}"),
+    ("{}, {}", "{}, {}"),
+    ("{}, {}, uses {}", "{}, {}, användningar: {}"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
