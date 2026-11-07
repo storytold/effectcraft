@@ -172,10 +172,12 @@ pub(super) fn layer_settings(s: &mut Session, p: &Value) -> Result<Value> {
     let pixel_aspect = pixel_aspect_p(p)?;
     let name = str_p(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
     let affect_all = p.get("affectAll").and_then(Value::as_bool).unwrap_or(true);
+    let t = s.time();
     let solid = s.edit("Layer Settings", None, |proj, _| {
         let src = layer_mut(proj, cid, lid)?.source.clone();
         if let Some(n) = &name {
-            layer_mut(proj, cid, lid)?.name = n.clone();
+            // A user name: a text layer's name stops following its text (#3233).
+            super::switches::set_layer_name(layer_mut(proj, cid, lid)?, n, t);
         }
         let LayerSource::Solid { item } = src else { return Ok(None) };
         let shared = proj.comps().flat_map(|(_, c)| &c.layers).filter(|l| l.source == src).count() > 1;

@@ -479,7 +479,12 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
                 .map(|d| crate::import::text::first_paragraph(&d.raw_text))
                 .filter(|t| !t.trim().is_empty())
         };
-        let name = aep_name.clone().or_else(|| src.as_ref().map(|s| s.name.clone())).or_else(text_name).unwrap_or_else(|| "Layer".to_string());
+        let name = aep_name
+            .clone()
+            .or_else(|| src.as_ref().map(|s| s.name.clone()))
+            .or_else(text_name)
+            // An empty text layer without a name is named as a new one is (#3233).
+            .unwrap_or_else(|| if h.layer_type == LayerType::Text { "Text" } else { "Layer" }.to_string());
         let skip = |cx: &mut Ctx<'_>, skipped: &mut HashMap<u32, String>, category: LossCategory, what: &str| {
             cx.col.lose(category, format!("{comp_name}: {what} '{name}'"));
             skipped.insert(h.id, what.to_string());
@@ -537,6 +542,10 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         };
         let mut l: Layer = build::layer(project, &comp, &name, source.clone(), size, None);
         l.name = name.clone();
+        // A text layer without a stored name follows its text; a stored name is the user's (#3233).
+        if is_text {
+            l.name_follows_text = Some(aep_name.is_none());
+        }
         l.label = Label::ALL.get(usize::from(h.label)).copied().unwrap_or(Label::None);
         apply_timing(&mut l, &h, &tm, &name, &mut cx.col);
         apply_switches(&mut l, &h);
