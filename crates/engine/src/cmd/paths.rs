@@ -253,23 +253,51 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         let (_, mut masks) = masks_for(s, p)?;
         let mask_of = |l: LayerId, u: Uid| comp.layer(l).and_then(|l| l.masks()).and_then(|m| m.groups().find(|g| g.uid == u));
         masks.retain(|(l, u)| mask_of(*l, *u).is_some());
+        // An explicit `layer` / `layers` is the scope: a mask selected on another layer is not
+        // converted in its place. With none of the selected masks in scope, the scoped layers'
+        // own masks are the targets, as for a selected layer.
+        let scope = if explicit_layers { Some(layers_p(s, p)?.1) } else { None };
+        let in_scope = |l: &LayerId| scope.as_ref().is_none_or(|v| v.contains(l));
+        if let Some(layers) = &scope {
+            masks.retain(|(l, _)| layers.contains(l));
+            if masks.is_empty() && p.get("mask").is_none() {
+                for l in layers {
+                    if let Some(m) = comp.layer(*l).and_then(|ly| ly.masks()) {
+                        masks.extend(m.groups().map(|g| (*l, g.uid)));
+                    }
+                }
+            }
+        }
+        masks.sort();
+        masks.dedup();
         // Masks take priority when they are targeted (a `mask`, a selected mask or mask vertices)
         // or when one of them has RotoBezier tangents to turn off. A selected layer's plain masks
         // are already Bezier paths: converting them would do nothing and hide the layer's
         // parametric shapes (#3057).
         let mask_targeted = p.get("mask").is_some()
-            || (p.get("layer").is_none() && !s.state.selected_vertices.is_empty())
-            || s.state.selected_props.iter().any(|(l, u)| comp.layer(*l).and_then(|l| l.masks()).is_some_and(|m| m.uid != *u && m.find_group(*u).is_some()));
+            || (p.get("layer").is_none() && s.state.selected_vertices.iter().any(|v| in_scope(&v.layer)))
+            || s.state
+                .selected_props
+                .iter()
+                .any(|(l, u)| in_scope(l) && comp.layer(*l).and_then(|l| l.masks()).is_some_and(|m| m.uid != *u && m.find_group(*u).is_some()));
         let any_roto = masks.iter().any(|(l, u)| mask_of(*l, *u).is_some_and(is_roto));
         // A selected group whose paths were all skipped as animated reports that, rather than
         // turning to the layer's masks.
         if !masks.is_empty() && (mask_targeted || (any_roto && skipped_animated == 0)) {
-            return edit_mask_groups(s, p, LABEL, |g| {
-                if let GroupKind::Mask { roto_bezier, .. } = &mut g.kind {
-                    *roto_bezier = false;
+            // The scoped targets are edited as resolved here, not looked up again.
+            let n = masks.len();
+            s.edit(LABEL, None, |proj, _| {
+                for (lid, uid) in &masks {
+                    let l = layer_mut(proj, cid, *lid)?;
+                    if let Some(g) = l.props.sub_mut("masks").and_then(|m| m.find_group_mut(*uid))
+                        && let GroupKind::Mask { roto_bezier, .. } = &mut g.kind
+                    {
+                        *roto_bezier = false;
+                    }
                 }
                 Ok(())
-            });
+            })?;
+            return Ok(json!({"masks": n}));
         }
         if p.get("mask").is_some() {
             return Err(bad(LABEL, "no mask matches `mask`"));

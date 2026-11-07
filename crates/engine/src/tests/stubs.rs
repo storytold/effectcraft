@@ -916,6 +916,29 @@ fn convert_to_bezier_converts_a_selected_mask_and_path_together() {
     assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "and the mask");
 }
 
+/// #3057 review: an explicit `layer` scopes the mask conversion too: a RotoBezier mask selected
+/// on another layer is left alone, and the given layer's masks convert.
+#[test]
+fn convert_to_bezier_keeps_masks_to_an_explicit_layer() {
+    let mut s = comp();
+    let (a, _) = masked(&mut s);
+    let (b, mb) = masked(&mut s);
+    for l in [a, b] {
+        s.state.selected_props.clear();
+        s.state.selected_vertices.clear();
+        s.execute("path.rotoBezier", json!({"layer": l, "value": true})).unwrap();
+    }
+    assert!(matches!(mask_kind(&s, a), GroupKind::Mask { roto_bezier: true, .. }));
+    assert!(matches!(mask_kind(&s, b), GroupKind::Mask { roto_bezier: true, .. }));
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(b), mb)];
+
+    let out = s.execute("path.convertToBezier", json!({"layer": a})).unwrap();
+    assert_eq!(out["masks"].as_u64(), Some(1), "{out}");
+    assert!(matches!(mask_kind(&s, a), GroupKind::Mask { roto_bezier: false, .. }), "the given layer's mask converts");
+    assert!(matches!(mask_kind(&s, b), GroupKind::Mask { roto_bezier: true, .. }), "the mask selected on another layer does not");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {
