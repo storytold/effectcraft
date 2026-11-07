@@ -194,6 +194,7 @@ fn circles_snap_point_to_point(bezier: bool) {
     assert_ne!(a, b, "two shape layers");
     if bezier {
         for l in [a, b] {
+            /// Returns the uid of the first ellipse group in the tree, searching depth first.
             fn ellipse(g: &effectcraft_project::PropGroup) -> Option<u64> {
                 if g.match_id == "ellipse" {
                     return Some(g.uid);
