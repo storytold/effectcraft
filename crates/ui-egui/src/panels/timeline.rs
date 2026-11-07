@@ -3716,12 +3716,14 @@ fn group_row_click(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
     let RowKind::Group { uid, name, fx, .. } = &rc.row.kind else { return };
     let gr_rect = Rect::from_min_max(pos2(indent + 8.0, r.min.y), pos2(cw.switches, r.max.y));
     // Effects, masks, shape items and animators drag to a new place among their siblings.
-    let movable = !layer.switches.locked && layer.props.find_group(*uid).is_some_and(PropGroup::is_instance);
+    let group = layer.props.find_group(*uid);
+    let movable = !layer.switches.locked && group.is_some_and(PropGroup::is_instance);
     let gr = ui.interact(gr_rect, egui::Id::unique(("grow", uid)), if movable { Sense::click_and_drag() } else { Sense::click() });
     if movable && gr.drag_started_by(egui::PointerButton::Primary) {
         ui.ctx().data_mut(|d| d.insert_temp(group_drag_id(), GroupDrag { comp: cid, owner: gr.id, layer: layer.id, uid: *uid }));
     }
     app.auto.add(&format!("timeline.group.{uid}.name"), gr_rect, name);
+    shape_path_menu(&mut app.auto, &gr, layer, group, &mut *actions);
     if gr.clicked() && uid & (WAVE_BIT | GEOM_BIT) == 0 {
         // Shift or Cmd/Ctrl adds the group to the selection, or takes a selected one out, as
         // property rows and Effect Controls headers do (#2552: several effects and styles for
@@ -3743,6 +3745,73 @@ fn group_row_click(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
             ui_actions.push(UiAct::ToggleGroup(layer.id.0, *uid, false));
         }
     }
+}
+
+/// The shape items Convert To Bezier Path turns into editable paths.
+const PARAMETRIC_PATHS: [&str; 3] = ["rect", "ellipse", "star"];
+
+/// The parametric paths (Rectangle, Ellipse, Polystar Path) inside shape group `g`, nested groups
+/// included, that convert without losing anything: a keyframed or expression-driven one would
+/// lose its animation, so the group leaves it alone.
+fn static_parametric_paths(g: &PropGroup) -> Vec<u64> {
+    // Depth-first, without recursion; only groups and their contents hold paths.
+    let mut out = Vec::new();
+    let mut stack = vec![g];
+    while let Some(n) = stack.pop() {
+        for c in n.groups() {
+            match c.match_id.as_str() {
+                m if PARAMETRIC_PATHS.contains(&m) => {
+                    if !c.any_animated() {
+                        out.push(c.uid);
+                    }
+                }
+                "group" | "contents" => stack.push(c),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Right-click on a Rectangle, Ellipse or Polystar Path row, or on a shape group holding such
+/// paths: After Effects' Convert To Bezier Path, acting on that row (#3237). A path's own row
+/// converts it even when animated (After Effects makes a static path at the current time); the
+/// group's entry, an addition to After Effects, converts the static paths inside it.
+fn shape_path_menu(
+    auto: &mut crate::automation::Registry,
+    resp: &egui::Response,
+    layer: &Layer,
+    group: Option<&PropGroup>,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let Some(g) = group.filter(|_| matches!(layer.source, LayerSource::Shape)) else { return };
+    let uid = g.uid;
+    let items = if PARAMETRIC_PATHS.contains(&g.match_id.as_str()) {
+        vec![uid]
+    } else if g.match_id == "group" {
+        // Walked once, when the menu opens, not for every group row on every frame.
+        let key = egui::Id::unique(("tl-shape-path-menu", layer.id.0, uid));
+        if resp.secondary_clicked() {
+            let found = static_parametric_paths(g);
+            resp.ctx.data_mut(|d| d.insert_temp(key, found));
+        }
+        resp.ctx.data(|d| d.get_temp::<Vec<u64>>(key)).unwrap_or_default()
+    } else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let (cmd, label) = ("path.convertToBezier", "Convert To Bezier Path");
+    let params = json!({"layer": layer.id.0, "items": items});
+    crate::widgets::context_menu(resp, |ui| {
+        let r = ui.add_enabled(!layer.switches.locked, egui::Button::new(crate::i18n::context_item(cmd, &params, label)));
+        auto.add(&format!("timeline.group.{uid}.menu.convertToBezier"), r.rect, label);
+        if r.clicked() {
+            actions.push((cmd.into(), params.clone()));
+            ui.close();
+        }
+    });
 }
 
 fn waveform_row(app: &mut EffectcraftApp, g: &Rw, rc: &RowCtx<'_>) {
