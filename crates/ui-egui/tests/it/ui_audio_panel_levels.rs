@@ -199,3 +199,75 @@ fn ctrl_alt_scrub_is_proportional_over_the_selected_layers() {
     assert!(moved[0].abs() < 1e-9, "the first selected layer stays: {moved:?}");
     assert!((moved[1] - moved[2] / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
 }
+
+/// Scrub Left in the Audio panel 40 px to the right with `modifiers`.
+fn scrub_left(h: &mut Harness<'_, EffectcraftApp>, modifiers: Modifiers) {
+    let from = center(h, LEFT);
+    let to = from + vec2(40.0, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    for k in 1..=24 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 24.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+}
+
+/// An expression shifts the shown levels: a scrub moves the keyframed value under it (of the
+/// shown layer and of every other selected layer) by the scrub's change, the same as without the
+/// expression, not by the change plus the expression's offset; Ctrl+Alt spreads that change.
+#[test]
+fn a_scrub_of_expression_driven_levels_moves_every_selected_layer_by_the_scrub() {
+    let mut s = effectcraft_host::session();
+    let first = sound_layer(&mut s, [-20.0, -20.0]);
+    let mut ids = vec![first];
+    for _ in 0..2 {
+        let l = s.execute("layer.addItem", json!({"item": "Sound"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "audio/levels", "value": [-30.0, -30.0]})).unwrap();
+        ids.push(l);
+    }
+    let mut h = harness(s, first);
+    for l in &ids[1..] {
+        h.state_mut().session.execute("layer.select", json!({"layers": [l], "add": true})).unwrap();
+    }
+    h.run_steps(2);
+    let left = |h: &Harness<'_, EffectcraftApp>| -> Vec<f64> { ids.iter().map(|l| levels(h, *l).value.components()[0]).collect() };
+    let undo = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+    };
+    let before = left(&h);
+    // Without an expression: the change a 40 px scrub makes.
+    scrub_left(&mut h, Modifiers::NONE);
+    let change = left(&h)[0] - before[0];
+    assert!(change > 1.0, "the scrub raised Left: {before:?} -> {:?}", left(&h));
+    undo(&mut h);
+    assert_eq!(left(&h), before);
+
+    for l in &ids {
+        h.state_mut().session.execute("prop.setExpression", json!({"layer": l, "path": "audio/levels", "expression": "value + [10, 10]"})).unwrap();
+    }
+    h.run_steps(2);
+    assert_eq!(label(&h, LEFT), db(-10.0), "the panel shows the expression's value");
+    scrub_left(&mut h, Modifiers::NONE);
+    let after = left(&h);
+    for (i, (a, b)) in after.iter().zip(&before).enumerate() {
+        assert!((a - b - change).abs() < 1e-6, "layer {i} moved by the scrub ({change}), not by the expression's offset too: {before:?} -> {after:?}");
+    }
+    assert_eq!(label(&h, LEFT), db(after[0] + 10.0), "the panel shows the moved value through the expression");
+    undo(&mut h);
+
+    // Proportional: the first selected stays, the middle takes half, the last all of it.
+    let ctrl_alt = Modifiers { alt: true, ctrl: true, command: true, ..Default::default() };
+    scrub_left(&mut h, ctrl_alt);
+    let moved: Vec<f64> = left(&h).iter().zip(&before).map(|(a, b)| a - b).collect();
+    assert!(moved[0].abs() < 1e-9, "the first selected layer stays: {moved:?}");
+    assert!((moved[2] - change).abs() < 1e-6, "the last selected moves by the scrub's change ({change}): {moved:?}");
+    assert!((moved[1] - change / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
+}

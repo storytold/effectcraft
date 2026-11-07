@@ -390,11 +390,13 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
                 property_overrides: &[],
                 media_overrides: &[],
             };
-            Some((layer.id.0, pr.uid, pr.has_expression(), layer.name.as_str(), ectx.value(layer, pr).as_vec2()))
+            // The keyframed value before the expression: what `prop.set` writes and scrubs from.
+            let raw = pr.value_at(layer.layer_time(ectx.time)).as_vec2();
+            Some((layer.id.0, pr.uid, pr.has_expression(), layer.name.as_str(), ectx.value(layer, pr).as_vec2(), raw))
         }),
         _ => None,
     };
-    let Some((lid, uid, driven, name, values)) = levels else {
+    let Some((lid, uid, driven, name, values, raw)) = levels else {
         p.text(pos2(lx, top + 12.0), Align2::LEFT_CENTER, tr("No audio layer selected"), Tokens::ui(11.0), t.text_faint);
         return;
     };
@@ -419,17 +421,23 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
         if let Some(nv) = nv {
             let merge = format!("audio-levels-{uid}");
             let mut params = json!({"layer": lid, "prop": uid, "merge": merge, "selected": true, "offset": scrub, "proportional": proportional, "dims": [d]});
-            if linked {
+            let value = if linked {
                 // The other channel follows by each layer's own change, keeping its balance.
-                params["value"] = json!(widgets::shifted(&values, d, nv));
                 params["follow"] = json!([usize::from(d == 0)]);
+                widgets::shifted(&values, d, nv)
             } else {
-                let mut value = values;
+                let mut value = values.to_vec();
                 if let Some(slot) = value.get_mut(d) {
                     *slot = nv;
                 }
-                params["value"] = json!(value);
-            }
+                value
+            };
+            // A scrub moves the shown (expression-evaluated) value; `prop.set` takes the change
+            // from the keyframed value under the expression, so the scrub becomes that value
+            // moved by the same change (every selected layer then moves by it). A typed value is
+            // set as it is.
+            let value: Vec<f64> = if scrub { value.iter().zip(values.iter().zip(raw)).map(|(n, (shown, r))| r + (n - shown)).collect() } else { value };
+            params["value"] = json!(value);
             actions.push(params);
         }
     }
