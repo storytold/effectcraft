@@ -1440,6 +1440,46 @@ fn key_drag_id() -> egui::Id {
     egui::Id::unique("tl-key-drag")
 }
 
+/// A Timeline box in progress, which selects as it moves (#2858): the comp, the selection when it
+/// began (Shift keeps it, Escape puts it back) and what was last selected for: the layers and keys
+/// touched, Shift and Cmd/Ctrl. It runs again only when one of those changes.
+#[derive(Clone, Debug)]
+struct KeyMarquee {
+    comp: ItemId,
+    keys: Vec<effectcraft_engine::KeyRef>,
+    props: Vec<(LayerId, u64)>,
+    layers: Vec<LayerId>,
+    vertices: Vec<effectcraft_engine::VertexRef>,
+    applied: Option<(Vec<u64>, Vec<effectcraft_engine::KeyRef>, bool, bool)>,
+}
+
+impl KeyMarquee {
+    fn begin(app: &EffectcraftApp, comp: ItemId) -> Self {
+        let st = &app.session.state;
+        KeyMarquee {
+            comp,
+            keys: st.selected_keys.clone(),
+            props: st.selected_props.clone(),
+            layers: st.selected_layers.clone(),
+            vertices: st.selected_vertices.clone(),
+            applied: None,
+        }
+    }
+
+    /// Back to the selection from when the box began.
+    fn restore(&self, app: &mut EffectcraftApp) {
+        let st = &mut app.session.state;
+        st.selected_keys.clone_from(&self.keys);
+        st.selected_props.clone_from(&self.props);
+        st.selected_layers.clone_from(&self.layers);
+        st.selected_vertices.clone_from(&self.vertices);
+    }
+}
+
+fn key_marquee_id() -> egui::Id {
+    egui::Id::unique("tl-key-marquee")
+}
+
 /// A Quick Offset drag of selected layer bars (Ctrl/Cmd+Alt, #1012): the bar it started on, where
 /// the pointer started, how many layers it staggers and how many frames the last one has moved.
 #[derive(Clone, Copy, Debug)]
@@ -1996,7 +2036,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     group_reorder_drag(ui, g);
     quick_offset_follow(g);
     key_drag_follow(app, g);
-    box_select(app, ui, g);
+    box_select(app, g);
     current_time_indicator(app, g);
     let footer = footer_bar(app, ui, g);
     footer_zoom(app, ui, g, footer);
@@ -4828,7 +4868,7 @@ fn box_targets(
 /// The Timeline's one selection box, from the empty outline or the empty time graph: it spans both
 /// columns as it is dragged (the pointer may cross the boundary either way) and on release selects
 /// the layer rows it crosses and the keys inside it, as in After Effects.
-fn box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
+fn box_select(app: &mut EffectcraftApp, g: &mut Rw) {
     let t = g.tl.t;
     let tm = g.tl.tm;
     let rows_rect = g.tl.rows_rect;
@@ -4837,37 +4877,50 @@ fn box_select(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     let graph_on = g.graph_on;
     let ctx = g.tl.ctx.clone();
     let comp = g.tl.comp.clone();
+    let cid = g.tl.cid;
     let rows = g.tl.rows.clone();
     let origin = [&g.outline_empty, &g.empty].into_iter().find(|r| r.dragged() || r.drag_stopped()).cloned();
-    let Some(origin) = origin else { return };
-    let box_of = |o: &egui::Response| {
-        let start = ctx.input(|i| i.pointer.press_origin());
-        start.zip(o.interact_pointer_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()))).map(|(a, b)| Rect::from_two_pos(a, b).intersect(rows_rect))
+    let (released, escape, mods) = ctx.input(|i| (i.pointer.any_released(), i.key_pressed(egui::Key::Escape), i.modifiers));
+    let km = ctx.data(|d| d.get_temp::<KeyMarquee>(key_marquee_id())).filter(|k| k.comp == cid);
+    let Some(origin) = origin.filter(|o| o.dragged()) else {
+        // The release keeps what the box showed; Escape, or a drag that ends some other way, puts
+        // back the selection from before it.
+        ctx.data_mut(|d| d.remove::<KeyMarquee>(key_marquee_id()));
+        if let Some(km) = km
+            && (escape || !released)
+        {
+            km.restore(app);
+            ctx.request_repaint();
+        }
+        return;
     };
-    let id = egui::Id::unique("tl-box");
-    if origin.dragged()
-        && let Some(br) = box_of(&origin)
-    {
-        let bp = g.tl.p.with_clip_rect(rows_rect);
-        bp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
-        bp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
-        ctx.data_mut(|d| d.insert_temp(id, br));
-    }
-    if origin.drag_stopped()
-        && let Some(br) = ctx.data(|d| d.get_temp::<Rect>(id))
-    {
-        ctx.data_mut(|d| d.remove::<Rect>(id));
-        let (layers, touched) = box_targets(&comp, &rows, &g.hit_rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, graph_x0, graph_on, br);
-        let mods = ui.input(|i| i.modifiers);
+    let start = ctx.input(|i| i.pointer.press_origin());
+    let Some(br) =
+        start.zip(origin.interact_pointer_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()))).map(|(a, b)| Rect::from_two_pos(a, b).intersect(rows_rect))
+    else {
+        return;
+    };
+    let bp = g.tl.p.with_clip_rect(rows_rect);
+    bp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
+    bp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+    let mut km = km.unwrap_or_else(|| KeyMarquee::begin(app, cid));
+    let (layers, touched) = box_targets(&comp, &rows, &g.hit_rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, graph_x0, graph_on, br);
+    let applied = (layers, touched, mods.shift, mods.command);
+    if km.applied.as_ref() != Some(&applied) {
+        km.restore(app);
+        let (layers, touched) = (&applied.0, &applied.1);
         let add = mods.shift || mods.command;
+        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
         let actions = &mut g.tl.actions;
         // A box that catches nothing leaves nothing selected (layers included), unless it adds.
         actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
-        if !touched.is_empty() {
-            let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
+        if !keys.is_empty() {
             actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
         }
+        km.applied = Some(applied);
+        ctx.request_repaint();
     }
+    ctx.data_mut(|d| d.insert_temp(key_marquee_id(), km));
 }
 
 fn current_time_indicator(app: &mut EffectcraftApp, g: &Rw) {

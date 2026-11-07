@@ -1,5 +1,6 @@
 //! The key marquee in the Timeline (#2857): a box selects a key as soon as it touches any part of
-//! the key's glyph, not when it reaches the key's center.
+//! the key's glyph, not when it reaches the key's center. It selects as it moves, before the release
+//! (#2858).
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::LayerId;
@@ -73,6 +74,179 @@ fn a_box_selects_a_key_it_grazes_from_any_side_and_not_one_it_stops_short_of() {
         assert!(marquee(&mut h, c + from, c + to).is_empty(), "a box 1 pt short on the {side} misses it");
         assert!(h.state().session.state.selected_layers.is_empty(), "a box that catches nothing deselects (layers included)");
     }
+}
+
+/// Press at `from` with `modifiers` held, ready to drag.
+fn press(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, modifiers: Modifiers) {
+    h.event(Event::ModifiersChanged(modifiers));
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+}
+
+/// Drag the pointer to `to` in a straight line from `from` (the button stays down).
+fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+    for i in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+}
+
+fn release(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, modifiers: Modifiers) {
+    h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+}
+
+fn selected(h: &Harness<'_, EffectcraftApp>) -> Vec<f64> {
+    let mut times: Vec<f64> = h.state().session.state.selected_keys.iter().map(|k| k.time.seconds()).collect();
+    times.sort_by(f64::total_cmp);
+    times
+}
+
+/// Select the key at `secs` as a click on it does: its property and layer too.
+fn select_key(h: &mut Harness<'_, EffectcraftApp>, id: u64, secs: f64) {
+    let keys = json!([{"layer": id, "path": "transform/opacity", "time": secs}]);
+    h.state_mut().session.execute("keys.select", json!({"keys": keys, "selectProperties": true})).unwrap();
+    h.run_steps(2);
+}
+
+#[test]
+fn the_selection_follows_the_box_while_it_is_dragged() {
+    let (mut h, id) = harness();
+    let (one, two) = (key_center(&h, id, 1.0), key_center(&h, id, 2.0));
+    let from = two + vec2(30.0, 5.0);
+    let (over_two, over_both) = (two + vec2(-30.0, -5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    drag(&mut h, from, over_two);
+    assert_eq!(selected(&h), [2.0], "the key the box reached is selected before the release");
+    assert_eq!(h.state().session.state.selected_layers, [LayerId(id)], "and its layer, as the release selects it");
+    drag(&mut h, over_two, over_both);
+    assert_eq!(selected(&h), [1.0, 2.0], "the box grows over the next key");
+    drag(&mut h, over_both, over_two);
+    assert_eq!(selected(&h), [2.0], "the box shrinks off a key");
+    drag(&mut h, over_two, from + vec2(5.0, 0.0));
+    assert!(selected(&h).is_empty(), "the box leaves every key");
+    assert!(h.state().session.state.selected_layers.is_empty(), "a box that catches nothing deselects (layers included)");
+    let end = from + vec2(5.0, 0.0);
+    drag(&mut h, end, over_two);
+    release(&mut h, over_two, Modifiers::default());
+    assert_eq!(selected(&h), [2.0], "the release keeps what the box showed");
+}
+
+#[test]
+fn a_plain_box_replaces_the_selection_as_soon_as_it_starts() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    drag(&mut h, from, one + vec2(20.0, -5.0));
+    assert!(selected(&h).is_empty(), "the box has caught nothing yet");
+    drag(&mut h, one + vec2(20.0, -5.0), past_key);
+    assert_eq!(selected(&h), [1.0]);
+    release(&mut h, past_key, Modifiers::default());
+    assert_eq!(selected(&h), [1.0]);
+}
+
+#[test]
+fn a_shift_box_adds_to_the_selection_and_drops_only_what_it_added() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key, short) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0), one + vec2(20.0, -5.0));
+    press(&mut h, from, Modifiers::SHIFT);
+    drag(&mut h, from, short);
+    assert_eq!(selected(&h), [2.0], "Shift keeps the selection from before the drag");
+    drag(&mut h, short, past_key);
+    assert_eq!(selected(&h), [1.0, 2.0], "the box adds the key it reaches");
+    drag(&mut h, past_key, short);
+    assert_eq!(selected(&h), [2.0], "leaving the key drops it, but not the key selected before");
+    assert_eq!(h.state().session.state.selected_layers, [LayerId(id)]);
+    drag(&mut h, short, past_key);
+    release(&mut h, past_key, Modifiers::SHIFT);
+    assert_eq!(selected(&h), [1.0, 2.0]);
+}
+
+#[test]
+fn a_cmd_box_adds_to_the_selection_like_shift() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::COMMAND);
+    drag(&mut h, from, past_key);
+    assert_eq!(selected(&h), [1.0, 2.0], "Cmd/Ctrl keeps the selection from before the drag");
+    release(&mut h, past_key, Modifiers::COMMAND);
+    assert_eq!(selected(&h), [1.0, 2.0]);
+}
+
+#[test]
+fn a_box_over_only_locked_keys_still_clears_the_selection() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [id], "switch": "locked", "value": true})).unwrap();
+    h.run_steps(2);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    drag(&mut h, from, past_key);
+    release(&mut h, past_key, Modifiers::default());
+    let st = &h.state().session.state;
+    assert!(st.selected_keys.is_empty() && st.selected_props.is_empty() && st.selected_layers.is_empty(), "a box that catches nothing leaves nothing selected");
+}
+
+#[test]
+fn escape_puts_back_the_selection_from_before_the_box() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    let before = {
+        let st = &h.state().session.state;
+        (st.selected_keys.clone(), st.selected_props.clone(), st.selected_layers.clone())
+    };
+    assert_eq!(before.1.len(), 1, "the click selected the key's property");
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    drag(&mut h, from, past_key);
+    assert_eq!(selected(&h), [1.0], "the box replaced the selection");
+    h.input_mut().events.push(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.input_mut().events.push(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+    h.step();
+    let after = |h: &Harness<'_, EffectcraftApp>| {
+        let st = &h.state().session.state;
+        (st.selected_keys.clone(), st.selected_props.clone(), st.selected_layers.clone())
+    };
+    assert_eq!(after(&h), before, "Escape restores keys, properties and layers");
+    // The button is still down: neither moving on nor letting go brings the box back.
+    drag(&mut h, past_key, from);
+    drag(&mut h, from, past_key);
+    release(&mut h, past_key, Modifiers::default());
+    assert_eq!(after(&h), before, "the cancelled box is gone");
+}
+
+#[test]
+fn a_box_makes_no_undo_step_and_runs_one_selection_per_change() {
+    let (mut h, id) = harness();
+    let undo = h.state().session.history.undo.len();
+    let revision = h.state().session.revision;
+    let journal = h.state().session.journal.len();
+    let (one, two) = (key_center(&h, id, 1.0), key_center(&h, id, 2.0));
+    let from = two + vec2(30.0, 5.0);
+    let (over_two, over_both) = (two + vec2(-30.0, -5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    // 24 frames of movement: the box starts empty, then reaches one key, then the other.
+    drag(&mut h, from, over_two);
+    drag(&mut h, over_two, over_both);
+    drag(&mut h, over_both, over_both + vec2(-20.0, 0.0));
+    release(&mut h, over_both + vec2(-20.0, 0.0), Modifiers::default());
+    assert_eq!(selected(&h), [1.0, 2.0]);
+    assert_eq!(h.state().session.history.undo.len(), undo, "selecting keys is no edit");
+    assert_eq!(h.state().session.revision, revision, "nor does it re-render the project");
+    let runs = h.state().session.journal.len() - journal;
+    // Three changes (empty, one key, both keys), each a deselect and a key selection at most.
+    assert!(runs <= 6, "selection commands run when the selection changes, not each frame: {runs}");
 }
 
 /// #3056: one box spans the layer outline and the time graph. Dragged from the empty outline
