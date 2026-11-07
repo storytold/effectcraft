@@ -212,13 +212,14 @@ impl SequenceInfo {
 
 /// The file names of a `LIST StVc` (Force alphabetical order): the `Utf8` children in order, at most
 /// as many as the count in `StVS` (little-endian `u32`) says. Empty names count toward that number
-/// and are then skipped. A name that is not a plain file name (holding `/`, `\` or `:`, or being
-/// `.` or `..`) makes the whole list unreadable (empty): the names are joined to the folder.
+/// and are then skipped. A name that is not a plain file name (holding `/`, `\`, `:` or a control
+/// character such as NUL, or being `.` or `..`) makes the whole list unreadable (empty): the names
+/// are joined to the folder.
 fn sequence_file_list(list: &Chunk<'_>) -> Vec<String> {
     let count = list.child(b"StVS").and_then(|c| c.bytes()).and_then(|b| le_u32(b, 0)).and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
     let names: Vec<String> =
         list.children().iter().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).take(count).map(text).filter(|n| !n.is_empty()).collect();
-    if names.iter().any(|n| n.contains(['/', '\\', ':']) || n == "." || n == "..") {
+    if names.iter().any(|n| n.contains(|c: char| matches!(c, '/' | '\\' | ':') || c.is_control()) || n == "." || n == "..") {
         return Vec::new();
     }
     names

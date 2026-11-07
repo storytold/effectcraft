@@ -179,8 +179,9 @@ fn a_single_naming_part_is_placed_by_the_stored_first_file_name() {
 #[test]
 fn a_file_list_with_a_name_that_is_not_a_plain_file_name_is_reported() {
     // The listed names are joined to the folder: a separator, a drive colon or a dot directory
-    // would point outside it, so such a list is not read.
-    for hostile in ["..\\..\\x.png", "../x.png", "C:x.png", "..", "."] {
+    // would point outside it, and a NUL or another control character is no file name, so such a
+    // list is not read.
+    for hostile in ["..\\..\\x.png", "../x.png", "C:x.png", "..", ".", "x\0.png", "x\n.png"] {
         let list = Chunk::list(*b"StVc", vec![Chunk::data(*b"StVS", 2u32.to_le_bytes().to_vec()), utf8("a.png"), utf8(hostile)]);
         let bytes = with_sequence_naming(&[list], Some([u32::MAX, u32::MAX, 0]));
         reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
