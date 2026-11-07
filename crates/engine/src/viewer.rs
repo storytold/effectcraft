@@ -1,5 +1,5 @@
 //! Composition viewer maths shared by the frontends and tests: snapping (targets, tolerance and
-//! priority), the Show Channel / Exposure display transforms, and the viewer snapshot.
+//! priority), the display pass (Show Channel, exposure, display colour), and the viewer snapshot.
 //!
 //! Nothing here touches the project; edits go through commands.
 
@@ -14,6 +14,9 @@ use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
+
+mod display_pass;
+pub use display_pass::{DisplayPass, FrameEncoding, PassColor, PassConv, PassCurve, SHADER_EXPONENTS, hdr_step, lut_eval};
 
 // ---------------------------------------------------------------- snapping
 
@@ -48,7 +51,7 @@ pub struct SnapTarget {
     pub priority: u8,
     pub source: SnapSource,
     /// A line's extent along itself (y of a vertical line, x of a horizontal one): a layer's
-    /// edge without Snap Edges Extended. `None` runs across the whole comp.
+    /// edge or centre line without Snap Edges Extended. `None` runs across the whole comp.
     #[serde(default)]
     pub span: Option<[f64; 2]>,
 }
@@ -70,7 +73,7 @@ impl SnapTarget {
 }
 
 /// Tools bar ▸ Snapping options, the two After Effects' Snapping menu has: Snap Edges Extended
-/// (layer edges snap along their whole line, beyond the layer's bounds) and Snap to Features in
+/// (layer edge and centre lines snap along their whole line, beyond the layer's bounds) and Snap to Features in
 /// Collapsed Compositions and Text Layers (the layers inside a precomp layer with Collapse
 /// Transformations on are targets too). Both are on by default. Every layer feature snaps
 /// (corners, edge midpoints, centre, anchor point, mask and shape path points), as in After
@@ -126,9 +129,10 @@ fn better(a: (f64, u8), b: (f64, u8)) -> bool {
 }
 
 /// Snap feature points `sources` (comp pixels) to the nearest target within `tol` comp pixels.
-/// A point target snaps both axes and wins when it is at least as near as the best lines;
-/// otherwise the nearest vertical and horizontal lines snap x and y independently. Ties go to
-/// the lower priority value.
+/// A point target snaps both axes and wins unless a vertical and a horizontal line both resolve
+/// and together lie nearer than it (one line alone leaves the other axis free, so it never beats
+/// a point: a layer's edge midpoint lies on its edge line); otherwise the nearest vertical and
+/// horizontal lines snap x and y independently. Ties go to the lower priority value.
 pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Snap> {
     let mut best_pt: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
     let mut best_x: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
@@ -150,9 +154,9 @@ pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Sn
             }
         }
     }
-    let line_best = [best_x.map(|b| b.0.0), best_y.map(|b| b.0.0)].into_iter().flatten().fold(f64::INFINITY, f64::min);
+    let both_lines = best_x.zip(best_y).map_or(f64::INFINITY, |(x, y)| x.0.0.hypot(y.0.0));
     if let Some((k, s, t)) = best_pt
-        && k.0 <= line_best + 1e-9
+        && k.0 <= both_lines + 1e-9
     {
         return Some(Snap { delta: [t.pos[0] - s[0], t.pos[1] - s[1]], hits: vec![t], at: t.pos });
     }
@@ -366,8 +370,8 @@ fn visible_layers<'a>(ctx: &EvalCtx<'a>, exclude: &'a [LayerId]) -> impl Iterato
     comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo) && !exclude.contains(&l.id))
 }
 
-/// A 2D layer's snap targets: its box points, its edges as lines while unrotated (across the
-/// comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
+/// A 2D layer's snap targets: its box points, its edges and centre as lines while unrotated (across
+/// the comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
 /// false (Pan Behind drags it, the box stays put), its mask and shape path vertices and, with
 /// Snap to Features in Collapsed Compositions, the targets of the visible layers inside a
 /// collapsed precomp layer. None for cameras, lights and 3D layers.
@@ -386,10 +390,10 @@ fn layer_targets_at(ctx: &EvalCtx, l: &Layer, anchor: bool, f: SnapFeatures, dep
         let [nw, ne, _, sw] = b.corners;
         if (nw[1] - ne[1]).abs() < 1e-6 && (nw[0] - sw[0]).abs() < 1e-6 {
             let (xs, ys) = if f.edges_extended { (None, None) } else { (Some([nw[0], ne[0]]), Some([nw[1], sw[1]])) };
-            for x in [nw[0], ne[0]] {
+            for x in [nw[0], b.center[0], ne[0]] {
                 out.push(SnapTarget::vline(x, PRI_LAYER, src).within(ys));
             }
-            for y in [nw[1], sw[1]] {
+            for y in [nw[1], b.center[1], sw[1]] {
                 out.push(SnapTarget::hline(y, PRI_LAYER, src).within(xs));
             }
         }
@@ -497,63 +501,6 @@ fn srgb_to_linear(v: f32) -> f32 {
 fn linear_to_srgb(v: f32) -> f32 {
     let v = v.max(0.0);
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
-}
-
-/// 8-bit exposure lookup table: `stops` applied in linear light.
-pub fn exposure_lut(stops: f32) -> [u8; 256] {
-    let k = 2f32.powf(stops);
-    let mut lut = [0u8; 256];
-    for (i, o) in lut.iter_mut().enumerate() {
-        let lin = srgb_to_linear(i as f32 / 255.0) * k;
-        *o = (linear_to_srgb(lin).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    }
-    lut
-}
-
-/// Apply the viewer's channel and exposure to premultiplied 8-bit RGBA pixels in place.
-/// RGB shows the image (exposure only); Red/Green/Blue/Alpha show one channel as an opaque
-/// grayscale image (or tinted in that channel's colour when `colorized`); RGB Straight shows the
-/// unpremultiplied colour, opaque.
-pub fn display_transform(px: &mut [[u8; 4]], channel: Channel, colorized: bool, stops: f32) {
-    let lut = (stops != 0.0).then(|| exposure_lut(stops));
-    let ex = |v: u8| lut.as_ref().map(|l| l[v as usize]).unwrap_or(v);
-    for p in px.iter_mut() {
-        let [r, g, b, a] = *p;
-        *p = match channel {
-            Channel::Rgb => {
-                if lut.is_none() {
-                    continue;
-                }
-                // Exposure on straight colour, re-premultiplied.
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                let pm = |c: u8| ((ex(un(c)) as u32 * a as u32 + 127) / 255) as u8;
-                [pm(r), pm(g), pm(b), a]
-            }
-            Channel::Red | Channel::Green | Channel::Blue => {
-                let (i, c) = match channel {
-                    Channel::Red => (0, r),
-                    Channel::Green => (1, g),
-                    _ => (2, b),
-                };
-                let v = ex(c);
-                if colorized {
-                    let mut o = [0, 0, 0, 255];
-                    o[i] = v;
-                    o
-                } else {
-                    [v, v, v, 255]
-                }
-            }
-            Channel::Alpha => {
-                let v = ex(a);
-                [v, v, v, 255]
-            }
-            Channel::RgbStraight => {
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                [ex(un(r)), ex(un(g)), ex(un(b)), 255]
-            }
-        };
-    }
 }
 
 // ---------------------------------------------------------------- display colour management
@@ -998,6 +945,12 @@ impl DisplayColor {
         )
     }
 
+    /// A conversion that is a baked 3D LUT alone, as a LUT-based My Custom RGB profile makes
+    /// (tests of the display pass).
+    pub fn from_lut(lut: Arc<effectcraft_color::icc::Lut3d>) -> DisplayColor {
+        DisplayColor { sim: None, display: None, lut: Some(lut) }
+    }
+
     /// Whether the simulation runs a LUT-based ICC profile (baked into a 3D LUT).
     pub fn is_lut(&self) -> bool {
         self.lut.is_some()
@@ -1096,6 +1049,9 @@ pub struct Snapshot {
     /// Render scale the image was taken at.
     pub scale: f64,
     pub image: Arc<Image>,
+    /// How `image` is encoded: rendered without the HDR step in 32 bpc, so viewer exposure
+    /// reaches its over-range values; the display pass applies the step.
+    pub encoding: FrameEncoding,
 }
 
 #[cfg(test)]

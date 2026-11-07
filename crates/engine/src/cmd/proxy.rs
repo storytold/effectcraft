@@ -53,6 +53,7 @@ fn probe(s: &Session, path: &str, cmd: &str) -> Result<Footage> {
 
 /// Attach `footage` as the proxy of `items` (Use Proxy on). One undo step.
 pub(crate) fn set_proxy_footage(s: &mut Session, items: &[ItemId], footage: Footage) -> Result<()> {
+    s.stored_paths.allow(&footage);
     s.edit("Set Proxy", None, |proj, _| {
         for i in items {
             if let Some(it) = proj.item_mut(*i) {

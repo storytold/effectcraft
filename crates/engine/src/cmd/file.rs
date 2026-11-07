@@ -327,7 +327,7 @@ impl Prober {
             && self.report_missing_frames
             && let Some(gaps) = crate::sequence::missing_report(&f.sequence)
         {
-            warning = Some(format!("{name}: {gaps} (shown as placeholders)"));
+            warning = Some(format!("{name}: {gaps} (the previous frame is held)"));
         }
         // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
         // own alpha, and audio and data have none).

@@ -197,6 +197,22 @@ fn write_on_and_glue_gun_draw_at_brush() {
     assert_eq!(g.img.get(0, 0), src.get(0, 0));
 }
 
+/// #2980: Brush Size of Write-on and Stroke goes up to 200 px as in After Effects (read back from
+/// After Effects 2026: setting 201 is refused with "out of range 0 to 200"), and a brush that
+/// wide paints that wide.
+#[test]
+fn brush_size_goes_up_to_200() {
+    for id in ["ec.generate.writeon", "ec.generate.stroke"] {
+        let spec = crate::find(id).unwrap();
+        let size = spec.params.iter().find(|p| p.id == "brushSize").unwrap();
+        assert!(matches!(size.ui, ParamUi::Slider { min, max, .. } if min == 0.0 && max == 200.0), "{id}: {:?}", size.ui);
+    }
+    let set = [("brushSize", num(120.0)), ("brushHardness", num(100.0)), ("brushPosition", Value::Vec2([128.0, 128.0]))];
+    let wide = run("ec.generate.writeon", &set, Image::new(256, 256));
+    assert!(wide.img.get(128 + 55, 128)[3] > 0.9, "radius 60 reaches 55 px from the centre");
+    assert!(wide.img.get(128 + 70, 128)[3] == 0.0);
+}
+
 /// #536: an animated Brush Position draws a stroke that stays (Stroke Length 0), expires
 /// after Stroke Length, and lays its dabs Brush Spacing seconds apart.
 #[test]
@@ -394,4 +410,46 @@ fn scribble_caps_and_start_end_apply_to() {
     let all = run_env("ec.generate.scribble", &[base.as_slice(), &seq].concat(), img.clone(), 0.0, env2);
     let each = run_env("ec.generate.scribble", &[base.as_slice(), &seq, &[("startEndApplyTo", Value::Enum(1))]].concat(), img, 0.0, env2);
     assert_ne!(all.img.data, each.img.data);
+}
+
+#[test]
+fn vegas_long_segments_are_sampled_finely() {
+    // A short segment keeps the 12 samples; a long one gets more so it bends smoothly round rounded corners.
+    assert_eq!(super::paths::vegas_substeps(10.0, 4.0), 12);
+    let n = super::paths::vegas_substeps(400.0, 4.0);
+    assert!(n > 12 && n.is_multiple_of(2), "{n}");
+    assert!(super::paths::vegas_substeps(13.0 * 4.0, 4.0).is_multiple_of(2));
+    assert!(400.0 / n as f64 <= 4.0 + 1e-9);
+    assert_eq!(super::paths::vegas_substeps(1.0e9, 4.0), 512);
+}
+
+#[test]
+fn vegas_long_segment_follows_curved_mask() {
+    // One segment as long as a round mask (radius 90 px): with only 12 straight pieces the
+    // chords cut ~3 px inside the curve, leaving gaps on the mask outline.
+    let (c, r) = (100.0, 90.0);
+    let mut points = Vec::new();
+    for i in 0..256 {
+        let a = i as f64 / 256.0 * std::f64::consts::TAU;
+        points.push([c + r * a.cos(), c + r * a.sin()]);
+    }
+    let masks = vec![MaskShape { name: "Mask 1".into(), points, closed: true, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [
+        ("stroke", Value::Enum(1)),
+        ("segments", num(1.0)),
+        ("length", num(1.0)),
+        ("segmentDistribution", Value::Enum(1)),
+        ("blendMode", Value::Enum(0)),
+        ("hardness", num(1.0)),
+        ("midpointOpacity", num(1.0)),
+        ("endOpacity", num(1.0)),
+    ];
+    let out = run_env("ec.generate.vegas", &set, Image::new(200, 200), 0.5, env);
+    for k in 0..720 {
+        let a = k as f64 / 720.0 * std::f64::consts::TAU;
+        let (x, y) = ((c + r * a.cos()).floor() as usize, (c + r * a.sin()).floor() as usize);
+        let alpha = out.img.data[y * 200 + x][3];
+        assert!(alpha > 0.5, "gap on the curve at {k}/720 turn: alpha {alpha}");
+    }
 }

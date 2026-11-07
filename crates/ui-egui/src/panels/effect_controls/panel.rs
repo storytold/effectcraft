@@ -127,6 +127,17 @@ fn drop_payload(ui: &egui::Ui, rect: Rect, p: &egui::Painter, t: &Tokens, layer_
     }
 }
 
+/// A plug-in effect whose last render failed (an effect helper that stopped, ...): a warning sign
+/// at `at`, after the effect's name, with the message on hover. The frame shows the input as is.
+fn render_error_mark(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, effect: &str, g: &PropGroup, at: egui::Pos2) {
+    let Some(err) = effectcraft_engine::effects::plugin::plugin_error(effect) else { return };
+    let wr = bp.text(at, Align2::LEFT_CENTER, "⚠", Tokens::semibold(12.0), app.tokens.warning);
+    let resp = ui.interact(wr.expand(2.0), egui::Id::unique(("ec-fx-error", g.uid)), Sense::hover());
+    app.auto.add(&format!("effectControls.effect.{}.error", g.uid), wr, &err);
+    resp.on_hover_text(err);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+}
+
 fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, t: &Tokens, effect: &str, g: &PropGroup, r: Rect) {
     // About…: the effect's name and category (AE's About dialog).
     let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.center().y - 9.0), vec2(44.0, 18.0));
@@ -181,12 +192,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
     let body = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), rect.max);
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("ec-scroll"), body);
+    let body = scroll.content;
     let mut y = body.min.y + 4.0 - scroll.offset;
     let mut actions: Actions = vec![];
     let bp = p.with_clip_rect(body);
-    // Rows scroll under the header: clip their widgets (and hit tests) to the body.
-    let panel_clip = ui.clip_rect();
-    ui.set_clip_rect(body.intersect(panel_clip));
     let fx: Vec<PropGroup> = layer.effects().map(|f| f.groups().cloned().collect()).unwrap_or_default();
     if fx.is_empty() {
         bp.text(
@@ -248,6 +257,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         } else {
             let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::semibold(12.0), t.text);
             app.auto.add(&format!("effectControls.effect.{}.name", g.uid), name, &g.name);
+            render_error_mark(app, ui, &bp, effect, g, pos2(name.max.x + 8.0, r.center().y));
         }
         let rresp = ui.interact(reset, egui::Id::unique(("ec-reset", g.uid)), Sense::click());
         bp.text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), Tokens::ui(11.5), if rresp.hovered() { t.hot_text } else { t.text_dim });
@@ -268,8 +278,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         hresp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, &shown));
         app.auto.add(&format!("effectControls.effect.{}", g.uid), r, &g.name);
         if hresp.clicked() || hresp.drag_started() || hresp.secondary_clicked() {
-            let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-            if add && hresp.clicked() {
+            let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+            if shift && hresp.clicked() {
+                // A range from the last effect picked, which stays the end the next range starts from.
+                let from = app.session.state.selected_props.iter().rev().find_map(|(l, u)| fx.iter().position(|f| *l == layer.id && f.uid == *u));
+                let from = from.unwrap_or(fi);
+                let range = fx.iter().enumerate().filter(|(i, _)| (from.min(fi)..=from.max(fi)).contains(i));
+                let mut picked: Vec<_> = range.filter(|(i, _)| *i != from).map(|(_, f)| (layer.id, f.uid)).collect();
+                picked.extend(fx.get(from).map(|f| (layer.id, f.uid)));
+                app.session.state.selected_props = picked;
+            } else if command && hresp.clicked() {
                 if selected {
                     app.session.state.selected_props.retain(|(l, u)| !(*l == layer.id && *u == g.uid));
                 } else {
@@ -370,7 +388,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.set_min_width(200.0);
         actions.extend(crate::menus::menu_contents(app, ui, "Effect"));
     });
-    ui.set_clip_rect(panel_clip);
     let content_h = y + scroll.offset - body.min.y;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
     drop_payload(ui, rect, &p, &t, layer.id.0, &mut actions);

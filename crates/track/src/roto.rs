@@ -901,6 +901,87 @@ pub fn warp_prior(prev_img: &Image, prev: &FrameSeg, next_img: &Image, opts: &Se
     Prior { soft: res.iter().map(|r| r.0).collect(), fg: prev.fg.clone(), bg: prev.bg.clone(), refine: res.iter().map(|r| r.1).collect(), weight: PRIOR }
 }
 
+/// The inputs of a band re-cut on one (sub)image of `size`.
+struct Band<'a> {
+    size: (usize, usize),
+    rgb: &'a [[f32; 3]],
+    /// The warped soft matte (the prior, before blurring).
+    soft: &'a [f32],
+    free: &'a [bool],
+    seeds: &'a [bool],
+}
+
+/// Graph cut of the free pixels with the blurred prior, then [`clean`].
+fn cut_band(b: &Band, labels: &mut [u8], sigma: f64, models: (&Gmm, &Gmm)) {
+    let (w, h) = b.size;
+    let soft = matting::gauss(b.soft, w, h, sigma);
+    cut(b.rgb, b.size, labels, b.free, &vec![0u8; w * h], models, Some((&soft, PRIOR)));
+    clean(labels, b.seeds, &vec![false; w * h], w, h);
+}
+
+/// The half-open rectangle `[x0, y0, x1, y1)` around the pixels with `sd >= -r` (the band
+/// `|sd| <= r` and the core `sd > r`), grown by `pad` and clipped to the frame; `None` when
+/// there are none.
+fn band_rect(sd: &[f32], size: (usize, usize), r: f32, pad: usize) -> Option<[usize; 4]> {
+    let (w, h) = size;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, d) in sd.iter().enumerate() {
+        if *d >= -r {
+            let (x, y) = (i % w.max(1), i / w.max(1));
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    (x0 <= x1).then(|| [x0.saturating_sub(pad), y0.saturating_sub(pad), x1.saturating_add(pad + 1).min(w), y1.saturating_add(pad + 1).min(h)])
+}
+
+/// The pixels of `rect` (row-major) of a `w`-wide plane.
+fn crop_of<T: Copy>(src: &[T], w: usize, rect: [usize; 4]) -> Vec<T> {
+    let [x0, y0, x1, y1] = rect;
+    (y0..y1).flat_map(|y| src.get(y * w + x0..y * w + x1).unwrap_or(&[]).iter().copied()).collect()
+}
+
+/// Re-cut the band `|sd| <= r` around the edge of `labels` (the warped matte) with `soft` as the
+/// prior; outside it the labels stay. `models`: the colour models, fitted on the whole frame when
+/// `None`. With `crop` the cut runs on the bounding box of the band and the core, padded by the
+/// reach of the prior blur: outside that box every pixel is background more than `r` from the
+/// edge, the free pixels, their neighbours and the seeds are the same, and every free pixel sees
+/// the same blur window as on the full frame.
+fn recut_band(rgb: &[[f32; 3]], size: (usize, usize), labels: &mut [u8], soft: &[f32], r: f32, models: Option<(&Gmm, &Gmm)>, crop: bool) {
+    let (w, h) = size;
+    let fitted;
+    let models = match models {
+        Some(m) => m,
+        None => {
+            fitted = fit_models(rgb, labels);
+            (&fitted.0, &fitted.1)
+        }
+    };
+    let sd = matting::signed_distance(labels, w, h);
+    let free: Vec<bool> = sd.iter().map(|d| d.abs() <= r).collect();
+    // The seeds of `core_of(soft, ..)`: `labels` is `soft >= 0.5`, so this is its core.
+    let core: Vec<bool> = sd.iter().map(|d| *d > r).collect();
+    let seeds: Vec<bool> = if core.iter().any(|c| *c) { core } else { labels.iter().map(|v| *v != 0).collect() };
+    let sigma = (r as f64 / 4.0).max(1.0);
+    let full = [0, 0, w, h];
+    let rect = if crop { band_rect(&sd, size, r, matting::gauss_reach(sigma).max(1)) } else { Some(full) };
+    // No band and no core: there is no foreground, so nothing is free and `clean` keeps all.
+    let Some(rect) = rect else { return };
+    if rect == full {
+        cut_band(&Band { size, rgb, soft, free: &free, seeds: &seeds }, labels, sigma, models);
+        return;
+    }
+    let [x0, y0, x1, y1] = rect;
+    let cw = x1 - x0;
+    let (rgb_c, soft_c, free_c, seeds_c) = (crop_of(rgb, w, rect), crop_of(soft, w, rect), crop_of(&free, w, rect), crop_of(&seeds, w, rect));
+    let mut cl = crop_of(labels, w, rect);
+    cut_band(&Band { size: (cw, y1 - y0), rgb: &rgb_c, soft: &soft_c, free: &free_c, seeds: &seeds_c }, &mut cl, sigma, models);
+    for (y, row) in (y0..y1).zip(cl.chunks(cw.max(1))) {
+        if let Some(dst) = labels.get_mut(y * w + x0..y * w + x1) {
+            dst.copy_from_slice(row);
+        }
+    }
+}
+
 /// Propagate the previous frame's segmentation to the next frame: warp it, then re-cut in a
 /// band of Search Radius pixels around the warped boundary. Strokes on the next frame re-cut
 /// the whole frame with the warped matte as a soft prior instead.
@@ -912,15 +993,9 @@ pub fn propagate(prev_img: &Image, prev: &FrameSeg, next_img: &Image, strokes: &
     }
     let rgb = rgb_of(next_img);
     let mut labels: Vec<u8> = prior.soft.iter().map(|v| (*v >= 0.5) as u8).collect();
-    let sd = matting::signed_distance(&labels, w, h);
     let r = (opts.search_radius * opts.scale).max(2.0) as f32;
-    let free: Vec<bool> = sd.iter().map(|d| d.abs() <= r).collect();
-    let hard = vec![0u8; w * h];
-    let soft = matting::gauss(&prior.soft, w, h, (r as f64 / 4.0).max(1.0));
-    let (fg, bg) = if prev.fg.is_empty() || prev.bg.is_empty() { fit_models(&rgb, &labels) } else { (prev.fg.clone(), prev.bg.clone()) };
-    cut(&rgb, (w, h), &mut labels, &free, &hard, (&fg, &bg), Some((&soft, PRIOR)));
-    let seeds = core_of(&prior.soft, w, h, r as f64);
-    clean(&mut labels, &seeds, &vec![false; w * h], w, h);
+    let models = (!prev.fg.is_empty() && !prev.bg.is_empty()).then_some((&prev.fg, &prev.bg));
+    recut_band(&rgb, (w, h), &mut labels, &prior.soft, r, models, true);
     finish(next_img, &rgb, labels, strokes, Some(&prior.refine), opts, refine_radius)
 }
 

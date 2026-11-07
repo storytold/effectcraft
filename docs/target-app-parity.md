@@ -171,8 +171,7 @@ Checked on 10 October 2026 when the mainstream and essentials numbers were added
 
 ## Mainstream practitioner and essentials user
 
-Two narrower questions, computed the same way in every craft app (craftrules
-`standards/progress-docs.md`, "Numbers"). The stage still follows the full-target number and the
+Two narrower questions, computed the same way in every craft app. The stage still follows the full-target number and the
 [alpha gate](roadmap.md#alpha-gate).
 
 ### Mainstream practitioner

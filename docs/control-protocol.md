@@ -9,6 +9,13 @@ effectcraft --control 9877        # or EFFECTCRAFT_CONTROL_PORT=9877
 The port must be a number from 1 to 65535, and `--control` overrides the variable. A bad port or an
 unknown option prints an error and the app exits with status 1 before it opens a window.
 
+An app started with a control port is meant to be driven by an agent, so a normal launch does not
+wait for a person: the window opens without taking keyboard focus, and the app skips crash recovery,
+the Home screen (unless `--home` is given) and the startup update check. Help ▸ Check for Updates
+still works. One exception: when the window cannot start at all, the app writes the error to
+standard error and the session log and then shows it in a message box, and it exits only after
+someone closes that box.
+
 - **Transport:** TCP on `127.0.0.1` only, one JSON object per line in each direction. Connections are
   persistent; requests on one connection are answered in order.
 - **Request:** `{"id": 1, "method": "engine.execute", "params": {...}}` (`id` is echoed back, `params`
@@ -143,7 +150,9 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 `viewer.showSnapshot`, `viewer.fastPreviews` (their popup entries are `viewer.<menu>Item.<n>`),
 `viewer.ruler.top|left|origin`, `viewer.mask.<uid>.vertex.<i>`, `viewer.shapePath.<uid>.vertex.<i>`,
 `viewer.motionPath.<layer>.<key>[.in|.out]`, `viewer.puppetPin.<uid>[.rotate|.scale]`,
-`viewer.freeTransform.handle.<i>` and
+`viewer.freeTransform.handle.<i>`, `viewer.cryptoPick` (the Cryptomatte eyedropper's hover chip; its
+label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
+`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
 `timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
 

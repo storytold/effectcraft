@@ -24,11 +24,12 @@ fn plugins_list(s: &mut Session, _: &Value) -> Result<Value> {
                 "author": m.as_ref().map(|m| m.author.clone()),
                 "description": m.as_ref().map(|m| m.description.clone()),
                 "source": p.map(|p| p.source()),
+                "error": plugin::plugin_error(spec.id),
                 "params": spec.params.iter().map(|p| p.id).collect::<Vec<_>>(),
             })
         })
         .collect();
-    Ok(json!({"api": plugin::PLUGIN_API_VERSION, "wasm": s.plugin_loader.is_some(), "plugins": list}))
+    Ok(json!({"api": plugin::PLUGIN_API_VERSION, "wasm": s.plugin_loader.is_some(), "helpers": s.helpers.is_some(), "plugins": list}))
 }
 
 /// `effect.plugins.load`: load WebAssembly effect plug-ins (a file, or every `.wasm` in a
@@ -68,6 +69,205 @@ fn plugins_load(s: &mut Session, p: &Value) -> Result<Value> {
         s.toast(format!("Loaded {} effect plug-in(s)", loaded.len()));
     }
     Ok(json!({"loaded": loaded, "errors": errors}))
+}
+
+/// The settings-folder name the desktop app scans for WebAssembly effect plug-ins on start.
+/// The scan uses this constant ([`apps/effectcraft/src/main.rs`]), so the two cannot drift.
+pub const PLUGINS_DIR: &str = "Plug-ins";
+
+/// The most one installed file may be: a plug-in is a compiled effect, a panel is script text.
+/// Above this the install refuses rather than reading an unbounded file into memory and copying
+/// it into a folder the app loads at every start.
+const MAX_INSTALL_BYTES: u64 = 64 << 20;
+
+/// `effect.plugins.install`: install WebAssembly effect plug-ins so they load on every start,
+/// not only in this session (Load Effect Plug-in keeps the file where it is and just loads it).
+/// `path` installs one `.wasm`; `folder` installs a bundle in one go: every `.wasm` at its top
+/// level is copied into the Plug-ins folder and every `.jsx` becomes a ScriptUI panel. What
+/// installs also loads in this session at once, so the effect menu has it immediately. A `.wasm`
+/// that fails to load is not copied: a broken plug-in must not fail every start.
+fn plugins_install(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "effect.plugins.install";
+    let loader = s.plugin_loader.ok_or_else(|| EngineError::Other("WebAssembly effect plug-ins are not available in this build".into()))?;
+    let cfg = s.config.clone().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
+    let root = cfg.dir().ok_or_else(|| EngineError::Other("this session has no settings folder to install plug-ins into".into()))?;
+    // The folder the Plug-in Library installs next to (`Session::plugins_dir`: the host's, else
+    // `Plug-ins` next to the settings), so both kinds of install live in one place.
+    let plug_dir = s.plugins_dir().unwrap_or_else(|| root.join(PLUGINS_DIR));
+    let single = str_p(p, "path").is_some();
+    let mut listing_errors: Vec<Value> = Vec::new();
+    let sources: Vec<std::path::PathBuf> = match (str_p(p, "path"), str_p(p, "folder")) {
+        (Some(path), _) => vec![std::path::PathBuf::from(path)],
+        (None, Some(dir)) => {
+            let read = std::fs::read_dir(dir).map_err(|e| bad(c, format!("cannot list {dir}: {e}")))?;
+            let mut v = Vec::new();
+            for entry in read {
+                match entry {
+                    Ok(e) => match e.path().metadata() {
+                        Ok(m) if m.is_file() => v.push(e.path()),
+                        // A vanished or unreadable entry is a bundle problem: report it rather
+                        // than installing a bundle that silently misses files. (`is_file()`
+                        // alone would treat unreadable metadata as "not a file" and skip it.)
+                        Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                        Ok(_) => {}
+                    },
+                    Err(e) => listing_errors.push(json!({"error": format!("cannot read the bundle folder: {e}")})),
+                }
+            }
+            v.sort();
+            v
+        }
+        _ => return Err(bad(c, "give `path` (a .wasm plug-in) or `folder` (a plug-in bundle)")),
+    };
+    let mut errors = listing_errors;
+    let mut installed = Vec::new();
+    let mut loaded = Vec::new();
+    let mut panels = Vec::new();
+    for src in &sources {
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if name.is_empty() || name.starts_with('.') {
+            // A bundle's hidden files (`.DS_Store`, `._x.wasm` resource forks) are skipped; a
+            // single install must not report success for a file it skipped.
+            if single {
+                return Err(bad(c, format!("`{}` is not a plug-in file name (hidden files are not installed)", src.display())));
+            }
+            continue;
+        }
+        let is_wasm = src.extension().is_some_and(|x| x.eq_ignore_ascii_case("wasm"));
+        let is_panel = src.extension().is_some_and(|x| x.eq_ignore_ascii_case("jsx"));
+        if single {
+            if !is_wasm {
+                return Err(bad(c, "an effect plug-in install is a `.wasm` file"));
+            }
+        } else if !is_wasm && !is_panel {
+            continue; // a bundle may carry readmes, manifests and source: skip them
+        }
+        let body: std::result::Result<(), String> = (|| {
+            // The name the installed file gets, so it must be one the Scripts menu lists and
+            // `file.uninstallScript` accepts (like `file.installScript`'s): one bare component,
+            // and on Windows not a device name or one Windows rewrites.
+            if !super::scripts::is_bare_name(&name) || (cfg!(windows) && super::scripts::windows_unsafe_name(&name)) {
+                return Err(format!("`{name}` is not a file name that can be installed"));
+            }
+            // Never silently replace an installed file: a name collision is either a re-install
+            // the user did not ask to overwrite or a bundle that would shadow a working plug-in,
+            // and the update path is explicit (remove the old one first).
+            if is_panel {
+                let key = format!("{}/{name}", super::scripts::PANELS_DIR);
+                // Listed, not read: an existing panel whose text cannot be read is still a panel
+                // and must not be replaced (reading it would report it as absent). Compared
+                // ignoring case and checked on disk too: on Windows and macOS `my panel.jsx` is
+                // `My Panel.jsx`, and writing it would replace that panel.
+                let lower = name.to_lowercase();
+                if cfg.list(super::scripts::PANELS_DIR).iter().any(|n| n.to_lowercase() == lower) || cfg.files().is_file(&root.join(&key)) {
+                    return Err(format!("{name} is already installed as a ScriptUI panel; remove it from the Scripts/ScriptUI Panels folder first to update"));
+                }
+                let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
+                let code = String::from_utf8(bytes).map_err(|_| "panels are UTF-8 text (.jsx)".to_string())?;
+                cfg.write(&key, &code).map_err(|e| format!("cannot install panel: {e}"))?;
+                panels.push(json!(name));
+                return Ok(());
+            }
+            let target = plug_dir.join(&name);
+            if cfg.files().is_file(&target) {
+                return Err(format!("{name} is already installed; remove it from the Plug-ins folder first to update"));
+            }
+            let bytes = s.services.read_file_bounded(&src.to_string_lossy(), MAX_INSTALL_BYTES).map_err(|e| format!("cannot read it: {e}"))?;
+            cfg.files().write(&target, &bytes).map_err(|e| format!("cannot write into the Plug-ins folder: {e}"))?;
+            // Load in-session now: a plug-in that cannot load is rolled back, so a broken
+            // plug-in never makes every start fail.
+            // Its source is the installed copy (what `effect.plugins.list` shows and the next
+            // start loads), not the file it was installed from.
+            match loader(&bytes, &target.to_string_lossy()) {
+                Ok(v) => {
+                    loaded.push(v);
+                    installed.push(json!(name));
+                    Ok(())
+                }
+                Err(e) => match cfg.files().remove(&target) {
+                    Ok(()) => Err(format!("it does not load, nothing was installed: {e}")),
+                    // Never say "nothing was installed" when the invalid copy is still there:
+                    // every start would report it and a re-install would say "already installed".
+                    Err(re) => Err(format!(
+                        "it does not load and its copy could not be removed from the Plug-ins folder ({re}): delete `{name}` there, or every start reports it; {e}"
+                    )),
+                },
+            }
+        })();
+        match body {
+            Ok(()) => {}
+            Err(e) => {
+                if single {
+                    return Err(bad(c, format!("{name}: {e}")));
+                }
+                errors.push(json!({"file": name, "error": e}));
+            }
+        }
+    }
+    if !panels.is_empty() {
+        s.scripts_changed();
+    }
+    if !installed.is_empty() || !panels.is_empty() {
+        let mut toast = format!("Installed {} effect plug-in(s)", installed.len());
+        if !panels.is_empty() {
+            toast.push_str(&format!(" and {} ScriptUI panel(s)", panels.len()));
+        }
+        toast.push_str(": they load on every start");
+        s.toast(toast);
+    }
+    Ok(json!({"installed": installed, "panels": panels, "loaded": loaded, "errors": errors}))
+}
+
+/// External effect helpers need a host that runs them.
+fn has_helpers(s: &Session) -> std::result::Result<(), String> {
+    if s.helpers.is_some() { Ok(()) } else { Err("effect helpers are not available in this build".into()) }
+}
+
+/// The host's helper hooks, for the commands that start helpers. Helpers run native code, so a
+/// script may start them only with Allow Scripts to Write Files and Access Network on (as for
+/// File.execute()).
+fn helper_hooks(s: &Session, c: &str) -> Result<crate::HelperHooks> {
+    if s.running_for_script() && !s.prefs.scripting.allow_scripts_write_files {
+        return Err(bad(
+            c,
+            "scripts can't start effect helpers unless Settings ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network is on",
+        ));
+    }
+    s.helpers.ok_or_else(|| EngineError::Other("effect helpers are not available in this build".into()))
+}
+
+/// `effect.helpers.list`: the external effect helpers and their state.
+fn helpers_list(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(match s.helpers {
+        Some(h) => (h.list)(),
+        None => json!({"helpers": [], "blocked": [], "available": false}),
+    })
+}
+
+/// `effect.helpers.scan`: start the installed helpers that aren't running and register their
+/// effects. One bad helper doesn't stop the rest; `retry: true` turns blocked effects back on.
+fn helpers_scan(s: &mut Session, p: &Value) -> Result<Value> {
+    let h = helper_hooks(s, "effect.helpers.scan")?;
+    let r = (h.scan)(b_p(p, "retry").unwrap_or(false));
+    let n = r["loaded"].as_array().map_or(0, Vec::len);
+    if n > 0 {
+        s.toast(format!("{n} effect(s) from effect helpers"));
+    }
+    Ok(r)
+}
+
+/// `effect.helpers.load`: load a file or folder through the helpers that accept it (an OpenFX
+/// helper takes `.ofx` plug-ins, for example).
+fn helpers_load(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "effect.helpers.load";
+    let h = helper_hooks(s, c)?;
+    let path = str_p(p, "path").ok_or_else(|| bad(c, "missing `path`"))?;
+    let r = (h.load)(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let n = r["loaded"].as_array().map_or(0, Vec::len);
+    if n > 0 {
+        s.toast(format!("Loaded {n} effect(s) through a helper"));
+    }
+    Ok(r)
 }
 
 fn apply(s: &mut Session, p: &Value) -> Result<Value> {
@@ -317,12 +517,11 @@ impl CryptoProbe {
                 media_overrides: &[],
             };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-            let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
             let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
             if !live() {
                 return Ok(None);
             }
-            let layer_name = aux.resolve_crypto_layer(want).ok_or(NO_CRYPTO)?;
+            let layer_name = effectcraft_effects::crypto_layer_named(&aux, params.s("layerName"), params.e("layer") as usize).ok_or(NO_CRYPTO)?;
             // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
             // up, proxies have their own size, earlier effects can pad it), rendered and cached.
             if !live() {
@@ -498,6 +697,39 @@ pub(crate) fn crypto_probe_job(s: &Session, p: &Value) -> Result<Option<CryptoPr
             s.probe = Some(probe);
         }
     })))
+}
+
+/// [`Session::crypto_coverage`].
+pub(crate) fn crypto_coverage(s: &Session, p: &Value, hash: u32, max_side: usize) -> Option<CryptoCoverage> {
+    let (key, ..) = probe_key(s, p, "effect.cryptomatteAt").ok()?;
+    let probe = cached_probe(s, key)?;
+    let b = probe.grid.as_ref().ok()?;
+    let (aw, ah) = (b.aux.width as usize, b.aux.height as usize);
+    if aw == 0 || ah == 0 {
+        return None;
+    }
+    let step = aw.max(ah).div_ceil(max_side.max(1)).max(1);
+    let (w, h) = (aw.div_ceil(step), ah.div_ceil(step));
+    let planes = b.aux.crypto_rank_planes(&b.layer);
+    let sample = |j: usize| {
+        planes.iter().filter(|(id, _)| id.get(j).is_some_and(|v| v.to_bits() == hash)).map(|(_, c)| c.get(j).map_or(0.0, |c| c.max(0.0))).sum::<f32>().min(1.0)
+    };
+    // Each sample at the centre of its step × step cell; the last cells are cut by the layer.
+    let at = |x: usize, y: usize| sample((y * step + step / 2).min(ah - 1) * aw + (x * step + step / 2).min(aw - 1));
+    let coverage = (0..w * h).map(|i| at(i % w, i / w)).collect();
+    let (size, uv) = ([aw as f64 / b.aux.scale, ah as f64 / b.aux.scale], [aw as f64 / (w * step) as f64, ah as f64 / (h * step) as f64]);
+    Some(CryptoCoverage { width: w, height: h, coverage, size, uv })
+}
+
+/// An ID's coverage over a layer, for the eyedropper's hover highlight: `width` × `height`
+/// samples (row-major, 0..1). The layer, `size` effect-space pixels from its origin, shows the
+/// texture from (0, 0) to `uv`.
+pub struct CryptoCoverage {
+    pub width: usize,
+    pub height: usize,
+    pub coverage: Vec<f32>,
+    pub size: [f64; 2],
+    pub uv: [f64; 2],
 }
 
 /// What a pick finds at a point.
@@ -1107,7 +1339,7 @@ pub fn specs() -> Vec<CommandSpec> {
         crate::query!(
             "effect.plugins.list",
             "List Effect Plug-ins",
-            "{} → {api, wasm, plugins: [{id, name, category, version, author, source, params}]}",
+            "{} → {api, wasm, helpers, plugins: [{id, name, category, version, author, source, params, error}]}",
             plugins_list
         ),
         cmd!(
@@ -1118,6 +1350,39 @@ pub fn specs() -> Vec<CommandSpec> {
             "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
+        ),
+        cmd!(
+            "effect.plugins.install",
+            "Install Effect Plug-in...",
+            [],
+            None,
+            "{path (.wasm plug-in: copied into the Plug-ins folder and loaded on every start) | folder (a plug-in bundle: every .wasm goes into the Plug-ins folder and every .jsx becomes a ScriptUI panel), bundle? (the menu: ask for a folder)}",
+            super::always,
+            plugins_install
+        ),
+        crate::query!(
+            "effect.helpers.list",
+            "List Effect Helpers",
+            "{} → {helpers: [{program, name, version, loads, running, effects, restarts, error}], blocked: [effect ids]}",
+            helpers_list
+        ),
+        cmd!(
+            "effect.helpers.scan",
+            "Scan for Effect Helpers",
+            [],
+            None,
+            "{retry?} → {paths, helpers, loaded, errors}: starts the effect helpers installed in helpers/ next to the app, helpers/ in the settings folder and EFFECTCRAFT_HELPER_PATH, and adds their effects; retry turns effects that kept stopping their helper back on",
+            has_helpers,
+            helpers_scan
+        ),
+        cmd!(
+            "effect.helpers.load",
+            "Load Plug-ins Through Helper...",
+            [],
+            None,
+            "{path (a file or folder an installed helper accepts, e.g. a folder of .ofx plug-ins for an OpenFX helper; the menu asks for a folder)} → {loaded: [{id, name, category, helper}], errors}",
+            has_helpers,
+            helpers_load
         ),
     ]
 }
