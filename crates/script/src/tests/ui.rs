@@ -297,3 +297,125 @@ fn sample_scripts_and_installing() {
     let _ = std::fs::remove_dir_all(&dir);
     let _: Value = json!(null);
 }
+
+const PICK_AUDIO: &str = r#"
+var d = new Window("dialog", "Pick Audio");
+var song = d.add("edittext", undefined, "", { name: "song" });
+var browse = d.add("button", undefined, "Browse...", { name: "browse" });
+browse.onClick = function () {
+  var f = File.openDialog("Select a song", "Audio:*.MP3;*.wav,All files:*.*");
+  song.text = f ? f.fsName : "(cancelled)";
+};
+var where = d.add("button", undefined, "Folder...", { name: "where" });
+where.onClick = function () {
+  var f = Folder.selectDialog("Output folder");
+  song.text = f instanceof Folder ? "folder " + f.fsName : "(cancelled)";
+};
+d.add("button", undefined, "OK", { name: "ok" });
+var r = d.show();
+r + " " + song.text
+"#;
+
+/// #2778: File.openDialog, Folder.selectDialog… in a dialog's Browse… handler. With a frontend
+/// that shows scripts' file dialogs, the script waits for `scriptui.fileDialog`'s answer (the
+/// picked files, or null when cancelled); headless runs get null at once.
+#[test]
+fn file_dialogs_wait_for_their_answer() {
+    let mut s = session();
+    // Headless: nothing shows a dialog, so the script never waits on one.
+    let o = run_code(&mut s, r#"var f = File.openDialog("Pick"); f === null ? "none" : "picked""#, "headless.jsx");
+    assert!(!o.waiting && o.error.is_none(), "{o:?}");
+    assert_eq!(o.result, json!("none"));
+    assert!(s.script_ui.file_dialogs.is_empty());
+
+    s.script_ui.answers_file_dialogs = true;
+    // At the top of a script, with multiSelect: an array of Files.
+    let o = run_code(&mut s, r#"var fs = File.openDialog("Pick scripts", "*.jsx", true); fs ? fs.length + " " + fs[1].name : "none""#, "top.jsx");
+    assert!(o.waiting, "{o:?}");
+    let asked = s.execute("scriptui.fileDialogs", json!({})).unwrap();
+    assert_eq!(asked[0]["kind"], "open", "{asked}");
+    assert_eq!((asked[0]["prompt"].clone(), asked[0]["exts"].clone(), asked[0]["many"].clone()), (json!("Pick scripts"), json!(["jsx"]), json!(true)));
+    let r = s.execute("scriptui.fileDialog", json!({"paths": ["/a/x.jsx", "/b/y.jsx"]})).unwrap();
+    assert_eq!(r["result"], "2 y.jsx", "{r}");
+    assert!(s.script_ui.file_dialogs.is_empty());
+
+    // In a modal dialog's Browse… handler.
+    let o = run_code(&mut s, PICK_AUDIO, "pick.jsx");
+    assert!(o.waiting, "{o:?}");
+    let r = s.execute("scriptui.click", json!({"widget": "browse"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    let asked = s.script_ui.file_dialogs.clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].exts, ["mp3", "wav"], "the filter's extensions, `*.*` adds none");
+    assert_eq!((asked[0].label.as_str(), asked[0].any, asked[0].many), ("Audio", true, false));
+    // An answer for another dialog (a stale one) is refused; this one still waits.
+    let e = s.execute("scriptui.fileDialog", json!({"id": asked[0].id + 1000, "paths": null})).unwrap_err().to_string();
+    assert!(e.contains("no such file dialog"), "{e}");
+    assert_eq!(s.script_ui.file_dialogs.len(), 1);
+    // The dialog's controls wait for the answer.
+    let e = s.execute("scriptui.click", json!({"widget": "ok"})).unwrap_err().to_string();
+    assert!(e.contains("waiting for its file dialog"), "{e}");
+    // Cancelled: null.
+    s.execute("scriptui.fileDialog", json!({"paths": null})).unwrap();
+    let song = |s: &Session| s.script_ui.windows[0].root.lookup(&json!("song")).map(|w| w.text.clone()).unwrap_or_default();
+    assert_eq!(song(&s), "(cancelled)");
+    s.execute("scriptui.click", json!({"widget": "browse"})).unwrap();
+    // Only one file without multiSelect.
+    s.execute("scriptui.fileDialog", json!({"paths": ["/media/song.wav", "/media/other.wav"]})).unwrap();
+    assert_eq!(song(&s), "/media/song.wav");
+    s.execute("scriptui.click", json!({"widget": "where"})).unwrap();
+    assert_eq!(s.script_ui.file_dialogs[0].kind, effectcraft_engine::scriptui::FileDialogKind::Folder);
+    s.execute("scriptui.fileDialog", json!({"paths": ["/media/out"]})).unwrap();
+    assert_eq!(song(&s), "folder /media/out");
+    let r = s.execute("scriptui.click", json!({"widget": "ok"})).unwrap();
+    assert_eq!(r["result"], "1 folder /media/out", "{r}");
+    // Nothing waits any more.
+    assert!(s.execute("scriptui.fileDialog", json!({"paths": null})).is_err());
+
+    // A file dialog whose answer never comes doesn't trap its script window: closing it cancels
+    // the file dialog, then closes the window.
+    let o = run_code(&mut s, PICK_AUDIO, "pick.jsx");
+    assert!(o.waiting, "{o:?}");
+    s.execute("scriptui.click", json!({"widget": "browse"})).unwrap();
+    assert_eq!(s.script_ui.file_dialogs.len(), 1);
+    let r = s.execute("scriptui.close", json!({})).unwrap();
+    assert_eq!(r["result"], "2 (cancelled)", "{r}");
+    assert!(s.script_ui.windows.is_empty() && s.script_ui.file_dialogs.is_empty());
+}
+
+/// A script can't answer or close another script's waiting file dialog (it would take the dialog
+/// off the list and leave its script waiting for good): refused, and the window still closes.
+#[test]
+fn scripts_cannot_strand_a_waiting_file_dialog() {
+    let mut s = session();
+    s.script_ui.answers_file_dialogs = true;
+    let o = run_code(&mut s, PICK_AUDIO, "pick.jsx");
+    assert!(o.waiting, "{o:?}");
+    s.execute("scriptui.click", json!({"widget": "browse"})).unwrap();
+    let (window, id) = (s.script_ui.windows[0].id, s.script_ui.file_dialogs[0].id);
+    // From the Script Console.
+    for (command, params) in [("scriptui.close", json!({"window": window})), ("scriptui.fileDialog", json!({"id": id, "paths": ["/x.wav"]}))] {
+        let code = format!("try {{ __exec({command:?}, {:?}); \"ran\" }} catch (e) {{ \"refused\" }}", params.to_string());
+        let o = crate::run(&mut s, &effectcraft_engine::ScriptRequest { code: &code, name: "console", console: true });
+        assert_eq!(o.result, json!("refused"), "{command}: {o:?}");
+        assert_eq!(s.script_ui.file_dialogs.len(), 1, "{command}: the dialog still waits");
+    }
+    let r = s.execute("scriptui.close", json!({"window": window})).unwrap();
+    assert_eq!(r["result"], "2 (cancelled)", "{r}");
+    assert!(s.script_ui.windows.is_empty() && s.script_ui.file_dialogs.is_empty());
+}
+
+#[test]
+fn file_dialog_filters_name_their_extensions() {
+    use crate::ui::filter_exts;
+    assert_eq!(filter_exts("*.jsx"), ["jsx"]);
+    assert_eq!(filter_exts("Audio:*.MP3;*.wav,All files:*.*"), ["mp3", "wav"]);
+    assert_eq!(filter_exts("Images (*.png, *.jpg)|*.png;*.jpg"), ["png", "jpg"]);
+    assert!(filter_exts("*.*").is_empty() && filter_exts("").is_empty() && filter_exts("*.").is_empty());
+    use crate::ui::{filter_any, filter_label};
+    assert_eq!(filter_label("Audio:*.mp3;*.wav,All files:*.*"), "Audio");
+    assert_eq!(filter_label("Images (*.png, *.jpg)|*.png;*.jpg"), "Images");
+    assert_eq!(filter_label("*.jsx"), "");
+    assert!(filter_any("Audio:*.mp3,All files:*.*") && filter_any("Any|*"));
+    assert!(!filter_any("*.jsx") && !filter_any(""));
+}

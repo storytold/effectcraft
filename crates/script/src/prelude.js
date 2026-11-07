@@ -279,11 +279,23 @@ File.prototype = {
   copy: function (to) { return JSON.parse(__file("copy", this.__path, __str(to))); },
   rename: function () { throw __err("File.rename is not supported"); },
   execute: function () { return JSON.parse(__file("execute", this.__path)); },
-  openDlg: function () { return null; },
-  saveDlg: function () { return null; },
+  openDlg: function (prompt, filter, multiSelect) { return __pickFile("open", prompt, filter, multiSelect, this.__path); },
+  saveDlg: function (prompt, filter) { return __pickFile("save", prompt, filter, false, this.__path); },
 };
-File.openDialog = function () { return null; };
-File.saveDialog = function () { return null; };
+// The app's file dialog (#2778): a File (an array of them with multiSelect), a Folder for
+// "folder", or null when cancelled, and where no dialog can be shown (the Script Console, the
+// web, headless runs). Filters are strings ("*.jsx", "Audio:*.mp3;*.wav"); a function (macOS)
+// offers every file.
+function __pickFile(kind, prompt, filter, multiSelect, start) {
+  var opt = function (v) { return v === undefined || v === null ? null : __str(v); };
+  var r = JSON.parse(__fileDialog(kind, opt(prompt), typeof filter === "string" ? filter : null, !!multiSelect, opt(start)));
+  if (!r || !r.length) return null;
+  if (kind === "folder") return new Folder(r[0]);
+  if (kind === "open" && multiSelect) return r.map(function (p) { return new File(p); });
+  return new File(r[0]);
+}
+File.openDialog = function (prompt, filter, multiSelect) { return __pickFile("open", prompt, filter, multiSelect); };
+File.saveDialog = function (prompt, filter) { return __pickFile("save", prompt, filter, false); };
 File.decode = function (s) { return decodeURIComponent(s); };
 File.encode = function (s) { return encodeURIComponent(s); };
 File.fs = "EffectCraft";
@@ -321,9 +333,9 @@ Folder.prototype = {
     }
     return out;
   },
-  selectDlg: function () { return null; },
+  selectDlg: function (prompt) { return __pickFile("folder", prompt, null, false, this.__path); },
 };
-Folder.selectDialog = function () { return null; };
+Folder.selectDialog = function (prompt) { return __pickFile("folder", prompt, null, false); };
 Object.defineProperty(Folder, "current", { get: function () { var d = __get("app").projectDir; return d ? new Folder(d) : null; } });
 Object.defineProperty(Folder, "temp", { get: function () { return null; } });
 Object.defineProperty(Folder, "desktop", { get: function () { return null; } });
