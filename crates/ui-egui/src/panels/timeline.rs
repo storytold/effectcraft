@@ -4053,6 +4053,7 @@ fn prop_key_navigator(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, r
 /// The stopwatch.
 fn prop_stopwatch(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, prop: &Property) {
     let t = g.tl.t;
+    let cid = g.tl.cid;
     let ctx = g.tl.ctx.clone();
     let actions = &mut g.tl.actions;
     let lp = g.lp.clone();
@@ -4062,8 +4063,9 @@ fn prop_stopwatch(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &
     let indent = rc.indent;
     let uid = &prop.uid;
 
-    // Stopwatch: Alt+click adds an expression; a press toggles the animation, and
-    // dragging on over other stopwatches gives them the same state (#284).
+    // Stopwatch: Alt+click (or Add Expression in its right-click menu) adds an expression; a
+    // press toggles the animation, and dragging on over other stopwatches gives them the same
+    // state (#284).
     if !prop.static_only {
         let swr = Rect::from_center_size(pos2(indent, cy), vec2(15.0, 15.0));
         let resp = ui.interact(swr, egui::Id::unique(("stopwatch", uid)), Sense::click_and_drag());
@@ -4076,18 +4078,13 @@ fn prop_stopwatch(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &
         };
         icons::paint(&lp, swr, Icon::Stopwatch, col);
         app.auto.add(&format!("timeline.prop.{uid}.stopwatch"), swr, &prop.name);
+        // Right-click: the property's menu, whose Add Expression needs no Alt, which Linux
+        // window managers take for moving the window (#3192).
+        prop_context_menu(app, &ctx, &resp, cid, layer, prop, &mut *actions);
         if ui.input(|i| i.modifiers.alt) {
             if resp.clicked() {
                 actions.push(("prop.setExpression".into(), json!({"layer": layer.id.0, "prop": uid})));
-                if prop.expr.is_none() {
-                    // Adding one: its editor opens, comes into view and takes the
-                    // keyboard with the new expression selected (#1072).
-                    app.ui.timeline.expr_closed.remove(uid);
-                    focus_expression(&ctx, *uid, [usize::MAX, 0]);
-                } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == *uid) {
-                    // Removing it: nothing is left to take the keyboard.
-                    ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
-                }
+                expression_toggled(app, &ctx, prop);
             }
         } else if let Some((value, merge)) = switch_gesture(ui, &resp, r, "stopwatch", prop.is_animated()) {
             actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid, "value": value, "merge": merge})));
@@ -4131,8 +4128,39 @@ fn prop_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCt
     if name_resp.clicked() {
         actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "add": ui.input(|i| i.modifiers.shift)})));
     }
-    crate::widgets::context_menu(&name_resp, |ui| prop_menu(ui, &mut app.auto, cid, layer, prop, &mut *actions));
+    prop_context_menu(app, &ctx, &name_resp, cid, layer, prop, &mut *actions);
     name_x
+}
+
+/// `prop`'s context menu ([`prop_menu`]) on `resp`, its name or its stopwatch. Its Add or
+/// Remove Expression does what an Alt-click on the stopwatch does to the editor.
+fn prop_context_menu(
+    app: &mut EffectcraftApp,
+    ctx: &egui::Context,
+    resp: &egui::Response,
+    cid: ItemId,
+    layer: &Layer,
+    prop: &Property,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let before = actions.len();
+    crate::widgets::context_menu(resp, |ui| prop_menu(ui, &mut app.auto, cid, layer, prop, &mut *actions));
+    if actions.get(before..).is_some_and(|picked| picked.iter().any(|(id, _)| id == "prop.setExpression")) {
+        expression_toggled(app, ctx, prop);
+    }
+}
+
+/// An expression was just added to `prop` (it had none) or removed: adding one opens its
+/// editor, which comes into view and takes the keyboard with the new expression selected
+/// (#1072); removing it leaves nothing to take the keyboard.
+fn expression_toggled(app: &mut EffectcraftApp, ctx: &egui::Context, prop: &Property) {
+    let uid = prop.uid;
+    if prop.expr.is_none() {
+        app.ui.timeline.expr_closed.remove(&uid);
+        focus_expression(ctx, uid, [usize::MAX, 0]);
+    } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == uid) {
+        ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
+    }
 }
 
 /// The value editors and the property pick whip.
@@ -5496,7 +5524,8 @@ pub(crate) fn is_position(layer: &Layer, uid: u64) -> bool {
     layer.transform().is_some_and(|tr| ["position", "positionX", "positionY", "positionZ"].iter().any(|m| tr.get(m).is_some_and(|p| p.uid == uid)))
 }
 
-/// A property's context menu (right-click its name in the Timeline), as in After Effects.
+/// A property's context menu: right-click its name in the Timeline, as in After Effects, or its
+/// stopwatch (an Add Expression that needs no Alt-click, #3192).
 fn prop_menu(
     ui: &mut egui::Ui,
     auto: &mut crate::automation::Registry,
