@@ -99,6 +99,22 @@ pub(crate) fn import_effects<'f, 'a>(
             None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
         }
         let params = defs.params(&fx);
+        // Borrowed definitions (another instance's or the project copy) may not name every value
+        // record this instance has: such a record has nothing to import into, so it is reported.
+        if params.first().is_some_and(|p| p.borrowed_definition) {
+            let defined: std::collections::HashSet<&str> = params.iter().map(|p| p.match_name.as_str()).collect();
+            for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
+                col.lose(
+                    LossCategory::Effects,
+                    format!(
+                        "{}: '{}' effect '{shown}' ({}): the value record {name} has no parameter definition, not imported",
+                        cx.comp,
+                        cx.layer,
+                        fx.match_name()
+                    ),
+                );
+            }
+        }
         if map.extra == Extra::Cryptomatte {
             import_cryptomatte(&fx, &params, cx, &shown, &mut group, col);
         } else {
