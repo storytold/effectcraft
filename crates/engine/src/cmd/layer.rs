@@ -114,7 +114,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_layers,
             set_switch
         ),
-        cmd!("layer.rename", "Rename", [], Some("Enter"), "{layer?, name}", has_layers, rename),
+        cmd!(
+            "layer.rename",
+            "Rename",
+            [],
+            Some("Enter"),
+            "{layer?, name} — a text layer's name follows its text until renamed; an empty name follows it again",
+            has_layers,
+            rename
+        ),
         cmd!("layer.setComment", "Layer Comment", [], None, "{layers?, comment}", has_layers, set_comment),
         cmd!("layer.setBlendMode", "Blending Mode", [], None, "{layers?, mode?: Normal|Multiply|Screen|…, step?: ±1}", has_layers, blend),
         cmd!(
