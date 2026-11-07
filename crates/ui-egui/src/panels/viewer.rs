@@ -96,6 +96,7 @@ struct Grabs {
     guides: Vec<(f32, bool)>,
 }
 
+/// The egui data key of the viewer's [`Grabs`] for the current pass.
 fn grabs_id() -> egui::Id {
     egui::Id::unique("viewer-grabs")
 }
@@ -1180,6 +1181,8 @@ fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
     layers.iter().map(|l| led(l.0)).collect()
 }
 
+/// Starts the gesture a new primary drag begins (pan, move, scale, a handle, a vertex, a marquee),
+/// unless an overlay claimed the press.
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1780,6 +1783,8 @@ fn phase_stopped(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, re
     v.pin_hits = pin_hits;
 }
 
+/// Acts on a click in the viewer for the active tool (select, zoom, add or delete vertices),
+/// including a click an overlay passed on, and not one an overlay claimed.
 fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -1926,6 +1931,8 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
     v.puppet_layers = puppet_layers;
 }
 
+/// Acts on a double-click: a path's points into a Free Transform box, or a precomp opened; lets
+/// go of an overlay's claim on the press once the button is up.
 fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let map = v.map;
     let ctx = v.ctx.clone();
@@ -1986,6 +1993,8 @@ fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Respons
     v.paths = paths;
 }
 
+/// Runs the overlays drawn on top of the viewer (effect, gradient and text handles), after
+/// recording the viewer's own controls for them, and draws the status chips.
 fn phase_tail(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &mut Vw<'_>) {
     let t = v.t;
     let cid = v.cid;

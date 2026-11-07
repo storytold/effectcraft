@@ -452,6 +452,8 @@ enum Step {
     Blur(u64, f64),
 }
 
+/// Performs one model step (a pick, an edit, undo or redo, applying or removing the effect) and
+/// records the state the model expects after it.
 fn run_step(h: &mut Harness<'_, EffectcraftApp>, f: &Fix, m: &mut Model, size: [f64; 2], step: &Step, n: usize) {
     let mut o = m.state().clone();
     let before = h.state().session.history.undo.len();

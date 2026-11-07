@@ -73,6 +73,7 @@ fn on_plate(h: &Harness<'_, EffectcraftApp>, x: f64, y: f64) -> Pos2 {
     comp_to_screen(&h.ctx, [(80.0 + x) as f32, y as f32]).unwrap()
 }
 
+/// Moves the pointer to `pos`, waits until the Cryptomatte IDs are read, and returns the chip's text.
 fn hover(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) -> Option<String> {
     h.event(Event::PointerMoved(pos));
     // The overlay comes up over the layer in this pass and is hovered from the next one on.
@@ -97,6 +98,7 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2, modifiers: Modifiers) {
     h.run_steps(2);
 }
 
+/// Presses at `from`, drags by `by` over a few passes and releases.
 fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, by: egui::Vec2) {
     h.event(Event::PointerMoved(from));
     h.step();
@@ -110,6 +112,7 @@ fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, by: egui::Vec2) {
     h.run_steps(3);
 }
 
+/// The plate's Cryptomatte Selection text.
 fn selection(h: &Harness<'_, EffectcraftApp>, ids: &Ids) -> String {
     let s = &h.state().session;
     match &s.active_comp().unwrap().layer(LayerId(ids.plate)).unwrap().props.find(ids.sel).unwrap().value {
@@ -118,15 +121,18 @@ fn selection(h: &Harness<'_, EffectcraftApp>, ids: &Ids) -> String {
     }
 }
 
+/// The layer's Position value, formatted for comparison.
 fn position(h: &Harness<'_, EffectcraftApp>, layer: u64) -> String {
     let l = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().clone();
     format!("{:?}", l.transform().and_then(|t| t.get("position")).map(|p| p.value.clone()))
 }
 
+/// How many steps the undo history holds.
 fn undo_steps(h: &Harness<'_, EffectcraftApp>) -> usize {
     h.state().session.history.undo.len()
 }
 
+/// The ids of the selected layers.
 fn selected_layers(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
     h.state().session.state.selected_layers.iter().map(|l| l.0).collect()
 }
