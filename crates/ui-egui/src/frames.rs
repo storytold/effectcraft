@@ -450,17 +450,18 @@ fn frame_disk_key(keys: &ContentKeys, project: &Project, key: &FrameKey, opts_ha
 
 /// Queue `img` for the disk cache under `dk` with the source files it was made of. `false` when
 /// refused: a GPU frame (no CPU pixels), files that can't be checked when the entry is read
-/// (an incomplete list, #3184: the frame is shown, not stored), a full queue.
-fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles, virtual_id: Option<disk_cache::VirtualFileId<'_>>) -> bool {
+/// (an incomplete list, #3184: the frame is shown, not stored), a full queue, a file dropped
+/// (File ▸ Reload Footage) after `since`, the drop generation its render started at.
+fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles, virtual_id: Option<disk_cache::VirtualFileId<'_>>, since: u64) -> bool {
     if !files.is_complete() {
         return false;
     }
     match img {
         FrameImage::Cpu(img) => {
             let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba, files, virtual_id)
+            dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba, files, virtual_id, since)
         }
-        FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits(), files, virtual_id),
+        FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits(), files, virtual_id, since),
         FrameImage::Gpu(_) => false,
     }
 }
@@ -1065,10 +1066,12 @@ impl Frames {
         }
         let (persisted, written, virtual_id) = (self.persisted.clone(), self.written.clone(), self.virtual_id.clone());
         let work = move || {
+            // (a frame made of a file dropped while it rendered kept an incomplete list: not here)
+            let since = dc.drop_generation();
             for (dk, img, files) in missing {
                 // (accepted: the disk cache tracks it until written, and it counts as a try;
                 // refused by a full queue: retried, without counting)
-                let accepted = put_disk_frame(&dc, dk, &img, &files, virtual_id.as_deref());
+                let accepted = put_disk_frame(&dc, dk, &img, &files, virtual_id.as_deref(), since);
                 if accepted && let Ok(mut w) = written.lock() {
                     let n = w.1.entry(dk).or_default();
                     *n = n.saturating_add(1);
@@ -1609,8 +1612,11 @@ impl Worker {
             job
         };
         let t0 = web_time::Instant::now();
-        let disk = job.src.disk.as_ref().map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts))));
-        let from_disk = disk.as_ref().and_then(|(dc, k)| self.disk_frame(dc, *k, &job));
+        // (the drop generation before the frame reads anything: File ▸ Reload Footage meanwhile
+        // makes what it read from a reloaded file stale)
+        let disk =
+            job.src.disk.as_ref().map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts)), dc.drop_generation()));
+        let from_disk = disk.as_ref().and_then(|(dc, k, _)| self.disk_frame(dc, *k, &job));
         let disk_hit = from_disk.is_some();
         // `files`: the source files the frame was made of (see `render::reads`).
         let (ci, files) = match from_disk {
@@ -1625,13 +1631,21 @@ impl Worker {
                 }
             },
         };
+        let mut files = files;
+        if let Some((dc, _, since)) = &disk
+            && dc.dropped_since(&files, *since)
+        {
+            // Made of a file as it was before File ▸ Reload Footage dropped it: shown, but its
+            // list can't vouch for it, so neither this worker nor `persist_missing` stores it.
+            files.mark_incomplete();
+        }
         let files = Arc::new(files);
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
         self.finish(&job, ci.clone(), Some(files.clone()), t0);
         if !disk_hit
-            && let Some((dc, k)) = &disk
-            && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref())
+            && let Some((dc, k, since)) = &disk
+            && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
             && let Some(ctx) = &self.ctx
         {
             ctx.request_repaint();

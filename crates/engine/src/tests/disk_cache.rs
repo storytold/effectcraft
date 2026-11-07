@@ -397,3 +397,73 @@ fn reload_footage_drops_the_entries_of_its_files() {
     assert!(dc.get_frame(2, None).is_some(), "another file's frame stays");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Reload Footage while the disk cache is off (#3184): when it is switched on later in the
+/// session, the entries made of the reloaded files are dropped before anything is read from it
+/// (a file replaced by one with the same size and time would pass the check on hit); entries of
+/// other files stay.
+#[test]
+fn reload_footage_while_the_disk_cache_is_off_drops_its_entries_when_it_is_on() {
+    use crate::render::disk_cache::{DiskCache, Kind};
+    use crate::render::reads::{FileStamp, ReadFile, ReadFiles};
+    struct Probe;
+    impl crate::Importer for Probe {
+        fn probe(&self, path: &str) -> std::result::Result<effectcraft_project::Footage, String> {
+            Ok(effectcraft_project::Footage {
+                path: path.into(),
+                kind: effectcraft_project::FootageKind::Still,
+                width: 1,
+                height: 1,
+                has_video: true,
+                ..Default::default()
+            })
+        }
+    }
+    let dir = folder("reload-off");
+    let src = std::path::Path::new(&dir).join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut s = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+    let mut add = |name: &str| {
+        let p = src.join(name);
+        std::fs::write(&p, b"aa").unwrap();
+        let path = p.to_string_lossy().to_string();
+        let f = effectcraft_project::Footage {
+            path: path.clone(),
+            kind: effectcraft_project::FootageKind::Still,
+            width: 1,
+            height: 1,
+            has_video: true,
+            ..Default::default()
+        };
+        let id = s.edit("add", None, |p, _| Ok(p.add_item(name, effectcraft_color::Label::None, None, effectcraft_project::ItemKind::Footage(f)))).unwrap();
+        (id, path)
+    };
+    let (a, a_path) = add("a.png");
+    let (_, b_path) = add("b.png");
+    // Entries from an earlier session in the cache folder.
+    let read = |p: &str| -> ReadFiles { [ReadFile::new(p, FileStamp::native(p).unwrap())].into_iter().collect() };
+    {
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &read(&a_path));
+        dc.put_frame_now(2, 1, 1, &[2; 4], &read(&b_path));
+        dc.put_layer_now(3, &effectcraft_effects::Buf { img: effectcraft_raster::Image::new(1, 1), offset: [0.0; 2], scale: 1.0 }, &read(&a_path));
+    }
+    // Other bytes, same size, the old time back; reloaded while the cache is off.
+    let t = std::fs::metadata(&a_path).unwrap().modified().unwrap();
+    std::fs::write(&a_path, b"AA").unwrap();
+    std::fs::File::options().append(true).open(&a_path).unwrap().set_modified(t).unwrap();
+    assert!(s.disk_cache.is_none());
+    s.execute_checked("file.reloadFootage", json!({"item": a.0})).unwrap();
+    // Switched on: the reloaded file's entries are misses from the start, and then gone.
+    s.execute_checked("prefs.set", json!({"values": {"disk.diskCacheFolder": &dir, "disk.diskCacheEnabled": true}})).unwrap();
+    let dc = s.disk_cache.clone().unwrap();
+    assert!(dc.get_frame(1, None).is_none(), "the reloaded file's frame renders again");
+    assert!(dc.get_layer(3, None).is_none(), "and its layer buffer");
+    dc.flush();
+    assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Layer, 3));
+    assert!(dc.get_frame(2, None).is_some(), "another file's frame stays");
+    assert!(s.pending_disk_drops.is_empty(), "applied once");
+    drop(dc);
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}

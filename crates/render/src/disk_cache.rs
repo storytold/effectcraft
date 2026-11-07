@@ -279,6 +279,44 @@ struct Queue {
     busy: bool,
     /// Keys of frames queued or being written.
     pending_frames: std::collections::HashSet<u128>,
+    /// The drops so far (under the queue's lock: a write is queued either before a drop, which
+    /// then sweeps it, or after it, when this refuses it if it was made from before).
+    drops: Drops,
+}
+
+/// Files dropped from the cache files beyond this are not remembered one by one: everything made
+/// before the drop that forgot them is refused instead.
+const MAX_DROPPED_PATHS: usize = 1 << 16;
+
+/// The [`DiskCache::drop_files`] calls so far: their number (the drop generation) and the last one
+/// of each file. An entry made of a file read before that file's last drop (its render started at
+/// an earlier generation) holds the pixels from before and is refused.
+#[derive(Default)]
+struct Drops {
+    generation: u64,
+    last: HashMap<Arc<str>, u64>,
+    /// Everything made before this generation is refused (the per-file record was forgotten).
+    floor: u64,
+}
+
+impl Drops {
+    fn record(&mut self, paths: &[Arc<str>]) {
+        self.generation = self.generation.saturating_add(1);
+        if self.last.len().saturating_add(paths.len()) > MAX_DROPPED_PATHS {
+            self.last.clear();
+            self.floor = self.generation;
+            return;
+        }
+        for p in paths {
+            self.last.insert(p.clone(), self.generation);
+        }
+    }
+
+    /// Whether something made of `paths`, whose reads started at generation `since`, read one of
+    /// them before it was dropped.
+    fn stale<'a>(&self, mut paths: impl Iterator<Item = &'a Arc<str>>, since: u64) -> bool {
+        since < self.floor || paths.any(|p| self.last.get(p).is_some_and(|g| *g > since))
+    }
 }
 
 impl Queue {
@@ -401,6 +439,7 @@ impl DiskCache {
                     jobs: Default::default(),
                     busy: cfg!(not(target_arch = "wasm32")),
                     pending_frames: Default::default(),
+                    drops: Drops::default(),
                 }),
                 Condvar::new(),
             )),
@@ -629,6 +668,9 @@ impl DiskCache {
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
         };
+        // (before the file is read: the writer may finish a drop's sweep between the read and the
+        // check below, and a drop may start meanwhile)
+        let drops = self.drops_now();
         let Some((found, payload)) = self.load(kind, key) else { return miss() };
         if found != format {
             let other_frame_format = kind == Kind::Frame && (found == FORMAT_RGBA8_FILES || found == FORMAT_F16_FILES);
@@ -642,7 +684,7 @@ impl DiskCache {
             return miss();
         };
         self.file_checks.fetch_add(files.len() as u64, Ordering::Relaxed);
-        if self.made_of_dropped(&files) || !files.unchanged(virtual_id) {
+        if self.made_of_dropped(&files, &drops) || !files.unchanged(virtual_id) {
             self.discard(kind, key);
             return miss();
         }
@@ -674,13 +716,19 @@ impl DiskCache {
 
     /// Queue a write; `false` when it was dropped (a full queue).
     fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
-        self.enqueue_format(kind, key, FORMAT_RGBA8, payload)
+        self.enqueue_format(kind, key, FORMAT_RGBA8, payload, None)
     }
 
-    /// [`DiskCache::enqueue`] with the entry's header format byte.
-    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Vec<u8>) -> bool {
+    /// [`DiskCache::enqueue`] with the entry's header format byte. `made`: the source files of a
+    /// frame or layer entry and the drop generation its reads started at
+    /// ([`DiskCache::drop_generation`]); refused (`false`) when one of them was dropped since.
+    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Vec<u8>, made: Option<(&EntryFiles, u64)>) -> bool {
+        let stale = |q: &Queue| made.is_some_and(|(files, since)| q.drops.stale(files.files().iter().map(|f| &f.path), since));
         #[cfg(target_arch = "wasm32")]
         {
+            if self.queue.0.lock().is_ok_and(|q| stale(&q)) {
+                return false;
+            }
             self.write_format(kind, key, format, &payload);
             true
         }
@@ -688,6 +736,9 @@ impl DiskCache {
         {
             let (m, cv) = &*self.queue;
             let Ok(mut q) = m.lock() else { return false };
+            if stale(&q) {
+                return false;
+            }
             let full = match kind {
                 Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
                 _ => q.jobs.len() >= QUEUE_LIMIT,
@@ -770,6 +821,9 @@ impl DiskCache {
     /// entries that list one of `paths`, after the writes queued before (those are swept too);
     /// until it is done, an entry made of one of them is a miss. Entries are deleted for good,
     /// so they don't come back after a restart. Nothing else in the cache is touched.
+    ///
+    /// A render that was under way meanwhile may still offer an entry made of one of `paths` as
+    /// it was before: it is refused, see [`DiskCache::drop_generation`].
     pub fn drop_files(&self, paths: impl IntoIterator<Item = impl Into<Arc<str>>>) {
         let paths: Vec<Arc<str>> = paths.into_iter().map(Into::into).collect();
         if paths.is_empty() {
@@ -782,17 +836,36 @@ impl DiskCache {
                 *n = n.saturating_add(1);
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (m, cv) = &*self.queue;
-            if let Ok(mut q) = m.lock() {
-                // (never refused for a full queue)
-                q.jobs.push_back(Job::Drop(paths));
-                cv.notify_all();
-                return;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        let (m, cv) = &*self.queue;
+        match m.lock() {
+            Ok(mut q) => {
+                q.drops.record(&paths);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    // (never refused for a full queue)
+                    q.jobs.push_back(Job::Drop(paths));
+                    cv.notify_all();
+                    return;
+                }
             }
+            // (no writer thread to take the job any more)
+            Err(poisoned) => poisoned.into_inner().drops.record(&paths),
         }
         self.sweep(&paths);
+    }
+
+    /// The number of [`DiskCache::drop_files`] calls so far. A render takes it before it starts
+    /// reading and hands it to `put_frame` / `put_layer` with what it made: an entry listing a
+    /// file dropped after that is refused (the render may have read the file as it was before).
+    pub fn drop_generation(&self) -> u64 {
+        self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.generation
+    }
+
+    /// Whether one of `files` was dropped after generation `since` ([`DiskCache::drop_generation`]):
+    /// what a render that started then made of them is from before the drop (shown, never stored).
+    pub fn dropped_since(&self, files: &ReadFiles, since: u64) -> bool {
+        self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.stale(files.files().iter().map(|f| &f.path), since)
     }
 
     /// Whether a [`DiskCache::drop_files`] is pending.
@@ -800,10 +873,21 @@ impl DiskCache {
         !self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
     }
 
-    /// An entry made of a file being dropped.
-    fn made_of_dropped(&self, files: &EntryFiles) -> bool {
+    /// The drop generation and the files being dropped now, taken before an entry is read
+    /// (see [`DiskCache::made_of_dropped`]).
+    fn drops_now(&self) -> (u64, Vec<Arc<str>>) {
+        let generation = self.drop_generation();
         let d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        !d.is_empty() && files.files().iter().any(|f| d.contains_key(&f.path))
+        (generation, d.keys().cloned().collect())
+    }
+
+    /// An entry read after [`DiskCache::drops_now`] gave `drops` that is made of a file whose
+    /// drop was pending then (its sweep may have ended since, after the entry was read) or that
+    /// was dropped since.
+    fn made_of_dropped(&self, files: &EntryFiles, drops: &(u64, Vec<Arc<str>>)) -> bool {
+        let (since, pending) = drops;
+        let paths = || files.files().iter().map(|f| &f.path);
+        paths().any(|p| pending.contains(p)) || self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.stale(paths(), *since)
     }
 
     /// The writer's part of [`DiskCache::drop_files`]: delete the entries made of `paths`, then
@@ -864,13 +948,25 @@ impl DiskCache {
 
     /// Queue a half-float frame for writing (`width * height * 4` binary16 values) with the
     /// source files it was made of. `true` when it is on disk or queued; `false` when refused
-    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`]).
-    pub fn put_frame_f16(&self, key: u128, width: u32, height: u32, rgba: &[u16], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> bool {
+    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`];
+    /// a file dropped after `since`, the [`DiskCache::drop_generation`] the render started at).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame_f16(
+        &self,
+        key: u128,
+        width: u32,
+        height: u32,
+        rgba: &[u16],
+        files: &ReadFiles,
+        virtual_id: Option<VirtualFileId<'_>>,
+        since: u64,
+    ) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
         let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
-        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, with_files(&files, encode_frame_f16(width, height, rgba)))
+        let payload = with_files(&files, encode_frame_f16(width, height, rgba));
+        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
     }
 
     /// Write a half-float frame synchronously (tests); a list that can't be stored is not.
@@ -882,13 +978,16 @@ impl DiskCache {
 
     /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes) with the
     /// source files it was made of. `true` when it is on disk or queued; `false` when refused
-    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`]).
-    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> bool {
+    /// (wrong size, a full queue, files that can't be checked later: see [`EntryFiles::of`];
+    /// a file dropped after `since`, the [`DiskCache::drop_generation`] the render started at).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
         let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
-        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, with_files(&files, encode_frame(width, height, rgba)))
+        let payload = with_files(&files, encode_frame(width, height, rgba));
+        self.contains(Kind::Frame, key) || self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
     }
 
     /// A layer buffer (key: [`layer_disk_key`]) whose source files are unchanged, with those
@@ -900,12 +999,14 @@ impl DiskCache {
     }
 
     /// Queue a layer buffer for writing with the source files it was made of (see
-    /// [`EntryFiles::of`]: a buffer whose files can't all be named must not be stored).
-    pub fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles) {
+    /// [`EntryFiles::of`]: a buffer whose files can't all be named must not be stored). Refused
+    /// when one of them was dropped after `since`, the [`DiskCache::drop_generation`] its render
+    /// started at.
+    pub fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
         if self.contains(Kind::Layer, key) {
             return;
         }
-        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)));
+        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
     }
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
@@ -1110,8 +1211,11 @@ impl crate::cache::LayerStore for DiskCache {
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
         DiskCache::get_layer(self, key, virtual_id).map(|(b, f)| (Arc::new(b), f))
     }
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles) {
-        DiskCache::put_layer(self, key, buf, files);
+    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
+        DiskCache::put_layer(self, key, buf, files, since);
+    }
+    fn drop_generation(&self) -> u64 {
+        DiskCache::drop_generation(self)
     }
     fn min_layer_ms(&self) -> u64 {
         DiskCache::min_layer_ms(self)
@@ -1470,7 +1574,7 @@ mod tests {
         assert!(dc.get_frame_f16(3, None).map(|f| f.0).is_none());
         assert!(!dc.contains(Kind::Frame, 3) && !p.exists());
         // Wrong lengths are not written.
-        dc.put_frame_f16(4, w, h, &rgba[1..], &ReadFiles::default(), None);
+        dc.put_frame_f16(4, w, h, &rgba[1..], &ReadFiles::default(), None, 0);
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 4));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1514,15 +1618,15 @@ mod tests {
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         assert!(dc.get_layer(42, None).is_none());
         let b = buf(1, 33, 17);
-        dc.put_layer(42, &b, &EntryFiles::default());
+        dc.put_layer(42, &b, &EntryFiles::default(), 0);
         dc.flush();
         let (back, files) = dc.get_layer(42, None).unwrap();
         assert!(files.is_empty() && files.is_complete());
         assert_eq!(back.img, b.img);
         assert_eq!((back.offset, back.scale), (b.offset, b.scale));
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
-        assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None));
-        assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None), "a wrong-size frame is refused");
+        assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None, 0));
+        assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
         dc.flush();
         assert_eq!(dc.get_frame(7, None).map(|f| f.0).unwrap().rgba, rgba);
         let st = dc.stats();
@@ -1566,11 +1670,11 @@ mod tests {
         let dir = tmpdir("burst");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         for k in 0..300 {
-            dc.put_layer(10_000 + k, &buf(1, 64, 64), &EntryFiles::default());
+            dc.put_layer(10_000 + k, &buf(1, 64, 64), &EntryFiles::default(), 0);
         }
         let rgba = vec![7u8; 32 * 32 * 4];
         for k in 0..300 {
-            dc.put_frame(k, 32, 32, &rgba, &ReadFiles::default(), None);
+            dc.put_frame(k, 32, 32, &rgba, &ReadFiles::default(), None, 0);
         }
         dc.flush();
         assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
@@ -1783,17 +1887,17 @@ mod tests {
         let dc = DiskCache::open(tmpdir("virtual"), 1 << 30).unwrap();
         let k = frame_key(comp_content_key(&p, cid), 0, 1000, 0);
         let files: ReadFiles = [crate::reads::ReadFile::new("/virtual.mov", crate::reads::FileStamp::Virtual)].into_iter().collect();
-        assert!(dc.put_frame(k, 1, 1, &[1, 2, 3, 4], &files, Some(&one)));
+        assert!(dc.put_frame(k, 1, 1, &[1, 2, 3, 4], &files, Some(&one), 0));
         dc.flush();
         assert!(dc.get_frame(k, Some(&one)).is_some_and(|(_, f)| f == files));
         assert!(dc.get_frame(k, Some(&two)).is_none() && !dc.contains(Kind::Frame, k), "replaced: a miss, deleted");
         // A layer buffer made of it.
         let lk = layer_disk_key(7);
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap());
+        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&one)).is_some_and(|(b, f)| b.img == buf(1, 4, 4).img && f == files && f.is_complete()));
         assert!(dc.get_layer(lk, None).is_none() && !dc.contains(Kind::Layer, lk), "no identity: a miss, deleted");
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap());
+        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&two)).is_none() && !dc.contains(Kind::Layer, lk), "replaced: a miss, deleted");
         // The browser's sealed layer entries carry the same list.
@@ -1957,7 +2061,7 @@ mod tests {
         // Frames whose files can't all be named are not stored.
         let mut incomplete = read(&[&fresh]);
         incomplete.mark_incomplete();
-        assert!(!dc.put_frame(8, 1, 1, &[8; 4], &incomplete, None));
+        assert!(!dc.put_frame(8, 1, 1, &[8; 4], &incomplete, None, 0));
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 8));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1992,7 +2096,7 @@ mod tests {
         std::fs::File::options().append(true).open(&a).unwrap().set_modified(t).unwrap();
         assert!(dc.get_frame(1, None).is_some(), "same size and time: still a hit");
         // A frame queued (not written yet) when the drop comes is dropped too.
-        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None));
+        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, 0));
         dc.drop_files([a.clone()]);
         dc.flush();
         assert!(!dc.is_dropping());
@@ -2012,6 +2116,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A render under way when Reload Footage drops its files offers its entries after the drop
+    /// (#3184), when the writer has already deleted the old ones: made of the files as they were,
+    /// they are refused, frames and layer buffers alike. What the same render made of other files
+    /// is stored, and so is what a render that started after the drop makes.
+    #[test]
+    fn entries_made_before_a_drop_are_refused_after_it() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-in-flight");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, name.as_bytes()).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png"), file("b.png"));
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap())).collect() };
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        // The render starts (and reads a.png and b.png), then a.png is reloaded.
+        let before = dc.drop_generation();
+        dc.drop_files([a.clone()]);
+        dc.flush();
+        assert!(!dc.is_dropping());
+        assert!(dc.dropped_since(&read(&[&a]), before) && !dc.dropped_since(&read(&[&b]), before));
+        assert!(!dc.put_frame(1, 1, 1, &[1; 4], &read(&[&a, &b]), None, before), "a frame from before the drop");
+        assert!(!dc.put_frame_f16(2, 1, 1, &[1; 4], &read(&[&a]), None, before));
+        dc.put_layer(3, &buf(3, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
+        assert!(dc.put_frame(4, 1, 1, &[4; 4], &read(&[&b]), None, before), "b.png wasn't dropped");
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Frame, 2) && !dc.contains(Kind::Layer, 3));
+        assert!(dc.get_frame(1, None).is_none() && dc.get_layer(3, None).is_none());
+        assert_eq!(dc.get_frame(4, None).map(|f| f.0.rgba), Some(vec![4; 4]));
+        // A render that starts after the drop reads the reloaded file: stored and served.
+        let after = dc.drop_generation();
+        assert!(after > before && !dc.dropped_since(&read(&[&a]), after));
+        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, after));
+        dc.put_layer(6, &buf(6, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
+        dc.flush();
+        assert_eq!(dc.get_frame(5, None).map(|f| f.0.rgba), Some(vec![5; 4]));
+        assert!(dc.get_layer(6, None).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The record of dropped files is bounded: past it, everything made before the drop that
+    /// forgot the record is refused, and what is made after it is stored.
+    #[test]
+    fn the_record_of_dropped_files_is_bounded() {
+        let mut d = Drops::default();
+        let a: Arc<str> = "/a.png".into();
+        d.record(std::slice::from_ref(&a));
+        assert!(d.stale([&a].into_iter(), 0) && !d.stale([&a].into_iter(), 1));
+        let many: Vec<Arc<str>> = (0..=MAX_DROPPED_PATHS).map(|i| format!("/f{i}").into()).collect();
+        d.record(&many);
+        assert!(d.last.is_empty(), "forgotten, not grown");
+        let other: Arc<str> = "/other.png".into();
+        assert!(d.stale([&other].into_iter(), 1), "made before the drop that forgot the record");
+        assert!(!d.stale([&a].into_iter(), 2), "made after it");
+    }
+
     /// While a drop waits, an entry made of a dropped file is a miss (and deleted), and frames
     /// aren't linked to new keys.
     #[test]
@@ -2028,6 +2190,29 @@ mod tests {
         dc.dropping.lock().unwrap().insert(a.as_str().into(), 1);
         assert!(!dc.link_frame(1, 2));
         assert!(dc.get_frame(1, None).is_none() && !dc.contains(Kind::Frame, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An entry read while its file's drop was pending is a miss even when the writer ends the
+    /// sweep between the read and the check (it deleted the file, but its bytes were read), and
+    /// so is one read before a drop that starts meanwhile. Found under load: a stale hit.
+    #[test]
+    fn a_sweep_ending_during_a_read_never_makes_a_hit() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-race");
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        let files = EntryFiles::of(&[ReadFile::new("/a.png", FileStamp::Missing)].into_iter().collect(), None).unwrap();
+        // Read while the drop is pending; the sweep ends before the check.
+        dc.dropping.lock().unwrap().insert("/a.png".into(), 1);
+        let drops = dc.drops_now();
+        dc.dropping.lock().unwrap().clear();
+        assert!(dc.made_of_dropped(&files, &drops));
+        // Read before a drop that starts (and ends) before the check.
+        let drops = dc.drops_now();
+        dc.drop_files(["/a.png"]);
+        dc.flush();
+        assert!(dc.made_of_dropped(&files, &drops));
+        assert!(!dc.made_of_dropped(&files, &dc.drops_now()), "read after the drop: used");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -171,6 +171,9 @@ pub struct Session {
     pub crypto_probe: Arc<std::sync::Mutex<commands::CryptoProbeSlot>>,
     /// The persistent disk cache (Settings ▸ Media & Disk Cache), when enabled.
     pub disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
+    /// Files File ▸ Reload Footage reloaded while the disk cache was off: their entries are
+    /// dropped when it is switched on ([`Session::configure_disk_cache`]), before it is used.
+    pub pending_disk_drops: std::collections::BTreeSet<String>,
     /// Settings (Preferences).
     pub prefs: prefs::Prefs,
     /// Bumped whenever settings change (frontends re-apply theme, labels…).
@@ -348,6 +351,7 @@ impl Default for Session {
             layer_cache: Arc::new(LayerCache::default()),
             crypto_probe: Default::default(),
             disk_cache: None,
+            pending_disk_drops: Default::default(),
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
             config: None,

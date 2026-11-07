@@ -263,7 +263,11 @@ checksummed) and survive restarts. The design (#3184):
   source that doesn't say what it read, more than 4096 files) is shown but never written.
 - **Reload Footage drops entries.** File ▸ Reload Footage deletes the frame and layer entries
   whose lists name the item's files (the writer thread reads each entry's list, not its
-  pixels), so a file replaced by one with the same size and time is read again.
+  pixels), so a file replaced by one with the same size and time is read again. A reload while
+  the cache is off is remembered for the session and applied when it is switched on, before it
+  is read. A render already under way offers entries made of the files as they were: each
+  render takes the cache's drop generation before it reads, and an entry listing a file dropped
+  after that is refused (`DiskCache::drop_generation`); the frame is shown, never stored.
 - **Edits keep what they can't change.** RAM frames outside an edit's dirty spans are kept
   (`Project::dirty_spans`), and their disk entries are linked to the comp's new key.
 

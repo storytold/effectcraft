@@ -2582,6 +2582,8 @@ mod frame_files {
         src: RenderSource,
         disk: Arc<DiskCache>,
         hook_calls: Arc<AtomicUsize>,
+        /// The session's media pool (`src.footage`): what it decoded and opened.
+        pool: Arc<effectcraft_media::MediaPool>,
     }
 
     fn session(p: &Arc<Project>, dir: &Path) -> Session {
@@ -2593,16 +2595,17 @@ mod frame_files {
             calls.fetch_add(1, Ordering::Relaxed);
             None
         }));
+        let pool = Arc::new(effectcraft_media::MediaPool::new());
         let src = RenderSource {
             project: p.clone(),
-            footage: Arc::new(effectcraft_media::MediaPool::new()),
+            footage: pool.clone(),
             expr: None,
             layer_cache: Arc::default(),
             gpu: None,
             gpu_display: false,
             disk: Some(disk.clone()),
         };
-        Session { frames, src, disk, hook_calls }
+        Session { frames, src, disk, hook_calls, pool }
     }
 
     impl Session {
@@ -2693,6 +2696,28 @@ mod frame_files {
         let shown = third.show(cid, &all);
         assert_eq!(third.hits(), (FRAMES as u64, 0));
         assert!(close(shown[2], 250) && close(shown[3], level(3)), "{shown:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reopened (a new preview cache, media pool, layer cache and disk cache on the same folder):
+    /// the frame comes from disk, its one source file is checked (a `metadata` call), and no
+    /// source file is opened or decoded for it.
+    #[test]
+    fn a_reopened_project_serves_its_frame_from_disk_without_opening_a_source_file() {
+        let dir = folder("reopen");
+        let (p, cid, _) = project(&dir);
+        let first = session(&p, &dir);
+        let shown = first.show(cid, &[1]);
+        assert!(close(shown[0], level(1)), "{shown:?}");
+        assert!(first.pool.stats().misses > 0, "the first session decodes the frame's file: {:?}", first.pool.stats());
+        assert!(first.disk.contains(disk_cache::Kind::Frame, first.disk_key(cid, 1)));
+        drop(first);
+        let again = session(&p, &dir);
+        let shown = again.show(cid, &[1]);
+        assert!(close(shown[0], level(1)), "{shown:?}");
+        assert_eq!(again.hits(), (1, 0), "served from disk");
+        assert_eq!(again.disk.file_checks(), 1, "its one file checked");
+        assert_eq!(again.pool.stats(), effectcraft_media::PoolStats::default(), "no source file opened or decoded");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

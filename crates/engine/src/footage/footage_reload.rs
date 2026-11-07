@@ -281,10 +281,14 @@ fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usi
     apply_reloads(s, updates, undoable)?;
     forget_media(s, &paths);
     // An explicit reload also reads files again that kept their size and time (the check on hit
-    // can't tell those apart): their entries in the disk cache go (#3184). An automatic one
-    // only follows a changed stamp, which the check catches.
-    if undoable && let Some(dc) = &s.disk_cache {
-        dc.drop_files(paths.iter().map(String::as_str));
+    // can't tell those apart): their entries in the disk cache go (#3184), when the cache is
+    // switched on if it is off now. An automatic one only follows a changed stamp, which the
+    // check catches.
+    if undoable {
+        match &s.disk_cache {
+            Some(dc) => dc.drop_files(paths.iter().map(String::as_str)),
+            None => s.pending_disk_drops.extend(paths),
+        }
     }
     Ok((n, failed))
 }

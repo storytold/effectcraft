@@ -63,8 +63,9 @@ struct Inner {
     clock: u64,
     hits: u64,
     misses: u64,
-    /// When each recent miss happened (to time the render that follows it).
-    missed_at: HashMap<u64, web_time::Instant>,
+    /// When each recent miss happened (to time the render that follows it), with the store's
+    /// drop generation then ([`LayerStore::drop_generation`]).
+    missed_at: HashMap<u64, (web_time::Instant, u64)>,
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -164,13 +165,18 @@ impl LayerCache {
             }
             None => {
                 g.misses += 1;
-                if g.missed_at.len() > 4096 {
-                    g.missed_at.clear();
-                }
-                g.missed_at.insert(key, web_time::Instant::now());
                 drop(g);
+                let store = self.persistent();
+                // (before the buffer's reads: what it is made of may be dropped meanwhile)
+                let since = store.as_ref().map_or(0, |s| s.drop_generation());
+                if let Ok(mut g) = self.inner.lock() {
+                    if g.missed_at.len() > 4096 {
+                        g.missed_at.clear();
+                    }
+                    g.missed_at.insert(key, (web_time::Instant::now(), since));
+                }
                 // Disk cache: a hit comes back into memory.
-                let store = self.persistent()?;
+                let store = store?;
                 let id = self.virtual_id();
                 let (buf, files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
                 let files = Arc::new(files);
@@ -196,11 +202,13 @@ impl LayerCache {
         }
         let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
         if let Some(store) = self.persistent() {
-            let slow = started.is_some_and(|t| t.elapsed().as_secs_f64() * 1e3 >= store.min_layer_ms() as f64);
             let id = self.virtual_id();
             // (an incomplete list, or a file from memory without its identity: not stored)
-            if slow && let Some(entry) = EntryFiles::of(&files, id.as_deref()) {
-                store.put_layer(layer_disk_key(key), &buf, &entry);
+            if let Some((t, since)) = started
+                && t.elapsed().as_secs_f64() * 1e3 >= store.min_layer_ms() as f64
+                && let Some(entry) = EntryFiles::of(&files, id.as_deref())
+            {
+                store.put_layer(layer_disk_key(key), &buf, &entry, since);
             }
         }
         self.insert_mem(key, buf, files)
@@ -282,8 +290,15 @@ pub trait LayerStore: Send + Sync {
     /// mid-render). An entry whose files changed, or damaged, is a miss and is dropped, so the
     /// buffer rendered again replaces it. `virtual_id` names files served from memory.
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)>;
-    /// Keep a buffer that was slow to render, with the source files it was made of.
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles);
+    /// Keep a buffer that was slow to render, with the source files it was made of. `since`: the
+    /// [`LayerStore::drop_generation`] when its render started (a buffer made of a file dropped
+    /// after that is refused).
+    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64);
+    /// How many times files were dropped from the store (File ▸ Reload Footage,
+    /// [`crate::disk_cache::DiskCache::drop_files`]); `0` for a store that never drops.
+    fn drop_generation(&self) -> u64 {
+        0
+    }
     /// Buffers faster to render than this (ms) are not stored.
     fn min_layer_ms(&self) -> u64 {
         0
@@ -444,7 +459,7 @@ impl LayerStore for PrefetchStore {
         Some((buf, files.to_read_files()))
     }
 
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles) {
+    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, _since: u64) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
             s.writes.push((key, crate::disk_cache::layer_entry(buf, files)));
@@ -878,7 +893,7 @@ mod shared_insert_tests {
         assert!(store.get_layer(5, Some(&two)).is_none());
         assert!(!store.has(5));
         assert_eq!(store.take_misses(), [5]);
-        store.put_layer(5, &buf(), &EntryFiles::of(&files, Some(&two)).unwrap());
+        store.put_layer(5, &buf(), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
         assert_eq!(store.take_writes().len(), 1, "written over the changed entry");
         // Through the layer cache: a hit reports its files; incomplete lists are not queued.
         let cache = LayerCache::default();
@@ -896,6 +911,35 @@ mod shared_insert_tests {
         cache.insert(11, Arc::new(buf()), Arc::new(files.clone()));
         let written: Vec<u128> = store.take_writes().into_iter().map(|w| w.0).collect();
         assert_eq!(written, [layer_disk_key(11)], "only the buffer whose files are all named");
+    }
+
+    /// A layer buffer whose render started before Reload Footage dropped its file (#3184) is
+    /// not written to the disk cache when it is kept afterwards; one whose render started after
+    /// the drop is.
+    #[test]
+    fn a_buffer_rendered_across_a_drop_is_not_written() {
+        use crate::disk_cache::{DiskCache, Kind, layer_disk_key};
+        use crate::reads::{FileStamp, ReadFile, ReadFiles};
+        let dir = std::env::temp_dir().join(format!("effectcraft-layer-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.set_min_layer_ms(0);
+        let cache = LayerCache::default();
+        cache.set_disk(Some(dc.clone()));
+        let buf = || Arc::new(Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 });
+        let files = Arc::new([ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect::<ReadFiles>());
+        // The miss starts the render; the file is reloaded before the buffer is kept.
+        assert!(cache.get(1).is_none());
+        dc.drop_files(["/a.png"]);
+        cache.insert(1, buf(), files.clone());
+        // A render after the drop.
+        assert!(cache.get(2).is_none());
+        cache.insert(2, buf(), files);
+        dc.flush();
+        assert!(!dc.contains(Kind::Layer, layer_disk_key(1)), "made of the file as it was before the drop");
+        assert!(dc.contains(Kind::Layer, layer_disk_key(2)));
+        drop((cache, dc));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A render that gets another render's buffer gets that buffer's files too (#3184): when a

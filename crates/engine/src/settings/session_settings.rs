@@ -158,6 +158,11 @@ impl Session {
                 }
             },
         };
+        // Files reloaded while the cache was off: their entries go before anything is read from
+        // it (until the writer has deleted them they are misses, and no frame is linked).
+        if !self.pending_disk_drops.is_empty() {
+            dc.drop_files(std::mem::take(&mut self.pending_disk_drops));
+        }
         self.disk_cache = Some(dc.clone());
         // The reserve applies from the start (a new folder's watcher is idle).
         self.poll_disk_space();
