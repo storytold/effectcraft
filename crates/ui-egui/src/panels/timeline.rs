@@ -4912,15 +4912,10 @@ fn box_select(app: &mut EffectcraftApp, g: &mut Rw) {
         let add = mods.shift || mods.command;
         let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
         let actions = &mut g.tl.actions;
-        if layers.is_empty() && !keys.is_empty() {
-            // Keys alone: one command, which selects their layers and properties too.
-            actions.push(("keys.select".into(), json!({"keys": keys, "add": add, "selectProperties": true})));
-        } else {
-            // A box that catches nothing leaves nothing selected (layers included), unless it adds.
-            actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
-            if !keys.is_empty() {
-                actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
-            }
+        // A box that catches nothing leaves nothing selected (layers included), unless it adds.
+        actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
+        if !keys.is_empty() {
+            actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
         }
         km.applied = Some(applied);
         ctx.request_repaint();

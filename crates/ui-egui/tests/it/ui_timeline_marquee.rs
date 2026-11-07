@@ -183,6 +183,21 @@ fn a_cmd_box_adds_to_the_selection_like_shift() {
 }
 
 #[test]
+fn a_box_over_only_locked_keys_still_clears_the_selection() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [id], "switch": "locked", "value": true})).unwrap();
+    h.run_steps(2);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::default());
+    drag(&mut h, from, past_key);
+    release(&mut h, past_key, Modifiers::default());
+    let st = &h.state().session.state;
+    assert!(st.selected_keys.is_empty() && st.selected_props.is_empty() && st.selected_layers.is_empty(), "a box that catches nothing leaves nothing selected");
+}
+
+#[test]
 fn escape_puts_back_the_selection_from_before_the_box() {
     let (mut h, id) = harness();
     select_key(&mut h, id, 2.0);
@@ -230,7 +245,8 @@ fn a_box_makes_no_undo_step_and_runs_one_selection_per_change() {
     assert_eq!(h.state().session.history.undo.len(), undo, "selecting keys is no edit");
     assert_eq!(h.state().session.revision, revision, "nor does it re-render the project");
     let runs = h.state().session.journal.len() - journal;
-    assert!(runs <= 3, "a selection command runs when the selection changes, not each frame: {runs}");
+    // Three changes (empty, one key, both keys), each a deselect and a key selection at most.
+    assert!(runs <= 6, "selection commands run when the selection changes, not each frame: {runs}");
 }
 
 /// #3056: one box spans the layer outline and the time graph. Dragged from the empty outline
