@@ -3771,7 +3771,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("X: {}", "X: {}"),
     ("Y: {}", "Y: {}"),
     ("{}, {}", "{}, {}"),
-    ("{}, {}, uses {}", "{}, {}, användningar: {}"),
+    ("{}, {}, uses {}", "{}, {}, använder {}"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
