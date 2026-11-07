@@ -310,13 +310,13 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
             m.insert("pointUnits".into(), json!(c.units.id()));
         }
     }
-    // After Frame Rate: an image sequence's frames (missing ones show colour bars, as in
-    // After Effects), then Start Timecode.
+    // After Frame Rate: an image sequence's frames (a missing one holds the previous frame),
+    // then Start Timecode.
     let mut timing = Vec::new();
     if f.kind == effectcraft_engine::project::FootageKind::Sequence {
         let gaps = match effectcraft_engine::sequence::missing_report(&f.sequence) {
             _ if f.alphabetical => "files in alphabetical order".into(),
-            Some(gaps) => format!("{gaps} shown as color bars"),
+            Some(gaps) => format!("{gaps} (the previous frame is held)"),
             None => "no missing frames".into(),
         };
         timing.push(Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())));
@@ -1170,6 +1170,24 @@ mod tests {
             assert_eq!(footage.cineon.gamma, 2.2);
             assert_eq!(footage.cineon.converted_white, 900.0);
         }
+    }
+
+    /// Interpret Footage on an image sequence with a gap says the previous frame is held there
+    /// (what the media pool shows), not colour bars.
+    #[test]
+    fn interpret_footage_says_a_sequence_gap_holds_the_previous_frame() {
+        use effectcraft_engine::project::{Footage, FootageKind, ItemKind};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let sequence: Vec<String> = ["/m/a_001.png", "/m/a_002.png", "/m/a_005.png"].map(String::from).to_vec();
+        let footage = Footage { path: sequence[0].clone(), kind: FootageKind::Sequence, sequence, width: 4, height: 4, has_video: true, ..Default::default() };
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let item = project.add_item("a_[001-005].png", Default::default(), None, ItemKind::Footage(footage));
+        app.session.state.project_selection = vec![item];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        let note = app.dialog_state.form.fields.iter().find(|f| f.key == "sequenceInfo").map(|f| f.kind.clone());
+        let Some(FieldKind::Note(text)) = note else { panic!("no sequence note: {note:?}") };
+        assert!(text.contains("2 missing frames (3–4)") && text.contains("the previous frame is held"), "{text}");
+        assert!(!text.contains("color bars"), "{text}");
     }
 
     /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in

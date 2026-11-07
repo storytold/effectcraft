@@ -175,23 +175,7 @@ fn uniform_rotation(m: effectcraft_geom::Mat4) -> Option<(effectcraft_geom::Mat4
     Some((rotation, factor))
 }
 
-/// The turn (degrees) of a rotation about Z alone, or `None` for any other rotation.
-fn z_only_turn(correction: effectcraft_geom::Mat4) -> Option<f64> {
-    let m = correction.0;
-    let about_z = [m[0][2], m[1][2], m[2][0], m[2][1]].iter().all(|v| v.abs() < 1e-9) && (m[2][2] - 1.0).abs() < 1e-9;
-    about_z.then(|| m[1][0].atan2(m[0][0]).to_degrees())
-}
-
-/// ZYX Euler angles in degrees of a row-major rotation (`Rz * Ry * Rx`), safe at gimbal lock.
-fn euler_zyx(r: [[f64; 4]; 4]) -> [f64; 3] {
-    // atan2 rather than asin: near ±90 degrees asin loses precision, while cos(y) stays exact.
-    let cy = r[0][0].hypot(r[1][0]);
-    let y = (-r[2][0]).atan2(cy);
-    let (x, z) = if cy > 1e-9 { (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0])) } else { ((-r[1][2]).atan2(r[1][1]), 0.0) };
-    [x.to_degrees(), y.to_degrees(), z.to_degrees()]
-}
-
-/// The equivalent ZYX Euler triple nearest `reference`: each axis moved by whole turns, or the
+/// The equivalent XYZ Euler triple nearest `reference`: each axis moved by whole turns, or the
 /// `(x + 180, 180 - y, z + 180)` form when that is nearer.
 fn nearest_euler(euler: [f64; 3], reference: [f64; 3]) -> [f64; 3] {
     let near = |v: [f64; 3]| -> [f64; 3] { std::array::from_fn(|i| v[i] + ((reference[i] - v[i]) / 360.0).round() * 360.0) };
@@ -204,136 +188,30 @@ fn nearest_euler(euler: [f64; 3], reference: [f64; 3]) -> [f64; 3] {
 /// The Euler Orientation of `correction * Orientation(o)`, in the form nearest `reference`.
 fn reexpress_euler(correction: effectcraft_geom::Mat4, o: [f64; 3], reference: [f64; 3]) -> [f64; 3] {
     let world = correction * effectcraft_geom::Mat4::orientation(effectcraft_geom::Vec3::from(o));
-    nearest_euler(euler_zyx(world.0), reference)
+    let angles = world.orientation_angles();
+    nearest_euler([angles.x, angles.y, angles.z], reference)
 }
 
-/// Largest angle (degrees) a baked Orientation may drift from the exact rotation between its keys.
-const BAKE_TOLERANCE_DEGREES: f64 = 0.05;
-/// How many times a segment may be halved while baking, and the most keys a property may end up with.
-const BAKE_MAX_DEPTH: u32 = 10;
-const BAKE_MAX_KEYS: usize = 4096;
-
-/// The angle (degrees) between two rotations.
-fn rotation_angle(a: effectcraft_geom::Mat4, b: effectcraft_geom::Mat4) -> f64 {
-    let trace: f64 = (0..3).flat_map(|i| (0..3).map(move |j| (i, j))).map(|(i, j)| a.0[i][j] * b.0[i][j]).sum();
-    ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
-}
-
-/// Adds keys between `(ta, ea)` and `(tb, eb)` (already converted) wherever the straight Euler blend
-/// between them drifts from `correction * Orientation(authored)` by more than the tolerance. `out`
-/// never grows past `budget` keys: what the whole property may still add, not what one segment may.
-fn bake_between(
-    correction: effectcraft_geom::Mat4,
-    authored: &effectcraft_project::Property,
-    (ta, ea): (Tick, [f64; 3]),
-    (tb, eb): (Tick, [f64; 3]),
-    depth: u32,
-    budget: usize,
-    out: &mut Vec<effectcraft_keyframe::Keyframe>,
-) {
-    use effectcraft_geom::{Mat4, Vec3};
-    if depth == 0 || tb.0 - ta.0 < 2 || out.len() >= budget {
-        return;
-    }
-    let tm = Tick(ta.0 + (tb.0 - ta.0) / 2);
-    let blend = [(ea[0] + eb[0]) / 2.0, (ea[1] + eb[1]) / 2.0, (ea[2] + eb[2]) / 2.0];
-    let exact = correction * Mat4::orientation(Vec3::from(authored.value_at(tm).as_vec3()));
-    // Symmetric easing crosses the straight blend at its midpoint. Check both sides too before
-    // accepting a segment whose original easing will be replaced with a linear blend.
-    let quarter = (tb.0 - ta.0) / 4;
-    if [Tick(ta.0 + quarter), tm, Tick(tb.0 - quarter)].into_iter().all(|t| {
-        let u = (t.0 - ta.0) as f64 / (tb.0 - ta.0) as f64;
-        let linear = std::array::from_fn(|i| ea[i] + (eb[i] - ea[i]) * u);
-        let target = correction * Mat4::orientation(Vec3::from(authored.value_at(t).as_vec3()));
-        rotation_angle(Mat4::orientation(Vec3::from(linear)), target) <= BAKE_TOLERANCE_DEGREES
-    }) {
-        return;
-    }
-    let em = nearest_euler(euler_zyx(exact.0), blend);
-    bake_between(correction, authored, (ta, ea), (tm, em), depth - 1, budget, out);
-    if out.len() >= budget {
-        return;
-    }
-    out.push(effectcraft_keyframe::Keyframe::new(tm, KV::Vec3(em)));
-    bake_between(correction, authored, (tm, em), (tb, eb), depth - 1, budget, out);
-}
-
-/// Re-expresses Orientation as `correction * Orientation`. A Z-only correction shifts Z exactly in the
-/// value and every key. For any other correction a static value is converted directly; keys are
-/// converted, and keys are added between them wherever the Euler blend between two keys would drift
-/// from the exact rotation (the segments become linear, with the original easing baked in).
+/// Re-express Orientation as `correction * Orientation`, retaining authored keys and easing.
+/// Orientation interpolates along quaternion arcs: a constant left rotation preserves those arcs
+/// and their angular speeds, so converting the endpoints preserves the entire eased animation.
 fn reexpress_orientation(correction: effectcraft_geom::Mat4, pr: &mut effectcraft_project::Property) {
-    if let Some(turn) = z_only_turn(correction) {
-        // No turn (an identity correction) leaves every authored value as it is.
-        if turn.abs() <= 1e-12 {
-            return;
-        }
-        let shift = |value: &KV| {
-            let [x, y, z] = value.as_vec3();
-            KV::Vec3([x, y, z + turn])
-        };
-        pr.value = shift(&pr.value);
-        for key in &mut pr.keys {
-            key.value = shift(&key.value);
-        }
+    if (0..3).all(|row| (0..3).all(|col| (correction.0[row][col] - if row == col { 1.0 } else { 0.0 }).abs() < 1e-12)) {
         return;
     }
     let value = pr.value.as_vec3();
     pr.value = KV::Vec3(reexpress_euler(correction, value, value));
-    if pr.keys.is_empty() {
-        return;
-    }
-    let authored = pr.clone();
-    // Each key keeps the authored change from the previous key on top of its converted value.
-    let mut converted: Vec<[f64; 3]> = vec![];
     let mut prev: Option<([f64; 3], [f64; 3])> = None;
-    for key in &authored.keys {
+    for key in &mut pr.keys {
         let o = key.value.as_vec3();
         let reference = match prev {
             Some((before, after)) => [after[0] + o[0] - before[0], after[1] + o[1] - before[1], after[2] + o[2] - before[2]],
             None => o,
         };
         let n = reexpress_euler(correction, o, reference);
-        converted.push(n);
+        key.value = KV::Vec3(n);
         prev = Some((o, n));
     }
-    use effectcraft_keyframe::Interp;
-    let mut keys: Vec<effectcraft_keyframe::Keyframe> = vec![];
-    let mut after_baked_segment = false;
-    for (i, key) in authored.keys.iter().enumerate() {
-        let mut k = key.clone();
-        k.value = KV::Vec3(converted[i]);
-        if after_baked_segment {
-            k.in_interp = Interp::Linear;
-            k.in_ease.clear();
-            k.auto_bezier = false;
-            k.continuous = false;
-        }
-        after_baked_segment = false;
-        let segment = authored.keys.get(i + 1).filter(|_| key.out_interp != Interp::Hold);
-        let mut between = vec![];
-        if let Some(next) = segment {
-            // What the whole property may still add: the keys it will have already (the ones written
-            // and the authored ones still to come) count against the cap.
-            let budget = BAKE_MAX_KEYS.saturating_sub(keys.len() + authored.keys.len() - i);
-            bake_between(correction, &authored, (key.time, converted[i]), (next.time, converted[i + 1]), BAKE_MAX_DEPTH, budget, &mut between);
-            // With the cap reached the segment can't be checked or subdivided: it keeps its authored easing between
-            // the converted keys, rather than becoming a straight blend that was never checked against the original.
-            if between.len() >= budget {
-                between.clear();
-            // An eased segment, or one that gained keys, becomes a run of straight blends.
-            } else if !between.is_empty() || key.out_interp != Interp::Linear || next.in_interp != Interp::Linear {
-                k.out_interp = Interp::Linear;
-                k.out_ease.clear();
-                k.auto_bezier = false;
-                k.continuous = false;
-                after_baked_segment = true;
-            }
-        }
-        keys.push(k);
-        keys.extend(between);
-    }
-    pr.keys = keys;
 }
 
 /// Correction for a two-node rig's Orientation: after a uniform parent change its aim is
