@@ -8968,6 +8968,10 @@ const GEORGIAN_PANELS: &[(&str, &str)] = &[
     ("Open in Essential Graphics", "ძირითად გრაფიკაში გახსნა"),
     ("Video preview is off (Preview panel): audio only", "ვიდეოს წინასწარი ნახვა გამორთულია (წინასწარი ნახვის პანელი): მხოლოდ აუდიო"),
     ("Solid…", "სოლიდი…"),
+    ("All", "ყველა"),
+    ("Available", "ხელმისაწვდომი"),
+    ("Missing", "აკლია"),
+    ("Filter by footage status", "ვიდეომასალის გაფილტვრა სტატუსის მიხედვით"),
 ];
 
 /// French: vouvoiement, infinitive for commands, sentence case; the same source strings as the other
