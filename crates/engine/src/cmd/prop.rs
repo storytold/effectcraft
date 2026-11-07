@@ -436,12 +436,35 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
             let mut q = twin_params(p, olid, ouid);
             shifted(s, &mut q, olid, ouid, k);
             typed(s, &mut q, olid, ouid);
+            if is_mask_feather(s, cid, olid, ouid) {
+                non_negative(&mut q["value"]);
+            }
             // (a layer that can't take it, e.g. a clamped or static property, keeps its value)
             let _ = set(s, &q);
         }
         Ok(out)
     };
     if merge_p(p).is_some() { run(s) } else { super::app_more::grouped(s, "Change Property", run) }
+}
+
+/// Whether property `uid` of `lid` is a mask's Mask Feather, which is never negative (After
+/// Effects; the panels clamp a typed or scrubbed value at 0).
+fn is_mask_feather(s: &Session, cid: ItemId, lid: LayerId, uid: Uid) -> bool {
+    let Some(l) = s.project.comp(cid).and_then(|c| c.layer(lid)) else { return false };
+    l.props.find(uid).is_some_and(|q| q.match_id == "feather") && l.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }))
+}
+
+/// A JSON number, or each number of an array, raised to at least 0.
+fn non_negative(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if let Some(x) = n.as_f64().filter(|x| *x < 0.0) {
+                *v = json!(x.max(0.0));
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(non_negative),
+        _ => {}
+    }
 }
 
 /// `prop.toggleAnimation`; with `selected`, the other selected layers' same property follows.

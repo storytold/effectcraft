@@ -1554,6 +1554,30 @@ fn a_typed_factor_scales_each_selected_layers_own_value() {
     assert_eq!(prop(&s, b, "transform/position").value.components()[..2], [50.0, 50.0], "B halves its own X, keeps its Y");
 }
 
+/// #3195: Mask Feather is never negative on the other selected layers either, when a typed `*-1`
+/// (the edited layer clamped at 0 by the panel) or a change by the same amount takes theirs
+/// below 0.
+#[test]
+fn a_selected_mask_feather_stays_non_negative() {
+    let (mut s, a) = setup();
+    let b = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    for (l, feather) in [(a, [10.0, 20.0]), (b, [4.0, 30.0])] {
+        s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [20, 0], [20, 20]]})).unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "masks/#1/feather", "value": feather})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    let feather = |s: &Session, l: u64| prop(s, l, "masks/#1/feather").value.components();
+    let uid = prop(&s, a, "masks/#1/feather").uid;
+    // `*-1` into the linked pair: the panel clamps the edited layer at [0, 0].
+    s.execute_checked("prop.set", json!({"layer": a, "prop": uid, "value": [0.0, 0.0], "selected": true, "dims": [0, 1], "factor": -1.0})).unwrap();
+    assert_eq!(feather(&s, a), [0.0, 0.0]);
+    assert_eq!(feather(&s, b), [0.0, 0.0], "B is clamped at 0, not [-4, -30]");
+    // A change by the same amount (a scrub, or a typed `+`): A by [-10, -15] from [10, 20].
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": a, "prop": uid, "value": [0.0, 5.0], "selected": true, "offset": true})).unwrap();
+    assert_eq!(feather(&s, b), [0.0, 15.0], "B's X is clamped at 0, its Y moves by -15");
+}
+
 /// #2485: linked Audio Levels typed with several layers selected: each takes the typed Left, and
 /// its Right moves by its own change, so every layer keeps its own stereo balance.
 #[test]
