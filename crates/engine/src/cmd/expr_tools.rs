@@ -2,7 +2,7 @@
 //! Language menu (the ⓕ button next to an expression), written from the public Expression
 //! Language Reference.
 
-use effectcraft_project::{Expression, ItemId, Layer, Property};
+use effectcraft_project::{Comp, Expression, ItemId, Layer, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 use serde::Serialize;
@@ -42,8 +42,16 @@ impl ExprError {
 /// expressions and the syntax errors that disabled others.
 pub fn errors(s: &Session, cid: ItemId, t: Tick) -> Vec<ExprError> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx = EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) };
-    errors_in(&ctx, s.expr_check, || true).unwrap_or_default()
+    errors_in(&eval_ctx(s, cid, comp, t), s.expr_check, || true).unwrap_or_default()
+}
+
+/// The context to evaluate expressions of comp `cid` at comp time `t` as the render does for the
+/// comp at top level: with the session's expression host and its footage source, so
+/// `sampleImage()` reads footage pixels instead of failing or sampling transparent (#1000,
+/// #3231). `expr.errors`, `prop.get`, [`Session::expression_errors`] and the script value query
+/// all evaluate through this one context.
+pub fn eval_ctx<'a>(s: &'a Session, cid: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
+    EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) }
 }
 
 /// Evaluate diagnostics against an immutable snapshot. Background callers can cancel between
