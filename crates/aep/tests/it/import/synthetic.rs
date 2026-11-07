@@ -392,6 +392,186 @@ fn default_state_effect_records_import_like_written_ones() {
     assert_eq!(clip, vec![("clipToOutputBlack".to_string(), effectcraft_keyframe::Value::Enum(1))]);
 }
 
+/// Sets the `cdat` of the value record `param` in the value group `tdgp` (the first `f64`), and
+/// its state to `tdsb` when given. True when the group has that record.
+fn patch_record(tdgp: &mut Chunk<'_>, param: &str, tdsb: Option<u32>, value: f64) -> bool {
+    let kids = tdgp.children_mut();
+    let Some(at) = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(param.as_bytes()))) else {
+        return false;
+    };
+    let Some(record) = kids.get_mut(at + 1).filter(|k| k.is_list(b"tdbs")) else { return false };
+    for k in record.children_mut() {
+        if k.is(b"tdsb")
+            && let Some(state) = tdsb
+        {
+            set_data(k, 0, &state.to_be_bytes());
+        } else if k.is(b"cdat") {
+            set_data(k, 0, &value.to_be_bytes());
+        }
+    }
+    true
+}
+
+/// The project without its project-level effect definitions (`EfdG`; some files have none, seen
+/// in the projects inside After Effects-made Motion Graphics templates) and with a second Glow
+/// just above the first on the layer: a copy of it whose `parT` is empty, as such files write
+/// every instance of a type but one. `edit_copy` is applied to every chunk of the copy; with
+/// `empty_original` the original's `parT` is emptied too.
+fn second_glow_without_definitions(edit_copy: &mut dyn FnMut(&mut Chunk<'_>), empty_original: bool) -> Vec<u8> {
+    fn empty_part(fx: &mut Chunk<'_>) {
+        for k in fx.children_mut() {
+            if let Body::List { list_type, children, .. } = &mut k.body
+                && list_type == b"parT"
+            {
+                children.clear();
+            }
+        }
+    }
+    let mut file: AepFile<'_> = parse(SYNTHETIC).unwrap();
+    let mut added = 0;
+    visit(&mut file.chunks, &mut |c| {
+        if let Body::List { list_type, children, .. } = &mut c.body {
+            if list_type == b"EfdG" {
+                *list_type = *b"XfdG";
+                return;
+            }
+            if list_type != b"tdgp" {
+                return;
+            }
+            let Some(at) = children.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(b"ADBE Glo2"))) else {
+                return;
+            };
+            let (Some(name), Some(mut fx)) = (children.get(at).cloned(), children.get(at + 1).filter(|k| k.is_list(b"sspc")).cloned()) else { return };
+            empty_part(&mut fx);
+            edit_copy(&mut fx);
+            visit(fx.children_mut(), edit_copy);
+            if empty_original && let Some(original) = children.get_mut(at + 1) {
+                empty_part(original);
+            }
+            children.insert(at, fx);
+            children.insert(at, name);
+            added += 1;
+        }
+    });
+    assert_eq!(added, 1, "one Glow on the layer");
+    write(&file).unwrap()
+}
+
+/// The imported Glows in stack order, each as its property values by property id.
+fn glow_values(p: &Project) -> Vec<Vec<(String, effectcraft_keyframe::Value)>> {
+    let glow = effectcraft_project::GroupKind::Effect { effect: "ec.stylize.glow".to_string() };
+    let mut glows = Vec::new();
+    for item in p.items.values() {
+        if let ItemKind::Comp(c) = &item.kind {
+            for layer in &c.layers {
+                for node in layer.effects().map(|fx| fx.children.as_slice()).unwrap_or_default() {
+                    if let effectcraft_project::Node::Group(g) = node
+                        && g.kind == glow
+                    {
+                        let mut values = Vec::new();
+                        g.walk("", &mut |_, prop| values.push((prop.match_id.clone(), prop.value.clone())));
+                        glows.push(values);
+                    }
+                }
+            }
+        }
+    }
+    glows
+}
+
+/// The value of property `id` in `values`.
+fn value_of<'v>(values: Option<&'v Vec<(String, effectcraft_keyframe::Value)>>, id: &str) -> Option<&'v effectcraft_keyframe::Value> {
+    values?.iter().find(|(i, _)| i == id).map(|(_, v)| v)
+}
+
+/// Every instance of an effect type but one has an empty `parT`; without a project-level copy the
+/// others borrow the definitions of that one (#3170: 129 Color Controls of a template were
+/// reported "without readable parameter definitions" and dropped).
+#[test]
+fn an_instance_without_definitions_imports_with_those_of_another_instance() {
+    // Both Glows import; before, the copy was reported and not imported.
+    let (p, r) = run(&second_glow_without_definitions(&mut |_| {}, false), true);
+    let r = r.unwrap();
+    let found = losses(&r, LossCategory::Effects);
+    assert!(!found.iter().any(|d| d.contains("without readable parameter definitions") || d.contains("no parameter definition")), "{found:?}");
+    assert_eq!(r.report.imported.effects, 3, "Levels and both Glows: {:?}", r.report.losses);
+    let glows = glow_values(&p);
+    assert_eq!(glows.len(), 2);
+    assert_eq!(glows.first(), glows.get(1), "the copy has the same records, so the same values");
+
+    // The values come from each instance's own records: the copy's A & B Midpoint (`-0011`) set
+    // to 0.75 arrives as 75 % in the copy only; the Glow it borrows from keeps its own.
+    let mut patched = 0;
+    let bytes = second_glow_without_definitions(
+        &mut |c| {
+            if c.is_list(b"tdgp") && patch_record(c, "ADBE Glo2-0011", None, 0.75) {
+                patched += 1;
+            }
+        },
+        false,
+    );
+    assert_eq!(patched, 1, "the copy's record");
+    let (p, r) = run(&bytes, true);
+    r.unwrap();
+    let glows = glow_values(&p);
+    let seventy_five = effectcraft_keyframe::Value::Scalar(75.0);
+    assert_eq!(value_of(glows.first(), "abMidpoint"), Some(&seventy_five));
+    let own = value_of(glows.get(1), "abMidpoint");
+    assert!(own.is_some() && own != Some(&seventy_five), "{own:?}");
+}
+
+/// A value record that the borrowed definitions do not name is reported, not dropped silently.
+#[test]
+fn a_value_record_the_borrowed_definitions_do_not_name_is_reported() {
+    let bytes = second_glow_without_definitions(
+        &mut |c| {
+            if c.is(b"tdmn") && c.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(b"ADBE Glo2-0011")) {
+                set_data(c, 0, b"ADBE Glo2-0099\0");
+            }
+        },
+        false,
+    );
+    let (_, r) = run(&bytes, true);
+    let r = r.unwrap();
+    let found = losses(&r, LossCategory::Effects);
+    assert!(found.iter().any(|d| d.contains("ADBE Glo2-0099") && d.contains("no parameter definition")), "{found:?}");
+    assert_eq!(r.report.imported.effects, 3, "{:?}", r.report.losses);
+}
+
+/// When no instance of the type keeps its definitions, every instance is reported.
+#[test]
+fn instances_without_any_definitions_are_reported() {
+    let (p, r) = run(&second_glow_without_definitions(&mut |_| {}, true), true);
+    let r = r.unwrap();
+    let found = losses(&r, LossCategory::Effects);
+    assert_eq!(found.iter().filter(|d| d.contains("ADBE Glo2") && d.contains("without readable parameter definitions, not imported")).count(), 2, "{found:?}");
+    assert_eq!(r.report.imported.effects, 1, "Levels only: {:?}", r.report.losses);
+    assert!(glow_values(&p).is_empty());
+}
+
+/// The reader's side: the copy's definitions come from the other instance.
+#[test]
+fn an_instance_without_definitions_reads_those_of_another_instance() {
+    let bytes = second_glow_without_definitions(&mut |_| {}, false);
+    let file = parse(&bytes).unwrap();
+    let project = effectcraft_aep::Project::new(&file).unwrap();
+    let defs = project.effect_definition_index();
+    let mut sources = Vec::new();
+    for item in project.all_items() {
+        let Some(comp) = item.comp() else { continue };
+        for layer in comp.layers() {
+            for fx in layer.effects().iter().filter(|fx| fx.match_name() == "ADBE Glo2") {
+                sources.push(defs.source(fx));
+                let params = defs.params(fx);
+                assert_eq!(params.len(), 16, "Glow's parameters");
+                assert_eq!(params.iter().all(|p| p.borrowed_definition), defs.source(fx) == effectcraft_aep::DefinitionSource::OtherInstance);
+            }
+        }
+    }
+    // The copy is above the instance it borrows from (earlier in the stack).
+    assert_eq!(sources, [effectcraft_aep::DefinitionSource::OtherInstance, effectcraft_aep::DefinitionSource::Instance]);
+}
+
 /// A record in a state other than 1 or 3 is not read and is reported.
 #[test]
 fn an_effect_record_in_another_state_is_reported_as_damaged() {
@@ -402,4 +582,61 @@ fn an_effect_record_in_another_state_is_reported_as_damaged() {
         let damaged = losses(&r, LossCategory::DamagedData);
         assert!(damaged.iter().any(|l| l.contains("unreadable value")), "tdsb {tdsb}: {:?}", r.report.losses);
     }
+}
+
+/// The project with a value record for Glow's Color A (`ADBE Glo2-0012`, which the project does
+/// not store) in state `tdsb` holding the ARGB doubles `argb` (0..255): a copy of the A & B
+/// Midpoint record (`-0011`) made a 4-component colour without its expression.
+fn with_color_a(tdsb: u32, argb: [f64; 4]) -> Vec<u8> {
+    let mut file: AepFile<'_> = parse(SYNTHETIC).unwrap();
+    let mut added = 0;
+    visit(&mut file.chunks, &mut |c| {
+        let Body::List { list_type, children, .. } = &mut c.body else { return };
+        if list_type != b"tdgp" {
+            return;
+        }
+        let Some(at) = children.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(b"ADBE Glo2-0011"))) else {
+            return;
+        };
+        let (Some(mut name), Some(mut record)) = (children.get(at).cloned(), children.get(at + 1).filter(|k| k.is_list(b"tdbs")).cloned()) else { return };
+        set_data(&mut name, 0, b"ADBE Glo2-0012\0");
+        if let Body::List { children: kids, .. } = &mut record.body {
+            kids.retain(|k| !k.is(b"Utf8"));
+            for k in kids.iter_mut() {
+                if k.is(b"tdsb") {
+                    set_data(k, 0, &tdsb.to_be_bytes());
+                } else if k.is(b"tdb4") {
+                    // 4 components; no expression (bytes 76, 77 and 120).
+                    set_data(k, 3, &[4]);
+                    for byte in [76, 77, 120] {
+                        set_data(k, byte, &[0]);
+                    }
+                } else if k.is(b"cdat") {
+                    *k = Chunk::data(*b"cdat", argb.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>());
+                }
+            }
+        }
+        children.insert(at + 2, record);
+        children.insert(at + 2, name);
+        added += 1;
+    });
+    assert_eq!(added, 2, "the instance and the EfdG copy");
+    write(&file).unwrap()
+}
+
+/// A colour recorded in the default state (`tdsb` 3) reads like a written one (#3170's "parameter
+/// Color ... holds an unreadable value" on 0.21.1, which read only written records).
+#[test]
+fn a_default_state_colour_record_holds_the_value() {
+    let argb = [255.0, 51.0, 153.0, 255.0];
+    let (written, r1) = run(&with_color_a(1, argb), true);
+    let (default_state, r3) = run(&with_color_a(3, argb), true);
+    let (r1, r3) = (r1.unwrap(), r3.unwrap());
+    assert!(losses(&r3, LossCategory::DamagedData).is_empty(), "{:?}", r3.report.losses);
+    assert_eq!(r3.report.losses, r1.report.losses);
+    let colour = |p: &Project| value_of(glow_values(p).first(), "colorA").cloned();
+    let (unchanged, _) = run(SYNTHETIC, true);
+    assert!(colour(&written).is_some());
+    assert_eq!(colour(&default_state), colour(&written));
+    assert_ne!(colour(&default_state), colour(&unchanged), "the recorded colour, not the default");
 }
