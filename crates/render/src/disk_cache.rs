@@ -1064,8 +1064,12 @@ fn file_stamp(h: &mut Hash128, path: &str, virtual_id: Option<VirtualFileId<'_>>
     }
     if let Some(crate::reads::FileStamp::Native { len, modified }) = crate::reads::FileStamp::native(path) {
         h.write_u64(len);
-        if let Some(t) = modified {
-            h.write_u64(t);
+        match modified {
+            Some(t) => {
+                h.write(&[1]);
+                h.write(&t.to_le_bytes());
+            }
+            None => h.write(&[0]),
         }
         return;
     }

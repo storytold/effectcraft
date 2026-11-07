@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FileStamp {
     /// A file on disk: its size in bytes and its modification time (nanoseconds since the Unix
-    /// epoch; `None` where the file system has none).
-    Native { len: u64, modified: Option<u64> },
+    /// epoch, negative before it; `None` only where the file system has none).
+    Native { len: u64, modified: Option<i128> },
     /// Bytes given from memory instead of the file system (the browser's file table): their
     /// identity is the size and content hash a
     /// [`VirtualFileId`](crate::disk_cache::VirtualFileId) gives for the path.
@@ -31,14 +31,23 @@ pub enum FileStamp {
 impl FileStamp {
     /// The identity of a file from metadata the caller already has (of an open file).
     pub fn of_metadata(md: &std::fs::Metadata) -> FileStamp {
-        let modified = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64);
-        FileStamp::Native { len: md.len(), modified }
+        FileStamp::Native { len: md.len(), modified: md.modified().ok().map(epoch_nanos) }
     }
 
     /// The identity of the file at `path` now: one `metadata` call. `None` when the file system
     /// can't describe it (missing, or a path served from memory).
     pub fn native(path: &str) -> Option<FileStamp> {
         std::fs::metadata(path).ok().map(|md| FileStamp::of_metadata(&md))
+    }
+}
+
+/// `t` in nanoseconds since the Unix epoch, negative before it: every time a file system can
+/// store fits (`i128` nanoseconds span far more than any `SystemTime`), saturating otherwise.
+pub fn epoch_nanos(t: std::time::SystemTime) -> i128 {
+    let nanos = |d: std::time::Duration| i128::try_from(d.as_nanos()).unwrap_or(i128::MAX);
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => nanos(after),
+        Err(before) => nanos(before.duration()).saturating_neg(),
     }
 }
 
@@ -207,6 +216,39 @@ mod tests {
         let files: ReadFiles = [file("/a", 1), file("/a", 2)].into_iter().collect();
         assert_eq!(files.len(), 1);
         assert!(!files.is_complete());
+    }
+
+    /// Modification times keep their full value: before 1970 (not "no time") and past 2554
+    /// (where `u64` nanoseconds end), so two such files never look alike.
+    #[test]
+    fn modification_times_are_kept_whole() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let day = Duration::from_secs(86_400);
+        assert_eq!(epoch_nanos(UNIX_EPOCH), 0);
+        assert_eq!(epoch_nanos(UNIX_EPOCH - day), -86_400_000_000_000);
+        let far = 600 * 365 * day;
+        if let Some(t) = UNIX_EPOCH.checked_add(far) {
+            assert_eq!(epoch_nanos(t), i128::try_from(far.as_nanos()).unwrap());
+        }
+        let dir = std::env::temp_dir().join(format!("effectcraft-stamp-1969-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.bin"), dir.join("b.bin"));
+        let mut stamps = vec![];
+        for (p, back) in [(&a, day), (&b, 2 * day)] {
+            std::fs::write(p, b"abc").unwrap();
+            let f = std::fs::File::options().write(true).open(p).unwrap();
+            if f.set_modified(UNIX_EPOCH - back).is_err() {
+                // (a file system that can't store times before 1970)
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            drop(f);
+            stamps.push(FileStamp::native(&p.to_string_lossy()).unwrap());
+        }
+        assert!(matches!(stamps[0], FileStamp::Native { modified: Some(t), .. } if t < 0), "{:?}", stamps[0]);
+        assert_ne!(stamps[0], stamps[1], "two files from before 1970 with the same size");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
