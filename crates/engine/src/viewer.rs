@@ -189,6 +189,50 @@ pub fn layer_features(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
     out
 }
 
+/// [`snap`] for a drag Shift keeps to one axis (`along_x`: it moves along x and y stays put, else
+/// the other way round): only the free coordinate snaps, so the feature never leaves the axis
+/// (#3229). A point target acts as a line through it across the drag (a vertical line at its x
+/// for a drag along x) that reaches it only within `tol` on each axis (a square around the point),
+/// so the feature lines up with a point near the axis, not with every point in the comp; lines
+/// along the drag (horizontal ones for a drag along x) would only move the locked coordinate and
+/// are left out. The nearest target wins, ties to the lower priority value. A hit on a point
+/// reports the point (the feedback box) and the line from it to where the feature landed.
+pub fn snap_along(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64, along_x: bool) -> Option<Snap> {
+    // (Key, source, target, and the free coordinate it snaps to.)
+    let mut best: Option<((f64, u8), [f64; 2], SnapTarget, f64)> = None;
+    for s in sources {
+        let (free, along) = if along_x { (s[0], s[1]) } else { (s[1], s[0]) };
+        for t in targets {
+            // The line the target snaps as: its coordinate and extent along it.
+            let (line, span) = match (t.kind, along_x) {
+                (SnapKind::Point, true) => (t.pos[0], Some([t.pos[1] - tol, t.pos[1] + tol])),
+                (SnapKind::Point, false) => (t.pos[1], Some([t.pos[0] - tol, t.pos[0] + tol])),
+                (SnapKind::VLine, true) => (t.pos[0], t.span),
+                (SnapKind::HLine, false) => (t.pos[1], t.span),
+                (SnapKind::VLine, false) | (SnapKind::HLine, true) => continue,
+            };
+            let d = (line - free).abs();
+            if d > tol || span.is_some_and(|[a, b]| along < a || along > b) {
+                continue;
+            }
+            let key = (d, t.priority);
+            if best.as_ref().is_none_or(|(k, _, _, _)| better(key, *k)) {
+                best = Some((key, *s, *t, line));
+            }
+        }
+    }
+    let (_, s, t, line) = best?;
+    let (delta, at) = if along_x { ([line - s[0], 0.0], [line, s[1]]) } else { ([0.0, line - s[1]], [s[0], line]) };
+    let mut hits = vec![t];
+    if t.kind == SnapKind::Point {
+        // The alignment, drawn from the point to the feature.
+        let (from, to) = if along_x { (t.pos[1], at[1]) } else { (t.pos[0], at[0]) };
+        let l = if along_x { SnapTarget::vline(line, t.priority, t.source) } else { SnapTarget::hline(line, t.priority, t.source) };
+        hits.push(l.within(Some([from, to])));
+    }
+    Some(Snap { delta, hits, at })
+}
+
 /// A layer's content box in comp space: corners (top left, top right, bottom right, bottom
 /// left), edge midpoints (top, right, bottom, left) and centre.
 struct BoxPoints {

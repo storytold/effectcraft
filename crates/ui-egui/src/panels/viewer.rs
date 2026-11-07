@@ -1448,10 +1448,13 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                 }
             }
             Gesture::Move { layers, start, snap_src } => {
-                let mut d = one_axis([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
+                let raw = [cpt[0] - start[0], cpt[1] - start[1]];
+                let mut d = one_axis(raw, mods.shift);
                 if let Some(src) = snap_src {
                     let ids: Vec<LayerId> = layers.iter().map(|x| x.0).collect();
-                    let c = vt::snap(app, &ctx, ectx, &map, &ids, &[[src[0] + d[0], src[1] + d[1]]], mods);
+                    // Shift: only the coordinate along the axis snaps, so the layer stays on it (#3229).
+                    let q = vt::SnapQuery { exclude: &ids, sources: &[[src[0] + d[0], src[1] + d[1]]], mods, extra: &[], along_x: drag_axis(raw, mods.shift) };
+                    let c = vt::snap_with(app, &ctx, ectx, &map, &q);
                     d = [d[0] + c[0], d[1] + c[1]];
                     if vt::snapping_on(app, mods) {
                         vt::draw_handle(&painter, map.to_screen([src[0] + d[0], src[1] + d[1]]));
@@ -1491,10 +1494,12 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
             Gesture::Anchor { layer, start_anchor, start_pos, start, inv, l2p, own, anchor_only } => {
                 // Pan Behind snaps the anchor point (to its own layer's box, other layers' features,
                 // guides and the grid); Shift keeps the move to one axis.
-                let d = one_axis([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
+                let raw = [cpt[0] - start[0], cpt[1] - start[1]];
+                let d = one_axis(raw, mods.shift);
                 let anchor_c = inv.inverse().map(|m| m.apply(gv2(start_anchor[0], start_anchor[1]))).unwrap_or(gv2(start[0], start[1]));
                 let want = [anchor_c.x + d[0], anchor_c.y + d[1]];
-                let sc = vt::snap_with(app, &ctx, ectx, &map, &vt::SnapQuery { exclude: &[layer], sources: &[want], mods, extra: &own });
+                let q = vt::SnapQuery { exclude: &[layer], sources: &[want], mods, extra: &own, along_x: drag_axis(raw, mods.shift) };
+                let sc = vt::snap_with(app, &ctx, ectx, &map, &q);
                 let a = inv.apply(gv2(start[0], start[1]));
                 let b = inv.apply(gv2(start[0] + d[0] + sc[0], start[1] + d[1] + sc[1]));
                 let dl = gv2(b.x - a.x, b.y - a.y);
@@ -1528,9 +1533,12 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
             }
             Gesture::Vertices { start, src, applied, inv, layer } => {
                 // The grabbed vertex snaps (to other layers' vertices and features, guides, grid);
-                // Shift keeps it to one axis, as a layer move does (#1964).
-                let want = one_axis([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
-                let c = vt::snap(app, &ctx, ectx, &map, &[layer], &[[src[0] + want[0], src[1] + want[1]]], mods);
+                // Shift keeps it to one axis, as a layer move does (#1964), snapping too (#3229).
+                let raw = [cpt[0] - start[0], cpt[1] - start[1]];
+                let want = one_axis(raw, mods.shift);
+                let at = [src[0] + want[0], src[1] + want[1]];
+                let q = vt::SnapQuery { exclude: &[layer], sources: &[at], mods, extra: &[], along_x: drag_axis(raw, mods.shift) };
+                let c = vt::snap_with(app, &ctx, ectx, &map, &q);
                 let total = [want[0] + c[0], want[1] + c[1]];
                 let d = inv.apply_vec(gv2(total[0] - applied[0], total[1] - applied[1]));
                 if d.x != 0.0 || d.y != 0.0 {
@@ -1993,7 +2001,7 @@ mod view;
 use frame::{empty_state, rect_of, show_frame};
 pub(crate) use frame::{extended_region, minify_factor, snap_to_pixels, styled_line, zoom_sampler, zoom_texture_options};
 use geometry::{
-    anchor_in_comp, cam_state, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
+    anchor_in_comp, cam_state, drag_axis, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
     rotation_sign, selected_others, snap_handle, turn_delta,
 };
 #[cfg(test)]
