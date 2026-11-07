@@ -1,8 +1,8 @@
-//! File ▸ Import ▸ After Effects Project… from the menu: what the import cannot carry over is
-//! shown first (the command's dry run), and the user chooses to cancel or to go on with those
-//! losses (`allowLosses`). Cancel changes nothing; an import without losses runs at once. Agents
-//! running `file.importAep` with `engine.execute` are never asked: they pass `allowLosses` or get
-//! the refusal.
+//! File ▸ Import / Export ▸ After Effects Project… from the menu: what the conversion cannot
+//! carry over is shown first (the command's dry run), and the user chooses to cancel or to go on
+//! with those losses (`allowLosses`). Cancel changes nothing; a conversion without losses runs at
+//! once. Agents running `file.importAep` / `file.exportAep` with `engine.execute` are never asked:
+//! they pass `allowLosses` or get the refusal.
 //!
 //! Automation ids: `dialog.aepLosses.continue`, `dialog.aepLosses.cancel`.
 
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
-/// The import waiting on the prompt: its command, params and the dry run's report.
+/// The conversion waiting on the prompt: its command, params and the dry run's report.
 #[derive(Clone, Debug, Default)]
 pub struct Pending {
     pub command: Option<(String, Value, Value)>,
@@ -26,7 +26,10 @@ const DETAILS: usize = 3;
 /// holding the command and the caller must not run it. `Err` when the dry run fails (the file
 /// cannot be read or is not a project), with the message.
 pub fn guard(app: &mut EffectcraftApp, id: &str, params: &Value) -> Result<bool, String> {
-    if id != "file.importAep" || params.get("allowLosses") == Some(&Value::Bool(true)) || params.get("dryRun") == Some(&Value::Bool(true)) {
+    if !matches!(id, "file.importAep" | "file.exportAep")
+        || params.get("allowLosses") == Some(&Value::Bool(true))
+        || params.get("dryRun") == Some(&Value::Bool(true))
+    {
         return Ok(false);
     }
     let mut dry = params.as_object().cloned().unwrap_or_default();
@@ -62,13 +65,19 @@ pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
 }
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
-    let Some((_, _, report)) = app.dialog_state.aep_losses.command.clone() else {
+    let Some((id, _, report)) = app.dialog_state.aep_losses.command.clone() else {
         app.dialog = None;
         return;
     };
+    let import = id == "file.importAep";
+    let title = if import { "Import After Effects Project" } else { "Export After Effects Project" };
     let mut answer: Option<bool> = None;
-    super::dialogs::modal(ctx, "Import After Effects Project", vec2(520.0, 340.0), t, |ui| {
-        let text = tr("Some parts of this project cannot be imported exactly (left out or changed):");
+    super::dialogs::modal(ctx, title, vec2(520.0, 340.0), t, |ui| {
+        let text = if import {
+            tr("Some parts of this project cannot be imported exactly (left out or changed):")
+        } else {
+            tr("Some parts of this project cannot be exported exactly (left out or changed):")
+        };
         ui.label(egui::RichText::new(text).color(t.tab_text_active));
         ui.add_space(6.0);
         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
@@ -81,7 +90,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
         ui.add_space(14.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = tr("Import Anyway");
+            let label = if import { tr("Import Anyway") } else { tr("Export Anyway") };
             let r = ui.button(label);
             app.auto.add("dialog.aepLosses.continue", r.rect, label);
             if r.clicked() {
@@ -102,8 +111,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     }
 }
 
-/// The prompt's answer: Cancel (`false`) drops the import, Import Anyway runs it with
-/// `allowLosses`.
+/// The prompt's answer: Cancel (`false`) drops the conversion, Import / Export Anyway runs it
+/// with `allowLosses`.
 fn finish(app: &mut EffectcraftApp, ctx: &egui::Context, go: bool) {
     app.dialog = None;
     let Some((id, params, _)) = app.dialog_state.aep_losses.command.take() else { return };
@@ -147,23 +156,54 @@ mod tests {
     }
 
     #[test]
-    fn cancel_changes_nothing_and_continue_imports_with_the_losses() {
+    fn cancel_changes_nothing_and_continue_exports_with_the_losses() {
         let ctx = egui::Context::default();
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
-        let params = json!({"path": "/no/such/file.aep"});
-        let pending = || Some(("file.importAep".to_string(), params.clone(), json!({"losses": [{"category": "effects", "count": 1}]})));
-        app.dialog_state.aep_losses.command = pending();
-        app.dialog = Some(Dialog::AepLosses);
+        // Rec. 2020 has no After Effects counterpart: the export reports it.
+        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        let dir = TempDir::new();
+        let path = dir.0.join("out.aep");
+        let params = json!({"path": path.to_string_lossy()});
+        assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
+        assert_eq!(app.dialog, Some(Dialog::AepLosses));
         crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(app.dialog.is_none() && app.dialog_state.aep_losses.command.is_none());
-        assert_eq!(app.session.project.items.len(), 0, "Cancel imported nothing");
-        app.dialog_state.aep_losses.command = pending();
-        app.dialog = Some(Dialog::AepLosses);
+        assert!(!path.exists(), "Cancel wrote nothing");
+        assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
         finish(&mut app, &ctx, true);
-        // Import Anyway ran the import (here it cannot read the file) with the consent.
-        assert!(app.dialog.is_none() && app.ui.status.contains("cannot read"), "{}", app.ui.status);
-        assert_eq!(with_losses(&params), json!({"path": "/no/such/file.aep", "allowLosses": true}));
+        assert!(app.dialog.is_none() && path.is_file(), "Export Anyway wrote the file");
+    }
+
+    #[test]
+    fn a_false_consent_still_asks() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        let dir = TempDir::new();
+        let params = json!({"path": dir.0.join("out.aep").to_string_lossy(), "allowLosses": false, "dryRun": false});
+        assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
+        assert_eq!(app.dialog, Some(Dialog::AepLosses));
+    }
+
+    /// A folder of its own for one test, removed afterwards.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("ec-aep-losses-{}-{nanos}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "a fresh folder");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]

@@ -295,3 +295,111 @@ fn unknown_time_display_and_frame_start_codes_are_reported() {
         assert!(losses(&r.unwrap(), LossCategory::ProjectSettings).is_empty(), "nhed {at}: {bytes:?}");
     }
 }
+
+/// The project with the value records named `param` (`<effect>-NNNN`: the instance's and the one in
+/// the project's copy of the effect, `EfdG`) set to state `tdsb` and holding `value` (the `cdat`
+/// starts with the big-endian `f64`).
+fn with_record(param: &str, tdsb: u32, value: f64) -> Vec<u8> {
+    let mut file: AepFile<'_> = parse(SYNTHETIC).unwrap();
+    let mut patched = 0;
+    visit(&mut file.chunks, &mut |c| {
+        if !c.is_list(b"tdgp") {
+            return;
+        }
+        let kids = c.children_mut();
+        let Some(at) = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(param.as_bytes()))) else {
+            return;
+        };
+        let Some(record) = kids.get_mut(at + 1).filter(|k| k.is_list(b"tdbs")) else { return };
+        for k in record.children_mut() {
+            if k.is(b"tdsb") {
+                set_data(k, 0, &tdsb.to_be_bytes());
+            } else if k.is(b"cdat") {
+                set_data(k, 0, &value.to_be_bytes());
+            }
+        }
+        patched += 1;
+    });
+    assert_eq!(patched, 2, "{param}: the instance and the EfdG copy");
+    write(&file).unwrap()
+}
+
+/// The values of the imported effect parameters, by property id, in file order.
+fn effect_values(p: &Project) -> Vec<(String, effectcraft_keyframe::Value)> {
+    let mut out = Vec::new();
+    for item in p.items.values() {
+        if let ItemKind::Comp(c) = &item.kind {
+            for layer in &c.layers {
+                if let Some(fx) = layer.effects() {
+                    fx.walk("", &mut |_, prop| out.push((prop.match_id.clone(), prop.value.clone())));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A default-state record (`tdsb` 3) reads like a written one, except through `stored_value`.
+#[test]
+fn a_default_state_effect_record_holds_the_value() {
+    // After Effects writes the values of some parameters as records in the default state (`tdsb`
+    // 3): Lumetri Color's hidden controls (1200) and Cryptomatte's Selection Mode (1400), each
+    // read back as recorded. The reader reads them like a written record (`tdsb` 1).
+    let bytes = with_record("ADBE Glo2-0011", 3, 0.75);
+    let file = parse(&bytes).unwrap();
+    let project = effectcraft_aep::Project::new(&file).unwrap();
+    let defs = project.effect_definition_index();
+    let mut seen = 0;
+    for item in project.all_items() {
+        let Some(comp) = item.comp() else { continue };
+        for layer in comp.layers() {
+            for fx in layer.effects().iter().filter(|fx| fx.match_name() == "ADBE Glo2") {
+                let params = defs.params(fx);
+                let p = params.iter().find(|p| p.match_name == "ADBE Glo2-0011").unwrap();
+                assert_eq!(p.stored().and_then(|s| s.flags()), Some(3));
+                // `stored_value` keeps reading written records only.
+                assert_eq!(p.stored_value(), None);
+                assert_eq!(p.recorded_value(), Some(effectcraft_aep::ParamValue::Number(0.75)));
+                assert_eq!(p.value(), Some(effectcraft_aep::ParamValue::Number(0.75)));
+                assert_eq!(p.is_default(), Some(false));
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 1);
+}
+
+/// Default-state records import with their values and no loss, like written records.
+#[test]
+fn default_state_effect_records_import_like_written_ones() {
+    // Before, such a record was reported as an unreadable value and the default used.
+    for (param, value) in [("ADBE Glo2-0011", 0.75), ("ADBE Easy Levels2-0008", 1.0)] {
+        let (written, r1) = run(&with_record(param, 1, value), true);
+        let (default_state, r3) = run(&with_record(param, 3, value), true);
+        let (r1, r3) = (r1.unwrap(), r3.unwrap());
+        assert!(losses(&r3, LossCategory::DamagedData).is_empty(), "{param}: {:?}", r3.report.losses);
+        assert_eq!(r3.report.losses, r1.report.losses, "{param}");
+        assert_eq!(effect_values(&default_state), effect_values(&written), "{param}");
+    }
+    // Glow's A & B Midpoint 0.75 is 75 % (the default is 50).
+    let (p, _) = run(&with_record("ADBE Glo2-0011", 3, 0.75), true);
+    let mid: Vec<_> = effect_values(&p).into_iter().filter(|(id, _)| id == "abMidpoint").collect();
+    assert_eq!(mid, vec![("abMidpoint".to_string(), effectcraft_keyframe::Value::Scalar(75.0))]);
+    // Levels' Clip To Output Black (`-0008`) recorded as After Effects' item 1, On: EffectCraft's
+    // On is item 1 of Off, On, Off for 32 bpc Color (the default is item 2).
+    let (p, _) = run(&with_record("ADBE Easy Levels2-0008", 3, 1.0), true);
+    let clip: Vec<_> = effect_values(&p).into_iter().filter(|(id, _)| id == "clipToOutputBlack").collect();
+    assert_eq!(clip, vec![("clipToOutputBlack".to_string(), effectcraft_keyframe::Value::Enum(1))]);
+}
+
+/// A record in a state other than 1 or 3 is not read and is reported.
+#[test]
+fn an_effect_record_in_another_state_is_reported_as_damaged() {
+    // Only the written (1) and the default (3) state hold a value; any other state is not read.
+    for tdsb in [0, 2, 5] {
+        let (_, r) = run(&with_record("ADBE Glo2-0011", tdsb, 0.75), true);
+        let r = r.unwrap();
+        let damaged = losses(&r, LossCategory::DamagedData);
+        assert!(damaged.iter().any(|l| l.contains("unreadable value")), "tdsb {tdsb}: {:?}", r.report.losses);
+    }
+}
