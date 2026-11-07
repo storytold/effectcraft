@@ -170,11 +170,17 @@ impl EffectcraftApp {
             self.session.poll_jobs();
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // The disk cache's footage salt, taken off the UI thread after footage changed.
+        if self.session.poll_disk_salt() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         // Analyses running in a worker (the web app).
         if !self.session.offloaded.is_empty() {
             self.session.poll_offload();
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Plug-in Library: a finished job's toast (also polled with Roto, for other frontends).
+        self.session.poll_library();
         // Warp Stabilizer: finish analyses and start queued (re-)analyses in the background.
         if self.session.warp_job.is_some() || !self.session.warp_pending.is_empty() {
             self.session.poll_warp(true);
@@ -327,7 +333,9 @@ impl EffectcraftApp {
             ctx.request_repaint();
             return;
         }
+        panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
+        panels::crypto_pick::upkeep(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
@@ -454,10 +462,22 @@ impl EffectcraftApp {
         }
     }
 
+    /// Sets the status line and restarts its 5 s, also when the same text is still showing (a
+    /// message set again would otherwise keep the time it was first shown).
+    pub(crate) fn say(&mut self, ctx: &egui::Context, msg: String) {
+        ctx.data_mut(|d| d.remove::<(f64, String)>(egui::Id::unique("status-since")));
+        self.ui.status = msg;
+    }
+
     /// The status message or the latest toast, bottom left (`lift` points higher while the
     /// Importing card is there).
     fn draw_toast(&mut self, ui: &mut egui::Ui, full: egui::Rect, lift: f32) {
         let now = self.now;
+        // A message cleared before its time (a click on it, Esc, another pick) forgets its time, so
+        // the same message shown again later gets its own 5 s.
+        if self.ui.status.is_empty() {
+            ui.data_mut(|d| d.remove::<(f64, String)>(egui::Id::unique("status-since")));
+        }
         let msg = if !self.ui.status.is_empty() {
             Some(self.ui.status.clone())
         } else {
@@ -485,11 +505,14 @@ impl EffectcraftApp {
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             if !self.ui.status.is_empty() {
-                let since: f64 = ui.data(|d| d.get_temp(egui::Id::unique("status-since")).unwrap_or(now));
-                ui.data_mut(|d| d.insert_temp(egui::Id::unique("status-since"), since));
+                // Each message gets its own 5 s (a new one doesn't inherit the old one's time).
+                let key = egui::Id::unique("status-since");
+                let shown = ui.data(|d| d.get_temp::<(f64, String)>(key)).filter(|(_, m)| *m == self.ui.status);
+                let since = shown.map_or(now, |(t, _)| t);
+                ui.data_mut(|d| d.insert_temp(key, (since, self.ui.status.clone())));
                 if now - since > 5.0 {
                     self.ui.status.clear();
-                    ui.data_mut(|d| d.remove::<f64>(egui::Id::unique("status-since")));
+                    ui.data_mut(|d| d.remove::<(f64, String)>(key));
                 }
             }
         }
@@ -549,24 +572,11 @@ impl EffectcraftApp {
         self.tick_footage_reload(ctx);
     }
 
-    /// Settings ▸ Import ▸ Reload Footage Changed on Disk: a worker thread stamps the footage
-    /// files (every two seconds while the window is in front, and as soon as it comes back to
-    /// the front after saving in another app) and wakes this frame only when a stamp changed;
-    /// the changed files are reloaded here. Nothing here asks for a repaint: an idle app with
-    /// unchanged footage stays asleep.
+    /// One background worker tracks source availability and optional content reloads. It wakes
+    /// the UI only for changes; availability remains enabled when automatic reload is off.
     fn tick_footage_reload(&mut self, ctx: &egui::Context) {
         use effectcraft_engine::footage_reload;
-        if let Some(stamps) = self.footage_watcher.as_ref().and_then(footage_reload::Watcher::take)
-            && let Err(e) = footage_reload::apply_stamps(&mut self.session, stamps)
-        {
-            self.ui.status = e.to_string();
-        }
-        let off = self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty();
-        if off {
-            if let Some(w) = &mut self.footage_watcher {
-                w.set_watched(Default::default());
-            }
-            self.footage_watch_key = None;
+        if self.session.project.items.is_empty() && self.footage_watcher.is_none() {
             return;
         }
         if self.footage_watcher.is_none() {
@@ -576,10 +586,22 @@ impl EffectcraftApp {
         let Some(watcher) = &mut self.footage_watcher else { return };
         watcher.set_focused(self.focused);
         // Which files are watched follows the project and the preference, not the frame.
-        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone());
+        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some());
         if self.footage_watch_key.as_ref() != Some(&key) {
             self.footage_watch_key = Some(key);
-            watcher.set_watched(footage_reload::watched(&self.session));
+            watcher.update(&self.session);
+        }
+        let before = self.session.revision;
+        if let Some(scan) = watcher.take() {
+            match scan.apply(&mut self.session) {
+                Ok(result) if result.get("stale").and_then(serde_json::Value::as_bool) == Some(true) => watcher.recheck(),
+                Err(e) => self.ui.status = e.to_string(),
+                _ => {}
+            }
+        }
+        if self.session.revision != before {
+            self.footage_watch_key = Some((self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some()));
+            watcher.update(&self.session);
         }
     }
 }

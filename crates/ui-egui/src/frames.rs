@@ -23,12 +23,16 @@
 //! to the GPU) frames stay on the GPU: the compositor writes an RGBA8 texture that the viewer
 //! registers with egui-wgpu and draws directly; pixels are read back only when something needs
 //! them (Info panel, eyedroppers, histograms).
+//!
+//! 32 bpc projects keep half-float frames on the desktop ([`F16Frame`], rendered without the HDR
+//! step): twice the bytes of an 8-bit frame, so the RAM preview holds half as many. The disk
+//! cache keeps them as half-float entries.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
+use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
@@ -39,15 +43,22 @@ use rayon::prelude::*;
 const MAX_KEEPERS: usize = 64;
 
 /// GPU frames kept for RAM preview (bytes of video memory) at first. wgpu can't tell how much
-/// video memory there is: each time the device runs out, the budget halves (to
-/// [`MIN_GPU_BUDGET`]) and the frame renders on the CPU (#106).
+/// video memory there is: allocation pressure halves the budget (to [`MIN_GPU_BUDGET`])
+/// and the frame renders on the CPU (#106). One burst is counted once; successful GPU
+/// renders gradually restore the budget after pressure subsides.
 const GPU_BUDGET: usize = 1 << 30;
 const MIN_GPU_BUDGET: usize = 64 << 20;
+const GPU_PRESSURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+const GPU_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A rendered viewer frame: CPU pixels or a GPU texture.
+mod f16;
+pub use f16::{F16_PIXEL_BYTES, F16Frame};
+
+/// A rendered viewer frame: 8-bit CPU pixels, half-float CPU pixels (32 bpc) or a GPU texture.
 #[derive(Clone)]
 pub enum FrameImage {
     Cpu(Arc<egui::ColorImage>),
+    CpuF16(Arc<F16Frame>),
     Gpu(Arc<DisplayFrame>),
 }
 
@@ -55,11 +66,14 @@ impl FrameImage {
     pub fn size(&self) -> [usize; 2] {
         match self {
             FrameImage::Cpu(c) => c.size,
+            FrameImage::CpuF16(f) => f.size(),
             FrameImage::Gpu(f) => [f.width as usize, f.height as usize],
         }
     }
-    fn bytes(&self) -> usize {
-        self.size()[0] * self.size()[1] * 4
+    /// Bytes the frame holds in the RAM preview (GPU frames: without their mips).
+    pub fn bytes(&self) -> usize {
+        let [w, h] = self.size();
+        w * h * if matches!(self, FrameImage::CpuF16(_)) { F16_PIXEL_BYTES } else { 4 }
     }
     fn is_gpu(&self) -> bool {
         matches!(self, FrameImage::Gpu(_))
@@ -151,6 +165,8 @@ struct Cache {
     budget: usize,
     /// Bytes of GPU frames to keep at most ([`GPU_BUDGET`]).
     gpu_budget: usize,
+    gpu_pressure: Option<web_time::Instant>,
+    gpu_adjusted: Option<web_time::Instant>,
     /// The playing preview, if any: evictions spare the frames it shows next.
     playhead: Option<Playhead>,
     /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
@@ -207,15 +223,32 @@ impl Cache {
             }
         }
     }
-    /// The GPU ran out of memory: keep half as many GPU frames from now on.
+    /// Several workers failing in one burst must not halve the shared budget repeatedly.
     fn gpu_out_of_memory(&mut self) {
-        self.gpu_budget = (self.gpu_budget / 2).max(MIN_GPU_BUDGET);
+        let now = web_time::Instant::now();
+        if self.gpu_pressure.is_none_or(|last| now.duration_since(last) >= GPU_PRESSURE_COOLDOWN) {
+            self.gpu_budget = (self.gpu_budget / 2).max(MIN_GPU_BUDGET);
+            self.gpu_adjusted = Some(now);
+        }
+        self.gpu_pressure = Some(now);
         self.evict_gpu();
     }
+    fn gpu_succeeded(&mut self) {
+        let now = web_time::Instant::now();
+        if self.gpu_pressure.is_some_and(|last| now.duration_since(last) >= GPU_RECOVERY_INTERVAL)
+            && self.gpu_adjusted.is_some_and(|last| now.duration_since(last) >= GPU_RECOVERY_INTERVAL)
+        {
+            self.gpu_budget = self.gpu_budget.saturating_add(MIN_GPU_BUDGET).min(GPU_BUDGET);
+            self.gpu_adjusted = Some(now);
+        }
+    }
+    fn gpu_ready(&self) -> bool {
+        self.gpu_pressure.is_none_or(|last| last.elapsed() >= GPU_PRESSURE_COOLDOWN)
+    }
     fn forget(&mut self, img: &FrameImage) {
-        self.bytes -= img.bytes();
+        self.bytes = self.bytes.saturating_sub(img.bytes());
         if img.is_gpu() {
-            self.gpu_bytes -= img.bytes();
+            self.gpu_bytes = self.gpu_bytes.saturating_sub(img.bytes());
         }
     }
     fn remove(&mut self, k: &FrameKey) {
@@ -315,12 +348,26 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64, 
 /// hands out), and by value the project settings and the footage, solids and proxies it uses.
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
-    comp_content_with(project, comp, project, |_, c| c)
+    comp_content_with(project, comp, project, |_, c| c, true)
+}
+
+/// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
+/// ([`Project::dirty_spans`]), a frame wider either side for rounding.
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId, heard: &Heard, outside: bool) -> Option<Vec<(i64, i64)>> {
+    let fr = new.comp(comp)?.frame_rate;
+    Some(new.dirty_spans(old, comp, heard, outside)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
-/// Sources removed by undo are read from `base`.
-fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
+/// Sources removed by undo are read from `base`. Only the comps and items it draws count unless
+/// `everything` and an expression (which can read any item) is among them.
+fn comp_content_with<'a>(
+    project: &'a Project,
+    comp: ItemId,
+    base: &'a Project,
+    version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>,
+    everything: bool,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     fn has_expression(g: &PropGroup) -> bool {
         g.children.iter().any(|c| match c {
@@ -344,7 +391,7 @@ fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, 
             if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                 stack.push(item);
             }
-            expressions = expressions || has_expression(&l.props);
+            expressions = expressions || (everything && has_expression(&l.props));
         }
     }
     let ids: Vec<ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
@@ -483,7 +530,40 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
+    /// Disk keys [`Frames::persist_missing`] is converting (the disk cache tracks them once
+    /// queued, so an evicted or refused frame is written again).
+    #[cfg(not(target_arch = "wasm32"))]
+    persisted: Arc<Mutex<HashSet<u128>>>,
+    /// The disk limit and how often each disk key was written under it: a frame is rewritten
+    /// once after an eviction, not again (a disk cache smaller than the RAM preview, or a frame
+    /// that can't fit, would otherwise be rewritten on every idle pass). A new limit resets it.
+    #[cfg(not(target_arch = "wasm32"))]
+    written: Arc<Mutex<(u64, HashMap<u128, u8>)>>,
+    /// Edits whose kept frames are still to be found on disk under the new content key
+    /// ([`Frames::carry_disk`]), oldest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_carries: Arc<Mutex<VecDeque<DiskCarry>>>,
+    /// A carry job is scheduled or running: at most one at a time, draining the edits in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    carry_scheduled: Arc<AtomicBool>,
+    /// The disk series (scale, view and options hash) each comp's frames are cached in.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk_series: Arc<Mutex<HashMap<u64, Vec<(u32, u64)>>>>,
 }
+
+/// An edit's kept frames, to find on disk under the comp's new content key: those of `comp` in
+/// `from` outside `dirty` (inclusive frame ranges) also draw `to`'s.
+#[cfg(not(target_arch = "wasm32"))]
+struct DiskCarry {
+    comp: u64,
+    from: Arc<Project>,
+    to: Arc<Project>,
+    dirty: Vec<(i64, i64)>,
+}
+
+/// Disk series remembered per comp (see [`Frames::disk_series`]).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DISK_SERIES: usize = 8;
 
 impl Default for Frames {
     fn default() -> Self {
@@ -505,7 +585,7 @@ impl Default for Frames {
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None, scale: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -532,7 +612,40 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            persisted: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            written: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_carries: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            carry_scheduled: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_series: Arc::default(),
         }
+    }
+}
+
+/// Whether viewer frames of a project with `settings` are half floats ([`F16Frame`], rendered
+/// with `RenderOpts::skip_hdr_step`): 32 bpc on the desktop. The browser's frames (its frame
+/// worker's RGBA8, the GPU compositor's display textures) stay 8-bit for now.
+pub fn f16_frames(settings: &effectcraft_engine::project::ProjectSettings) -> bool {
+    cfg!(not(target_arch = "wasm32")) && settings.bit_depth.levels().is_none()
+}
+
+/// Bytes per pixel of the viewer frames of a project with `settings` (see [`f16_frames`]).
+pub fn frame_pixel_bytes(settings: &effectcraft_engine::project::ProjectSettings) -> usize {
+    if f16_frames(settings) { F16_PIXEL_BYTES } else { 4 }
+}
+
+/// A rendered frame as a cached viewer frame: half floats for `skip_hdr_step` renders (see
+/// [`f16_frames`]), else 8-bit.
+pub fn cpu_frame(img: &effectcraft_engine::render::Image, project: &Project, opts: &RenderOpts) -> FrameImage {
+    if opts.skip_hdr_step {
+        let encoding = effectcraft_engine::viewer::FrameEncoding::of(&project.settings, true);
+        FrameImage::CpuF16(Arc::new(F16Frame::from_image(img, encoding)))
+    } else {
+        FrameImage::Cpu(Arc::new(to_color_image(img)))
     }
 }
 
@@ -767,29 +880,51 @@ impl Frames {
         let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
         // Markers are pixels only to the expressions that read them (#1083).
         let markers = project.reads_markers();
+        // Whose audio is drawn, before or after the edit (a waveform added or removed counts).
+        let heard = bases.get(&comp.0).map_or_else(|| project.heard_layers(), |(_, base)| project.heard_layers().union(&base.heard_layers()));
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
-            && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
-                _ => c,
-            }) == *base_id
+            && comp_content_with(
+                project,
+                comp,
+                project,
+                |id, c| match base.item(id).map(|i| &i.kind) {
+                    Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+                    _ => c,
+                },
+                true,
+            ) == *base_id
         {
             return (*base_id, Some(base.clone()));
         }
-        // Only layers of this comp changed: its frames outside their span (and a frame either
-        // side for rounding) keep drawing the same pixels, so a cut or trim recaches only the
-        // layers it touched (#1641).
+        // Only comps changed (not the footage, solids or settings they draw): its frames outside
+        // the spans the edit reaches (and a frame either side for rounding) keep drawing the same
+        // pixels, so a nudge, cut or trim, here or in a precomp, recaches only the frames it
+        // touched (#1641). Expressions can read anything at any time, so with them a change
+        // elsewhere in the project (another comp, an item's name) reaches the frames of the
+        // layers that have one.
+        let base_comp = |id: ItemId| bases.get(&comp.0).and_then(|(_, base)| base.item(id)).map(|i| &i.kind);
+        let base_tree = |id, c| match base_comp(id) {
+            Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers, &|l| heard.contains(id, l)) => b,
+            _ => c,
+        };
+        let base_comps = |id, c| match base_comp(id) {
+            Some(ItemKind::Comp(b)) => b,
+            _ => c,
+        };
         if let Some((base_id, base)) = bases.get(&comp.0)
-            && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
-            && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
-                _ => c,
-            }) == *base_id
-            && let Some((s, e)) = new.changed_span(old)
+            && comp_content_with(project, comp, base, base_comps, false) == comp_content_with(base, comp, base, |_, c| c, false)
+            && let Some(dirty) = dirty_frames(base, project, comp, &heard, comp_content_with(project, comp, base, base_tree, true) != *base_id)
             && let Ok(mut cache) = self.cache.lock()
         {
-            let (first, last) = (new.frame_rate.frame_at(s).saturating_sub(1), new.frame_rate.frame_at(e).saturating_add(1));
-            cache.carry(*base_id, plain, |f| f < first || f > last);
+            cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Ok(mut q) = self.disk_carries.lock() {
+                if q.len() >= MAX_KEEPERS {
+                    q.pop_front();
+                }
+                q.push_back(DiskCarry { comp: comp.0, from: base.clone(), to: project.clone(), dirty });
+            }
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
@@ -835,6 +970,11 @@ impl Frames {
         }
         let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.note_disk_series(base.comp, base.scale, base.view ^ opts_hash(opts));
+            self.carry_disk(src);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let content = {
             let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
             let Some(content) = known else {
@@ -848,6 +988,153 @@ impl Frames {
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
         let oh = opts_hash(opts);
         (start..end).filter(|f| !ram.contains(f)).filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh))).collect()
+    }
+
+    /// Write the RAM frames of `base`'s series that the disk cache lacks: frames an edit kept
+    /// (written under the comp's previous content key) and writes the disk cache dropped. They
+    /// are converted on the frame pool, each queued once. `true` while there may be more to
+    /// write (a content key being computed, frames being converted): call again soon, since a
+    /// refused write is only retried by a later call. Disk keys hash `opts` the way the worker
+    /// writes them (`base.opts` also carries the Roto Brush model stamp).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey, opts: &RenderOpts) -> bool {
+        let Some(dc) = src.disk.clone() else { return false };
+        let oh = opts_hash(opts);
+        self.note_disk_series(base.comp, base.scale, base.view ^ oh);
+        self.carry_disk(src);
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
+        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
+        let Some(content) = known else {
+            self.request_content_key(src.project.clone(), base.revision, base.comp);
+            return true;
+        };
+        let (missing, converting): (Vec<(u128, FrameImage)>, bool) = {
+            let (Ok(c), Ok(mut queued), Ok(mut written)) = (self.cache.lock(), self.persisted.lock(), self.written.lock()) else { return false };
+            if queued.len() > 100_000 {
+                queued.clear();
+            }
+            let limit = dc.limit_bytes();
+            if written.0 != limit || written.1.len() > 100_000 {
+                *written = (limit, HashMap::new());
+            }
+            let missing = c
+                .map
+                .iter()
+                .filter(|(k, _)| k.same_series(base))
+                .filter_map(|(k, img)| {
+                    // (GPU frames have no CPU pixels to write)
+                    if img.is_gpu() {
+                        return None;
+                    }
+                    let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
+                    let tries = written.1.get(&dk).copied().unwrap_or(0);
+                    (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                })
+                .collect();
+            (missing, !queued.is_empty())
+        };
+        if missing.is_empty() {
+            return converting;
+        }
+        let (persisted, written) = (self.persisted.clone(), self.written.clone());
+        let work = move || {
+            for (dk, img) in missing {
+                // (accepted: the disk cache tracks it until written, and it counts as a try;
+                // refused by a full queue: retried, without counting)
+                let accepted = match &img {
+                    FrameImage::Cpu(img) => {
+                        let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                        dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba)
+                    }
+                    FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits()),
+                    FrameImage::Gpu(_) => false,
+                };
+                if accepted && let Ok(mut w) = written.lock() {
+                    let n = w.1.entry(dk).or_default();
+                    *n = n.saturating_add(1);
+                }
+                if let Ok(mut q) = persisted.lock() {
+                    q.remove(&dk);
+                }
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
+        true
+    }
+
+    /// Remember that `comp`'s frames are cached on disk at `scale` with view and options hash
+    /// `view` (the most recent [`MAX_DISK_SERIES`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_disk_series(&self, comp: u64, scale: u32, view: u64) {
+        if let Ok(mut m) = self.disk_series.lock() {
+            let v = m.entry(comp).or_default();
+            if v.first() != Some(&(scale, view)) {
+                v.retain(|s| *s != (scale, view));
+                v.insert(0, (scale, view));
+                v.truncate(MAX_DISK_SERIES);
+            }
+        }
+    }
+
+    /// Find the frames edits kept ([`Frames::identity`]) on disk under their comps' new content
+    /// keys: link each kept frame of every disk series of the comp to its new key, on the frame
+    /// pool, oldest edit first.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn carry_disk(&self, src: &RenderSource) {
+        let Some(dc) = src.disk.clone() else { return };
+        let pending = |q: &Mutex<VecDeque<DiskCarry>>| q.lock().is_ok_and(|q| !q.is_empty());
+        // (called on every paint: one job drains every carry queued meanwhile)
+        if !pending(&self.disk_carries) || self.carry_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (carries, scheduled, series, ctx) = (self.disk_carries.clone(), self.carry_scheduled.clone(), self.disk_series.clone(), self.ctx.clone());
+        let virtual_id = self.virtual_id.clone();
+        let work = move || {
+            let mut linked = false;
+            loop {
+                let todo: Vec<DiskCarry> = carries.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+                if todo.is_empty() {
+                    scheduled.store(false, Ordering::Release);
+                    // (a carry queued after the drain and before the store: keep it, unless a new job took it)
+                    if pending(&carries) && !scheduled.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    break;
+                }
+                for c in todo {
+                    // (a panicking carry is skipped: the others still carry, and the flag is
+                    // still cleared below)
+                    let carry = || {
+                        let Some(series) = series.lock().ok().and_then(|m| m.get(&c.comp).cloned()) else { return false };
+                        let comp = ItemId(c.comp);
+                        let n = c.to.comp(comp).map_or(0, |k| k.frame_rate.frame_at(k.duration)).clamp(0, 100_000);
+                        let key = |p: &Project| disk_cache::comp_content_key_with(p, comp, virtual_id.as_deref());
+                        let (a, b) = (key(&c.from), key(&c.to));
+                        if a == b {
+                            return false;
+                        }
+                        let mut linked = false;
+                        for f in (0..n).filter(|f| !c.dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))) {
+                            for (scale, view) in &series {
+                                linked |= dc.link_frame(disk_cache::frame_key(a, f, *scale, *view), disk_cache::frame_key(b, f, *scale, *view));
+                            }
+                        }
+                        linked
+                    };
+                    linked |= std::panic::catch_unwind(std::panic::AssertUnwindSafe(carry)).unwrap_or(false);
+                }
+            }
+            if linked && let Some(ctx) = &ctx {
+                ctx.request_repaint();
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -914,6 +1201,9 @@ impl Frames {
             c.order.clear();
             c.bytes = 0;
             c.gpu_bytes = 0;
+            c.gpu_budget = GPU_BUDGET;
+            c.gpu_pressure = None;
+            c.gpu_adjusted = None;
         }
         // Disk keys hash the footage files' size and time, but are remembered per revision; a
         // file reloaded from disk without a new revision (a re-rendered image sequence) must be
@@ -1315,10 +1605,20 @@ impl Worker {
             .disk
             .as_ref()
             .map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts), epoch, self.virtual_id.as_deref())));
-        let from_disk = disk.as_ref().and_then(|(dc, k)| dc.get_frame(*k));
+        // Half-float frames (32 bpc) have entries of their own (their key has the options).
+        let from_disk = disk.as_ref().and_then(|(dc, k)| {
+            if job.opts.skip_hdr_step {
+                let f = dc.get_frame_f16(*k)?;
+                let encoding = effectcraft_engine::viewer::FrameEncoding::of(&job.src.project.settings, true);
+                Some(FrameImage::CpuF16(Arc::new(F16Frame::from_bits(f.width, f.height, f.rgba, encoding))))
+            } else {
+                let f = dc.get_frame(*k)?;
+                Some(FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))))
+            }
+        });
         let disk_hit = from_disk.is_some();
         let ci = match from_disk {
-            Some(f) => FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba))),
+            Some(f) => f,
             None => match self.render_guarded(&job).filter(|_| !job.cancel.load(Ordering::Relaxed)) {
                 Some(ci) => ci,
                 // Called off (frames it read may be missing) or failed: not cached, and not
@@ -1332,10 +1632,20 @@ impl Worker {
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
         self.finish(&job, ci.clone(), t0);
-        if !disk_hit && let (Some((dc, k)), FrameImage::Cpu(img)) = (&disk, &ci) {
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
-            if let Some(ctx) = &self.ctx {
+        if !disk_hit && let Some((dc, k)) = &disk {
+            let written = match &ci {
+                FrameImage::Cpu(img) => {
+                    let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                    dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
+                    true
+                }
+                FrameImage::CpuF16(f) => {
+                    dc.put_frame_f16(*k, f.width, f.height, f.bits());
+                    true
+                }
+                FrameImage::Gpu(_) => false,
+            };
+            if written && let Some(ctx) = &self.ctx {
                 ctx.request_repaint();
             }
         }
@@ -1382,10 +1692,15 @@ impl Worker {
     /// `None` if that panicked too.
     fn render_guarded(&self, job: &Job) -> Option<FrameImage> {
         let attempt = |gpu: bool| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_job(job, gpu))).ok();
-        attempt(true).or_else(|| {
+        let img = attempt(true).or_else(|| {
             log::error!("a frame render panicked (frame {})", job.key.frame);
             job.src.gpu.as_ref().and_then(|_| attempt(false))
-        })
+        });
+        // A preview frame is done: the GPU pool ages the sizes it did not ask for.
+        if let Some(g) = &job.src.gpu {
+            effectcraft_engine::render::Accelerator::frame_end(g);
+        }
+        img
     }
 
     /// A failed scoped attempt retries on CPU. Retired contexts cannot recover by reducing
@@ -1406,9 +1721,19 @@ impl Worker {
         }
     }
 
+    fn gpu_succeeded(&self) {
+        if let Ok(mut c) = self.cache.lock() {
+            c.gpu_succeeded();
+        }
+    }
+
+    fn gpu_ready(&self) -> bool {
+        !self.gpu_retired.load(Ordering::Acquire) && self.cache.lock().is_ok_and(|c| c.gpu_ready())
+    }
+
     /// The frame on the GPU, kept there for the viewer, if the compositor can do it alone.
     fn render_gpu(&self, job: &Job) -> Option<FrameImage> {
-        if self.gpu_retired.load(Ordering::Acquire) {
+        if !self.gpu_ready() {
             return None;
         }
         let g = job.src.gpu.as_ref()?;
@@ -1418,8 +1743,15 @@ impl Worker {
         r.cache = Some(&job.src.layer_cache);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
-        match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
-            Ok(f) => f.map(|f| FrameImage::Gpu(Arc::new(f))),
+        let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
+        effectcraft_engine::render::Accelerator::frame_end(g);
+        match f {
+            Ok(f) => {
+                if f.is_some() {
+                    self.gpu_succeeded();
+                }
+                f.map(|f| FrameImage::Gpu(Arc::new(f)))
+            }
             Err(e) => {
                 self.gpu_attempt_failed(g, &e);
                 None
@@ -1432,7 +1764,7 @@ impl Worker {
         let footage = job.footage();
         let mut r = Renderer::new(&job.src.project, &footage, job.opts);
         r.expr = job.src.expr.as_deref();
-        let gpu_allowed = gpu && !self.gpu_retired.load(Ordering::Acquire);
+        let gpu_allowed = gpu && self.gpu_ready();
         // A failed GPU attempt may have populated intermediate entries before its scope
         // reported failure. The CPU retry must compute its own pixels from the snapshot.
         r.cache = gpu_allowed.then_some(job.src.layer_cache.as_ref());
@@ -1452,6 +1784,7 @@ impl Worker {
                 let t0 = web_time::Instant::now();
                 match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
                     Ok(Some(f)) => {
+                        self.gpu_succeeded();
                         if let Some((p, key)) = auto {
                             // Time the GPU's work, not just its recording.
                             g.wait();
@@ -1474,23 +1807,26 @@ impl Worker {
                 }
             }
             let t0 = web_time::Instant::now();
-            let img = to_color_image(&r.comp_frame_cpu(job.comp, job.t));
+            let img = cpu_frame(&r.comp_frame_cpu(job.comp, job.t), &job.src.project, &job.opts);
             if let Some((p, key)) = auto {
                 p.record(key, false, t0.elapsed().as_secs_f64() * 1000.0);
             }
-            return FrameImage::Cpu(Arc::new(img));
+            return img;
         }
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
             return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
-                Ok(img) => FrameImage::Cpu(Arc::new(to_color_image(&img))),
+                Ok(img) => {
+                    self.gpu_succeeded();
+                    cpu_frame(&img, &job.src.project, &job.opts)
+                }
                 Err(e) => {
                     self.gpu_attempt_failed(g, &e);
                     self.render_job(job, false)
                 }
             };
         }
-        FrameImage::Cpu(Arc::new(to_color_image(&r.comp_frame(job.comp, job.t))))
+        cpu_frame(&r.comp_frame(job.comp, job.t), &job.src.project, &job.opts)
     }
 }
 
@@ -1580,5 +1916,13 @@ impl Queue {
     }
 }
 
+/// The render scale a viewer frame's key stands for: it keeps thousandths, but the viewer
+/// renders every n-th pixel, and 0.333 is not 1/3 (2 pixels off by row 1000 at Third). The
+/// comp's own factor decides when two factors share the thousandths (from 1/34).
+pub(crate) fn render_scale(thousandths: u32, factor: Option<u8>) -> f64 {
+    let n = factor.map(f64::from).filter(|n| (1000.0 / n).round() == f64::from(thousandths));
+    1.0 / n.unwrap_or_else(|| (1000.0 / f64::from(thousandths.max(1))).round()).max(1.0)
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

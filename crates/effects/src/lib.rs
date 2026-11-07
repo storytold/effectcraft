@@ -88,8 +88,8 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
-    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, radial_wipe_sigma, radial_wipe_wedge, venetian_cover,
-    venetian_origin,
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma, radial_wipe_sigma,
+    radial_wipe_wedge, venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
@@ -104,18 +104,21 @@ pub use generate3::{
 };
 pub use noise::GrainLook;
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
-pub use transition::place_layer;
+pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
 pub use noise3::{FractalGpu, NOISE_CELL, fractal_gpu};
-pub use stylize3::{BumpLight, bump_layer_id};
+pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
 // effectcraft-gpu fx_tone.
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
-pub use channel3d::{CRYPTO_LAYERS, CryptoAux, aux_point, crypto_aux_image, crypto_aux_image_with, id_color, selection_hashes};
+pub use channel3d::{
+    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
+    crypto_layer_name, crypto_layer_named, id_color, matte_only_px, reads_aux, selection_hashes,
+};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
@@ -338,19 +341,70 @@ impl Buf {
     }
 }
 
-/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
-/// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
-/// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
-pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
+/// The most pixels a `w` × `h` effect buffer may grow to: 16 Mpx (256 MiB of f32 RGBA) or four
+/// times its own area, whichever is larger. Shared by every effect that grows its buffer.
+fn pixel_budget(w: f64, h: f64) -> f64 {
     const MIN_BUDGET: f64 = 16_777_216.0;
+    MIN_BUDGET.max(4.0 * w * h)
+}
+
+/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
+/// [`pixel_budget`]: a small layer far from an effect's centre can't ask for gigabytes (#2261).
+/// Shared with the GPU path.
+pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
     let (w, h) = (f64::from(w), f64::from(h));
-    let budget = MIN_BUDGET.max(4.0 * w * h);
+    let budget = pixel_budget(w, h);
     if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
         return pad;
     }
     // (w + 2p)(h + 2p) = budget, solved for p.
     let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
     (p.floor().max(0.0) as u32).min(pad)
+}
+
+/// The most pixels on a side that [`grow_sides`] grows a buffer to.
+const MAX_GROWN_SIDE: f64 = 16384.0;
+
+/// The transparent pixels to add (left, top, right, bottom; for [`Buf::pad_sides`]) so a
+/// `width` × `height` buffer also spans the pixel box `lo`..`hi`, in the buffer's own coordinates.
+/// When the full growth would pass [`MAX_GROWN_SIDE`] or the [`pixel_budget`], every side is cut
+/// by the same factor instead of giving up, so the picture shrinks smoothly rather than popping.
+/// `None` when the buffer already spans the box, or the box is not finite.
+pub fn grow_sides(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option<[u32; 4]> {
+    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let (w, h) = (f64::from(width), f64::from(height));
+    let want = |v: f64| v.clamp(0.0, MAX_GROWN_SIDE);
+    let [l, t] = [want(-lo[0].floor()), want(-lo[1].floor())];
+    let [r, b] = [want(hi[0].ceil() - w), want(hi[1].ceil() - h)];
+    let (sx, sy) = (l + r, t + b);
+    if sx == 0.0 && sy == 0.0 {
+        return None;
+    }
+    let mut f = 1.0_f64;
+    if sx > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - w).max(0.0) / sx);
+    }
+    if sy > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - h).max(0.0) / sy);
+    }
+    let budget = pixel_budget(w, h);
+    if (w + sx * f) * (h + sy * f) > budget {
+        // (w + sx·f)(h + sy·f) = budget, solved for f.
+        let (a, bq, c) = (sx * sy, w * sy + h * sx, w * h - budget);
+        let q = if a > 0.0 { (-bq + (bq * bq - 4.0 * a * c).max(0.0).sqrt()) / (2.0 * a) } else { -c / bq };
+        f = f.min(q);
+    }
+    let f = if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 };
+    let sides = [l, t, r, b].map(|v| (v * f).floor() as u32);
+    sides.iter().any(|&v| v != 0).then_some(sides)
+}
+
+/// The pixel box (min, max) enclosing the four points of a quad.
+pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
+    let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
+    ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
@@ -544,6 +598,12 @@ pub struct EffectEnv<'a> {
     /// comp's and the layer's motion blur switches are on (Transform's Use Composition's
     /// Shutter Angle).
     pub shutter: Option<(f64, f64, u32)>,
+    /// The layer's source time range in **layer time** seconds as (first, end): the layer time of
+    /// the first source frame and the time just past the last one (so the source lasts
+    /// `end - first` seconds and its last frame starts one frame before `end`). `None` when the
+    /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
+    /// Retimers clamp their source requests to it.
+    pub layer_span: Option<(f64, f64)>,
 }
 
 /// What an effect gets to render with.
@@ -1409,6 +1469,30 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1938: Corner Pin's growth spans the pinned quad, and past the side cap or the pixel
+    /// budget it is cut by one factor instead of being dropped.
+    #[test]
+    fn grow_sides_spans_the_box_and_clamps_instead_of_giving_up() {
+        let area = |w: u32, h: u32, s: [u32; 4]| (u64::from(w) + u64::from(s[0]) + u64::from(s[2])) * (u64::from(h) + u64::from(s[1]) + u64::from(s[3]));
+        assert_eq!(grow_sides([-3.5, 2.0], [30.0, 40.2], 20, 10), Some([4, 0, 10, 31]));
+        assert_eq!(grow_sides([1.0, 1.0], [19.0, 9.0], 20, 10), None, "already inside");
+        assert_eq!(grow_sides([f64::NAN, 0.0], [30.0, 40.0], 20, 10), None);
+        assert_eq!(grow_sides([0.0, 0.0], [f64::INFINITY, 40.0], 20, 10), None);
+        // A pin near (16000, 16000) on a small layer: cut to the budget, still growing, in the same ratio.
+        let s = grow_sides([0.0, 0.0], [16000.0, 16000.0], 20, 10).unwrap();
+        assert!(s[2] > 1000 && s[3] > 1000 && area(20, 10, s) <= 1 << 24, "{s:?}");
+        // An absurdly far pin is still bounded and still grows.
+        let s = grow_sides([-1e12, -1e12], [1e12, 1e12], 1920, 1080).unwrap();
+        assert!(s.iter().all(|&v| v > 0) && area(1920, 1080, s) <= 1 << 24, "{s:?}");
+        assert!(1920 + u64::from(s[0]) + u64::from(s[2]) <= 16384);
+        // A layer already past the side cap does not grow.
+        assert_eq!(grow_sides([0.0, 0.0], [20000.0, 100.0], 17000, 50), None);
+        // A degenerate quad (all four points equal) grows to its point only.
+        let q = [[50.0, 30.0]; 4];
+        let (lo, hi) = quad_bounds(&q);
+        assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
+    }
 
     /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
     /// big layers may still grow to four times their area, and small pads are untouched.

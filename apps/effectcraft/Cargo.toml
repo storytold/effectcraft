@@ -27,6 +27,9 @@ cpal = { workspace = true }
 log = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Native GNOME/Wayland controls without a bundled title font.
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita-notitle"] }
+
 # Settings ▸ Appearance ▸ Sync with System: the XDG desktop portal's colour scheme. Already in
 # Cargo.lock (accesskit, through eframe), so it adds no new crates.
 zbus = "5.19"

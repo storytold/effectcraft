@@ -45,8 +45,9 @@ pub(crate) fn render<'g>(e: &mut Enc<'g>, r: &Renderer, comp_id: ItemId, t: Tick
     if let Some(l) = pipe.levels {
         canvas = ops::quantize(e, &canvas, l);
     }
+    let out = r.output_pipe();
     if r.depth() == 0
-        && let Some(c) = pipe.output()
+        && let Some(c) = out.output()
     {
         canvas = ops::convert(e, &canvas, &c);
         if let Some(l) = pipe.levels {
@@ -54,7 +55,7 @@ pub(crate) fn render<'g>(e: &mut Enc<'g>, r: &Renderer, comp_id: ItemId, t: Tick
         }
     }
     if r.depth() == 0
-        && let Some((lin, mode, enc)) = pipe.output_hdr()
+        && let Some((lin, mode, enc)) = out.output_hdr()
     {
         on_cpu(e, &mut canvas, |img| {
             effectcraft_render::color::output_hdr(img, lin, mode, enc);
@@ -213,6 +214,12 @@ fn draw_collapsed<'a>(
 }
 
 fn draw_layer(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
+    let out = draw_layer_on(e, r, ctx, layer, canvas);
+    e.mem_gate();
+    out
+}
+
+fn draw_layer_on(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
     if layer.switches.adjustment {
         if draw_adjustment(e, r, ctx, layer, canvas).is_some() {
             return Some(());

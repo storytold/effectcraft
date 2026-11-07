@@ -42,6 +42,10 @@ fn aux_at(t: Tick) -> AuxChannels {
         aux.channels.push((format!("CryptoObject00.{c}"), planes[k].clone()));
     }
     aux.manifests = vec![("CryptoObject".into(), ["left", "right", "late", COMMA, "star*"].iter().map(|n| (n.to_string(), crypto_hash(n))).collect())];
+    // A second view's layer of the same kind (`Z.CryptoObject`, stored Layer 3): "right" everywhere.
+    aux.channels.push(("Z.CryptoObject00.R".into(), vec![crypto_float(crypto_hash("right")); w * h]));
+    aux.channels.push(("Z.CryptoObject00.G".into(), vec![1.0; w * h]));
+    aux.manifests.push(("Z.CryptoObject".into(), vec![("right".into(), crypto_hash("right"))]));
     aux
 }
 
@@ -128,6 +132,17 @@ fn picks_replace_add_and_remove_in_one_undo_step_each() {
     s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": " \"Green, \\\"Glossy\\\"\" "})).unwrap();
     let n = s.history.undo.len();
     assert_eq!((pick(&mut s, 2.0, "replace")["changed"].as_bool(), s.history.undo.len()), (Some(false), n));
+}
+
+/// A second layer that fits a standard slot (`Z.CryptoObject` beside `CryptoObject`) is picked by
+/// its own Layer value (3); Layer 0 still reads the first one.
+#[test]
+fn pick_reads_the_second_layer_of_a_kind() {
+    let mut s = session();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "left");
+    s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": 3})).unwrap();
+    assert_eq!(pick(&mut s, 1.0, "replace")["name"], "right");
+    assert_eq!(s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 1.0, "y": 1.5})).unwrap()["name"], "right");
 }
 
 #[test]
@@ -431,7 +446,13 @@ fn hover_latency() {
                 format!("{:.3}", t0.elapsed().as_secs_f64() * 1e3)
             })
             .collect();
-        eprintln!("HOVER {name}: first {} ms, then {} ms", ms[0], ms[1..].join(" / "));
+        // The highlight of the hovered ID (built once per ID, at most 1024 samples wide).
+        let q = json!({"effect": "Cryptomatte", "x": 100.0, "y": 500.0});
+        let hash = u32::from_str_radix(s.execute("effect.cryptomatteAt", q.clone()).unwrap()["hash"].as_str().unwrap(), 16).unwrap();
+        let t0 = std::time::Instant::now();
+        let c = s.crypto_coverage(&q, hash, 1024).unwrap();
+        let cov = t0.elapsed().as_secs_f64() * 1e3;
+        eprintln!("HOVER {name}: first {} ms, then {} ms; highlight {}x{} {cov:.2} ms", ms[0], ms[1..].join(" / "), c.width, c.height);
     }
 }
 
@@ -793,4 +814,139 @@ fn undoing_picks_keeps_the_probe_and_the_step_says_pick() {
     s.crypto_probe_job(&q).unwrap().unwrap()();
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert!(!s.crypto_probe_ready(&q).unwrap(), "an undone opacity change needs a new probe");
+}
+
+/// The hover highlight: an ID's coverage from the kept probe, one sample at the centre of each
+/// cell of aux pixels, over the layer's extent (the last cells cut by it).
+#[test]
+fn coverage_of_an_id_from_the_kept_probe() {
+    let s = session();
+    let q = json!({"effect": 1, "x": 0.5, "y": 1.5});
+    let left = crypto_hash("left");
+    assert!(s.crypto_coverage(&q, left, 64).is_none(), "no coverage before the probe");
+    s.crypto_probe_job(&q).unwrap().unwrap()();
+    let c = s.crypto_coverage(&q, left, 64).unwrap();
+    assert_eq!((c.width, c.height, c.size, c.uv), (16, 8, [8.0, 4.0], [1.0, 1.0]), "the aux pixels over the layer");
+    assert!(c.coverage.iter().all(|v| (0.0..=1.0).contains(v)) && c.coverage.iter().any(|v| *v > 0.5) && c.coverage.contains(&0.0), "{:?}", c.coverage);
+    assert_eq!(c.coverage[0], 0.6, "left's coverage at the first aux pixel");
+    assert!(s.crypto_coverage(&q, crypto_hash("nobody"), 64).unwrap().coverage.iter().all(|v| *v == 0.0));
+    assert_eq!(s.crypto_coverage(&q, left, 2).map(|c| (c.width, c.height)), Some((2, 1)));
+    // An odd size: 2 × 2 cells, the last ones half outside the layer; samples at cell centres.
+    let mut s = cells_session(1919, 1079, false);
+    let q = json!({"effect": "Cryptomatte", "x": 40.0, "y": 10.0});
+    assert_eq!(s.execute("effect.cryptomatteAt", q.clone()).unwrap()["name"], "c1_0");
+    let c = s.crypto_coverage(&q, crypto_hash("c1_0"), 1024).unwrap();
+    assert_eq!((c.width, c.height, c.size), (960, 540, [1919.0, 1079.0]));
+    assert_eq!(c.uv, [1919.0 / 1920.0, 1079.0 / 1080.0]);
+    // Sample 18 covers pixels 36-37: its centre (37) is in c1_0, its corner (36) in c0_0.
+    assert_eq!((c.coverage[17], c.coverage[18], c.coverage[37]), (0.0, 1.0, 0.0));
+}
+
+struct Ranked(u32, u32, std::sync::OnceLock<Arc<AuxChannels>>);
+impl FootageSource for Ranked {
+    fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+        Some(Arc::new(Image::new(f.width, f.height)))
+    }
+    fn aux(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<AuxChannels>> {
+        Some(
+            self.2
+                .get_or_init(|| {
+                    let (w, h) = (self.0 as usize, self.1 as usize);
+                    let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
+                    for part in 0..3 {
+                        for (k, c) in ["R", "G", "B", "A"].iter().enumerate() {
+                            let rank = part * 2 + k / 2;
+                            let v: Vec<f32> = (0..w * h)
+                                .map(|i| if k % 2 == 0 { crypto_float(crypto_hash(&format!("r{rank}_{}", Cells::name(i % w, i / w)))) } else { 1.0 / 6.0 })
+                                .collect();
+                            aux.channels.push((format!("CryptoObject{part:02}.{c}"), v));
+                        }
+                    }
+                    Arc::new(aux)
+                })
+                .clone(),
+        )
+    }
+}
+
+fn rss_mb() -> f64 {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    s.lines().find(|l| l.starts_with("VmRSS")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+}
+
+/// Highlight cost with 6 ranks (Cryptomatte's default 3 parts) at 1080p, 4K and 8K, and the memory the
+/// probe pins. Run with `--ignored --nocapture`; it measures, it doesn't assert.
+#[test]
+#[ignore]
+fn highlight_cost_with_six_ranks() {
+    for (w, h) in [(1920u32, 1080u32), (3840, 2160), (7680, 4320)] {
+        let r0 = rss_mb();
+        let mut s = Session { footage: Arc::new(Ranked(w, h, Default::default())), importer: Some(Arc::new(CellsProbe(w, h))), ..Default::default() };
+        let item = s.execute("file.import", json!({"paths": ["/renders/ranked.exr"]})).unwrap()["items"][0].clone();
+        s.execute("comp.new", json!({"name": "C", "width": w, "height": h, "frameRate": 24, "duration": 2})).unwrap();
+        s.execute("layer.addItem", json!({"item": item})).unwrap();
+        s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+        let q = json!({"effect": "Cryptomatte", "x": 100.0, "y": 500.0});
+        let t0 = std::time::Instant::now();
+        let r = s.execute("effect.cryptomatteAt", q.clone()).unwrap();
+        let build = t0.elapsed().as_secs_f64() * 1e3;
+        let hash = u32::from_str_radix(r["hash"].as_str().unwrap(), 16).unwrap();
+        let mut ms = vec![];
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            let c = s.crypto_coverage(&q, hash, 1024).unwrap();
+            ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            assert!(c.coverage.iter().any(|v| *v > 0.0));
+        }
+        ms.sort_by(f64::total_cmp);
+        let aux = s.footage.aux(ItemId(0), &Footage::default(), Tick::ZERO).unwrap();
+        let bytes: usize = aux.channels.iter().map(|(_, v)| v.len() * 4).sum();
+        eprintln!(
+            "HIGHLIGHT 6 ranks {w}x{h}: aux {:.0} MB ({} planes), probe build {build:.1} ms, highlight median {:.2} ms (min {:.2}), RSS +{:.0} MB",
+            bytes as f64 / 1e6,
+            aux.channels.len(),
+            ms[2],
+            ms[0],
+            rss_mb() - r0
+        );
+    }
+}
+
+/// 8 × 4 footage whose Cryptomatte layers are `Mine` (`left` / `right` halves) and `CryptoMaterial`
+/// (the other way round).
+struct Layers;
+impl FootageSource for Layers {
+    fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+        Some(Arc::new(Image::new(f.width, f.height)))
+    }
+    fn aux(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<AuxChannels>> {
+        let mut aux = AuxChannels::new(8, 4, 1.0);
+        for (name, flip) in [("Mine", false), ("CryptoMaterial", true)] {
+            let ids = (0..32).map(|i| crypto_float(crypto_hash(if (i % 8 < 4) != flip { "left" } else { "right" }))).collect();
+            aux.channels.push((format!("{name}00.R"), ids));
+            aux.channels.push((format!("{name}00.G"), vec![1.0; 32]));
+        }
+        Some(Arc::new(aux))
+    }
+}
+
+/// #473: the probe reads the layer the Layer value names, as the effect does: 0 (a saved
+/// CryptoObject) on a file without it reads the file's first layer, 1 is CryptoMaterial, and 3
+/// is the file's other layer.
+#[test]
+fn pick_reads_the_layer_the_layer_value_names() {
+    let mut s = Session { footage: Arc::new(Layers), importer: Some(Arc::new(Probe)), ..Default::default() };
+    let item = s.execute("file.import", json!({"paths": ["/renders/layers.exr"]})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "C", "width": 8, "height": 4, "frameRate": 24, "duration": 2})).unwrap();
+    s.execute("layer.addItem", json!({"item": item})).unwrap();
+    s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+    let name_at = |s: &mut Session, layer: u32| {
+        s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": layer})).unwrap();
+        let r = s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 0.5, "y": 1.5})).unwrap();
+        (r["name"].clone(), r["layer"].clone())
+    };
+    // The files' layers sort as CryptoMaterial, Mine (no manifest here, so the IDs have no name).
+    assert_eq!(name_at(&mut s, 0).1, "CryptoMaterial", "a saved CryptoObject: the first layer");
+    assert_eq!(name_at(&mut s, 1).1, "CryptoMaterial");
+    assert_eq!(name_at(&mut s, 3).1, "Mine");
 }
