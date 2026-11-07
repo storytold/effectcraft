@@ -159,7 +159,9 @@ pub fn import(
     let (mut imported, report) = filmcraft_interchange::import_with(bytes, format.fc(), &fc_opts)?;
     // Each file is probed once, though an EDL's media are probed before the layers are made.
     let mut probed: HashMap<String, Option<Footage>> = HashMap::new();
-    let mut probe_once = |path: &str| probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone();
+    // An EDL's guessed paths that leave the list's folder are not probed (see `guessed_outside`).
+    let outside = if format == TimelineFormat::Edl { guessed_outside(&imported.project, opts.base_dir.as_deref()) } else { HashSet::new() };
+    let mut probe_once = |path: &str| if outside.contains(path) { None } else { probed.entry(path.to_string()).or_insert_with(|| probe(path)).clone() };
     let left_on_timecode = if format == TimelineFormat::Edl { rebase_to_file_timecode(&mut imported.project, &mut probe_once) } else { Vec::new() };
     let mut res = ImportResult { format: Some(format), ..Default::default() };
     for e in &report.entries {
@@ -175,7 +177,16 @@ pub fn import(
     }
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
-    let mut im = Importer { src: &imported.project, project, res, items: HashMap::new(), solids: HashMap::new(), solids_folder: None, bins: HashMap::new() };
+    let mut im = Importer {
+        src: &imported.project,
+        project,
+        res,
+        items: HashMap::new(),
+        solids: HashMap::new(),
+        solids_folder: None,
+        bins: HashMap::new(),
+        probe_offline: format == TimelineFormat::Edl,
+    };
     im.run(&imported.sequences, &mut probe_once);
     Ok(im.res)
 }
@@ -187,6 +198,35 @@ const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media t
 /// An EDL's source times are its source timecodes, which FilmCraft's reader keeps as media time.
 /// The largest start timecode, in frames, a file may have: a day at 1000 fps.
 const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
+
+/// The paths an EDL reader guessed (media it flags offline: a line without `SOURCE FILE` names
+/// only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
+/// one would link a file elsewhere on the disk. They stay placeholders. A `SOURCE FILE` path is
+/// the list's own choice and is kept, also when another clip guesses the same path.
+fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<String> {
+    let inside = |path: &str| {
+        let p = std::path::Path::new(path);
+        let rest = match base_dir.filter(|b| !b.is_empty()) {
+            Some(b) => p.strip_prefix(b).ok(),
+            None => Some(p),
+        };
+        rest.is_some_and(|r| r.components().all(|c| matches!(c, std::path::Component::Normal(_))))
+    };
+    let (mut guessed, mut named) = (HashSet::new(), HashSet::new());
+    for it in project.items.values() {
+        if let fp::ItemKind::Media(m) = &it.kind
+            && let fp::MediaRef::File { path } = &m.media
+        {
+            if m.offline && !inside(path) {
+                guessed.insert(path.clone());
+            } else {
+                named.insert(path.clone());
+            }
+        }
+    }
+    guessed.retain(|p| !named.contains(p));
+    guessed
+}
 
 /// Put the clips of each file that has a start timecode on the file's own time, as FilmCraft does
 /// when it links the media of an imported EDL. Returns the names of the media that stay on
@@ -201,20 +241,20 @@ fn rebase_to_file_timecode(project: &mut fp::Project, probe: &mut dyn FnMut(&str
             on_timecode.extend(seq.all_tracks().flat_map(|t| &t.items).filter(|ti| ti.source_in >= hour).map(|ti| ti.item));
         }
     }
-    let files: Vec<(fp::ItemId, String, String, bool)> = project
+    let files: Vec<(fp::ItemId, String, String)> = project
         .items
         .values()
         .filter_map(|it| match &it.kind {
             fp::ItemKind::Media(m) => match &m.media {
-                fp::MediaRef::File { path } => Some((it.id, it.name.clone(), path.clone(), m.offline)),
+                fp::MediaRef::File { path } => Some((it.id, it.name.clone(), path.clone())),
                 _ => None,
             },
             _ => None,
         })
         .collect();
     let mut left = Vec::new();
-    for (id, name, path, offline) in files {
-        match if offline { None } else { probe(&path) } {
+    for (id, name, path) in files {
+        match probe(&path) {
             // A corrupt timecode past a day of frames (at up to 1000 fps) would overflow the tick
             // arithmetic; such a file stays on timecode.
             Some(Footage { file_timecode: Some(tc), native_rate, frame_rate, .. }) if (0..=MAX_FILE_TIMECODE).contains(&tc) => {
@@ -240,6 +280,11 @@ struct Importer<'a> {
     solids_folder: Option<ItemId>,
     /// Folder of each source item (from the bins).
     bins: HashMap<fp::ItemId, ItemId>,
+    /// Probe media the reader flags offline too. An EDL line without `SOURCE FILE` names its clip and
+    /// FilmCraft guesses the path beside the list; other readers flag media offline for other reasons
+    /// (an OTIO missing reference also gets a guessed path), and a same-named file there is not
+    /// the intended clip.
+    probe_offline: bool,
 }
 
 impl Importer<'_> {
@@ -312,7 +357,9 @@ impl Importer<'_> {
     }
 
     fn footage(&mut self, name: &str, path: &str, m: &fp::MediaClip, probe: &mut dyn FnMut(&str) -> Option<Footage>) -> Footage {
-        if !m.offline
+        // An EDL's offline media is probed: the clip is named and the file may sit beside the list.
+        // A path that is not there probes to nothing and stays a placeholder.
+        if (!m.offline || self.probe_offline)
             && let Some(mut f) = probe(path)
         {
             if let Some(r) = m.interpret.frame_rate

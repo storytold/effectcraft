@@ -48,6 +48,12 @@ pub trait FootageSource: Send + Sync {
     fn aux(&self, _item: ItemId, _footage: &Footage, _t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         None
     }
+    /// The footage files (by [`Footage::path`]) whose channels effects of the project read
+    /// through [`FootageSource::aux`] (EXtractoR, Cryptomatte and the other 3D Channel effects),
+    /// replacing the set given before. A source that decodes a file's picture and its channels
+    /// separately can decode both at once for these from the first frame on. Sources that don't
+    /// ignore it.
+    fn set_aux_footage(&self, _paths: &[String]) {}
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -93,18 +99,36 @@ pub trait FootageSource: Send + Sync {
     fn problem(&self, _footage: &Footage) -> Option<String> {
         None
     }
-    /// [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
+    /// Missing files and [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
     /// instead (the reason then says it is the proxy's), else the footage item's own. A
     /// composition has one only through its proxy.
     fn item_problem(&self, item: &effectcraft_project::Item) -> Option<String> {
         match item.proxy.as_deref().filter(|px| px.enabled && px.footage.has_video) {
-            Some(px) => self.problem(&px.footage).map(|why| format!("Proxy: {why}")),
+            Some(px) => {
+                missing_problem(&px.footage, "Use Set Proxy to locate the proxy file.").or_else(|| self.problem(&px.footage)).map(|why| format!("Proxy: {why}"))
+            }
             None => match &item.kind {
-                ItemKind::Footage(f) => self.problem(f),
+                ItemKind::Footage(f) => missing_problem(f, "Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage.").or_else(|| self.problem(f)),
                 _ => None,
             },
         }
     }
+}
+
+/// A known offline source, without filesystem access while painting or querying.
+fn missing_problem(f: &Footage, remedy: &str) -> Option<String> {
+    (f.missing && !f.path.is_empty() && f.kind != effectcraft_project::FootageKind::Data).then(|| format!("Missing footage: {}. {remedy}", f.path))
+}
+
+/// Inventory warning, including an unused proxy or an original currently replaced by a proxy.
+/// Viewer warnings instead use `item_problem`, which follows the active render source.
+pub fn missing_item_problem(item: &effectcraft_project::Item) -> Option<String> {
+    if let ItemKind::Footage(f) = &item.kind
+        && let Some(why) = missing_problem(f, "Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage.")
+    {
+        return Some(why);
+    }
+    item.proxy.as_ref().and_then(|p| missing_problem(&p.footage, "Use Set Proxy to locate the proxy file.")).map(|why| format!("Proxy: {why}"))
 }
 
 /// A render's view of a [`FootageSource`] whose frame reads can be called off with `cancel`
@@ -139,6 +163,9 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)
+    }
+    fn set_aux_footage(&self, paths: &[String]) {
+        self.inner.set_aux_footage(paths)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)

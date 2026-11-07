@@ -33,10 +33,11 @@ pub mod style_map;
 mod textdoc;
 mod typed;
 mod values;
+mod version;
 mod write;
 
 pub use aepx::{is_aepx, parse_any, read_aepx, read_aepx_with_limits};
-pub use arbitrary::{CURVE_IDENTITY, CurvesData, HueSaturationData, LevelsData, MeshData, curve_lut};
+pub use arbitrary::{CURVE_IDENTITY, CryptomatteData, CurvesData, HueSaturationData, LevelsData, MeshData, curve_lut};
 pub use camera::{CameraPosition, DEFAULT_CAMERA_ZOOM};
 pub use chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS, Walk};
 pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, LayerRef, ParamKind, ParamValue};
@@ -54,4 +55,5 @@ pub use textdoc::{
 };
 pub use typed::{Comp, Item, ItemKind, KeyLayout, KeyList, Keyframe, Layer, ListHeader, Project, PropEntry, PropGroup, PropNode, Property, TimeBase};
 pub use values::{Orientation, OrientationKey, TimeRemap, TimeRemapKey, Tracked, Transform, ValueSource};
+pub use version::AeVersion;
 pub use write::{write, write_to};

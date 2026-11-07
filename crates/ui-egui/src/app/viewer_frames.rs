@@ -7,11 +7,18 @@ impl EffectcraftApp {
     }
 
     /// The viewer's current pixels as 8-bit premultiplied RGBA, reading a GPU frame back the
-    /// first time something asks for it.
+    /// first time something asks for it. A half-float frame (32 bpc) is converted the first time:
+    /// as rendered with Project Settings ▸ HDR, without the viewer's exposure or display colour.
     ///
     /// The browser can't wait for the GPU: there the first call starts an asynchronous readback
     /// and returns `None`; a later call (the next frame) has the pixels.
     pub fn viewer_pixels(&mut self) -> Option<Arc<egui::ColorImage>> {
+        if self.viewer_image.is_none()
+            && let Some(f) = &self.viewer_f16
+        {
+            let pass = effectcraft_engine::viewer::DisplayPass::new(effectcraft_engine::viewer::Channel::Rgb, false, 0.0, f.encoding, None);
+            self.viewer_image = Some(Arc::new(f.to_color_image(&pass)));
+        }
         let to_image = |bytes: Vec<u8>, w: u32, h: u32| {
             let px = bytes.as_chunks::<4>().0.iter().map(|c| egui::Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3])).collect();
             Arc::new(egui::ColorImage::new([w as usize, h as usize], px))
@@ -42,6 +49,36 @@ impl EffectcraftApp {
             }
         }
         self.viewer_image.clone()
+    }
+
+    /// The half-float frame on screen (32 bpc projects), for float readouts.
+    pub fn viewer_f16(&self) -> Option<&Arc<frames::F16Frame>> {
+        self.viewer_f16.as_ref()
+    }
+
+    /// The texture the Composition viewer's display pass drew last (half-float frames, or 8-bit
+    /// frames with exposure, a channel view or display colour), when it ran on the GPU.
+    pub fn viewer_display_texture(&self) -> Option<egui::TextureId> {
+        self.viewer_bake.id()
+    }
+
+    /// The display pass's pipelines on egui-wgpu's device, made the first time (desktop; the
+    /// browser's viewer converts on the CPU for now). `None` without a device.
+    pub(crate) fn display_gpu(&mut self) -> Option<Arc<crate::display_gpu::DisplayGpu>> {
+        if cfg!(target_arch = "wasm32") || self.display_gpu_failed {
+            return None;
+        }
+        if self.display_gpu.is_none() {
+            let rs = self.window_wgpu.as_ref()?;
+            match crate::display_gpu::DisplayGpu::try_new(&rs.device) {
+                Ok(g) => self.display_gpu = Some(Arc::new(g)),
+                Err(e) => {
+                    log::warn!("the viewer's display pass runs on the CPU: {e}");
+                    self.display_gpu_failed = true;
+                }
+            }
+        }
+        self.display_gpu.clone()
     }
 
     /// The viewer's Resolution: the active composition's (saved with the project).
@@ -105,6 +142,15 @@ impl EffectcraftApp {
         self.frame_series(comp, scale as f64 / 1000.0)
     }
 
+    /// The frame series a preview with options `o` plays: at its Resolution, or the one the
+    /// viewer shows with Auto (it follows the zoom). The Preview panel's cache bar counts it.
+    pub fn preview_series(&self, comp: ItemId, o: &effectcraft_engine::preview::PreviewPreset) -> FrameKey {
+        match o.resolution.factor(o.custom_resolution) {
+            Some(n) => self.frame_series(comp, 1.0 / f64::from(n)),
+            None => self.shown_series(comp),
+        }
+    }
+
     /// Hash of the comp viewer's 3D view camera (0 for the active camera view).
     pub fn view_hash(&self, comp: ItemId) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -164,6 +210,9 @@ impl EffectcraftApp {
             backend: effectcraft_engine::render::Backend::Auto,
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
+            // 32 bpc: half-float frames without the HDR step; the display pass applies it after
+            // the viewer's exposure (#2797).
+            skip_hdr_step: frames::f16_frames(&self.session.project.settings),
             proxy: Default::default(),
         }
     }

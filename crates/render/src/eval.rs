@@ -203,13 +203,7 @@ impl<'a> EvalCtx<'a> {
         // Auto-orient (along path / towards camera) replaces Orientation.
         let orient = crate::three_d::camera::auto_orient_3d(self, layer, p)
             .unwrap_or_else(|| Mat4::orientation(Vec3::from(self.v3(layer, tr, "orientation", [0.0; 3]))));
-        Mat4::translate(p)
-            * orient
-            * Mat4::rotate_z(rz)
-            * Mat4::rotate_y(ry)
-            * Mat4::rotate_x(rx)
-            * Mat4::scale(Vec3::from(scale) / 100.0)
-            * Mat4::translate(-Vec3::from(anchor))
+        Mat4::translate(p) * orient * Mat4::rotation_xyz(rx, ry, rz) * Mat4::scale(Vec3::from(scale) / 100.0) * Mat4::translate(-Vec3::from(anchor))
     }
 
     /// Layer space → comp (world) space, including parents.
@@ -382,6 +376,24 @@ fn effect_bounds_of(comp: &Comp, size: (u32, u32)) -> ([f64; 2], [f64; 2]) {
         }
         (w, h) => ([w as f64, h as f64], [0.0; 2]),
     }
+}
+
+/// The layer's source time range in layer time seconds as (first, end) for
+/// [`effectcraft_effects::EffectEnv::layer_span`]: footage and nested comps last their item's
+/// duration from layer time 0. With Time Remap layer time is no longer source time, so the layer's
+/// visible span (in to out point, in layer time) is reported instead. `None` for sources without
+/// a duration (stills, solids, text, shapes...).
+pub fn layer_span(project: &Project, layer: &Layer) -> Option<(f64, f64)> {
+    let span = if layer.props.get("timeRemap").is_some() {
+        let (a, b) = (layer.layer_time(layer.in_point).seconds(), layer.layer_time(layer.out_point).seconds());
+        (a.min(b), a.max(b))
+    } else {
+        match &layer.source {
+            LayerSource::Footage { item } | LayerSource::Comp { item } => (0.0, project.item(*item)?.duration()?.seconds()),
+            _ => return None,
+        }
+    };
+    (span.0.is_finite() && span.1.is_finite() && span.1 > span.0).then_some(span)
 }
 
 /// Size of a layer's source in layer pixels.

@@ -261,6 +261,35 @@ build real projects through these interfaces; they are worked examples of everyt
   `layer.centerAnchor` skip them and fail when every target is locked ("… is locked"); Select
   All and `layer.selectNext` / `selectPrevious` step over them. Unlock with
   `layer.setSwitch {"layers": [...], "switch": "lock", "value": false}` or `layer.unlockAll`.
+* **Un-precompose**: `layer.unprecompose {layer?, force?, dryRun?}` (Layer ▸ Un-precompose) expands the
+  selected pre-comp layer into copies of its composition's layers at its place (order, keyframes,
+  effects, masks, parenting, mattes, markers kept; timing moved by the layer's Start and trimmed to
+  what it showed; Position minus Anchor Point added to the unparented ones). One undo step; the
+  nested comp stays in the project; the nested comp's frame no longer clips what its layers draw
+  outside it. Only a **locked** pre-comp layer is refused (with or without `force`), changing
+  nothing. Everything that would change the picture or drop something is a warning: the pre-comp
+  layer has a parent or matte, effects, masks, layer styles, a non-default Scale / Rotation /
+  Opacity, an animated transform, time remap or stretch, a blending mode, Video or Audio off, Solo
+  or Guide on, the 3D / collapse / adjustment switch or Preserve Transparency, or is used by another
+  layer (parent, matte or a layer property), or an expression of another layer names it (by name in
+  quotes or as `layer(<index>)`; listed per property, the expression is left as written and will
+  no longer find it); or the nested comp holds a camera, light, adjustment,
+  3D, collapsing or soloed layer, or a layer with a blending mode or Preserve Transparency, preserves
+  a frame rate other than the comp's, has a motion-blur shutter other than the comp's (with motion
+  blur layers), or has an unparented layer with a Position expression while the pre-comp layer's
+  Position differs from its Anchor Point (the move is added to stored values only). Without
+  `force` such a call is an error listing every reason and nothing changes; `dryRun: true` returns
+  `{dryRun, warnings}` without changing anything. With `force: true` it unpacks anyway and returns
+  `{layers, warnings}`: what the pre-comp layer itself carried (effects, masks, styles, transform
+  beyond Position, time remap, blending mode, switches, its parent and matte) is dropped, and other
+  layers' parent, track matte and layer-property links to it are removed. The menu shows the
+  reasons and asks (Unpack Anyway / Cancel, `dialog.unprecompose.force` /
+  `dialog.unprecompose.cancel`); a layer without reasons unpacks without asking.
+* **Quick Set Anchor**: `layer.quickSetAnchor {point: topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight, layers?}`
+  (Layer ▸ Transform ▸ Quick Set Anchor) moves the Anchor Point of 2D layers to that point of their
+  content and shifts Position and its keys so the layers don't move, in one undo step. 3D and
+  locked layers, and layers whose Anchor Point, Scale or Rotation is keyed or has an expression,
+  are skipped (an error when none is left); returns `{layers}`.
 * **Solid Settings**: `layer.settings {layer, name?, color?, width?, height?, pixelAspect?,
   affectAll?}` edits a solid or adjustment layer's solid (and renames the layer and the solid).
   A solid shared by several layers (duplicates share theirs) changes for all of them unless
@@ -297,8 +326,8 @@ build real projects through these interfaces; they are worked examples of everyt
   file's whole numbered run as one item (several picked frames: that range; a folder: each run in
   it, also without `sequence`). Without `"sequence": true` a picked or dropped numbered file imports
   as one still, as in After Effects; `"alphabetical": true`: Force Alphabetical Order, the files
-  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). Missing frames show
-  colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
+  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). A gap in the numbering holds
+  the previous frame, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
   "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
   length). See [footage.md](footage.md).
 * **Colour of footage**: `file.interpretFootage {"items":[id], "preserveRgb":true}` is Interpret
@@ -313,12 +342,21 @@ build real projects through these interfaces; they are worked examples of everyt
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
   (`prop.set {"path":"effects/#1/red","value":"depth.Z"}`). Effect Controls offers them as popups.
-* **Masks**: `layer.addMask {layer, shape: rect|ellipse, rect}` first, then `layer.mask.set
-  {field: feather|expansion|opacity, value}`.
+* **Masks**: `layer.addMask {layer, shape: rect|ellipse|rounded, rect, roundness}` first, then
+  `layer.mask.set {field: feather|expansion|opacity, value}`. A Rounded Rectangle mask's corner
+  radius (`roundness`, layer pixels) is set when it's added and changed later with
+  `mask.setRoundness {layer, mask, roundness}` (0 = square corners); it only reshapes a rectangular mask.
 * **Renders**: `renderQueue.add {comp, format: h264|prores|webm|png…, channels: rgba,
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  OpenEXR sequences (`format: exr`) are scan-line files, linear and premultiplied, and take
+  `exrCompression: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab` (default `zip`, 16-line
+  blocks; `zips` is ZIP one scan line per block, the "Zip (1 scanline)" many compositing
+  pipelines default to) and `exrBitDepth: half|float` (default `float`); `renderQueue.formats`
+  lists them.
+  PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
+  stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both
@@ -649,7 +687,8 @@ that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript 
 `file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes
 the project first). Scripts' `app.settings`:
 `script.settings.get {"section": …, "key": …}` and `script.settings.save {…, "value": …}`.
-Extension points and the bundled extensions: [plugins.md](plugins.md).
+Extension points and the bundled extensions: [plugins.md](plugins.md); publishing an effect plug-in
+in the Plug-in Library: [publishing-plugins.md](publishing-plugins.md).
 
 ### Timeline: layer order, properties and shortcuts
 
@@ -751,6 +790,7 @@ effectcraft-cli exec layer.newNull --bridge 9877                 # same commands
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
+effectcraft-cli render main.ecproj --comp Main --out 'main_[#####].exr' --exr-compression piz --exr-depth half   # half-float PIZ OpenEXR frames
 ```
 
 Runs that save over the project they opened (`--save`, or `--save-as` the same file) take turns, so
@@ -793,6 +833,8 @@ agent can check what a player will not show. A `.lottie` path writes a dotLottie
 `file.importLottie` returns `{comp, items, warnings}` and opens the new composition.
 
 `file.importAep {path, allowLosses?, dryRun?, applySettings?}` imports an After Effects project (`.aep` or `.aepx`) into a folder named after the file and returns `{folder, comps, items, report}`. The report counts what arrived and lists, per category, what did not (effects outside the importer's table, undecoded text or style settings, simplified keyframes…); without `allowLosses` an import that would lose anything is refused and changes nothing, and `dryRun` returns just the report ([aep-import.md](aep-import.md)).
+
+`file.exportAep {path, allowLosses?, dryRun?}` writes the project as an After Effects project and returns `{path, bytes, report}`. The report counts what was written and lists, per category, what was not; without `allowLosses` an export that would lose anything is refused and writes nothing, and `dryRun` returns just the report ([aep-export.md](aep-export.md)).
 
 Premiere Pro interop goes through timeline interchange (MCP: the `execute_command` tool; control channel: `engine.execute`
 with the same ids):

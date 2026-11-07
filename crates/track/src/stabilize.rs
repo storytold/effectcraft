@@ -887,6 +887,32 @@ mod tests {
         });
     }
 
+    /// `cargo test --release -p effectcraft-track subspace_plan_bench -- --ignored --nocapture`
+    /// (`RAYON_NUM_THREADS=1` for one thread): `plan()` of a 300-frame synthetic parallax shot.
+    #[test]
+    #[ignore]
+    fn subspace_plan_bench() {
+        let n = 300;
+        let scene = Scene::new(n);
+        let mut an = Analyzer::new(scene.size, AnalyzeOpts::default());
+        for t in 0..n {
+            let img = scene.frame(t);
+            an.push(&Frame { img: &img, offset: [0.0; 2] });
+        }
+        let a = an.finish(0.0, 1.0 / 24.0);
+        for ripple in [Ripple::Automatic, Ripple::Enhanced] {
+            let s = StabSettings { method: Method::SubspaceWarp, ripple, framing: Framing::StabilizeOnly, fps: 24.0, ..Default::default() };
+            let mut times = vec![];
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                std::hint::black_box(plan(&a, &s));
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!("plan {ripple:?}, {} tracks, {} threads: median {:.1} ms", a.tracks.len(), rayon::current_num_threads(), times[2]);
+        }
+    }
+
     #[test]
     fn subspace_warp_beats_perspective_on_parallax() {
         let n = 48;
