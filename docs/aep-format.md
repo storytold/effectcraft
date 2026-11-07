@@ -573,6 +573,64 @@ suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
 
+**Lumetri Color** (`ADBE Lumetri`, 1200: 63 compositions in After Effects 2026, 32 bpc, working space
+None; by script: defaults, all set, one per section, valid minima and maxima, every popup item the script
+can set, checkboxes toggled, keys, an expression; from presets made by hand, `-58` ... `-62`: an Input
+LUT, a Look, the RGB curve, Hue vs Sat, the colour wheels): 131 `parT` entries. The `-NNNN` suffix is a
+parameter id, not the position (`-0127` ... `-0130` sit between `-0005` and `-0026`), so the importer
+keys by suffix. Float sliders (type 10) store the value After Effects shows; the valid ranges (`pard`
+104 / 108) are wider than the slider's (112 / 116): Temperature / Tint -300..300 (slider -100..100),
+Saturation 0..300 (0..200), Exposure -7..7 (-5..5), Contrast, Highlights, Shadows, Whites, Blacks,
+HDR Specular, Tint Balance -150..150 (-100..100), Faded Film 0..150 (0..100), HDR White 100..1000,
+HDR Range 100..10000, Refine Blur 0..1000 (0..30), Vignette Amount -5..5 (-3..3); the read-backs of
+`-19-min` / `-20-max` equal the stored numbers. **Hidden controls are recorded in the default state**
+(`tdsb` 3) and still hold the value After Effects reads back: High Dynamic Range `-0062` (1.0),
+HDR Specular `-0064` (22), the second Look popup `-0128` (26.16 as set, read back 26), Legacy Tone And
+Saturation `-0097` (its `pard` default reads off as the script saved the project and on once the
+project was opened and saved again, `versions/1200-lumetri-26`, `-25x`, `-24x`; a fresh instance reads
+back off), Auto Color `-0124`, Face Detection `-0102`, the Auto Intensity `-0123`
+(`EffectParam::recorded_value`). Each section has an Active checkbox (blank `pard` name; `-0003` Basic
+Correction, `-0023` Creative, `-0037` Curves, `-0118` RGB Curves, `-0104` / `-0105` / `-0107` / `-0109` /
+`-0111` the hue / saturation curves, `-0046` Color Wheels, `-0068` HSL Secondary, `-0050` Vignette, on
+by default); off, the section does nothing (`-03-sec-basic-correction`, `-17-sec-vignette` render as
+`-00-defaults`). Arbitrary data (type 11, a record and `aRbs` in every instance; empty is `fe fe`):
+`-0001` an XML copy of the grade written only when the Look changes (not kept current: `-01-set-all`
+holds defaults for controls set after the Look; it names the LUT file, `Fuji F125 Kodak 2393 (by
+Adobe).cube`); `-0096` the Look's name, UTF-16LE (`SL BLUE ICE`, `Fuji F125 Kodak 2393 (by Adobe)` in
+`-59-preset-look-lut`; the popup `-0025` itself has no record, `-0128` can disagree with it:
+`-07-sec-creative` names item 20 while `-0128` holds 23), `-0095` likewise for the Input LUT
+(`ALEXA_Default_LogC2Rec709`, `-58-preset-input-lut`; the popups `-0005` / `-0127` keep no record,
+`-0004`, `-0024` and the assets `-0125` / `-0126` stay `fe fe`: the LUTs are After Effects' own files,
+named, not embedded); `-0129` the Look colour space's 16-byte id (the GUID `LookColorSpace` of `-0001`
+in Windows layout: the first 4, 2 and 2 bytes little-endian; zero for None; the Color Space popup
+`-0130` writes no record of its own, `-22-pop38-1` ... `-53-pop38-33`);
+`-0032` Split Toning (32 zero bytes); `-0039` the four RGB curves and `-0042`, `-0106`, `-0108`,
+`-0110`, `-0112` the hue / saturation curves, 520 bytes each: `i32` type (3 for the hue curves, 2 for
+Luma vs Sat and Sat vs Sat, 0 for an RGB curve), `u32` point count, then little-endian `f64` pairs x, y
+sorted by x (bytes after the counted points are stale). RGB: x and y 0..1, (0, 0), (1, 1) by default;
+the first of the four is the master curve (`-60-preset-curves-rgb`: (0.491, 0.787) lifts R, G and B
+alike, and the render follows a natural cubic spline through the points within 0.003); the order of
+the other three is H (the `-0001` XML names `ToneCurvesLuma`, `Red`, `Green`, `Blue`; no sample moves
+one). Hue / saturation: x the hue (0 red, 1/3 green) or the luma / saturation 0..1, y the offset from
+neutral 0; a fresh curve has no points, the selector colours `-0113` ... `-0117` add three at y = 0,
+the hue picked +- 0.0556. Hue vs Sat's y scales the saturation by 1 + y in linear light
+(`-61-preset-curves-huesat`: (0.0155, 0.97) takes pure red's linear saturation to 1.96 times, (0.263,
+-0.03) and (0.765, -0.02) green, cyan and blue to 0.97); the other four curves' scale is H. `-0047`
+Color Wheels, 4 `f64` triples: hue in degrees (0 red, 120 green), brightness slider 0..1 (0.5
+neutral), distance from the centre 0..1; 0, 0.5, 0 each by default; Shadows, Midtones, Highlights, then
+a fourth wheel of unknown role (`-62-preset-wheels`: Shadows 229.1, 0.370, 0.547 towards blue with the
+slider down; Midtones 0.1, 0.5, 0.395 towards red; Highlights 93.4, 0.727, 0.319 towards yellow-green
+with the slider up; the fourth at its default); `-0085` the HSL correction wheels (8 triples, the same
+default; layout H); `-0073` the HSL key, 40 bytes: a flag byte (1 once a colour was picked), then hue,
+saturation, lightness, each centre, range, tolerance (`f32` LE, fractions) and an enabled byte (fresh:
+0.5, 0, 0, on; picking RGB 0.02 0.55 0.85 gives hue centre 0.5605 = that colour's hue and lightness
+centre 0.435 = its HSL lightness, range 0.05, tolerance 0.1: `-01-set-all`; whether range is the half
+or full width is H); `-0122` the Auto Tone analysis (UTF-16 JSON). The project saved as 25.x and 24.x
+copies (`versions/1200-lumetri-25x`, `-24x`: the 58 scripted compositions, saved by After Effects
+2026) stores every Lumetri definition, valid range and value as the 26 save does. [V for the sliders,
+checkboxes, popups, the `tdsb` 3 values, the master RGB curve, Hue vs Sat, the colour wheels and the
+LUT names; H where marked]
+
 **Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
 sample; read from 88 instances in one production project, not made by us, and from our own After
 Effects 2026 sample 1400 (corpus `aep/cryptomatte.aep`: a fresh instance, Selection Mode on, each

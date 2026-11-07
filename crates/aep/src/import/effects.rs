@@ -34,7 +34,7 @@
 //! import. Hue/Saturation's master values and Levels' values are arbitrary data, decoded by the
 //! reader (444-446, 512-516).
 
-use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, popup_key};
+use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_key};
 use crate::{
     CryptomatteData, CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, HueSaturationData, Layer as AepLayer, LayerRef,
     LevelsData, MeshData, ParamKind, ParamValue,
@@ -99,7 +99,9 @@ pub(crate) fn import_effects<'f, 'a>(
             None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
         }
         let params = defs.params(&fx);
-        if map.extra == Extra::Cryptomatte {
+        if map.extra == Extra::Lumetri {
+            crate::import::lumetri::import_lumetri(&fx, &params, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
+        } else if map.extra == Extra::Cryptomatte {
             import_cryptomatte(&fx, &params, cx, &shown, &mut group, col);
         } else {
             for p in &params {
@@ -112,7 +114,7 @@ pub(crate) fn import_effects<'f, 'a>(
 }
 
 /// Parameters that never carry a value to import.
-fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
+pub(crate) fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
     matches!(p.kind, ParamKind::Button | ParamKind::NoData | ParamKind::GroupStart | ParamKind::GroupEnd) || (p.index == 0 && p.kind == ParamKind::Layer)
 }
 
@@ -131,10 +133,15 @@ pub(crate) struct PendingLayerRef {
 
 /// Where a parameter is imported to: the effect's group, the layer parameters still to resolve
 /// and the report.
-struct ParamOut<'a> {
-    group: &'a mut PropGroup,
-    refs: &'a mut Vec<PendingLayerRef>,
-    col: &'a mut Collector,
+pub(crate) struct ParamOut<'a> {
+    pub group: &'a mut PropGroup,
+    pub refs: &'a mut Vec<PendingLayerRef>,
+    pub col: &'a mut Collector,
+}
+
+/// How a parameter is named in the report: its name and match name.
+pub(crate) fn param_label(p: &EffectParam<'_, '_>) -> String {
+    if p.name.trim().is_empty() { p.match_name.clone() } else { format!("{} ({})", p.name.trim(), p.match_name) }
 }
 
 /// Imports one parameter of `fx` into its EffectCraft property: its keyframes, the value in its
@@ -144,7 +151,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
     if carries_nothing(p) {
         return;
     }
-    let label = if p.name.is_empty() { p.match_name.clone() } else { format!("{} ({})", p.name, p.match_name) };
+    let label = param_label(p);
     let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
     if p.kind == ParamKind::ArbitraryData && map.extra != Extra::None {
         import_extra(fx, map.extra, p, &here, cx.size, group, col);
@@ -158,6 +165,14 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         }
         return;
     };
+    import_mapped(p, m, cx, (&here, &label), ParamOut { group, refs, col });
+}
+
+/// Imports parameter `p` into the property `m` names, converted by `m.conv`. `names` is
+/// `(here, label)`, the effect and the parameter for the report.
+pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
+    let (here, label) = names;
+    let ParamOut { group, refs, col } = out;
     if p.kind != m.kind {
         col.lose(LossCategory::Effects, format!("{here}: parameter {label} has type {:?}, expected {:?}; not imported", p.kind, m.kind));
         return;
@@ -165,7 +180,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
     match m.conv {
         Conv::Skip => return,
         Conv::LayerRef { own } => {
-            import_layer_ref(p, m.target, own, cx, (&here, &label), ParamOut { group, refs, col });
+            import_layer_ref(p, m.target, own, cx, (here, label), ParamOut { group, refs, col });
             return;
         }
         _ => {}
@@ -270,9 +285,9 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
                 col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} has no readable keyframe, default used"));
             }
             if let Some(map) = &popup_map {
-                remap_popup_keys(prop, map, &here, &label, col);
+                remap_popup_keys(prop, map, here, label, col);
             }
-            report_beyond_limit(m.limit, prop.keys.iter().map(|k| &k.value), &here, &label, col);
+            report_beyond_limit(m.limit, prop.keys.iter().map(|k| &k.value), here, label, col);
         }
         return;
     }
@@ -308,7 +323,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
     };
     match converted {
         Some(v) => {
-            report_beyond_limit(m.limit, std::iter::once(&v), &here, &label, col);
+            report_beyond_limit(m.limit, std::iter::once(&v), here, label, col);
             prop.value = v;
         }
         None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
@@ -473,7 +488,7 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
             Some(m) => import_mesh(&m, here, size, group, col),
             None => col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh is unreadable, defaults used")),
         },
-        Extra::None | Extra::Cryptomatte => {}
+        Extra::None | Extra::Lumetri | Extra::Cryptomatte => {}
     }
 }
 

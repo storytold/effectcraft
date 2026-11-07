@@ -27,6 +27,7 @@
 mod build;
 mod camera;
 mod effects;
+mod lumetri;
 mod markers;
 mod masks;
 mod props;
