@@ -194,6 +194,22 @@ fn functions_and_let_are_reusable_across_evaluations() {
 }
 
 #[test]
+fn a_function_declaration_ends_at_its_brace_so_a_leading_minus_starts_a_new_statement() {
+    // #3212: the array-math rewrite took `function … {…}\n-50 + 100` for one expression,
+    // `(function … {…}) - 50 + 100`, which is NaN (and left the function undeclared).
+    let f = fx();
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100", 0.0), 50.0);
+    // The declaration really declared the function (globals do not outlive one evaluation).
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100;\nsame3212(7)", 0.0), 7.0);
+    assert_close!(f.num("function twice3212(x){ return x * 2; }\n-twice3212(10) + 100", 0.0), 80.0);
+    assert_close!(f.num("function seven3212(){ return 7; }\n+seven3212()", 0.0), 7.0);
+    assert_close!(f.num("function one3212(){ return 1; } -one3212() * 3", 0.0), -3.0);
+    assert_close!(f.num("if (time >= 0) { function neg3212(x){ return -x; }\n-neg3212(4) }", 0.0), 4.0);
+    // A function expression stays an operand: `function - 1` is NaN in JavaScript too.
+    assert_close!(f.num("var g3212 = function(){ return 1; }\n- 1;\ntypeof g3212 == 'number' ? 5 : 6", 0.0), 5.0);
+}
+
+#[test]
 fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
     let f = fx();
     // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
