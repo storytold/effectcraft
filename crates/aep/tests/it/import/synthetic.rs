@@ -77,6 +77,148 @@ fn a_sequence_with_long_names_is_not_expanded_past_the_byte_budget() {
     assert_eq!(longest, 0, "the sequence was not expanded");
 }
 
+/// The project with the sequence's naming (the chunks between `Als2` and `opti` in its `Pin `)
+/// replaced by `naming`, and the `sspc` numbering (start, end, digits at 172, 176, 180) set to
+/// `numbering` when given.
+fn with_sequence_naming(naming: &[Chunk<'static>], numbering: Option<[u32; 3]>) -> Vec<u8> {
+    let mut file: AepFile<'_> = parse(SYNTHETIC).unwrap();
+    let mut patched = 0;
+    visit(&mut file.chunks, &mut |c| {
+        if !c.is_list(b"Pin ") {
+            return;
+        }
+        let Body::List { children, .. } = &mut c.body else { return };
+        let Some(als) = children.iter().position(|k| k.is_list(b"Als2")) else { return };
+        let Some(opti) = children.iter().position(|k| k.is(b"opti")) else { return };
+        assert!(als < opti);
+        let tail = children.split_off(opti);
+        children.truncate(als + 1);
+        children.extend(naming.iter().map(shorten));
+        children.extend(tail);
+        if let Some(numbering) = numbering {
+            let sspc = children.iter_mut().find(|k| k.is(b"sspc")).unwrap();
+            for (at, v) in [172, 176, 180].into_iter().zip(numbering) {
+                set_data(sspc, at, &v.to_be_bytes());
+            }
+        }
+        patched += 1;
+    });
+    assert_eq!(patched, 1, "the synthetic project has one sequence");
+    write(&file).unwrap()
+}
+
+/// `bytes` with the first file name the sequence stores in its png `opti` (byte 58, NUL-terminated)
+/// set to `name`.
+fn with_first_file(bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut file: AepFile<'_> = parse(bytes).unwrap();
+    let mut patched = 0;
+    visit(&mut file.chunks, &mut |c| {
+        if c.is(b"opti") && c.bytes().is_some_and(|d| d.get(..4) == Some(&b"png!"[..])) {
+            let mut z = name.as_bytes().to_vec();
+            z.push(0);
+            set_data(c, 58, &z);
+            patched += 1;
+        }
+    });
+    assert_eq!(patched, 1, "the synthetic project has one png item");
+    write(&file).unwrap()
+}
+
+/// The imported sequence item's footage.
+fn the_footage(p: &Project) -> effectcraft_project::Footage {
+    p.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.clone()) } else { None }).expect("the sequence")
+}
+
+/// The file names (without the folder) of a footage's sequence.
+fn file_names(f: &effectcraft_project::Footage) -> Vec<String> {
+    f.sequence.iter().map(|s| s.rsplit(['\\', '/']).next().unwrap_or_default().to_string()).collect()
+}
+
+/// A copy of `c` that borrows for any lifetime (a chunk is covariant in its lifetime).
+fn shorten<'a>(c: &Chunk<'static>) -> Chunk<'a> {
+    c.clone()
+}
+
+fn utf8(s: &str) -> Chunk<'static> {
+    Chunk::data(*b"Utf8", s.as_bytes().to_vec())
+}
+
+#[test]
+fn a_sequence_without_a_filename_prefix_imports_its_files() {
+    // `0001.png` .. `0003.png`: After Effects omits the empty prefix, so only `.png` follows the
+    // alias. Before, `.png` was read as the prefix, the suffix was missing and the item became a
+    // video linked to its folder.
+    let (p, r) = run(&with_sequence_naming(&[utf8(".png")], None), true);
+    r.unwrap();
+    let f = the_footage(&p);
+    assert_eq!(f.kind, FootageKind::Sequence);
+    assert_eq!(file_names(&f), ["0001.png", "0002.png", "0003.png"]);
+    assert!(f.path.ends_with("0001.png"), "{}", f.path);
+}
+
+#[test]
+fn a_single_naming_part_is_placed_by_the_stored_first_file_name() {
+    // `0001_v2.png` ..: the one `Utf8` is the suffix, as the first file name (`opti`) ends with it.
+    let bytes = with_first_file(&with_sequence_naming(&[utf8("_v2.png")], None), "0001_v2.png");
+    let (p, r) = run(&bytes, true);
+    r.unwrap();
+    let f = the_footage(&p);
+    assert_eq!(f.kind, FootageKind::Sequence);
+    assert_eq!(file_names(&f), ["0001_v2.png", "0002_v2.png", "0003_v2.png"]);
+    // `shot_0001` ..: a name without an extension; the one `Utf8` is the prefix.
+    let bytes = with_first_file(&with_sequence_naming(&[utf8("shot_")], None), "shot_0001");
+    let (p, r) = run(&bytes, true);
+    r.unwrap();
+    assert_eq!(file_names(&the_footage(&p)), ["shot_0001", "shot_0002", "shot_0003"]);
+    // Without that evidence (the stored first file is `shot_0001.png`), a part that is no extension
+    // is not guessed: the item is reported.
+    let bytes = with_sequence_naming(&[utf8("_v2.png")], None);
+    reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
+}
+
+#[test]
+fn a_file_list_with_a_name_that_is_not_a_plain_file_name_is_reported() {
+    // The listed names are joined to the folder: a separator, a drive colon or a dot directory
+    // would point outside it, so such a list is not read.
+    for hostile in ["..\\..\\x.png", "../x.png", "C:x.png", "..", "."] {
+        let list = Chunk::list(*b"StVc", vec![Chunk::data(*b"StVS", 2u32.to_le_bytes().to_vec()), utf8("a.png"), utf8(hostile)]);
+        let bytes = with_sequence_naming(&[list], Some([u32::MAX, u32::MAX, 0]));
+        reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
+    }
+}
+
+#[test]
+fn a_sequence_imported_with_force_alphabetical_order_imports_its_file_list() {
+    // Force alphabetical order: `LIST StVc` with `StVS` (the count, little-endian) and one `Utf8`
+    // per file instead of the prefix and suffix; the numbering in `sspc` is not set. Before, the
+    // item became a video linked to its folder.
+    let list = Chunk::list(*b"StVc", vec![Chunk::data(*b"StVS", 3u32.to_le_bytes().to_vec()), utf8("b_take.png"), utf8("a_take.png"), utf8("c_take.png")]);
+    let (p, r) = run(&with_sequence_naming(&[list], Some([u32::MAX, u32::MAX, 0])), true);
+    let r = r.unwrap();
+    let f = the_footage(&p);
+    assert_eq!(f.kind, FootageKind::Sequence);
+    // The stored order is kept.
+    assert_eq!(file_names(&f), ["b_take.png", "a_take.png", "c_take.png"]);
+    assert!(f.path.ends_with("b_take.png"), "{}", f.path);
+    assert!(losses(&r, LossCategory::DamagedData).is_empty(), "{:?}", r.report.losses);
+    // The count bounds the list.
+    let list = Chunk::list(*b"StVc", vec![Chunk::data(*b"StVS", 2u32.to_le_bytes().to_vec()), utf8("x.png"), utf8("y.png"), utf8("z.png")]);
+    let (p, r) = run(&with_sequence_naming(&[list], Some([u32::MAX, u32::MAX, 0])), true);
+    r.unwrap();
+    assert_eq!(file_names(&the_footage(&p)), ["x.png", "y.png"]);
+}
+
+#[test]
+fn a_sequence_whose_naming_cannot_be_read_is_reported() {
+    // No naming at all after the alias. Before, the item silently linked its folder.
+    let bytes = with_sequence_naming(&[], None);
+    reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
+    // An empty file list is no naming either.
+    let empty = Chunk::list(*b"StVc", vec![Chunk::data(*b"StVS", 0u32.to_le_bytes().to_vec())]);
+    let bytes = with_sequence_naming(&[empty], Some([u32::MAX, u32::MAX, 0]));
+    reported_and_refused(&bytes, LossCategory::DamagedData, "image sequence naming not read, linked to its folder");
+}
+
 #[test]
 fn a_solid_with_a_nan_channel_is_repaired_and_reported() {
     let nan = f32::NAN.to_be_bytes();
