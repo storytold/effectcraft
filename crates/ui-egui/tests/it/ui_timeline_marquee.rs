@@ -170,6 +170,19 @@ fn a_shift_box_adds_to_the_selection_and_drops_only_what_it_added() {
 }
 
 #[test]
+fn a_cmd_box_adds_to_the_selection_like_shift() {
+    let (mut h, id) = harness();
+    select_key(&mut h, id, 2.0);
+    let one = key_center(&h, id, 1.0);
+    let (from, past_key) = (one + vec2(30.0, 5.0), one + vec2(-30.0, -5.0));
+    press(&mut h, from, Modifiers::COMMAND);
+    drag(&mut h, from, past_key);
+    assert_eq!(selected(&h), [1.0, 2.0], "Cmd/Ctrl keeps the selection from before the drag");
+    release(&mut h, past_key, Modifiers::COMMAND);
+    assert_eq!(selected(&h), [1.0, 2.0]);
+}
+
+#[test]
 fn escape_puts_back_the_selection_from_before_the_box() {
     let (mut h, id) = harness();
     select_key(&mut h, id, 2.0);
