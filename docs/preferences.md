@@ -52,7 +52,13 @@ Commands (CLI, MCP, control channel):
 - `autoSave.saveOnRenderStart`: Save When Starting Render Queue
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
-  Adaptive Resolution drops to while you drag; a playing preview keeps the viewer's resolution)
+  Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
+- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. On by default. A
+  preview at Resolution Auto that stalls on frames and shows under 80 % of its frame rate steps
+  down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,
+  no lower than the Adaptive Resolution Limit) for the rest of that play; stopping goes back to the viewer's resolution, and Cache
+  Frames When Idle fills it in. An explicit Resolution (the comp's or the Preview panel's) is
+  kept as set
 - `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview): after a second
   without input or edits, the viewer renders the work area into the RAM preview in the
   background, from the current time on, until it is cached or the budget is full. On by default,

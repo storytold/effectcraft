@@ -316,3 +316,53 @@ fn cache_frames_when_idle_survives_an_inverted_work_area() {
     }
     assert!(!h.state().playback.playing);
 }
+
+/// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at Auto that
+/// stalls for two seconds steps down to half its scale, two more to a quarter; an explicit Resolution and
+/// the pref turned off keep the scale, and stopping goes back to the viewer's.
+#[test]
+fn playback_that_cannot_keep_up_steps_down_a_resolution() {
+    let stall = |h: &mut Harness<'_, EffectcraftApp>, secs: f64| {
+        for _ in 0..(secs / 0.1).round() as usize {
+            h.state_mut().clock_mut().advance(0.1);
+            h.step();
+        }
+    };
+    let play = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().use_manual_clock();
+        invoke(h, "playback.toggle", json!({}));
+        h.step();
+        assert!(h.state().playback.playing);
+    };
+    let mut h = harness();
+    // No room in the RAM preview: frames never stay cached and every pass stalls, as with a comp
+    // too heavy to render in real time.
+    h.state().frames.set_budget(0);
+    play(&mut h);
+    stall(&mut h, 1.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0, "it waits two seconds before it steps down");
+    stall(&mut h, 0.7);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5);
+    stall(&mut h, 1.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5, "and two more before the next step");
+    stall(&mut h, 0.7);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.25);
+    invoke(&mut h, "playback.toggle", json!({}));
+    assert!(!h.state().playback.playing);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0, "stopped: the viewer's resolution again");
+
+    // An explicit Resolution is kept.
+    let cid = h.state().session.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Full;
+    play(&mut h);
+    stall(&mut h, 2.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
+    invoke(&mut h, "playback.toggle", json!({}));
+
+    // So is Auto with the pref off.
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Auto;
+    h.state_mut().session.prefs.previews.adaptive_playback = false;
+    play(&mut h);
+    stall(&mut h, 2.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
+}

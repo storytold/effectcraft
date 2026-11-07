@@ -340,6 +340,8 @@ impl EffectcraftApp {
                 self.session.set_time(fr.tick_of(f));
                 self.playback.frame_shown(now);
             }
+            // Dropping frames: a lower resolution may keep up (the rate shown says so).
+            self.step_down(now, pass.scale);
         }
         ctx.request_repaint();
         true
@@ -421,6 +423,7 @@ impl EffectcraftApp {
         } else {
             // Not cached yet: hold the clock at the current frame (cache first, then play).
             self.playback.waiting = true;
+            self.step_down(now, pass.scale);
             let next = plan.and_then(|p| p.frame_after(cur, 1)).unwrap_or(if cur + 1 > wb { wa } else { cur + 1 });
             if self.frames.is_cached(&FrameKey { frame: next, ..series }) {
                 self.session.set_time(fr.tick_of(next));
@@ -429,6 +432,31 @@ impl EffectcraftApp {
             self.playback.start_frame = fr.frame_at(self.session.time());
         }
         ctx.request_repaint();
+    }
+
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at
+    /// Resolution Auto stalled on a frame that isn't cached and shows under 80 % of its frame
+    /// rate two seconds after it started or last stepped down (the first frames at a new scale,
+    /// and the GPU's warm-up frames, take a moment), so it plays on at half `scale`, no lower than
+    /// the Adaptive Resolution Limit. An explicit Resolution is kept.
+    // ponytail: it never steps back up during a play, and frames cached at the higher scale aren't
+    // shown once it stepped down; add both if loops over a partly cached comp need them.
+    fn step_down(&mut self, now: f64, scale: f64) {
+        let pb = &self.playback;
+        let since = pb.adaptive.map_or(pb.starting_since, |(_, t)| t);
+        let step = pb.plan.map_or(1, |p| p.step).max(1) as f64;
+        let lower = scale * 0.5;
+        if !self.session.prefs.previews.adaptive_playback
+            || pb.res.is_some()
+            || !self.viewer_res().is_auto()
+            || now - since < 2.0
+            || pb.achieved_fps().is_some_and(|f| f * step >= pb.fps * 0.8)
+            || lower < self.session.prefs.adaptive_limit() - 1e-9
+        {
+            return;
+        }
+        self.playback.adaptive = Some((lower, now));
+        self.playback.shown_at.clear();
     }
 
     /// While the project keeps changing (an edit within [`EDIT_QUIET`] seconds), how long until

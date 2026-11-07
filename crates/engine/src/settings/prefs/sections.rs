@@ -92,6 +92,9 @@ page!(CompositionPrefs {
 page!(Previews {
     /// Largest downsampling while playing back: `1/2`, `1/4`, `1/8`.
     adaptive_resolution_limit: String = "1/8".into(),
+    /// A preview at Resolution Auto that renders slower than real time steps down a resolution
+    /// (½, then ¼, no further than the Adaptive Resolution Limit) for the rest of that play.
+    adaptive_playback: bool = true,
     show_internal_wireframes: bool = false,
     cache_frames_when_idle: bool = true,
     fast_previews: bool = false,

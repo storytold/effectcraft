@@ -190,6 +190,9 @@ pub struct Playback {
     pub caching: bool,
     /// Resolution override while playing (pixel step), `None` = the viewer's.
     pub res: Option<u32>,
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: the lower render
+    /// scale this play stepped down to, and when (seconds). See `step_down`.
+    pub adaptive: Option<(f64, f64)>,
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
