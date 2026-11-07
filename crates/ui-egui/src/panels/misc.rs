@@ -354,33 +354,98 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(pos2(sx + 2.0, y), Align2::LEFT_CENTER, format!("{db:.1}"), Tokens::ui(10.0), t.text_faint);
     }
     p.text(pos2(sx + 30.0, top - 9.0), Align2::LEFT_CENTER, "dB", Tokens::ui(10.0), t.text_dim);
-    // Selected layer's Audio Levels.
+    // Selected layer's Audio Levels (the editable "-12.0 dB" fields need about 110 px).
     let lx = rect.min.x + 120.0;
-    if rect.max.x - lx < 80.0 {
+    if rect.max.x - lx < 110.0 {
         return;
     }
-    let sel = app.session.state.selected_layers.first().copied();
-    let levels = sel.and_then(|id| {
-        let c = app.session.active_comp()?;
-        let l = c.layer(id)?;
-        let pr = l.props.sub("audio")?.get("levels")?;
-        Some((l.name.clone(), pr.value.as_vec2()))
-    });
-    match levels {
-        Some((name, [a, b])) => {
-            p.text(pos2(lx, top - 9.0), Align2::LEFT_CENTER, &name, Tokens::ui(11.0), t.text_dim);
-            for (i, (k, v)) in [("Left", a), ("Right", b)].into_iter().enumerate() {
-                let y = top + 12.0 + i as f32 * 20.0;
-                p.text(pos2(lx, y), Align2::LEFT_CENTER, k, Tokens::ui(12.0), t.text_dim);
-                p.text(pos2(lx + 44.0, y), Align2::LEFT_CENTER, format!("{v:+.1} dB"), Tokens::ui(12.0), t.hot_text);
-            }
-        }
-        None => {
-            p.text(pos2(lx, top + 12.0), Align2::LEFT_CENTER, tr("No audio layer selected"), Tokens::ui(11.0), t.text_faint);
-        }
-    }
+    audio_levels(app, ui, &p, pos2(lx, top));
     if app.meter.active() || app.audio.is_some() {
         ui.ctx().request_repaint();
+    }
+}
+
+/// The Audio panel's level fields at `at` (left, top of the meters): the selected layer's Audio
+/// Levels at the current time, keyframes (read at layer time) and expression included, as the
+/// Timeline and Effect Controls show them (#3227). An edit runs the Timeline's `prop.set`: on a
+/// keyframed property it keys the current time; a scrub is one undo step; with the Timeline's
+/// Link Channels on, the other channel moves by the same dB (#2485).
+fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: egui::Pos2) {
+    let t = app.tokens;
+    let (lx, top) = (at.x, at.y);
+    let comp = app.session.active_comp_arc();
+    let selected = app.session.state.selected_layers.first().copied();
+    let levels = match (comp.as_deref(), app.session.active_comp_id()) {
+        (Some(comp), Some(cid)) => selected.and_then(|id| comp.layer(id)).and_then(|layer| {
+            let pr = layer.props.sub("audio")?.get("levels")?;
+            let project = app.session.project.clone();
+            let expr = app.session.expr.clone();
+            let ectx = effectcraft_engine::render::EvalCtx {
+                project: &project,
+                comp_id: cid,
+                comp,
+                time: app.session.time(),
+                expr: expr.as_deref(),
+                footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
+            };
+            // The keyframed value before the expression: what `prop.set` writes and scrubs from.
+            let raw = pr.value_at(layer.layer_time(ectx.time)).as_vec2();
+            Some((layer.id.0, pr.uid, pr.has_expression(), layer.name.as_str(), ectx.value(layer, pr).as_vec2(), raw))
+        }),
+        _ => None,
+    };
+    let Some((lid, uid, driven, name, values, raw)) = levels else {
+        p.text(pos2(lx, top + 12.0), Align2::LEFT_CENTER, tr("No audio layer selected"), Tokens::ui(11.0), t.text_faint);
+        return;
+    };
+    p.text(pos2(lx, top - 9.0), Align2::LEFT_CENTER, name, Tokens::ui(11.0), t.text_dim);
+    // The values themselves: red while an expression drives the property (#1306).
+    let vt = t.for_value(driven);
+    // As in the Timeline, a scrub moves every selected layer by the same change and a typed value
+    // sets the typed channel.
+    let scrub = ui.ctx().dragged_id().is_some() && ui.input(|i| i.pointer.is_decidedly_dragging());
+    // Proportional Scrubbing (Ctrl+Alt / Cmd+Opt): the change spreads over the selected layers by
+    // selection order, as in the Timeline.
+    let proportional = scrub && ui.input(|i| widgets::proportional_scrub(i.modifiers));
+    // Linked channels move together; Alt edits one alone (Ctrl+Alt is a proportional scrub).
+    let linked = app.ui.timeline.is_linked(uid, false) && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers));
+    let mut actions: Vec<serde_json::Value> = vec![];
+    for (d, (k, v)) in [("Left", values[0]), ("Right", values[1])].into_iter().enumerate() {
+        let y = top + 12.0 + d as f32 * 20.0;
+        p.text(pos2(lx, y), Align2::LEFT_CENTER, k, Tokens::ui(12.0), t.text_dim);
+        let spec = widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: " dB" };
+        let (r, nv, _) = widgets::hot_number_at(ui, pos2(lx + 44.0, y - 9.0), egui::Id::unique(("audio-level", uid, d)), v, &spec, &vt);
+        app.auto.add(if d == 0 { "audio.levelLeft" } else { "audio.levelRight" }, r, &format!("{v:.1} dB"));
+        if let Some(nv) = nv {
+            let merge = format!("audio-levels-{uid}");
+            let mut params = json!({"layer": lid, "prop": uid, "merge": merge, "selected": true, "offset": scrub, "proportional": proportional, "dims": [d]});
+            let value = if linked {
+                // The other channel follows by each layer's own change, keeping its balance.
+                params["follow"] = json!([usize::from(d == 0)]);
+                widgets::shifted(&values, d, nv)
+            } else {
+                let mut value = values.to_vec();
+                if let Some(slot) = value.get_mut(d) {
+                    *slot = nv;
+                }
+                value
+            };
+            // A scrub moves the shown (expression-evaluated) value; `prop.set` takes the change
+            // from the keyframed value under the expression, so the scrub becomes that value
+            // moved by the same change (every selected layer then moves by it). A typed value is
+            // set as it is.
+            let value: Vec<f64> = if scrub { value.iter().zip(values.iter().zip(raw)).map(|(n, (shown, r))| r + (n - shown)).collect() } else { value };
+            params["value"] = json!(value);
+            actions.push(params);
+        }
+    }
+    let ctx = ui.ctx().clone();
+    for params in actions {
+        if let Err(e) = crate::menus::invoke(app, &ctx, "prop.set", params) {
+            app.ui.status = e;
+        }
     }
 }
 
