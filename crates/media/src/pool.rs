@@ -172,6 +172,9 @@ pub struct PoolStats {
     /// Pictures decoded: a still's file (once for all the sizes asked for at the same time) or
     /// a movie frame. Requests for a picture being decoded wait for it instead (#3269).
     pub decodes: u64,
+    /// Bytes of whole stills kept beside the frame cache for other sizes of the same frame (at
+    /// most half the budget; not in `bytes`).
+    pub recent_bytes: usize,
 }
 
 /// Whole stills decoded for a reduced size kept beside the frame cache ([`CacheState::recent`]):
@@ -229,17 +232,35 @@ impl CacheState {
     /// Keep the whole still `img` decoded for a reduced size, dropping the oldest beyond
     /// [`RECENT_BYTES`] (and half of `budget`).
     fn keep_recent(&mut self, key: Key, img: Arc<Image>, budget: usize) {
-        let cap = RECENT_BYTES.min(budget / 2);
         let bytes = img.data.len().saturating_mul(std::mem::size_of::<Px>());
         self.recent.retain(|r| r.key != key);
-        if bytes > cap {
+        if bytes > Self::recent_cap(budget) {
             return;
         }
         let stamp = self.lru.clock;
         self.recent.push_back(Recent { key, img, bytes, stamp });
-        while self.recent.iter().map(|r| r.bytes).sum::<usize>() > cap {
-            self.recent.pop_front();
+        self.trim_recent(budget);
+    }
+
+    /// The most bytes of whole stills [`CacheState::recent`] holds with the frame cache's `budget`.
+    fn recent_cap(budget: usize) -> usize {
+        RECENT_BYTES.min(budget / 2)
+    }
+
+    /// Drop the oldest whole stills until the rest fit [`CacheState::recent_cap`] of `budget`
+    /// (also when the budget shrinks).
+    fn trim_recent(&mut self, budget: usize) {
+        let cap = Self::recent_cap(budget);
+        while self.recent_bytes() > cap {
+            if self.recent.pop_front().is_none() {
+                break;
+            }
         }
+    }
+
+    /// The bytes of the whole stills [`CacheState::recent`] holds.
+    fn recent_bytes(&self) -> usize {
+        self.recent.iter().map(|r| r.bytes).sum()
     }
 }
 
@@ -521,7 +542,9 @@ impl MediaPool {
     /// Change the frame-cache budget (evicts immediately when shrinking).
     pub fn set_budget(&self, bytes: usize) {
         self.inner.budget.store(bytes as u64, Ordering::Relaxed);
-        lock(&self.inner.cache).lru.evict(bytes);
+        let mut c = lock(&self.inner.cache);
+        c.lru.evict(bytes);
+        c.trim_recent(bytes);
     }
 
     /// Enable or disable reading one frame ahead during sequential playback (on by default on
@@ -541,6 +564,7 @@ impl MediaPool {
             bytes: c.lru.bytes,
             opened: i.opened.load(Ordering::Relaxed),
             decodes: i.decodes.load(Ordering::Relaxed),
+            recent_bytes: c.recent_bytes(),
         }
     }
 
@@ -1899,5 +1923,19 @@ mod tests {
         assert!(c.recent(&key(9)).is_none());
         c.lru.clock += RECENT_AGE + 1;
         assert!(c.recent(&key(5)).is_none(), "expired");
+    }
+
+    /// #3270 review: lowering the budget drops whole stills beyond the new cap at once (they
+    /// were kept until the next one was), and the stats count them.
+    #[test]
+    fn a_lower_budget_trims_recent_whole_stills() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, Some((8, 4)), FloatCurve::Srgb).unwrap();
+        let whole = 16 * 8 * std::mem::size_of::<Px>();
+        assert_eq!(pool.stats().recent_bytes, whole);
+        pool.set_budget(whole);
+        assert_eq!(pool.stats().recent_bytes, 0, "half the new budget holds no whole still");
+        assert!(lock(&pool.inner.cache).recent.is_empty());
     }
 }
