@@ -182,6 +182,8 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         ids.iter().filter_map(|lid| comp.layer(*lid).map(|l| (*lid, effectcraft_render::effect_bounds(&s.project, comp, l).0))).collect();
     let mut applied = 0;
     let mut skipped = vec![];
+    // Channel selections whose keys or expression the preset had: their first value is kept.
+    let mut static_kept: Vec<String> = vec![];
     s.edit("Apply Animation Preset", None, |proj, _| {
         let mut next = proj.next_id;
         for lid in &ids {
@@ -198,6 +200,11 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                     };
                     if let Some(spec) = spec {
                         effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), size);
+                        // (channel selection is static: a preset's keys or expression on it
+                        // are dropped, its first value kept)
+                        for name in effectcraft_effects::migrate::static_channel_params(spec, &mut g) {
+                            static_kept.push(format!("{}: {name}", g.name));
+                        }
                     }
                     retime_effect(&mut g, 1.0, "anim.applyPreset", |t| Ok(Tick(t.0.checked_add(lt.0).ok_or_else(|| effect_time_error("anim.applyPreset"))?)))?;
                     g.reassign_uids(&mut next);
@@ -209,6 +216,15 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             for (path, src) in &props {
                 let resolved = resolve_effect_path(l, path);
                 match l.props.prop_mut(&resolved) {
+                    // A property that can't be animated takes the preset's first value alone.
+                    Some(pr) if pr.static_only && std::mem::discriminant(&pr.value) == std::mem::discriminant(&src.value) => {
+                        let first = src.keys.first().map(|k| &k.value).filter(|v| std::mem::discriminant(*v) == std::mem::discriminant(&src.value));
+                        pr.value = first.unwrap_or(&src.value).clone();
+                        if !src.keys.is_empty() || src.expr.is_some() {
+                            static_kept.push(pr.name.clone());
+                        }
+                        applied += 1;
+                    }
                     Some(pr) if std::mem::discriminant(&pr.value) == std::mem::discriminant(&src.value) => {
                         pr.value = src.value.clone();
                         pr.keys = src
@@ -232,7 +248,10 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         proj.next_id = next;
         Ok(())
     })?;
-    Ok(json!({"applied": applied, "skipped": skipped}))
+    if !static_kept.is_empty() {
+        s.toast(format!("Channel selection can't be animated: kept the first value of {}", static_kept.join(", ")));
+    }
+    Ok(json!({"applied": applied, "skipped": skipped, "staticKept": static_kept}))
 }
 
 // ---------------------------------------------------------------- keyframes

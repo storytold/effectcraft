@@ -248,6 +248,7 @@ impl Session {
 /// current schema. Channel-selection parameters are made static
 /// ([`effectcraft_effects::migrate::static_channel_params`]); returns what lost its animation
 /// (`Layer: Effect: Parameter`).
+#[must_use = "what lost its animation is reported to the user"]
 pub fn upgrade_effects(p: &mut Project) -> Vec<String> {
     let mut lost = vec![];
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;

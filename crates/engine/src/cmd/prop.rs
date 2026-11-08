@@ -742,18 +742,30 @@ fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
     let results = s.edit("Expression", merge_p(p), |proj, state| {
         let mut out = vec![];
         let mut changed_types = vec![];
+        let mut skipped = None;
+        let mut applied = 0usize;
         for (((cid, lid, uid), def), time) in targets.iter().zip(&defs).zip(&times) {
             let pr = layer_mut(proj, *cid, *lid)?.props.find_mut(*uid).ok_or_else(|| bad(C, "property vanished"))?;
             // A property that can't be animated takes no expression (one an older document has
-            // may still be disabled or removed).
+            // may still be disabled or removed): named, that is an error; in a selection it is
+            // left out, as Add Keyframe leaves it out.
             if pr.static_only && adds_expression(pr, &text, enabled, def) {
-                return Err(bad(C, format!("{} can't have an expression", pr.name)));
+                if explicit {
+                    return Err(bad(C, format!("{} can't have an expression", pr.name)));
+                }
+                skipped = Some(pr.name.clone());
+                out.push(Value::Null);
+                continue;
             }
             apply_expr(pr, &text, enabled, def);
+            applied += 1;
             out.push(json!(pr.expr.as_ref().map(|e| e.text.clone())));
             if pr.match_id == "type" {
                 changed_types.push((*cid, *lid, *uid, *time));
             }
+        }
+        if let Some(name) = skipped.filter(|_| applied == 0) {
+            return Err(bad(C, format!("{name} can't have an expression")));
         }
         // All selected targets must be edited before a Type change can remove inner controls.
         for (cid, lid, uid, time) in changed_types {

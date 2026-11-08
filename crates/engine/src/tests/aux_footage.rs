@@ -296,3 +296,85 @@ fn a_channel_selections_old_expression_can_be_removed() {
     s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "expression": ""})).unwrap();
     assert!(expr(&s).is_none(), "removed");
 }
+
+/// An EXtractoR layer of `path` in a fresh session; the session and the layer.
+fn extractor_layer(rec: &Arc<Recorder>, path: &str) -> (Session, u64) {
+    let mut s = session(rec);
+    let item = import(&mut s, path);
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    (s, l)
+}
+
+/// #3271 review: an animation preset with keys or an expression on a channel selection applies
+/// its first value, static, as a document does (an effect group, and a lone property).
+#[test]
+fn a_preset_keeps_a_channel_selection_static() {
+    use effectcraft_keyframe::{Keyframe, Value as K};
+    let rec = Arc::new(Recorder::default());
+    let (mut s, l) = extractor_layer(&rec, "/renders/preset.exr");
+    let lid = effectcraft_project::LayerId(l);
+    let mut g = s.active_comp().unwrap().layer(lid).unwrap().effects().unwrap().groups().next().unwrap().clone();
+    if let Some(pr) = g.get_mut("red") {
+        pr.static_only = false;
+        pr.keys = vec![Keyframe::new(Tick::ZERO, K::Str("Z".into())), Keyframe::new(Tick::from_seconds_f64(1.0), K::Str("N.X".into()))];
+        pr.expr = Some(effectcraft_project::Expression { text: "'N.Y'".into(), enabled: true });
+    }
+    let preset = json!({"effectcraftAnimationPreset": 2, "name": "keyed", "properties": [], "effects": [g]});
+    let r = s.execute_checked("anim.applyPreset", json!({"preset": preset, "layers": [l]})).unwrap();
+    assert_eq!(r["staticKept"].as_array().map(Vec::len), Some(1), "{r}");
+    let c = s.active_comp().unwrap();
+    let applied = c.layer(lid).unwrap().effects().unwrap().groups().nth(1).unwrap();
+    let red = applied.get("red").unwrap();
+    assert!(red.static_only && red.keys.is_empty() && red.expr.is_none());
+    assert_eq!(red.value, K::Str("Z".into()));
+    // A lone property of the preset.
+    let path = "effects/#1/green";
+    let preset = json!({"effectcraftAnimationPreset": 2, "name": "lone", "properties": [{"path": path, "value": K::Str("G".into()), "keys": [Keyframe::new(Tick::ZERO, K::Str("Y".into()))]}], "effects": []});
+    s.execute_checked("anim.applyPreset", json!({"preset": preset, "layers": [l]})).unwrap();
+    let green = s.active_comp().unwrap().layer(lid).unwrap().props.prop(path).unwrap().clone();
+    assert!(green.keys.is_empty() && green.expr.is_none());
+    assert_eq!(green.value, K::Str("Y".into()));
+}
+
+/// #3271 review: Add Expression on a selection leaves a channel selection out (as Add Keyframe
+/// does) and adds the others' expressions; named alone, the channel selection is an error.
+#[test]
+fn add_expression_on_a_selection_skips_a_channel_selection() {
+    let rec = Arc::new(Recorder::default());
+    let (mut s, l) = extractor_layer(&rec, "/renders/select.exr");
+    for path in ["effects/#1/red", "effects/#1/blackPoint"] {
+        s.execute_checked("prop.select", json!({"layer": l, "path": path, "add": true})).unwrap();
+    }
+    s.execute_checked("prop.setExpression", json!({"expression": "0.25"})).unwrap();
+    let c = s.active_comp().unwrap();
+    let props = &c.layer(effectcraft_project::LayerId(l)).unwrap().props;
+    assert!(props.prop("effects/#1/red").unwrap().expr.is_none(), "left out");
+    assert!(props.prop("effects/#1/blackPoint").unwrap().expr.is_some(), "the other one has it");
+    assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": "effects/#1/red", "expression": "'Z'"})).is_err());
+}
+
+/// #3271 review: File ▸ Import a project that animated a channel selection keeps its first value
+/// and says so with the import's warnings.
+#[test]
+fn importing_a_keyed_channel_selection_says_so() {
+    use effectcraft_keyframe::{Keyframe, Value as K};
+    let rec = Arc::new(Recorder::default());
+    let (mut s, l) = extractor_layer(&rec, "/renders/imported.exr");
+    let cid = s.active_comp_id().unwrap();
+    {
+        let p = Arc::make_mut(&mut s.project);
+        let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut("effects/#1/red").unwrap();
+        pr.static_only = false;
+        pr.keys = vec![Keyframe::new(Tick::ZERO, K::Str("Z".into())), Keyframe::new(Tick::from_seconds_f64(1.0), K::Str("N.X".into()))];
+    }
+    let dir = std::env::temp_dir().join(format!("ec-3271-import-static-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keyed.ecproj");
+    s.execute_checked("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut o = session(&rec);
+    let r = o.execute_checked("file.importProject", json!({"path": path.to_string_lossy()})).unwrap();
+    let said = r["warnings"].as_array().is_some_and(|w| w.iter().any(|w| w.as_str().is_some_and(|w| w.contains("channel selection"))));
+    assert!(said, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
