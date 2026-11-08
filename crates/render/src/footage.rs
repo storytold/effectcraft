@@ -1,4 +1,5 @@
 use super::{Arc, AtomicBool, Footage, Image, ItemId, ItemKind, Ordering, Tick};
+use crate::reads::ReadLog;
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
 /// linear light: encoded with a curve, as the compositor takes footage, or as stored. Other
@@ -91,6 +92,15 @@ pub trait FootageSource: Send + Sync {
     /// exist, so what was made from them must not be kept.
     fn called_off(&self) -> bool {
         false
+    }
+    /// Run `f`, which reads from this source on this thread, noting in `reads` every source file
+    /// those reads use, with its identity as read (see [`crate::reads`]): the file a frame was
+    /// decoded from, also when it comes from the source's own memory cache (without reading the
+    /// file again). Sources that can't tell which files they read keep the default, which marks
+    /// `reads` incomplete.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        reads.mark_incomplete();
+        f()
     }
     /// Why `footage` shows no picture although its file is there: a read of it failed because
     /// no decoder handles its codec, profile, chroma format or bit depth, or the stream is damaged
@@ -194,6 +204,10 @@ impl FootageSource for CancellableFootage<'_> {
     fn called_off(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.inner.called_off()
     }
+    /// Runs `f` with the inner source, collecting the files it reads into `reads`.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        self.inner.recording(reads, f)
+    }
     fn problem(&self, footage: &Footage) -> Option<String> {
         self.inner.problem(footage)
     }
@@ -211,7 +225,12 @@ pub fn is_vector_footage(f: &Footage) -> bool {
 pub struct NoFootage;
 
 impl FootageSource for NoFootage {
+    /// Always `None`: there is no footage.
     fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
         None
+    }
+    /// Reads no files.
+    fn recording(&self, _: &ReadLog, f: &mut dyn FnMut()) {
+        f()
     }
 }

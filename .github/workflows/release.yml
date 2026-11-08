@@ -15,7 +15,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Regenerates contributors/contributors.json for the release commit; every build bundles it.
+  credits:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: storytold/craft-common-actions/.github/workflows/refresh-contributors.yml@main
   release:
+    needs: credits
     permissions:
       contents: write
       packages: write
@@ -25,6 +32,7 @@ jobs:
       app-name: effectcraft
       app-title: EffectCraft
       version: ${{ inputs.version }}
+      contributors-artifact: ${{ needs.credits.outputs.artifact-name }}
     secrets:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

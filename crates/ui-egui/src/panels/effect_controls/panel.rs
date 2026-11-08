@@ -186,6 +186,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let hdr = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
     p.text(pos2(hdr.min.x + 10.0, hdr.center().y), Align2::LEFT_CENTER, format!("{} • {}", comp_name, layer.name), Tokens::ui(11.5), t.text_dim);
