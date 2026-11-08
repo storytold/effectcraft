@@ -285,8 +285,8 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         cx.col.missing_footage.push(shown);
     }
     let kind = if sequence.is_empty() { footage_kind(&path, f.native_frame_rate, f.audio_sample_rate.is_some()) } else { FootageKind::Sequence };
-    // A placed PDF / Illustrator / EPS file keeps After Effects' framing and size (#3099).
-    let placed_page = kind == FootageKind::Still && is_vector_path(&path);
+    // A placed PDF / Illustrator file keeps After Effects' framing and size (#3099).
+    let placed_page = kind == FootageKind::Still && is_placed_page_path(&path);
     let mut footage = Footage {
         path,
         kind,
@@ -330,10 +330,12 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     }
 }
 
-/// Whether `path` names a PDF, Illustrator or EPS file (by its extension).
-fn is_vector_path(path: &str) -> bool {
+/// Whether `path` names a file whose page is framed as After Effects places it
+/// ([`Footage::placed_page`]): an Illustrator or PDF file, by its extension. EPS files keep
+/// their bounding box at their own size: how After Effects sizes them was not measured (#3099).
+fn is_placed_page_path(path: &str) -> bool {
     let ext = path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
-    matches!(ext.as_deref(), Some("pdf" | "ai" | "eps" | "epsf" | "epsi"))
+    matches!(ext.as_deref(), Some("pdf" | "ai"))
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
@@ -916,6 +918,18 @@ fn resolve_parents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3099: an `.ai` or `.pdf` from an `.aep` is a placed page; an EPS (not measured in After
+    /// Effects) and other files are not.
+    #[test]
+    fn only_illustrator_and_pdf_files_are_placed_pages() {
+        for path in [r"C:\fixture\x\logo.ai", "/work/Logo.AI", "art.pdf", r"C:\a.b\page.PDF"] {
+            assert!(is_placed_page_path(path), "{path}");
+        }
+        for path in [r"C:\fixture\x\still.eps", "a.epsf", "a.epsi", "still.png", r"C:\dir.ai\file", "ai", ""] {
+            assert!(!is_placed_page_path(path), "{path}");
+        }
+    }
 
     #[test]
     fn unlisted_extensions_follow_what_the_file_stores() {

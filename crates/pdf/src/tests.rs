@@ -127,6 +127,7 @@ fn boxes_pdf(pages: &str, page: &str) -> Vec<u8> {
     )
 }
 
+/// The first page of `bytes` framed as After Effects places it.
 fn placed(bytes: &[u8]) -> Doc {
     parse_page_framed(bytes, 0, Framing::Placed).unwrap()
 }

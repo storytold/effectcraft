@@ -13,6 +13,8 @@ use crate::{EngineError, Result, Session, cmd};
 
 const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d";
 
+/// Layer ▸ Create (`layer.create`): the `op` ([`OPS`]) on the given or selected layers; returns
+/// the created layer ids and what was skipped.
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let op = str_p(p, "op").ok_or_else(|| bad("layer.create", format!("missing `op` ({OPS})")))?;
     let (cid, lids) = layers_p(s, p)?;

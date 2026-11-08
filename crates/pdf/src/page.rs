@@ -34,6 +34,8 @@ pub fn pages(file: &File) -> Vec<Page> {
     let mut out = vec![];
     let Some(cat) = file.catalog() else { return out };
     let Some(root) = file.get_dict(cat, "Pages") else { return out };
+    /// Collects the pages under `node`, passing on the attributes pages inherit (resources,
+    /// MediaBox, CropBox, /Rotate); bounded in depth and page count.
     fn walk(file: &File, node: &Dict, inherited: (Option<Dict>, Option<Vec<f64>>, Option<Vec<f64>>, i32), out: &mut Vec<Page>, depth: usize) {
         if depth > 32 || out.len() > 10_000 {
             return;

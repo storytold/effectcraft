@@ -137,9 +137,11 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
 - **Null objects.** The hidden placeholder solid of a null object is not an item (null layers
   have no source item here). A null's Anchor Point that is not stored is its top-left corner
   `[0, 0]`, not the centre, as After Effects 2026 reads it back (#3099).
-- **Placed PDF / Illustrator / EPS files** (`Footage::placed_page`): the page is framed as After
-  Effects places it (the ArtBox clipped to the crop box, `/Rotate` ignored) and drawn to fill the
-  stored footage size, which masks and anchors are measured against (#3099).
+- **Placed Illustrator and PDF files** (`.ai`, `.pdf`; `Footage::placed_page`): the page is
+  framed as After Effects places it (the ArtBox clipped to the crop box, `/Rotate` ignored) and
+  drawn to fill the stored footage size, which masks and anchors are measured against (#3099).
+  EPS files keep their bounding box at their own size: how After Effects sizes them is not
+  measured.
 - **Track mattes.** The mode and the matte layer's id are in the target layer's header
   (aep-format.md 3.1). The matte layer can be any layer of the composition (407: below its
   target); it keeps its stored video switch (After Effects switches it off when the matte is set,

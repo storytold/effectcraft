@@ -758,6 +758,8 @@ impl Inner {
         ((d.0 as i128 * rate.num as i128 + den / 2) / den) as i64
     }
 
+    /// Where the frame of `footage` at `t` comes from (file, frame or media time) and its cache
+    /// key, at the footage's own size.
     fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Loc {
         let alpha = match footage.alpha {
             AlphaMode::Straight => 0,

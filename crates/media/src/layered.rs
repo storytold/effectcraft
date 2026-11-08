@@ -186,10 +186,12 @@ mod tests {
         )
     }
 
+    /// An opaque red pixel.
     fn is_red(p: [f32; 4]) -> bool {
         p[3] > 0.99 && p[0] > 0.9 && p[2] < 0.1
     }
 
+    /// An opaque blue pixel.
     fn is_blue(p: [f32; 4]) -> bool {
         p[3] > 0.99 && p[2] > 0.9 && p[0] < 0.1
     }

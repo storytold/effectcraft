@@ -1176,6 +1176,8 @@ struct PropAt<'a> {
     null: bool,
 }
 
+/// What is written for transform property `p` (`kind`) of a layer: its value or keys in the
+/// stored unit and its expression; `None` when it is at After Effects' default and has neither.
 fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, cp: &CompPlan, col: &mut Collector) -> Option<PropPlan> {
     let PropAt { comp, comp_name, layer, source, text, null } = at;
     // A text layer's anchor is stored in pixels, with the origin as its default (385).

@@ -159,6 +159,7 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
     Doc { width, height, root, skipped }
 }
 
+/// Page `index` of a PDF framed as `framing` says, as a document in points (y down).
 fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);

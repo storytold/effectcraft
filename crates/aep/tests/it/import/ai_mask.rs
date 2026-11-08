@@ -19,6 +19,7 @@ use crate::import::helpers::comp;
 
 const AI_MASK: &[u8] = include_bytes!("../../fixtures/ai-mask-3099.aep");
 
+/// The fixture imported into an empty project (losses allowed, no footage file present).
 fn load() -> (Project, effectcraft_aep::import::ImportResult) {
     let mut project = Project::default();
     let none = |_: &str| false;
@@ -26,15 +27,18 @@ fn load() -> (Project, effectcraft_aep::import::ImportResult) {
     (project, r)
 }
 
+/// The first two components of the static value of property `path` of `l`.
 fn vec2(l: &Layer, path: &str) -> [f64; 2] {
     let v = l.props.prop(path).unwrap_or_else(|| panic!("{}: {path}", l.name)).value.as_vec2();
     [v[0], v[1]]
 }
 
+/// `a` and `b` agree within float32 noise.
 fn near(a: [f64; 2], b: [f64; 2]) -> bool {
     (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
 }
 
+/// The four `.ai` items have After Effects' sizes and are placed pages.
 #[test]
 fn placed_ai_sizes_are_after_effects_sizes() {
     let (p, _) = load();
@@ -62,6 +66,8 @@ fn placed_ai_sizes_are_after_effects_sizes() {
     );
 }
 
+/// Parents, transforms (the default null anchor at `[0, 0]`) and both masks of each art layer
+/// as After Effects read them back.
 #[test]
 fn masks_anchors_and_parents_are_after_effects_values() {
     let (p, r) = load();

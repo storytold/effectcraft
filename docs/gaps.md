@@ -270,7 +270,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
   clipped to the crop box, `/Rotate` ignored) and drawn to fill the size After Effects stored
   (#3099), measured with hand-written PDFs named `.ai`. Not yet measured: files saved by
   Illustrator itself (artboards, bleed, art past the artboard, private data), a CropBox without
-  an ArtBox, and `.pdf` names.
+  an ArtBox, `.pdf` names, and EPS files (they keep their bounding box at their own size, not
+  the placed framing).
 - Done when: the decision is recorded and, if approved, a corpus of real-world-shaped projects
   opens with its comps, layers, keyframes, effects and expressions intact.
 

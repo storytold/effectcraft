@@ -176,6 +176,8 @@ fn psd_layer(s: &Session, path: &str, l: &SourceLayer) -> Option<(u32, Option<(u
     Some((u32::try_from(found.index).ok()?, size))
 }
 
+/// The pixel size of vector footage `f` as its file is now (its page, framing and layer), or
+/// `None` when the file cannot be read or shows nothing.
 fn vector_size(s: &Session, f: &Footage) -> Option<(u32, u32)> {
     let bytes = s.services.read_file(&f.path).ok()?;
     let doc = crate::vector::footage_doc(f, &bytes)?.ok()?;
