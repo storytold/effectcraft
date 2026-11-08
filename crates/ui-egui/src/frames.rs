@@ -707,15 +707,36 @@ struct DiskCarry {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_DISK_SERIES: usize = 8;
 
+/// Threads per lane (see [`Queue::lanes`]). A frame's passes are memory-bound and stop scaling
+/// at about 4 threads, so a core per lane (12 frames at once, each on one thread) and 4 cores
+/// per lane cache frames at the same rate (within 3 %, widths 1–4 measured on 12 cores); but the
+/// 12 single-threaded frames start and finish together, so a preview that can't keep up shows
+/// them in bursts, and its second frame waits for the whole batch (0.3–1.3 s). Three lanes of
+/// four threads finish frames 3× as often and the second frame shows in 0.13–0.45 s.
+/// Never fewer than two lanes: one would finish frames in a single file.
+const LANE_WIDTH: usize = 4;
+
 impl Default for Frames {
     fn default() -> Self {
+        Self::with_lane_width(LANE_WIDTH)
+    }
+}
+
+impl Frames {
+    /// A frame cache whose lanes are `width` threads each (see [`LANE_WIDTH`]); `Default` uses
+    /// [`LANE_WIDTH`], benchmarks compare widths.
+    pub fn with_lane_width(width: usize) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = width;
         #[cfg(not(target_arch = "wasm32"))]
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
         #[cfg(not(target_arch = "wasm32"))]
-        let lanes: Vec<rayon::ThreadPool> = (0..threads)
+        let width = width.clamp(1, (threads / 2).max(1));
+        #[cfg(not(target_arch = "wasm32"))]
+        let lanes: Vec<rayon::ThreadPool> = (0..(threads / width).max(1))
             .map_while(|i| {
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(1)
+                    .num_threads(width)
                     .thread_name(move |_| format!("ec-preview-{i}"))
                     .panic_handler(|_| log::error!("a frame render panicked; that frame was skipped"))
                     .build()
@@ -764,6 +785,15 @@ impl Default for Frames {
             #[cfg(not(target_arch = "wasm32"))]
             disk_series: Arc::default(),
         }
+    }
+
+    /// How many frames render at once on the lanes (a playing preview's prefetch, Cache Frames
+    /// When Idle); in the browser, the frame workers.
+    pub fn lanes(&self) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        return self.remote_slots().max(1);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.queue.lock().map_or(1, |q| q.lanes.max(1))
     }
 }
 

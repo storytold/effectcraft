@@ -549,13 +549,10 @@ impl EffectcraftApp {
         side(comp.width) * side(comp.height) * frames::frame_pixel_bytes(&self.session.project.settings) as f64
     }
 
+    /// Frames rendered at once by a preview or idle caching: the lanes (in the browser the frame
+    /// workers; without them frames render one at a time on the UI thread, `Frames::pump`).
     fn frames_parallelism(&self) -> usize {
-        if cfg!(target_arch = "wasm32") {
-            // frame workers render one frame each; without them frames render one at a time
-            // on the UI thread (`Frames::pump`)
-            return self.frames.remote_slots().max(1);
-        }
-        self.frames.parallelism()
+        self.frames.lanes()
     }
 }
 

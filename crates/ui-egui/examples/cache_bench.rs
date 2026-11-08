@@ -10,8 +10,8 @@
 //!
 //! Options: `--project P --comp C` (a saved project's comp instead), `--scale S` (render scale,
 //! default 0.5: a viewer at half size), `--frames N` (frames to cache, default the whole comp),
-//! `--slots N` (frames in flight, at least 1, default one per frame thread as the app does when
-//! idle),
+//! `--slots N` (frames in flight, at least 1, default one per lane as the app does when idle),
+//! `--lane-width W` (threads per lane; the app's default when absent; `--play` takes it too),
 //! `--disk` (with a fresh disk cache in `target/cache-bench/disk`), `--no-adjustment`,
 //! `--gpu` (composite on a GPU of its own, as the desktop app does with Mercury GPU Acceleration:
 //! the GPU or the CPU, whichever Auto measures faster per comp, read back to the CPU; the viewer's
@@ -35,6 +35,11 @@ use serde_json::{Value, json};
 fn arg(name: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
     a.iter().position(|x| x == name).and_then(|i| a.get(i + 1).cloned())
+}
+
+/// `--lane-width W`: threads per frame lane (the app's default when absent).
+fn lane_width() -> Option<usize> {
+    arg("--lane-width").and_then(|v| v.parse().ok())
 }
 
 fn run(s: &mut Session, cmd: &str, p: Value) -> Value {
@@ -130,9 +135,9 @@ fn main() {
     let n = arg("--frames").and_then(|v| v.parse().ok()).unwrap_or(total).min(total);
     let scale: f64 = arg("--scale").and_then(|v| v.parse().ok()).unwrap_or(0.5);
 
-    let frames = Frames::default();
-    // (as Cache Frames When Idle: one frame per frame thread, see `app/prefetch.rs`)
-    let slots: usize = arg("--slots").and_then(|v| v.parse().ok()).map(|n: usize| n.max(1)).unwrap_or(frames.parallelism().max(1));
+    let frames = lane_width().map_or_else(Frames::default, Frames::with_lane_width);
+    // (as Cache Frames When Idle: one frame per lane, see `app/prefetch.rs`)
+    let slots: usize = arg("--slots").and_then(|v| v.parse().ok()).map(|n: usize| n.max(1)).unwrap_or(frames.lanes());
     // Room for every frame: this measures speed, not eviction.
     frames.set_budget(64 << 30);
     use effectcraft_engine::render::Backend;
@@ -168,9 +173,10 @@ fn main() {
     };
 
     eprintln!(
-        "caching {n} frames of {}×{} at scale {scale} with {slots} in flight{}…",
+        "caching {n} frames of {}×{} at scale {scale} with {slots} in flight on {} lanes{}…",
         comp.width,
         comp.height,
+        frames.lanes(),
         if src.gpu.is_some() { " on the GPU" } else { "" }
     );
     let (gop0, t0) = (effectcraft_media::gop_stats(), Instant::now());
@@ -224,6 +230,9 @@ fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool)
     let mut h = builder.build_eframe(move |_| EffectcraftApp::new(session).with_control(rx));
     {
         let app = h.state_mut();
+        if let Some(w) = lane_width() {
+            app.frames = effectcraft_ui_egui::frames::Frames::with_lane_width(w);
+        }
         let _ = app.session.execute("comp.open", json!({"comp": cid.0}));
         app.ui.viewer.zoom = Some(1.0);
         app.ui.cache_when_idle = false;
@@ -242,6 +251,10 @@ fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool)
     let _ = tx.send(ControlRequest { method: "ui.playback".into(), params: json!({"action": "play"}), reply });
     let t0 = Instant::now();
     let (mut started, mut stalled, mut last, mut scales) = (None, 0.0, t0, std::collections::BTreeMap::<u32, u64>::new());
+    // When each new frame went on screen (seconds since play was pressed): the cadence. The
+    // current time, not `Playback::shown`: frames shown while the clock holds don't count there.
+    let fr = h.state().session.project.comp(cid).map(|c| c.frame_rate);
+    let (mut shown_at, mut last_frame) = (Vec::<f64>::new(), None);
     while t0.elapsed().as_secs_f64() < secs {
         h.step();
         let now = Instant::now();
@@ -252,19 +265,50 @@ fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool)
                 stalled += (now - last).as_secs_f64();
             }
         }
+        let frame = fr.map(|fr| fr.frame_at(app.session.time()));
+        if app.playback.playing && frame != last_frame {
+            last_frame = frame;
+            shown_at.push((now - t0).as_secs_f64());
+        }
         *scales.entry(app.shown_series(cid).scale).or_default() += 1;
         last = now;
         std::thread::sleep(Duration::from_millis(2));
     }
     let app = h.state();
     let played = started.map_or(0.0, |t| t.elapsed().as_secs_f64());
-    let shown = app.playback.shown;
-    let fr = app.session.project.comp(cid).map(|c| c.frame_rate);
+    let shown = shown_at.len();
     let frame = fr.map_or(0, |fr| fr.frame_at(app.session.time()));
     println!(
         "played            {shown} frames shown in {played:.2} s: {:.1} frames/s, stalled {stalled:.2} s, reached frame {frame}{}",
         shown as f64 / played.max(1e-9),
         if gpu { " (GPU)" } else { "" }
+    );
+    // Cadence: how evenly the frames went on screen (the intervals between consecutive shown
+    // frames after the first), and how long the first two took.
+    let mut gaps: Vec<f64> = shown_at.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_by(f64::total_cmp);
+    let at = |q: f64| gaps.get(((gaps.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0) * 1000.0;
+    let holds = gaps.iter().filter(|g| **g > 0.2).count();
+    println!(
+        "cadence           first frame {:.2} s, second {:.2} s; gaps median {:.0} ms, p95 {:.0} ms, max {:.0} ms, {holds} holds > 200 ms",
+        shown_at.first().copied().unwrap_or(0.0),
+        shown_at.get(1).copied().unwrap_or(0.0),
+        at(0.5),
+        at(0.95),
+        at(1.0)
+    );
+    // The opening (the first 3 s, before an adaptive step down can have taken effect): how
+    // evenly the uncached frames at the starting resolution went on screen.
+    let mut early: Vec<f64> = shown_at.windows(2).filter(|w| w[1] <= 3.0).map(|w| w[1] - w[0]).collect();
+    early.sort_by(f64::total_cmp);
+    let at = |q: f64| early.get(((early.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0) * 1000.0;
+    println!(
+        "opening (3 s)     {} frames; gaps median {:.0} ms, p95 {:.0} ms, max {:.0} ms, {} holds > 200 ms",
+        early.len() + usize::from(!early.is_empty()),
+        at(0.5),
+        at(0.95),
+        at(1.0),
+        early.iter().filter(|g| **g > 0.2).count()
     );
     let passes: u64 = scales.values().sum();
     let s: Vec<String> = scales.iter().map(|(k, v)| format!("{:.3}: {:.0} %", *k as f64 / 1000.0, 100.0 * *v as f64 / passes.max(1) as f64)).collect();
