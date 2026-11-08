@@ -96,6 +96,13 @@ impl ExrIndex {
         }
     }
 
+    /// Every channel but the picture's (what [`crate::exr_planes`] means by all channels: the
+    /// picture is kept converted, by the media pool, not as planes too).
+    pub(crate) fn aux_ids(&self) -> Vec<usize> {
+        let picture = self.picture_ids().unwrap_or_default();
+        (0..self.channels.len()).filter(|i| !picture.contains(i)).collect()
+    }
+
     /// The channels named `names` (exact plane names, each once, in file order).
     pub(crate) fn ids_named<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<usize> {
         let names: std::collections::HashSet<&str> = names.into_iter().collect();

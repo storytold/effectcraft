@@ -43,6 +43,22 @@ const READS_AUX: [&str; 8] = [
     "ec.3d.identifier",
 ];
 
+/// The parameters that pick which channels or which Cryptomatte layer an effect reads. They
+/// can't be animated (no stopwatch, no keyframes, no expression), as in After Effects: the
+/// channels a frame needs are known before it renders, from these values alone (#3271).
+const CHANNEL_PARAMS: [(&str, &[&str]); 5] = [
+    ("ec.3d.channelextract", &["channel"]),
+    ("ec.3d.cryptomatte", &["layer", "layerName"]),
+    ("ec.3d.extractor", &["red", "green", "blue", "alpha"]),
+    ("ec.3d.idmatte", &["auxChannel", "useCoverage"]),
+    ("ec.3d.identifier", &["channelType"]),
+];
+
+/// Does parameter `param` of effect `effect` pick the channels it reads ([`CHANNEL_PARAMS`])?
+pub fn selects_channels(effect: &str, param: &str) -> bool {
+    CHANNEL_PARAMS.iter().any(|(e, ps)| *e == effect && ps.contains(&param))
+}
+
 /// Does effect `id` read its layer's auxiliary channels ([`crate::EffectHost::aux`])? The media
 /// layer then decodes the footage's picture together with its channels (#474).
 pub fn reads_aux(id: &str) -> bool {
@@ -82,10 +98,22 @@ pub fn aux_needs(id: &str, params: &crate::Params) -> Option<Vec<AuxLookup>> {
         "ec.3d.cryptomatte" => vec![AuxLookup::Crypto { name: params.s("layerName").to_string(), index: params.e("layer") as usize }],
         // (an empty name reads the layer's own channel)
         "ec.3d.extractor" => {
-            ["red", "green", "blue", "alpha"].iter().map(|k| params.s(k).trim()).filter(|n| !n.is_empty()).map(|n| AuxLookup::Name(n.to_string())).collect()
+            // (`(copy)` reads the input's own channel, no footage channel)
+            ["red", "green", "blue", "alpha"]
+                .iter()
+                .map(|k| params.s(k).trim())
+                .filter(|n| !n.is_empty() && !is_extractor_copy(n))
+                .map(|n| AuxLookup::Name(n.to_string()))
+                .collect()
         }
         _ => return None,
     })
+}
+
+/// [`aux_needs`] as an [`AuxNeed`]: what effect `id` reads, nothing for an effect that reads no
+/// channels (every effect that does declares its lookups; a test holds them to it).
+pub fn aux_need(id: &str, params: &crate::Params) -> effectcraft_raster::channels3d::AuxNeed {
+    effectcraft_raster::channels3d::AuxNeed::Lookups(aux_needs(id, params).unwrap_or_default())
 }
 
 /// How far effect `id` with `params` reaches around a pixel of its layer (layer pixels), for
@@ -614,6 +642,39 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- EXtractoR
 
+/// EXtractoR's channel name for After Effects' `(copy)`: the effect input's own channel of the
+/// same position (red's red ... alpha's alpha), as the earlier effects left it, never a footage
+/// channel of some name (an OpenEXR's `A` is the file's alpha, not the input's).
+pub const EXTRACTOR_COPY: &str = "(copy)";
+
+/// Whether an EXtractoR channel name is [`EXTRACTOR_COPY`].
+pub fn is_extractor_copy(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(EXTRACTOR_COPY)
+}
+
+/// The layer's own channel an EXtractoR output channel at position `k` reads when no footage
+/// channel of that name exists: `R`/`G`/`B`/`A` (or the long names) by name, [`EXTRACTOR_COPY`]
+/// its own position.
+pub fn extractor_own_channel(k: usize, name: &str) -> Option<usize> {
+    if is_extractor_copy(name) {
+        return (k < 4).then_some(k);
+    }
+    match name.trim().to_ascii_uppercase().as_str() {
+        "R" | "RED" => Some(0),
+        "G" | "GREEN" => Some(1),
+        "B" | "BLUE" => Some(2),
+        "A" | "ALPHA" => Some(3),
+        _ => None,
+    }
+}
+
+/// The footage channel an EXtractoR output channel reads by name: none for an empty name or
+/// [`EXTRACTOR_COPY`] (the input's own channel).
+pub fn extractor_aux_channel<'a>(a: &'a AuxChannels, name: &str) -> Option<&'a [f32]> {
+    let n = name.trim();
+    if n.is_empty() || is_extractor_copy(n) { None } else { a.get(n) }
+}
+
 fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let a = aux(ctx);
     let names = [ctx.params.s("red"), ctx.params.s("green"), ctx.params.s("blue"), ctx.params.s("alpha")];
@@ -621,17 +682,11 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let unmult = ctx.params.b("unMult");
     let clip = ctx.params.b("clip");
     let idx = a.as_ref().map(|a| index_map(&b, a));
-    // Each output channel: an aux channel by name, or the layer's own R/G/B/A.
-    let own = |n: &str| match n.trim().to_ascii_uppercase().as_str() {
-        "R" | "RED" => Some(0),
-        "G" | "GREEN" => Some(1),
-        "B" | "BLUE" => Some(2),
-        "A" | "ALPHA" => Some(3),
-        "" => None,
-        _ => None,
-    };
-    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| if n.trim().is_empty() { None } else { a.get(n.trim()) })).collect();
-    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(n) == Some(k)) {
+    // Each output channel: an aux channel by name, or the layer's own R/G/B/A (`(copy)`: its
+    // own position, never an aux channel).
+    let own = |k: usize, n: &str| extractor_own_channel(k, n);
+    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| extractor_aux_channel(a, n))).collect();
+    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(k, n) == Some(k)) {
         return b;
     }
     let src = b.img.clone();
@@ -647,7 +702,7 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
             o[k] = match (src_ch[k], idx.as_ref().and_then(|m| m[i])) {
                 (Some(ch), Some(j)) => ch[j],
                 (Some(_), None) => 0.0,
-                (None, _) => match own(names[k]) {
+                (None, _) => match own(k, names[k]) {
                     Some(c) => straight[c],
                     None => {
                         if k == 3 {
@@ -793,3 +848,17 @@ pub fn specs() -> Vec<EffectSpec> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod aux_need_tests {
+    /// #3271: every effect that reads its layer's channels says which (else a frame would read
+    /// all of them, or none).
+    #[test]
+    fn every_channel_effect_declares_what_it_reads() {
+        for id in super::READS_AUX {
+            let spec = crate::find(id).expect("an effect");
+            let params = crate::Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            assert!(super::aux_needs(id, &params).is_some(), "{id}");
+        }
+    }
+}

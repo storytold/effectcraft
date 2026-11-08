@@ -271,7 +271,7 @@ fn concurrent_requests_decode_a_file_once() {
             .map(|_| {
                 s.spawn(|| {
                     barrier.wait();
-                    store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other).unwrap()
+                    store.get(path, &source, &index, &Want { all: true, ids: (0..4).collect() }, Use::Other).unwrap()
                 })
             })
             .collect();
@@ -311,7 +311,7 @@ fn the_store_evicts_least_recently_used_by_bytes() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(2 * one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -350,7 +350,7 @@ fn a_decode_thread_finishing_late_does_not_pin_the_planes() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(2 * one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -397,7 +397,7 @@ fn a_file_forgotten_while_it_decodes_is_not_kept() {
             })),
         );
     }
-    let got = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other);
+    let got = store.get(path, &source, &index, &Want { all: true, ids: (0..4).collect() }, Use::Other);
     set_before_read(path, None);
     assert!(got.is_ok());
     assert_eq!(decodes_of(path).len(), 2, "decoded again after the reload");
@@ -414,7 +414,7 @@ fn a_request_after_forget_does_not_join_the_old_decode() {
     let source = ExrSource::Bytes(bytes);
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let calls = Arc::new(AtomicU64::new(0));
     let (tx, rx) = std::sync::mpsc::channel();
     {
@@ -460,7 +460,7 @@ fn forgetting_another_file_keeps_a_decode_in_flight() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
     let (a, b) = ("/3271-forget-other-a.exr", "/3271-forget-other-b.exr");
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let source = ExrSource::Bytes(bytes);
     let index = crate::exr_index::get(a, &source).unwrap();
     // B is in the store first.
@@ -502,7 +502,7 @@ fn a_pictures_planes_are_held_for_its_effects() {
     let source = ExrSource::Bytes(bytes);
     let store = PlaneStore::new(1);
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     drop(store.get(path, &source, &index, &all, Use::Picture).unwrap());
     assert!(store.is_held(path));
     drop(store.get(path, &source, &index, &all, Use::Other).unwrap());
@@ -527,14 +527,14 @@ fn given_aux_footage_decodes_once_from_the_first_frame() {
     pool.set_aux_footage(&[given.to_string()]);
     take_decodes();
     pool.frame_at(&f[given], Tick::ZERO).unwrap();
-    assert!(pool.aux(ItemId(1), &f[given], Tick::ZERO).unwrap().get("diffuse.R").is_some());
+    assert!(pool.aux_for(ItemId(1), &f[given], Tick::ZERO, &AuxNeed::All).unwrap().get("diffuse.R").is_some());
     assert_eq!(take_decodes(), [0, 1], "the picture and the channels share one decode");
     pool.frame_at(&f[learned], Tick::ZERO).unwrap();
-    pool.aux(ItemId(2), &f[learned], Tick::ZERO).unwrap();
+    pool.aux_for(ItemId(2), &f[learned], Tick::ZERO, &AuxNeed::All).unwrap();
     assert_eq!(take_decodes(), [0, 2]);
     let d = decodes_of(learned);
     assert_eq!(d[0].channels.len(), 4, "the picture alone");
-    assert_eq!(d[1].channels.len(), crate::exr_index::cached(learned).unwrap().channels.len(), "all: a picture read alone isn't kept twice");
+    assert_eq!(d[1].channels.len(), crate::exr_index::cached(learned).unwrap().aux_ids().len(), "all but the picture: a picture read alone isn't kept twice");
 }
 
 /// #474: the picture made of the planes of a file with exact R, G, B channels is the `image`
@@ -576,7 +576,7 @@ fn picture_from_planes_is_the_image_crates() {
 #[test]
 fn a_decode_that_panics_is_not_left_in_the_store() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     for (k, inline) in [false, true].into_iter().enumerate() {
         let path = format!("/3271-panics-{k}.exr");
         let source = ExrSource::Bytes(bytes.clone());
@@ -620,7 +620,7 @@ fn a_file_is_used_as_of_its_decode() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = Arc::new(PlaneStore::new(2 * one));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = {
         let (store, bytes, all) = (store.clone(), bytes.clone(), all.clone());
         move |p: &str| {
@@ -656,7 +656,7 @@ fn concurrent_frames_decode_each_file_once() {
     let rgbz = [("R", false), ("G", false), ("B", false), ("Z", false)];
     let bytes: Arc<[u8]> = write(vec![part(None, &rgbz, (64, 64), Compression::ZIP1)], (64, 64)).into();
     let store = PlaneStore::new(4 * (64 * 64 * 4 + 1));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let (next, frames) = (std::sync::atomic::AtomicUsize::new(0), 24);
     std::thread::scope(|s| {
         for _ in 0..4 {
@@ -708,8 +708,8 @@ fn a_new_aux_footage_set_returns_to_picture_only() {
     pool.set_aux_footage(&[]);
     assert!(!shared().is_held(&paths[0]), "no longer kept once no effect reads it");
     assert_eq!(frame(1), Some(4), "no longer given: the picture alone");
-    // Learned by `aux()`, then a new set without it: picture only again.
-    pool.aux(ItemId(1), &f, at(1)).unwrap();
+    // Learned by `aux_for()`, then a new set without it: picture only again.
+    pool.aux_for(ItemId(1), &f, at(1), &AuxNeed::All).unwrap();
     assert_eq!(frame(2), Some(all), "learned");
     pool.set_aux_footage(&[]);
     assert_eq!(frame(3), Some(4), "a new set drops what was learned");
@@ -769,7 +769,7 @@ fn a_failed_request_fails_only_requests_as_large() {
     let store = PlaneStore::new(CACHE_BUDGET);
     let index = crate::exr_index::get(path, &source).unwrap();
     let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let held = store.get(path, &source, &index, &picture, Use::Picture).unwrap();
     assert_eq!(store.get(path, &source, &index, &all, Use::Other).err(), Some(Refused::Unreadable));
     assert!(Arc::ptr_eq(&store.get(path, &source, &index, &picture, Use::Other).unwrap(), &held), "served from the store");
@@ -804,7 +804,7 @@ fn a_picture_too_large_with_its_channels_is_read_alone() {
 fn the_store_keeps_a_bounded_number_of_files() {
     let bytes: Arc<[u8]> = write(vec![part(None, &[("R", true)], (2, 2), Compression::ZIP1)], (2, 2)).into();
     let store = PlaneStore::new(CACHE_BUDGET);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     for i in 0..CACHE_FILES + 10 {
         let path = format!("/3271-many/{i}.exr");
         let source = ExrSource::Bytes(bytes.clone());
@@ -994,7 +994,7 @@ fn a_decode_thread_takes_over_a_queued_decode() {
     let source = ExrSource::Bytes(bytes);
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let threads = crate::pool::decode_threads().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     // When the asker queues its decode: a decode thread asks for the same planes.
@@ -1045,7 +1045,7 @@ fn the_plane_store_is_trimmed_by_the_accountant() {
     }
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str, by: Use| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -1250,7 +1250,7 @@ fn trimming_for_bytes_keeps_remembered_failures() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let mut broken = bytes.to_vec();
     broken.truncate(broken.len() - 64);
     let broken = ExrSource::Bytes(broken.into());
@@ -1266,4 +1266,148 @@ fn trimming_for_bytes_keeps_remembered_failures() {
     assert_eq!(store.cached(), [path], "the planes went, the failure stays");
     assert!(store.get(path, &broken, &index, &all, Use::Other).is_err());
     assert_eq!(decodes_of(path).len(), 1, "not read again");
+}
+
+/// #3271 (user test): the decoded planes have no budget of their own; the plane store follows
+/// the footage frames' cap (#3298: the whole common budget on the desktop). A cap of 10000 MB
+/// lets the plane store hold far more than 1 GB, and a change resizes it at once.
+#[test]
+fn the_footage_budget_sizes_the_plane_store() {
+    use effectcraft_render::FootageSource;
+    let pool = crate::MediaPool::new();
+    pool.set_cache_budget(10_000 << 20);
+    assert_eq!(super::budget(), 10_000 << 20);
+    assert!(super::budget() > 1 << 30, "more than the old fixed 1 GB");
+    pool.set_cache_budget(3_000 << 20);
+    assert_eq!(super::budget(), 3_000 << 20, "resized at run time");
+    // (back to the default for the tests beside it)
+    pool.set_cache_budget(CACHE_BUDGET);
+}
+
+/// #3271 (user decision): the footage frames and the decoded planes have one least-recently-used
+/// order: filling the frame cache drops the oldest plane sets, filling the plane store drops the
+/// oldest frames; neither side has a share of its own. (#3298: they share the one budget with
+/// every cache, and the accountant orders by value; at the same cost per byte, as here, that is
+/// least recently used first.)
+#[test]
+fn frames_and_planes_make_room_for_each_other() {
+    use effectcraft_render::memory::{Accountant, Candidate, MemoryHolder};
+    struct Planes(Arc<PlaneStore>);
+    impl MemoryHolder for Planes {
+        fn name(&self) -> &'static str {
+            "planes"
+        }
+        fn bytes(&self) -> usize {
+            self.0.lock().entries.iter().map(|e| e.bytes).sum()
+        }
+        fn oldest(&self) -> Option<Candidate> {
+            self.0.oldest_candidate()
+        }
+        fn drop_oldest(&self) -> usize {
+            self.0.drop_candidate()
+        }
+    }
+    /// A holder whose items all cost the same per byte (decode times vary from run to run).
+    struct SameCost(Arc<dyn MemoryHolder>);
+    impl MemoryHolder for SameCost {
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+        fn bytes(&self) -> usize {
+            self.0.bytes()
+        }
+        fn oldest(&self) -> Option<Candidate> {
+            self.0.oldest().map(|c| Candidate { cost_us: c.bytes as u64, ..c })
+        }
+        fn drop_oldest(&self) -> usize {
+            self.0.drop_oldest()
+        }
+    }
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let one = 4 * (32 * 32 * 4 + 1);
+    let budget = 5 * one;
+    let store = Arc::new(PlaneStore::new(budget));
+    let pool = crate::MediaPool::with_budget(budget);
+    let acc = Accountant::new(budget);
+    let holders: Vec<Arc<dyn MemoryHolder>> = vec![Arc::new(SameCost(Arc::new(Planes(store.clone())))), Arc::new(SameCost(pool.memory_holder()))];
+    for h in &holders {
+        acc.register(h);
+    }
+    let all = Want { all: true, ids: (0..4).collect() };
+    let planes = |p: &str| {
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(p, &source).unwrap();
+        drop(store.get(p, &source, &index, &all, Use::Other).unwrap());
+    };
+    // Plane sets first, then frames: the frames push the oldest plane sets out.
+    planes("/3271-share-p1.exr");
+    planes("/3271-share-p2.exr");
+    planes("/3271-share-p3.exr");
+    for f in ["/f1", "/f2", "/f3"] {
+        pool.keep_test_frame(f, 32, 32);
+        acc.balance();
+    }
+    assert_eq!(pool.test_frames(), ["/f1", "/f2", "/f3"], "the frames stay");
+    assert!(!store.cached().contains(&"/3271-share-p1.exr".to_string()), "the oldest plane set went: {:?}", store.cached());
+    assert!(store.cached().contains(&"/3271-share-p3.exr".to_string()));
+    // Now plane sets: they push the oldest frames out.
+    for p in ["/3271-share-p4.exr", "/3271-share-p5.exr", "/3271-share-p6.exr"] {
+        planes(p);
+        acc.balance();
+    }
+    let frames = pool.test_frames();
+    assert!(!frames.contains(&"/f1".to_string()), "the oldest frame went: {frames:?}");
+    assert!(store.cached().contains(&"/3271-share-p6.exr".to_string()), "the newest plane set stays");
+    assert!(acc.total() <= budget, "{} of {budget}", acc.total());
+}
+
+/// #3271 (rule: picture channels are never kept twice): once the picture is converted (the
+/// media pool keeps it), its R, G, B, A planes leave the plane store; the channels the effects
+/// read stay, and a picture channel an effect names itself (EXtractoR reading "R") stays too.
+#[test]
+fn the_picture_planes_are_not_kept_beside_the_picture() {
+    let bytes: Arc<[u8]> =
+        write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false), ("N", false)], (16, 8), Compression::ZIP1)], (16, 8)).into();
+    let source = ExrSource::Bytes(bytes);
+    let op = crate::convert::AlphaOp::of(&Footage::default(), FloatCurve::Linear);
+    let plane = 16 * 8 * 4;
+    for (path, need, kept) in [
+        ("/3271-slim-aux.exr", AuxNeed::Lookups(vec![AuxLookup::Name("Z".into())]), vec!["Z"]),
+        ("/3271-slim-named.exr", AuxNeed::Lookups(vec![AuxLookup::Name("Z".into()), AuxLookup::Name("R".into())]), vec!["R", "Z"]),
+        ("/3271-slim-all.exr", AuxNeed::All, vec!["N", "Z"]),
+    ] {
+        let Picture::Done(Ok(_)) = picture(path, &source, op, Some(&need)) else { panic!("{path}: a picture") };
+        let (names, bytes) = shared().kept(path).expect("the effects' channels are kept");
+        assert_eq!(names, kept, "{path}");
+        assert_eq!(bytes, kept.iter().map(|n| n.len() + plane).sum::<usize>(), "{path}");
+        forget(path);
+    }
+    // The picture alone keeps nothing.
+    let path = "/3271-slim-none.exr";
+    let Picture::Done(Ok(_)) = picture(path, &source, op, None) else { panic!("a picture") };
+    assert!(shared().kept(path).is_none());
+    forget(path);
+}
+
+/// #3271 review (#3301): a remembered failure belongs to the file as it was. A file that was
+/// unreadable and is then replaced on disk (no Reload Footage: the new index comes from its new
+/// stamp) is read again, not refused with the old file's failure.
+#[test]
+fn a_failure_is_forgotten_once_the_file_changes() {
+    let good: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let mut broken = good.to_vec();
+    broken.truncate(broken.len() - 64);
+    let path = "/3271-failed-then-fixed.exr";
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let all = Want { all: true, ids: (0..4).collect() };
+    let source = ExrSource::Bytes(broken.into());
+    let old = crate::exr_index::get(path, &source).unwrap();
+    assert!(store.get(path, &source, &old, &all, Use::Other).is_err());
+    assert!(store.get(path, &source, &old, &all, Use::Other).is_err(), "remembered for the same file");
+    // The file is replaced: another index (here read under another name, as the file's new stamp
+    // would give it).
+    let source = ExrSource::Bytes(good);
+    let new = crate::exr_index::get("/3271-failed-then-fixed-new.exr", &source).unwrap();
+    assert!(!Arc::ptr_eq(&old, &new));
+    assert!(store.get(path, &source, &new, &all, Use::Other).is_ok(), "the new file is read");
 }

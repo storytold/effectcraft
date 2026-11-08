@@ -457,6 +457,38 @@ fn extractor_maps_named_channels() {
     assert_eq!(s.img.get(0, 0), [1.0, 0.3, 0.4, 1.0]);
 }
 
+/// `(copy)` (After Effects' EXtractoR choice, imported from .aep) is the effect input's own
+/// channel as earlier effects left it, never the OpenEXR's plane of the same name: here the input
+/// buffer differs from the footage's R, G, B and A planes, as after an earlier effect.
+#[test]
+fn extractor_copy_reads_the_current_input_not_the_footage_plane() {
+    let (w, h) = (4usize, 3usize);
+    let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
+    // The file's own planes (what the footage held before any effect) and a depth channel.
+    a.channels = ["R", "G", "B", "A"].iter().map(|n| (n.to_string(), vec![0.9; w * h])).collect();
+    a.channels.push(("Z".into(), vec![0.7; w * h]));
+    let host = AuxHost(Arc::new(a));
+    let env = || EffectEnv { host: Some(&host), ..Default::default() };
+    // The input after an earlier effect: straight (0.2, 0.3, 0.4) at alpha 0.5, premultiplied.
+    let input = Image::filled(w as u32, h as u32, [0.1, 0.15, 0.2, 0.5]);
+    let copy = || Value::Str(EXTRACTOR_COPY.into());
+    // All four `(copy)`: the input unchanged.
+    let all = [("red", copy()), ("green", copy()), ("blue", copy()), ("alpha", copy())];
+    let o = run_fx("ec.3d.extractor", &all, input.clone(), 0.0, env()).img;
+    assert_eq!(o.data, input.data);
+    // Mixed with a named channel (no pass-through): red from Z, green and alpha copied, blue the
+    // footage's B plane.
+    let vals = [("red", Value::Str("Z".into())), ("green", copy()), ("blue", Value::Str("B".into())), ("alpha", copy())];
+    let px = run_fx("ec.3d.extractor", &vals, input.clone(), 0.0, env()).img.get(1, 1);
+    let want = [0.7 * 0.5, 0.3 * 0.5, 0.9 * 0.5, 0.5];
+    for (c, (got, want)) in px.iter().zip(want).enumerate() {
+        assert!((got - want).abs() < 1e-6, "channel {c}: {got} != {want} ({px:?})");
+    }
+    // `A` by name is the footage's alpha plane (0.9), not the input's alpha (0.5).
+    let named = [("alpha", Value::Str("A".into())), ("red", Value::Str("Z".into()))];
+    assert!((run_fx("ec.3d.extractor", &named, input, 0.0, env()).img.get(1, 1)[3] - 0.9).abs() < 1e-6);
+}
+
 #[test]
 fn channel_extract_antialias_averages_sub_pixels() {
     // Depth at twice the layer resolution, alternating 0 / 1000 per aux column.

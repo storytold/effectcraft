@@ -16,10 +16,12 @@
 //! - **Nothing made before a Reload is kept or served** ([`forget`]): a decode that started
 //!   before the file was forgotten keeps nothing, and the requests waiting for it ask again.
 //! - Kept by the memory accountant (#3298): least recently used offered first, each entry worth
-//!   what decoding it took. In the browser, and while the accountant has no budget, also bounded
-//!   by bytes ([`CACHE_BUDGET`], [`UNMANAGED_BUDGET`]); there the newest entry stays even when it
-//!   alone is over. Entries in use (planes an effect holds, a decode in progress, the last
-//!   pictures' planes kept for their effects, [`HELD_FILES`]) are never dropped, by either.
+//!   what decoding it took. Also bounded by bytes by itself ([`CACHE_BUDGET`] until the caches'
+//!   budget is set, then the footage frames' cap, [`set_budget`]: the whole budget on the
+//!   desktop, at most [`crate::exr_channels::WEB_CACHE_CAP`] in the browser); there the newest
+//!   entry stays even when it alone is over. Entries in use (planes an effect holds, a decode in
+//!   progress, the last pictures' planes kept for their effects, [`HELD_FILES`]) are never
+//!   dropped, by either.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -35,10 +37,6 @@ use crate::exr_channels::CACHE_BUDGET;
 use crate::exr_channels::{Rgb, planes_picture};
 use crate::exr_index::{self, ExrIndex, IndexError};
 use crate::exr_read::{ExrSource, Opened, ReadError, ReadRequest, read_planes};
-
-/// What the store holds at most while the memory accountant has no budget (a session that never
-/// set one): the planes' own budget before they shared one with the other caches.
-const UNMANAGED_BUDGET: usize = 1 << 30;
 
 /// At most this many entries are kept (unreadable files hold no bytes).
 const CACHE_FILES: usize = 64;
@@ -89,7 +87,8 @@ pub(crate) struct Batch {
     pub(crate) index: Arc<ExrIndex>,
     /// The channels held, in file order (parallel to `aux.channels`).
     pub(crate) ids: Vec<usize>,
-    /// Every channel of the file.
+    /// Every channel of the file but the picture's ([`ExrIndex::aux_ids`]; the picture's may be
+    /// there too).
     pub(crate) all: bool,
     pub(crate) aux: Arc<AuxChannels>,
     /// The file as read.
@@ -110,14 +109,15 @@ impl Batch {
 
     /// It holds what `want` asks of the file `index` describes.
     fn covers(&self, index: &Arc<ExrIndex>, want: &Want) -> bool {
-        Arc::ptr_eq(&self.index, index) && (self.all || (!want.all && want.ids.iter().all(|id| self.ids.binary_search(id).is_ok())))
+        Arc::ptr_eq(&self.index, index) && (self.all || !want.all) && want.ids.iter().all(|id| self.ids.binary_search(id).is_ok())
     }
 }
 
 /// The channels a request asks for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Want {
-    /// Every channel.
+    /// Every channel but the picture's ([`ExrIndex::aux_ids`]): the picture's planes are asked
+    /// for by name (`ids`).
     pub(crate) all: bool,
     pub(crate) ids: BTreeSet<usize>,
 }
@@ -269,14 +269,13 @@ struct Entry {
     path: String,
     batch: Option<Arc<Batch>>,
     flight: Option<Arc<Flight>>,
-    /// Requests that failed for good (unreadable, too large) and why: a request asking for at
+    /// Requests that failed for good (unreadable, too large), the index they were made with, and
+    /// why: a request of that index (the file as it was) asking for at
     /// least as much fails the same way until the file is forgotten.
-    failed: Vec<(Want, Refused)>,
+    failed: Vec<(Arc<ExrIndex>, Want, Refused)>,
     bytes: usize,
-    /// When it was last asked for or finished decoding (a counter).
+    /// When it was last asked for or finished decoding ([`effectcraft_render::memory::tick`]).
     used: u64,
-    /// The same, for the memory accountant ([`effectcraft_render::memory::tick`]).
-    stamp: u64,
     /// What decoding its planes took, in microseconds (0: not decoded yet).
     cost_us: u64,
 }
@@ -290,7 +289,6 @@ impl Entry {
 
 struct State {
     entries: Vec<Entry>,
-    clock: u64,
     /// Pictures' planes kept for their effects, oldest first (at most [`HELD_FILES`]).
     held: VecDeque<(String, Arc<Batch>)>,
 }
@@ -326,7 +324,8 @@ impl Drop for Owning<'_> {
 /// Decoded planes by file, bounded by bytes.
 pub(crate) struct PlaneStore {
     state: Mutex<State>,
-    budget: usize,
+    /// Bytes it keeps at most ([`set_budget`]).
+    budget: std::sync::atomic::AtomicUsize,
 }
 
 thread_local! {
@@ -442,7 +441,17 @@ fn cap_of(path: &str) -> usize {
 
 impl PlaneStore {
     pub(crate) const fn new(budget: usize) -> PlaneStore {
-        PlaneStore { state: Mutex::new(State { entries: Vec::new(), clock: 0, held: VecDeque::new() }), budget }
+        PlaneStore { state: Mutex::new(State { entries: Vec::new(), held: VecDeque::new() }), budget: std::sync::atomic::AtomicUsize::new(budget) }
+    }
+
+    fn budget(&self) -> usize {
+        self.budget.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Keep at most `bytes` from now on, dropping the oldest entries not in use at once.
+    pub(crate) fn set_budget(&self, bytes: usize) {
+        self.budget.store(bytes, std::sync::atomic::Ordering::Relaxed);
+        Self::drop_oldest(&mut self.lock(), bytes, CACHE_FILES, None);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -488,18 +497,17 @@ impl PlaneStore {
     #[allow(clippy::too_many_arguments)]
     fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use, opened: &mut Option<Opened>, since: u64) -> Step {
         let mut st = self.lock();
-        st.clock += 1;
-        let clock = st.clock;
+        // (shared with the footage frames: one least-recently-used order across both)
+        let clock = effectcraft_render::memory::tick();
         let at = match st.entries.iter().position(|e| e.path == path) {
             Some(i) => i,
             None => {
-                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock, stamp: 0, cost_us: 0 });
+                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock, cost_us: 0 });
                 st.entries.len() - 1
             }
         };
         let Some(e) = st.entries.get_mut(at) else { return Step::Done(Err(Refused::Unreadable)) };
         e.used = clock;
-        e.stamp = effectcraft_render::memory::tick();
         // What the store holds first: a failure of a larger request doesn't hide it.
         if let Some(b) = e.batch.clone().filter(|b| b.covers(index, want)) {
             Self::hold(&mut st, path, &b, by);
@@ -507,7 +515,8 @@ impl PlaneStore {
             crate::reads::note(b.file.clone());
             return Step::Done(Ok(b));
         }
-        if let Some((_, why)) = e.failed.iter().find(|(failed, _)| asks_at_least(want, failed)) {
+        // (a failure of the file as it was before: the file changed since, it is read again)
+        if let Some((_, _, why)) = e.failed.iter().find(|(of, failed, _)| Arc::ptr_eq(of, index) && asks_at_least(want, failed)) {
             return Step::Done(Err(why.clone()));
         }
         if let Some(flight) = e.flight.clone() {
@@ -559,13 +568,52 @@ impl PlaneStore {
         }
     }
 
-    /// Stop keeping the planes `b` of `path` (a picture alone, converted: the pool keeps the
-    /// picture, the planes would be a second copy of it).
-    pub(crate) fn release(&self, path: &str, b: &Arc<Batch>) {
+    /// Keep only the channels `keep` of the planes `b` of `path` (a picture converted: the pool
+    /// keeps the picture, its planes would be a second copy of it); nothing when none is left.
+    /// The set is trimmed in place when nobody else holds it, else the kept planes are copied.
+    pub(crate) fn keep_only(&self, path: &str, b: Arc<Batch>, keep: &BTreeSet<usize>) {
+        if b.ids.iter().all(|id| keep.contains(id)) {
+            return;
+        }
         let mut st = self.lock();
-        if let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.batch.as_ref().is_some_and(|k| Arc::ptr_eq(k, b))) {
+        let Some(at) = st.entries.iter().position(|e| e.path == path && e.batch.as_ref().is_some_and(|k| Arc::ptr_eq(k, &b))) else { return };
+        let held = st.held.iter().any(|(p, h)| p == path && Arc::ptr_eq(h, &b));
+        // (taken out of the entry and the held list: then this is likely the only holder)
+        if let Some(e) = st.entries.get_mut(at) {
             e.batch = None;
             e.bytes = 0;
+        }
+        st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, &b)));
+        let slim = match Arc::try_unwrap(b) {
+            Ok(mut owned) => {
+                let mut aux = Arc::try_unwrap(owned.aux).unwrap_or_else(|shared| AuxChannels::clone(&shared));
+                let channels = std::mem::take(&mut aux.channels);
+                aux.channels = owned.ids.iter().zip(channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c).collect();
+                owned.ids.retain(|id| keep.contains(id));
+                aux.listed = owned.index.channels.iter().map(|c| c.name.clone()).collect();
+                owned.aux = Arc::new(aux);
+                owned
+            }
+            Err(shared) => {
+                let mut aux = AuxChannels::new(shared.aux.width, shared.aux.height, shared.aux.scale);
+                aux.manifests = shared.aux.manifests.clone();
+                aux.aliases = shared.aux.aliases.clone();
+                aux.listed = shared.index.channels.iter().map(|c| c.name.clone()).collect();
+                aux.channels = shared.ids.iter().zip(&shared.aux.channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c.clone()).collect();
+                let ids = shared.ids.iter().copied().filter(|id| keep.contains(id)).collect();
+                Batch { index: shared.index.clone(), ids, all: shared.all, aux: Arc::new(aux), file: shared.file.clone() }
+            }
+        };
+        if slim.ids.is_empty() {
+            return;
+        }
+        let slim = Arc::new(slim);
+        if let Some(e) = st.entries.get_mut(at) {
+            e.bytes = slim.bytes();
+            e.batch = Some(slim.clone());
+        }
+        if held {
+            st.held.push_back((path.to_string(), slim));
         }
     }
 
@@ -590,8 +638,8 @@ impl PlaneStore {
     /// Also the bytes the store grew by (for the memory accountant).
     fn finish(&self, path: &str, flight: &Arc<Flight>, outcome: Result<Arc<Batch>, Refused>) -> (Result<Arc<Batch>, Refused>, usize) {
         let mut st = self.lock();
-        st.clock += 1;
-        let clock = st.clock;
+        // (shared with the footage frames: one least-recently-used order across both)
+        let clock = effectcraft_render::memory::tick();
         let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.flight.as_ref().is_some_and(|f| Arc::ptr_eq(f, flight))) else {
             let outcome = match outcome {
                 Err(e @ (Refused::Cancelled | Refused::Stopped)) => Err(e),
@@ -601,23 +649,27 @@ impl PlaneStore {
         };
         e.flight = None;
         e.used = clock;
-        e.stamp = effectcraft_render::memory::tick();
         let had = e.bytes;
         match &outcome {
             Ok(b) => {
                 e.bytes = b.bytes();
                 e.batch = Some(b.clone());
-                let took = e.stamp.saturating_sub(flight.asked).max(1);
+                let took = clock.saturating_sub(flight.asked).max(1);
                 // A decode adding channels to what was held: both decodes made the planes; one
                 // that read them all anew replaces what was held, and its cost.
                 e.cost_us = if flight.base.is_some() { e.cost_us.saturating_add(took) } else { took };
             }
             Err(why @ (Refused::Unreadable | Refused::TooLarge(_))) => {
-                let want = flight.state().want.clone();
+                let (index, want) = {
+                    let fs = flight.state();
+                    (fs.index.clone(), fs.want.clone())
+                };
+                // (failures of another version of the file no longer apply)
+                e.failed.retain(|(of, _, _)| Arc::ptr_eq(of, &index));
                 if e.failed.len() >= FAILED_KEPT {
                     e.failed.remove(0);
                 }
-                e.failed.push((want, why.clone()));
+                e.failed.push((index, want, why.clone()));
             }
             // (the file changed: what is held is of the old one)
             Err(Refused::Changed) => {
@@ -628,15 +680,8 @@ impl PlaneStore {
             Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped) => {}
         }
         let grown = st.entries.iter().find(|e| e.path == path).map_or(0, |e| e.bytes.saturating_sub(had));
-        Self::drop_oldest(&mut st, self.own_budget(), CACHE_FILES, Some(path));
+        Self::drop_oldest(&mut st, self.budget(), CACHE_FILES, Some(path));
         (outcome, grown)
-    }
-
-    /// The most it holds by itself: its budget ([`CACHE_BUDGET`]), and while nothing keeps the
-    /// caches within a common budget (the memory accountant has none, #3298 review)
-    /// [`UNMANAGED_BUDGET`].
-    fn own_budget(&self) -> usize {
-        if effectcraft_render::memory::Accountant::global().budget() == usize::MAX { self.budget.min(UNMANAGED_BUDGET) } else { self.budget }
     }
 
     /// Drop least recently used entries until the rest take at most `bytes` in at most `files`
@@ -674,7 +719,7 @@ impl PlaneStore {
         let e = st.entries.get(Self::oldest_droppable(&st, None, false)?)?;
         let cost_us =
             if e.cost_us > 0 { e.cost_us } else { effectcraft_render::memory::default_cost(e.bytes, effectcraft_render::memory::DEFAULT_PLANE_US_PER_MB) };
-        Some(effectcraft_render::memory::Candidate { used: e.stamp, bytes: e.bytes, cost_us })
+        Some(effectcraft_render::memory::Candidate { used: e.used, bytes: e.bytes, cost_us })
     }
 
     /// Drop [`PlaneStore::oldest_candidate`]; the bytes freed.
@@ -729,6 +774,15 @@ impl PlaneStore {
     /// Stop keeping the last pictures' planes for their effects.
     pub(crate) fn release_held(&self) {
         self.lock().held.clear();
+    }
+
+    /// The channels kept of `path` and their bytes (tests).
+    #[cfg(test)]
+    pub(crate) fn kept(&self, path: &str) -> Option<(Vec<String>, usize)> {
+        let st = self.lock();
+        let e = st.entries.iter().find(|e| e.path == path)?;
+        let b = e.batch.as_ref()?;
+        Some((b.aux.channels.iter().map(|(n, _)| n.clone()).collect(), e.bytes))
     }
 
     #[cfg(test)]
@@ -869,8 +923,12 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         fs.sealed = true;
         fs.want.clone()
     };
-    let wanted: Vec<usize> =
-        if want.all { (0..index.channels.len()).collect() } else { want.ids.iter().copied().filter(|i| *i < index.channels.len()).collect() };
+    let wanted: Vec<usize> = if want.all {
+        index.aux_ids().into_iter().chain(want.ids.iter().copied()).collect::<BTreeSet<usize>>().into_iter().collect()
+    } else {
+        want.ids.iter().copied().collect()
+    };
+    let wanted: Vec<usize> = wanted.into_iter().filter(|i| *i < index.channels.len()).collect();
     let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
     let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
     let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
@@ -934,11 +992,11 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     }
     new.sort_by_key(|(id, _)| *id);
     new.dedup_by_key(|(id, _)| *id);
-    let all = new.len() == index.channels.len();
+    let all = index.aux_ids().iter().all(|id| new.binary_search_by_key(id, |(i, _)| *i).is_ok());
     let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
     aux.manifests = index.names.manifests.clone();
     aux.aliases = index.names.aliases.clone();
-    if !all {
+    if new.len() != index.channels.len() {
         aux.listed = index.channels.iter().map(|c| c.name.clone()).collect();
     }
     let ids: Vec<usize> = new.iter().map(|(id, _)| *id).collect();
@@ -1032,6 +1090,20 @@ impl effectcraft_render::memory::MemoryHolder for SharedStore {
     }
 }
 
+/// The most the shared plane store keeps by itself, the footage frames' cap (#3298: the whole
+/// common budget on the desktop; in the browser at most [`crate::exr_channels::WEB_CACHE_CAP`]).
+/// The memory accountant keeps the planes within the common budget with the other caches.
+pub(crate) fn set_budget(bytes: usize) {
+    let bytes = if cfg!(target_arch = "wasm32") { bytes.min(crate::exr_channels::WEB_CACHE_CAP) } else { bytes };
+    store().set_budget(bytes);
+}
+
+/// The bytes the shared plane store keeps at most.
+#[cfg(test)]
+pub(crate) fn budget() -> usize {
+    STORE.budget()
+}
+
 /// Is `path` an OpenEXR file by name (the store reads those; other files, and files named so
 /// that aren't OpenEXR, go the `image` crate's way).
 pub(crate) fn is_exr(path: &str) -> bool {
@@ -1090,9 +1162,13 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
         };
         let img = picture_of(&index, &batch, op);
-        // A picture read alone is kept by the pool once converted, not twice.
-        if extra.is_none() && !batch.all && batch.ids.len() == want.ids.len() {
-            store().release(path, &batch);
+        // The picture is kept by the pool once converted, not twice: its planes go, but for those
+        // an effect names (EXtractoR reading "R").
+        if img.is_some() {
+            let named = extra.and_then(|n| need_ids(&index, n)).unwrap_or_default();
+            let picture: BTreeSet<usize> = index.picture_ids().unwrap_or_default().into_iter().filter(|id| !named.contains(id)).collect();
+            let keep: BTreeSet<usize> = batch.ids.iter().copied().filter(|id| !picture.contains(id)).collect();
+            store().keep_only(path, batch, &keep);
         }
         return match img {
             Some(img) => Picture::Done(Ok(img)),
@@ -1176,13 +1252,28 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
 /// The channels `need` reads of the OpenEXR at `path` (all for [`AuxNeed::All`]), from the
 /// store. `None` when it isn't a readable OpenEXR (or the request was called off).
 pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<AuxChannels>> {
+    aux_of(path, source, need, false)
+}
+
+/// Every channel of the OpenEXR at `path`, the picture's too ([`FootageSource::aux`]: no render
+/// asks for that; a render asks for what its effects read, [`aux`]).
+///
+/// [`FootageSource::aux`]: effectcraft_render::FootageSource::aux
+pub(crate) fn every_channel(path: &str, source: &ExrSource) -> Option<Arc<AuxChannels>> {
+    aux_of(path, source, &AuxNeed::All, true)
+}
+
+fn aux_of(path: &str, source: &ExrSource, need: &AuxNeed, with_picture: bool) -> Option<Arc<AuxChannels>> {
     for _ in 0..2 {
         let since = drop_generation();
         let (index, opened) = exr_index::get_opened(path, source).ok()?;
-        let want = match need_ids(&index, need) {
+        let mut want = match need_ids(&index, need) {
             Some(ids) => Want { all: false, ids },
             None => Want { all: true, ids: BTreeSet::new() },
         };
+        if with_picture {
+            want.ids.extend(index.picture_ids().unwrap_or_default());
+        }
         match store().get_opened(path, source, &index, &want, Use::Other, opened, since) {
             Ok(b) => return Some(b.aux.clone()),
             Err(Refused::Changed) => continue,

@@ -253,8 +253,8 @@ impl<'a> Renderer<'a> {
     }
 
     /// What the enabled effects of `layer` read of its auxiliary channels at the context time
-    /// ([`effectcraft_effects::aux_needs`], #3271): the union of their lookups, or all channels
-    /// when one doesn't say (or none reads them).
+    /// ([`effectcraft_effects::aux_needs`], #3271): the union of their lookups (none when no
+    /// effect reads them).
     pub fn layer_aux_need(&self, ctx: &EvalCtx, layer: &Layer) -> effectcraft_raster::channels3d::AuxNeed {
         use effectcraft_raster::channels3d::AuxNeed;
         let mut need: Option<AuxNeed> = None;
@@ -264,13 +264,13 @@ impl<'a> Renderer<'a> {
                 continue;
             }
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-            let one = effectcraft_effects::aux_needs(effect, &params).map_or(AuxNeed::All, AuxNeed::Lookups);
+            let one = effectcraft_effects::aux_need(effect, &params);
             need = Some(match need {
                 Some(n) => n.union(one),
                 None => one,
             });
         }
-        need.unwrap_or_default()
+        need.unwrap_or(AuxNeed::Lookups(vec![]))
     }
 
     /// Evaluation context of comp `comp_id` at comp time `t`.

@@ -51,12 +51,21 @@ pub fn default_cost(bytes: usize, us_per_mb: u64) -> u64 {
     mb.max(1).saturating_mul(us_per_mb)
 }
 
-/// The use stamp holders give their items: microseconds since the process's first stamp
-/// (monotonic; two uses may share one).
+/// The use stamp holders give their items: microseconds since the process's first stamp, and
+/// later uses get larger stamps (two uses never tie: holders may key their order by it).
 pub fn tick() -> u64 {
     static START: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let start = START.get_or_init(web_time::Instant::now);
-    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+    let now = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last.saturating_add(1));
+        match LAST.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
 }
 
 /// Inserts balance at most this often ([`Accountant::note_growth`])…
