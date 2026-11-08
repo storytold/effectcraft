@@ -28,9 +28,9 @@ use crate::{EvalCtx, ExprHost, FootageSource};
 const MAX_DEPTH: usize = 16;
 
 /// Fastest a layer's audio plays (source samples per comp sample): 1 % stretch, the smallest
-/// Time Stretch accepts. A faster layer (a stretch below 1 %, only from a damaged or foreign
-/// file) is silent instead of reading unbounded source: a last-resort guard, imports clamp
-/// such stretches.
+/// Time Stretch accepts. The mix plays the clamped stretch (`Layer::effective_stretch`, #3247),
+/// so a layer is never faster; a faster speed would be silent instead of reading unbounded
+/// source: a last-resort guard.
 const MAX_SPEED: f64 = 100.0;
 
 /// Most source sample frames one read asks a footage item or precomp for; a longer read is made
@@ -176,10 +176,12 @@ impl MixEnv<'_> {
         if a >= b {
             return out;
         }
-        let speed = 100.0 / l.stretch;
+        // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
+        // usize::MAX source samples for one block. A negative stretch plays backwards (#3239).
+        let speed = 100.0 / l.effective_stretch();
         let aspeed = speed.abs();
-        // A zero or non-finite stretch never gets here (see `mix_into`); NaN is checked anyway.
-        // The tolerance keeps exactly 1 % audible whatever the float noise in the stretch.
+        // The clamped stretch keeps the speed within MAX_SPEED; NaN is checked anyway. The
+        // tolerance keeps exactly 1 % audible whatever the float noise in the stretch.
         if aspeed.is_nan() || aspeed > MAX_SPEED * (1.0 + 1e-9) {
             return out;
         }
@@ -357,8 +359,9 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
-        // A zero or non-finite stretch has no layer time to play; a negative one plays backwards.
-        if !audible(project, l) || (any_solo && !l.switches.solo) || l.stretch == 0.0 || !l.stretch.is_finite() {
+        // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`;
+        // a negative one plays backwards (#3239).
+        if !audible(project, l) || (any_solo && !l.switches.solo) {
             continue;
         }
         // Sample range of the block that falls inside the layer's [in, out).

@@ -715,3 +715,90 @@ fn range_bar_drag_values() {
     assert_eq!(range_value_of(3.6 / 7.0, 0.0, true, 7), 4.0);
     assert_eq!(range_value_of(3.6 / 7.0, 2.0 / 7.0, true, 7), 2.0, "less a 2-character Offset");
 }
+
+/// Text names the font files it is drawn with (#3184), with their identity as they were read, so
+/// a cache entry of it is checked against them; what the files can't vouch for (a family that
+/// isn't installed) leaves the list incomplete.
+#[test]
+fn text_notes_the_font_files_it_draws_with() {
+    use crate::reads::{FileStamp, ReadLog};
+    use effectcraft_text::fonts::{self, FaceData, FaceInfo, FontSource};
+    struct OneFile(std::path::PathBuf);
+    impl FontSource for OneFile {
+        fn faces(&self) -> Vec<FaceInfo> {
+            vec![FaceInfo {
+                family: "Reads Test Sans".into(),
+                style: "Regular".into(),
+                weight: 400,
+                italic: false,
+                index: 0,
+                data: FaceData::File(self.0.clone()),
+                origin: "system",
+                native_family: None,
+                full_name: "Reads Test Sans Regular".into(),
+                postscript: None,
+                variable: false,
+                instances: vec![],
+            }]
+        }
+    }
+    // (a fresh directory, removed when the test ends, panicking or not)
+    let dir = tempfile::tempdir().unwrap();
+    let font = dir.path().join("reads-test-sans.ttf");
+    std::fs::write(&font, fonts::INTER_REGULAR).unwrap();
+    fonts::add_source(&OneFile(font.clone()));
+    let stamp = FileStamp::native(&font.to_string_lossy()).unwrap();
+    // (`value`: a Character Value animator puts that character in for every one)
+    let files_with = |family: &str, value: Option<char>| {
+        let (mut p, cid, comp) = setup(200, 80);
+        let mut l =
+            text_layer(&mut p, &comp, TextDoc { text: "Hi there\rtwo".into(), font: family.into(), style: "Regular".into(), size: 30.0, ..Default::default() });
+        if let Some(c) = value {
+            animator(&mut p, &mut l, &["characterValue"], &["range"]);
+            set(&mut l, "text/animators/#1/properties/characterValue", Value::Scalar(c as u32 as f64));
+        }
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let log = ReadLog::new();
+        let c = EvalCtx { reads: Some(&log), ..ctx(&p, cid, 0.0) };
+        assert!(text_geom(&c, &p.comp(cid).unwrap().layers[0]).is_some());
+        log.into_files()
+    };
+    let files_of = |family: &str| files_with(family, None);
+    let files = files_of("Reads Test Sans");
+    assert!(files.is_complete(), "{files:?}");
+    assert_eq!(files.files().len(), 1, "{files:?}");
+    assert_eq!(files.get(&font.to_string_lossy()), Some(stamp));
+    // The bundled family reads no file.
+    let files = files_of(effectcraft_text::fonts::DEFAULT_FAMILY);
+    assert!(files.is_complete() && files.is_empty(), "{files:?}");
+    // A family that isn't installed falls back: installing it would change the text.
+    assert!(!files_of("No Such Family 3184").is_complete());
+    // A substituted character the face has is drawn with it: the same one file.
+    let files = files_with("Reads Test Sans", Some('B'));
+    assert!(files.is_complete(), "{files:?}");
+    assert_eq!(files.get(&font.to_string_lossy()), Some(stamp));
+    // One it lacks (Inter has no CJK) is drawn with a fallback face, or none: another installed
+    // font could take it, so the list can't vouch for the text.
+    assert!(!files_with("Reads Test Sans", Some('\u{4e2d}')).is_complete());
+    // An empty first paragraph in the face draws no glyph, but in a box its face sets the first
+    // baseline that places the lines after it: the file is read all the same.
+    let (mut p, cid, comp) = setup(200, 80);
+    let base = TextDoc {
+        text: "\rHi".into(),
+        font: fonts::DEFAULT_FAMILY.into(),
+        style: "Regular".into(),
+        size: 30.0,
+        box_size: Some([180.0, 60.0]),
+        ..Default::default()
+    };
+    let first = effectcraft_keyframe::CharStyle { font: "Reads Test Sans".into(), ..base.base_style() };
+    let runs = vec![effectcraft_keyframe::StyleRun { len: 1, style: first }, effectcraft_keyframe::StyleRun { len: 2, style: base.base_style() }];
+    let l = text_layer(&mut p, &comp, TextDoc { runs, ..base });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let log = ReadLog::new();
+    let c = EvalCtx { reads: Some(&log), ..ctx(&p, cid, 0.0) };
+    assert!(text_geom(&c, &p.comp(cid).unwrap().layers[0]).is_some());
+    let files = log.into_files();
+    assert!(files.is_complete(), "{files:?}");
+    assert_eq!(files.get(&font.to_string_lossy()), Some(stamp), "{files:?}");
+}

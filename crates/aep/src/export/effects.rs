@@ -461,7 +461,7 @@ fn plan_layer_param(layer: &Layer, g: &PropGroup, target: &str, own: bool, prop:
 fn plan_extra(spec: &EffectMap, g: &PropGroup, pdefs: &HashMap<u16, ParDef>, here: &str, col: &mut Collector) -> Option<(u16, Vec<u8>)> {
     let ids: &[&str] = match spec.extra {
         // (the Cryptomatte plug-in's settings are its own binary layout: not written, reported below)
-        Extra::None | Extra::Curves | Extra::MeshWarp | Extra::Cryptomatte => return None,
+        Extra::None | Extra::Curves | Extra::MeshWarp | Extra::Lumetri | Extra::Cryptomatte | Extra::Extractor | Extra::Identifier => return None,
         Extra::HueSaturation => &HUE_SATURATION_MASTER,
         Extra::Levels => &LEVELS_RGB,
     };
@@ -643,7 +643,9 @@ fn report_unmapped(g: &PropGroup, (effect, spec): (&str, &EffectMap), size: (f64
     // effect was added at is not known here.
     let (fresh, other) = (fresh([size.0, size.1], &mut next), fresh([size.0 * 2.0 + 7.0, size.1 * 3.0 + 5.0], &mut next));
     let extra: &[&str] = match spec.extra {
-        Extra::None | Extra::Cryptomatte => &[],
+        // Lumetri Color, EXtractoR and IDentifier have no prototype to write from, so they never
+        // get this far (they are reported).
+        Extra::None | Extra::Lumetri | Extra::Cryptomatte | Extra::Extractor | Extra::Identifier => &[],
         Extra::HueSaturation => &HUE_SATURATION_MASTER,
         Extra::Levels => &LEVELS_RGB,
         Extra::Curves => &["channel", "rgb", "red", "green", "blue", "alpha"],
