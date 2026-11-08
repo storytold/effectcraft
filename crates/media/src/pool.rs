@@ -1103,6 +1103,13 @@ impl Inner {
         self.frame_at_rows(footage, t, playback, size, float, None)
     }
 
+    /// Whether a request for some rows of `footage` at `t` reads only those: an OpenEXR frame
+    /// (not a movie) whose channels no effect reads.
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        let loc = Self::locate(footage, t, FloatCurve::Srgb);
+        loc.media_t.is_none() && crate::exr_planes::is_exr(&loc.key.path) && lock(&self.aux_footage).plan(&footage.path).is_none()
+    }
+
     /// [`Inner::frame_at`] of only the rows `rows` of an OpenEXR frame whose channels no effect
     /// reads (#3271; others are read whole).
     fn frame_at_rows(
@@ -1119,7 +1126,7 @@ impl Inner {
         }
         let mut loc = Self::locate(footage, t, float);
         let movie = loc.media_t.is_some();
-        loc.key.rows = rows.filter(|_| !movie && crate::exr_planes::is_exr(&loc.key.path) && lock(&self.aux_footage).plan(&footage.path).is_none());
+        loc.key.rows = rows.filter(|_| self.reads_rows(footage, t));
         // A still asked for at its own size is the unsized frame (one decode, one entry).
         if let Some(size) = size.filter(|s| movie || *s != (footage.width, footage.height)) {
             loc.key.size = size;
@@ -1572,6 +1579,11 @@ impl FootageSource for MediaPool {
             return None;
         }
         Inner::frame_at_rows(&self.inner, footage, t, true, size, float, Some(rows)).ok()
+    }
+    /// Only an OpenEXR frame whose channels no effect reads is read by rows (others whole, see
+    /// [`Inner::frame_at_rows`]).
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        !footage.missing && self.inner.reads_rows(footage, t)
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {

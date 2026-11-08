@@ -962,7 +962,8 @@ impl<'a> Renderer<'a> {
             return None;
         }
         let fx_margin = effects_margin(ctx, layer)?;
-        if comp_reads_pixels(ctx) {
+        // (a source that reads whole frames anyway: the whole frame, which the layer cache keeps)
+        if comp_reads_pixels(ctx) || !self.footage.reads_rows(f, ctx.source_time(layer)) {
             return None;
         }
         let inv = ctx.world_matrix(layer).inverse()?;

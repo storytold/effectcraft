@@ -385,6 +385,10 @@ impl FootageSource for ConfinedFootage {
     fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_rows(item, footage, t, size, float, rows)).flatten()
     }
+    /// Whether the inner source reads only the rows asked for (footage outside the roots: no).
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        self.readable(footage) && self.inner.reads_rows(footage, t)
+    }
     /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
         self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
