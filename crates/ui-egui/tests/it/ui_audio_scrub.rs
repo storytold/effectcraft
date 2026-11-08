@@ -269,6 +269,84 @@ fn preview_with_audio_sounds_without_caching_the_work_area() {
     assert!((1..900).contains(&cached), "it started with {cached} of the 900 frames cached, not the whole work area");
 }
 
+/// Pretend the silent preview showed its last ten frames in real time, up to now: the next step
+/// then finds it keeping up (`Playback::keeps_up`), however long steps take on the test host.
+fn kept_up(h: &mut Harness<'_, EffectcraftApp>) {
+    let now = h.state().now();
+    h.state_mut().playback.shown_at = (0..10i32).map(|i| now - f64::from(9 - i) / 30.0).collect();
+}
+
+/// Frames `from..from + n`.
+fn run(from: i64, n: i64) -> Vec<i64> {
+    (from..from + n).collect()
+}
+
+/// A preview that renders just below real time (#2473, #3260): once a stall stopped the sound,
+/// `ahead` cached frames were enough to start it again while the silent preview kept up, so it
+/// ran out of them, stopped and started again every few frames, which played as distortion.
+/// After each stall the sound waits for twice as many cached frames ahead.
+#[test]
+fn each_stall_doubles_the_frames_ahead_the_sound_waits_for() {
+    let fake = Fake::default();
+    let (mut app, cid) = setup_long(true, &fake, 30.0);
+    let gate = GatedFrames::default();
+    let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
+    app.frames.set_remote(Some(renderer));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+    h.state_mut().use_manual_clock();
+    h.run_steps(2);
+    gate.discard(&mut h);
+    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
+    let now = h.state().now();
+    h.state_mut().play(now);
+    gate.render(&mut h, cid, &run(0, ahead));
+    step(&mut h);
+    assert!(h.state().audio.is_some(), "the sound started");
+    assert_eq!(h.state().playback.stalls, 0);
+
+    // A stall stops the sound.
+    gate.discard(&mut h);
+    h.state().frames.clear();
+    h.step();
+    assert!(h.state().audio.is_none() && h.state().playback.audio_held, "a stall stops the sound");
+    assert_eq!(h.state().playback.stalls, 1);
+    // One and a half times `ahead` cached while it keeps up: that used to start the sound again.
+    let at = frame(&h, cid);
+    gate.render(&mut h, cid, &run(at, ahead + ahead / 2));
+    kept_up(&mut h);
+    step(&mut h);
+    assert!(h.state().audio.is_none(), "after one stall, {} frames ahead are not enough", ahead + ahead / 2);
+    // Twice `ahead` are.
+    let at = frame(&h, cid);
+    gate.render(&mut h, cid, &run(at, 3 * ahead));
+    kept_up(&mut h);
+    step(&mut h);
+    assert!(h.state().audio.is_some(), "after one stall, {} frames ahead start the sound", 3 * ahead);
+
+    // A second stall: now three times `ahead` are not enough, and five times are.
+    gate.discard(&mut h);
+    h.state().frames.clear();
+    h.step();
+    assert!(h.state().audio.is_none() && h.state().playback.audio_held);
+    assert_eq!(h.state().playback.stalls, 2);
+    let at = frame(&h, cid);
+    gate.render(&mut h, cid, &run(at, 3 * ahead));
+    kept_up(&mut h);
+    step(&mut h);
+    assert!(h.state().audio.is_none(), "after two stalls, {} frames ahead are not enough", 3 * ahead);
+    let at = frame(&h, cid);
+    gate.render(&mut h, cid, &run(at, 5 * ahead));
+    kept_up(&mut h);
+    step(&mut h);
+    assert!(h.state().audio.is_some(), "after two stalls, {} frames ahead start the sound", 5 * ahead);
+
+    // A new preview starts counting again.
+    h.state_mut().stop();
+    let now = h.state().now();
+    h.state_mut().play(now);
+    assert_eq!(h.state().playback.stalls, 0);
+}
+
 /// Pull `frames` stereo frames from the output, waiting for the feeder thread to mix them.
 fn pull(feed: &AudioFeed, frames: usize) -> Vec<f32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
