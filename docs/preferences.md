@@ -157,7 +157,7 @@ Commands (CLI, MCP, control channel):
   `disk.networkFootageLocations`: OpenEXR footage on network shares is copied, one file at a
   time on a background thread, to a local folder (by default beside the disk cache's folder),
   and read from the copy once it is complete and the source still has the size and modification
-  time it had when copied. Network footage is UNC paths (`\server\share\…`) and the locations
+  time it had when copied. Network footage is UNC paths (`\\server\share\…`) and the locations
   listed in `disk.networkFootageLocations` (`;`-separated path prefixes, such as a drive letter
   mapped to a share: `P:\`). The copies take at most `disk.localizeMaxGb` and leave the disk
   cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
