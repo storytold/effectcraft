@@ -338,6 +338,29 @@ impl Cache {
     }
 }
 
+/// The preview frames (in RAM; GPU frames have their own budget) in the common memory budget
+/// (#3271): what the user looks at, freed last.
+struct PreviewMemory(Arc<Mutex<Cache>>);
+
+impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
+    fn name(&self) -> &'static str {
+        "preview frames"
+    }
+    fn bytes(&self) -> usize {
+        self.0.lock().map(|c| c.bytes.saturating_sub(c.gpu_bytes)).unwrap_or(0)
+    }
+    fn priority(&self) -> u8 {
+        3
+    }
+    fn trim_to(&self, bytes: usize) {
+        let Ok(mut c) = self.0.lock() else { return };
+        while c.bytes.saturating_sub(c.gpu_bytes) > bytes {
+            let Some(old) = c.victim().and_then(|i| c.order.remove(i)) else { break };
+            c.remove(&old);
+        }
+    }
+}
+
 /// What a render job needs (all cheap clones).
 #[derive(Clone)]
 pub struct RenderSource {
@@ -556,6 +579,8 @@ pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
 
 pub struct Frames {
     cache: Arc<Mutex<Cache>>,
+    /// The preview frames in the common memory budget (#3271), held here (registered weakly).
+    _memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder>,
     /// Keys queued or rendering.
     inflight: Arc<Mutex<HashSet<FrameKey>>>,
     /// Pending jobs, picked by priority when a pool thread frees up (the viewer's frame first).
@@ -642,8 +667,23 @@ impl Default for Frames {
         let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), ..Default::default() };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
+        let cache = Arc::new(Mutex::new(Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            gpu_bytes: 0,
+            budget: 3 << 30,
+            gpu_budget: GPU_BUDGET,
+            gpu_pressure: None,
+            gpu_adjusted: None,
+            playhead: None,
+            scale: None,
+        }));
+        let memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder> = Arc::new(PreviewMemory(cache.clone()));
+        effectcraft_engine::render::memory::Accountant::global().register(&memory);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache,
+            _memory: memory,
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
