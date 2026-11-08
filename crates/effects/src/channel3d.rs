@@ -88,6 +88,20 @@ pub fn aux_needs(id: &str, params: &crate::Params) -> Option<Vec<AuxLookup>> {
     })
 }
 
+/// How far effect `id` with `params` reaches around a pixel of its layer (layer pixels), for
+/// reading only the footage rows a region of interest shows (#3271): `Some(0)` for effects whose
+/// pixel depends on that pixel alone, `None` for every other (it may read anywhere).
+pub fn pixel_margin(id: &str, params: &crate::Params) -> Option<f64> {
+    match id {
+        "ec.3d.channelextract" | "ec.3d.depthmatte" | "ec.3d.identifier" | "ec.3d.cryptomatte" | "ec.3d.extractor" => Some(0.0),
+        // (its Gradient Layer reads another layer)
+        "ec.3d.fog3d" if params.f("layerContribution") <= 0.0 => Some(0.0),
+        // (Feather blurs the matte)
+        "ec.3d.idmatte" if params.f("feather") <= 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
 fn aux(ctx: &EffectCtx) -> Option<Arc<AuxChannels>> {
     ctx.env.host?.aux()
 }

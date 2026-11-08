@@ -866,7 +866,9 @@ impl<'a> Renderer<'a> {
                 let proxy = self.proxy_for(item);
                 let pf = proxy.unwrap_or(f);
                 let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-                let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+                // Only the rows a viewer region of interest shows of it (#3271).
+                let rows = proxy.is_none().then(|| self.footage_rows(ctx, layer, f)).flatten();
+                let img = self.footage_frame_in(ctx, layer, item, pf, lt, size, rows)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
@@ -933,6 +935,49 @@ impl<'a> Renderer<'a> {
     /// `t` falls between frames (footage rate ≠ comp rate, time stretch, time remapping).
     /// `size`: a plain frame may come resampled to it ([`FootageSource::frame_at_size`]).
     fn footage_frame(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
+        self.footage_frame_in(ctx, layer, item, f, t, size, None)
+    }
+
+    /// The footage rows a top-level region of interest shows of footage layer `layer` (`f`), at
+    /// full resolution, grown by what reaches into them: the layer's resampling (wider at a
+    /// reduced scale) and its effects' declared margins (#3271). `None` (the whole frame) without
+    /// a region, when the rows are all of it, or when anything may read the layer's other pixels:
+    /// a 3D layer, motion blur, frame blending, fields, layer styles, an effect that doesn't
+    /// declare its margin, or anything in the comp that reads layers' pixels (an effect's layer
+    /// parameter, an expression).
+    pub(crate) fn footage_rows(&self, ctx: &EvalCtx, layer: &Layer, f: &Footage) -> Option<(i64, i64)> {
+        let roi = self.opts.roi.filter(|_| self.top)?;
+        if layer.switches.three_d
+            || f.fields != effectcraft_project::FieldOrder::Off
+            || !matches!(f.kind, FootageKind::Still | FootageKind::Sequence)
+            || self.mb_on(ctx, layer)
+            || frame_blend_mode(ctx, layer) != FrameBlend::Off
+            || styles::group(layer).is_some()
+        {
+            return None;
+        }
+        let fx_margin = effects_margin(ctx, layer)?;
+        if comp_reads_pixels(ctx) {
+            return None;
+        }
+        let inv = ctx.world_matrix(layer).inverse()?;
+        let ys: Vec<f64> = [[roi[0], roi[1]], [roi[0] + roi[2], roi[1]], [roi[0], roi[1] + roi[3]], [roi[0] + roi[2], roi[1] + roi[3]]]
+            .iter()
+            .map(|p| inv.apply(effectcraft_geom::vec3(p[0], p[1], 0.0)).y)
+            .collect();
+        let (lo, hi) = ys.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| (lo.min(*y), hi.max(*y)));
+        if !lo.is_finite() || !hi.is_finite() {
+            return None;
+        }
+        let margin = 2.0 + (2.0 / self.opts.scale.max(1e-3)).ceil() + fx_margin.ceil();
+        let h = i64::from(f.height);
+        let (y0, y1) = (((lo - margin).floor() as i64).clamp(0, h), ((hi + margin).ceil() as i64).clamp(0, h));
+        (y0 > 0 || y1 < h).then_some((y0, y1.max(y0)))
+    }
+
+    /// [`Renderer::footage_frame`] of only the rows `rows` (see [`Renderer::footage_rows`]).
+    #[allow(clippy::too_many_arguments)]
+    fn footage_frame_in(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>, rows: Option<(i64, i64)>) -> Option<Arc<Image>> {
         // Interpret Footage ▸ Separate Fields: each field is a frame at twice the rate.
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
@@ -946,7 +991,11 @@ impl<'a> Renderer<'a> {
         // Interpretation is per pixel but not linear: it runs on the frame before resampling.
         let per_pixel = f.invert_alpha || f.linear_light_applies();
         let size = size.filter(|_| !(per_pixel || f.cineon_applies()));
-        let img = self.footage_frame_raw(ctx, layer, item, f, t, size)?;
+        let img = match rows {
+            // (no frame blending, no fields: see `footage_rows`)
+            Some(rows) => self.read(|| self.footage.frame_rows(item, f, t, size, self.pipe.float_curve(f), rows)).map(|img| cineon_frame(img, f))?,
+            None => self.footage_frame_raw(ctx, layer, item, f, t, size)?,
+        };
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
@@ -992,6 +1041,17 @@ impl<'a> Renderer<'a> {
             }
         }
         self.read(|| self.footage.frame_with(item, f, t, size, float)).map(|img| cineon_frame(img, f))
+    }
+
+    /// Is footage layer `layer` read in part ([`Renderer::footage_rows`]).
+    fn reads_footage_rows(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+        let LayerSource::Footage { item } = &layer.source else { return false };
+        let item = ctx.media_item(layer, *item);
+        if self.opts.roi.is_none() || !self.top || self.proxy_for(item).is_some() {
+            return false;
+        }
+        let Some(ItemKind::Footage(f)) = ctx.project.item(item).map(|it| &it.kind) else { return false };
+        self.footage_rows(ctx, layer, f).is_some()
     }
 
     /// Source → masks, clamped/quantised to the project depth.
@@ -1092,6 +1152,9 @@ impl<'a> Renderer<'a> {
         mut timing: Option<&mut LayerTiming>,
     ) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        // A footage layer read in part (a region of interest, #3271) isn't kept: its key names
+        // the whole layer.
+        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let key = self.content_key(ctx, layer, key);
         if let Some((b, files)) = self.cached(key) {
             if let Some(t) = timing.as_deref_mut() {
@@ -1131,4 +1194,31 @@ impl<'a> Renderer<'a> {
         });
         Some(self.keep(key, Arc::new(buf?), &files).0)
     }
+}
+
+/// How far the enabled effects of `layer` reach around a pixel (layer pixels), `None` when one
+/// doesn't declare it (`effectcraft_effects::pixel_margin`).
+fn effects_margin(ctx: &EvalCtx, layer: &Layer) -> Option<f64> {
+    if !layer.switches.effects {
+        return Some(0.0);
+    }
+    let mut most: f64 = 0.0;
+    for g in layer.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+        let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return None };
+        let params = effectcraft_effects::flatten_params(g, &mut |p| ctx.value(layer, p));
+        most = most.max(effectcraft_effects::pixel_margin(effect, &params)?);
+    }
+    Some(most)
+}
+
+/// Does anything in the comp read layers' pixels where it likes: an enabled effect with a layer
+/// parameter set, or an expression (`sampleImage`).
+fn comp_reads_pixels(ctx: &EvalCtx) -> bool {
+    fn group(g: &effectcraft_project::PropGroup, effects: bool) -> bool {
+        g.children.iter().any(|c| match c {
+            effectcraft_project::Node::Prop(p) => p.has_expression() || (effects && matches!(p.value, effectcraft_keyframe::Value::Layer(Some(_)))),
+            effectcraft_project::Node::Group(sub) => group(sub, effects || matches!(sub.kind, effectcraft_project::GroupKind::Effect { .. })),
+        })
+    }
+    ctx.comp.layers.iter().any(|l| group(&l.props, false))
 }

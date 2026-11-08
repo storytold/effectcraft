@@ -37,6 +37,14 @@ pub trait FootageSource: Send + Sync {
             None => self.frame(item, footage, t),
         }
     }
+    /// [`FootageSource::frame_with`] where only the rows `rows` (of the footage's frame, at
+    /// full resolution) are shown (#3271: a viewer region of interest mapped back through the
+    /// layer): a source may leave the other rows empty (any value) and read only those. Sources
+    /// that read whole frames can leave the default, which reads it all.
+    fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        let _ = rows;
+        self.frame_with(item, footage, t, size, float)
+    }
     /// `frames` interleaved stereo sample frames of `item`'s audio from source time `t` at
     /// `rate` Hz (`None` when unavailable). The first sample is `t.to_units_floor(rate)`;
     /// a sample boundary uses the earliest representable tick that selects that sample.
@@ -272,6 +280,9 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.read(|| self.inner.frame_with(item, footage, t, size, float))
+    }
+    fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        self.read(|| self.inner.frame_rows(item, footage, t, size, float, rows))
     }
 }
 

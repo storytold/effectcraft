@@ -53,6 +53,9 @@ struct Key {
     /// A still at a reduced `size`: the footage's nominal size, which decides whether it is
     /// resampled (see `Inner::sized_still`); (0, 0) otherwise.
     nominal: (u32, u32),
+    /// An OpenEXR frame of which only these rows are read (a region of interest, #3271; the other
+    /// rows are empty); `None`: all of it.
+    rows: Option<(i64, i64)>,
 }
 
 struct Entry {
@@ -1025,7 +1028,7 @@ impl Inner {
                 FloatCurve::Gamma24 => 2,
             } << 2);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
-        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0) };
+        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None };
         match footage.kind {
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
@@ -1067,11 +1070,26 @@ impl Inner {
     /// thumbnail beside a reduced viewer) comes from the same decode, the frame cache's whole
     /// picture or a recent one ([`CacheState::recent`]), and is the same as decoded on its own.
     fn frame_at(self: &Arc<Self>, footage: &Footage, t: Tick, playback: bool, size: Option<(u32, u32)>, float: FloatCurve) -> Result<Arc<Image>> {
+        self.frame_at_rows(footage, t, playback, size, float, None)
+    }
+
+    /// [`Inner::frame_at`] of only the rows `rows` of an OpenEXR frame whose channels no effect
+    /// reads (#3271; others are read whole).
+    fn frame_at_rows(
+        self: &Arc<Self>,
+        footage: &Footage,
+        t: Tick,
+        playback: bool,
+        size: Option<(u32, u32)>,
+        float: FloatCurve,
+        rows: Option<(i64, i64)>,
+    ) -> Result<Arc<Image>> {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
         }
         let mut loc = Self::locate(footage, t, float);
         let movie = loc.media_t.is_some();
+        loc.key.rows = rows.filter(|_| !movie && crate::exr_planes::is_exr(&loc.key.path) && lock(&self.aux_footage).plan(&footage.path).is_none());
         // A still asked for at its own size is the unsized frame (one decode, one entry).
         if let Some(size) = size.filter(|s| movie || *s != (footage.width, footage.height)) {
             loc.key.size = size;
@@ -1328,7 +1346,11 @@ impl Inner {
         if crate::exr_planes::is_exr(path) {
             use crate::exr_planes::Picture;
             let extra = lock(&self.aux_footage).plan(&footage.path);
-            match crate::exr_planes::picture(path, &self.exr_source(path), op, extra.as_ref()) {
+            let picture = match loc.key.rows {
+                Some(rows) if extra.is_none() => crate::exr_planes::picture_rows(path, &self.exr_source(path), op, rows),
+                _ => crate::exr_planes::picture(path, &self.exr_source(path), op, extra.as_ref()),
+            };
+            match picture {
                 Picture::Done(Ok(img)) => return Ok(img),
                 Picture::Done(Err(why)) => return Err(MediaError::Decode(format!("{path}: {why}"))),
                 Picture::Cancelled => return Err(MediaError::Cancelled),
@@ -1481,6 +1503,12 @@ impl FootageSource for MediaPool {
     }
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.frame_sized(item, footage, t, size, float)
+    }
+    fn frame_rows(&self, _item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        if footage.missing {
+            return None;
+        }
+        Inner::frame_at_rows(&self.inner, footage, t, true, size, float, Some(rows)).ok()
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {
@@ -1753,7 +1781,7 @@ mod tests {
     fn lru_respects_budget_and_recycles() {
         let mut c = Lru::default();
         let img = || Arc::new(Image::new(16, 16)); // 4 KiB + overhead
-        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0) };
+        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
         let budget = 3 * (4096 + 64);
         for i in 0..10 {
             c.insert(k(i), img(), Arc::default(), budget);
@@ -2120,7 +2148,7 @@ mod tests {
     /// the frame cache has moved on.
     #[test]
     fn recent_whole_stills_are_capped_and_expire() {
-        let key = |i| Key { path: "/s.exr".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0) };
+        let key = |i| Key { path: "/s.exr".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
         let mut c = CacheState::default();
         // 64 KiB each (64 × 64 pixels of 16 bytes), a budget of 512 KiB: room for 4.
         for i in 0..6 {

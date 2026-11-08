@@ -971,3 +971,47 @@ fn a_localized_network_file_is_read_from_its_copy() {
     pool.set_localizer(None);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #3271: a viewer region of interest reads only the footage rows it shows of an OpenEXR layer
+/// (with one scan line per chunk, only those lines are decompressed), and the region renders
+/// bit for bit what reading the whole frame renders, at full and reduced resolution.
+#[test]
+fn a_region_of_interest_reads_only_its_rows() {
+    use effectcraft_project::{Comp, ItemKind, LayerSource, Project, Value, build};
+    use effectcraft_render::{RenderOpts, Renderer};
+    use effectcraft_time::FrameRate;
+    /// The pool, reading whole frames (the region's rows ignored).
+    struct Whole<'a>(&'a crate::MediaPool);
+    impl FootageSource for Whole<'_> {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            self.0.frame(item, f, t)
+        }
+        fn frame_with(&self, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
+            self.0.frame_with(item, f, t, size, float)
+        }
+    }
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/3271-roi.exr";
+    let pool = crate::MediaPool::new();
+    pool.add_bytes(path, bytes.clone());
+    let f = crate::probe_bytes(path, bytes).unwrap();
+    let mut p = Project::default();
+    let comp = Comp::new(96, 96, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let fid = p.add_item("plate", effectcraft_color::Label::Aqua, None, ItemKind::Footage(f));
+    let mut l = build::layer(&mut p, &comp, "plate", LayerSource::Footage { item: fid }, (64, 64), None);
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 46.0, 0.0]);
+    l.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(12.0);
+    l.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([90.0, 110.0, 100.0]);
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
+    for scale in [1.0, 0.5] {
+        let opts = RenderOpts { scale, roi: Some([30.0, 40.0, 24.0, 10.0]), ..Default::default() };
+        let whole = Renderer::new(&p, &Whole(&pool), opts).comp_frame(cid, Tick::ZERO);
+        let before = decodes_of(path).len();
+        let rows = Renderer::new(&p, &pool, opts).comp_frame(cid, Tick::ZERO);
+        assert_eq!(bits(&rows), bits(&whole), "at {scale}");
+        let d = decodes_of(path);
+        let last = d.get(before..).and_then(|d| d.last()).expect("a read of the region's rows");
+        assert!(last.stats.lines < SIZE.1, "at {scale}: {} lines", last.stats.lines);
+    }
+}

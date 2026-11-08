@@ -116,7 +116,7 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
-    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_needs, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
+    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_needs, aux_point, pixel_margin, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
     crypto_layer_name, crypto_layer_named, id_color, matte_only_px, reads_aux, selection_hashes,
 };
 pub use ocio::{ColorOp, Straight, Tf, color_program};

@@ -1002,6 +1002,54 @@ fn picture_of(index: &ExrIndex, batch: &Batch, op: AlphaOp) -> Option<Image> {
     }
 }
 
+/// The picture of the OpenEXR at `path` (as [`picture`]) of only the display rows `rows`: those
+/// rows are read (with 1-line chunks exactly those lines, else the chunks holding them) and
+/// converted, the others stay empty (#3271: a region of interest). Read for this request alone,
+/// not kept in the store or on disk (the pool keeps the picture under a key naming the rows).
+pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i64, i64)) -> Picture {
+    let (index, opened) = match index_of(path, source) {
+        Ok(ix) => ix,
+        Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
+        Err(_) => return Picture::Legacy,
+    };
+    let Some(mut ids) = index.picture_ids() else { return Picture::Legacy };
+    // (in file order: the planes are looked up by id)
+    ids.sort_unstable();
+    ids.dedup();
+    let opened = match opened {
+        Some(o) => Ok(o),
+        None => source.open(),
+    };
+    let Ok(mut opened) = opened else { return Picture::Legacy };
+    // (a file changed since it was indexed: the whole picture, as `picture` reads it)
+    if opened.stamp != index.stamp {
+        return picture(path, source, op, None);
+    }
+    let request = ReadRequest { rows: Some(rows.0..rows.1), max_bytes: cap_of(path), ..ReadRequest::full(ids.clone()) };
+    let (planes, stats) = read_planes(&mut *opened.reader, &index, &request);
+    let names: Vec<String> = ids.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
+    #[cfg(test)]
+    DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats, from_disk: false }));
+    #[cfg(not(test))]
+    let _ = stats;
+    let planes = match planes {
+        Ok(p) => p,
+        Err(ReadError::Cancelled) => return Picture::Cancelled,
+        Err(ReadError::TooLarge(why)) => return Picture::Done(Err(why)),
+        Err(_) => return Picture::Legacy,
+    };
+    let (w, h) = index.size();
+    let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
+    aux.channels = names.into_iter().zip(planes).collect();
+    let file = ReadFile::new(path, opened.stamp);
+    crate::reads::note(file.clone());
+    let batch = Batch { index: index.clone(), ids, all: false, aux: Arc::new(aux), file };
+    match picture_of(&index, &batch, op) {
+        Some(img) => Picture::Done(Ok(img)),
+        None => Picture::Legacy,
+    }
+}
+
 /// The channels `need` reads of the OpenEXR at `path` (all for [`AuxNeed::All`]), from the
 /// store. `None` when it isn't a readable OpenEXR (or the request was called off).
 pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<AuxChannels>> {
