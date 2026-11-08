@@ -96,10 +96,7 @@ fn execute_engine(app: &mut EffectcraftApp, id: &str, params: Value) -> Result<O
     p.as_object_mut().ok_or("command params must be an object")?.insert("wait".into(), json!(false));
     let result = app.session.execute_checked(id, p).map_err(|e| e.to_string())?;
     let jobs: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).filter(|j| !before.contains(j)).collect();
-    if jobs.is_empty() {
-        return Ok(ok(result));
-    }
-    Ok(Outcome::AwaitJobs(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor }))
+    Ok(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor }.into_outcome())
 }
 
 fn script_outcome(result: Value) -> Outcome {
@@ -120,6 +117,13 @@ pub(crate) fn check_script_render(app: &EffectcraftApp, id: &str) -> Result<(), 
 }
 
 impl JobWaiter {
+    fn into_outcome(self) -> Outcome {
+        // A native render may finish before jobs() snapshots its running workers. Still use
+        // the completion boundary to apply post-render actions and refresh the cached reply.
+        let native_render = cfg!(not(target_arch = "wasm32")) && self.command == "renderQueue.render";
+        if self.jobs.is_empty() && !native_render { ok(self.result) } else { Outcome::AwaitJobs(self) }
+    }
+
     /// Whether its jobs are still running.
     pub fn pending(&self, app: &EffectcraftApp) -> bool {
         app.session.jobs().iter().any(|j| self.jobs.contains(&j.id))
@@ -930,6 +934,28 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_native_render_with_no_running_jobs_still_refreshes_its_reply() {
+        // Reproduce the completion race deterministically: the worker has already finished,
+        // so jobs() returned nothing, but the command's earlier result still says rendering.
+        let waiter = super::JobWaiter {
+            command: "renderQueue.render".into(),
+            params: serde_json::json!({}),
+            result: serde_json::json!({"rendering": true, "items": []}),
+            jobs: vec![],
+            log_cursor: 0,
+        };
+        let super::Outcome::AwaitJobs(waiter) = waiter.into_outcome() else {
+            panic!("a finished native render must still pass through completion polling");
+        };
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(!waiter.pending(&app));
+        let reply = waiter.finish(&mut app);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["rendering"], false);
+    }
+
     #[test]
     fn base64_rfc4648_vectors() {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
